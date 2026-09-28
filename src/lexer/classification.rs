@@ -220,7 +220,16 @@ pub(super) fn mark_quoted_assignment_value(raw: &str, value: &str) -> String {
         && !raw_rhs.contains("$(")
         && !raw_rhs.contains('`')
     {
-        rhs.replace('\'', crate::executor::markers::PROTECTED_ESCAPED_SQUOTE_STR)
+        // A `'` in the RHS's own text is data inside the double quotes, but
+        // quotes inside a `${...}` unit belong to the substitution's own
+        // grammar (`${x#'foo'}` pattern quoting, POSIX 2.6.2 /
+        // parse.y:3877 parse_matched_pair) and must stay raw for the
+        // parameter engine — mark only the word's own quotes (rubash#258
+        // BUG_PSUBSQUOT: `v="${x#'foo'}"` stopped stripping the prefix).
+        super::quotes::mark_data_squotes_around_substitutions(rhs).replace(
+            crate::executor::markers::ANSI_C_QUOTE_MARKER_STR,
+            crate::executor::markers::PROTECTED_ESCAPED_SQUOTE_STR,
+        )
     } else {
         rhs.to_string()
     };

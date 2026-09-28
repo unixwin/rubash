@@ -80,6 +80,7 @@ pub(super) fn conditional_syntax_error_spec(
         closed,
         newline_consumed_for: None,
         virtual_newline_seen: false,
+        bang_term_position: true,
     };
     let fail = match cond_or(&mut cursor) {
         Err(fail) => fail,
@@ -251,6 +252,16 @@ struct CondCursor<'a> {
     newline_consumed_for: Option<usize>,
     /// The virtual `\n' GNU's reader reports at end-of-input before EOF.
     virtual_newline_seen: bool,
+    /// Whether the NEXT token sits at a term position — GNU's
+    /// `reserved_word_acceptable(last_read_token)' restricted to the `[['
+    /// token population (parse.y:5901-5945). read_token maps the word `!`
+    /// to BANG only through CHECK_FOR_RESERVED_WORD (parse.y:3168-3181),
+    /// so an unquoted `!` negates ONLY after a term opener (expression
+    /// start, `(', `&&', `||', another `!', a newline); after a WORD or
+    /// `<'/`>' it stays a WORD operand (`[[ $1 == -* || $1 == ! ]]`,
+    /// bats-exec-test:67 — the RHS `!` is a literal pattern, not
+    /// negation).
+    bang_term_position: bool,
 }
 
 impl<'a> CondCursor<'a> {
@@ -274,7 +285,7 @@ impl<'a> CondCursor<'a> {
                 // bang check (parse.y:5117) reads the parser's raw word
                 // text, where a quoted `"!"` starts with `"` and is a term.
                 (_, false) => CondTok::Word,
-                ("!", _) => CondTok::Bang,
+                ("!", _) if self.bang_term_position => CondTok::Bang,
                 ("&&", true) => CondTok::AndAnd,
                 ("||", true) => CondTok::OrOr,
                 ("(", true) => CondTok::LParen,
@@ -299,6 +310,15 @@ impl<'a> CondCursor<'a> {
     /// only their virtual state; real arguments advance the index.
     fn next(&mut self) -> (CondTok, usize, Option<usize>, usize) {
         let peeked = self.peek();
+        // parse.y CHECK_FOR_RESERVED_WORD runs against last_read_token, so
+        // the token just consumed decides whether a following `!' word is
+        // eligible to become BANG: only the term openers (BANG itself, `(',
+        // `&&', `||', and a newline — parse.y:5901-5945 lists all of them)
+        // leave a term position; a WORD or `<'/`>' does not.
+        self.bang_term_position = matches!(
+            peeked.0,
+            CondTok::Bang | CondTok::LParen | CondTok::AndAnd | CondTok::OrOr | CondTok::Newline
+        );
         match peeked.0 {
             CondTok::Newline => {
                 if self.index < self.args.len() {

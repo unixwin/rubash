@@ -2778,7 +2778,7 @@ fn quoted_pure_reference_expands_empty(content: &str, executor: &Executor) -> bo
     executor
         .dynamic_parameter_value(name)
         .or_else(|| executor.shell_variable_value(name))
-        .or_else(|| std::env::var(name).ok())
+        .or_else(|| crate::executor::env_helpers::exact_case_env_var(name))
         .is_none_or(|value| value.is_empty())
 }
 

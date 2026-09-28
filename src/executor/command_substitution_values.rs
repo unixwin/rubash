@@ -1587,7 +1587,25 @@ fn quoted_body_positional_at_segments(
                             continue;
                         }
                     }
-                    return None;
+                    // GNU subst.c:11730-11808 (expand_word_internal, the
+                    // double-quote case): the whole quoted span is one
+                    // recursively-expanded unit in which `$@`/`${@}` is the
+                    // word-list split point and every other `${name...}`
+                    // parameter is ordinary affix text around it — it stays
+                    // part of the current literal piece and the segment
+                    // expander expands it. Skip the unit brace-aware so a
+                    // `$@` inside an operator word (`${a:-$@}`) belongs to
+                    // that expansion, never to the top-level split
+                    // (rubash#258 QRK_EMPTPPWRD: `"${v}$@${v}"` is 0 fields
+                    // with no positional parameters and one word per
+                    // parameter otherwise).
+                    let rest: String = body[index + 2..].iter().collect();
+                    match super::parameter_ops::matching_parameter_brace(&rest) {
+                        Some(end_byte) => {
+                            index += 2 + rest[..=end_byte].chars().count();
+                        }
+                        None => return None,
+                    }
                 } else {
                     return None;
                 }

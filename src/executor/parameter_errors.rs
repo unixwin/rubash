@@ -1284,7 +1284,10 @@ impl Executor {
                 }
                 true
             }
-            None => !has_array_marker && std::env::var(name).is_ok(),
+            None => {
+                !has_array_marker
+                    && crate::executor::env_helpers::exact_case_env_var(name).is_some()
+            }
         }
     }
 

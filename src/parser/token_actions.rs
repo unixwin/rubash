@@ -1,7 +1,7 @@
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
-use super::parse_loop::ParseState;
+use super::parse_loop::{command_is_pending_inversion, ParseState};
 
 pub(super) enum TokenAction {
     Advance,
@@ -888,10 +888,20 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 return TokenAction::Continue;
             }
 
-            if token.value == "!" && command_is_empty(&state.current_cmd) {
-                // TODO(parse.y/execute_cmd.c): Bash represents `!` as a
-                // pipeline/list inversion flag. Keep it on the next simple
-                // command until the parser has a real pipeline state.ast.
+            if token.value == "!"
+                && (command_is_empty(&state.current_cmd)
+                    || command_is_pending_inversion(&state.current_cmd))
+            {
+                // GNU parse.y:1410-1413 `pipeline_command: BANG
+                // pipeline_command' is right-recursive and toggles
+                // CMD_INVERT_RETURN (`$2->flags ^= CMD_INVERT_RETURN'), so
+                // any run of BANG prefixes may precede a pipeline — and the
+                // pipeline_command underneath can itself be a compound
+                // (`! ! case x in ... esac' is legal). Accept the toggle
+                // while the current command holds ONLY a pending inversion,
+                // so a second `!' toggles back off instead of degrading
+                // into a `!' word argument (which then steals command
+                // position from a following `case' — rubash#257).
                 state.current_cmd.inverted = !state.current_cmd.inverted;
                 note_command_line(&mut state.current_cmd, token);
                 *i += 1;

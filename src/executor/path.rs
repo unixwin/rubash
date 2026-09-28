@@ -731,23 +731,37 @@ pub fn external_command_for_named_program(
     // Do not reinterpret those switches as paths under Winuxsh's logical
     // shell root; doing so starts cmd.exe without its command string.
     let preserve_native_args = is_windows_command_processor(program);
+    // Child-argv byte contract (rubash#141): GNU hands execve the raw word
+    // bytes (execute_cmd.c:6139 shell_execve); Windows argv is UTF-16, so an
+    // invalid-UTF-8 byte travels as its own code point (WTF-8 style, byte
+    // value == code point) instead of the internal PUA marker pair, which
+    // ANSI children re-encoded as GBK mojibake.
+    let decode_bytes = |arg: String| {
+        crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(&arg)
+    };
+    // A shell-wrapped child (a `#!/...` script run through another bash)
+    // lives in the SAME shell path domain as the caller: GNU's ENOEXEC
+    // re-entry (execute_cmd.c:6252) hands the child shell the argv words
+    // verbatim, and the child understands `/d/...` shell paths natively.
+    // Converting slash-paths to `D:\...` there mixes domains and breaks
+    // path arithmetic in the child (`${BATS_TEST_FILENAME##*/}` keeps the
+    // whole backslash path, rubash#259 bats-gather-tests). Native .exe
+    // children keep the existing Windows-form conversion — they need real
+    // Windows operands (sed.exe et al).
+    let shell_wrapped = cfg!(windows)
+        && !is_windows_powershell_script(program)
+        && !is_windows_batch_file(program)
+        && should_run_with_shell(program);
     let native_args = args
         .iter()
         .map(|arg| {
-            if preserve_native_args {
+            if preserve_native_args || shell_wrapped {
                 arg.clone()
             } else {
                 external_argument_path(arg, env_vars)
             }
         })
-        // Child-argv byte contract (rubash#141): GNU hands execve the raw
-        // word bytes (execute_cmd.c:6139 shell_execve); Windows argv is
-        // UTF-16, so an invalid-UTF-8 byte travels as its own code point
-        // (WTF-8 style, byte value == code point) instead of the internal
-        // PUA marker pair, which ANSI children re-encoded as GBK mojibake.
-        .map(|arg| {
-            crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(&arg)
-        })
+        .map(decode_bytes)
         .collect::<Vec<_>>();
 
     if is_windows_powershell_script(program) {

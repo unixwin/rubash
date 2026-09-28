@@ -39,6 +39,105 @@ pub(crate) fn remove_shell_quotes(raw: &str) -> String {
     remove_shell_quotes_with_posix(raw, false)
 }
 
+/// Replace every `'` that is NOT inside a substitution unit (`${...}`,
+/// `$(...)`, `` `...` ``) with the ANSI-C quote data marker.
+///
+/// GNU parse.y:3877 parse_matched_pair / parse.y:4451 parse_comsub own the
+/// quoting inside a substitution: a quote there belongs to the
+/// substitution's own grammar — the pattern quotes of `${x#'foo'}` (POSIX
+/// 2.6.2: "quoting characters within the braces shall have this effect" on
+/// the pattern characters), the default value of `${x:-'v'}`, the words of
+/// an inner command — never to the enclosing double-quoted word. Only a
+/// `'` in the word's own text is literal data that must survive downstream
+/// quote removal (parse.y skip_double_quoted: `'` is ordinary inside
+/// `"..."`). Blanket `.replace('\'', marker)` across a double-quoted body
+/// corrupts the substitution's quotes into data markers (rubash#258
+/// BUG_PSUBSQUOT: `v="${x#'foo'}"` kept `'foo'` literal and stopped
+/// stripping the prefix).
+pub(crate) fn mark_data_squotes_around_substitutions(body: &str) -> String {
+    let chars: Vec<char> = body.chars().collect();
+    let mut out = String::with_capacity(body.len());
+    let mut index = 0usize;
+    while index < chars.len() {
+        let unit_start = index;
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+            if let Some(close) = skip_braced_unit_quotes(&chars, index + 1, '}') {
+                out.extend(&chars[unit_start..=close]);
+                index = close + 1;
+                continue;
+            }
+        }
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+            if let Some(close) = skip_braced_unit_quotes(&chars, index + 1, ')') {
+                out.extend(&chars[unit_start..=close]);
+                index = close + 1;
+                continue;
+            }
+        }
+        if chars[index] == '`' {
+            index += 1;
+            while index < chars.len() && chars[index] != '`' {
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    index += 1;
+                }
+                index += 1;
+            }
+            if index < chars.len() {
+                index += 1;
+            }
+            out.extend(&chars[unit_start..index]);
+            continue;
+        }
+        if chars[index] == '\'' {
+            out.push(crate::executor::markers::ANSI_C_QUOTE_MARKER);
+        } else {
+            out.push(chars[index]);
+        }
+        index += 1;
+    }
+    out
+}
+
+/// Quote-aware skip from an opener (the `{` of `${` or the `(` of `$(`) to
+/// its matching closer at nesting depth 0, honoring `'...'`/`"..."` spans
+/// and backslash escapes outside single quotes (the same state machine GNU
+/// parse_matched_pair runs; the executor's
+/// skip_braced_case_pattern_unit is its twin). Returns the index OF the
+/// closing character.
+fn skip_braced_unit_quotes(chars: &[char], open: usize, closer: char) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = open;
+    let mut single = false;
+    let mut double = false;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' if !single => {
+                index += 2;
+                continue;
+            }
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '{' if !single && !double && closer == '}' => depth += 1,
+            '(' if !single && !double && closer == ')' => depth += 1,
+            ')' if !single && !double && closer == ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            '}' if !single && !double && closer == '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 /// Quote removal with the lexer's POSIX mode. Inside double quotes the
 /// `${...}` span scan must agree with the tokenizing skip phase: in POSIX
 /// mode the Interp 221 big hammer closes the span at the first `}` (single

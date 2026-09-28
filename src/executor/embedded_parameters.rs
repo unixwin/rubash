@@ -612,7 +612,7 @@ impl Executor {
                     }
                     if let Some(value) = self.dynamic_parameter_value(&name).or_else(|| {
                         self.shell_variable_value(&name)
-                            .or_else(|| std::env::var(&name).ok())
+                            .or_else(|| crate::executor::env_helpers::exact_case_env_var(&name))
                     }) {
                         let value = shell_safe_value(&value);
                         if heredoc {

@@ -1179,9 +1179,9 @@ impl Executor {
                     if let Some(value) =
                         self.expand_with_parameter_env(saved_parameter_state, |executor| {
                             executor.dynamic_parameter_value(&name).or_else(|| {
-                                executor
-                                    .shell_variable_value(&name)
-                                    .or_else(|| std::env::var(&name).ok())
+                                executor.shell_variable_value(&name).or_else(|| {
+                                    crate::executor::env_helpers::exact_case_env_var(&name)
+                                })
                             })
                         })
                     {

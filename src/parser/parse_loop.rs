@@ -1985,7 +1985,7 @@ fn compound_eof_error_node(
     command
 }
 
-fn command_is_pending_inversion(command: &CommandNode) -> bool {
+pub(super) fn command_is_pending_inversion(command: &CommandNode) -> bool {
     if !command.inverted {
         return false;
     }

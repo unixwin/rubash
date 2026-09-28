@@ -728,12 +728,25 @@ pub(in crate::executor) fn eval_source_for_reparse(source: &str) -> String {
 }
 
 fn protect_unmatched_double_quoted_backticks(source: &str) -> String {
+    // GNU parse.y:5416-5432 (read_token_word, the backtick arm of the
+    // double-quote scanner) + subst.c:925-932
+    // (string_extract_double_quoted backquote mode): an UNESCAPED backtick
+    // inside double quotes opens a backquote command substitution whose
+    // body keeps its own quoting; the unit ends at the matching unescaped
+    // backtick. `eval 'x="`echo "("`"'` must reach the re-parse with the
+    // substitution intact (rubash#258 BUG_CSUBBTQUOT / modernish
+    // bin/modernish:1580). Only a backtick with no closing partner is
+    // treated as literal data (the original protector's unmatched case)
+    // and travels as the DATA_BACKTICK carrier.
+    let chars: Vec<char> = source.chars().collect();
     let mut output = String::with_capacity(source.len());
-    let mut chars = source.char_indices().peekable();
+    let mut index = 0usize;
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
-    while let Some((_index, ch)) = chars.next() {
+    while index < chars.len() {
+        let ch = chars[index];
+        index += 1;
         if escaped {
             output.push(ch);
             escaped = false;
@@ -753,7 +766,39 @@ fn protect_unmatched_double_quoted_backticks(source: &str) -> String {
                 in_double = !in_double;
                 output.push(ch);
             }
-            '`' if in_double && !in_single => output.push(crate::executor::markers::DATA_BACKTICK),
+            '`' if in_double && !in_single => {
+                // Scan for the closing unescaped backtick of the backquote
+                // unit; the body is copied verbatim (nested quotes belong
+                // to the inner command).
+                let mut scan = index;
+                let mut unit_escaped = false;
+                let mut close = None;
+                while scan < chars.len() {
+                    let unit_ch = chars[scan];
+                    if unit_escaped {
+                        unit_escaped = false;
+                        scan += 1;
+                        continue;
+                    }
+                    if unit_ch == '\\' {
+                        unit_escaped = true;
+                        scan += 1;
+                        continue;
+                    }
+                    if unit_ch == '`' {
+                        close = Some(scan);
+                        break;
+                    }
+                    scan += 1;
+                }
+                match close {
+                    Some(close) => {
+                        output.extend(&chars[index - 1..=close]);
+                        index = close + 1;
+                    }
+                    None => output.push(crate::executor::markers::DATA_BACKTICK),
+                }
+            }
             _ => output.push(ch),
         }
     }

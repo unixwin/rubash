@@ -1475,7 +1475,39 @@ impl Executor {
         };
 
         loop {
-            self.with_errexit_suppressed(|executor| executor.execute_ast(&condition))?;
+            // GNU execute_cmd.c:3801 (execute_while_or_until) increments
+            // loop_level before the first test evaluation, so `break` /
+            // `continue` anywhere in the loop CONDITION are in-loop
+            // (modernish bin/modernish:866 `while case $# in (0) break;;`).
+            self.shell_state.loop_depth += 1;
+            let condition_result =
+                self.with_errexit_suppressed(|executor| executor.execute_ast(&condition));
+            self.shell_state.loop_depth -= 1;
+            match condition_result {
+                Ok(()) => {}
+                // GNU break-in-test: execute_cmd.c:635 makes the body a
+                // no-op (returns last status, which `break` set to 0), then
+                // the post-body `if (breaking) { breaking--; break; }` at
+                // execute_cmd.c:3840 exits this loop. A level > 1 break
+                // propagates one level outward.
+                Err(ExecuteError::Break(level)) if level <= 1 => {
+                    self.exit_code = 0;
+                    break;
+                }
+                Err(ExecuteError::Break(level)) => return Err(ExecuteError::Break(level - 1)),
+                // GNU continue-in-test: post-body check at
+                // execute_cmd.c:3846 decrements `continuing`; with 1 left
+                // over it does not break, so the loop skips the body for
+                // this iteration and re-evaluates the test.
+                Err(ExecuteError::Continue(level)) if level <= 1 => {
+                    self.exit_code = 0;
+                    continue;
+                }
+                Err(ExecuteError::Continue(level)) => {
+                    return Err(ExecuteError::Continue(level - 1));
+                }
+                Err(error) => return Err(error),
+            }
             self.run_pending_signal_traps()?;
             let condition_matched = self.exit_code == 0;
             if condition_matched == loop_command.until {
@@ -2518,8 +2550,13 @@ fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String)
                     // parse.y read_token_word: a `'` inside double quotes is
                     // literal data; tag it so expand_word's quote removal
                     // does not collapse it (same protection the pattern
-                    // twin applies).
-                    let body = body.replace('\'', crate::lexer::ANSI_C_QUOTE_MARKER_STR);
+                    // twin applies). Quotes inside a `${...}`/`$(...)`/
+                    // backtick unit belong to the substitution's own
+                    // grammar (parse.y:3877 parse_matched_pair) and stay
+                    // raw — `${x#'foo'}` in a double-quoted case word must
+                    // keep stripping the quoted pattern (rubash#258
+                    // BUG_PSUBSQUOT).
+                    let body = crate::lexer::quotes::mark_data_squotes_around_substitutions(&body);
                     output.push_str(&expand_word(&body));
                 }
                 index = end + 1;
@@ -2626,7 +2663,10 @@ fn quote_aware_case_pattern(raw: &str, mut expand_word: impl FnMut(&str) -> Stri
                     // the empty string via quote removal, so tag each one
                     // with the lexer's decoded-quote marker first — the
                     // same protection escape_decoded_ansi_c_quotes applies.
-                    let body = body.replace('\'', crate::lexer::ANSI_C_QUOTE_MARKER_STR);
+                    // Quotes inside a `${...}`/`$(...)`/backtick unit stay
+                    // raw (parse.y:3877 parse_matched_pair owns them;
+                    // rubash#258 BUG_PSUBSQUOT).
+                    let body = crate::lexer::quotes::mark_data_squotes_around_substitutions(&body);
                     expand_word(&body)
                 };
                 output.push_str(&escape_case_pattern_literal(&literal));
@@ -2740,6 +2780,46 @@ pub(in crate::executor) fn quoted_case_pattern_end(
             escaped = true;
             index += 1;
             continue;
+        }
+        if quote == '"' {
+            // GNU parse.y skip_double_quoted (via parse_matched_pair,
+            // parse.y:5416-5432): inside `"..."` a substitution unit owns
+            // its own quoting — `$(` takes parse_comsub/parse_matched_pair,
+            // `${` takes parse_matched_pair, and a backquote opens backquote
+            // mode — so an inner `"` never ends the span. Stopping at the
+            // first inner quote truncated `$(<"file")` to `$(<` and made
+            // the comsub look unclosed (rubash#259: bats-preprocess
+            // `<<<"$(<"$test_file")"$'\n'` lost the whole here-string).
+            match chars[index] {
+                '`' => {
+                    index += 1;
+                    while index < chars.len() && chars[index] != '`' {
+                        if chars[index] == '\\' && index + 1 < chars.len() {
+                            index += 1;
+                        }
+                        index += 1;
+                    }
+                    if index < chars.len() {
+                        index += 1;
+                    }
+                    continue;
+                }
+                '$' if chars.get(index + 1) == Some(&'(') => {
+                    if let Some(close) =
+                        crate::lexer::skip_parenthesized_unit_corrected(chars, index + 1)
+                    {
+                        index = close.min(chars.len());
+                        continue;
+                    }
+                }
+                '$' if chars.get(index + 1) == Some(&'{') => {
+                    if let Some(close) = skip_braced_case_pattern_unit(chars, index + 1) {
+                        index = close + 1;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
         }
         if chars[index] == quote {
             return Some(index);

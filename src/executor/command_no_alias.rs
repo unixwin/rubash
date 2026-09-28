@@ -19,6 +19,12 @@ impl Executor {
 
         match word.as_str() {
             ":" => {
+                // GNU command.def -> execute_builtin: the builtin's
+                // redirections are applied before it runs (redir.c
+                // do_redirections). `command : <&8` with a closed fd 8
+                // fails "8: Bad file descriptor" like every other builtin
+                // (modernish BUG_SCLOSEDFD probe).
+                self.apply_no_output_builtin_redirects(cmd)?;
                 self.exit_code = crate::builtins::colon::colon();
                 Ok(())
             }
@@ -26,6 +32,7 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "true") {
                     return self.execute_external(cmd);
                 }
+                self.apply_no_output_builtin_redirects(cmd)?;
                 self.exit_code = crate::builtins::colon::true_builtin();
                 Ok(())
             }
@@ -33,6 +40,7 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "false") {
                     return self.execute_external(cmd);
                 }
+                self.apply_no_output_builtin_redirects(cmd)?;
                 self.exit_code = crate::builtins::colon::false_builtin();
                 Ok(())
             }

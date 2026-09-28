@@ -230,10 +230,67 @@ pub(super) fn command_boundary_keyword_allowed(tokens: &[Token], index: usize) -
         && matches!(
             previous.value.as_str(),
             "{" | "(" | ")" | "then" | "do" | "else" | "elif" | "fi" | "done" | "esac" | "}"
+                // GNU parse.y:5899-5940 reserved_word_acceptable also
+                // accepts BANG, TIME, TIMEOPT, TIMEIGN, IF, WHILE, UNTIL
+                // and COPROC as the preceding token: a compound command
+                // is a legal pipeline element after `!' (rubash#257
+                // `if ...; then ! case x in ...) ;; esac; fi') and after
+                // `time'/`if'/`while'/`until'/`coproc'. Without these the
+                // if/loop body-boundary scanner never pushes the inner
+                // compound and truncates the body at its own closer
+                // (`esac' arrives "where `fi' was expected").
+                | "!" | "time" | "if" | "while" | "until" | "coproc"
         ))
         || (previous.kind == TokenKind::Word
             && matches!(previous.raw.as_str(), ";;" | ";&" | ";;&"))
+        // GNU parse.y:5906-5908 TIMEOPT/TIMEIGN: `-p' after `time' and
+        // `--' after `time'/`time -p' also leave a command boundary.
+        || time_option_precedes(tokens, index)
+        // GNU parse.y:5934-5939: a WORD directly after `coproc' or
+        // `function' (the NAME of `coproc NAME cmd' / `function f {')
+        // is followed by an acceptable reserved word.
+        || (previous.kind == TokenKind::Word
+            && matches!(
+                index.checked_sub(2).and_then(|i| tokens.get(i)).map(|t| {
+                    (t.kind.clone(), t.value.clone())
+                }),
+                Some((TokenKind::Keyword, ref v)) if v == "coproc" || v == "function"
+            ))
         || compound_close_precedes(tokens, index)
+}
+
+/// Whether the token at `index - 1` is a TIMEOPT/TIMEIGN option word —
+/// `-p` right after the `time` keyword, or `--` after `time`/`time -p`
+/// (GNU parse.y:3470-3479 tokenizes exactly these two spellings).
+fn time_option_precedes(tokens: &[Token], index: usize) -> bool {
+    let Some(previous) = index.checked_sub(1).and_then(|i| tokens.get(i)) else {
+        return false;
+    };
+    if previous.kind != TokenKind::Word {
+        return false;
+    }
+    let before_that = index
+        .checked_sub(2)
+        .and_then(|i| tokens.get(i))
+        .map(|t| (t.kind.clone(), t.value.clone()));
+    match previous.raw.as_str() {
+        "-p" => {
+            matches!(&before_that, Some((TokenKind::Keyword, v)) if v == "time")
+        }
+        "--" => match &before_that {
+            Some((TokenKind::Keyword, v)) if v == "time" => true,
+            Some((TokenKind::Word, w)) if w == "-p" => {
+                matches!(
+                    index.checked_sub(3).and_then(|i| tokens.get(i)).map(|t| {
+                        (t.kind.clone(), t.value.clone())
+                    }),
+                    Some((TokenKind::Keyword, v)) if v == "time"
+                )
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Whether the token at `index - 1` is a `]]` or `))` that actually

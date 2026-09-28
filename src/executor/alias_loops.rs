@@ -100,10 +100,29 @@ impl Executor {
             let condition_ast = Ast {
                 commands: condition_commands.clone(),
             };
-            if let Err(error) =
-                executor.with_errexit_suppressed(|executor| executor.execute_ast(&condition_ast))
-            {
-                break Err(error);
+            // GNU execute_cmd.c:3801: loop_level covers the test too, so
+            // `break`/`continue` in the loop condition are in-loop. A Break /
+            // Continue surfacing from the condition is consumed here exactly
+            // like one from the body (execute_cmd.c:3840-3851).
+            executor.shell_state.loop_depth += 1;
+            let condition_result =
+                executor.with_errexit_suppressed(|executor| executor.execute_ast(&condition_ast));
+            executor.shell_state.loop_depth -= 1;
+            match condition_result {
+                Ok(()) => {}
+                Err(ExecuteError::Break(level)) if level <= 1 => {
+                    executor.exit_code = 0;
+                    break Ok(());
+                }
+                Err(ExecuteError::Break(level)) => break Err(ExecuteError::Break(level - 1)),
+                Err(ExecuteError::Continue(level)) if level <= 1 => {
+                    executor.exit_code = 0;
+                    continue;
+                }
+                Err(ExecuteError::Continue(level)) => {
+                    break Err(ExecuteError::Continue(level - 1));
+                }
+                Err(error) => break Err(error),
             }
             let condition_matched = executor.exit_code == 0;
             if condition_matched == until {

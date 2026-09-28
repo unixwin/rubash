@@ -1,6 +1,32 @@
 use super::*;
 
 impl Executor {
+    /// GNU redir.c do_redirection_internal, r_duplicating_input /
+    /// r_duplicating_output arms (redir.c:1129-1210): the dup2 of the
+    /// source fd happens for builtins too, and a closed source fails with
+    /// EBADF ("N: Bad file descriptor", redirect status 1). fd 0/1/2 have
+    /// no explicit fd-table entry when they hold the process's own stdio —
+    /// those are always open; every other untracked or explicitly-closed
+    /// fd is a bad descriptor (rubash's virtual fd table is the single
+    /// source of truth, replacing the OS handle slot Windows exposes
+    /// nondeterministically).
+    fn validate_builtin_dup_source(&self, source_fd: u32) -> Result<(), ExecuteError> {
+        if source_fd <= 2 {
+            return Ok(());
+        }
+        let open = matches!(
+            self.fd_table.entries.get(&source_fd),
+            Some(entry) if !entry.closed
+        );
+        if open {
+            Ok(())
+        } else {
+            Err(ExecuteError::IoError(std::io::Error::other(format!(
+                "{source_fd}: Bad file descriptor"
+            ))))
+        }
+    }
+
     pub(in crate::executor) fn write_builtin_not_found(
         &mut self,
         cmd: &CommandNode,
@@ -39,13 +65,19 @@ impl Executor {
             let target = self.expand_redirect_target(redirect);
             if redirect.fd_var.is_some() {
             } else if is_closed_redirect_target(&target) {
-            } else if redirect_target_fd_and_move(&target).is_some() {
+            } else if let Some((source_fd, _)) = redirect_target_fd_and_move(&target) {
                 // `<&N`, the move form `<&N-` (make_cmd.c:704-718) and the
                 // fd-alias paths (/dev/stdin, /dev/fd/0, /proc/self/fd/0):
                 // the builtin keeps reading its current stdin channel — the
                 // dup is a no-op for the virtual input model, and the
                 // reject_invalid_redirects gate already validated fd N is
-                // open (redir.c:1115 dup2 EBADF).
+                // open (redir.c:1115 dup2 EBADF). GNU r_duplicating_input
+                // (redir.c:1152-1160) still runs the dup2 and fails EBADF
+                // when fd N is closed, so a closed or untracked source must
+                // fail the builtin with `N: Bad file descriptor' instead of
+                // silently succeeding (modernish BUG_SCLOSEDFD probe
+                // `command : <&8' — rubash#258).
+                self.validate_builtin_dup_source(source_fd)?;
             } else if redirect.append {
                 OpenOptions::new()
                     .create(true)
@@ -61,9 +93,12 @@ impl Executor {
             let target = self.expand_redirect_target(redirect);
             if redirect.fd_var.is_some() {
             } else if is_closed_redirect_target(&target) {
-            } else if redirect_target_fd_and_move(&target).is_some() {
+            } else if let Some((source_fd, _)) = redirect_target_fd_and_move(&target) {
                 // `>&N` / `>&N-` dup (and move) forms: validated by the
-                // reject_invalid_redirects gate; nothing to open here.
+                // reject_invalid_redirects gate; nothing to open here. GNU
+                // redir.c:1152-1160 dup2 EBADF — closed source fails with
+                // `N: Bad file descriptor' (rubash#258 SCLOSEDFD).
+                self.validate_builtin_dup_source(source_fd)?;
             } else if redirect.fd.unwrap_or(1) == 1 && target.starts_with('&') {
                 // GNU redir.c:832-838: >&WORD with a non-numeric WORD and
                 // redirector 1 translates to r_err_and_out (>&file ==

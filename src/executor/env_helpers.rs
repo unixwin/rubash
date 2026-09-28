@@ -1,6 +1,22 @@
 use super::*;
 use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
+/// Exact-case bare-name fallback into the process environment.
+///
+/// GNU variables.c: the shell variable table is case-sensitive and the
+/// process environment is imported once at startup with its stored
+/// spelling (variables.c initialize_shell_variables). Windows
+/// `std::env::var` looks up the environment block case-INSENSITIVELY, so
+/// using it for the bare `$NAME` fallback resolves `$m2` against an
+/// ambient `M2` (e.g. `$username` leaking `USERNAME`). The fallback must
+/// match the stored key exactly; a case-variant miss is simply unbound
+/// (rubash#273: `M2=x rubash -u -c 'echo $m2'` must fail like GNU).
+pub(in crate::executor) fn exact_case_env_var(name: &str) -> Option<String> {
+    std::env::vars()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value)
+}
+
 pub(in crate::executor) fn mark_initial_exported_vars(env_vars: &mut HashMap<String, String>) {
     let mut names: Vec<String> = env_vars
         .keys()

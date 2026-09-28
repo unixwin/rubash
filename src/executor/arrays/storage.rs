@@ -95,9 +95,55 @@ pub(in crate::executor) fn parse_array_numeric_subscript(name: &str) -> Option<(
     Some((array_name, index))
 }
 
+/// Split a bare array reference `name[subscript]` into its parts.
+///
+/// GNU arrayfunc.c:1290-1333 tokenize_array_reference (via valid_array_reference):
+/// the subscript ends at the `]` that closes the FIRST `[` — found with
+/// skipsubscript/skip_matched_pair nesting (arrayfunc.c:1318, brackets nest,
+/// backslash escapes the next char) — and the reference is only valid when
+/// that `]` is the LAST character (`t[len+1] != '\0'` fails, arrayfunc.c:1322)
+/// and the subscript is non-empty (`len == 1` fails, arrayfunc.c:1322).
+/// A body like `arr[0]#[\'\"]` (bats-preprocess
+/// `${BASH_REMATCH[1]#[\'\"]}`) is therefore NOT an array reference — its
+/// name ends at the operator `#` (subst.c:9807 string_extract with the
+/// `#%^,:-=?+/@}` delimiter set skips the well-formed `[0]` and stops at
+/// `#`), so the residue belongs to the pattern-removal operator, not the
+/// subscript. The old `split_once('[')`+`strip_suffix(']')` accepted any
+/// tail that happened to end in `]` and fed `0]#[\'\"` to arithmetic.
 pub(in crate::executor) fn parse_array_subscript(name: &str) -> Option<(&str, &str)> {
-    let (array_name, subscript) = name.split_once('[')?;
-    Some((array_name, subscript.strip_suffix(']')?))
+    let (array_name, rest) = name.split_once('[')?;
+    // skip_matched_pair from the opening `[`: depth 1, nested `[`/`]` adjust
+    // depth, a backslash protects the next character, and the first depth-0
+    // `]` closes the subscript.
+    let bytes = rest.as_bytes();
+    let mut depth = 1usize;
+    let mut index = 0usize;
+    let mut close = None;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => {
+                index += 2;
+                continue;
+            }
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    let close = close?;
+    if close != bytes.len() - 1 || close == 0 {
+        // Closing `]` must end the reference; `[]` is not a valid
+        // non-associative subscript (arrayfunc.c:1322 len == 1).
+        return None;
+    }
+    Some((array_name, &rest[..close]))
 }
 
 pub(in crate::executor) fn format_indexed_array_storage(

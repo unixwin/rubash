@@ -106,7 +106,7 @@ impl Executor {
                     let end = index;
                     let defined = self.dynamic_parameter_value(name).is_some()
                         || self.shell_variable_value(name).is_some()
-                        || std::env::var(name).is_ok();
+                        || crate::executor::env_helpers::exact_case_env_var(name).is_some();
                     if !defined {
                         return Some(expression[start..end].to_string());
                     }
@@ -374,7 +374,7 @@ impl Executor {
             let lookup = |name: &str| -> Option<String> {
                 self.dynamic_parameter_value(name)
                     .or_else(|| self.shell_variable_value(name))
-                    .or_else(|| std::env::var(name).ok())
+                    .or_else(|| crate::executor::env_helpers::exact_case_env_var(name))
             };
             match chars.peek().copied() {
                 Some('{') => {

@@ -404,11 +404,23 @@ impl Executor {
         // body's `1>&3` resolve fd 3 to the call's binding. The body's
         // ambient line_number is the body-open line
         // (execute_cmd.c:5351 line_number = function_line_number = tc->line).
+        //
+        // GNU execute_cmd.c:5249 (unwind_protect_int (loop_level)) and
+        // :5358 (`if (shell_compatibility_level > 43) loop_level = 0;'):
+        // a function body starts a fresh loop scope, so `break'/'continue'
+        // do NOT cross the function barrier back into the caller's loop —
+        // they hit check_loop_level's "only meaningful in a loop" path and
+        // return success without unwinding (modernish QRK_BCDANGER: bash
+        // 5.x is quirk-ABSENT). Restore the caller's depth after the body
+        // like the unwind-protect does.
+        let saved_loop_depth = self.shell_state.loop_depth;
+        self.shell_state.loop_depth = 0;
         let result = self.with_compound_output_redirects(call_cmd, |executor| {
             executor.with_ambient_line(body_open_line, |executor| {
                 executor.execute_ast_inner(body_ast)
             })
         });
+        self.shell_state.loop_depth = saved_loop_depth;
         // GNU execute_cmd.c:5269+ — the call's input redirections are
         // undone when the function returns.
         while let Some(binding) = fd0_bindings.pop() {
