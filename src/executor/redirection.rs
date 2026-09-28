@@ -479,6 +479,31 @@ impl Executor {
         state.write_to_fd(self, 2, message)
     }
 
+    /// niubash#144: does this pipeline element's stderr end up on the same
+    /// pipe as its stdout? GNU binds the element's fd 1 to the pipe first
+    /// (execute_cmd.c execute_pipeline), then applies do_redirections — a
+    /// `2>&1` (or `2>&3 3>&1`, or `|&`) leaves fd 2 dup'd onto that pipe.
+    /// The element's merged bytes must then flow through ONE shared pipe so
+    /// they interleave in true write order (redir.c:1169-1170 dup2
+    /// semantics), never two pipes concatenated stdout-first. Resolves the
+    /// element's redirects against the seeded pipe-fd-1 state exactly like
+    /// route_pipeline_stage_streams does.
+    pub(in crate::executor) fn pipeline_stage_stderr_merges_into_stdout(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
+        let mut state = self.command_output_fd_state();
+        state.fds.insert(1, OutputTarget::Stdout);
+        // Same defer as route_pipeline_stage_streams: a diagnostic the walk
+        // emits against the seeded Stdout must not leak to the real stdout.
+        state.defer_stdout_writes = true;
+        if !self.apply_ordered_output_redirects(cmd, &mut state)? {
+            return Ok(false);
+        }
+        Ok(matches!(state.fd_target(1), Some(OutputTarget::Stdout))
+            && matches!(state.fd_target(2), Some(OutputTarget::Stdout)))
+    }
+
     pub(in crate::executor) fn command_output_redirect_fails(
         &mut self,
         cmd: &CommandNode,

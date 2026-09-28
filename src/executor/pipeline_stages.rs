@@ -629,46 +629,67 @@ impl Executor {
         } else {
             process.stdin(Stdio::piped());
         }
-        process.stdout(Stdio::piped());
 
         // Bash applies a pipeline element's redirections before running the
         // command (redir.c do_redirection_internal). The child's stderr must
-        // follow the stage's parsed `2>`/`2>>`/`2>&1` redirect instead of
-        // inheriting the shell's stderr, or diagnostics such as ls's
-        // "cannot access" leak past `2>/dev/null` (issue #70).
-        let mut stderr_merges_into_stdout = false;
-        if let Some(redirect) = &command.redirect_err {
-            let target = self.expand_redirect_target(redirect);
-            if redirect_target_fd(&target) == Some(1) {
-                stderr_merges_into_stdout = true;
-                process.stderr(Stdio::piped());
-            } else if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                if let Ok(file) = self.create_redirect_output(&target, redirect.clobber) {
-                    process.stderr(Stdio::from(file));
-                }
-            }
-        } else if let Some(redirect) = &command.redirect_err_append {
-            let target = self.expand_redirect_target(redirect);
-            if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                if let Ok(file) = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
+        // follow the stage's parsed `2>`/`2>>` redirect instead of inheriting
+        // the shell's stderr, or diagnostics such as ls's "cannot access"
+        // leak past `2>/dev/null` (issue #70).
+        //
+        // niubash#144: when the element's stderr resolves onto the SAME pipe
+        // as its stdout (`2>&1`, `2>&3 3>&1`, `|&`), the child gets ONE
+        // shared pipe for both streams — GNU's dup2 (redir.c:1169-1170)
+        // leaves both descriptors on the pipe's write end, so the merged
+        // bytes interleave in true write order. The retired shape piped the
+        // two streams separately and concatenated stdout-first at exit,
+        // which both reordered and withheld the stderr half.
+        let mut stderr_merges_into_stdout =
+            command.pipe == Some(2) || self.pipeline_stage_stderr_merges_into_stdout(command)?;
+        let mut merged_stage_reader = None;
+        if stderr_merges_into_stdout {
+            let (reader, writer) = os_pipe::pipe().map_err(ExecuteError::IoError)?;
+            let writer_clone = writer.try_clone().map_err(ExecuteError::IoError)?;
+            process.stdout(Stdio::from(writer_clone));
+            process.stderr(Stdio::from(writer));
+            merged_stage_reader = Some(reader);
+        } else {
+            process.stdout(Stdio::piped());
+            if let Some(redirect) = &command.redirect_err {
+                let target = self.expand_redirect_target(redirect);
+                if redirect_target_fd(&target) == Some(1) {
+                    // `2>&1` whose fd 1 left the pipe (`2>&1 >f`): the pipe
+                    // half stays stderr's payload; the routing pass after
+                    // the stage resolves which stream lands where.
+                    stderr_merges_into_stdout = false;
+                } else if !is_closed_redirect_target(&target)
+                    && redirect_target_fd(&target).is_none()
                 {
-                    process.stderr(Stdio::from(file));
+                    if let Ok(file) = self.create_redirect_output(&target, redirect.clobber) {
+                        process.stderr(Stdio::from(file));
+                    }
+                }
+            } else if let Some(redirect) = &command.redirect_err_append {
+                let target = self.expand_redirect_target(redirect);
+                if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
+                    if let Ok(file) = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
+                    {
+                        process.stderr(Stdio::from(file));
+                    }
                 }
             }
-        } else if command.pipe == Some(2) {
-            // GNU pipe-and-ampersand is "2>&1 |" (redir.c): an external
-            // producer's stderr belongs to the pipe payload. Without the
-            // explicit pipe the child inherits the shell's stderr, so the
-            // invocation.tests option-error producers fed their consumers
-            // an empty stream.
-            stderr_merges_into_stdout = true;
-            process.stderr(Stdio::piped());
         }
 
         let mut child = process.spawn()?;
+        // Drop the Command NOW: std retains the `Stdio::from(PipeWriter)`
+        // values set above, and a live Command keeps the merged pipe's
+        // write end open in the parent — the drain below would never see
+        // EOF even after the child exits. The child holds its own
+        // duplicated inheritable handles (the fork-and-dup of GNU's
+        // execute_pipeline element setup).
+        drop(process);
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(
                 &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
@@ -677,6 +698,22 @@ impl Executor {
             // (same approximation as comsub_stdin_writeback — a spawned
             // process's read() calls are not observable here).
             self.pipeline_stdin_consumed.set(Some(input.len()));
+        }
+        if let Some(mut reader) = merged_stage_reader {
+            // One pipe carries the merged stream in true write order; drain
+            // it to EOF while the child runs, then reap.
+            use std::io::Read;
+            let mut merged = Vec::new();
+            reader
+                .read_to_end(&mut merged)
+                .map_err(ExecuteError::IoError)?;
+            let status = child.wait().map_err(ExecuteError::IoError)?;
+            merged.extend(self.finish_dev_fd_operands(dev_ops));
+            return Ok(Some((
+                crate::executor::substitution_metadata::bytes_to_shell_text(&merged),
+                String::new(),
+                crate::executor::wait_status::process_exit_status(&status),
+            )));
         }
         let output = child.wait_with_output()?;
 

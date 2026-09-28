@@ -773,6 +773,18 @@ pub struct Executor {
     pub(crate) read_eof_no_delimiter: bool,
     stdout_capture: Option<Vec<u8>>,
     stderr_capture: Option<Vec<u8>>,
+    /// niubash#144: outcome of the external stdio plan from the last
+    /// `apply_external_redirects` (ordered-walk shared handles), consumed
+    /// by the immediately following `spawn_external_process`. `Some(..)`
+    /// means the child already owns real handles for fd 1/2 and the legacy
+    /// capture-replay routes MUST NOT touch the command again (an empty
+    /// replay would re-open `>f` and truncate the child's live output);
+    /// `CapturePipe` additionally carries the ONE shared pipe the plan
+    /// bound the merged fds to (a command substitution's pipe, GNU
+    /// subst.c:7143 command_substitute) for the post-exit drain into the
+    /// active capture. `None` means the planner declined and the legacy
+    /// split/capture routes own the command untouched.
+    external_stdio_outcome: Option<external_redirects::ExternalStdioOutcome>,
     host_external_command_handler: Option<HostExternalCommandHandler>,
     #[cfg(windows)]
     elevation_handler: Option<ElevationHandler>,

@@ -310,6 +310,7 @@ impl Executor {
             read_eof_no_delimiter: false,
             stdout_capture: None,
             stderr_capture: None,
+            external_stdio_outcome: None,
             host_external_command_handler: None,
             #[cfg(windows)]
             elevation_handler: None,

@@ -885,7 +885,17 @@ impl Executor {
             use std::os::unix::process::CommandExt;
             process.pre_exec(crate::builtins::kill::child_pre_exec_reset);
         }
-        match process.spawn() {
+        let spawned = process.spawn();
+        // Drop the Command NOW: std retains every `Stdio::from(..)` it was
+        // given (the #144 shared capture-pipe write clones among them), so a
+        // still-live Command keeps the pipe's write end open in the parent
+        // and the post-exit drain below would block on an EOF that cannot
+        // arrive even after the child is gone. The child already holds its
+        // own duplicated inheritable handles; GNU closes the parent's copies
+        // right after the fork (redir.c do_redirection_internal runs in the
+        // child).
+        drop(process);
+        match spawned {
             Ok(mut child) => {
                 for dup in parent_side_dups {
                     crate::fd::close_handle(dup);
@@ -908,7 +918,56 @@ impl Executor {
                     }
                 }
 
-                if self.external_needs_fd_copy_capture(cmd) {
+                if let Some(outcome) = self.external_stdio_outcome.take() {
+                    // niubash#144: the stdio plan already gave the child real
+                    // handles; only the shared capture pipe needs collecting.
+                    // Drain it to EOF first — the merged bytes stream in true
+                    // write order through the ONE pipe both fds dup onto
+                    // (GNU redir.c:1169-1170), unlike the retired two-pipe
+                    // capture-replay.
+                    let foreground_pid = child.id();
+                    if let super::external_redirects::ExternalStdioOutcome::CapturePipe(
+                        mut reader,
+                    ) = outcome
+                    {
+                        use std::io::Read;
+                        let mut merged = Vec::new();
+                        reader.read_to_end(&mut merged)?;
+                        let status = self.wait_external_child(&mut child)?;
+                        if let Some(signal) =
+                            crate::executor::wait_status::exit_status_signal(&status)
+                        {
+                            self.note_child_signal_death(
+                                foreground_pid,
+                                signal,
+                                self.signal_notice_command_text(cmd),
+                                true,
+                            );
+                        }
+                        self.run_sigchld_trap_for_reaped_child()?;
+                        // Route the merged stream into the active capture
+                        // exactly like the legacy single-stream collection.
+                        self.write_default_stdout(&merged)?;
+                        self.exit_code = crate::executor::wait_status::process_exit_status(&status);
+                    } else {
+                        let status = self.wait_external_child(&mut child)?;
+                        if let Some(signal) =
+                            crate::executor::wait_status::exit_status_signal(&status)
+                        {
+                            self.note_child_signal_death(
+                                foreground_pid,
+                                signal,
+                                self.signal_notice_command_text(cmd),
+                                true,
+                            );
+                        }
+                        self.exit_code = crate::executor::wait_status::process_exit_status(&status);
+                        // A reaped foreground child delivers SIGCHLD in
+                        // GNU bash; a set trap runs once at this boundary
+                        // (trap8.sub).
+                        self.run_sigchld_trap_for_reaped_child()?;
+                    }
+                } else if self.external_needs_fd_copy_capture(cmd) {
                     let foreground_pid = child.id();
                     match child.wait_with_output() {
                         Ok(output) => {
@@ -985,6 +1044,9 @@ impl Executor {
                 for dup in parent_side_dups {
                     crate::fd::close_handle(dup);
                 }
+                // The failed spawn never consumed the stdio plan; drop it so
+                // no later command mistakes it for its own.
+                self.external_stdio_outcome = None;
                 if !used_shell && is_exec_format_error(&error) {
                     // GNU execute_cmd.c:6139-6233 (shell_execve): when the OS
                     // refuses to exec a file, its first bytes decide. A #!
