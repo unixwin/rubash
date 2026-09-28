@@ -119,6 +119,7 @@ impl Executor {
         // entry (`mkdir -p d` created `./-p`).
         let mut mode_value_pending = false;
         let mut no_more_flags = false;
+        let mut failed = false;
         for word in &cmd.words[1..] {
             let expanded = self.expand_word(word);
             if !no_more_flags && !mode_value_pending && expanded == "--" {
@@ -136,9 +137,27 @@ impl Executor {
                 mode_value_pending = false;
                 continue;
             }
-            fs::create_dir_all(shell_path_to_windows(&expanded, &self.shell_state.env_vars))?;
+            // coreutils mkdir.c: a failed operand reports
+            // `mkdir: cannot create directory 'NAME': <strerror>' and the
+            // loop continues with the remaining operands, leaving status 1.
+            // The wrapper is the cosmetic part rubash#280 fixes:
+            // propagating the io::Error with `?` printed a bare
+            // `<script>: line N: Invalid argument` with no mkdir context
+            // (an NTFS-invalid wildcard name such as `x*s' triggers it on
+            // Windows while ext4 accepts it).
+            if let Err(error) =
+                fs::create_dir_all(shell_path_to_windows(&expanded, &self.shell_state.env_vars))
+            {
+                eprintln!(
+                    "{}mkdir: cannot create directory '{}': {}",
+                    self.diagnostic_prefix(),
+                    expanded,
+                    crate::posix_errors::message(&error)
+                );
+                failed = true;
+            }
         }
-        self.exit_code = 0;
+        self.exit_code = i32::from(failed);
         Ok(true)
     }
 

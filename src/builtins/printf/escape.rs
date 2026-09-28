@@ -1,47 +1,91 @@
 use crate::executor::substitution_metadata::encode_raw_byte_marker;
 
-pub(super) fn expand_format_escape<I>(chars: &mut std::iter::Peekable<I>) -> String
+/// Expand one backslash escape from the FORMAT string. Returns the expanded
+/// text plus an optional bare builtin_error body (no shell prefix): GNU
+/// printf.def tescape() reports `missing hex digit for \x` (and the \u/\U
+/// analogue) through builtin_error without setting conversion_error, so the
+/// diagnostic is stderr-only and the exit status stays 0.
+pub(super) fn expand_format_escape<I>(
+    chars: &mut std::iter::Peekable<I>,
+) -> (String, Option<String>)
 where
     I: Iterator<Item = char>,
 {
     match chars.next() {
-        Some('a') => "\x07".to_string(),
-        Some('b') => "\x08".to_string(),
+        Some('a') => ("\x07".to_string(), None),
+        Some('b') => ("\x08".to_string(), None),
         // \e and \f decode to carrier bytes (0x1b QUOTED_WORD_PREFIX, 0x0c):
         // as data they must be marker-tagged so no carrier consumer claims
         // them (unicode1.sub printf -v). Same contract as push_ansi_c_byte.
-        Some('e') | Some('E') => encode_raw_byte(0x1b),
-        Some('f') => encode_raw_byte(0x0c),
-        Some('n') => "\n".to_string(),
-        Some('r') => "\r".to_string(),
-        Some('t') => "\t".to_string(),
-        Some('v') => "\x0b".to_string(),
-        Some('\\') => "\\".to_string(),
+        Some('e') | Some('E') => (encode_raw_byte(0x1b), None),
+        Some('f') => (encode_raw_byte(0x0c), None),
+        Some('n') => ("\n".to_string(), None),
+        Some('r') => ("\r".to_string(), None),
+        Some('t') => ("\t".to_string(), None),
+        Some('v') => ("\x0b".to_string(), None),
+        Some('\\') => ("\\".to_string(), None),
         // GNU printf.def:1148-1158: \', \", \? in the format string are
         // recognized as escape sequences with backslash removal (sawc==0).
-        Some('\'') => "'".to_string(),
-        Some('"') => "\"".to_string(),
-        Some('?') => "?".to_string(),
-        Some('x') => format_escape_codepoint(read_escape_digits(chars, 16, 2), "\\x"),
-        Some('u') => format_unicode_escape(read_escape_digits_raw(chars, 16, 4), "\\u"),
-        Some('U') => format_unicode_escape(read_escape_digits_raw(chars, 16, 8), "\\U"),
-        Some('0') => format_escape_byte(read_escape_digits(chars, 8, 3).or(Some(0)), ""),
-        Some(octal @ '1'..='7') => {
-            format_escape_byte(read_prefixed_escape_digits(chars, octal, 8, 3), "")
+        Some('\'') => ("'".to_string(), None),
+        Some('"') => ("\"".to_string(), None),
+        Some('?') => ("?".to_string(), None),
+        Some('x') => {
+            let (expanded, missing) = format_escape_codepoint(
+                read_escape_digits(chars, 16, 2),
+                "\\x",
+                "missing hex digit for \\x",
+            );
+            (expanded, missing)
         }
-        Some(other) => format!("\\{other}"),
-        None => "\\".to_string(),
+        Some('u') => format_unicode_escape(read_escape_digits_raw(chars, 16, 4), "\\u", 'u'),
+        Some('U') => format_unicode_escape(read_escape_digits_raw(chars, 16, 8), "\\U", 'U'),
+        // GNU printf.def tescape() octal: `temp = 2 + (!evalue && !!sawc)`.
+        // In the FORMAT string sawc is NULL, so a leading-\0 escape takes at
+        // most two more digits (three total); the fourth digit stays literal
+        // (`printf '\0007'` emits NUL then `7`). The %b path passes sawc and
+        // takes three more (see expand_percent_b).
+        Some('0') => (
+            format_escape_byte(read_escape_digits(chars, 8, 2).or(Some(0)), ""),
+            None,
+        ),
+        Some(octal @ '1'..='7') => (
+            format_escape_byte(read_prefixed_escape_digits(chars, octal, 8, 3), ""),
+            None,
+        ),
+        Some(other) => (format!("\\{other}"), None),
+        None => ("\\".to_string(), None),
     }
 }
 
-fn format_escape_codepoint(value: Option<u32>, fallback: &str) -> String {
+fn format_escape_codepoint(
+    value: Option<u32>,
+    fallback: &str,
+    diagnostic: &str,
+) -> (String, Option<String>) {
     // GNU printf.def:1121-1140: \uNNNN/\UNNNNNNNN convert through u32cconv,
     // which encodes every value <= 0x7fffffff (surrogates and the 5/6-byte
     // UTF-8 forms included) and emits nothing for larger values. A missing
     // digit run is the only fallback case.
     match value {
-        Some(value) => crate::executor::substitution_metadata::u32cconv_utf8_text(value),
-        None => fallback.to_string(),
+        Some(value) => (
+            crate::executor::substitution_metadata::u32cconv_utf8_text(value),
+            None,
+        ),
+        None => (fallback.to_string(), Some(format!("printf: {diagnostic}"))),
+    }
+}
+
+fn format_unicode_escape(
+    value: Option<(u32, String)>,
+    prefix: &str,
+    kind: char,
+) -> (String, Option<String>) {
+    match value {
+        Some((codepoint, _raw)) => (unicode_escape_text(codepoint), None),
+        None => (
+            prefix.to_string(),
+            Some(format!("printf: missing unicode digit for \\{kind}")),
+        ),
     }
 }
 
@@ -67,10 +111,15 @@ pub(super) fn raw_bytes(value: &str) -> Vec<u8> {
     crate::executor::substitution_metadata::shell_text_to_raw_bytes(value)
 }
 
-pub(super) fn expand_percent_b(value: &str) -> (String, bool) {
+/// Expand a `%b` argument. Returns the expanded text, whether a `\c` escape
+/// stopped the output, and an optional bare builtin_error body for the
+/// missing-digit diagnostics (GNU tescape: builtin_error only, exit status
+/// unaffected).
+pub(super) fn expand_percent_b(value: &str) -> (String, bool, Option<String>) {
     let mut output = String::new();
     let mut chars = value.chars().peekable();
     let mut stop_output = false;
+    let mut diagnostic = None;
 
     while let Some(ch) = chars.next() {
         if ch != '\\' {
@@ -93,18 +142,35 @@ pub(super) fn expand_percent_b(value: &str) -> (String, bool) {
             Some('v') => output.push('\x0b'),
             Some('\\') => output.push('\\'),
             Some('x') => {
-                push_escape_codepoint(&mut output, read_escape_digits(&mut chars, 16, 2), "\\x")
+                let (expanded, missing) = format_escape_codepoint(
+                    read_escape_digits(&mut chars, 16, 2),
+                    "\\x",
+                    "missing hex digit for \\x",
+                );
+                if missing.is_some() && diagnostic.is_none() {
+                    diagnostic = missing;
+                }
+                output.push_str(&expanded);
             }
-            Some('u') => push_unicode_escape(
-                &mut output,
-                read_escape_digits_raw(&mut chars, 16, 4),
-                "\\u",
-            ),
-            Some('U') => push_unicode_escape(
-                &mut output,
-                read_escape_digits_raw(&mut chars, 16, 8),
-                "\\U",
-            ),
+            Some('u') => {
+                let (expanded, missing) =
+                    format_unicode_escape(read_escape_digits_raw(&mut chars, 16, 4), "\\u", 'u');
+                if missing.is_some() && diagnostic.is_none() {
+                    diagnostic = missing;
+                }
+                output.push_str(&expanded);
+            }
+            Some('U') => {
+                let (expanded, missing) =
+                    format_unicode_escape(read_escape_digits_raw(&mut chars, 16, 8), "\\U", 'U');
+                if missing.is_some() && diagnostic.is_none() {
+                    diagnostic = missing;
+                }
+                output.push_str(&expanded);
+            }
+            // GNU printf.def tescape with sawc != NULL: a leading-0 octal
+            // escape consumes up to three MORE digits (four total), so
+            // %b '\0007' is a single BEL.
             Some('0') => {
                 let value = read_escape_digits(&mut chars, 8, 3).or(Some(0));
                 push_escape_byte(&mut output, value, "");
@@ -123,7 +189,7 @@ pub(super) fn expand_percent_b(value: &str) -> (String, bool) {
         }
     }
 
-    (output, stop_output)
+    (output, stop_output, diagnostic)
 }
 
 fn read_prefixed_escape_digits<I>(
@@ -201,12 +267,6 @@ where
 }
 
 /// Format a `\u`/`\U` escape (format string).
-fn format_unicode_escape(value: Option<(u32, String)>, prefix: &str) -> String {
-    match value {
-        Some((codepoint, _raw)) => unicode_escape_text(codepoint),
-        None => prefix.to_string(),
-    }
-}
 
 /// Encode a parsed `\u`/`\U` code point under the active locale.
 ///
@@ -244,25 +304,6 @@ fn unicode_escape_text(codepoint: u32) -> String {
     out
 }
 
-/// Push a `\u`/`\U` escape result into an output buffer (for `%b` expansion).
-fn push_unicode_escape(output: &mut String, value: Option<(u32, String)>, prefix: &str) {
-    match value {
-        Some((codepoint, _raw)) => output.push_str(&unicode_escape_text(codepoint)),
-        None => output.push_str(prefix),
-    }
-}
-
-fn push_escape_codepoint(output: &mut String, value: Option<u32>, fallback: &str) {
-    // Same GNU u32cconv table as the format-string path (printf.def uses one
-    // decode for \u/\U in both the format and %b argument expansion).
-    match value {
-        Some(value) => output.push_str(
-            &crate::executor::substitution_metadata::u32cconv_utf8_text(value),
-        ),
-        None => output.push_str(fallback),
-    }
-}
-
 fn push_escape_byte(output: &mut String, value: Option<u32>, fallback: &str) {
     match value {
         Some(byte) => output.push_str(&encode_raw_byte(byte as u8)),
@@ -270,7 +311,34 @@ fn push_escape_byte(output: &mut String, value: Option<u32>, fallback: &str) {
     }
 }
 
+/// GNU shquote.c:95 sh_single_quote(): wrap in `'...'`, embedding a
+/// literal `'` as `'\''`. The single-character string `'` collapses to
+/// `\'`. Selected by printf's altform flag (`%#q`, printf.def:699).
+pub(super) fn single_shell_quote(value: &str) -> String {
+    if value == "'" {
+        return "\\'".to_string();
+    }
+    let mut quoted = String::with_capacity(value.len() + 3);
+    quoted.push('\'');
+    for ch in value.chars() {
+        quoted.push(ch);
+        if ch == '\'' {
+            quoted.push_str("\\''");
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
 pub(super) fn shell_quote(value: &str) -> String {
+    shell_quote_form(value, false)
+}
+
+/// GNU printf.def:695-702 quoting decision for %q/%Q: empty -> `''`;
+/// ansic_shouldquote (control characters / non-printable bytes) ->
+/// ansic_quote ($'...'); altform (`%#q') -> sh_single_quote; otherwise
+/// sh_backslash_quote with flags 3.
+pub(super) fn shell_quote_form(value: &str, altform: bool) -> String {
     if value.is_empty() {
         return "''".to_string();
     }
@@ -291,6 +359,10 @@ pub(super) fn shell_quote(value: &str) -> String {
 
     if value.chars().any(|ch| ch.is_control()) {
         return ansi_c_shell_quote(value);
+    }
+
+    if altform {
+        return single_shell_quote(value);
     }
 
     // GNU shquote.c sh_backslash_quote with flags=3 (printf.def:702): the

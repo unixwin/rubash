@@ -300,6 +300,7 @@ impl Executor {
             exit_jump_pending: Cell::new(false),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
+            alias_introduced_words: Cell::new(0),
             redirect_target_memo: RefCell::new(HashMap::new()),
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             fd_var_external_undo: Vec::new(),

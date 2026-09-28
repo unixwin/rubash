@@ -716,6 +716,15 @@ pub struct Executor {
     /// `self.exit_code = self.execute_x(cmd)?` does not overwrite the
     /// write-failure status with the builtin's nominal zero.
     last_builtin_write_failed: Cell<bool>,
+    /// How many LEADING words of the last alias expansion came from alias
+    /// VALUES (parse.y push_string): only that prefix is alias-introduced
+    /// syntax; every word after it is original input whose post-expansion
+    /// content is DATA. execute_alias_expanded_syntax re-parses only when
+    /// the prefix itself carries operators/assignments, and shell-quotes
+    /// the tail words when rebuilding the source so their spaces/`=' cannot
+    /// re-tokenize (modernish's `alias let='let --'` + `let "a = b"`
+    /// became `let -- -- a = b` through the unquoted join + re-expansion).
+    alias_introduced_words: Cell<usize>,
     /// GNU redir.c:298 redirection_expand expands each redirect word once,
     /// inside do_redirections' single left-to-right pass. Rubash resolves
     /// redirect targets in several passes (ambiguity precheck, fd-scope

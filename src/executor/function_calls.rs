@@ -126,6 +126,14 @@ impl Executor {
             redirects.heredoc_body = cmd.heredoc_body.clone();
             redirects.here_string = cmd.here_string.clone();
             redirects.here_string_carrier = cmd.here_string_carrier.clone();
+            // GNU execute_cmd.c:5205 binds the definition's BODY command
+            // (function_cell), whose `redirects' list carries the numbered
+            // entries (`} 5</dev/null'); execute_command re-applies them
+            // whenever the function runs (execute_cmd.c:854). Keep the
+            // ordered list so the call-time wrap can bind the numbered fds
+            // (fatal.sh FTL_FNREDIR: `fn 5<&-' must not close what the
+            // definition opened for the body).
+            redirects.redirects = cmd.redirects.clone();
             self.shell_state
                 .function_definition_redirects
                 .insert(function.name.clone(), redirects);
@@ -207,10 +215,21 @@ impl Executor {
             || function_redirects_affect_body(call_cmd);
         let redirected_body = if body_needs_redirects {
             let mut commands = body.commands.clone();
+            // GNU applies the invocation's redirects first
+            // (execute_cmd.c:5606, execute_builtin_or_function's
+            // do_redirections on the call's redirect list before dispatch)
+            // and the stored DEFINITION redirects only when the body
+            // command itself runs (execute_cmd.c:854 do_redirections over
+            // tc->redirects, the body copy from execute_function:5205) —
+            // the definition-level binding is the inner one and wins for
+            // the body. `fn() { command : <&5; } 5</dev/null` called as
+            // `fn 5<&-' therefore keeps fd 5 open in the body (fatal.sh
+            // FTL_FNREDIR); splicing in the definition redirects first let
+            // the call-site `5<&-' close what the body still needed.
+            self.apply_function_call_redirects(&mut commands, call_cmd)?;
             if let Some(definition_redirects) = &definition_redirects {
                 self.apply_function_call_redirects(&mut commands, definition_redirects)?;
             }
-            self.apply_function_call_redirects(&mut commands, call_cmd)?;
             Some(Ast { commands })
         } else {
             None
@@ -415,10 +434,39 @@ impl Executor {
         // like the unwind-protect does.
         let saved_loop_depth = self.shell_state.loop_depth;
         self.shell_state.loop_depth = 0;
+        // GNU execute_cmd.c:5205 (execute_function) runs a copy of the
+        // stored body command, and execute_command_internal:854 applies
+        // the DEFINITION's redirect list when that body command runs —
+        // after the invocation's redirects (execute_builtin_or_function's
+        // do_redirections at execute_cmd.c:5606) — so the definition-level
+        // numbered bindings are the innermost ones and win for the body:
+        // `fn() { command : <&5; } 5</dev/null' called as `fn 5<&-' keeps
+        // fd 5 open inside the body (modernish fatal.sh FTL_FNREDIR).
+        // The wrap carries only the numbered (>2) entries: the stdio legs
+        // of the definition are already spliced per-leaf by
+        // apply_function_call_redirects.
+        let definition_numbered_only = definition_redirects.as_ref().map(|definition| {
+            let mut numbered = CommandNode::new();
+            numbered.redirects = definition
+                .redirects
+                .iter()
+                .filter(|redirect| {
+                    redirect.fd_var.is_none() && redirect.fd.is_some_and(|fd| fd > 2)
+                })
+                .cloned()
+                .collect();
+            numbered
+        });
         let result = self.with_compound_output_redirects(call_cmd, |executor| {
-            executor.with_ambient_line(body_open_line, |executor| {
-                executor.execute_ast_inner(body_ast)
-            })
+            let body_run = |executor: &mut Executor| {
+                executor.with_ambient_line(body_open_line, |executor| {
+                    executor.execute_ast_inner(body_ast)
+                })
+            };
+            match &definition_numbered_only {
+                Some(definition) => executor.with_numbered_fd_bindings(definition, body_run),
+                None => body_run(executor),
+            }
         });
         self.shell_state.loop_depth = saved_loop_depth;
         // GNU execute_cmd.c:5269+ — the call's input redirections are

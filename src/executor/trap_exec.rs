@@ -1476,7 +1476,15 @@ impl Executor {
                 Ok(Stdio::from(crate::fd::handle_to_file(dup)))
             }
             Some(FdWriteEndpoint::Stdout) if fd != 1 => self.exec_stdio_for_endpoint(1, depth + 1),
-            Some(FdWriteEndpoint::Stderr) if fd != 2 => self.exec_stdio_for_endpoint(2, depth + 1),
+            // A Stderr endpoint on fd != 2 is a dup2 snapshot of the
+            // ORIGINAL stderr object (rubash#279): resolving through the
+            // live fd 2 would send a child's `>&3` output into the group's
+            // later `2>/dev/null`. Stdio::inherit() passes the process's
+            // real stderr handle, which is exactly the object the dup
+            // copied (a bound fd 2 clones its File entry instead of
+            // carrying the Stderr marker, so the marker really means the
+            // implicit process stderr).
+            Some(FdWriteEndpoint::Stderr) if fd != 2 => Ok(Stdio::inherit()),
             _ => Ok(Stdio::inherit()),
         }
     }

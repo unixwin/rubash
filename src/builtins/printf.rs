@@ -42,11 +42,17 @@ struct FormatSpec {
     precision_from_arg: bool,
     time_format: Option<String>,
     specifier: char,
+    /// GNU printf.def:472-477 `longform': the `l' length modifier was seen;
+    /// selects the wide (%ls/%lc) unit model when the locale is multibyte.
+    wide: bool,
     /// GNU printf.def:897-918 decodeint() reports ERANGE when an inline
     /// (non-`*`) width or precision overflows `int`. The flag is set in
-    /// parse_format_spec and surfaced as a diagnostic in render_one_pass.
+    /// parse_format_spec and surfaced as a diagnostic in render_one_pass;
+    /// the digit run is kept because report_erange names the digits alone.
     inline_width_overflow: bool,
     inline_precision_overflow: bool,
+    width_digits: Option<String>,
+    precision_digits: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +61,11 @@ struct RenderedPrintf {
     status: i32,
     errors: Vec<String>,
     stop_output: bool,
+    /// GNU printf.def's global `conversion_error': any printf_erange /
+    /// sh_invalidnum / EOVERFLOW diagnostic makes the builtin exit status 1
+    /// even though processing continues (printf.def:826-827). Warnings
+    /// (invalid time format, tescape missing-digit) never set it.
+    conversion_error: bool,
 }
 
 enum ParsedFormat {
@@ -668,6 +679,7 @@ fn render(format: &str, args: &[&str], env_vars: &mut HashMap<String, String>) -
     let mut output = String::new();
     let mut arg_index = 0;
     let mut errors = Vec::new();
+    let mut conversion_error = false;
 
     if args.is_empty() {
         return render_one_pass(format, args, &mut arg_index, output, env_vars);
@@ -678,12 +690,14 @@ fn render(format: &str, args: &[&str], env_vars: &mut HashMap<String, String>) -
         let rendered = render_one_pass(format, args, &mut arg_index, output, env_vars);
         output = rendered.output;
         errors.extend(rendered.errors);
+        conversion_error |= rendered.conversion_error;
         if rendered.stop_output {
             return RenderedPrintf {
                 output,
-                status: status_from_errors(&errors),
+                status: EXECUTION_FAILURE,
                 errors,
                 stop_output: true,
+                conversion_error,
             };
         }
 
@@ -694,9 +708,14 @@ fn render(format: &str, args: &[&str], env_vars: &mut HashMap<String, String>) -
 
     RenderedPrintf {
         output,
-        status: status_from_errors(&errors),
+        status: if conversion_error {
+            EXECUTION_FAILURE
+        } else {
+            EXECUTION_SUCCESS
+        },
         errors,
         stop_output: false,
+        conversion_error,
     }
 }
 
@@ -709,10 +728,18 @@ fn render_one_pass(
 ) -> RenderedPrintf {
     let mut chars = format.chars().peekable();
     let mut errors = Vec::new();
+    let mut conversion_error = false;
+    let prefix = diagnostic_prefix(env_vars);
 
     while let Some(ch) = chars.next() {
         match ch {
-            '\\' => output.push_str(&expand_format_escape(&mut chars)),
+            '\\' => {
+                let (expanded, diagnostic) = expand_format_escape(&mut chars);
+                output.push_str(&expanded);
+                if let Some(body) = diagnostic {
+                    errors.push(format!("{prefix}{body}"));
+                }
+            }
             '%' => {
                 if chars.peek() == Some(&'%') {
                     chars.next();
@@ -727,18 +754,17 @@ fn render_one_pass(
                             output,
                             status: EXECUTION_FAILURE,
                             errors: vec![format!(
-                                "{}printf: `{format}': missing format character",
-                                diagnostic_prefix(env_vars)
+                                "{prefix}printf: `{format}': missing format character"
                             )],
                             stop_output: true,
+                            conversion_error: false,
                         };
                     }
                 };
 
                 if spec.time_format.is_some() && spec.specifier != 'T' {
                     errors.push(format!(
-                        "{}printf: warning: `{}': invalid time format specification",
-                        diagnostic_prefix(env_vars),
+                        "{prefix}printf: warning: `{}': invalid time format specification",
                         spec.specifier
                     ));
                     output.push_str(&spec.raw);
@@ -750,38 +776,77 @@ fn render_one_pass(
                         output,
                         status: EXECUTION_FAILURE,
                         errors: vec![format!(
-                            "{}printf: `{}': invalid format character",
-                            diagnostic_prefix(env_vars),
+                            "{prefix}printf: `{}': invalid format character",
                             spec.specifier
                         )],
                         stop_output: true,
+                        conversion_error: false,
                     };
                 };
-                errors.extend(resolve_dynamic_format_args(&mut spec, args, arg_index));
+                let dynamic = resolve_dynamic_format_args(&mut spec, args, arg_index);
+                // GNU getint/chk_converror: every diagnostic from a `*'
+                // width/precision argument is a conversion error (rc 1),
+                // but processing continues with the clamped fallback.
+                conversion_error |= !dynamic.is_empty();
+                errors.extend(dynamic.into_iter().map(|body| format!("{prefix}{body}")));
 
-                // GNU printf.def:897-918 decodeint() reports ERANGE when an
-                // inline (non-`*`) width or precision overflows int. The
-                // flags are set in parse_format_spec; surface them here
-                // where the diagnostic prefix is available.
-                if spec.inline_width_overflow {
-                    errors.push(format!(
-                        "{}printf: warning: {}: Numerical result out of range",
-                        diagnostic_prefix(env_vars),
-                        spec.raw
-                    ));
-                }
-                if spec.inline_precision_overflow {
-                    errors.push(format!(
-                        "{}printf: warning: {}: Numerical result out of range",
-                        diagnostic_prefix(env_vars),
-                        spec.raw
-                    ));
+                // Inline (non-`*') width/precision overflow splits along
+                // GNU's two output engines:
+                //   * the PF macro hands the directive to the C library,
+                //     whose printf fails with EOVERFLOW: builtin_error
+                //     prints strerror(errno), the directive's output is
+                //     lost, and PRETURN stops the whole builtin (rc 1);
+                //   * printstr/printwidestr re-parse the digit run with
+                //     decodeint(diagnose=1): report_erange names the
+                //     digits, conversion_error is set (rc 1), and the
+                //     remaining format keeps processing.
+                let wide_form = spec.wide || matches!(spec.specifier, 'S' | 'C');
+                let printstr_form = wide_form || matches!(spec.specifier, 'b' | 'q' | 'Q' | 'T');
+                if spec.specifier != 'n'
+                    && (spec.inline_width_overflow || spec.inline_precision_overflow)
+                {
+                    if printstr_form {
+                        let digits = spec
+                            .precision_digits
+                            .clone()
+                            .or_else(|| spec.width_digits.clone())
+                            .unwrap_or_default();
+                        errors.push(format!(
+                            "{prefix}printf: {digits}: Numerical result out of range"
+                        ));
+                        conversion_error = true;
+                    } else {
+                        errors.push(format!(
+                            "{prefix}printf: Value too large for defined data type"
+                        ));
+                        return RenderedPrintf {
+                            output,
+                            status: EXECUTION_FAILURE,
+                            errors,
+                            stop_output: true,
+                            conversion_error: true,
+                        };
+                    }
                 }
 
                 if spec.specifier == 'n' {
+                    // GNU printf.def:654-671: %n binds the character count
+                    // written so far; an operand that is not a valid
+                    // identifier is sh_invalidid + PRETURN(EXECUTION_FAILURE).
                     let name = next_arg(args, arg_index);
-                    if valid_identifier(name) {
+                    if name.is_empty() {
+                        // `if (var && *var)': an empty operand binds nothing.
+                    } else if valid_identifier(name) {
                         env_vars.insert(name.to_string(), output.chars().count().to_string());
+                    } else {
+                        errors.push(format!("{prefix}printf: `{name}': not a valid identifier"));
+                        return RenderedPrintf {
+                            output,
+                            status: EXECUTION_FAILURE,
+                            errors,
+                            stop_output: true,
+                            conversion_error: true,
+                        };
                     }
                 } else if spec.specifier == 'T' {
                     let value = if *arg_index < args.len() {
@@ -791,22 +856,33 @@ fn render_one_pass(
                     };
                     let (rendered, error) = format_time_value(value, &spec, env_vars);
                     if let Some(error) = error {
-                        errors.push(error);
+                        errors.push(format!("{prefix}{error}"));
                     }
                     output.push_str(&rendered);
                 } else {
+                    // GNU getstr/getintmax distinguish a MISSING argument
+                    // (treated as ""/0 without complaint) from a PRESENT
+                    // empty-string argument (strtoimax leaves ep==s ->
+                    // chk_converror -> sh_invalidnum: `printf: : invalid
+                    // number', value 0). printf.tests line 388.
+                    let arg_present = args.get(*arg_index).is_some();
                     let value = next_arg(args, arg_index);
-                    let (rendered, stop_output, error) = format_value(value, &spec);
-                    if let Some(error) = error {
-                        errors.push(error);
+                    let (rendered, stop_output, diagnostics) =
+                        format_value(value, &spec, arg_present);
+                    for (body, fatal) in diagnostics {
+                        if fatal {
+                            conversion_error = true;
+                        }
+                        errors.push(format!("{prefix}{body}"));
                     }
                     output.push_str(&rendered);
                     if stop_output {
                         return RenderedPrintf {
                             output,
-                            status: status_from_errors(&errors),
+                            status: EXECUTION_FAILURE,
                             errors,
                             stop_output: true,
+                            conversion_error,
                         };
                     }
                 }
@@ -816,22 +892,14 @@ fn render_one_pass(
     }
     RenderedPrintf {
         output,
-        status: status_from_errors(&errors),
+        status: if conversion_error {
+            EXECUTION_FAILURE
+        } else {
+            EXECUTION_SUCCESS
+        },
         errors,
         stop_output: false,
-    }
-}
-
-fn status_from_errors(errors: &[String]) -> i32 {
-    if errors
-        .iter()
-        .all(|error| error.contains(": printf: warning:"))
-    {
-        EXECUTION_SUCCESS
-    } else if errors.is_empty() {
-        EXECUTION_SUCCESS
-    } else {
-        EXECUTION_FAILURE
+        conversion_error,
     }
 }
 

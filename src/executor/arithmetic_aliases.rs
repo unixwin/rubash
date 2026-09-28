@@ -545,28 +545,41 @@ impl Executor {
         raws: &[Option<&str>],
     ) -> Vec<String> {
         if !self.alias_expansion_enabled() || self.alias_streamed() {
+            self.alias_introduced_words.set(0);
             return words.to_vec();
         }
 
         let mut expanded = Vec::new();
         let mut expand_next = true;
+        // parse.y push_string: words emitted by alias VALUES are the only
+        // alias-introduced syntax; the first original word that is not
+        // itself an alias ends that region (command position moves on).
+        let mut introduced = 0_usize;
 
         for (index, word) in words.iter().enumerate() {
             let raw = raws.get(index).copied().flatten();
             if expand_next && !crate::executor::command_prepare::raw_word_is_quoted(raw) {
                 let mut seen = Vec::new();
                 let (mut alias_words, alias_expand_next) = self.expand_alias_word(word, &mut seen);
-                if alias_words.is_empty() && !self.shell_state.aliases.contains_key(word) {
-                    expanded.push(word.clone());
-                } else {
+                // The word came from an alias VALUE only when the table has
+                // it and the expansion replaced it (expand_alias_word passes
+                // non-aliases and suppressed aliases through verbatim).
+                let replaced_by_alias = self.shell_state.aliases.contains_key(word)
+                    && !(alias_words.len() == 1 && alias_words[0] == *word);
+                if replaced_by_alias {
+                    introduced += alias_words.len();
                     expanded.append(&mut alias_words);
+                    expand_next = alias_expand_next;
+                } else {
+                    expanded.push(word.clone());
+                    expand_next = false;
                 }
-                expand_next = alias_expand_next;
             } else {
                 expanded.push(word.clone());
                 expand_next = false;
             }
         }
+        self.alias_introduced_words.set(introduced);
 
         expanded
     }

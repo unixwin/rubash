@@ -81,11 +81,16 @@ pub(super) fn parse_f64(value: &str) -> ParsedNumber<f64> {
     }
 }
 
+/// GNU printf.def:834-838 printf_erange()/1391-1398 chk_converror(): the
+/// diagnostic is a builtin_error body (no "warning:") naming the offending
+/// operand, and conversion_error makes the builtin exit status 1. The body
+/// carries no shell prefix -- render_one_pass adds the `script: line N:`
+/// prologue from builtin_error's error_prolog.
 pub(super) fn invalid_number_error(value: &str) -> String {
     if let Some(value) = value.strip_prefix("__rubash_printf_overflow__:") {
-        format!("rubash: printf: warning: {value}: Numerical result out of range")
+        format!("printf: {value}: Numerical result out of range")
     } else if value.starts_with("0x") || value.starts_with("0X") {
-        format!("rubash: printf: {value}: invalid hex number")
+        format!("printf: {value}: invalid hex number")
     } else if value.len() > 1
         && value.starts_with('0')
         && value
@@ -93,9 +98,9 @@ pub(super) fn invalid_number_error(value: &str) -> String {
             .iter()
             .any(|byte| matches!(byte, b'8' | b'9'))
     {
-        format!("rubash: printf: {value}: invalid octal number")
+        format!("printf: {value}: invalid octal number")
     } else {
-        format!("rubash: printf: {value}: invalid number")
+        format!("printf: {value}: invalid number")
     }
 }
 

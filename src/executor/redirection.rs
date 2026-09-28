@@ -24,6 +24,15 @@ enum OutputTarget {
     /// the fd actually holds — or `None` for the real process stdout when
     /// it was bound outside any capture (rubash#223).
     ProcessStdoutAt(Option<usize>),
+    /// The stderr twin of ProcessStdout (rubash#279): GNU
+    /// redir.c:237 do_redirections applies `3>&2` left to right — the dup2
+    /// copies fd 2's open file description AT THAT MOMENT, so a later
+    /// `2>/dev/null` in the same list never moves fd 3 (ble.sh's
+    /// `... 3>&2 ... &>/dev/null` init guard prints its diagnostic through
+    /// exactly this). An fd_table `Stderr` endpoint on any fd OTHER than 2
+    /// means "the process stderr object as bound" and must resolve to the
+    /// raw stderr channel, never through the live fd_table[2].
+    ProcessStderr,
     Null,
     CoprocStdin(u32),
     Path(String),
@@ -713,7 +722,18 @@ impl Executor {
                             OutputTarget::ProcessStdout
                         }
                     }
-                    FdWriteEndpoint::Stderr => OutputTarget::Stderr,
+                    FdWriteEndpoint::Stderr => {
+                        // fd 2's live alias stays live (an `exec 2> f` inside
+                        // the body must retarget plain stderr writes); every
+                        // OTHER fd's Stderr endpoint is a dup2 snapshot of
+                        // the original stderr object (rubash#279), mirroring
+                        // the Stdout/ProcessStdout split above.
+                        if *fd == 2 {
+                            OutputTarget::Stderr
+                        } else {
+                            OutputTarget::ProcessStderr
+                        }
+                    }
                     FdWriteEndpoint::File(file_fd) => {
                         let path = shell_display_path(&file_fd.path.to_string_lossy());
                         if is_null_device(&path) {
@@ -775,6 +795,16 @@ impl Executor {
                             state.redirect_failed = true;
                             return Ok(true);
                         }
+                        // A dup of the LIVE stderr alias must freeze the
+                        // original stderr object (rubash#279): `3>&2
+                        // 2>/dev/null` keeps fd 3 on the original stderr.
+                        // fd 2 itself keeps the live marker so a plain
+                        // `2>&2` stays a no-op alias.
+                        let source_target = if fd != 2 && source_target == OutputTarget::Stderr {
+                            OutputTarget::ProcessStderr
+                        } else {
+                            source_target
+                        };
                         state.fds.insert(fd, source_target);
                         state.saw_output_redirect = true;
                         continue;
@@ -822,6 +852,15 @@ impl Executor {
                             state.redirect_failed = true;
                             return Ok(true);
                         }
+                        // Same live-alias freeze as the file arm above
+                        // (rubash#279): `>&2 2>/dev/null` in one command
+                        // list keeps the first dup on the original stderr.
+                        let source_target =
+                            if target_fd != 2 && source_target == OutputTarget::Stderr {
+                                OutputTarget::ProcessStderr
+                            } else {
+                                source_target
+                            };
                         state.fds.insert(target_fd, source_target);
                         state.saw_output_redirect = true;
                         continue;
@@ -1004,6 +1043,14 @@ impl Executor {
                 let taken = std::mem::take(stdout);
                 stderr.push_str(&taken);
             }
+            OutputTarget::ProcessStderr => {
+                // dup2 snapshot of the original stderr (rubash#279): route
+                // straight to the raw channel, not the (possibly rebound)
+                // fd 2 staging.
+                let taken = std::mem::take(stdout);
+                let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(&taken);
+                super::shell_options::write_stderr_bytes(&bytes)?;
+            }
             target => {
                 let target = target.clone();
                 let taken = std::mem::take(stdout);
@@ -1015,6 +1062,11 @@ impl Executor {
             OutputTarget::Stdout => {
                 let taken = std::mem::take(stderr);
                 stdout.push_str(&taken);
+            }
+            OutputTarget::ProcessStderr => {
+                let taken = std::mem::take(stderr);
+                let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(&taken);
+                super::shell_options::write_stderr_bytes(&bytes)?;
             }
             target => {
                 let target = target.clone();
@@ -1043,6 +1095,10 @@ impl Executor {
         let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(output);
         match target {
             OutputTarget::Stdout | OutputTarget::Stderr => {}
+            OutputTarget::ProcessStderr => {
+                // dup2 snapshot of the original stderr object (rubash#279).
+                super::shell_options::write_stderr_bytes(&bytes)?;
+            }
             OutputTarget::ProcessStdout => {
                 // Snapshot of the original stdout object (rubash#170): the
                 // stream goes to the default stdout resolution — active
@@ -1238,6 +1294,12 @@ impl OutputFdState {
                 Ok(())
             }
             OutputTarget::Stderr => executor.write_default_stderr(output),
+            OutputTarget::ProcessStderr => {
+                // dup2 snapshot of the original stderr object (rubash#279):
+                // the raw stderr channel, never the live fd_table[2].
+                super::shell_options::write_stderr_bytes(output)?;
+                Ok(())
+            }
             OutputTarget::Null | OutputTarget::Closed => Ok(()),
             OutputTarget::CoprocStdin(fd) => {
                 if let Some(pipe) = executor.coproc_write_file(fd) {

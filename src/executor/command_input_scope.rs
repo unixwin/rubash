@@ -977,3 +977,26 @@ impl Executor {
         }
     }
 }
+
+impl Executor {
+    /// Bind ONLY the numbered (>2) input and output redirects of `cmd` on
+    /// the fd table for `body`'s duration — the narrow subset of
+    /// with_command_input_redirects that a function-definition redirect
+    /// list needs (GNU execute_cmd.c:854 applies tc->redirects when the
+    /// stored body command runs). The full wrapper is wrong here: its
+    /// fd-0/FUNCTION_STDIN text-channel bookkeeping belongs to compounds
+    /// with stdin redirects, and saving/restoring it around a function
+    /// body corrupted the driver's pending-stdin state.
+    pub(in crate::executor) fn with_numbered_fd_bindings<T: Default>(
+        &mut self,
+        cmd: &CommandNode,
+        body: impl FnOnce(&mut Executor) -> Result<T, ExecuteError>,
+    ) -> Result<T, ExecuteError> {
+        let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
+        let saved_output = self.open_compound_output_redirects(cmd)?;
+        let result = body(self);
+        self.restore_compound_output_redirects(saved_output);
+        self.restore_compound_numbered_input_redirects(saved_numbered);
+        result
+    }
+}

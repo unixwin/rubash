@@ -40,7 +40,7 @@ fn run_bytes(args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
 }
 
 #[test]
-fn integer_overflow_saturates_and_warns_without_failure() {
+fn integer_overflow_saturates_and_sets_failure_status() {
     let (status, stdout, stderr, _) = run(&[
         "%d|%d|%x",
         "9223372036854775808",
@@ -48,12 +48,16 @@ fn integer_overflow_saturates_and_warns_without_failure() {
         "0xFFFFFFFFFFFFFFFF",
     ]);
 
-    assert_eq!(status, EXECUTION_SUCCESS);
+    // GNU printf.def:826-827: printf_erange sets conversion_error, so the
+    // builtin exits 1 even though it keeps processing and prints the
+    // saturated values (`printf '%d' 9223372036854775808; echo $?` -> 1).
+    assert_eq!(status, EXECUTION_FAILURE);
     assert_eq!(
         stdout,
         "9223372036854775807|-9223372036854775808|ffffffffffffffff"
     );
     assert_eq!(stderr.matches("Numerical result out of range").count(), 2);
+    assert!(!stderr.contains("warning:"));
 }
 
 #[test]
@@ -83,12 +87,13 @@ fn unsigned_invalid_prefix_fails_and_preserves_value() {
 }
 
 #[test]
-fn unsigned_overflow_saturates_with_warning_only() {
+fn unsigned_overflow_saturates_with_conversion_error_status() {
     let (status, stdout, stderr, _) =
         run(&["%u|%x", "18446744073709551616", "0x10000000000000000"]);
-    assert_eq!(status, EXECUTION_SUCCESS);
+    assert_eq!(status, EXECUTION_FAILURE);
     assert_eq!(stdout, "18446744073709551615|ffffffffffffffff");
     assert_eq!(stderr.matches("Numerical result out of range").count(), 2);
+    assert!(!stderr.contains("warning:"));
 }
 
 #[test]
@@ -111,7 +116,13 @@ fn prints_plain_and_escaped_format() {
 fn format_string_escapes_match_bash() {
     assert_eq!(run(&["\\045\\x41\\u0042\\101"]).1, "%ABA");
     assert_eq!(run(&["4\\.2 one\\ctwo"]).1, "4\\.2 one\\ctwo");
-    assert_eq!(run(&["\\0101"]).1, "A");
+    // GNU printf.def tescape with sawc==NULL (format string): a leading-0
+    // octal escape takes at most two MORE digits, so `\0101' is `\010'
+    // (backspace) followed by a literal `1'; only %b (sawc != NULL) allows
+    // the four-digit form. Verified: `printf '\01017' | od -An -tx1' on GNU
+    // 5.3.0 prints `08 31 37'.
+    assert_eq!(run(&["\\0101"]).1, "\u{8}1");
+    assert_eq!(run(&["\\01017"]).1, "\u{8}17");
 }
 
 #[test]
@@ -177,9 +188,12 @@ fn numeric_errors_do_not_stop_reused_formats() {
 
     let (status, stdout, stderr, _) = run(&["%d", ""]);
 
-    assert_eq!(status, EXECUTION_SUCCESS);
+    // GNU getintmax: a PRESENT empty operand is `printf: : invalid number'
+    // with exit 1 (strtoimax leaves ep==s -> chk_converror); only a MISSING
+    // argument converts silently as 0.
+    assert_eq!(status, EXECUTION_FAILURE);
     assert_eq!(stdout, "0");
-    assert!(stderr.is_empty());
+    assert!(stderr.contains("printf: : invalid number"));
 }
 
 #[test]

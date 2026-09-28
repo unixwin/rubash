@@ -1,5 +1,23 @@
 use super::*;
 
+/// Quote one already-expanded word for execute_alias_expanded_syntax's
+/// re-parse so its content is re-read as a single DATA word: single-quote
+/// wrapping with the standard `'\''` escape keeps spaces, `=', operators
+/// and substitution markers inert while tokenize re-splits the line.
+fn quote_reparse_word(word: &str) -> String {
+    let mut quoted = String::with_capacity(word.len() + 2);
+    quoted.push('\'');
+    for ch in word.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_alias_expanded_syntax(
         &mut self,
@@ -19,16 +37,40 @@ impl Executor {
             return Ok(false);
         }
 
-        if !cmd.words.iter().any(|word| {
+        // parse.y push_string: only the words emitted by alias VALUES are
+        // alias-introduced syntax. The words AFTER them are original input
+        // whose post-expansion content is DATA — a plain argument that
+        // happens to contain `=' (modernish tst/run.sh `let "opt_e = opt_q
+        // = ..."' under `alias let='let --'') must not re-tokenize as an
+        // assignment or split on its spaces. Scan only the introduced
+        // prefix.
+        let introduced = self.alias_introduced_words.get();
+        let syntax_in_prefix = cmd.words.iter().take(introduced).any(|word| {
             matches!(word.as_str(), ";" | "<" | ">" | ">>" | "|" | "&")
                 || word.contains('=')
                 || word.contains("$(")
                 || word.contains('`')
-        }) {
+        });
+        if !syntax_in_prefix {
             return Ok(false);
         }
 
-        let source = cmd.words.join(" ");
+        // Rebuild the source with the tail words shell-quoted so the
+        // re-tokenizer keeps each one a single data word, then suppress
+        // alias expansion for the re-parse (the alias values already
+        // expanded; re-running the word expander fired them a second time:
+        // `let -- ...' became `let -- -- ...').
+        let mut source = String::new();
+        for (index, word) in cmd.words.iter().enumerate() {
+            if index > 0 {
+                source.push(' ');
+            }
+            if index < introduced {
+                source.push_str(word);
+            } else {
+                source.push_str(&quote_reparse_word(word));
+            }
+        }
         let tokens = crate::lexer::tokenize(&source);
         let ast = crate::parser::parse(&tokens);
         self.shell_state

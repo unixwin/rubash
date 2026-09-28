@@ -480,6 +480,7 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
                         | crate::parser::RedirectKind::CombinedOutput
                         | crate::parser::RedirectKind::CombinedAppend
                 ) && existing.fd.unwrap_or(1) == 1
+                    && !is_injected_group_redirect(existing)
             });
         let no_own_stdout_field = !command.redirect_out.as_ref().is_some_and(|r| own_fd1(r))
             && !command.append.as_ref().is_some_and(|r| own_fd1(r));
@@ -602,6 +603,15 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
             command.redirect_err.is_none() && command.redirect_err_append.is_none();
         if inherits_stderr {
             command.redirect_err_append = Some(injected_group_redirect(&redirect));
+            // An INJECTED group stdout append is not the command's own
+            // stdout redirect: GNU applies every compound redirect before
+            // the body runs (redir.c do_redirections at compound entry), so
+            // the stderr half of a group `&>' must bind BEFORE the leaf's
+            // own `>&N' dup -- pushing it after the injected append let the
+            // CombinedOutput leaf arm re-bind fd 1 onto the null device and
+            // swallow the leaf's `echo ... >&3' (rubash#279, ble.sh's
+            // `... 3>&2 ... &>/dev/null' init guard). Only a redirect the
+            // leaf itself wrote keeps the trailing position.
             let has_stdout_redirect = command.redirects.iter().any(|existing| {
                 matches!(
                     existing.kind,
@@ -609,6 +619,7 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
                         | crate::parser::RedirectKind::Append
                         | crate::parser::RedirectKind::ClobberOutput
                 ) && existing.fd.unwrap_or(1) == 1
+                    && !is_injected_group_redirect(existing)
             });
             if has_stdout_redirect {
                 command.redirects.push(injected_group_redirect(&redirect));

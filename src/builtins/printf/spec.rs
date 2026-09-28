@@ -37,6 +37,7 @@ where
             None if width.is_some() => {
                 spec.width = Some(0);
                 spec.inline_width_overflow = true;
+                spec.width_digits = Some(digits);
             }
             None => {}
         }
@@ -60,9 +61,13 @@ where
                 None if precision.is_some() => {
                     // Overflow: GNU's printstr adjusts pr back to
                     // `precision` (0 from printf_builtin), yielding
-                    // precision 0, not -1.
+                    // precision 0, not -1. The %Q adjustment in
+                    // printf_builtin instead decodes to -1 (no truncation)
+                    // and re-derives the precision from the quoted length,
+                    // so the overflow flag -- not this clamp -- drives it.
                     spec.precision = Some(0);
                     spec.inline_precision_overflow = true;
+                    spec.precision_digits = Some(digits);
                 }
                 None => spec.precision = Some(0),
             }
@@ -97,7 +102,13 @@ where
         spec.time_format = Some(time_format);
     }
 
+    // GNU printf.def:472-477: `longform' is set when the `l' length
+    // modifier precedes the conversion character; it selects the wide
+    // (%ls/%lc) code path whenever the locale is multibyte.
     while let Some(length @ ('h' | 'j' | 'l' | 'L' | 't' | 'z')) = chars.peek().copied() {
+        if length == 'l' {
+            spec.wide = true;
+        }
         raw.push(length);
         chars.next();
     }
@@ -123,20 +134,20 @@ pub(super) fn resolve_dynamic_format_args(
             value: width,
             invalid,
         } = parse_i64(raw);
-        let had_error = invalid.is_some();
         if let Some(invalid) = invalid {
             errors.push(invalid_number_error(&invalid));
         }
         // GNU printf.def:1400-1424 getint(): field width is an int, so
         // values outside i32 range return 0 (the overflow_retval for
-        // width) and produce an ERANGE diagnostic. Without this clamp,
-        // a huge width argument causes apply_width to allocate
+        // width) after chk_converror reports the argument with
+        // printf_erange (conversion_error -> exit status 1). Without this
+        // clamp, a huge width argument causes apply_width to allocate
         // gigabytes of padding, hanging the process (issue #90,
         // printf7.sub overflow tests).
         let width = match i32::try_from(width) {
             Ok(w) => w,
             Err(_) => {
-                if !had_error {
+                if !errors.iter().any(|error| error.contains(raw)) {
                     errors.push(invalid_number_error(&format!(
                         "__rubash_printf_overflow__:{raw}"
                     )));
@@ -158,17 +169,17 @@ pub(super) fn resolve_dynamic_format_args(
             value: precision,
             invalid,
         } = parse_i64(raw);
-        let had_error = invalid.is_some();
         if let Some(invalid) = invalid {
             errors.push(invalid_number_error(&invalid));
         }
         // GNU printf.def:1400-1424 getint(): precision is an int, so
         // values outside i32 range return -1 (the overflow_retval for
-        // precision, meaning "no precision").
+        // precision, meaning "no precision") after the same
+        // chk_converror/printf_erange diagnostic.
         let precision = match i32::try_from(precision) {
             Ok(p) => p,
             Err(_) => {
-                if !had_error {
+                if !errors.iter().any(|error| error.contains(raw)) {
                     errors.push(invalid_number_error(&format!(
                         "__rubash_printf_overflow__:{raw}"
                     )));
@@ -200,10 +211,12 @@ where
 pub(super) fn valid_format_specifier(specifier: char) -> bool {
     matches!(
         specifier,
-        's' | 'b'
+        's' | 'S'
+            | 'b'
             | 'q'
             | 'Q'
             | 'c'
+            | 'C'
             | 'd'
             | 'i'
             | 'u'
