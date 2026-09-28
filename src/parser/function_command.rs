@@ -116,6 +116,46 @@ pub(super) fn parse_function_command_with_diagnostic(
         let group_gate = tokens.get(i).map_or(true, |token| token.extglob_gate);
         crate::lexer::set_parse_extended_glob(group_gate);
         let mut body_tokens = crate::lexer::tokenize(inner);
+        // GNU parse.y:1264-1290 list grammar, same gate as
+        // parse_brace_group_command: a body whose last significant token is
+        // a dangling connector (`f() { x && }') is not a terminated list —
+        // the `}' token arrives where the grammar demands a pipeline, so
+        // GNU's yacc error names `}' and print_offending_line
+        // (parse.y:6813-6826) echoes that physical line (rubash#285: the
+        // body used to re-parse as a bare dangling `&&' and report
+        // `near unexpected end of file' instead).
+        let tail_dangles = body_tokens.last().is_some_and(|last| {
+            matches!(
+                last.kind,
+                TokenKind::And | TokenKind::Or | TokenKind::Pipe | TokenKind::PipeErr
+            )
+        });
+        if tail_dangles {
+            crate::lexer::set_parse_extended_glob(saved_extglob);
+            let mut command = CommandNode::new();
+            let close_line = tokens.get(i).map_or(1, |token| {
+                token.position
+                    + token.raw[..token.raw.rfind('}').unwrap_or(0)]
+                        .matches('\n')
+                        .count()
+            });
+            command.line = Some(close_line);
+            command.insert_assignment(
+                "__RUBASH_PARSE_ERROR__".to_string(),
+                "unexpected token `}'".to_string(),
+            );
+            let source_line = diagnostic_text.and_then(|text| {
+                close_line
+                    .checked_sub(source_line_offset)
+                    .and_then(|line_in_text| {
+                        super::parse_loop::source_line_by_number(text, line_in_text)
+                    })
+            });
+            if let Some(line) = source_line {
+                command.insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), line);
+            }
+            return Some((command, i + 1));
+        }
         // GNU parse.y keeps absolute source lines inside function bodies:
         // `typeset -n v=$1` under a multi-line `function f1 { ... }` reports
         // its own line (nameref8.sub: line 16, not the `function` line 14).

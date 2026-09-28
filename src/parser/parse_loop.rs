@@ -78,8 +78,20 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
             tokens[i].kind,
             TokenKind::Word | TokenKind::CommandSubst | TokenKind::Assignment
         ) {
-            state.pending_comsub +=
-                crate::lexer::unclosed_command_substitution_depth(&tokens[i].raw);
+            // Gate the residual on the corrected balancer (skip.rs): it knows
+            // the `case WORD in' chain (GNU special_case_tokens,
+            // parse.y:3369-3386 + 3433-3441 — `case W in esac' is the empty
+            // case whose `)` closes the substitution), while
+            // unclosed_command_substitution_depth (continuation.rs) does not
+            // and reports a false residual of 1 for a folded token like
+            // `v=$(case x in esac)' (rubash#284). That phantom residual made
+            // the guard below swallow the line's real `;;'/`)' tokens as
+            // closers and run `... echo hi;; esac)` instead of GNU's
+            // `syntax error near unexpected token `;;''.
+            if !crate::lexer::command_substitutions_balanced(&tokens[i].raw) {
+                state.pending_comsub +=
+                    crate::lexer::unclosed_command_substitution_depth(&tokens[i].raw);
+            }
         }
         if state.pending_comsub > 0
             && [")", ";;", ";&", ";;;&"]
@@ -182,6 +194,40 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
                 push_unexpected_token_error(&mut state, tokens, next_i, &options);
                 break;
             }
+            // A folded compound whose body carries a parse-error node fails
+            // the whole logical line: GNU yyparse reads the complete command
+            // list before executing any of it, so nothing earlier on the
+            // compound's own script lines runs either (`echo one; { :; } }'
+            // prints nothing — rubash#285 side-fix). Hoist the inner error
+            // node to the top level, drop the commands parsed from the
+            // compound's lines, and stop reading the input like yyerror's
+            // jump to top level.
+            if let Some(error) = state
+                .ast
+                .commands
+                .last()
+                .and_then(compound_body_parse_error)
+                .cloned()
+            {
+                let compound_line = tokens.get(i).map(|token| token.position);
+                match compound_line {
+                    Some(line) => {
+                        while state
+                            .ast
+                            .commands
+                            .last()
+                            .is_some_and(|command| command.line.is_some_and(|l| l >= line))
+                        {
+                            state.ast.commands.pop();
+                        }
+                    }
+                    None => {
+                        state.ast.commands.pop();
+                    }
+                }
+                state.ast.commands.push(error);
+                break;
+            }
             i = next_i;
             continue;
         }
@@ -205,6 +251,42 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
     state.ast.commands = fold_background_commands(state.ast.commands);
     mark_parse_time_extglob_errors(&mut state.ast, tokens);
     state.ast
+}
+
+/// The innermost `__RUBASH_PARSE_ERROR__`-marked command inside a folded
+/// compound's body (brace group, function body, case clause bodies), or the
+/// command itself when it is the error node. The main loop uses this to fail
+/// the whole logical line the way GNU's yyparse does.
+fn compound_body_parse_error(cmd: &CommandNode) -> Option<&CommandNode> {
+    if cmd.has_assignment("__RUBASH_PARSE_ERROR__")
+        || cmd.has_assignment("__RUBASH_PARSE_ERROR_NEAR__")
+    {
+        return Some(cmd);
+    }
+    if let Some(group) = &cmd.brace_group {
+        for body in &group.body {
+            if let Some(error) = compound_body_parse_error(body) {
+                return Some(error);
+            }
+        }
+    }
+    if let Some(function) = &cmd.function_command {
+        for body in &function.body {
+            if let Some(error) = compound_body_parse_error(body) {
+                return Some(error);
+            }
+        }
+    }
+    if let Some(case_cmd) = &cmd.case_command {
+        for clause in &case_cmd.clauses {
+            for body in &clause.body {
+                if let Some(error) = compound_body_parse_error(body) {
+                    return Some(error);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Extglob is enabled while Bash parses a command unit, not after the unit
@@ -1844,7 +1926,7 @@ fn if_frame_offender(region: &[Token]) -> Option<usize> {
 /// read), else reconstructed from same-line token raws. `line_offset` is
 /// the caller's line shift (`ParseLoopOptions::source_line_offset`), so
 /// the line within `source` is `position - line_offset`.
-fn offending_line_text(
+pub(super) fn offending_line_text(
     tokens: &[Token],
     index: usize,
     source: Option<&str>,
@@ -2112,7 +2194,7 @@ pub(super) fn parse_time_prefixed_shell_command(
 /// The 1-based `line` of `text`, verbatim. Token positions are line
 /// numbers (parse.y `line_number`), so diagnostic line echo is a line
 /// lookup, not a byte-offset slice (rubash#204).
-fn source_line_by_number(text: &str, line: usize) -> Option<String> {
+pub(super) fn source_line_by_number(text: &str, line: usize) -> Option<String> {
     let line = line.checked_sub(1)?;
     text.lines().nth(line).map(str::to_string)
 }

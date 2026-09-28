@@ -2270,6 +2270,10 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
     let mut word_boundary = true;
     let mut current_word_boundary = true;
     let mut parameter_depth = 0usize;
+    // `case WORD in' chain tracker (GNU special_case_tokens,
+    // parse.y:3369-3386 + 3433-3441) — see
+    // update_command_substitution_case_depth (rubash#284).
+    let mut case_in_stage = 0u8;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start of the body. `word.is_empty()` alone is wrong: `$`, quotes,
@@ -2479,12 +2483,18 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
             &mut word_boundary,
             &mut current_word_boundary,
             &rest,
+            &mut case_in_stage,
         );
         if let Some(delta) = alias_case_delta {
             if delta > 0 {
                 case_depth += 1;
+                // An alias for `case' starts the same `case WORD in' chain
+                // the reserved word does (GNU alias expansion happens at
+                // read time, parse.y alias_expand_token).
+                case_in_stage = 1;
             } else {
                 case_depth = case_depth.saturating_sub(1);
+                case_in_stage = 0;
             }
         }
         match source_ch {
@@ -2790,6 +2800,7 @@ pub(in crate::executor) fn update_command_substitution_case_depth(
     word_boundary: &mut bool,
     current_word_boundary: &mut bool,
     rest: &str,
+    case_in_stage: &mut u8,
 ) {
     if single || double {
         word.clear();
@@ -2814,22 +2825,53 @@ pub(in crate::executor) fn update_command_substitution_case_depth(
         return;
     }
 
+    // The word completing while `case' awaits its subject IS the subject
+    // (stage 1 -> 2); specific arms below may then rewrite the stage. See
+    // the stage-tracker comment on the skip.rs twin for the GNU citations
+    // (special_case_tokens parse.y:3369-3386 + 3433-3441, rubash#284).
+    let completing_after_case = *case_in_stage == 1;
+    if completing_after_case {
+        *case_in_stage = 2;
+    }
+
     let reserved_word_allows_next = match word.as_str() {
         "case" if *current_word_boundary => {
             *case_depth += 1;
+            *case_in_stage = 1;
             false
+        }
+        "in" if *case_in_stage == 2 => {
+            // GNU special_case_tokens rule 6 (parse.y:3369-3386): this `in'
+            // follows the case subject, so it is the IN token even off a
+            // reserved-word boundary.
+            *case_in_stage = 3;
+            true
+        }
+        "esac" if *case_in_stage == 3 => {
+            // GNU parse.y:3433-3441: `esac' directly after IN is ESAC — the
+            // empty case `case WORD in esac' — unconditionally.
+            *case_depth = case_depth.saturating_sub(1);
+            *case_in_stage = 0;
+            true
         }
         "esac" if *current_word_boundary && !case_pattern_starts_with_esac_rest(ch, rest) => {
             *case_depth = case_depth.saturating_sub(1);
+            *case_in_stage = 0;
             true
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
         | "done"
             if *current_word_boundary =>
         {
+            *case_in_stage = 0;
             true
         }
-        _ => false,
+        _ => {
+            if !completing_after_case {
+                *case_in_stage = 0;
+            }
+            false
+        }
     };
     word.clear();
     *word_boundary =

@@ -36,7 +36,20 @@ pub(super) fn parse_brace_group_command(
             crate::lexer::tokenize_with_initial_posix_and_line(inner_source, false, token.position);
         crate::lexer::set_parse_extended_glob(saved_extglob);
         let inner_tail = inner_source.trim_end_matches([' ', '\t']);
-        let completed = if inner_tail.is_empty() {
+        // GNU parse.y:1264-1290 list grammar: after a completed `list1' only
+        // `;' / `&' / a newline may follow before `}'. A body whose last
+        // significant token is a dangling connector (`{ x &&\n}') is NOT
+        // terminated — in GNU the `}' token then arrives where the grammar
+        // demands a pipeline, so the yacc error names `}' (verified vs WSL
+        // GNU 5.3.0: `{ x &&\n}` -> line 2 `syntax error near unexpected
+        // token `}'' echoing `}').
+        let tail_dangles = body_tokens.last().is_some_and(|last| {
+            matches!(
+                last.kind,
+                TokenKind::And | TokenKind::Or | TokenKind::Pipe | TokenKind::PipeErr
+            )
+        });
+        let completed = if inner_tail.is_empty() || tail_dangles {
             false
         } else if inner_tail.ends_with(';') || inner_tail.ends_with('\n') {
             true
@@ -47,10 +60,33 @@ pub(super) fn parse_brace_group_command(
         };
         if !completed {
             let mut command = CommandNode::new();
+            // GNU parse.y:1264-1290 compound_list — the group body's last
+            // command must be terminated. GNU reports the yacc error at the
+            // closing `}' token (`{ x && }' -> `syntax error near unexpected
+            // token `}'' at the `}' line) and print_offending_line
+            // (parse.y:6813-6826) echoes that physical input line verbatim —
+            // rubash#285: no echo at all used to print. The folded token
+            // spans to its final `}', so the closing line is the open brace's
+            // line plus the newlines before that `}'.
+            let close_line = token.position
+                + token.raw[..token.raw.rfind('}').unwrap_or(0)]
+                    .matches('\n')
+                    .count();
+            command.line = Some(close_line);
             command.insert_assignment(
                 "__RUBASH_PARSE_ERROR__".to_string(),
                 "unexpected token `}'".to_string(),
             );
+            let source_line = source.and_then(|text| {
+                close_line
+                    .checked_sub(source_line_offset)
+                    .and_then(|line_in_text| {
+                        super::parse_loop::source_line_by_number(text, line_in_text)
+                    })
+            });
+            if let Some(line) = source_line {
+                command.insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), line);
+            }
             return Some((command, start + 1));
         }
         // GNU parse.y keeps the in-place line counter: body commands inside

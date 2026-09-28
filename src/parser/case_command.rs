@@ -56,7 +56,15 @@ pub(super) fn parse_case_command(
                     break;
                 }
             }
-            let source = raw_token_span(tokens, start, final_esac);
+            // GNU print_offending_line (parse.y:6813-6826) echoes the
+            // physical input line of the offending token, verbatim — not a
+            // reconstructed token span (rubash#285).
+            let source = super::parse_loop::offending_line_text(
+                tokens,
+                final_esac,
+                source,
+                source_line_offset,
+            );
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|token| token.position);
             command.insert_assignment(

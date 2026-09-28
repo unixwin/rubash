@@ -20,6 +20,10 @@ impl<'a> Lexer<'a> {
         let mut word_boundary = true;
         let mut current_word_boundary = true;
         let mut parameter_depth = 0usize;
+        // `case WORD in' chain tracker (GNU special_case_tokens,
+        // parse.y:3369-3386 + 3433-3441) — see
+        // update_command_substitution_case_depth.
+        let mut case_in_stage = 0u8;
         // GNU read_token (parse.y:3630-3643): `#` introduces a comment only
         // at a token boundary — after whitespace, a separator (`;&|()<>`),
         // or at the start. `word.is_empty()` alone is wrong: `$`, quotes and
@@ -66,6 +70,7 @@ impl<'a> Lexer<'a> {
                 &mut word_boundary,
                 &mut current_word_boundary,
                 rest,
+                &mut case_in_stage,
             );
             match c {
                 '`' => {
@@ -1192,6 +1197,27 @@ fn brace_close_acceptable_word(word: &str) -> bool {
     )
 }
 
+/// Stage tracker for the `case WORD in' chain, mirroring GNU
+/// special_case_tokens (parse.y:3365):
+///
+/// - 0: idle.
+/// - 1: `case' was recognized at a word boundary; the next word that
+///   completes is the case SUBJECT (GNU: `reserved_word_acceptable(CASE)` is
+///   false, parse.y:5899-5946 — the subject is a plain WORD).
+/// - 2: the subject completed. GNU special_case_tokens rule 6
+///   (parse.y:3369-3386): a word exactly `in' completing now is the IN token
+///   (`last_read_token == WORD && token_before_that == CASE`), even though
+///   the subject is not a reserved-word position.
+/// - 3: directly after that IN. GNU parse.y:3433-3441: a word exactly `esac'
+///   completing now is ESAC unconditionally ("case word in esac, which is a
+///   legal construct" — the empty case; `esacs_needed_count` +
+///   `last_read_token == IN`). Without this chain, `$(case z in esac)` never
+///   balances its `)` because the `)` after `esac` is held back for a case
+///   pattern list that the empty case never opens (rubash#284).
+///
+/// Only the same-line whitespace-separated chain is modeled: `case x\nin`
+/// already reaches IN through the newline separator granting a boundary
+/// (reserved_word_acceptable('\n'), parse.y:5903).
 pub(super) fn update_command_substitution_case_depth(
     ch: char,
     single: bool,
@@ -1201,6 +1227,7 @@ pub(super) fn update_command_substitution_case_depth(
     word_boundary: &mut bool,
     current_word_boundary: &mut bool,
     rest: &str,
+    case_in_stage: &mut u8,
 ) {
     if single || double {
         word.clear();
@@ -1225,22 +1252,55 @@ pub(super) fn update_command_substitution_case_depth(
         return;
     }
 
+    // The word completing while `case' awaits its subject IS the subject
+    // (stage 1 -> 2); specific arms below may then rewrite the stage.
+    let completing_after_case = *case_in_stage == 1;
+    if completing_after_case {
+        *case_in_stage = 2;
+    }
+
     let reserved_word_allows_next = match word.as_str() {
         "case" if *current_word_boundary => {
             *case_depth += 1;
+            *case_in_stage = 1;
             false
+        }
+        "in" if *case_in_stage == 2 => {
+            // GNU special_case_tokens rule 6 (parse.y:3369-3386): this `in'
+            // follows the case subject, so it is the IN token even off a
+            // reserved-word boundary (`in` after `case SUBJECT `).
+            *case_in_stage = 3;
+            true
+        }
+        "esac" if *case_in_stage == 3 => {
+            // GNU parse.y:3433-3441: `esac' directly after IN is ESAC —
+            // the empty case `case WORD in esac'. Unconditional there, so
+            // no case_pattern_starts_with_esac_rest guard on this arm: the
+            // `)` right after `esac` is a stray top-level token, exactly
+            // how GNU reports `case x in esac) echo hi;; esac` (syntax
+            // error near unexpected token `)', verified vs WSL GNU 5.3.0).
+            *case_depth = case_depth.saturating_sub(1);
+            *case_in_stage = 0;
+            true
         }
         "esac" if *current_word_boundary && !case_pattern_starts_with_esac_rest(ch, rest).0 => {
             *case_depth = case_depth.saturating_sub(1);
+            *case_in_stage = 0;
             true
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
         | "done"
             if *current_word_boundary =>
         {
+            *case_in_stage = 0;
             true
         }
-        _ => false,
+        _ => {
+            if !completing_after_case {
+                *case_in_stage = 0;
+            }
+            false
+        }
     };
     word.clear();
     *word_boundary =
@@ -1439,6 +1499,10 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
     let mut word_boundary = true;
     let mut current_word_boundary = true;
     let mut parameter_depth = 0usize;
+    // `case WORD in' chain tracker (GNU special_case_tokens,
+    // parse.y:3369-3386 + 3433-3441) — see
+    // update_command_substitution_case_depth.
+    let mut case_in_stage = 0u8;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start. `word.is_empty()` alone is wrong: `$`, quotes and other
@@ -1539,6 +1603,7 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             // byte — multibyte chars here panicked on the byte slice
             // (niubash#139 `"${v}$(echo 中)"`).
             rest,
+            &mut case_in_stage,
         );
         match ch {
             '\'' => single = true,

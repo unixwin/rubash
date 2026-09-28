@@ -753,6 +753,10 @@ fn copy_dollar_paren_body_raw(
     let mut word = String::new();
     let mut word_boundary = true;
     let mut current_word_boundary = true;
+    // `case WORD in' chain tracker (GNU special_case_tokens,
+    // parse.y:3369-3386 + 3433-3441) — see skip.rs
+    // update_command_substitution_case_depth (rubash#284).
+    let mut case_in_stage = 0u8;
     while let Some(ch) = chars.next() {
         out.push(ch);
         if ch == '\\' {
@@ -782,6 +786,7 @@ fn copy_dollar_paren_body_raw(
             &mut word_boundary,
             &mut current_word_boundary,
             &rest,
+            &mut case_in_stage,
         );
         match ch {
             '$' if chars.peek() == Some(&'\'') => {

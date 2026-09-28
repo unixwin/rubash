@@ -38,7 +38,7 @@ impl Executor {
                 eprintln!(
                     "{}syntax error: `{}'",
                     self.parser_diagnostic_prefix(),
-                    super::command_execute::parse_error_source_display(source)
+                    source
                 );
             }
         } else {
@@ -47,12 +47,13 @@ impl Executor {
                 "{}syntax error near {message}",
                 self.parser_diagnostic_prefix(),
             );
+            // GNU parse.y:6813-6826 print_offending_line echoes the current
+            // shell_input_line verbatim — only trailing newlines are
+            // stripped; leading whitespace and the original spacing
+            // (`if :;then ...') stay as read (rubash#285: the old
+            // trim/`;then' display rewrite corrupted the physical line).
             if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                eprintln!(
-                    "{}`{}'",
-                    self.parser_diagnostic_prefix(),
-                    super::command_execute::parse_error_source_display(source)
-                );
+                eprintln!("{}`{}'", self.parser_diagnostic_prefix(), source);
             }
         }
     }

@@ -692,6 +692,10 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
             let mut inner_word = String::new();
             let mut inner_word_boundary = true;
             let mut inner_current_word_boundary = true;
+            // `case WORD in' chain tracker (GNU special_case_tokens,
+            // parse.y:3369-3386 + 3433-3441) — see embedded_mutations
+            // update_command_substitution_case_depth (rubash#284).
+            let mut inner_case_in_stage = 0u8;
             while cursor < chars.len() {
                 let (_, inner) = chars[cursor];
                 if inner == '\\' && !inner_single {
@@ -717,6 +721,7 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                         &mut inner_word_boundary,
                         &mut inner_current_word_boundary,
                         &raw[chars[cursor].0 + inner.len_utf8()..],
+                        &mut inner_case_in_stage,
                     );
                     // Heredoc bodies are literal data for substitution-span
                     // matching: parse.y gather_here_documents reads the whole

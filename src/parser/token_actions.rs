@@ -919,7 +919,12 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     "__RUBASH_PARSE_ERROR__".to_string(),
                     format!("unexpected token `{}`", token.value),
                 );
-                if let Some(source) = parse_error_source_line(tokens, *i) {
+                if let Some(source) = parse_error_source_line(
+                    tokens,
+                    *i,
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ) {
                     state
                         .current_cmd
                         .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
@@ -963,7 +968,12 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     "__RUBASH_PARSE_ERROR__".to_string(),
                     format!("unexpected token `{}`", token.value),
                 );
-                if let Some(source) = parse_error_source_line(tokens, *i) {
+                if let Some(source) = parse_error_source_line(
+                    tokens,
+                    *i,
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ) {
                     state
                         .current_cmd
                         .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
@@ -981,7 +991,12 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     "__RUBASH_PARSE_ERROR__".to_string(),
                     "unexpected token `('".to_string(),
                 );
-                if let Some(source) = parse_error_source_line(tokens, *i) {
+                if let Some(source) = parse_error_source_line(
+                    tokens,
+                    *i,
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ) {
                     state
                         .current_cmd
                         .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
@@ -1123,8 +1138,29 @@ fn collect_split_array_element_assignment_word(
     None
 }
 
-fn parse_error_source_line(tokens: &[Token], index: usize) -> Option<String> {
+/// The physical input line of `tokens[index]` for a `syntax error near
+/// unexpected token' node. GNU parse.y:6813-6826 print_offending_line echoes
+/// the current `shell_input_line` verbatim (only trailing newlines stripped,
+/// leading whitespace kept), so when the original text is available slice
+/// that line by the token's script line; the token join below is the
+/// no-source fallback and cannot recover the original spacing (rubash#285:
+/// `{ :; } }' used to echo a reconstructed `:; }').
+fn parse_error_source_line(
+    tokens: &[Token],
+    index: usize,
+    diagnostic_text: Option<&str>,
+    source_line_offset: usize,
+) -> Option<String> {
     tokens.get(index)?;
+    if let Some(text) = diagnostic_text {
+        if let Some(line) = tokens[index]
+            .position
+            .checked_sub(source_line_offset)
+            .and_then(|line_in_text| super::parse_loop::source_line_by_number(text, line_in_text))
+        {
+            return Some(line);
+        }
+    }
     let mut start = index;
     while start > 0 {
         let previous = &tokens[start - 1];
@@ -1302,7 +1338,12 @@ fn reject_compound_assignment_position(
         "__RUBASH_PARSE_ERROR__".to_string(),
         "unexpected token `('".to_string(),
     );
-    if let Some(source) = parse_error_source_line(tokens, *i) {
+    if let Some(source) = parse_error_source_line(
+        tokens,
+        *i,
+        state.diagnostic_text.as_deref(),
+        state.source_line_offset,
+    ) {
         state
             .current_cmd
             .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
