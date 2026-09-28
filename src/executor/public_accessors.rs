@@ -93,6 +93,59 @@ impl Executor {
         self.history_provider = Some(provider);
     }
 
+    /// Snapshot of the host-installed history provider's list (oldest to
+    /// newest), for interactive history expansion. `None` when no provider
+    /// is installed — the engine's session history is the list then.
+    pub(crate) fn history_provider_snapshot(&mut self) -> Option<Vec<String>> {
+        let provider = self.history_provider.as_ref()?.clone();
+        let entries = provider.borrow_mut().entries().unwrap_or_default();
+        Some(entries)
+    }
+
+    /// Rewrite the provider's most recent entry while it is still the raw
+    /// line the host's editor recorded before execution — the interactive
+    /// pre_process_line counterpart of bashhist.c maybe_add_history:
+    /// `Some(text)` records the expansion in the raw line's place (GNU
+    /// records the expanded line), `None` removes it (a failed expansion
+    /// records nothing). No-op when no provider is installed or the last
+    /// entry is no longer `raw`.
+    pub(crate) fn history_provider_replace_last(&mut self, raw: &str, replacement: Option<String>) {
+        let Some(provider) = self.history_provider.as_ref().cloned() else {
+            return;
+        };
+        let Ok(mut entries) = provider.borrow_mut().entries() else {
+            return;
+        };
+        if entries.last().map(String::as_str) != Some(raw) {
+            return;
+        }
+        match replacement {
+            Some(text) => {
+                let last = entries.len() - 1;
+                entries[last] = text;
+            }
+            None => {
+                entries.pop();
+            }
+        }
+        let _ = provider.borrow_mut().replace(entries);
+    }
+
+    /// Remove the provider's most recent entry unconditionally (the
+    /// interactive recording veto — see
+    /// script_driver::interactive_history_veto_recording). No-op when the
+    /// list is empty or no provider is installed.
+    pub(crate) fn history_provider_drop_last(&mut self) {
+        let Some(provider) = self.history_provider.as_ref().cloned() else {
+            return;
+        };
+        let Ok(mut entries) = provider.borrow_mut().entries() else {
+            return;
+        };
+        entries.pop();
+        let _ = provider.borrow_mut().replace(entries);
+    }
+
     /// Host completion hook. Given the in-progress command `line` and the
     /// `cursor` position, return completion candidates for the word under the
     /// cursor, honoring the compspec registered for the command (if any) and

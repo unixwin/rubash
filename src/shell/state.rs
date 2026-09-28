@@ -112,6 +112,13 @@ pub struct ShellState {
     /// subshell's `history` mutations cannot reach the parent — GNU gets
     /// the same isolation from the fork copy.
     pub(crate) session_history: Option<Rc<RefCell<SessionHistory>>>,
+    /// histexpand.c process statics (search_string, search_match, subst_lhs,
+    /// subst_rhs) that persist across history expansions within one shell —
+    /// GNU keeps them as globals for the process lifetime. Carried here so
+    /// the interactive pre_process_line path
+    /// (script_driver::pre_process_interactive_line) keeps them across
+    /// calls even when a host provider owns the list.
+    pub(crate) interactive_hist_engine: crate::history_expand::HistEngineState,
     /// Arithmetic expansion error flags (subshell boundary).
     /// GNU expr.c raises FORCE_EOF on unbound variable under `set -u`;
     /// these flags isolate errors in command substitutions from the outer shell.
@@ -296,6 +303,7 @@ impl Clone for ShellState {
                 .session_history
                 .as_ref()
                 .map(|s| Rc::new(RefCell::new(s.borrow().clone()))),
+            interactive_hist_engine: self.interactive_hist_engine.clone(),
             arithmetic_expansion_error: Cell::new(self.arithmetic_expansion_error.get()),
             arithmetic_nonfatal_error: Cell::new(self.arithmetic_nonfatal_error.get()),
             arithmetic_fatal_error: Cell::new(self.arithmetic_fatal_error.get()),

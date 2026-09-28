@@ -2009,6 +2009,139 @@ pub fn prepare_interactive_history(executor: &mut Executor) {
     initialize_interactive_history(executor);
 }
 
+/// Outcome of [`pre_process_interactive_line`] (bashhist.c pre_process_line
+/// applied to one interactive line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InteractiveExpansion {
+    /// Execute this text: the expansion when history expansion modified the
+    /// line, otherwise the input verbatim.
+    Execute(String),
+    /// Do not execute the line (expansion error, or the `:p` print-only
+    /// modifier). The diagnostic or the printed expansion has already gone
+    /// to stderr and the history list was fixed the way GNU records it.
+    Discard,
+}
+
+/// bashhist.c:562 pre_process_line (print_changes=1, addit=1) integrated the
+/// way the GNU interactive reader does it (y.tab.c:5020): expand history in
+/// one accepted interactive line before the host parses it, print the
+/// expansion like GNU's `fprintf (stderr, "%s\n", history_value)`, and keep
+/// the history recording the EXPANDED text (maybe_add_history).
+///
+/// For interactive hosts whose line editor owns the accepted line (niubash /
+/// reedline). The event designators resolve against the host-installed
+/// [`crate::history::HistoryProvider`] list — the live interactive list —
+/// falling back to the engine's session history when no provider is set.
+/// A host editor that records the accepted line *before* execution (reedline
+/// does) sees that trailing raw entry hidden from its own expansion, the
+/// same way bashhist.c:576-580 decrements `history_length` to hide the
+/// current line, and sees it rewritten to the expansion afterwards (or
+/// removed when the expansion failed, which GNU never records).
+///
+/// Gating mirrors bashhist.c:574: `set +H` (the histexpand option) disables
+/// expansion; the caller asserts the interactive context by calling this —
+/// y.tab.c:5003 `remember_on_history` corresponds to the host's own
+/// recording being active, so the engine's `set -o history` flag is not
+/// consulted (interactive hosts keep it off deliberately because the host
+/// owns the list). An unset histexpand flag is GNU's interactive
+/// HISTEXPAND_DEFAULT (bashhist.c:288): on. Expansion state (histexpand.c
+/// statics) persists in the shell state across calls.
+pub fn pre_process_interactive_line(executor: &mut Executor, line: &str) -> InteractiveExpansion {
+    let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
+    let chars = executor.get_env("histchars").unwrap_or("!^#");
+    let mut chars = chars.chars();
+    let ctx = HistCtx {
+        chars: HistChars {
+            expand: chars.next().unwrap_or('!'),
+            subst: chars.next().unwrap_or('^'),
+            comment: chars.next().unwrap_or('#'),
+        },
+        posix,
+    };
+
+    // bashhist.c:541-550 history_expansion_p: the expansion char or the
+    // quick-substitution char anywhere in the line.
+    let wants_expansion = line.contains(ctx.chars.expand) || line.contains(ctx.chars.subst);
+    // bashhist.c:574 gate on history_expansion; `set +H` writes the flag
+    // off, unset means the interactive default (bashhist.c:288).
+    let histexpand_on = executor.get_env("__RUBASH_SETOPT_histexpand").as_deref() != Some("0");
+    if !wants_expansion || !histexpand_on {
+        return InteractiveExpansion::Execute(line.to_string());
+    }
+
+    // The list events resolve against: the host provider owns the
+    // interactive list; the engine session is the fallback.
+    let mut scratch = SessionHistory::new();
+    let mut raw_preadded = false;
+    if let Some(mut entries) = executor.history_provider_snapshot() {
+        if entries.last().map(String::as_str) == Some(line) {
+            entries.pop();
+            raw_preadded = true;
+        }
+        scratch.entries = entries;
+    } else if let Some(session) = executor.get_session_history() {
+        scratch.entries = session.borrow().entries.clone();
+    }
+
+    // histexpand.c statics persist across expansions; they ride the shell
+    // state so later `!?` repeats and `:s` lhs reuse survive.
+    scratch.engine = std::mem::take(&mut executor.shell_state_mut().interactive_hist_engine);
+    let result = scratch.expand(line, ctx);
+    executor.shell_state_mut().interactive_hist_engine = scratch.engine;
+
+    match result.status {
+        -1 => {
+            // bashhist.c:594 internal_error ("%s", history_value): an
+            // interactive shell prefixes only the shell name (error.c
+            // report_prolog via get_name_for_error).
+            let name = executor
+                .get_env("__RUBASH_SHELL_NAME")
+                .as_deref()
+                .unwrap_or("bash")
+                .to_string();
+            eprintln!("{name}: {}", result.text);
+            // A failed expansion records nothing (GNU returns before
+            // maybe_add_history): undo the raw line the host editor added.
+            if raw_preadded {
+                executor.history_provider_replace_last(line, None);
+            }
+            InteractiveExpansion::Discard
+        }
+        2 => {
+            // expanded == 2: print-only (`:p`). bashhist.c:598-606 prints
+            // the expansion and maybe_add_history records the printed text.
+            eprintln!("{}", result.text);
+            if raw_preadded && !result.text.is_empty() {
+                executor.history_provider_replace_last(line, Some(result.text));
+            }
+            InteractiveExpansion::Discard
+        }
+        1 => {
+            // Expanded (hist_verify off — no verify mode): print the
+            // expansion, then record the EXPANDED line, not the raw text.
+            eprintln!("{}", result.text);
+            if raw_preadded {
+                executor.history_provider_replace_last(line, Some(result.text.clone()));
+            }
+            InteractiveExpansion::Execute(result.text)
+        }
+        _ => InteractiveExpansion::Execute(result.text),
+    }
+}
+
+/// bashhist.c remember_on_history veto for interactive hosts, applied after
+/// a line executed: GNU records a read line only when `set -o history` was
+/// on when the line was read (maybe_add_history under remember_on_history).
+/// The host editor (reedline) records the accepted line *before* execution,
+/// so when the caller observed recording off at read time the entry this
+/// line left in the provider list (the raw line, or the expansion
+/// [`pre_process_interactive_line`] recorded) must be removed again.
+/// Unconditional drop of the last entry: in a single-threaded REPL nothing
+/// else records between read and this call. No-op without a provider.
+pub fn interactive_history_veto_recording(executor: &mut Executor) {
+    executor.history_provider_drop_last();
+}
+
 /// general.c:718-741 check_binary_file: a script whose first line (two when
 /// it starts with a #! interpreter specifier) contains NUL, or an ELF image,
 /// is refused with "cannot execute binary file" and EX_BINARY_FILE (126).

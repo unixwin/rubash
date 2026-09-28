@@ -238,6 +238,7 @@ impl Executor {
                 coproc_names: HashMap::new(),
                 completion_specs: crate::builtins::complete::CompletionRegistry::new(),
                 session_history: None,
+                interactive_hist_engine: crate::history_expand::HistEngineState::default(),
                 arithmetic_expansion_error: Cell::new(false),
                 arithmetic_nonfatal_error: Cell::new(false),
                 arithmetic_fatal_error: Cell::new(false),
