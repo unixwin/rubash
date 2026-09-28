@@ -605,3 +605,77 @@ Wall-clock tables above answer *which scenario* is slow; they cannot answer
   build jobs (parallel cargo builds skew samples); keep the produced JSON
   under `target/perf-profiles/` (gitignored) and record the numbers that
   matter in this file, not the raw profile.
+## ombperf round (2026-09-28, wt9/ombperf on 847ab883): oh-my-bash load
+
+Goal: OMB (agnoster) load in the user's real HOME is engine-bound, not
+component-count-bound (three OMB-trim variants all 1.43-1.46s). Fix the
+engine's per-op fixed costs. All numbers release build, median of 5,
+Windows subprocess wall (python time.perf_counter) unless noted.
+
+### GNU anchors (WSL 5.3.0, /usr/local/bin/bash, script-file probes)
+
+- floor `bash --norc -i -c exit` (pty `script -qec`): 22 ms
+- OMB load (LF copy, ext4): inner 644-695 ms
+- OMB load (LF copy, /mnt/d NTFS via drvfs): inner 812-905 ms
+- GNU cannot parse the CRLF originals; LF-converted copies used for
+  content parity (conversion verified with od).
+
+### Engine-side before/after (rubash.exe --rcfile <rc> -i -c "exit 0")
+
+| metric | baseline 847ab883 | after 3 commits |
+|---|---:|---:|
+| floor `-c exit 0` | 21 ms | 21 ms |
+| full OMB load, LF copy on D: | 1436 ms | ~828 ms |
+| full OMB load, real CRLF on C: | 1424 ms | ~820 ms |
+| inner `source oh-my-bash.sh` (LF / CRLF) | 1093 / 1090 ms | 787 / 780 ms |
+| ConPTY (winpty backend) engine load | 5490 ms | 5161 ms |
+
+### niu side (scratch niubash release, [patch] -> this worktree)
+
+- `niu -c exit 0` floor: 160 -> 147 ms
+- `niu -C exit 0` (real HOME, rc + OMB + hooks): 1919 -> 1484 ms
+- `niu -C 'source OMB' --norc` inner: ~1090 -> 795 ms (median 790-803)
+- ConPTY `niu -C exit 0`: 6162 ms median (pty substrate adds ~4.5 s over
+  subprocess for BOTH baseline and current — winpty backend cost, not
+  engine; real-terminal delta baseline->current ~-330 ms by engine ratio)
+
+### Commits (each with GNU citation + numbers)
+
+1. `f72558a1` perf(assoc): content-addressed parse memo. GNU assoc.c:68
+   assoc_insert / hashlib.c:318 hash_insert are O(1); the rendered-string
+   storage made every element op a full re-parse (~244 us/call, O(n^2)
+   fills). OMB assoc fill 126.9->39.9 ms/call, key-copy 335.4->73.7 ms;
+   load 1436->926 ms; profiled assoc parse total 4999->12 ms.
+2. `25da547d` perf(lexer): skip duplicate comsub scan at the join gate.
+   GNU parse.y:3557 read_token is a streaming reader (never re-scans the
+   accumulated buffer); the join loop scanned it twice per physical line.
+   omb-prompt-base.sh tokenize 93.8->57.9 ms; load 926->828 ms.
+3. `3e1ec3b1` perf(arrays): same memo class for indexed storage
+   (array.c:516 array_insert O(1) append). Element-write parse sub-step
+   5.2->0.1 us; a[1]=$i shape 155.1->145.1 us (rest is expansion
+   machinery, below).
+
+### Semantics gate
+
+PS1 md5, `declare -p` md5s of _omb_spectrum_fg / FX / FG, function count
+(281), alias count (33): byte-identical baseline vs current (binaries
+built from git-archive 847ab883 and wt9/ombperf HEAD). cargo test --lib
+490/490; cargo fmt --check clean.
+
+### Remaining engine hotspots (measured, not fixed this round)
+
+- comsub_residuals / has_unclosed_quotes (continuation.rs, captain-
+  exclusive): `input.chars().collect::<Vec<_>>()` per call over the whole
+  accumulated logical line; 34 ms of omb-prompt-base's remaining 58 ms
+  tokenize (n=984 calls, 2.5 MB re-scanned). Diff + data to captain.
+- Pre-expansion validation walk: validate_command_parameter_expansions
+  re-walks every word's `${` spans before the real expansion (GNU
+  subst.c expands once, erroring inline); 264 ms inclusive in the load
+  profile. Needs careful per-arm GNU alignment before removing.
+- Per-command machinery floor: `:` costs 22 us vs GNU 1.8 us (expansion
+  CommandNode clone, alias checks, dispatch chain); local3 161 us vs
+  GNU 5.3 us and a[1]=$i 145 us vs 2.2 us live in the same expansion/
+  declare-family machinery (expand_command_words is 110 us of the arridx
+  op). Root-cause fix = borrow-based expansion refactor (deep subsystem).
+- niu host layer: ~560 ms of `niu -C` beyond engine+floor (precmd hooks,
+  gitstatus, completion refresh) — niubash repo, separate lane.
