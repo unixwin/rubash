@@ -759,7 +759,14 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
         // closes), non-POSIX honors quotes — so try POSIX first and fall back
         // to the non-POSIX scan; if neither closes, the line is unclosed.
         if ch == '$' && !single && chars.get(index + 1) == Some(&'{') {
-            let body: String = chars[index + 2..].iter().collect();
+            // rubash#281 (captain-applied perf3 proposal): zero-copy body
+            // view via the rubash#185 chars API — the String copy
+            // re-collected the ENTIRE remaining input per `${` (nvm.sh: 1644
+            // occurrences -> O(n^2); prescan 4540ms -> 27ms). The slice
+            // INCLUDES the `${` opener: scan_braced_parameter_body_chars
+            // requires it at position 0 — slicing from index+2 would report
+            // every span unclosed.
+            let body = &chars[index..];
             if !double {
                 let context = crate::lexer::dolbrace::BraceContext {
                     outer_double_quote: false,
@@ -768,9 +775,9 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
                     initial_state: crate::lexer::dolbrace::DolbraceState::Param,
                 };
                 if let Some(scan) =
-                    crate::lexer::dolbrace::scan_braced_parameter_body(&body, context)
+                    crate::lexer::dolbrace::scan_braced_parameter_body_chars(body, context)
                 {
-                    index += 2 + body[..scan.end].chars().count();
+                    index += 2 + scan.end;
                     comment_start = false;
                     continue;
                 }
@@ -786,9 +793,9 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
                         initial_state: crate::lexer::dolbrace::DolbraceState::Param,
                     };
                     if let Some(scan) =
-                        crate::lexer::dolbrace::scan_braced_parameter_body(&body, context)
+                        crate::lexer::dolbrace::scan_braced_parameter_body_chars(body, context)
                     {
-                        index += 2 + body[..scan.end].chars().count();
+                        index += 2 + scan.end;
                         comment_start = false;
                         closed = true;
                         break;
@@ -1006,15 +1013,19 @@ pub(super) fn has_unclosed_compound_assignment(input: &str) -> bool {
 
         // A `${...}` parameter expansion is opaque to parenthesis balancing.
         if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'{') {
-            let body: String = chars[index + 2..].iter().collect();
+            // rubash#281 (captain-applied perf3 proposal): zero-copy view;
+            // slice includes the `${` opener per the chars API contract.
+            let body = &chars[index..];
             let context = crate::lexer::dolbrace::BraceContext {
                 outer_double_quote: false,
                 posix: false,
                 replacement_context: false,
                 initial_state: crate::lexer::dolbrace::DolbraceState::Param,
             };
-            if let Some(scan) = crate::lexer::dolbrace::scan_braced_parameter_body(&body, context) {
-                index += 2 + body[..scan.end].chars().count();
+            if let Some(scan) =
+                crate::lexer::dolbrace::scan_braced_parameter_body_chars(body, context)
+            {
+                index += 2 + scan.end;
             } else {
                 index += 2;
             }
