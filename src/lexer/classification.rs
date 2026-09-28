@@ -176,9 +176,10 @@ pub(super) fn assignment_rhs_is_fully_single_quoted(raw: &str) -> bool {
 }
 
 /// Rewrite a wholly single-quoted assignment RHS into protected literal data:
-/// drop the quote delimiters and carry `$`/backtick/`"` as the walker's literal
-/// markers (\x1f / \x1a / \x18), which the parameter-expansion and storage
-/// layers restore on the way out. The `name=` prefix is copied verbatim.
+/// drop the quote delimiters and carry `$`/backtick/`"`/`\` as the walker's
+/// literal markers (\x1f / \x1a / \x18 / \x14), which the parameter-expansion
+/// and storage layers restore on the way out. The `name=` prefix is copied
+/// verbatim.
 ///
 /// GNU parse.y:5305 read_token_word treats every byte inside a single-quoted
 /// span as literal data and subst.c:4807 dequote_string removes only the
@@ -189,6 +190,17 @@ pub(super) fn assignment_rhs_is_fully_single_quoted(raw: &str) -> bool {
 /// as DATA_DQUOTE, the same carrier the normal dequote path emits for `"`
 /// inside single quotes when the word has content outside them
 /// (lexer/quotes.rs saw_outside_single arm).
+///
+/// A `\` needs the same carrier (rubash#301): GNU subst.c:11881-11886
+/// (expand_word_internal case '\'') hands the whole span to add_quoted_string,
+/// whose quote_string (subst.c:4773) CTLESC-protects every character, so the
+/// span's backslashes are data — `alias path='echo -e ${PATH//:/\\n}'`
+/// (mathiasbynens .aliases:148) stores `\\n` byte-for-byte. Rubash erases the
+/// delimiters here, and a raw `\` left in the token is re-read as source-word
+/// escape syntax by the embedded walker (embedded_mutations.rs `\\` arm
+/// collapses the pair to one `\`), so `NAME='...'` argument words lost one
+/// backslash of every `\\`. DATA_BACKSLASH is restored by the walker's tail
+/// chain and materialize_expanded_command_word before argv/glob see the word.
 pub(super) fn protect_fully_single_quoted_assignment(raw: &str) -> String {
     let mut out = String::new();
     let mut chars = raw.chars();
@@ -204,6 +216,7 @@ pub(super) fn protect_fully_single_quoted_assignment(raw: &str) -> String {
             '$' => out.push(DATA_DOLLAR),
             '`' => out.push(crate::executor::markers::DATA_BACKTICK),
             '"' => out.push(crate::executor::markers::DATA_DQUOTE),
+            '\\' => out.push(crate::executor::markers::DATA_BACKSLASH),
             _ => out.push(ch),
         }
     }

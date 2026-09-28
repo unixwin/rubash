@@ -76,6 +76,39 @@ impl Executor {
             // became a command name, rubash#117). Expand it as a plain word
             // with the caller's quote context instead.
             if let Some(rhs) = value.strip_prefix(tilde_expand::QUOTED_ASSIGNMENT_VALUE) {
+                // rubash#301 (argument-position `NAME='...'`-shaped words):
+                // the lexer erased the RHS quote delimiters, and a raw `\`
+                // that came from inside a `'...'`/`"..."` span is DATA —
+                // GNU parse.y:5419-5436 read_token_word keeps the span and
+                // subst.c:11881-11886 (expand_word_internal case '\'') ->
+                // add_quoted_string -> quote_string (subst.c:4773)
+                // CTLESC-protects every span character, so expand_word_list
+                // never reads it as source escape syntax. The embedded
+                // walker's `\\` arm collapses a raw pair to one `\`
+                // (`echo n='a\\b'` printed `n=a\b`; GNU prints `n=a\\b`), so
+                // carry each span-origin backslash as DATA_BACKSLASH — the
+                // walker's tail restore (embedded_mutations.rs) and
+                // materialize_expanded_command_word decode it back to `\`
+                // before argv/glob. Every unquoted-source escape was already
+                // lexer-converted (`\\`→DATA_BACKSLASH, `\$`→DATA_DOLLAR,
+                // quotes.rs backslash arm), so a surviving raw `\` in this
+                // cooked RHS can only be quote-span data. A live `${...}`
+                // body's `\` is pattern syntax and a `$(...)`/backtick
+                // body's `\` is nested-parse syntax, so those words bail
+                // out unchanged (same conservative guard as needs_hoist
+                // below); a live unbraced `$name` mixes fine — the walker
+                // expands it while the converted backslashes ride as data.
+                let rhs_owned;
+                let rhs = if rhs.contains('\\')
+                    && !rhs.contains("${")
+                    && !rhs.contains("$(")
+                    && !rhs.contains('`')
+                {
+                    rhs_owned = rhs.replace('\\', crate::executor::markers::DATA_BACKSLASH_STR);
+                    rhs_owned.as_str()
+                } else {
+                    rhs
+                };
                 return self.expand_embedded_parameters_mut_with_context(
                     &format!("{name}={rhs}"),
                     context,

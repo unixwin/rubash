@@ -229,9 +229,20 @@ pub(in crate::executor) fn hoist_data_single_quotes(value: &str, marker: &str) -
     let mut in_span = false;
     while idx < chars_vec.len() {
         let (_, ch) = chars_vec[idx];
-        // Skip $'...' ANSI-C quote bodies: the ' delimiters belong to the
-        // construct, not to single-quote word grouping.
-        if ch == '$' && idx + 1 < chars_vec.len() && chars_vec[idx + 1].1 == '\'' {
+        // Inside a hoisted '...' span everything is literal data (GNU
+        // arrayfunc.c:581 parse_string_to_word_list marks the whole word
+        // W_QUOTED; subst.c:11881-11886 case '\'' -> add_quoted_string ->
+        // quote_string CTLESC-protects the span, so expand_words_no_vars
+        // never sees live `${...}`/`$'...'` syntax inside it). The
+        // construct skips below must therefore fire only OUTSIDE a span:
+        // taking them inside hoisted `'${@}'` verbatim (rubash#303) left a
+        // live `${@}` that the walker expanded — GNU stores the literal
+        // text `${@}` (`A=('${@}')` is one element `${@}`; likewise
+        // `'a${v}b'`, `'${v:-y}'`, `'${*}'`, `'${#}'`). Inside the span the
+        // in_span arm below already carries the `$` as SQ_DOLLAR_DATA, and
+        // a `'` after a `$` simply closes the span (parse.y:5419
+        // parse_matched_pair: no escapes inside '...').
+        if !in_span && ch == '$' && idx + 1 < chars_vec.len() && chars_vec[idx + 1].1 == '\'' {
             out.push('$');
             out.push('\'');
             idx += 2;
@@ -252,8 +263,9 @@ pub(in crate::executor) fn hoist_data_single_quotes(value: &str, marker: &str) -
             }
             continue;
         }
-        // Skip ${...} bodies: quotes inside are parameter-expansion syntax.
-        if ch == '$' && idx + 1 < chars_vec.len() && chars_vec[idx + 1].1 == '{' {
+        // Skip ${...} bodies OUTSIDE single quotes: there they are live
+        // parameter syntax whose quotes belong to the expansion.
+        if !in_span && ch == '$' && idx + 1 < chars_vec.len() && chars_vec[idx + 1].1 == '{' {
             let body_start = chars_vec[idx + 1].0 + 1;
             if let Some(close) = matching_parameter_brace(&value[body_start..]) {
                 out.push_str(&value[chars_vec[idx].0..body_start + close + 1]);
