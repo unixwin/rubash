@@ -601,6 +601,15 @@ impl GroupScanFeeder {
         }
 
         let comsub_open = has_unclosed_command_substitution(&self.logical_line);
+        // Between this scan and the join-gate re-scan further down, the only
+        // mutation `self.logical_line` can undergo on a path that reaches
+        // that re-scan is the IFS_GLUE insert below (the backslash-
+        // continuation pop returns early). GNU parse.y:3557 read_token is a
+        // streaming reader — it never re-scans already-read input — so when
+        // the buffer is byte-identical the first answer stays valid (the
+        // scan is pure over its input) and the re-scan only has to run
+        // after the insert actually rewrote the buffer.
+        let mut comsub_state_changed = false;
         if !comsub_open {
             // GNU make_cmd.c:602-611: when the `)` closing the command
             // substitution sits on the heredoc delimiter line (e.g. `EOF)`),
@@ -635,6 +644,7 @@ impl GroupScanFeeder {
                         self.brace_cache.clear();
                         self.unclosed_quotes_cache = None;
                         self.boundary = None;
+                        comsub_state_changed = true;
                     }
                 }
             }
@@ -711,7 +721,14 @@ impl GroupScanFeeder {
             self.brace_join_active = false;
             return;
         }
-        if has_unclosed_command_substitution(&self.logical_line) {
+        // Join-gate re-scan: reuse the loop-head answer unless the IFS_GLUE
+        // insert rewrote the buffer this iteration (`comsub_open || ...` —
+        // an open substitution never takes the insert path, and the un-rewritten
+        // buffer answer is the loop-head answer by purity). See the comment
+        // at the loop-head scan.
+        if comsub_open
+            || (comsub_state_changed && has_unclosed_command_substitution(&self.logical_line))
+        {
             self.brace_join_active = false;
             return;
         }
