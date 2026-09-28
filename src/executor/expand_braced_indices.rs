@@ -408,11 +408,30 @@ impl Executor {
         if name == "#" {
             return Some(self.expand_parameter_named_value("#"));
         }
-        if (name.starts_with("##") && name.len() > 2) || name.starts_with("#%") {
+        if let Some(rest) = name.strip_prefix('#') {
+            // subst.c:9798-9810 + 9837-9862 + 9931-9938
+            // valid_length_expression: `${#` is the length form only when
+            // the text after `#` is an identifier, an all-digit
+            // positional, an array reference, or a single
+            // special-parameter char (`${#-}` is len($-), `${##}` is
+            // len($#)). Otherwise `#` IS the `$#` parameter and the next
+            // char is an operator on it — `${#/x/y}` is pattern
+            // substitution on `$#`, `${#-x}` the default-word op, and
+            // `${##pat}`/`${#%pat}` are removal ops on `$#`. The
+            // parameter_errors gate (is_length_operator_expression) has
+            // already rejected the empty-word operator forms and the
+            // `#`+starter bad-length names.
+            let bytes = rest.as_bytes();
+            let is_length_operand = bytes.iter().all(|b| b.is_ascii_digit())
+                || is_shell_name(rest)
+                || (rest.len() == 1
+                    && matches!(bytes[0], b'@' | b'*' | b'#' | b'?' | b'-' | b'$' | b'!'))
+                || parse_array_subscript(rest)
+                    .is_some_and(|(array_name, _)| is_shell_name(array_name));
+            if is_length_operand {
+                return Some(self.expand_braced_length_parameter(rest));
+            }
             return None;
-        }
-        if let Some(var_name) = name.strip_prefix('#') {
-            return Some(self.expand_braced_length_parameter(var_name));
         }
         if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
             return Some(self.expand_braced_substring_parameter(var_name, offset, length));

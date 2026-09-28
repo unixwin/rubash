@@ -174,9 +174,22 @@ pub(super) fn parse_function_command_with_diagnostic(
         }
         let mut body = parse_function_body(&body_tokens, diagnostic_text, source_line_offset);
         crate::lexer::set_parse_extended_glob(saved_extglob);
+        // Alias-introduced compound openers (e.g. `alias forever='while
+        // :;'`) expand in GNU's reader, before the body parse — this token
+        // path cannot see the alias table, so keep the verbatim body text
+        // for the executor's one alias-aware retry at definition time.
+        let unparsed_body_source = find_body_parse_error(&body).map(|_| {
+            (
+                inner.to_string(),
+                tokens
+                    .get(i)
+                    .map(|token| token.position)
+                    .unwrap_or_default(),
+            )
+        });
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
-        command.function_command = Some(function_command(
+        let mut function = function_command(
             name.clone(),
             name_raw.clone(),
             body,
@@ -194,7 +207,9 @@ pub(super) fn parse_function_command_with_diagnostic(
             tokens
                 .get(i)
                 .map(|token| token.position + token.raw.matches('\n').count()),
-        ));
+        );
+        function.unparsed_body_source = unparsed_body_source;
+        command.function_command = Some(function);
         return Some(finish_function_command(command, tokens, i + 1));
     }
     if let Some((mut body_command, body_end)) = parse_function_compound_body(tokens, i) {
@@ -404,9 +419,13 @@ fn parse_function_body(
 /// tree. Returns a clone of the node carrying the
 /// `__RUBASH_PARSE_ERROR__'/`__RUBASH_PARSE_SOURCE__' pair (line numbers
 /// and verbatim source ride on it), or None when the whole body parsed.
-fn find_body_parse_error(commands: &[CommandNode]) -> Option<CommandNode> {
+pub(crate) fn find_body_parse_error(commands: &[CommandNode]) -> Option<CommandNode> {
     for command in commands {
-        if command.has_assignment("__RUBASH_PARSE_ERROR__") {
+        if command
+            .assignments
+            .iter()
+            .any(|(name, _)| name.starts_with("__RUBASH_PARSE_ERROR"))
+        {
             return Some(command.clone());
         }
         let nested: Option<&Vec<CommandNode>> =
@@ -558,6 +577,7 @@ fn function_command(
         body_end,
         body_end_line,
         body_open_line,
+        unparsed_body_source: None,
     })
 }
 

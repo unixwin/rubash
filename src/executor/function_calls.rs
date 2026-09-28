@@ -6,6 +6,28 @@ impl Executor {
         cmd: &CommandNode,
         function: &FunctionCommand,
     ) -> Result<(), ExecuteError> {
+        // GNU parse.y:3249 alias_expand_token expands aliases in the READER
+        // — including inside a function body — so an alias supplying a
+        // compound opener (`alias forever='while :;'` → `while :; do`)
+        // parses structurally. The token-level body parse is alias-blind;
+        // when it produced a parse error the verbatim body text is kept on
+        // FunctionCommand::unparsed_body_source for ONE alias-aware retry
+        // here before the diagnostic stands (modernish `forever do` loops
+        // inside sourced .mm module bodies).
+        let function_storage;
+        let mut function = function;
+        let mut body_alias_expanded = false;
+        if let Some((source, base_line)) = function.unparsed_body_source.clone() {
+            if let Some(body) = self.retry_function_body_with_aliases(&source, base_line) {
+                function_storage = FunctionCommand {
+                    body,
+                    unparsed_body_source: None,
+                    ..function.clone()
+                };
+                function = &function_storage;
+                body_alias_expanded = true;
+            }
+        }
         // rubash#131: GNU parses a function definition as one unit — a
         // syntax error anywhere in the body aborts the reader at the
         // definition (parse.y parse_command -> report_syntax_error; e.g. an
@@ -57,10 +79,17 @@ impl Executor {
             )
         };
         if invalid_identifier {
-            eprintln!(
-                "{}`{}': not a valid identifier",
-                name_error_prefix(self),
-                name_raw
+            // GNU error.c report_error writes to fd 2 as bound by the
+            // enclosing redirections — `eprintln!` leaked this through
+            // `( f(){ :; } ) 2>/dev/null` and `case $(...) esac 2>/dev/null`
+            // (modernish ROFUNC.t).
+            self.write_diagnostic_fd2(
+                format!(
+                    "{}`{}': not a valid identifier\n",
+                    name_error_prefix(self),
+                    name_raw
+                )
+                .as_bytes(),
             );
             if posix_mode {
                 self.exit_code = 2;
@@ -70,10 +99,13 @@ impl Executor {
             return Ok(());
         }
         if posix_mode && is_posix_special_builtin(&function.name) {
-            eprintln!(
-                "{}`{}': is a special builtin",
-                name_error_prefix(self),
-                function.name
+            self.write_diagnostic_fd2(
+                format!(
+                    "{}`{}': is a special builtin\n",
+                    name_error_prefix(self),
+                    function.name
+                )
+                .as_bytes(),
             );
             self.exit_code = 2;
             return Err(ExecuteError::FatalFunctionError(2));
@@ -87,10 +119,13 @@ impl Executor {
             .iter()
             .any(|name| name == &function.name)
         {
-            eprintln!(
-                "{}{}: readonly function",
-                self.diagnostic_prefix(),
-                function.name
+            self.write_diagnostic_fd2(
+                format!(
+                    "{}{}: readonly function\n",
+                    self.diagnostic_prefix(),
+                    function.name
+                )
+                .as_bytes(),
             );
             self.exit_code = 1;
             return Ok(());
@@ -101,6 +136,29 @@ impl Executor {
                 commands: function.body.clone(),
             }),
         );
+        // GNU expands aliases in the reader while the definition is
+        // parsed (parse.y:3013 alias_expand_token), so the stored body is
+        // already expanded. lexer::alias_stream does that for streamed
+        // input; a body parsed from executor-level input (sourced `.`
+        // file, eval) keeps raw words, so flag it — execute_function
+        // suspends the ambient streamed marker for the body's duration
+        // and the executor-level expand_aliases does the work then
+        // (modernish `alias not='! '` inside sourced .mm function bodies).
+        // A body that just succeeded through the alias-aware retry above
+        // is already expanded like reader input — flag it as streamed.
+        if self.alias_streamed() || body_alias_expanded {
+            unmark_env_name(
+                &mut self.shell_state.env_vars,
+                UNSTREAMED_FUNCTION_BODIES,
+                &function.name,
+            );
+        } else {
+            mark_env_name(
+                &mut self.shell_state.env_vars,
+                UNSTREAMED_FUNCTION_BODIES,
+                &function.name,
+            );
+        }
         if let Some(line) = cmd.line {
             self.shell_state.function_definition_locations.insert(
                 function.name.clone(),
@@ -154,6 +212,40 @@ impl Executor {
         );
         self.exit_code = 0;
         Ok(())
+    }
+
+    /// Retry a function body whose token-level parse produced a parse-error
+    /// node, this time through the alias text stream (`expand_aliases_in_
+    /// source` — parse.y:3249 alias_expand_token/push_string). Returns the
+    /// re-parsed body only when it is parse-error-free; otherwise the
+    /// original diagnostic stands.
+    pub(in crate::executor) fn retry_function_body_with_aliases(
+        &self,
+        source: &str,
+        base_line: usize,
+    ) -> Option<Vec<CommandNode>> {
+        let expanded = self.comsub_body_alias_splice(source);
+        if expanded == source {
+            return None;
+        }
+        let mut tokens = crate::lexer::tokenize(&expanded);
+        if base_line > 1 {
+            for token in &mut tokens {
+                token.position += base_line - 1;
+            }
+        }
+        let body = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                stray_close_is_error: true,
+                source_text: Some(expanded),
+                ..Default::default()
+            },
+        )
+        .commands;
+        crate::parser::find_body_parse_error(&body)
+            .is_none()
+            .then_some(body)
     }
 
     pub(in crate::executor) fn function_name_for_command_word(&self, word: &str) -> Option<String> {
@@ -457,6 +549,18 @@ impl Executor {
                 .collect();
             numbered
         });
+        // A body flagged UNSTREAMED_FUNCTION_BODIES still holds
+        // unexpanded alias words; lift the ambient streamed marker so the
+        // executor-level expand_aliases sees them for the body's duration.
+        let body_unstreamed =
+            marked_env_names(&self.shell_state.env_vars, UNSTREAMED_FUNCTION_BODIES)
+                .iter()
+                .any(|marked| marked == name);
+        let saved_alias_streamed = if body_unstreamed {
+            self.suspend_alias_streamed()
+        } else {
+            None
+        };
         let result = self.with_compound_output_redirects(call_cmd, |executor| {
             let body_run = |executor: &mut Executor| {
                 executor.with_ambient_line(body_open_line, |executor| {
@@ -468,6 +572,9 @@ impl Executor {
                 None => body_run(executor),
             }
         });
+        if body_unstreamed {
+            self.resume_alias_streamed(saved_alias_streamed);
+        }
         self.shell_state.loop_depth = saved_loop_depth;
         // GNU execute_cmd.c:5269+ — the call's input redirections are
         // undone when the function returns.

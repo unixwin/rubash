@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use super::Executor;
 use crate::executor::execution_misc::RandomGen;
 use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
-use crate::executor::{is_marked_var, SubstitutionQuoteContext, ASSOC_VARS};
+use crate::executor::{is_marked_var, SubstitutionQuoteContext, ASSOC_VARS, UNSET_DYNAMIC_VARS};
 
 thread_local! {
     /// Variable writes performed by the arithmetic evaluator between the
@@ -354,10 +354,12 @@ impl Executor {
         }
         // Save a snapshot of variable values before evaluation to detect changes.
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
+        let dynamic_values = self.arith_dynamic_values();
         let (value, category) = eval_mutable_arith_value_with_random_flags(
             &expression,
             &mut self.shell_state.env_vars,
             Some(&self.shell_state.random_state),
+            Some(&dynamic_values),
             true,
         );
         self.shell_state
@@ -480,10 +482,12 @@ impl Executor {
         let expression = normalize_arithmetic_quotes(&with_assoc_keys);
         *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
+        let dynamic_values = self.arith_dynamic_values();
         let (value, category) = eval_mutable_arith_value_with_random_flags(
             &expression,
             &mut self.shell_state.env_vars,
             Some(&self.shell_state.random_state),
+            Some(&dynamic_values),
             true,
         );
         self.shell_state
@@ -592,10 +596,12 @@ impl Executor {
         // GNU expr.c: the expansion pass above already ran, so the parser
         // evaluates under evalexp's already-expanded rules — a surviving
         // `$name`/`$(...)` is "operand expected" data, not a re-expansion.
+        let dynamic_values = self.arith_dynamic_values();
         let (value, category) = eval_mutable_arith_value_with_random_flags(
             &expression,
             &mut self.shell_state.env_vars,
             Some(&self.shell_state.random_state),
+            Some(&dynamic_values),
             true,
         );
         self.shell_state
@@ -1007,7 +1013,7 @@ pub(crate) fn arithmetic_expansion_is_fatal(expression: &str) -> bool {
 
 pub(crate) fn arithmetic_error_category(expression: &str) -> Option<ArithmeticErrorCategory> {
     let mut env_vars = HashMap::new();
-    let (_, category) = eval_mutable_arith_result(expression, &mut env_vars, None, false);
+    let (_, category) = eval_mutable_arith_result(expression, &mut env_vars, None, None, false);
     category
 }
 
@@ -1037,6 +1043,7 @@ pub(in crate::executor) fn trailing_input_token(
         env_vars: &mut env_vars,
         resolving: Vec::new(),
         random_state: None,
+        dynamic_values: None,
         error_category: None,
         no_expand: false,
         error: None,
@@ -1089,6 +1096,7 @@ fn indexed_noexpand_error_token(resolved: &str) -> String {
         env_vars: &mut env_vars,
         resolving: Vec::new(),
         random_state: None,
+        dynamic_values: None,
         error_category: None,
         no_expand: true,
         error: None,
@@ -1179,7 +1187,7 @@ pub(crate) fn eval_conditional_arith_value_categorized(
     env_vars: &HashMap<String, String>,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
     let mut env_vars = env_vars.clone();
-    eval_mutable_arith_result(value, &mut env_vars, None, false)
+    eval_mutable_arith_result(value, &mut env_vars, None, None, false)
 }
 
 /// `eval_conditional_arith_value_categorized` plus the write-capture of
@@ -1196,7 +1204,7 @@ pub(crate) fn eval_conditional_arith_value_categorized_with_writes(
     Option<ArithmeticErrorCategory>,
 ) {
     let mut cloned = env_vars.clone();
-    let (result, category) = eval_mutable_arith_result(value, &mut cloned, None, false);
+    let (result, category) = eval_mutable_arith_result(value, &mut cloned, None, None, false);
     let writes = cloned
         .iter()
         .filter(|(name, _)| name.as_str() != "__RUBASH_ARITH_SUBSCRIPT_EXPR")
@@ -1258,12 +1266,31 @@ pub(super) fn arithmetic_unbound_variable(
             continue;
         }
         if !env_vars.contains_key(&name)
-            && !matches!(
+            && !(matches!(
                 name.as_str(),
                 // Dynamic parameters resolved by the evaluator without an
-                // env_vars entry (RANDOM/SRANDOM advance the RNG state).
-                "RANDOM" | "SRANDOM" | "SECONDS" | "EPOCHSECONDS" | "LINENO"
-            )
+                // env_vars entry (RANDOM/SRANDOM advance the RNG state;
+                // BASHPID/BASH_SUBSHELL/... come from the Executor's
+                // dynamic_values snapshot). GNU expr_streval sees all of
+                // them through find_variable, so under `set -u` they are
+                // bound — unless `unset -v` unbound the dynamic name
+                // (variables.c:3839 unbind_variable).
+                "RANDOM"
+                    | "SRANDOM"
+                    | "SECONDS"
+                    | "EPOCHSECONDS"
+                    | "EPOCHREALTIME"
+                    | "LINENO"
+                    | "BASHPID"
+                    | "BASH_SUBSHELL"
+                    | "BASH_ARGV0"
+                    | "FUNCNAME"
+                    | "GROUPS"
+                    | "BASH_COMMAND"
+                    | "SHELLOPTS"
+                    | "BASHOPTS"
+                    | "PIPESTATUS"
+            ) && !is_marked_var(env_vars, UNSET_DYNAMIC_VARS, &name))
         {
             return Some(name);
         }
@@ -2150,21 +2177,23 @@ pub(super) fn arithmetic_division_by_zero_token(expression: &str) -> Option<Stri
 }
 
 fn eval_mutable_arith_value(value: &str, env_vars: &mut HashMap<String, String>) -> Option<i128> {
-    eval_mutable_arith_value_with_random(value, env_vars, None).0
+    eval_mutable_arith_value_with_random(value, env_vars, None, None).0
 }
 
 pub(super) fn eval_mutable_arith_value_with_random(
     value: &str,
     env_vars: &mut HashMap<String, String>,
     random_state: Option<&RandomGen>,
+    dynamic_values: Option<&HashMap<String, String>>,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
-    eval_mutable_arith_value_with_random_flags(value, env_vars, random_state, false)
+    eval_mutable_arith_value_with_random_flags(value, env_vars, random_state, dynamic_values, false)
 }
 
 pub(super) fn eval_mutable_arith_value_with_random_flags(
     value: &str,
     env_vars: &mut HashMap<String, String>,
     random_state: Option<&RandomGen>,
+    dynamic_values: Option<&HashMap<String, String>>,
     no_expand: bool,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
     // GNU Bash's subexpr() treats an empty arithmetic expression as zero.
@@ -2175,13 +2204,14 @@ pub(super) fn eval_mutable_arith_value_with_random_flags(
     // eval_mutable_arith_result performs both, so this wrapper only passes
     // the flags through (the former duplicate normalize was one of the
     // ~10 full-string scans per `(( ))` evaluation; rubash#156).
-    eval_mutable_arith_result(value, env_vars, random_state, no_expand)
+    eval_mutable_arith_result(value, env_vars, random_state, dynamic_values, no_expand)
 }
 
 fn eval_mutable_arith_result(
     value: &str,
     env_vars: &mut HashMap<String, String>,
     random_state: Option<&RandomGen>,
+    dynamic_values: Option<&HashMap<String, String>>,
     no_expand: bool,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
     // Fresh evaluation: a stale record/diagnostic from an earlier
@@ -2200,6 +2230,7 @@ fn eval_mutable_arith_result(
         env_vars,
         resolving: Vec::new(),
         random_state,
+        dynamic_values,
         error_category: None,
         no_expand,
         error: None,

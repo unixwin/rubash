@@ -601,46 +601,178 @@ pub(in crate::executor) fn positional_parameter_substring_with_zero(
     positional_parameter_substring(&with_zero, 1, length)
 }
 
+/// GNU subst.c:9805-9880 (extract_variable_name -> op dispatch):
+/// string_extract(SX_VARNAME) stops the parameter name at the first
+/// operator character, and `/` is the substitution separator ONLY when it
+/// is that terminating char. A `/` after another operator or inside a
+/// quoted span is word text — `${v#"$x/"}` is prefix removal, not
+/// `${v/pat/repl}`. The old split_once("/") claimed the quoted `/`, the
+/// pattern `x` then carried a lone `"`, and the whole expansion died with
+/// a phantom unclosed-quote diagnostic (rubash#282 residual).
 pub(in crate::executor) fn parse_parameter_replacement(
     name: &str,
 ) -> Option<(&str, &str, &str, bool)> {
-    if let Some((var_name, rest)) = name.split_once("//").filter(|(var_name, _)| {
-        !var_name.ends_with('\\') && !var_name.ends_with(crate::executor::markers::DATA_BACKSLASH)
-    }) {
-        // A slash immediately after `//` is part of the pattern. This is
-        // ambiguous with the pattern/replacement separator, so skip it and
-        // find the next unescaped slash (`${v////-}`, `${v///r/-}`).
-        let separator = if rest.starts_with('/') {
-            split_unescaped_parameter_separator(&rest[1..])
-                .map(|(pattern, replacement)| (&rest[..pattern.len() + 1], replacement))
-        } else {
-            split_unescaped_parameter_separator(rest)
+    let bytes = name.as_bytes();
+    let mut head = super::expand_word::brace_name_head(bytes).len();
+    if head == 0 {
+        // The name begins with an operator char, so the extract stopped at
+        // once. GNU then accepts the single-char special parameters:
+        // `@` on its own (subst.c:9815-9821, it is also a transform op)
+        // and `-`, `?`, `#` with any further name text up to the next
+        // terminator (subst.c:9837-9862 VALID_SPECIAL_LENGTH_PARAM).
+        head = match bytes.first() {
+            Some(b'@') => 1,
+            Some(b'-' | b'?' | b'#') => 1 + parameter_name_tail_len(&bytes[1..]),
+            _ => 0,
         };
-        let (pattern, replacement) = separator.unwrap_or((rest, ""));
-        return Some((var_name, pattern, replacement, true));
     }
-
-    let (var_name, rest) = name.split_once('/')?;
-    let (pattern, replacement) = split_unescaped_parameter_separator(rest).unwrap_or((rest, ""));
-    Some((var_name, pattern, replacement, false))
+    if bytes.get(head) != Some(&b'/') {
+        return None;
+    }
+    let var_name = &name[..head];
+    // subst.c:9387-9390 MATCH_GLOBREP: a second `/` selects global
+    // replacement and is consumed before the pattern.
+    let global = bytes.get(head + 1) == Some(&b'/');
+    let rest = &name[head + if global { 2 } else { 1 }..];
+    // subst.c:9408-9409: when the pattern itself starts with `/`, that
+    // char is skipped before the separator scan (`${v///r/-}`,
+    // `${v////-}`).
+    if let Some(pattern_rest) = rest.strip_prefix('/') {
+        return match split_parameter_separator(pattern_rest) {
+            Some((inner, replacement)) => {
+                Some((var_name, &rest[..inner.len() + 1], replacement, global))
+            }
+            None => Some((var_name, rest, "", global)),
+        };
+    }
+    let (pattern, replacement) = split_parameter_separator(rest).unwrap_or((rest, ""));
+    Some((var_name, pattern, replacement, global))
 }
 
-fn split_unescaped_parameter_separator(value: &str) -> Option<(&str, &str)> {
-    let mut escaped = false;
-    for (index, ch) in value.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' || ch == crate::executor::markers::DATA_BACKSLASH {
-            escaped = true;
-            continue;
-        }
-        if ch == '/' {
-            return Some((&value[..index], &value[index + 1..]));
+/// subst.c:9844-9860 string_extract(string, &t_index, "#%:-=?+/@}", 0):
+/// after a single-char special parameter, the name continues up to the
+/// next operator terminator with no escape or subscript handling.
+fn parameter_name_tail_len(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .take_while(|b| {
+            !matches!(
+                b,
+                b'#' | b'%' | b':' | b'-' | b'=' | b'?' | b'+' | b'/' | b'@' | b'}'
+            )
+        })
+        .count()
+}
+
+/// Port of GNU subst.c:2199 skip_to_delim (flags=0, as called from
+/// parameter_brace_patsub at subst.c:9408): the pattern/replacement `/`
+/// is only a delimiter at top level — backslash pairs, backquotes,
+/// single/double quotes, `$(...)`, `${...}` and process substitutions are
+/// skipped as units, so a `/` inside any of them stays word text.
+fn split_parameter_separator(value: &str) -> Option<(&str, &str)> {
+    let chars: Vec<(usize, char)> = value.char_indices().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let (byte, ch) = chars[index];
+        match ch {
+            '/' => return Some((&value[..byte], &value[byte + '/'.len_utf8()..])),
+            '\\' | crate::executor::markers::DATA_BACKSLASH => index += 2,
+            '`' => index = skip_backquote_span(&chars, index),
+            '\'' | crate::executor::markers::DATA_SQUOTE => {
+                index = skip_literal_span(&chars, index, ch)
+            }
+            '"' | crate::executor::markers::DATA_DQUOTE => {
+                index = skip_double_quoted_span(&chars, index, ch)
+            }
+            '$' if matches!(chars.get(index + 1).map(|c| c.1), Some('(' | '{')) => {
+                let close = if chars[index + 1].1 == '(' { ')' } else { '}' };
+                index = skip_matched_span(&chars, index + 1, close);
+            }
+            '<' | '>' if chars.get(index + 1).map(|c| c.1) == Some('(') => {
+                index = skip_matched_span(&chars, index + 1, ')')
+            }
+            _ => index += 1,
         }
     }
     None
+}
+
+/// Index just past a `` `...` `` span opened at `index` (chars index),
+/// or chars.len() when unclosed.
+fn skip_backquote_span(chars: &[(usize, char)], index: usize) -> usize {
+    let mut i = index + 1;
+    while i < chars.len() {
+        match chars[i].1 {
+            '`' => return i + 1,
+            '\\' | crate::executor::markers::DATA_BACKSLASH => i += 2,
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+/// Index just past a `q...q` span (single quote or its data marker)
+/// opened at `index`.
+fn skip_literal_span(chars: &[(usize, char)], index: usize, quote: char) -> usize {
+    let mut i = index + 1;
+    while i < chars.len() {
+        if chars[i].1 == quote {
+            return i + 1;
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Index just past a double-quoted span opened at `index`; `\\X` pairs
+/// inside are skipped (subst.c skip_double_quoted).
+fn skip_double_quoted_span(chars: &[(usize, char)], index: usize, quote: char) -> usize {
+    let mut i = index + 1;
+    while i < chars.len() {
+        match chars[i].1 {
+            c if c == quote => return i + 1,
+            '\\' | crate::executor::markers::DATA_BACKSLASH => i += 2,
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+/// Index just past the `close` matching `chars[index]` (an open char),
+/// nesting counted and quotes/escapes/backquotes/`$(`${}` skipped as
+/// units — subst.c:2086 skip_matched_pair flags=0.
+fn skip_matched_span(chars: &[(usize, char)], index: usize, close: char) -> usize {
+    let open = chars[index].1;
+    let mut i = index + 1;
+    let mut depth = 1usize;
+    while i < chars.len() {
+        let ch = chars[i].1;
+        if ch == close {
+            depth -= 1;
+            i += 1;
+            if depth == 0 {
+                return i;
+            }
+        } else if ch == open {
+            depth += 1;
+            i += 1;
+        } else {
+            match ch {
+                '\\' | crate::executor::markers::DATA_BACKSLASH => i += 2,
+                '`' => i = skip_backquote_span(chars, i),
+                '\'' | crate::executor::markers::DATA_SQUOTE => i = skip_literal_span(chars, i, ch),
+                '"' | crate::executor::markers::DATA_DQUOTE => {
+                    i = skip_double_quoted_span(chars, i, ch)
+                }
+                '$' if matches!(chars.get(i + 1).map(|c| c.1), Some('(' | '{')) => {
+                    let inner = if chars[i + 1].1 == '(' { ')' } else { '}' };
+                    i = skip_matched_span(chars, i + 1, inner);
+                }
+                _ => i += 1,
+            }
+        }
+    }
+    i
 }
 
 #[cfg(test)]
@@ -701,6 +833,68 @@ mod tests {
         assert_eq!(
             parse_parameter_replacement("v///r/-"),
             Some(("v", "/r", "-", true))
+        );
+    }
+
+    #[test]
+    fn slash_after_another_operator_is_not_substitution() {
+        // subst.c:9805-9880: `/` is the substitution separator only when it
+        // terminates the name extract; `${v#"$x/"}` is prefix removal.
+        assert_eq!(parse_parameter_replacement("y#\"$Z/\""), None);
+        assert_eq!(parse_parameter_replacement("v%a/b"), None);
+        assert_eq!(parse_parameter_replacement("v:1:2"), None);
+        assert_eq!(parse_parameter_replacement("v=x/y"), None);
+    }
+
+    #[test]
+    fn separator_skips_quoted_and_nested_slashes() {
+        // subst.c:2199 skip_to_delim + subst.c:9408: quotes, backquotes,
+        // $(...)/${...} and process substitutions are skipped as units.
+        assert_eq!(
+            parse_parameter_replacement("v/a'/'c/X"),
+            Some(("v", "a'/'c", "X", false))
+        );
+        assert_eq!(
+            parse_parameter_replacement("v/a\"/\"b/Z"),
+            Some(("v", "a\"/\"b", "Z", false))
+        );
+        assert_eq!(
+            parse_parameter_replacement("w/$(x/y)/r"),
+            Some(("w", "$(x/y)", "r", false))
+        );
+        assert_eq!(
+            parse_parameter_replacement("w/`x/y`/r"),
+            Some(("w", "`x/y`", "r", false))
+        );
+        assert_eq!(
+            parse_parameter_replacement("w/${n/y}/r"),
+            Some(("w", "${n/y}", "r", false))
+        );
+    }
+
+    #[test]
+    fn single_char_special_parameter_names() {
+        // subst.c:9815-9821 / 9837-9862: `@` alone, and `-`/`?`/`#` plus
+        // name text up to the next terminator, are valid patsub names.
+        assert_eq!(
+            parse_parameter_replacement("@/a/b"),
+            Some(("@", "a", "b", false))
+        );
+        assert_eq!(
+            parse_parameter_replacement("#/x/y"),
+            Some(("#", "x", "y", false))
+        );
+        assert_eq!(
+            parse_parameter_replacement("?/x/y"),
+            Some(("?", "x", "y", false))
+        );
+        assert_eq!(
+            parse_parameter_replacement("-/x/y"),
+            Some(("-", "x", "y", false))
+        );
+        assert_eq!(
+            parse_parameter_replacement("1/a/b"),
+            Some(("1", "a", "b", false))
         );
     }
 

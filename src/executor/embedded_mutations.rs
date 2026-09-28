@@ -1000,7 +1000,16 @@ impl Executor {
                                     .arithmetic_last_error_category
                                     .take()
                                     .is_some();
-                                if (actual_fatal
+                                if self.shell_state.arithmetic_nounset_error.get() {
+                                    // GNU expr.c:1524 evalerror under
+                                    // `set -u` exits the shell — the
+                                    // expansion produced nothing and the
+                                    // expression text must NOT fall
+                                    // through to the command-substitution
+                                    // retry below (`NOPE+1` is not a
+                                    // command; probe 2026-10: `set -u;
+                                    // echo "x=$((NOPE+1))"` executed it).
+                                } else if (actual_fatal
                                     || crate::executor::arithmetic::arithmetic_expansion_is_fatal(
                                         &expression,
                                     ))

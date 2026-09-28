@@ -903,10 +903,12 @@ impl Executor {
         // `$name`/`$(...)` is still readtok junk -> "operand expected"
         // (expr.c:1502-1510), hence no_expand inside the parser.
         let left_eval = self.expand_arith_indexed_subscripts(&left_expanded);
+        let left_dynamic = self.arith_dynamic_values();
         let (Some(left_val), _) = eval_mutable_arith_value_with_random_flags(
             &left_eval,
             &mut self.shell_state.env_vars,
             Some(&self.shell_state.random_state),
+            Some(&left_dynamic),
             true,
         ) else {
             self.flush_arith_diags(Some("[["));
@@ -915,10 +917,12 @@ impl Executor {
         };
         self.flush_arith_diags(Some("[["));
         let right_eval = self.expand_arith_indexed_subscripts(&right_expanded);
+        let right_dynamic = self.arith_dynamic_values();
         let (Some(right_val), _) = eval_mutable_arith_value_with_random_flags(
             &right_eval,
             &mut self.shell_state.env_vars,
             Some(&self.shell_state.random_state),
+            Some(&right_dynamic),
             true,
         ) else {
             self.flush_arith_diags(Some("[["));
