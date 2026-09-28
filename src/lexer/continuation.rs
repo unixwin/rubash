@@ -1244,6 +1244,25 @@ fn skip_parenthesized_unit_ex(chars: &[char], open: usize) -> Option<(usize, boo
             index += 1;
             continue;
         }
+        // A `<<<` here-string is ONE redirection operator (GNU read_token
+        // builds the operator word from consecutive `<`s before dispatching
+        // it, parse.y redirection handling), so the second `<` must not pair
+        // with the third into a `<<` heredoc header — without this arm,
+        // `$(grep -- x <<< "$v")` misreads `<<` mid-operator, the delimiter
+        // scan swallows to end-of-input, and the atomic unit skip fails
+        // every time (the outer machine's own `<<<` arms below consume the
+        // three characters plainly). token_boundary mirrors the `<<` arm:
+        // the operand after the operator begins a fresh token.
+        if !single
+            && !double
+            && ch == '<'
+            && chars.get(index + 1) == Some(&'<')
+            && chars.get(index + 2) == Some(&'<')
+        {
+            token_boundary = true;
+            index += 3;
+            continue;
+        }
         // Skip a here-document body so its ) and quote bytes stay opaque to
         // parenthesis balancing, mirroring how GNU make_here_document reads
         // the body from the input stream (parse.y gather_here_documents)
