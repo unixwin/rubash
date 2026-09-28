@@ -665,6 +665,13 @@ pub struct Executor {
     /// through this cell and folded into FUNCTION_STDIN_OFFSET by the
     /// pipeline driver (initial_pipeline_input must not eagerly drain).
     pipeline_stdin_consumed: Cell<Option<usize>>,
+    /// Set by a sequential pipeline stage that wired the child's fd 1/fd 2
+    /// DIRECTLY onto their ordered targets (both fds sharing one open file
+    /// description — `>f 2>&1`, `>f |&`): the driver then skips
+    /// route_pipeline_stage_streams for the stage, because the routing
+    /// walk re-opens `>f` and would truncate the bytes the child already
+    /// wrote live through the shared description (niubash#144).
+    pipeline_stage_fds_pre_wired: Cell<bool>,
     /// Tracks the source of the last heredoc EOF warning emitted from
     /// command_substitution_heredoc_output_mut_typed, to avoid duplicate
     /// warnings when the same comsub is expanded through multiple paths
@@ -708,7 +715,7 @@ pub struct Executor {
     /// returns EX_USAGE/EX_UTILERROR/etc., and checks it in
     /// `execute_materialized_command` to exit the noninteractive POSIX shell.
     special_builtin_failed: Cell<bool>,
-    /// Set by `write_ordered_command_output` when a builtin's buffered
+    /// Set by `route_builtin_buffered_output` when a builtin's buffered
     /// stdout/stderr could not be delivered because the target fd is
     /// closed — the executor-side analogue of GNU `sh_chkwrite`
     /// (builtins/common.c:320) turning the builtin's result into
@@ -785,6 +792,12 @@ pub struct Executor {
     /// active capture. `None` means the planner declined and the legacy
     /// split/capture routes own the command untouched.
     external_stdio_outcome: Option<external_redirects::ExternalStdioOutcome>,
+    /// Set by the per-fd legacy branches of `apply_external_redirects` when
+    /// they hand the child a `Stdio::piped()` stream for a shape the stdio
+    /// planner declined — the parent must then drain that pipe (a full pipe
+    /// deadlocks the child) and route the bytes to the resolved fd
+    /// endpoint. Reset at the start of every `apply_external_redirects`.
+    external_stdio_piped_fallback: bool,
     host_external_command_handler: Option<HostExternalCommandHandler>,
     #[cfg(windows)]
     elevation_handler: Option<ElevationHandler>,

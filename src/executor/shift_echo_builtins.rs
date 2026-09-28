@@ -105,7 +105,7 @@ impl Executor {
             echo_args.iter().map(String::as_str),
             &mut output,
         )?;
-        if self.write_ordered_command_output(cmd, &output, &[])? {
+        if self.route_builtin_buffered_output(cmd, &output, &[])? {
             return Ok(());
         }
 

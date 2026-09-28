@@ -365,6 +365,25 @@ impl Executor {
             };
             commands.push(command);
         }
+        // GNU parse.y:1470-1487: `cmd1 |& cmd2` desugars at PARSE time into
+        // `cmd1 2>&1 | cmd2` — a r_duplicating_output redirect (redirector 2,
+        // destination 1) APPENDED to cmd1's redirect list. execute_pipeline
+        // binds the pipe to the element's fd 1 first (execute_cmd.c:2702
+        // passes fildes[1] as pipe_out), so the appended dup lands fd 2 on
+        // the SAME pipe open description fd 1 holds (redir.c:1169-1170
+        // `2>&1 means dup2 (1, 2)`), and the element's merged bytes
+        // interleave in true write order through that one pipe. rubash's
+        // parser carries `|&` as pipe == Some(2); normalize every stage to
+        // the GNU shape HERE so all downstream consumers — the compound
+        // redirect injector, the ordered stage routing, the external stdio
+        // planner, the concurrent-path admissions — see one form and no
+        // consumer needs a `|&` special case.
+        let normalized: Vec<CommandNode> = commands
+            .iter()
+            .map(|command| normalize_pipeerr_stage(command))
+            .collect();
+        let commands: Vec<&CommandNode> = normalized.iter().collect();
+        let first = commands[0];
         if self.execute_timed_read_pipeline(&commands)?.is_some() {
             return Ok(Some(end + 1));
         }
@@ -393,10 +412,11 @@ impl Executor {
             if let Some((prefix_len, prefix_output, prefix_stderr, prefix_statuses)) =
                 self.execute_external_prefix_concurrently(&commands)?
             {
-                let prefix_last = commands[prefix_len - 1];
-                if prefix_last.pipe == Some(2)
-                    || self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout)
-                {
+                // A prefix member carrying `|&` was normalized to a
+                // trailing `2>&1` and declined admission, so the only stderr
+                // merge left here is the ambient `exec 2>&1` fd-table
+                // binding (fd 2 already on fd 1's object).
+                if self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout) {
                     input = prefix_output;
                     input.push_str(&prefix_stderr);
                 } else if !prefix_stderr.is_empty() {
@@ -517,7 +537,16 @@ impl Executor {
             // element ran execute_command in this shell and already applied
             // its own redirections, so routing it again would reopen `>f`
             // and truncate the content the stage just wrote.
-            if !command_is_compound_pipeline_stage(command) && !in_shell_stage {
+            // A stage that wired the child's fds directly onto their
+            // targets (both fds on one shared open file — `>f 2>&1`, `>f
+            // |&`, niubash#144) owns its stream placement: the routing walk
+            // below would re-open `>f` and truncate what the child wrote
+            // live.
+            let stage_fds_pre_wired = self.pipeline_stage_fds_pre_wired.replace(false);
+            if !stage_fds_pre_wired
+                && !command_is_compound_pipeline_stage(command)
+                && !in_shell_stage
+            {
                 self.route_pipeline_stage_streams(
                     command,
                     &mut next_input,
@@ -525,9 +554,14 @@ impl Executor {
                     &mut next_status,
                 )?;
             }
-            if command.pipe == Some(2)
-                || self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout)
-            {
+            // `|&` stages were normalized to a trailing `2>&1` redirect
+            // above, so this branch no longer needs a pipe == Some(2)
+            // disjunct: a compound stage's group redirect and a simple
+            // stage's route_pipeline_stage_streams both resolve the dup
+            // against the pipe-bound fd 1, and the stderr bytes arrive
+            // already merged. The ambient `exec 2>&1` fd-table binding
+            // (every stage's fd 2 on fd 1's object) keeps appending here.
+            if self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout) {
                 next_input.push_str(&next_stderr);
             } else if !next_stderr.is_empty() {
                 std::io::stderr().write_all(
@@ -907,7 +941,6 @@ impl Executor {
                         })
                     || !command.process_substitutions.is_empty()
                     || command_has_pipeline_process_substitution(command)
-            || command.pipe == Some(2)
         }) {
             return Ok(None);
         }
@@ -998,7 +1031,6 @@ impl Executor {
                 })
             || !command.process_substitutions.is_empty()
             || command_has_pipeline_process_substitution(command)
-            || command.pipe == Some(2)
             || command_is_compound_pipeline_stage(command)
         {
             return None;
@@ -1421,7 +1453,6 @@ impl Executor {
                         })
                     || !command.process_substitutions.is_empty()
                     || command_has_pipeline_process_substitution(command)
-            || command.pipe == Some(2)
         }) {
             return Ok(None);
         }
@@ -1745,6 +1776,11 @@ impl Executor {
         input: &str,
         stdin_inherit: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
+        // `|&` → trailing `2>&1` (parse.y:1470-1487; normalize_pipeerr_stage).
+        // execute_simple_pipeline already normalized every gathered stage;
+        // this idempotent pass covers the recursion entry points that bypass
+        // the gather (the `time` prefix arm and the timed-read followup).
+        let command = &normalize_pipeerr_stage(command);
         // A pipeline element runs in its own subshell: an expansion error
         // raised while expanding the element's words on the shared executor
         // (notably `set -u` unbound in `$(( ))`) terminates only that
@@ -2790,6 +2826,61 @@ fn time_pipeline_prefix(command: &CommandNode) -> Option<TimePipelinePrefix> {
         inverted,
         posix_format,
     })
+}
+
+/// Marker stored on the `2>&1` redirect appended by
+/// [`normalize_pipeerr_stage`] (carried in `operator_metadata.raw`, which is
+/// never consulted at execution time — the same property that makes
+/// GROUP_REDIRECT_INJECTED_MARK a safe carrier). Makes the normalization
+/// idempotent and self-documenting at every consumer.
+const PIPEERR_DESUGAR_MARK: &str = "|&";
+
+/// GNU parse.y:1470-1487 (`pipeline BAR_AND pipeline`): `cmd1 |& cmd2` is
+/// `cmd1 2>&1 | cmd2` — the parser APPENDS a r_duplicating_output redirect
+/// (redirector 2, destination 1) to the tail of cmd1's redirect list. The
+/// pipeline binds the pipe to the element's fd 1 first (execute_cmd.c:2702),
+/// so the appended dup leaves fd 2 on the same pipe open description fd 1
+/// holds (redir.c:1169-1170) and the merged bytes interleave in true write
+/// order through ONE pipe. rubash's parser keeps `|&` as pipe == Some(2);
+/// this rewrites the stage node into the GNU shape exactly the way writing
+/// `2>&1` longhand would parse: the dup goes to the TAIL of `redirects` (so
+/// an existing `2>err` before it still opens/truncates its file, and the
+/// later dup re-binds fd 2 onto the pipe like GNU's walk order) and mirrors
+/// into `redirect_err` (the parser's `2>`-family mirror slot, which the
+/// builtin buffered-output router follows). Idempotent via
+/// PIPEERR_DESUGAR_MARK.
+fn normalize_pipeerr_stage(command: &CommandNode) -> CommandNode {
+    if command.pipe != Some(2) {
+        return command.clone();
+    }
+    if command
+        .redirects
+        .iter()
+        .any(|redirect| redirect.operator_metadata.raw == PIPEERR_DESUGAR_MARK)
+    {
+        return command.clone();
+    }
+    let mut normalized = command.clone();
+    let operator_metadata = crate::parser::WordMetadata::literal(
+        0,
+        "2>&".to_string(),
+        PIPEERR_DESUGAR_MARK.to_string(),
+    );
+    let target_metadata = crate::parser::WordMetadata::literal(0, "1".to_string(), "1".to_string());
+    let dup = crate::parser::Redirect {
+        fd: Some(2),
+        fd_var: None,
+        operator: "2>&".to_string(),
+        operator_metadata: Box::new(operator_metadata),
+        kind: crate::parser::RedirectKind::DuplicateOutput,
+        target: "&1".to_string(),
+        target_metadata: Box::new(target_metadata),
+        append: false,
+        clobber: false,
+    };
+    normalized.redirects.push(dup.clone());
+    normalized.redirect_err = Some(dup);
+    normalized
 }
 
 /// Parse the inline grep fast-path argument list: options from the set

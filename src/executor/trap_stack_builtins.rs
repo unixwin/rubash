@@ -32,7 +32,7 @@ impl Executor {
         // marker-free and non-UTF-8 slices pass through untouched.
         let stdout = decode_raw_byte_marker_bytes(stdout);
         let stderr = decode_raw_byte_marker_bytes(stderr);
-        if self.write_ordered_command_output(cmd, &stdout, &stderr)? {
+        if self.route_builtin_buffered_output(cmd, &stdout, &stderr)? {
             return Ok(());
         }
 

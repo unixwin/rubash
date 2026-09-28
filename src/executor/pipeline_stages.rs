@@ -1,3 +1,4 @@
+use super::redirection::OutputTarget;
 use super::*;
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::pipeline_exec::command_is_compound_pipeline_stage;
@@ -631,52 +632,118 @@ impl Executor {
         }
 
         // Bash applies a pipeline element's redirections before running the
-        // command (redir.c do_redirection_internal). The child's stderr must
-        // follow the stage's parsed `2>`/`2>>` redirect instead of inheriting
-        // the shell's stderr, or diagnostics such as ls's "cannot access"
-        // leak past `2>/dev/null` (issue #70).
+        // command (redir.c do_redirection_internal), with the pipe bound to
+        // fd 1 first (execute_cmd.c execute_pipeline): the element's FINAL
+        // fd-1/fd-2 targets decide the child's wiring.
         //
-        // niubash#144: when the element's stderr resolves onto the SAME pipe
-        // as its stdout (`2>&1`, `2>&3 3>&1`, `|&`), the child gets ONE
-        // shared pipe for both streams — GNU's dup2 (redir.c:1169-1170)
-        // leaves both descriptors on the pipe's write end, so the merged
-        // bytes interleave in true write order. The retired shape piped the
-        // two streams separately and concatenated stdout-first at exit,
-        // which both reordered and withheld the stderr half.
-        let mut stderr_merges_into_stdout =
-            command.pipe == Some(2) || self.pipeline_stage_stderr_merges_into_stdout(command)?;
+        // niubash#144: when both targets are the stage pipe (`2>&1`,
+        // `2>&3 3>&1`, `|&`), the child gets ONE shared pipe for both
+        // streams — GNU's dup2 (redir.c:1169-1170) leaves both descriptors
+        // on the pipe's write end, so the merged bytes interleave in true
+        // write order; two pipes concatenated stdout-first would reorder
+        // and withhold the stderr half. `|&` arrives as a trailing `2>&1`
+        // redirect (normalize_pipeerr_stage, parse.y:1470-1487), so the
+        // ordered walk — not a pipe == Some(2) special case — decides.
+        //
+        // When BOTH fds resolve onto one FILE description (`>f 2>&1`,
+        // `>f |&` — the dup follows the file open), GNU holds both
+        // descriptors on the SAME open file: the child writes both streams
+        // live through it. Wire both ends of one append-open directly and
+        // mark the stage pre-wired — the post-hoc routing pass would
+        // otherwise re-truncate the file the child already wrote (its walk
+        // re-opens `>f`). The walk above already applied the redirect's
+        // create/truncate/noclobber semantics once.
+        let (fd1_target, fd2_target) = self
+            .pipeline_stage_stdio_targets(command)?
+            .unwrap_or((OutputTarget::Stdout, OutputTarget::Stderr));
+        let stderr_merges_into_stdout = matches!(fd1_target, OutputTarget::Stdout)
+            && matches!(fd2_target, OutputTarget::Stdout);
+        let stage_fds_share_one_file = match (&fd1_target, &fd2_target) {
+            (OutputTarget::Path(a), OutputTarget::Path(b)) => a == b,
+            (OutputTarget::SharedFile(a), OutputTarget::SharedFile(b)) => std::rc::Rc::ptr_eq(a, b),
+            _ => false,
+        };
         let mut merged_stage_reader = None;
+        let mut merged_shared_file: Option<MergedSharedFile> = None;
         if stderr_merges_into_stdout {
             let (reader, writer) = os_pipe::pipe().map_err(ExecuteError::IoError)?;
             let writer_clone = writer.try_clone().map_err(ExecuteError::IoError)?;
             process.stdout(Stdio::from(writer_clone));
             process.stderr(Stdio::from(writer));
             merged_stage_reader = Some(reader);
+        } else if stage_fds_share_one_file {
+            // Both fds share ONE open file description in GNU — model it
+            // with ONE merged pipe (true write order) and append the
+            // drained bytes to the shared file after exit. The stage pipe
+            // payload stays empty (GNU hands the downstream stage nothing).
+            // Directly wiring the child's fds onto the file does not work
+            // for every child here (msys children lose direct stage-wired
+            // file handles), so the child only ever sees pipes.
+            let (reader, writer) = os_pipe::pipe().map_err(ExecuteError::IoError)?;
+            let writer_clone = writer.try_clone().map_err(ExecuteError::IoError)?;
+            process.stdout(Stdio::from(writer_clone));
+            process.stderr(Stdio::from(writer));
+            merged_stage_reader = Some(reader);
+            merged_shared_file = Some(match &fd1_target {
+                OutputTarget::Path(path) => MergedSharedFile::Path(path.clone()),
+                OutputTarget::SharedFile(file) => MergedSharedFile::Handle(file.handle),
+                _ => unreachable!("guarded above"),
+            });
+            self.pipeline_stage_fds_pre_wired.set(true);
         } else {
             process.stdout(Stdio::piped());
-            if let Some(redirect) = &command.redirect_err {
-                let target = self.expand_redirect_target(redirect);
-                if redirect_target_fd(&target) == Some(1) {
-                    // `2>&1` whose fd 1 left the pipe (`2>&1 >f`): the pipe
-                    // half stays stderr's payload; the routing pass after
-                    // the stage resolves which stream lands where.
-                    stderr_merges_into_stdout = false;
-                } else if !is_closed_redirect_target(&target)
-                    && redirect_target_fd(&target).is_none()
-                {
-                    if let Ok(file) = self.create_redirect_output(&target, redirect.clobber) {
-                        process.stderr(Stdio::from(file));
-                    }
+            match &fd2_target {
+                // fd 2 still on the stage pipe (`2>&1 >f`: the dup ran
+                // before fd 1 left for the file): pipe it and let the
+                // routing pass place the payload on the pipe.
+                OutputTarget::Stdout => {
+                    process.stderr(Stdio::piped());
                 }
-            } else if let Some(redirect) = &command.redirect_err_append {
-                let target = self.expand_redirect_target(redirect);
-                if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                    if let Ok(file) = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
-                    {
-                        process.stderr(Stdio::from(file));
+                // fd 2 on the walk's file (`2>err`, `>f 2>&1`): pipe it and
+                // let the routing pass place the payload in the file (its
+                // walk applies the redirect's create/truncate semantics
+                // again, then appends the payload — the file holds exactly
+                // the stream's bytes in write order). Direct stage-side
+                // file wiring is not reliable for every child (msys
+                // children lose it), so the child only ever sees pipes.
+                OutputTarget::Path(_) | OutputTarget::SharedFile(_) => {
+                    process.stderr(Stdio::piped());
+                }
+                OutputTarget::Null => {
+                    process.stderr(Stdio::null());
+                }
+                // Closed fd 2: pipe the payload so the routing pass reports
+                // `write error: Bad file descriptor` with status 1 the way
+                // GNU's EBADF write does.
+                OutputTarget::Closed => {
+                    process.stderr(Stdio::piped());
+                }
+                // Ambient stderr, dup snapshots the walk cannot express, or
+                // a failed walk: keep the per-redirect legacy handling.
+                _ => {
+                    if let Some(redirect) = &command.redirect_err {
+                        let target = self.expand_redirect_target(redirect);
+                        if !is_closed_redirect_target(&target)
+                            && redirect_target_fd(&target).is_none()
+                        {
+                            if let Ok(file) = self.create_redirect_output(&target, redirect.clobber)
+                            {
+                                process.stderr(Stdio::from(file));
+                            }
+                        }
+                    } else if let Some(redirect) = &command.redirect_err_append {
+                        let target = self.expand_redirect_target(redirect);
+                        if !is_closed_redirect_target(&target)
+                            && redirect_target_fd(&target).is_none()
+                        {
+                            if let Ok(file) = OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
+                            {
+                                process.stderr(Stdio::from(file));
+                            }
+                        }
                     }
                 }
             }
@@ -709,6 +776,31 @@ impl Executor {
                 .map_err(ExecuteError::IoError)?;
             let status = child.wait().map_err(ExecuteError::IoError)?;
             merged.extend(self.finish_dev_fd_operands(dev_ops));
+            if let Some(target) = merged_shared_file {
+                // The merged pipe stood for BOTH fds on one shared file
+                // (`>f 2>&1`, `>f |&`): the ordered walk already applied
+                // the redirect's open/truncate once, so append the drained
+                // bytes in true write order and hand the downstream stage
+                // an empty pipe (GNU's next element reads nothing).
+                match target {
+                    MergedSharedFile::Path(path) => {
+                        let mut file = OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(shell_path_to_windows(&path, &self.shell_state.env_vars))
+                            .map_err(ExecuteError::IoError)?;
+                        file.write_all(&merged)?;
+                    }
+                    MergedSharedFile::Handle(handle) => {
+                        crate::fd::write_all(handle, &merged).map_err(ExecuteError::IoError)?;
+                    }
+                }
+                return Ok(Some((
+                    String::new(),
+                    String::new(),
+                    crate::executor::wait_status::process_exit_status(&status),
+                )));
+            }
             return Ok(Some((
                 crate::executor::substitution_metadata::bytes_to_shell_text(&merged),
                 String::new(),
@@ -719,13 +811,12 @@ impl Executor {
 
         let mut stdout_bytes = output.stdout;
         stdout_bytes.extend(self.finish_dev_fd_operands(dev_ops));
-        let mut stderr_bytes = output.stderr;
-        if stderr_merges_into_stdout {
-            // 2>&1: the stage pipe is fd 1, so the captured stderr belongs
-            // to the pipe payload, not to the shell's stderr.
-            stdout_bytes.extend_from_slice(&stderr_bytes);
-            stderr_bytes.clear();
-        }
+        // Both-fds-on-the-pipe shapes took the merged-pipe branch above and
+        // returned early; here the streams stay separate and the driver's
+        // route_pipeline_stage_streams places each payload (fd 2 on the
+        // pipe = `2>&1 >f` lands on stdout's pipe content, a file target
+        // lands in the file).
+        let stderr_bytes = output.stderr;
 
         Ok(Some((
             crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
@@ -855,4 +946,12 @@ impl Executor {
         self.execute_ast(&reparsed)?;
         Ok(Some(index + 2))
     }
+}
+
+/// The file target a stage's merged pipe stood in for (both fds on one
+/// open file description — `>f 2>&1`, `>f |&`): the drained merged bytes
+/// append here after the child exits.
+enum MergedSharedFile {
+    Path(String),
+    Handle(crate::fd::HANDLE),
 }

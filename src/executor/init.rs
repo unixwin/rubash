@@ -293,6 +293,7 @@ impl Executor {
             last_command_substitution_status: Cell::new(None),
             comsub_stdin_writeback: Cell::new(None),
             pipeline_stdin_consumed: Cell::new(None),
+            pipeline_stage_fds_pre_wired: std::cell::Cell::new(false),
             last_heredoc_warning_source: RefCell::new(None),
             comsub_leading_newlines: Cell::new(0),
             current_shell_substitution_exit: Cell::new(None),
@@ -311,6 +312,7 @@ impl Executor {
             stdout_capture: None,
             stderr_capture: None,
             external_stdio_outcome: None,
+            external_stdio_piped_fallback: false,
             host_external_command_handler: None,
             #[cfg(windows)]
             elevation_handler: None,

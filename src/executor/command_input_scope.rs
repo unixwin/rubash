@@ -1,3 +1,4 @@
+use super::redirection::{dup_bad_fd_name, dup_source_fd_open};
 use super::*;
 use crate::executor::fd_table::FdEntry;
 use crate::executor::markers::DATA_DOLLAR;
@@ -53,6 +54,9 @@ impl Executor {
             }
         }
         let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
+        if let Some((index, name)) = self.compound_output_dup_bad_fd(cmd) {
+            return self.abandon_compound_for_dup_bad_fd(cmd, index, &name);
+        }
         let saved_output = self.open_compound_output_redirects(cmd)?;
         let result = self.with_command_input_redirects_inner(cmd, execute);
         self.restore_compound_output_redirects(saved_output);
@@ -993,10 +997,121 @@ impl Executor {
         body: impl FnOnce(&mut Executor) -> Result<T, ExecuteError>,
     ) -> Result<T, ExecuteError> {
         let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
+        if let Some((index, name)) = self.compound_output_dup_bad_fd(cmd) {
+            return self.abandon_compound_for_dup_bad_fd(cmd, index, &name);
+        }
         let saved_output = self.open_compound_output_redirects(cmd)?;
         let result = body(self);
         self.restore_compound_output_redirects(saved_output);
         self.restore_compound_numbered_input_redirects(saved_numbered);
         result
+    }
+
+    /// GNU redir.c:1169-1171 (`else if (dup2 (redir_fd, redirector) < 0)
+    /// return (errno)`) with redir.c:149-176 redirection_error: a dup whose
+    /// source fd is not open fails EBADF, reports `<fd>: Bad file
+    /// descriptor`, and ABANDONS the compound without running the body —
+    /// the element's status is 1 (WSL 5.3.0 probe: `{ printf X >&2; } 2>&3
+    /// 3>&1 | cat` prints the diagnostic once, the pipe stays empty,
+    /// PIPESTATUS[0] = 1). The open walk itself
+    /// (`open_compound_output_redirects_inner` → fd_table::dup_output)
+    /// cannot express the abandonment, so the callers preflight the list
+    /// (`compound_output_dup_bad_fd`) and route the failure here. The
+    /// diagnostic goes through the fd 2 binding only the redirects BEFORE
+    /// the failing dup installed (`{ :; } 2>/dev/null 2>&3` is silent),
+    /// because do_redirections stops at the failing step.
+    fn abandon_compound_for_dup_bad_fd<T: Default>(
+        &mut self,
+        cmd: &CommandNode,
+        index: usize,
+        name: &str,
+    ) -> Result<T, ExecuteError> {
+        let mut stderr = Vec::new();
+        writeln!(
+            stderr,
+            "{}{name}: Bad file descriptor",
+            self.diagnostic_prefix()
+        )?;
+        let mut prefix_cmd = cmd.clone();
+        prefix_cmd.redirects.truncate(index);
+        let _ = self.write_redirect_diagnostic_routed(&prefix_cmd, &stderr)?;
+        self.exit_code = 1;
+        // The compound command is terminated without running: its result is
+        // the default (the same shape as the stdin open failure path in
+        // with_command_input_redirects_inner).
+        Ok(T::default())
+    }
+
+    /// Ordered preflight of a compound's output-dup redirects: the first
+    /// `M>&N` (or `M>&N-`) whose source fd N is not open — judged with the
+    /// same left-to-right opened/closed tracking as the simple-command
+    /// preflight (`command_output_redirect_fails` /
+    /// `dup_source_fd_open`) — returns `(index, diagnostic name)`. Pure:
+    /// opens nothing, dups nothing.
+    fn compound_output_dup_bad_fd(&self, cmd: &CommandNode) -> Option<(usize, String)> {
+        let mut opened: HashMap<u32, bool> = HashMap::new();
+        for (index, redirect) in cmd.redirects.iter().enumerate() {
+            if redirect.fd_var.is_some() {
+                continue;
+            }
+            let fd = match redirect.kind {
+                crate::parser::RedirectKind::Output
+                | crate::parser::RedirectKind::Append
+                | crate::parser::RedirectKind::ClobberOutput
+                | crate::parser::RedirectKind::DuplicateOutput
+                | crate::parser::RedirectKind::CloseOutput => redirect.fd.unwrap_or(1),
+                crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend => 1,
+                _ => continue,
+            };
+            let target = self.expand_redirect_target(redirect);
+            match redirect.kind {
+                crate::parser::RedirectKind::CloseOutput => {
+                    opened.insert(fd, false);
+                }
+                crate::parser::RedirectKind::DuplicateOutput => {
+                    if is_closed_redirect_target(&target) {
+                        opened.insert(fd, false);
+                        continue;
+                    }
+                    if let Some((source_fd, _move_source)) = redirect_target_fd_and_move(&target) {
+                        if !dup_source_fd_open(&self.fd_table, source_fd, &opened) {
+                            let raw_word = redirect
+                                .target_metadata
+                                .raw
+                                .trim_start_matches('&')
+                                .trim_end_matches('-');
+                            return Some((index, dup_bad_fd_name(raw_word, fd, source_fd)));
+                        }
+                        let open = dup_source_fd_open(&self.fd_table, source_fd, &opened);
+                        opened.insert(fd, open);
+                        continue;
+                    }
+                    // `>&word` / `1>&word` (r_err_and_out) opens the word —
+                    // the open walk reports its failures.
+                    opened.insert(fd, true);
+                }
+                crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend => {
+                    opened.insert(1, true);
+                    opened.insert(2, true);
+                }
+                // Output | Append | ClobberOutput: a file open binds its
+                // redirector; an fd-alias name (/dev/fd/N) dups the alias.
+                _ => {
+                    if is_closed_redirect_target(&target) {
+                        opened.insert(fd, false);
+                    } else if let Some(source) =
+                        super::execution_misc::dev_stdio_redirect_fd(&target)
+                    {
+                        let open = dup_source_fd_open(&self.fd_table, source, &opened);
+                        opened.insert(fd, open);
+                    } else {
+                        opened.insert(fd, true);
+                    }
+                }
+            }
+        }
+        None
     }
 }

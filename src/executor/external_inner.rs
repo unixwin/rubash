@@ -989,7 +989,7 @@ impl Executor {
                             // GNU bash; a set trap runs once at this
                             // boundary (trap8.sub).
                             self.run_sigchld_trap_for_reaped_child()?;
-                            self.write_external_fd_copy_output(
+                            self.write_external_captured_streams(
                                 cmd,
                                 &output.stdout,
                                 &output.stderr,

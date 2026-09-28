@@ -7,7 +7,7 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum OutputTarget {
+pub(in crate::executor) enum OutputTarget {
     Stdout,
     Stderr,
     /// GNU dup2 snapshot (rubash#170): an fd_table `Stdout` endpoint on any
@@ -479,29 +479,31 @@ impl Executor {
         state.write_to_fd(self, 2, message)
     }
 
-    /// niubash#144: does this pipeline element's stderr end up on the same
-    /// pipe as its stdout? GNU binds the element's fd 1 to the pipe first
-    /// (execute_cmd.c execute_pipeline), then applies do_redirections — a
-    /// `2>&1` (or `2>&3 3>&1`, or `|&`) leaves fd 2 dup'd onto that pipe.
-    /// The element's merged bytes must then flow through ONE shared pipe so
-    /// they interleave in true write order (redir.c:1169-1170 dup2
-    /// semantics), never two pipes concatenated stdout-first. Resolves the
-    /// element's redirects against the seeded pipe-fd-1 state exactly like
-    /// route_pipeline_stage_streams does.
-    pub(in crate::executor) fn pipeline_stage_stderr_merges_into_stdout(
+    /// niubash#144: the ordered final fd-1/fd-2 targets of a pipeline
+    /// element, with the element's fd 1 seeded as the stage pipe (GNU
+    /// execute_cmd.c execute_pipeline binds the pipe first, then
+    /// do_redirections runs — redir.c:1169-1170 dup2 order). Drives the
+    /// sequential stage executor's child wiring: both targets Stdout means
+    /// the element's bytes flow through ONE shared pipe so they interleave
+    /// in true write order (never two pipes concatenated stdout-first);
+    /// fd 2 on a file or fd 1/fd 2 sharing one file description tell the
+    /// spawner which streams to wire directly. Returns None when the walk
+    /// fails (the caller keeps its legacy per-redirect handling).
+    pub(in crate::executor) fn pipeline_stage_stdio_targets(
         &mut self,
         cmd: &CommandNode,
-    ) -> Result<bool, ExecuteError> {
+    ) -> Result<Option<(OutputTarget, OutputTarget)>, ExecuteError> {
         let mut state = self.command_output_fd_state();
         state.fds.insert(1, OutputTarget::Stdout);
         // Same defer as route_pipeline_stage_streams: a diagnostic the walk
         // emits against the seeded Stdout must not leak to the real stdout.
         state.defer_stdout_writes = true;
         if !self.apply_ordered_output_redirects(cmd, &mut state)? {
-            return Ok(false);
+            return Ok(None);
         }
-        Ok(matches!(state.fd_target(1), Some(OutputTarget::Stdout))
-            && matches!(state.fd_target(2), Some(OutputTarget::Stdout)))
+        let stdout = state.fd_target(1).cloned().unwrap_or(OutputTarget::Stdout);
+        let stderr = state.fd_target(2).cloned().unwrap_or(OutputTarget::Stderr);
+        Ok(Some((stdout, stderr)))
     }
 
     pub(in crate::executor) fn command_output_redirect_fails(
@@ -571,7 +573,20 @@ impl Executor {
         state.write_to_fd(self, 2, message)
     }
 
-    pub(in crate::executor) fn write_ordered_command_output(
+    /// Routes one command's buffered stream pair through the command's
+    /// ordered redirect state. Owner: BUILTIN buffered output (echo/printf
+    /// style — rubash buffers a builtin's writes and flushes them at
+    /// completion) and the closed-output external shapes (see
+    /// write_external_captured_streams). GNU model: a builtin's
+    /// do_redirections run in the main shell (execute_cmd.c:5606
+    /// execute_builtin_or_function) and its writes go straight through the
+    /// redirected descriptors, with builtins/common.c:320-334 (sh_chkwrite)
+    /// folding a failed flush into `write error: ...` and the builtin's
+    /// status; routing the buffered bytes through the same ordered walk
+    /// reproduces the observable targets, the per-write order (each builtin
+    /// command's flush happens at its own completion, in execution order),
+    /// and the failure statuses.
+    pub(in crate::executor) fn route_builtin_buffered_output(
         &mut self,
         cmd: &CommandNode,
         stdout: &[u8],
@@ -700,19 +715,6 @@ impl Executor {
             }
             Err(error) => Err(error),
         }
-    }
-
-    pub(in crate::executor) fn command_needs_ordered_output_capture(
-        &self,
-        cmd: &CommandNode,
-    ) -> bool {
-        cmd.redirects.iter().any(|redirect| {
-            matches!(
-                redirect.kind,
-                crate::parser::RedirectKind::DuplicateOutput
-                    | crate::parser::RedirectKind::CloseOutput
-            )
-        })
     }
 
     fn command_output_fd_state(&self) -> OutputFdState {
@@ -1368,7 +1370,11 @@ fn is_closed_output_error(error: &ExecuteError) -> bool {
 /// closed), then the fd table; an absent entry for fds 0-2 is the
 /// process's implicit stdio — always open, exactly the fallback
 /// open_compound_output_redirects documents for its own dups.
-fn dup_source_fd_open(table: &FdTable, fd: u32, opened: &HashMap<u32, bool>) -> bool {
+pub(in crate::executor) fn dup_source_fd_open(
+    table: &FdTable,
+    fd: u32,
+    opened: &HashMap<u32, bool>,
+) -> bool {
     if let Some(is_open) = opened.get(&fd) {
         return *is_open;
     }
@@ -1386,7 +1392,11 @@ fn dup_source_fd_open(table: &FdTable, fd: u32, opened: &HashMap<u32, bool>) -> 
 /// written (make_redirection's dash strip at make_cmd.c:709-710 mutates
 /// `7-` to `7` first), other redirectors report itos(redirector).
 /// `fallback` stands in for the dest when no fd parsed (dest -1).
-fn dup_bad_fd_name(raw_word: &str, redirector: u32, fallback: u32) -> String {
+pub(in crate::executor) fn dup_bad_fd_name(
+    raw_word: &str,
+    redirector: u32,
+    fallback: u32,
+) -> String {
     let base = raw_word.strip_suffix('-').unwrap_or(raw_word);
     if !base.is_empty() && base.chars().all(|ch| ch.is_ascii_digit()) && raw_word == base {
         fallback.to_string()

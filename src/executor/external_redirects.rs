@@ -92,10 +92,12 @@ impl Executor {
         self.apply_external_stdin_redirect(cmd, process)?;
         // niubash#144: for EXTERNAL children the merged-output family gets
         // real shared handles (one open file description, or one capture
-        // pipe), never the retired two-pipe capture-replay that reordered
-        // stdout-before-stderr and withheld both until exit. The planner
-        // declines anything it cannot express; those shapes keep the legacy
-        // split/capture routes below unchanged.
+        // pipe) — the single true path; there is no capture-replay route
+        // anymore. The planner declines only shapes it cannot express as
+        // live handles; those flow into the per-fd legacy branches below,
+        // which mark any stream they pipe so the parent drains it
+        // (external_stdio_piped_fallback).
+        self.external_stdio_piped_fallback = false;
         match self.plan_external_stdio(cmd)? {
             Some(plan) => {
                 let ExternalStdioPlan {
@@ -117,9 +119,20 @@ impl Executor {
             }
             None => self.external_stdio_outcome = None,
         }
-        if self.command_needs_ordered_output_capture(cmd) {
+        // GNU redir.c r_close_this (do_redirection_internal): a closed fd
+        // 1/2 stays closed in the child, its write() fails EBADF, and the
+        // shell reports `write error: Bad file descriptor` with status 1
+        // (builtins/common.c:320-334 sh_chkwrite folds the failed write
+        // into the status). The child itself writes into these pipes; the
+        // parent routes the bytes through the ordered state
+        // (write_external_captured_streams), which produces the diagnostic
+        // and the status. A null-device Stdio instead would silently
+        // swallow the writes (fd_redirects
+        // c_external_command_reports_write_error_for_closed_stdout).
+        if self.external_output_fds_closed(cmd) {
             process.stdout(Stdio::piped());
             process.stderr(Stdio::piped());
+            self.external_stdio_piped_fallback = true;
             return Ok(());
         }
         if self.apply_external_combined_output_redirect(cmd, process)? {
@@ -128,6 +141,19 @@ impl Executor {
         self.apply_external_stdout_redirect(cmd, process)?;
         self.apply_external_stderr_redirect(cmd, process)?;
         Ok(())
+    }
+
+    /// GNU redir.c r_close_this: `>&-` / `2>&-` (RedirectKind::CloseOutput,
+    /// which also covers `>&N-`-with-N-closed via the parser's kind
+    /// classification) leaves fd 1/2 CLOSED in the child, and an ambient
+    /// fd-table close (`exec >&-`) has the same effect. True when either
+    /// std fd of this command resolves closed.
+    fn external_output_fds_closed(&self, cmd: &CommandNode) -> bool {
+        (1..=2).any(|fd| self.fd_table.has_entry(fd) && !self.fd_table.is_open_for_write(fd))
+            || cmd.redirects.iter().any(|redirect| {
+                redirect.fd.map_or(true, |fd| fd <= 2)
+                    && matches!(redirect.kind, crate::parser::RedirectKind::CloseOutput)
+            })
     }
 
     /// GNU redir.c do_redirection_internal for an external child's fd 1/2:
@@ -190,13 +216,34 @@ impl Executor {
                         ExternalStdioSlot::LiveStdout
                     } else {
                         // dup2 snapshot of the stdout OBJECT (rubash#170/#223):
-                        // only a binding taken with no capture active maps to
-                        // the real process stdout; a recorded generation must
-                        // resolve to that capture's buffer, which a live child
-                        // handle cannot express — decline to the legacy route.
+                        // the record names WHICH stdout object the fd holds.
+                        // When the recorded capture generation is STILL the
+                        // active thread-local capture, that object is the live
+                        // capture pipe fd 1 uses — the one-open-description
+                        // merge GNU's dup2 produces (redir.c:1169-1170
+                        // `2>&1 means dup2 (1, 2)`), so both fds share ONE
+                        // pipe and the merged bytes interleave in true write
+                        // order. This is exactly the shape a compound stage
+                        // leaves behind (`{ sh ...; } 2>&1 | cat`: the group
+                        // dup records the stage capture's generation, and the
+                        // leaf's external child still runs inside that same
+                        // capture scope). Any other record — the real process
+                        // stdout (no capture active at dup time), or a STALE
+                        // generation (an outer capture's buffer, which a live
+                        // child handle cannot express) — keeps the legacy
+                        // ambient route.
                         match self.fd_table.stdout_alias_generation.get(&fd) {
+                            Some(Some(generation)) => {
+                                let still_active =
+                                    crate::executor::shell_options::stdout_capture_active()
+                                        && *generation == crate::executor::shell_options::stdout_capture_generation();
+                                if still_active {
+                                    ExternalStdioSlot::LiveStdout
+                                } else {
+                                    return Ok(None);
+                                }
+                            }
                             Some(None) | None => ExternalStdioSlot::RealStdoutSnapshot,
-                            Some(Some(_)) => return Ok(None),
                         }
                     }
                 }
@@ -476,7 +523,6 @@ impl Executor {
             .unwrap_or(ExternalStdioSlot::LiveStderr);
         let stdout = realize(&stdout_slot, true)?;
         let stderr = realize(&stderr_slot, false)?;
-
         Ok(Some(ExternalStdioPlan {
             stdout,
             stderr,
@@ -593,6 +639,7 @@ impl Executor {
                     || self.output_fd_redirects_to_stderr(&target)
                 {
                     process.stdout(Stdio::piped());
+                    self.external_stdio_piped_fallback = true;
                 } else if self.output_fd_redirects_to_stdout(&target) {
                 } else if self.has_output_fd_target(&target) {
                     process.stdout(Stdio::from(self.open_output_fd_append(&target)?));
@@ -616,6 +663,7 @@ impl Executor {
                 Some(FdWriteEndpoint::Stderr)
             ) {
                 process.stdout(Stdio::piped());
+                self.external_stdio_piped_fallback = true;
             } else if let Some(FdWriteEndpoint::File(file_fd)) = self.fd_table.write_endpoint(1) {
                 let dup = crate::fd::duplicate_handle(file_fd.handle)?;
                 process.stdout(Stdio::from(crate::fd::handle_to_file(dup)));
@@ -630,6 +678,7 @@ impl Executor {
                 // stdout, where it would leak past the downstream pipe
                 // element (unixwin/niubash#93).
                 process.stdout(Stdio::piped());
+                self.external_stdio_piped_fallback = true;
             }
         }
 
@@ -648,6 +697,7 @@ impl Executor {
             || self.output_fd_redirects_to_stderr(target)
         {
             process.stdout(Stdio::piped());
+            self.external_stdio_piped_fallback = true;
         } else if self.output_fd_redirects_to_stdout(target) {
         } else if self.has_output_fd_target(target) {
             process.stdout(Stdio::from(self.open_output_fd_append(target)?));
@@ -680,6 +730,7 @@ impl Executor {
                 || self.output_fd_redirects_to_stdout(&target)
             {
                 process.stderr(Stdio::piped());
+                self.external_stdio_piped_fallback = true;
             } else if self.output_fd_redirects_to_stderr(&target) {
             } else if self.has_output_fd_target(&target) {
                 process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
@@ -710,6 +761,7 @@ impl Executor {
                     || self.output_fd_redirects_to_stdout(&target)
                 {
                     process.stderr(Stdio::piped());
+                    self.external_stdio_piped_fallback = true;
                 } else if self.output_fd_redirects_to_stderr(&target) {
                 } else if self.has_output_fd_target(&target) {
                     process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
@@ -733,6 +785,7 @@ impl Executor {
                 Some(FdWriteEndpoint::Stdout)
             ) {
                 process.stderr(Stdio::piped());
+                self.external_stdio_piped_fallback = true;
             } else if let Some(FdWriteEndpoint::File(file_fd)) = self.fd_table.write_endpoint(2) {
                 let dup = crate::fd::duplicate_handle(file_fd.handle)?;
                 process.stderr(Stdio::from(crate::fd::handle_to_file(dup)));
@@ -763,117 +816,52 @@ impl Executor {
         Ok(true)
     }
 
-    pub(in crate::executor) fn write_external_fd_copy_output(
-        &mut self,
-        cmd: &CommandNode,
-        stdout: &[u8],
-        stderr: &[u8],
-    ) -> Result<(), ExecuteError> {
-        if self.command_needs_ordered_output_capture(cmd)
-            && self.write_ordered_command_output(cmd, stdout, stderr)?
-        {
-            return Ok(());
-        }
-        if (self.stdout_capture.is_some()
-            || crate::executor::shell_options::stdout_capture_active())
-            && !self.external_stdout_copies_to_stderr(cmd)
-        {
-            self.write_default_stdout(stdout)?;
-        }
-        if self.external_stdout_copies_to_stderr(cmd) {
-            self.write_external_stdout_to_stderr(cmd, stdout)?;
-        }
-        if self.external_stderr_copies_to_stdout(cmd) {
-            self.write_external_stderr_to_stdout(stderr)?;
-        }
-        Ok(())
-    }
-
-    fn write_external_stderr_to_stdout(&mut self, stderr: &[u8]) -> Result<(), ExecuteError> {
-        if stderr.is_empty() {
-            return Ok(());
-        }
-
-        self.write_default_stdout(stderr)?;
-        Ok(())
-    }
-
-    fn write_external_stdout_to_stderr(
-        &self,
-        cmd: &CommandNode,
-        stdout: &[u8],
-    ) -> Result<(), ExecuteError> {
-        if stdout.is_empty() {
-            return Ok(());
-        }
-
-        if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_redirect_target(redirect);
-            if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
-                file.write_all(stdout)?;
-                return Ok(());
-            }
-        }
-
-        if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_redirect_target(redirect);
-            if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
-                file.write_all(stdout)?;
-                return Ok(());
-            }
-        }
-
-        std::io::stderr().lock().write_all(stdout)?;
-        Ok(())
-    }
-
+    /// Does this external command's spawn need the parent to drain piped
+    /// streams and route the bytes after exit? Only for shapes the stdio
+    /// planner declined AND that carry an active capture (a child writing
+    // the real stdout would leak past the capture, unixwin/niubash#93), a
+    /// stream one of the per-fd fallback branches piped
+    /// (external_stdio_piped_fallback), or a closed fd 1/2 whose write
+    /// failure must be reported. A command the stdio plan owns never gets
+    /// here (external_stdio_outcome is Some).
     pub(in crate::executor) fn external_needs_fd_copy_capture(&self, cmd: &CommandNode) -> bool {
-        // niubash#144: a command handled by the external stdio plan owns
-        // real handles (or a shared capture pipe drained by
-        // spawn_external_process itself); the legacy capture-replay must
-        // not re-open its redirect targets.
         if self.external_stdio_outcome.is_some() {
             return false;
         }
         self.stdout_capture.is_some()
             || crate::executor::shell_options::stdout_capture_active()
-            || self.command_needs_ordered_output_capture(cmd)
-            || self.external_stdout_copies_to_stderr(cmd)
-            || self.external_stderr_copies_to_stdout(cmd)
+            || self.external_stdio_piped_fallback
+            || self.external_output_fds_closed(cmd)
     }
 
-    fn external_stdout_copies_to_stderr(&self, cmd: &CommandNode) -> bool {
-        self.fd_table.write_endpoint(1) == Some(FdWriteEndpoint::Stderr)
-            || cmd
-                .redirect_out
-                .as_ref()
-                .or(cmd.append.as_ref())
-                .map(|redirect| self.expand_redirect_target(redirect))
-                .is_some_and(|target| {
-                    redirect_target_fd(&target) == Some(2)
-                        || self.output_fd_redirects_to_stderr(&target)
-                })
-    }
-
-    fn external_stderr_copies_to_stdout(&self, cmd: &CommandNode) -> bool {
-        self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout)
-            || cmd
-                .redirect_err
-                .as_ref()
-                .or(cmd.redirect_err_append.as_ref())
-                .map(|redirect| self.expand_redirect_target(redirect))
-                .is_some_and(|target| {
-                    redirect_target_fd(&target) == Some(1)
-                        || self.output_fd_redirects_to_stdout(&target)
-                })
+    /// Routes the drained stream pair of a piped-fallback external child.
+    /// Every piped fallback shape resolves its fds to DISTINCT destinations
+    /// (the stdio plan owns all same-object merges — one file handle or one
+    /// shared capture pipe, niubash#144), so per-stream routing through the
+    /// fd endpoints is exact: write_fd_endpoint follows the fd table's
+    /// bound files, dup2 snapshot records (rubash#223 — including an outer
+    /// capture generation), coproc pipes, and the active captures. The
+    /// closed-output shapes report the sh_chkwrite `write error: Bad file
+    /// descriptor` through the ordered state instead (the child's writes
+    /// cannot reach a closed fd, so the routing outcome IS the observable
+    /// behavior, status 1).
+    pub(in crate::executor) fn write_external_captured_streams(
+        &mut self,
+        cmd: &CommandNode,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> Result<(), ExecuteError> {
+        if self.external_output_fds_closed(cmd) {
+            let _ = self.route_builtin_buffered_output(cmd, stdout, stderr)?;
+            return Ok(());
+        }
+        if !stdout.is_empty() {
+            self.write_default_stdout(stdout)?;
+        }
+        if !stderr.is_empty() {
+            self.write_default_stderr(stderr)?;
+        }
+        Ok(())
     }
 }
 
