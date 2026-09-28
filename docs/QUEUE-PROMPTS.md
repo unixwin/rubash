@@ -50,6 +50,9 @@ GATES: build 0 warnings; lib 486 green; regression 24/24; check --tests both tar
 - ~~continuation.rs 零拷贝 diff~~ 已应用（15f94b9d）
 - niubash↔rubash linux 交叉编译钉版本：若外部 agent 有余力可查（niubash 依赖的 rubash 在 x86_64-unknown-linux-gnu 下 4 个编译错；先看 Cargo.toml 钉的 rev 是否落后于 rubash master）
 
+## 给外部 agent 的续作锚点（重要）
+你上一轮在主树留下的未提交改动（source 增量分组驱动 + 若干 parser/executor 文件）已被 captain 验证（build 0 警告、lib 489/489、9 例语义矩阵抽查过）并提交为 **wt8/sourcefix 分支的 93147937**——主树已还原干净。已知两个红门禁写进了提交信息：golden_nvm_load 超时（. nvm.sh ~8s→120s，分组驱动每组重扫）与 nquote 快照漂移。ZCode 侧的 sourcefix 车道正在该分支修这两项 + 小心复现 p6 崩溃 + 开 modernish 三单；你续作时请基于 wt8/sourcefix 的最新提交（或其合并后的 master），不要从主树旧状态重做。
+
 ## Q5 — 全量回归轮（开放板清零后的收官门）
 ```
 Full-regression audit for rubash at master. Work in D:/repo/rubash directly (read-only + report; no src edits without a filed issue). Run EVERYTHING and produce docs/FULL-REGRESSION.md:
