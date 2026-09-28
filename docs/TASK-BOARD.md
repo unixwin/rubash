@@ -104,3 +104,10 @@
 **新开单**：rubash#292（continuation perf）、rubash#293（Linux 三挂死）、niubash#148（--norc 顺序）、niubash#145/#146/#147 前述
 **退回待重交**：merge144（#144 评论：删 legacy 回退+三类输入覆盖）、interactive2（#286 评论：S1 测试红）
 **用户环境**：niu.exe @ 引擎 3795ccc4 待 retire-theme 收口后统一构建部署；agnoster 渲染干净（#288 修复已部署）
+
+## 🏁 2026-09-28 深夜里程碑：两仓 CI 首次双绿
+
+- **rubash CI 全绿**（run 36426368984，6/6 job success，master 40fc2faf）：红了几个月的 bash-upstream-progress 由 linuxhang 转绿（#293：execscript ELF-source NUL 剥离移植 + jobs=预算地板）；ubuntu Rust tests 的 30 分钟隐性挂死由 nextest 每测试 90s 硬超时终结（40fc2faf）——挂死未在 nextest 进程隔离下复现（cargo test harness 的句柄交互形态嫌疑），#294 保留观察一个周期，再现即被点名。
+- **niubash CI 绿**（run 36420424868）：strict-warnings 三平台全 target 清零（ca93c2a→a8d4c3a，教训：模拟必须 `cargo test --no-run`/`--all-targets`）+ hosted runner ConPTY 跳过（c28c21b，桌面/自托管可强制）+ savannah submodule 网络抖动 rerun。
+- 今日累计：rubash #284 #285 #288 #293 关闭（#294 新开观察中）；niubash #145 关闭（内置栈净删 1.24 万行）；7 车道回收（readhang/arrayesc/ombperf/retire-theme/linuxhang/perf5/resid3+sourcefix）；3 车道退回（merge144/interactive2 待重交）。
+- 用户环境终态：niu.exe @ 引擎 6ea4b037 + retire-theme（48b17e0 后构建）；agnoster 干净渲染；`niu -C` 2.58s→1.53s（OMB 内层 1093→972ms，GNU 锚 781ms）。
