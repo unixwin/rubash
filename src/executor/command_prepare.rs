@@ -755,7 +755,26 @@ impl Executor {
                     || word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
                     || word.starts_with(STORAGE_WORD_PREFIX)
                     || raw_word_suppresses_pathname_expansion(raw, metadata)
-                    || compound_assignment_operand_word(cmd, index, word);
+                    || compound_assignment_operand_word(cmd, index, word)
+                    // GNU general.c:477 assignment(): `name[sub]=value` is an
+                    // assignment word (skipsubscript -> `]` -> `=`), marked
+                    // W_ASSIGNMENT at parse (parse.y:5785-5791).
+                    // subst.c:12476 separate_out_assignments() peels the
+                    // leading W_ASSIGNMENT run BEFORE expand_words, so those
+                    // words never reach pathname expansion — with a file
+                    // `a1=5` present, standalone `a[1]=5` assigns
+                    // a=([1]="5") in GNU 5.3.0 while a globbed rewrite would
+                    // run the command `a1=5`. The parser records exactly the
+                    // leading-run scope (support.rs prior_words_are_array_
+                    // assignments), so the marker-based check cannot fire in
+                    // argument position (`echo a[1]=5` globs to `a1=5` in
+                    // GNU and must keep globbing here). Marker only — the
+                    // cooked-shape fallback in command_word_is_array_element_
+                    // assignment also matches argument-position words.
+                    || cmd
+                        .array_element_assignments
+                        .iter()
+                        .any(|assignment| assignment.word_index == Some(index));
                 let arrayref_marked = arrayref_marks.get(index).copied().unwrap_or(false);
                 self.expand_command_word(cmd, index, word, raw)
                     .into_iter()
