@@ -171,6 +171,18 @@ impl Executor {
         &self,
         word: &str,
     ) -> Option<(String, &'static str)> {
+        // perf6 admission: every error arm below requires an ASCII `$` in
+        // the word — `${` spans (assignment/operator/transform/length/
+        // indirect/substring arms) or a `$`-introduced parameter reference
+        // (nounset arm; the DATA_DOLLAR literal-$ marker is skipped there
+        // and never forms `${`). A `$`-free word therefore returns None;
+        // one memchr beats the per-byte quote state machine. GNU has no
+        // such pre-scan at all (subst.c expands once, reporting inline),
+        // so this keeps the pre-scan off words that cannot use it without
+        // touching any arm's semantics.
+        if !word.as_bytes().contains(&b'$') {
+            return None;
+        }
         let word = word
             .strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX)
             .or_else(|| word.strip_prefix(STORAGE_WORD_PREFIX))
@@ -647,6 +659,14 @@ impl Executor {
         word: &str,
         quote_aware: bool,
     ) -> Option<(String, String, i32)> {
+        // perf6 admission: same necessary condition as
+        // parameter_assignment_error_in_word — every arm (nounset `$ref`,
+        // `${` spans, `${|`) needs an ASCII `$`; a `$`-free word cannot
+        // produce a diagnostic. Heredoc bodies route here too (quotes are
+        // literal data there, but the `$` requirement is unchanged).
+        if !word.as_bytes().contains(&b'$') {
+            return None;
+        }
         let word = word
             .strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX)
             .or_else(|| word.strip_prefix(STORAGE_WORD_PREFIX))
