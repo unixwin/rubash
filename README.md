@@ -20,7 +20,18 @@ Rubash itself is not a shell product. It ships with a reference CLI used by the 
 
 **Paths are first-class, not converted**: the MSYS model *guesses* which arguments look like paths and rewrites them — which is why every AI agent and script has to set `MSYS_NO_PATHCONV=1` to stop `/flags` from becoming `C:/Program Files/Git/flags`. Rubash inverts the model: Windows paths are the native currency. POSIX-style and WSL-style paths are accepted as input and resolved to real Windows paths, so what a native Windows program receives is always a valid Win32 path — no conversion heuristics, no `MSYS_NO_PATHCONV`, no surprises at the process boundary.
 
-**Platform status**: Windows is the current focus and the only platform with the full stack today. macOS and Linux adaptation is planned but has not started. The engine's semantic model (in-process subshells, fd-table semantics, process boundaries) is deliberately platform-neutral, so the same 83-suite ledger is designed to travel to other platforms.
+**Platform status — cross-platform, Windows-first**: Windows is the primary
+target and the platform with the full stack: one self-contained binary
+solving the classic Windows bash pain points (no POSIX emulation layer, no
+path-conversion heuristics, no `MSYS_NO_PATHCONV`, native Win32 paths as
+the currency, MSYS2-compatible identity for the bash ecosystem). Linux now
+builds and runs natively (`x86_64-unknown-linux-gnu`) with real
+getrlimit/chmod/faccessat/uname(2) semantics and signal delivery — verified
+by running the same GNU suite corpus on the Linux binary inside WSL (19/24
+byte-identical and climbing; ledger in `docs/LINUX-RUN-STATUS.md`). macOS
+compiles green in CI with coreutils-correct uname arms. The engine's
+semantic model (in-process subshells, fd-table semantics, process
+boundaries) is deliberately platform-neutral, so the same ledger travels.
 
 ## Identity and Compatibility (rubash#154)
 
@@ -84,6 +95,31 @@ timeout; environment-bound diffs counted as zero after audit)
 ### Fully passing suites (zero diff, environment diffs excluded)
 
 `alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub-posix` `comsub` `comsub2` `cond` `coproc` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `errors` `exp` `exportfunc` `extglob` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `glob` `globstar` `heredoc` `herestr` `histexp` `history` `ifs-posix` `ifs` `intl` `invert` `invocation` `iquote` `jobs` `lastpipe` `mapfile` `more-exp` `new-exp` `nquote` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posix2` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `procsub` `quote` `quotearray` `read` `redir` `rhs-exp` `rsh` `set-e` `set-x` `shopt` `strip` `test` `tilde` `tilde2` `trap` `type` `varenv` `vredir`
+
+### Beyond the GNU suite — mixed evaluation suites and the real-world ecosystem
+
+The same true-baseline method (script files, byte-level diff vs GNU 5.3.0)
+applied to dedicated evaluation suites and real-world corpora
+(full inventory + verdicts: `docs/CORPUS-COVERAGE.md`):
+
+| Surface | Result |
+| --- | --- |
+| **modernish** capability suite (cross-shell quirk probes) | **166/166 rc-vector identical** |
+| **mvdan/sh parser corpus** | 559 snippets, parse-accept/exit parity after the operator-class fixes |
+| **ble.sh** (29,601-line line-editor framework) | `bash -n` **rc=0 parity**; source mode terminates |
+| **bash-completion** | 452/452 matrix; `bash -n` canary byte-identical |
+| **git-completion** | 140/140 |
+| **oh-my-bash** | 22 libs load, **252/252 functions** environment parity, PS1 byte-identical (5 themes) |
+| **nvm.sh** (v0.40.x loader) | loads byte-clean; own test slice engine-caused failures fixed |
+| **FFmpeg / OpenSSH / PHP / ltmain / cmake configure scripts** | `--help`/error-path output **byte-identical** |
+| **git's own test framework** (t/test-lib.sh) | runs end-to-end under the engine |
+| **GNU 83-suite on Linux native binary** | 19/24 byte-identical (WSL-internal measurement) |
+
+Everything above is pinned as regression fixtures (`tests/regression/`,
+24 tests incl. GNU-golden matrices, suite-slice snapshots, and perf
+canaries) running in CI on every push — plus a C-source line-level audit
+(`docs/SOURCE-AUDIT.md`, 336 behaviors inventoried) that keeps finding and
+closing gaps before suites hit them.
 
 ## Architecture
 
