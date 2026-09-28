@@ -253,7 +253,7 @@ mod plat {
     }
 
     #[cfg(target_os = "linux")]
-    fn resource(option: char) -> libc::c_int {
+    fn resource(option: char) -> libc::__rlimit_resource_t {
         match option {
             'R' => libc::RLIMIT_RTTIME,
             'c' => libc::RLIMIT_CORE,
@@ -289,6 +289,16 @@ mod plat {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn rlimit_get(res: libc::__rlimit_resource_t) -> io::Result<(u64, u64)> {
+        let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+        if unsafe { libc::getrlimit(res, &mut limit) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((limit.rlim_cur as u64, limit.rlim_max as u64))
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
     fn rlimit_get(res: libc::c_int) -> io::Result<(u64, u64)> {
         let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
         if unsafe { libc::getrlimit(res, &mut limit) } < 0 {
@@ -450,26 +460,26 @@ fn scan(args: &[String]) -> ScanOutcome {
                     sp = 1;
                 }
             }
-            _ if findlim(c as char).is_some() => {
+            _ if findlim(char::from(c)).is_some() => {
                 // `';'` option (bashgetopt.c:104-136): an attached rest
                 // (`-n2048`) or the following non-option word is the
                 // argument; otherwise none.
                 let attached = &word[sp + 1..];
                 if !attached.is_empty() {
-                    cmdlist.push((c as char, Some(attached.to_string())));
+                    cmdlist.push((char::from(c), Some(attached.to_string())));
                     index += 1;
                     sp = 1;
                 } else if index + 1 < args.len() && notopt(&args[index + 1]) {
-                    cmdlist.push((c as char, Some(args[index + 1].clone())));
+                    cmdlist.push((char::from(c), Some(args[index + 1].clone())));
                     index += 2;
                     sp = 1;
                 } else {
-                    cmdlist.push((c as char, None));
+                    cmdlist.push((char::from(c), None));
                     index += 1;
                     sp = 1;
                 }
             }
-            _ => return ScanOutcome::InvalidOption(c as char),
+            _ => return ScanOutcome::InvalidOption(char::from(c)),
         }
     }
 

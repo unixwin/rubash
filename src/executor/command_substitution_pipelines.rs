@@ -206,7 +206,7 @@ impl Executor {
                 z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
                 const ALPHABET: &[u8; 62] =
                     b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-                ALPHABET[(z ^ (z >> 31)) as usize % 62] as char
+                char::from(ALPHABET[(z ^ (z >> 31)) as usize % 62])
             };
             let suffix: String = (0..x_run).map(|_| random_suffix(&mut state)).collect();
             let filename = if x_run >= 3 {
