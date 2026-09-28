@@ -48,6 +48,52 @@ pub(in crate::executor) fn array_values(value: &str) -> Vec<String> {
 }
 
 pub(in crate::executor) fn indexed_array_entries(value: &str) -> BTreeMap<usize, String> {
+    indexed_array_entries_cached(value).as_ref().clone()
+}
+
+/// Content-addressed memo of `indexed_array_entries_uncached`, same
+/// discipline as the assoc parse memo in assignment_helpers.rs: the cache
+/// key IS the exact storage string, so a hit requires the live value to be
+/// byte-identical to the parsed one — a stale parse cannot be served.
+/// Writers feed their render back through `format_indexed_array_storage`,
+/// so a run of `a[i]=v` assignments over a growing array parses once
+/// instead of once per element write (GNU array.c:516 array_insert is an
+/// O(1) linked-list append; the string representation made each write
+/// re-scan the whole array, O(n^2) per fill loop, ~70x GNU on the OMB
+/// element-write shape).
+pub(in crate::executor) fn indexed_array_entries_cached(
+    value: &str,
+) -> std::sync::Arc<BTreeMap<usize, String>> {
+    let mut cache = indexed_parse_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(hit) = cache.get(value) {
+        return std::sync::Arc::clone(hit);
+    }
+    drop(cache);
+    let parsed = std::sync::Arc::new(indexed_array_entries_uncached(value));
+    let mut cache = indexed_parse_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= 128 {
+        cache.clear();
+    }
+    cache.insert(value.to_string(), std::sync::Arc::clone(&parsed));
+    parsed
+}
+
+fn indexed_parse_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, std::sync::Arc<BTreeMap<usize, String>>>,
+> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Arc<BTreeMap<usize, String>>>,
+        >,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn indexed_array_entries_uncached(value: &str) -> BTreeMap<usize, String> {
     if let Some(rendered) = value.strip_prefix(STORAGE_WORD_PREFIX) {
         return rendered_array_entries(rendered);
     }
@@ -63,8 +109,9 @@ pub(in crate::executor) fn array_indices(value: &str) -> Vec<String> {
 }
 
 pub(in crate::executor) fn array_value_at(value: &str, index: usize) -> Option<String> {
-    let mut entries = indexed_array_entries(value);
-    entries.remove(&index).map(normalize_array_expanded_value)
+    indexed_array_entries_cached(value)
+        .get(&index)
+        .map(|value| normalize_array_expanded_value(value.clone()))
 }
 
 pub(in crate::executor) fn resolve_indexed_array_subscript(
@@ -149,22 +196,40 @@ pub(in crate::executor) fn parse_array_subscript(name: &str) -> Option<(&str, &s
 pub(in crate::executor) fn format_indexed_array_storage(
     entries: BTreeMap<usize, String>,
 ) -> String {
+    let entries = std::sync::Arc::new(entries);
     let rendered = entries
-        .into_iter()
-        .map(|(index, value)| format!("[{index}]={}", quote_array_value(&value)))
+        .iter()
+        .map(|(index, value)| format!("[{index}]={}", quote_array_value(value)))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("{STORAGE_WORD_PREFIX_STR}({rendered})")
+    let storage = format!("{STORAGE_WORD_PREFIX_STR}({rendered})");
+    feed_indexed_parse_cache(&storage, &entries);
+    storage
 }
 
 pub(in crate::executor) fn format_indexed_array_values(values: Vec<String>) -> String {
     let rendered = values
-        .into_iter()
+        .iter()
         .enumerate()
-        .map(|(index, value)| format!("[{index}]={}", quote_array_value(&value)))
+        .map(|(index, value)| format!("[{index}]={}", quote_array_value(value)))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("{STORAGE_WORD_PREFIX_STR}({rendered})")
+    let storage = format!("{STORAGE_WORD_PREFIX_STR}({rendered})");
+    // Dense values form: parse reproduces the same 0..n map, so it can ride
+    // the memo as well (content-addressed, byte-identical hit required).
+    let entries: BTreeMap<usize, String> = values.into_iter().enumerate().collect();
+    feed_indexed_parse_cache(&storage, &std::sync::Arc::new(entries));
+    storage
+}
+
+fn feed_indexed_parse_cache(storage: &str, entries: &std::sync::Arc<BTreeMap<usize, String>>) {
+    let mut cache = indexed_parse_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= 128 {
+        cache.clear();
+    }
+    cache.insert(storage.to_string(), std::sync::Arc::clone(entries));
 }
 
 pub(in crate::executor) fn store_indexed_array(
