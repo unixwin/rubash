@@ -221,6 +221,27 @@ where
         }
     };
 
+    // GNU builtins/evalfile.c:184-212 (evalfile_internal; source_file's
+    // flags carry FEVAL_BUILTIN but not FEVAL_CHECKBINARY, so the 80-byte
+    // check_binary_file gate does NOT apply to `.`): when the buffer holds
+    // NUL bytes, evalfile strips them while scanning and refuses the file
+    // once more than 256 NULs were removed -- "probably a binary file" --
+    // with `<filename>: cannot execute binary file` and EX_BINARY_FILE
+    // (shell.h:63 = 126). Sourcing the shell binary (`. ${THIS_SH}` in
+    // execscript.tests) otherwise feeds megabytes of ELF to the parser.
+    let source = match evalfile_nul_stripped(&source) {
+        Ok(text) => text,
+        Err(_) => {
+            writeln!(
+                stderr,
+                "{}{command_name}: {filename}: cannot execute binary file",
+                executor.diagnostic_prefix()
+            )?;
+            executor.set_exit_code(126);
+            return Ok(());
+        }
+    };
+
     execution::execute_text_maybe_redirected(
         executor,
         &source,
@@ -232,6 +253,94 @@ where
 
 fn is_null_device(path: &str) -> bool {
     crate::executor::path::is_shell_null_device(path)
+}
+
+/// GNU builtins/evalfile.c:184-212 (evalfile_internal): when the sourced
+/// buffer contains NUL bytes (`strlen(string) < nr`), evalfile strips them
+/// with memmove while scanning and aborts with "cannot execute binary file"
+/// once the removed-NUL count passes 256 (`++nnull > 256`, the guard is
+/// active for every FEVAL_BUILTIN caller, i.e. the `.`/`source` builtin).
+/// The scan is byte-exact with the C loop, including its quirk that the
+/// byte shifted into a removed NUL's slot is never re-examined (the loop
+/// `i++` skips it), so a RUN of adjacent NULs removes and counts only every
+/// other byte (257 contiguous NULs strip 129 and succeed; GNU measured the
+/// same). `Ok` returns the stripped text; `Err` carries the count that
+/// exceeded the limit.
+pub(crate) fn evalfile_nul_stripped(source: &str) -> Result<String, usize> {
+    if !source.as_bytes().contains(&0) {
+        return Ok(source.to_string());
+    }
+    let mut bytes = source.as_bytes().to_vec();
+    let mut nr = bytes.len();
+    let mut nnull = 0usize;
+    let mut i = 0usize;
+    while i < nr {
+        if bytes[i] == 0 {
+            bytes.copy_within(i + 1..nr, i);
+            nr -= 1;
+            nnull += 1;
+            if nnull > 256 {
+                return Err(nnull);
+            }
+        }
+        i += 1;
+    }
+    // evalfile.c:212+ hands the stripped buffer to parse_and_execute as a C
+    // string (builtins/evalstring.c), so a NUL that survived the strip
+    // (every other byte of an adjacent run) terminates the sourced text:
+    // GNU sources only up to the first surviving NUL.
+    if let Some(first) = bytes[..nr].iter().position(|byte| *byte == 0) {
+        nr = first;
+    }
+    // Removing NUL bytes cannot invalidate UTF-8 (NUL is a complete
+    // single-byte sequence), so the lossy decode is a lossless clone.
+    Ok(String::from_utf8_lossy(&bytes[..nr]).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::evalfile_nul_stripped;
+
+    #[test]
+    fn plain_text_passes_through_unchanged() {
+        let text = "echo hello\nexit 0\n";
+        assert_eq!(evalfile_nul_stripped(text), Ok(text.to_string()));
+    }
+
+    #[test]
+    fn scattered_nuls_are_stripped_and_sourced() {
+        // evalfile.c:184-206: a NUL followed by a non-NUL byte is removed
+        // while scanning; the byte memmove shifts into the removed slot is
+        // skipped, so one NUL of an adjacent pair survives -- and that
+        // survivor then ends the sourced text (C-string parse,
+        // evalstring.c): `echo a\0\0 b` sources as `echo a`.
+        let text = "echo a\0\0 b\necho c\0\n";
+        assert_eq!(evalfile_nul_stripped(text), Ok("echo a".to_string()));
+        let lone = "x\0y\0z\n";
+        assert_eq!(evalfile_nul_stripped(lone), Ok("xyz\n".to_string()));
+    }
+
+    #[test]
+    fn contiguous_nul_run_strips_only_every_other_byte() {
+        // The C loop's i++ skips the byte memmove shifts into the removed
+        // slot, so a run of adjacent NULs removes only every other byte
+        // (GNU Bash 5.3.0 measured: `. file-with-257-contiguous-NULs`
+        // exits 0). 257 NULs -> 129 removed, and the first surviving NUL
+        // then ends the sourced text (C-string parse, evalstring.c), so
+        // only the text before the run is sourced.
+        let run = format!("x{}\necho tail\n", "\0".repeat(257));
+        assert_eq!(evalfile_nul_stripped(&run), Ok("x".to_string()));
+    }
+
+    #[test]
+    fn more_than_256_removed_nuls_is_refused_as_binary() {
+        // execscript.tests `. ${THIS_SH}`: an ELF image is NUL-dense; GNU
+        // reports "cannot execute binary file" / EX_BINARY_FILE (126).
+        let binary = format!("\u{7f}ELF\x02\x01\x01\0{}", "x\0".repeat(300));
+        assert!(evalfile_nul_stripped(&binary).is_err());
+        let sparse = format!("{}\0", "echo ok\0\n".repeat(300));
+        assert!(evalfile_nul_stripped(&sparse).is_err());
+    }
 }
 
 fn posix_plain_name_lookup(executor: &Executor, filename: &str) -> bool {

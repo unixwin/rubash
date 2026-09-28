@@ -48,6 +48,33 @@ validate_timeout() {
 
 validate_timeout
 
+# Per-suite minimum timeout budget. These suites' wall-clock floor is
+# dominated by the upstream scripts' own `sleep` timings, not by rubash
+# overhead, and exceeds the 60s default even for the reference shell:
+# jobs.tests' serial sleeps (main body + jobs1-jobs9 subs) measured
+# 64s under GNU Bash 5.3.0 (/usr/local/bin/bash, WSL reference host,
+# 2026-09-28) vs 65s under rubash; run-minimal chains ~30 run-* sub-suites
+# in one process. A floor keeps their exit-124 report meaningful (a real
+# hang still trips it) while BASH_UPSTREAM_TIMEOUT remains the default for
+# every other suite and can only raise these further.
+suite_timeout_floor() {
+  case "$1" in
+    run-jobs) printf '150\n' ;;
+    run-minimal) printf '120\n' ;;
+    *) printf '0\n' ;;
+  esac
+}
+
+runner_timeout_for() {
+  local floor
+  floor="$(suite_timeout_floor "$1")"
+  if (( floor > TIMEOUT_SECONDS )); then
+    printf '%s\n' "$floor"
+  else
+    printf '%s\n' "$TIMEOUT_SECONDS"
+  fi
+}
+
 real_path() {
   local resolved
   if command -v realpath >/dev/null 2>&1; then
@@ -312,6 +339,7 @@ EOF
   chmod +x "$shell_wrapper"
 
   set +e
+  runner_timeout="$(runner_timeout_for "$runner")"
   (
     cd "$test_workdir"
     refuse_unsafe_dir "$PWD"
@@ -325,7 +353,7 @@ EOF
       BASH_TSTOUT="$tmpdir/bashtst.out" \
       TMPDIR="$tmpdir" \
       PATH="$guard_bin:$BASH_TEST_DIR:$PATH" \
-      "$TIMEOUT_BIN" --kill-after="$TIMEOUT_KILL_AFTER" "$TIMEOUT_SECONDS" sh "./$runner"
+      "$TIMEOUT_BIN" --kill-after="$TIMEOUT_KILL_AFTER" "$runner_timeout" sh "./$runner"
   ) >"$log" 2>&1
   status=$?
   set -e
