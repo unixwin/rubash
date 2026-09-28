@@ -58,7 +58,8 @@ unset __rubash_pc 2>/dev/null || true"#;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Pre-existing dead import removed for the CI -D warnings gate; the
+    // tests below reach the impl via `crate::` paths only.
     use crate::executor::Executor;
     use crate::lexer::tokenize;
     use crate::parser::parse;

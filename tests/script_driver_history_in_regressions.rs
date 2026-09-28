@@ -15,9 +15,11 @@ use std::rc::Rc;
 #[test]
 fn host_session_history_feeds_and_collects_script_expansions() {
     let session = Rc::new(RefCell::new(SessionHistory::new()));
-    assert!(session
-        .borrow_mut()
-        .record("echo seedmark", "", "", Some(0)));
+    // histsize None = unstifled (variables.c:6066 sv_histsize only stifles on
+    // a set HISTSIZE). Passing Some(0) here would be HISTSIZE=0, which
+    // stifle_history(0) (readline/history.c:675) turns into an EMPTY list —
+    // GNU empties it too, so the seedmark preload must carry no limit.
+    assert!(session.borrow_mut().record("echo seedmark", "", "", None));
 
     let out = std::env::temp_dir().join(format!("rubash-s1-{}-out.txt", std::process::id()));
     let _ = std::fs::remove_file(&out);
@@ -28,6 +30,15 @@ fn host_session_history_feeds_and_collects_script_expansions() {
     let script = format!("set -o history\nset -o histexpand\n!echo >{out_str}\n");
 
     let mut executor = Executor::new();
+    // Hermetic: `set -o history` load_history (bashhist.c) must not read the
+    // machine's real HISTFILE, and ambient HISTSIZE must not stifle the list.
+    executor.set_env(
+        "HISTFILE",
+        &std::env::temp_dir()
+            .join(format!("rubash-s1-{}-absent-histfile", std::process::id()))
+            .to_string_lossy(),
+    );
+    executor.set_env("HISTSIZE", "500");
     let code = run_script_with_history_in(&mut executor, &script, session.clone(), None);
     assert_eq!(code, 0);
 
