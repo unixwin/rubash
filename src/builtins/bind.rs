@@ -24,6 +24,7 @@ const DEFAULT_BINDINGS: &[&str] = &[
 pub fn execute_with_io<E>(
     args: &[String],
     diagnostic_prefix: &str,
+    line_editing_enabled: bool,
     stderr: &mut E,
 ) -> io::Result<i32>
 where
@@ -36,10 +37,20 @@ where
         return Ok(EXECUTION_SUCCESS);
     }
 
-    writeln!(
-        stderr,
-        "{diagnostic_prefix}bind: warning: line editing not enabled"
-    )?;
+    // builtins/bind.def: GNU prints "bind: warning: line editing not
+    // enabled" only when no_line_editing is set — an interactive shell
+    // with readline never warns, so eight oh-my-bash `bind` calls in an
+    // interactive rc print nothing under GNU. rubash has no in-engine
+    // readline; interactive hosts (the niubash reedline REPL, rubash's own
+    // readline-style stdin driver) own the line editor, so "interactive"
+    // maps to line editing enabled. Non-interactive shells keep the
+    // warning, matching GNU's no_line_editing there.
+    if !line_editing_enabled {
+        writeln!(
+            stderr,
+            "{diagnostic_prefix}bind: warning: line editing not enabled"
+        )?;
+    }
 
     let mut index = 0;
     while let Some(arg) = args.get(index) {
