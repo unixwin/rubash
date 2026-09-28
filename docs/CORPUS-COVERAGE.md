@@ -400,3 +400,89 @@ coverage in ecosys1-3 counted loader/component files only, no test-suite run).
 | --- | --- | --- |
 | `read_loop_child_consumes_stdin.sh` | #260 | `while read l; do expr …; done < f` → rubash 1 iteration, GNU 5; `</dev/null` on child restores 5 |
 | `script_open_exit_status.sh` | #262 | `bash -n missing.sh` → GNU rc=127 / rubash rc=1 (dir-as-script: 126 vs 1) |
+
+# ===== SECTION: ecosweep lane (wt10/ecosweep, 2026-09-28) — APPENDED, DO NOT REORDER =====
+
+Fine-grained per-item pass over the bash plugin ecosystem. Worktree base `e207b0df`
+(rubash release build from it); oracle: WSL GNU Bash 5.3.0 (`/usr/local/bin/bash`),
+script-file probes only. Sandbox: `target/issue-suites/results/ecosweep/` (harness +
+per-item artifacts + probes/), corpora cloned LF-normalized under
+`target/ecosweep-corpus/`.
+
+Dedup check against §1–§4 BEFORE running: oh-my-bash (repo-level + 5-theme matrix +
+full init, ecosys1-3), bash-it, bash-completion, nvm, rustup, modernish, mvdan, ble.sh,
+bats — all coarse layers already covered, not re-run. **bash-preexec** (corpus2, #214/#217)
+and **fzf** (target-tools C, clean) and **starship** (target-tools C, #202) were likewise
+NOT re-run wholesale — bash-preexec only got a 2-probe known-issue status check (below).
+The new layers this lane added: (a) OMB *per-theme/per-plugin/per-alias/per-completion*
+matrices (never done item-by-item), (b) first contact with liquidprompt, bash-sensible,
+complete-alias, mathiasbynens dotfiles, thoughtbot dotfiles, direnv *bash hook template*
+(stdlib.sh was covered; the hook is a distinct artifact).
+
+## Method
+
+Carrier: `target/release/rubash.exe --rcfile <probe-rc> -i </dev/null`, rc sets
+`DISABLE_AUTO_UPDATE=true`, `OSH`, the OMB config arrays, `cd` into the worktree git
+repo, `source $OSH/oh-my-bash.sh`; assertions via markers: a) `@@SOURCE-DONE`,
+b) PROMPT_COMMAND loop `for pc in "${PROMPT_COMMAND[@]}"; do eval "$pc"; done`
+(stderr to per-item .pcerr), c/d) PS1 dumped raw between `@@PS1-START/END` and scanned
+post-hoc (python) for escape structure / carrier-PUA leakage. Every run under
+`timeout 20`. Harness: `target/issue-suites/results/ecosweep/omb/{run-item,drive-kind}.sh`
++ `post.py`; verdicts in `{themes,plugins,aliases,completions}.verdict.txt`.
+
+Pitfalls hit (recorded for future lanes):
+- The local `C:/Users/Administrator/.oh-my-bash` install is a **CRLF** checkout (GNU
+  cannot read it at all). GNU-side theme comparisons therefore use an LF clone at
+  `target/ecosweep-corpus/oh-my-bash-lf` (same commit abf8461). All corpus clones were
+  LF-renormalized the same way (`git config core.autocrlf false && git reset --hard`).
+- `~/.local/bin/env` (winuxsh env) silently swallows child stdout when used as a wrapper
+  — use plain shell assignments instead.
+- bash-completion master's `_comp_abspath` only recognizes `/*`-shaped absolutes;
+  feeding rubash `D:/…` sources degrades the base (missing `startup-core/` pickup).
+  POSIX-form `/d/…` paths on the rubash side are required for symmetric comparisons
+  (env-bound, upstream assumption — not a rubash issue).
+
+## A. oh-my-bash item-by-item (OSH abf8461 = local install = LF clone)
+
+| Kind | Items | Result | Reds |
+| --- | --- | --- | --- |
+| themes | 83 | 69 fully clean (a/b/c/d OK); 12 PS1-PUA hits are theme-authored powerline/nerd glyphs in source (agnoster, nekolight, powerbash10k, powerline* ×6, absimple) or deliberate `$'\1…\2'` title markers / printf-BEL (kitsune, morris) — by design, GNU-equivalent | binaryanomaly + rjorgenson: U+E000+U+E01C carrier pairs corrupt PS1 → **#296**; random: `${a[RANDOM%83]}` → **#299**; half-life: `_omb_util_split` positional-param IFS failure → **#298**; iterate: interactive COLUMNS/LINES never initialized → **#300**; every run's stderr carries post-exit REPL echo noise → **#297** |
+| plugins | 36 | **36/36 green** (only "tool not found" notices from the plugins themselves) | none |
+| aliases | 9 | **9/9 green** | none |
+| completions | 59 (with bash-completion base sourced first) | **58/59 green** (base-load marker `@@BC-BASE-OK` 59/59; verdict table's svn row is a false green — markers still print after the syntax error) | svn.completion.sh: `shopt -s extglob` mid-source kills the next `function NAME()` header → **#302** |
+
+Notable positive: the interactive OMB load that #251 described (13/326 functions) is gone —
+all 83 themes now source the full lib chain, run PROMPT_COMMAND and build a PS1.
+
+## B. previously-uncovered ecosystem sources
+
+| Corpus | Source / version | Verdict | Issue |
+| --- | --- | --- | --- |
+| liquidprompt | nojhan/liquidprompt @afd7e83 (2026-09-13) | **loads and renders under rubash**: source rc=0, PROMPT_COMMAND runs, PS1 built with correct `\[`+ESC structures (byte-shape parity vs GNU; text differs only by user/host/path env), 252 `__lp_*`/`_lp_*` functions defined (GNU 244 — env-conditioned set, none load-blocking) | none new (#297 stderr noise only) |
+| bash-sensible | mrzool/bash-sensible @eb82f9e (v0.2.2) | **clean**: all options/shopt/HIST*/trap state byte-identical; `bind` warnings line-for-line identical (path string differs only) | none |
+| complete-alias | cykerway/complete-alias @7f2555c | **clean**: source + alias registration + `complete -F _complete_alias` + simulated COMP_WORDS dispatch — COMP_WORDS/LINE/POINT rewrite and final COMPREPLY byte-identical, both with and without a bash-completion base (needs POSIX-form paths on the rubash side, see pitfall above) | none |
+| mathiasbynens/dotfiles | @b7c7894 (.bashrc → .bash_profile → .{path,bash_prompt,exports,aliases,functions}) | shopt chain + PS1 structure parity; alias table diff = env items ($SHELL, macOS guards) PLUS one real divergence: backslash dropped from single-quoted alias body | **#301** |
+| thoughtbot/dotfiles | @939a270 | **no bash component** (zsh-only repo: zshenv/zshrc/zprofile) — recorded, nothing to run (same class as volta in §3) | none |
+| direnv bash hook | direnv @master `internal/cmd/shell_bash.go` template, `{{.SelfPath}}` stubbed to true per side | **clean / byte-identical**: unset→array, scalar, and array PROMPT_COMMAND registration shapes, `";${PROMPT_COMMAND[*]:-};"` dedupe gate, `declare -p` array detection, `_direnv_hook` exit-status preservation | none (stdlib.sh already #202) |
+| bash-preexec (status only) | corpus2 coverage; pinned fixtures | **#214 and #217 both fixed at e207b0df** — fixtures run byte-identical to GNU; status comments posted on both issues | none new |
+
+## Issue ledger from this lane
+
+| issue | found via | class |
+| --- | --- | --- |
+| rubash#296 | binaryanomaly/rjorgenson themes | assignment-RHS word with control-byte var adjacent to live `$( )` leaks U+E000+U+E0xx carrier into the value (arg position clean; double pass escalates to U+E400-escaped) |
+| rubash#297 | harness stderr noise (all 83 theme runs) | `exit` in `--rcfile` init does not terminate the interactive shell — stdin lines execute afterwards (GNU exits); prompt echo + spurious `unexpected EOF looking for ')'` when PS1 has parens |
+| rubash#298 | half-life theme / lib/utils.sh `_omb_util_split` | unquoted positional parameter in array assignment is not word-split on IFS (`set -- a.b.c; IFS=.; A=($1)` → 1 element, GNU 3) |
+| rubash#299 | random theme | `RANDOM` (dynamic special var) expands empty in array-subscript arithmetic (`${a[RANDOM%3]}`) |
+| rubash#300 | iterate theme | interactive startup never binds COLUMNS/LINES without a tty (GNU: 80/24 via readline defaults) |
+| rubash#301 | mathiasbynens .aliases:148 | backslash inside a single-quoted alias body dropped from the stored alias value |
+| rubash#302 | svn.completion.sh | `shopt -s extglob` executed inside a sourced file breaks parsing of subsequent `function NAME()` headers (GNU accepts) |
+
+## Artifacts
+
+- Matrices: `target/issue-suites/results/ecosweep/omb/{themes,plugins,aliases,completions}.verdict.txt`
+  (+ per-item `.out/.err/.rc/.pcerr` in the same-named dirs; raw verdict note: completions/svn
+  row is a false green — see #302).
+- Probes + GNU comparisons: `target/issue-suites/results/ecosweep/probes/` (p1–p15 issue
+  isolation ladders, b01–b18 ecosystem probes, t1–t3 rcfile probes, diag* theme diagnostics).
+- Corpora (LF): `target/ecosweep-corpus/{oh-my-bash-lf,liquidprompt,bash-sensible,complete-alias,dotfiles-mathiasbynens,dotfiles-thoughtbot,bash-completion,direnv}`.
