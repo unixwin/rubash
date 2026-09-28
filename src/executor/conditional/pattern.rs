@@ -1,4 +1,7 @@
 pub(in crate::executor) fn case_pattern_matches(pattern: &str, word: &str) -> bool {
+    if let Some(verdict) = literal_pattern_equality(pattern, word, false) {
+        return verdict;
+    }
     if pattern_contains_raw_byte_markers(pattern) && !pattern.contains('[') {
         let pattern: Vec<char> = flatten_pattern_to_byte_chars(pattern);
         let word: Vec<char> = flatten_word_to_byte_chars(word);
@@ -10,6 +13,9 @@ pub(in crate::executor) fn case_pattern_matches(pattern: &str, word: &str) -> bo
 }
 
 pub(in crate::executor) fn case_pattern_matches_nocase(pattern: &str, word: &str) -> bool {
+    if let Some(verdict) = literal_pattern_equality(pattern, word, true) {
+        return verdict;
+    }
     if pattern_contains_raw_byte_markers(pattern) && !pattern.contains('[') {
         let pattern: Vec<char> = flatten_pattern_to_byte_chars(pattern);
         let word: Vec<char> = flatten_word_to_byte_chars(word);
@@ -18,6 +24,35 @@ pub(in crate::executor) fn case_pattern_matches_nocase(pattern: &str, word: &str
     let pattern: Vec<char> = pattern.chars().collect();
     let word: Vec<char> = word.chars().collect();
     case_pattern_matches_at_with_case(&pattern, 0, &word, 0, true)
+}
+
+/// rubash#281 (rubash#117 whitelist): a pattern whose every byte is
+/// printable ASCII and carries NO glob syntax byte — no `* ? [ ] \` and
+/// none of the extglob operator bytes `+ @ ! (` — matches by plain
+/// equality: every remaining byte is a literal compared against the word
+/// (GNU strmatch walks the pattern character by character; nothing but the
+/// metacharacters can consume or fold input). Returning the compare
+/// directly skips the two `Vec<char>` stagings per call, which the
+/// prefix/suffix removal loop pays once per candidate boundary. `nocase`
+/// folds with `eq_ignore_ascii_case`, the ASCII-only fold GNU's C-locale
+/// strncasecmp performs; non-ASCII bytes never admit here.
+fn literal_pattern_equality(pattern: &str, word: &str, nocase: bool) -> Option<bool> {
+    pattern
+        .bytes()
+        .all(|b| {
+            (b.is_ascii_graphic() || b == b' ')
+                && !matches!(
+                    b,
+                    b'*' | b'?' | b'[' | b']' | b'\\' | b'+' | b'@' | b'!' | b'(' | b')'
+                )
+        })
+        .then(|| {
+            if nocase {
+                word.eq_ignore_ascii_case(pattern)
+            } else {
+                word == pattern
+            }
+        })
 }
 
 /// Check if the pattern contains raw-byte marker sentinels (U+E000).

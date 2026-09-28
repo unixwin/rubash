@@ -928,8 +928,12 @@ impl Executor {
                                 // Propagate the outer quote context so a
                                 // double-quoted "${v:-~}" keeps its quoted
                                 // default-word semantics (no tilde expansion).
-                                executor
-                                    .expand_word_mut_with_context(&format!("${{{name}}}"), context)
+                                // rubash#281: resolve the fragment without
+                                // re-entering the whole pipeline (GNU
+                                // subst.c:11229 expand_word_internal is a
+                                // single pass; its `${` arm runs
+                                // parameter_brace_expand inline).
+                                executor.expand_braced_parameter_fragment_in_word(&name, context)
                             });
                         let value = protect_rhs_value(&value, protect_rhs_data);
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {

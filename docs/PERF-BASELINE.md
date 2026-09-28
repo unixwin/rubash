@@ -350,3 +350,234 @@ the per-line calls (both continuation.rs):
 somewhere in the case-in-comsub body path); GNU stores `z`. Repro:
 `/tmp/pr6.sh` shape above; base build reproduces byte-identically, so it is
 NOT from this round. Owner: comsub body extraction family.
+
+## perf3 round (2026-09-28, wt7/perf3 on 92de75bd)
+
+Third attack at #241/#242/#281 (the #281 umbrella: walker `${`-arm recursion,
+batch-tokenizer complete-command-boundary checkpoint, and the
+captain-exclusive continuation.rs cost centers). All numbers: debug build,
+median of 3 timed runs via `scripts/run-perf-suite.sh` (same harness both
+sides); the GNU column re-measured this round, so compare
+ratio-to-ratio and rubash-ms-to-rubash-ms. Environment: same host, CPU load
+elevated by unrelated processes during parts of the round — A/B medians
+below were verified with back-to-back alternating runs of two binaries
+where the delta was small.
+
+### Landed changes (8 files; scratch instrumentation removed before commit)
+
+1. **Walker `${`-arm fragment resolution — no pipeline re-entry**
+   (`parameter_words.rs expand_braced_parameter_fragment_in_word`,
+   `embedded_mutations.rs` arm). GNU anchor: `subst.c:11229
+   expand_word_internal()` is a single pass whose `${` arm calls
+   `parameter_brace_expand` (subst.c:9777) inline; the old reconstruction
+   `expand_word_mut_with_context(&format!("${{{name}}}"))` re-ran the whole
+   pipeline preamble per fragment (fresh SubXpassFrame scope, the `:=`/`=`
+   assignment pre-scan, funsub/whole-word routing scans — ~58 allocations
+   per `${}` fragment, 1.15M allocs / 769ms of probe 15's 3.4s wall).
+   Admission whitelist (rubash#117): the fragment name contains no `=`
+   (both assignment pre-scan splits fail), does not start with a funsub
+   introducer (whitespace/`|`), and `braced_parameter_spans_whole_word`
+   holds for the synthetic word — under those conditions the re-entry's
+   routing target was provably `expand_quoted_parameter_word_mut(synthetic,
+   context)`, which the fast path now calls directly. SubXpassFrame memo
+   semantics: the nested fragment's cross-pass entries now land in the
+   ENCLOSING word's frame instead of a private frame dropped on return —
+   keys are (word-context id, fragment path, text) and the walker's site
+   guard has already extended the path with the fragment's ordinal, so
+   sibling fragments cannot false-hit while re-probes of the same fragment
+   now dedup (the memo's documented purpose).
+2. **`case_pattern_matches` literal-equality fast path**
+   (`conditional/pattern.rs`): a pattern whose every byte is printable
+   ASCII without any glob/extglob syntax byte matches by plain equality
+   (GNU strmatch walks chars; the two `Vec<char>` stagings per call were
+   this port's cost, not GNU's — the prefix/suffix removal loop paid them
+   once per candidate boundary).
+3. **`remove_matching_prefix/suffix` allocation-free boundary walk**
+   (`parameter_decode.rs`): the `Vec<usize>` + `Box<dyn Iterator>` staging
+   became a `Chain<Map<CharIndices>, Once>` used forward/reversed
+   (DoubleEndedIterator) — byte-identical order, two allocations fewer per
+   removal call.
+4. **`expand_parameter_pattern_word` literal fast path**
+   (`parameter_patterns.rs`): a pattern of printable ASCII bytes outside
+   the quote/expansion/escape/sentinel set (`' " $ { } \` and backslash)
+   carries no syntax any downstream step reacts to, so every one of them
+   (masking, `${}` slotting, anchor marking, quote decoding, the embedded
+   walk, the marker replaces) is the identity — one clone replaces ~8
+   String builds plus a full walker pass per pattern.
+5. **`has_unclosed_parameter_expansion` + `skip_braced_parameter_in_chars`
+   zero-copy `${` scans** (`brace_scan.rs`): both carried the same
+   per-`${` `chars[index + 2..].iter().collect::<String>()` copy of the
+   ENTIRE remaining buffer as continuation.rs (nvm.sh: 1644 `${`
+   occurrences → O(buffer²) per call). Both now slice `&chars[index..]`
+   into the existing zero-copy `scan_braced_parameter_body_chars` API
+   (rubash#185). NOTE: that API requires the `${` at slice[0]
+   (`scan_braced_chars_from` verifies it) — slicing from index+2 makes
+   every span look unclosed. Un-covering this also un-covered that the
+   old join short-circuit (`brace_group_open || scan()`) was what kept the
+   quadratic off nvm's hot path; the scan is now linear so the join can
+   consult it unconditionally (the checkpoint's safety gate needs the
+   true param state).
+6. **Batch tokenizer complete-command-boundary checkpoint**
+   (`scanner.rs LexerBoundaryState`, `mod.rs`): GNU reads its input once,
+   token by token (parse.y:3557 read_token); the batch tokenizer re-lexed
+   the WHOLE accumulated logical line after every appended physical line
+   (nvm.sh `-n`: 5732 passes re-lexing 4.19MB). When a pass ends BETWEEN
+   tokens — quotes, command substitutions, compound assignments and
+   parameter expansions all closed (the huq/comsub/compound gates prove
+   it) and no open `(`/`((` group or pending extglob split
+   (`LexerBoundaryState::boundary_state` refuses those) — its token list
+   and lexer state are exactly the full pass's prefix results, so the
+   next pass resumes at the boundary and lexes only the appended tail.
+   Safety gate: the appended line must contain no `}` byte — a `{` group
+   still open in the prefix is emitted as a bare `{` Keyword plus
+   individually-lexed body tokens and FOLDS into one token in exactly the
+   pass where its `}` arrives (scanner.rs scan_token `{` arm), a fold a
+   resumed lexer cannot perform for an opener before the checkpoint
+   offset; every fold completion needs a `}` byte, so refusing the resume
+   restores full re-lexing exactly on fold passes. Invalidation
+   discipline = brace_scan_cache: every non-append mutation (IFS_GLUE
+   insert, backslash-join pop, comsub-heredoc rotation, flush) plus
+   `set -o posix` / `shopt extglob` value flips (the full pass would
+   re-lex the prefix under the new mode).
+
+### Ratios (perf3 round; baseline = this lane's own 92de75bd run)
+
+| probe | base rub/GNU | perf3 rub/GNU | rubash ms |
+|---|---:|---:|---:|
+| 01-startup-empty | **13.1x** | **14.5x** | 92 -> 87 (noise band) |
+| 02-startup-fndef | **12.7x** | **15.2x** | 89 -> 91 (GNU 6ms this round) |
+| 04-loop-true-builtin-x2000 | **52.4x** | **41.7x** | 1048 -> 626 |
+| 05-arith-x5000 | **49.8x** | **38.0x** | 648 -> 456 |
+| 08-cmdsub-true-x1000 | 1.2x | 1.0x | 477 -> 358 (spawn parity retained) |
+| 09-external-uname-x300 | 1.5x | 0.8x | 316 -> 188 (parity retained) |
+| 15-expansion-x5000 | **56.8x** | **54.9x** | 3407 -> 3293 (harness; back-to-back A/B medians 3545 -> 3418 under load; walker-guard cost 769 -> 508ms, allocs 3.58M -> 3.04M) |
+| 16-parse-flat8000 | **123.3x** | **125.2x** | 2219 -> 2253 (flat) |
+| 17-parse-flat8000-n | **39.2x** | **27.9x** | 510 -> 390 |
+| 18-nested-brace-nst1-d200 | **96.5x** | **99.3x** | 579 -> 596 (flat; GNU 6ms) |
+| 20-as-fn-mkdir-p-rep40 | **65.1x** | **54.0x** | 521 -> 486 |
+| 21-configure-head1374-n | **395.3x** | **383.1x** | 3558 -> 3448 (flat — dominated by continuation.rs prescan) |
+| 23-nvm-parse-n | **623.6x** | **644.9x** | 12472 -> 12254 (flat — dominated by continuation.rs) |
+| 24-nvm-load | **379.0x** | **208.1x** | 14402 -> 8116 |
+
+Side win: the `bash_completion -n` canary (regression
+`canary_bash_completion_bash_n_when_corpus_present`) runs 1443ms -> ~700-800ms
+with the exact GNU error retained (line 1820 extglob `(`).
+
+### nvm -n / configure -n decomposition (scratch phase timers, removed)
+
+On 92de75bd the 12.4s nvm -n spend was: 4.54s ONE whole-input
+`has_unclosed_quotes` prescan + 5.33s per-line `has_unclosed_quotes` calls
+(both continuation.rs, captain-exclusive) + 0.98s tokenize_plain
+re-tokenization + ~1.6s parse/reader. After perf3's committed changes
+(without touching continuation.rs): 12.25s (645x). With the captain's
+PROPOSED continuation.rs slice fix (below) temporarily applied on top:
+**2607ms = 137.2x** (probe 23) and **2606ms = 289.6x** (probe 21); probe 22
+(configure full -n) still exceeds its 120s budget (no output, rc=124 at
+100s — a parse-phase super-linear cost distinct from the `${` scans).
+
+### Acceptance re-scope (honest numbers)
+
+The <60x targets for nvm -n (from 720x) and configure-head (from 357x) are
+NOT reached this round and cannot be from this lane alone: 9.9s of nvm -n's
+12.4s lives in `continuation.rs` (captain-exclusive), and even with the
+proposed continuation.rs diff applied nvm -n is 137x — the remaining ~2.6s
+splits ~1.0s lexer (now: comsub scan ~0.2s, huq ~0.12s, tokenize ~0.36s)
+and ~1.6s parse/reader phase, which is the next deep system (GNU does the
+whole parse in 19ms). Re-scope: #241/#242/#281 stay open with these
+numbers; #281's umbrella items (walker memo + boundary checkpoint) are
+landed, its continuation.rs cost centers remain captain-owned.
+
+### Verification (this round)
+
+- `cargo build` 0 warnings; `cargo check --tests` clean; `cargo test --lib`
+  482/482; regression 24/24 (54-92s, was 91s at base).
+- 120-case `${...}` parameter-expansion GNU-diff matrix (probe files under
+  `target/issue-suites/results/perf3/param-matrix*.sh`): byte-identical
+  stdout/stderr/rc vs WSL GNU 5.3.0 (only the $0-path prefix in two stderr
+  lines differs — invocation artifact, both shells print their own $0).
+  Covers plain/pattern/substring/transform/case-mod/operator forms, the
+  `=`-bearing fragments excluded from the fast path, nocasematch, extglob,
+  nameref/indirect, nested patterns, arithmetic offsets.
+- Two multi-line logical-line matrices (`lex-matrix*.sh`, same dir):
+  byte-identical incl. rc — function bodies, nested groups, inline and lone
+  `}` closes, `${` joins, backslash continuations, multi-line strings,
+  compound arrays, subshells, `((`/if/elif/for/until/case, heredocs inside
+  groups, comments at group top, `set -o posix` flips.
+
+### Captain's proposed continuation.rs diff (rubash#281, NOT applied —
+captain-exclusive; measured by temp-apply + revert)
+
+The `${` arm of `has_unclosed_quotes` (continuation.rs:762) and the `${`
+skip of `comsub_residuals` (continuation.rs:1009) copy the ENTIRE
+remaining input per `${` (`let body: String = chars[index + 2..]
+.iter().collect();`) — O(n²) with nvm.sh's 1644 occurrences. The
+zero-copy `scan_braced_parameter_body_chars` API already exists
+(dolbrace.rs, rubash#185). Verbatim diff:
+
+```diff
+--- a/src/lexer/continuation.rs
++++ b/src/lexer/continuation.rs
+@@ has_unclosed_quotes, `${` arm (~line 762)
+         if ch == '$' && !single && chars.get(index + 1) == Some(&'{') {
+-            let body: String = chars[index + 2..].iter().collect();
++            // rubash#281: zero-copy body view (rubash#185 API); the String
++            // copy re-collected the ENTIRE remaining input per `${` (nvm.sh:
++            // 1644 occurrences -> O(n^2)). Slice INCLUDES the `${` opener:
++            // scan_braced_parameter_body_chars requires it at position 0.
++            let body = &chars[index..];
+             if !double {
+                 let context = crate::lexer::dolbrace::BraceContext {
+                     outer_double_quote: false,
+                     posix: false,
+                     replacement_context: false,
+                     initial_state: crate::lexer::dolbrace::DolbraceState::Param,
+                 };
+                 if let Some(scan) =
+-                    crate::lexer::dolbrace::scan_braced_parameter_body(&body, context)
++                    crate::lexer::dolbrace::scan_braced_parameter_body_chars(body, context)
+                 {
+-                    index += 2 + body[..scan.end].chars().count();
++                    index += 2 + scan.end;
+                     comment_start = false;
+                     continue;
+                 }
+@@ same function, double-quoted posix loop (~line 785)
+                     if let Some(scan) =
+-                        crate::lexer::dolbrace::scan_braced_parameter_body(&body, context)
++                        crate::lexer::dolbrace::scan_braced_parameter_body_chars(body, context)
+                     {
+-                        index += 2 + body[..scan.end].chars().count();
++                        index += 2 + scan.end;
+                         comment_start = false;
+                         closed = true;
+                         break;
+                     }
+@@ comsub_residuals, `${` skip (~line 1009)
+         if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'{') {
+-            let body: String = chars[index + 2..].iter().collect();
++            let body = &chars[index..];
+             let context = crate::lexer::dolbrace::BraceContext {
+                 outer_double_quote: false,
+                 posix: false,
+                 replacement_context: false,
+                 initial_state: crate::lexer::dolbrace::DolbraceState::Param,
+             };
+-            if let Some(scan) = crate::lexer::dolbrace::scan_braced_parameter_body(&body, context) {
+-                index += 2 + body[..scan.end].chars().count();
++            if let Some(scan) =
++                crate::lexer::dolbrace::scan_braced_parameter_body_chars(body, context)
++            {
++                index += 2 + scan.end;
+             } else {
+                 index += 2;
+             }
+```
+
+Measured effect (temp-applied on the perf3 state, then reverted):
+prescan 4540ms -> 27ms, per-line huq 5325ms -> 122ms, nvm -n
+12254ms -> 2607ms (645x -> 137x), configure-head 3448ms -> 2606ms
+(383x -> 290x). The `&chars[index..]` slice (WITH the `${`) is load-bearing:
+slicing from index+2 makes `scan_braced_chars_from` reject every span
+(dolbrace.rs requires `chars[0] == '$'`), which reports every line with a
+`${` as unclosed — that mistake was caught by the regression canaries this
+round, not by timing.

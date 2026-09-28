@@ -466,6 +466,72 @@ impl Executor {
         self.expand_embedded_parameters_alternate_mut(word)
     }
 
+    /// Resolve one `${...}` fragment collected by the embedded walker
+    /// WITHOUT re-entering the whole word-expansion pipeline (rubash#281).
+    ///
+    /// GNU anchor — subst.c:11229 `expand_word_internal()` is a single pass
+    /// over the word: its `${` arm calls `parameter_brace_expand`
+    /// (subst.c:9777) inline, and only the fragment's own machinery runs;
+    /// GNU never re-enters a fresh expand_word_internal over a synthetic
+    /// `${...}` word. The old rubash reconstruction
+    /// (`expand_word_mut_with_context(&format!("${{{name}}}"))`) re-ran the
+    /// pipeline preamble per fragment — a fresh SubXpassFrame scope, the
+    /// `:=`/`=` assignment pre-scan, the funsub and whole-word routing
+    /// scans — which was 2.5M allocations on expansion-heavy probes
+    /// (perf2 profile: ~58 allocs per `${}` fragment).
+    ///
+    /// Equivalence admission (rubash#117 whitelist — each condition proves
+    /// one preamble step of `expand_word_mut_with_context` is a no-op for
+    /// the synthetic `${name}` word, so its routing lands on
+    /// `expand_quoted_parameter_word_mut(synthetic, context)`, the exact
+    /// call made here):
+    ///
+    /// - `name` contains no `=`: both splits of
+    ///   `apply_parameter_assignment_expansions_in_word`
+    ///   (`split_once_outside_subscript_str(inner, ":=")` and
+    ///   `split_once_outside_subscript(inner, '=')`) fail, so the pre-scan
+    ///   assigns nothing. (`split_assignment_word` also cannot match: the
+    ///   word begins with `$`, not a legal variable starter.)
+    /// - `name` does not start with a funsub introducer (whitespace/`|`):
+    ///   the synthetic word's only top-level `${` is not a current-shell
+    ///   command substitution, so the funsub routing branch is not taken; a
+    ///   funsub NESTED in the name is not top-level (the outer `${` counts
+    ///   as an open brace) and reaches the same braced expander either way.
+    /// - `braced_parameter_spans_whole_word(synthetic)`: the re-entry's
+    ///   whole-word `${...}` routing applies; without the span the old path
+    ///   fell through to later arms, so those shapes keep the full
+    ///   re-entry.
+    ///
+    /// SubXpassFrame memo semantics: the skipped frame is the point of the
+    /// change. The nested fragment's cross-pass entries now land in the
+    /// ENCLOSING word's frame instead of a private one dropped on return.
+    /// Keys are (word-context id, fragment path, text) and the walker's
+    /// site guard has already extended the path with this fragment's
+    /// ordinal, so sibling fragments cannot false-hit; a fragment re-probed
+    /// by a later pass over the same word now HITS the memo — the memo's
+    /// documented purpose (one `${}` evaluation per GNU
+    /// parameter_brace_expand, subscript side effects included). The
+    /// WordCtxGuard is kept so a walker entered without an active word
+    /// context still keys its fragments exactly as before.
+    pub(in crate::executor) fn expand_braced_parameter_fragment_in_word(
+        &mut self,
+        name: &str,
+        context: SubstitutionQuoteContext,
+    ) -> String {
+        let synthetic = format!("${{{name}}}");
+        if name.contains('=')
+            || name
+                .chars()
+                .next()
+                .is_some_and(|first| first == '|' || first.is_whitespace())
+            || !braced_parameter_spans_whole_word(&synthetic)
+        {
+            return self.expand_word_mut_with_context(&synthetic, context);
+        }
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
+        self.expand_quoted_parameter_word_mut(&synthetic, context)
+    }
+
     pub(in crate::executor) fn expand_quoted_parameter_word_mut(
         &mut self,
         word: &str,

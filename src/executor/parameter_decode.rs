@@ -95,23 +95,26 @@ pub(in crate::executor) fn remove_matching_prefix(
     if pattern_has_raw_byte_markers(pattern) {
         return remove_matching_prefix_bytes(value, pattern, length, extglob);
     }
-    let indices: Vec<usize> = value
+    // Char boundaries plus the end offset, in one pass without staging a
+    // Vec (rubash#281): the old `collect::<Vec<usize>>` + `Box<dyn
+    // Iterator>` pair was two allocations per removal call, paid once per
+    // candidate boundary in the loop below. CharIndices/Chain are
+    // DoubleEndedIterators, so the Longest walk is the same reversed
+    // order the collected Vec produced.
+    let mut indices = value
         .char_indices()
         .map(|(index, _)| index)
-        .chain(std::iter::once(value.len()))
-        .collect();
-    let iter: Box<dyn Iterator<Item = usize>> = match length {
-        MatchLength::Shortest => Box::new(indices.into_iter()),
-        MatchLength::Longest => Box::new(indices.into_iter().rev()),
+        .chain(std::iter::once(value.len()));
+    let matched = match length {
+        MatchLength::Shortest => indices
+            .find(|&end| removal_pattern_matches(pattern, &value[..end], extglob))
+            .map(|end| value[end..].to_string()),
+        MatchLength::Longest => indices
+            .rev()
+            .find(|&end| removal_pattern_matches(pattern, &value[..end], extglob))
+            .map(|end| value[end..].to_string()),
     };
-
-    for end in iter {
-        if removal_pattern_matches(pattern, &value[..end], extglob) {
-            return value[end..].to_string();
-        }
-    }
-
-    value.to_string()
+    matched.unwrap_or_else(|| value.to_string())
 }
 
 pub(in crate::executor) fn remove_matching_suffix(
@@ -123,23 +126,21 @@ pub(in crate::executor) fn remove_matching_suffix(
     if pattern_has_raw_byte_markers(pattern) {
         return remove_matching_suffix_bytes(value, pattern, length, extglob);
     }
-    let indices: Vec<usize> = value
+    // Same allocation-free boundary walk as remove_matching_prefix above.
+    let mut indices = value
         .char_indices()
         .map(|(index, _)| index)
-        .chain(std::iter::once(value.len()))
-        .collect();
-    let iter: Box<dyn Iterator<Item = usize>> = match length {
-        MatchLength::Shortest => Box::new(indices.into_iter().rev()),
-        MatchLength::Longest => Box::new(indices.into_iter()),
+        .chain(std::iter::once(value.len()));
+    let matched = match length {
+        MatchLength::Shortest => indices
+            .rev()
+            .find(|&start| removal_pattern_matches(pattern, &value[start..], extglob))
+            .map(|start| value[..start].to_string()),
+        MatchLength::Longest => indices
+            .find(|&start| removal_pattern_matches(pattern, &value[start..], extglob))
+            .map(|start| value[..start].to_string()),
     };
-
-    for start in iter {
-        if removal_pattern_matches(pattern, &value[start..], extglob) {
-            return value[..start].to_string();
-        }
-    }
-
-    value.to_string()
+    matched.unwrap_or_else(|| value.to_string())
 }
 
 /// Check if the pattern contains raw-byte marker sentinels (U+E000).

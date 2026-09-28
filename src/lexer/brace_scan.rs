@@ -1,4 +1,4 @@
-use super::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
+use super::dolbrace::{scan_braced_parameter_body_chars, BraceContext, DolbraceState};
 use super::token::{Token, TokenKind};
 
 /// Whether the just-tokenized logical line still awaits a `}' from a later
@@ -130,17 +130,26 @@ pub(super) fn has_unclosed_parameter_expansion(input: &str) -> bool {
             // later expansion failure's same-line skip discarded the whole
             // script tail). Inside double quotes `${` still expands and
             // still continues, matching the test below.
-            let body: String = chars[index + 2..].iter().collect();
+            //
+            // rubash#281: the zero-copy char-slice API
+            // (scan_braced_parameter_body_chars, rubash#185) replaces the
+            // per-`${` String copy of the ENTIRE remaining buffer — nvm.sh
+            // carries 1644 `${` occurrences, so the copy made this scan
+            // O(buffer^2) per call (the same shape as the continuation.rs
+            // `${` arm). The slice INCLUDES the `${` opener (the scanner
+            // requires it at position 0) and `scan.end` is the CHAR count
+            // of the body past the closing `}`.
+            let body = &chars[index..];
             let context = BraceContext {
                 outer_double_quote: false,
                 posix: false,
                 replacement_context: false,
                 initial_state: DolbraceState::Param,
             };
-            let Some(scan) = scan_braced_parameter_body(&body, context) else {
+            let Some(scan) = scan_braced_parameter_body_chars(body, context) else {
                 return true;
             };
-            index += 2 + body[..scan.end].chars().count();
+            index += 2 + scan.end;
             comment_start = false;
             continue;
         }
@@ -411,15 +420,19 @@ fn brace_group_separator_allows_reserved_word(ch: char) -> bool {
 }
 
 pub(super) fn skip_braced_parameter_in_chars(chars: &[char], index: usize) -> usize {
-    let body: String = chars[index..].iter().collect();
+    // rubash#281: zero-copy scan (rubash#185 API) — the String copy below
+    // re-collected the whole remaining buffer per `${`. `index` sits just
+    // past a `${` (the caller matched it), so the slice starts at the `$`
+    // and `scan.end` is the CHAR count of the body past the closing `}`.
+    let body = &chars[index - 2..];
     let context = BraceContext {
         outer_double_quote: false,
         posix: false,
         replacement_context: false,
         initial_state: DolbraceState::Param,
     };
-    if let Some(scan) = scan_braced_parameter_body(&body, context) {
-        return index + body[..scan.end].chars().count();
+    if let Some(scan) = scan_braced_parameter_body_chars(body, context) {
+        return index + scan.end;
     }
 
     let mut index = index;

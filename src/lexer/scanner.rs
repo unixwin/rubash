@@ -36,6 +36,61 @@ pub(super) struct LexerParseState {
     last_was_time_option: bool,
 }
 
+/// Snapshot of every cross-token Lexer field at a byte offset where a pass
+/// over an accumulating logical line ended BETWEEN tokens (rubash#281
+/// complete-command-boundary checkpoint). GNU reads its input once, token
+/// by token (parse.y:3557 read_token): the reader state after the tokens
+/// of a prefix is exactly the state a longer input continues from. The
+/// batch tokenizer's per-join full re-lex is the deviation; resuming a
+/// Lexer from this snapshot reproduces the tail tokens the full pass
+/// would emit, provided the prefix ended at a clean token boundary.
+///
+/// Boundary cleanliness is decided by the producer (tokenize loop in
+/// `mod.rs`): quotes, command substitutions, compound assignments and
+/// parameter expansions all closed, no open `(`/`((` group, no pending
+/// extglob split (every one of those states means the final token was
+/// flushed mid-scan at end-of-input and would tokenize differently in the
+/// longer text), and the logical line has only grown by appends since.
+#[derive(Clone)]
+pub(super) struct LexerBoundaryState {
+    parse_state: LexerParseState,
+    last_token_end: Option<usize>,
+    last_token_was_open_paren: bool,
+}
+
+impl<'a> Lexer<'a> {
+    /// Snapshot the between-token state, or `None` when the lexer stopped
+    /// inside an open construct (see the struct docs).
+    pub(super) fn boundary_state(&self) -> Option<LexerBoundaryState> {
+        if !self.open_parens.is_empty() || self.extglob_split_pending {
+            return None;
+        }
+        Some(LexerBoundaryState {
+            parse_state: self.parse_state.clone(),
+            last_token_end: self.last_token_end,
+            last_token_was_open_paren: self.last_token_was_open_paren,
+        })
+    }
+
+    /// Resume scanning `input` at byte `position` with a previously
+    /// captured between-token state (same discipline as
+    /// `restore_parse_state`, plus the intra-line `(`-adjacency fields).
+    pub(super) fn new_resumed_at(
+        input: &'a str,
+        posix: bool,
+        brace_cache: &'a mut BraceScanCache,
+        position: usize,
+        state: &LexerBoundaryState,
+    ) -> Self {
+        let mut lexer = Self::new_with_cache(input, posix, brace_cache);
+        lexer.position = position.min(input.len());
+        lexer.parse_state = state.parse_state.clone();
+        lexer.last_token_end = state.last_token_end;
+        lexer.last_token_was_open_paren = state.last_token_was_open_paren;
+        lexer
+    }
+}
+
 impl LexerParseState {
     /// GNU read_token reads the newline that ends a logical line as a real
     /// '\n' token, so the first token of the next line is lexed with

@@ -244,6 +244,20 @@ impl Executor {
     }
 
     pub(in crate::executor) fn expand_parameter_pattern_word(&self, pattern: &str) -> String {
+        // rubash#281 (rubash#117 whitelist): a pattern whose every byte is
+        // printable ASCII and outside `'"${}\`` carries no quote, expansion,
+        // escape or sentinel syntax — every step below (the unclosed-quote
+        // gate, quote masking, `${}` slotting, anchor marking, quote
+        // decoding, the embedded-parameter walk and the marker replaces) is
+        // the identity on such input, so the result is the pattern verbatim.
+        // One clone replaces ~8 String builds plus a full walker pass, which
+        // the pattern removals pay once per `${a#pat}` fragment.
+        if pattern.bytes().all(|b| {
+            (b.is_ascii_graphic() || b == b' ')
+                && !matches!(b, b'\'' | b'"' | b'$' | b'{' | b'}' | b'\\' | b'`')
+        }) {
+            return pattern.to_string();
+        }
         // GNU parse.y parse_matched_pair: an unclosed quote inside the
         // ${...} word is an EOF syntax error, so expansion aborts the
         // command (`${c%' z'}` is fine; `${c%\' z'}` leaves an unclosed '

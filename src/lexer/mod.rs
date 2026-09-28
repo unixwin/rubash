@@ -35,7 +35,7 @@ pub(crate) use continuation::has_unclosed_command_substitution;
 pub(crate) use continuation::unclosed_command_substitution_depth;
 pub(crate) use continuation::unclosed_input_close_char_posix;
 use heredoc::heredoc_delimiters;
-use scanner::{Lexer, LexerParseState};
+use scanner::{Lexer, LexerBoundaryState, LexerParseState};
 pub(crate) use skip::command_substitutions_balanced;
 pub(crate) use skip::skip_parenthesized_unit_corrected;
 
@@ -318,6 +318,25 @@ fn tokenize_with_heredocs_inner(
     // Invalidated at every non-append mutation of `logical_line` (IFS_GLUE
     // insert, backslash pop, comsub-heredoc rotation, flush).
     let mut unclosed_quotes_cache: Option<bool> = None;
+    // rubash#281: complete-command-boundary checkpoint for the per-join
+    // re-tokenization. GNU reads its input once, token by token
+    // (parse.y:3557 read_token): after the tokens of a prefix, the reader
+    // state IS the state the longer input continues from. The batch
+    // tokenizer instead re-lexed the WHOLE accumulated logical line after
+    // every appended physical line — O(buffer) per join, the amplifier
+    // behind nvm.sh `-n` spending ~0.9s in tokenize_plain alone
+    // (5732 passes re-lexing 4.19MB). When a pass ends BETWEEN tokens —
+    // quotes, command substitutions, compound assignments and parameter
+    // expansions all closed (the huq/comsub/compound gates above prove it)
+    // and no open `(`/`((` group or pending extglob split (checked by
+    // `LexerBoundaryState::boundary_state`) — its token list and lexer
+    // state are exactly the full pass's prefix results: the next pass
+    // resumes at the boundary and lexes only the appended tail. Valid
+    // while the logical line only grows by appends; invalidated at every
+    // non-append mutation (same discipline as `brace_cache` and
+    // `unclosed_quotes_cache`) and at a `set -o posix` / `shopt extglob`
+    // flip (the full pass would re-lex the prefix under the new mode).
+    let mut boundary: Option<(usize, Vec<Token>, LexerBoundaryState)> = None;
 
     while let Some(raw_line) = lines.next() {
         // niubash #106: a '\r' immediately before the '\n' belongs to the
@@ -435,6 +454,7 @@ fn tokenize_with_heredocs_inner(
                         // Mid-string rewrite: positional scan cache invalid.
                         brace_cache.clear();
                         unclosed_quotes_cache = None;
+                        boundary = None;
                     }
                 }
             }
@@ -466,6 +486,7 @@ fn tokenize_with_heredocs_inner(
             // on: positional scan cache invalid.
             brace_cache.clear();
             unclosed_quotes_cache = None;
+            boundary = None;
             continued_line = true;
             brace_join_active = false;
             continue;
@@ -528,6 +549,7 @@ fn tokenize_with_heredocs_inner(
             // Rotation rewrites the middle of the line: cache invalid.
             brace_cache.clear();
             unclosed_quotes_cache = None;
+            boundary = None;
         }
         // GNU reads tokens sequentially (parse.y read_token): the reader
         // state feeding reserved_word_acceptable (parse.y:5899) is the state
@@ -541,13 +563,20 @@ fn tokenize_with_heredocs_inner(
         // partial ended with last=esac, so `{` sat in reserved-word
         // position) and swallowed the rest of the function body.
         let mut line_lex_state = lexer_parse_state.clone();
-        let mut line_tokens = tokenize_plain(
+        let (mut line_tokens, pass_boundary) = tokenize_with_boundary(
+            boundary.take(),
+            !line.contains('}'),
             &logical_line,
             parse_posix,
             &mut line_lex_state,
             &mut brace_cache,
         );
         if let Some(updated) = line_posix_mode_change(&line_tokens) {
+            if parse_posix != updated {
+                // The full pass would re-lex the whole line under the new
+                // mode; a resumed tail must not mix modes.
+                boundary = None;
+            }
             parse_posix = updated;
         }
         // rubash#131: a top-level `shopt -s/-u extglob` executes before the
@@ -558,8 +587,18 @@ fn tokenize_with_heredocs_inner(
         // `tokenize_depth == 1` is the outermost script tokenization.
         if parse_execution_expected() && extglob_flips_allowed && tokenize_depth == 1 {
             match line_extglob_mode_change(&line_tokens) {
-                ExtglobFlip::Enable => set_parse_extended_glob(true),
-                ExtglobFlip::Disable => set_parse_extended_glob(false),
+                ExtglobFlip::Enable => {
+                    if !parse_extended_glob() {
+                        set_parse_extended_glob(true);
+                        boundary = None;
+                    }
+                }
+                ExtglobFlip::Disable => {
+                    if parse_extended_glob() {
+                        set_parse_extended_glob(false);
+                        boundary = None;
+                    }
+                }
                 ExtglobFlip::ExecutionOff => extglob_flips_allowed = false,
                 ExtglobFlip::None => {}
             }
@@ -590,8 +629,9 @@ fn tokenize_with_heredocs_inner(
         // or an unterminated `${...}` parameter expansion. The old text-level
         // has_unclosed_brace_group counted `case x in {)`'s pattern brace as a
         // group opener, joining the pattern line to far-away text.
-        if (tokens_open_unclosed_brace_group(&line_tokens)
-            || has_unclosed_parameter_expansion(&logical_line))
+        let brace_group_open = tokens_open_unclosed_brace_group(&line_tokens);
+        let param_expansion_open = has_unclosed_parameter_expansion(&logical_line);
+        if (brace_group_open || param_expansion_open)
             && !opens_function_body_after_previous_signature(&logical_line, &output)
             && !has_heredoc
         {
@@ -600,6 +640,18 @@ fn tokenize_with_heredocs_inner(
             // token-level brace-group flag (and/or an open `${...}`, which
             // an inert line cannot close either). Arm the rubash#155 fast
             // path for the next physical line.
+            //
+            // rubash#281: when the join stands on the brace-group flag
+            // ALONE (no open `${...}` — an open expansion means the pass
+            // ended inside a word span), the pass ended between tokens and
+            // `pass_boundary` is Some: checkpoint its tokens + lexer state
+            // so the next pass lexes only the appended tail. The token Vec
+            // moves in (the join `continue` discards it anyway).
+            if brace_group_open && !param_expansion_open {
+                if let Some(state) = pass_boundary {
+                    boundary = Some((logical_line.len(), line_tokens, state));
+                }
+            }
             brace_join_active = true;
             continue;
         }
@@ -629,6 +681,7 @@ fn tokenize_with_heredocs_inner(
         lexer_parse_state = line_lex_state;
         logical_line.clear();
         unclosed_quotes_cache = None;
+        boundary = None;
         // Offsets restart for the next logical line: cache invalid.
         brace_cache.clear();
         header_scan_from = 0;
@@ -778,8 +831,11 @@ fn tokenize_with_heredocs_inner(
         if let Some(rotated) = relocate_comsub_heredoc_paren(&logical_line) {
             logical_line = rotated;
             brace_cache.clear();
+            boundary = None;
         }
-        let mut line_tokens = tokenize_plain(
+        let (mut line_tokens, _) = tokenize_with_boundary(
+            boundary.take(),
+            false,
             &logical_line,
             parse_posix,
             &mut lexer_parse_state,
@@ -1294,7 +1350,7 @@ fn tokenize_plain(
     posix: bool,
     parse_state: &mut LexerParseState,
     brace_cache: &mut BraceScanCache,
-) -> Vec<Token> {
+) -> (Vec<Token>, Option<LexerBoundaryState>) {
     let mut lexer = Lexer::new_with_cache(input, posix, brace_cache);
     lexer.extended_glob = parse_extended_glob();
     // parse.y keeps a single parser_state for the whole input — resume the
@@ -1308,7 +1364,56 @@ fn tokenize_plain(
         tokens.push(token);
     }
     *parse_state = lexer.take_parse_state();
-    tokens
+    (tokens, lexer.boundary_state())
+}
+
+/// rubash#281 complete-command-boundary resume: when a checkpoint from the
+/// previous pass over this logical line is valid (append-only growth, see
+/// the `boundary` declaration), continue lexing from the checkpoint offset
+/// with the captured between-token state instead of re-lexing the whole
+/// accumulated buffer. The produced token list and the final
+/// `LexerParseState` are identical to a full `tokenize_plain` pass by
+/// construction: the checkpointed prefix tokens ARE the full pass's prefix
+/// results, and the lexer is a deterministic scanner over
+/// (position, state, remaining text) — GNU's own read_token model
+/// (parse.y:3557).
+///
+/// `resume_allowed` carries the one whole-class safety gate the caller
+/// owns: the appended physical line must contain no `}` byte. A `{` group
+/// still open in the prefix is emitted as a bare `{` Keyword plus
+/// individually-lexed body tokens (scanner.rs scan_token `{` arm), and it
+/// FOLDS into one token in the exact pass where its `}` arrives — a fold
+/// the resumed lexer cannot perform for a `{` that sits before the
+/// checkpoint offset (it never re-visits the opener). Every fold
+/// completion needs a `}` byte in the appended text, so refusing to
+/// resume when the line carries one restores full re-lexing exactly on
+/// the fold passes (once per group close); false positives (`}` inside a
+/// comment or string) only cost the full pass.
+fn tokenize_with_boundary(
+    checkpoint: Option<(usize, Vec<Token>, LexerBoundaryState)>,
+    resume_allowed: bool,
+    input: &str,
+    posix: bool,
+    parse_state: &mut LexerParseState,
+    brace_cache: &mut BraceScanCache,
+) -> (Vec<Token>, Option<LexerBoundaryState>) {
+    if resume_allowed {
+        if let Some((offset, mut tokens, state)) = checkpoint {
+            if offset <= input.len() {
+                let mut lexer = Lexer::new_resumed_at(input, posix, brace_cache, offset, &state);
+                lexer.extended_glob = parse_extended_glob();
+                for token in &mut lexer {
+                    if token.kind == TokenKind::Eof {
+                        break;
+                    }
+                    tokens.push(token);
+                }
+                *parse_state = lexer.take_parse_state();
+                return (tokens, lexer.boundary_state());
+            }
+        }
+    }
+    tokenize_plain(input, posix, parse_state, brace_cache)
 }
 
 /// Detect top-level `set -o posix` / `set +o posix` commands in a tokenized
