@@ -959,3 +959,157 @@ constant); harness medians above are the honest numbers.
    only on GNU-slower days. Remaining time: join-loop scans on $-dense
    lines and nested body re-parses (both characterized in the perf4
    round's leftover list).
+## perf6 round (2026-09-28, wt10/perf6 on e207b0df): the two ombperf gaps
+
+Goal: attack the two hotspots the ombperf round left open — the
+pre-expansion validation double-walk and the per-command machinery floor.
+All numbers release build, same-session base-vs-current (base binary =
+e207b0df built in a detached worktree), median of 5, Windows subprocess
+wall (python time.perf_counter) unless noted. GNU anchors = WSL 5.3.0
+(/usr/local/bin/bash), inner $EPOCHREALTIME timing, script files under
+target/perf6/.
+
+### GNU anchors (this session, 20000 iterations, inner ms)
+
+- null `for ((;;)) :` 40.3 (2.0 us/op) | local3 113.9 (5.7 us/op) |
+  arridx `a[1]=$i` 39.7 (2.0 us/op)
+
+### Gap 1 decision: KEEP the pre-scan, add a provable admission gate
+
+Decision rationale (delete was considered first):
+
+- Introduced by 341321cd (2026-06-22, "feat: support parameter expansion
+  errors") as the ONLY detector for `${x?}`-family errors; since then ~12
+  more error classes accreted into parameter_errors.rs.
+- The real expansion path does NOT duplicate these diagnostics — it relies
+  on the pre-scan. src/executor/expand_braced_special.rs (indirect base
+  resolution): "an unresolvable base was already reported as `invalid
+  indirect expansion` by the word error scan and expands empty here."
+  Messages `cannot assign in this way` / `invalid indirect expansion` /
+  `invalid variable name` / `substring expression < 0` exist ONLY in
+  parameter_errors.rs. Deleting the pre-scan loses error detection unless
+  all arms move into the expansion walker — a deep subsystem refactor
+  (per-arm lazy-vs-eager semantics: expand_word.rs already notes bad
+  substitution must fire only when a nested word is actually evaluated,
+  e.g. `${x:-${(M)y}}` with x set stays silent). > 1 round; not attempted.
+- Short-circuit instead: every arm of BOTH scans
+  (parameter_assignment_error_in_word, parameter_expansion_error_in_
+  word_context) requires an ASCII `$` in the word — `${` spans, or a
+  `$`-introduced parameter reference in the nounset arm (the DATA_DOLLAR
+  literal-`$` marker byte is skipped there and never forms `${`). A word
+  without `$` provably returns None, so one memchr (`contains('$')`)
+  gates the whole per-byte quote state machine. This is a necessary-
+  condition admission, not a blacklist symptom guard; `$`-bearing words
+  keep the full scan.
+
+GNU citation for the eventual full delete: GNU has no pre-scan at all —
+subst.c:11229 expand_word_internal expands once and reports inline
+(parameter_brace_expand_error at subst.c:8221, expand_wdesc_error /
+expand_param_error mapping at subst.c:4288-4296).
+
+### Gap 1 error-path matrix (script-file probes, WSL 5.3.0 vs rubash)
+
+15/15 byte-identical (stdout+stderr+rc, invocation-path prefix
+normalized; artifacts target/perf6/errmat/ + run-errmat.py):
+`${x?}` fatal rc1; `${x:?}` set-null; `${1=x}` cannot-assign;
+`${@=x}` cannot-assign; `${ro=x}` readonly; `${!bad!}` bad substitution
+(non-fatal, next line runs); `${x@C}` bad substitution FATAL rc1;
+`${#:}` bad substitution; `${!unsetname}` invalid indirect expansion;
+`${!x}` invalid variable name (value-dependent); `${a[@]:0:-1}`
+substring expression < 0; nounset `$missing` unbound variable rc1;
+`${x` unmatched `}` rc2; 2 dollar-free controls. Plus `bash -uc`-shape
+fatal cases: `${x?}` and nounset `$missing` both rc=127 with identical
+messages (shell-name prefix = each shell's own $0).
+
+### Gap 2 decomposition (scratch phase timers + clone counters, removed)
+
+Instrumentation: P_VALIDATE timer, word/dollar counters on both pre-scans,
+clone counters at 5 candidate sites (arith cmd.clone, pre-alias
+words.clone, strip early cmd.clone, expand field clones, loop redirect
+clone), 4 sub-timers inside expand_command_words. All removed before
+commit; numbers from RUBASH_EXEC_PROFILE=1 release runs.
+
+- p6-arr (`a[1]=$i`, 20000 cmds): expand phase 2586 ms of which
+  **glob/materialize block = 2412 ms** (120 us/cmd); the actual per-word
+  expansion was 110 ms; premeta 55 ms. The ombperf hypothesis
+  ("CommandNode clone/borrow missing") is refuted for this shape: full
+  CommandNode clones measured only 20000/probe (c_strip) with ~190 KB
+  total word bytes.
+- Clone census per probe (count / word-bytes): c_strip 20000 / 190 KB
+  (waste — nothing stripped), c_prealias 20000 (1-word Vec clone),
+  c_arith 0, c_loop 0. Top 3 clone points by count: strip early-return,
+  pre-alias words snapshot, expand_command_words field set (1/cmd).
+- p6-null (`:`): for_test 198 + for_update 266 ms of 742 total (arith
+  machinery, not the `:` command); validate 2.5 ms; expand 31 ms.
+- OMB load: validate phase 264 ms (ombperf, pre-gate) -> 2.9 ms
+  (post-gate, instrumented build; cross-session, machine load differs —
+  the same-session base-vs-cur load delta below is the honest number).
+
+### Landed changes (4 files; instrumentation fully removed)
+
+1. **perf(executor): array-element assignment words never pathname-expand**
+   (command_prepare.rs, expand_command_words suppress_glob). GNU
+   general.c:477 assignment() accepts `name[sub]=value` (skipsubscript
+   -> `]` -> `=`), parse.y:5785-5791 marks it W_ASSIGNMENT at parse, and
+   subst.c:12476 separate_out_assignments() peels the leading
+   W_ASSIGNMENT run BEFORE expand_words — assignment words never reach
+   glob(). Rubash's parser keeps them in cmd.words, so pathname_expand_
+   word globbed them: `a[1]=5` with a file `a1=5` in cwd ran
+   `a1=5: command not found` (GNU 5.3.0 probe: assigns a=([1]="5")).
+   Both a perf win (no directory scan per element write) and a GNU-
+   alignment fix. Admission = parser's array_element_assignments marker
+   (leading-run scope, mirrors separate_out_assignments); argument
+   position (`echo a[1]=5` -> `a1=5`) keeps globbing in both shells.
+2. **perf(executor): borrow instead of clone when nothing to strip**
+   (command_execute.rs, strip_invalid_env_assignment_prefixes ->
+   Cow<CommandNode>). The early return cloned the whole 55-field
+   CommandNode for every command (20000/probe measured); GNU
+   execute_simple_command walks WORD_LIST by pointer (execute_cmd.c:
+   4550+) — the nothing-to-strip case borrows, the copy exists only when
+   words are actually removed.
+3. **perf(expansion): `$`-byte admission on the parameter-error
+   pre-scan** (parameter_errors.rs, both scan entry points). See Gap 1.
+4. **chore(test): drop unused `use super::*`** in prompt_command.rs
+   tests (pre-existing master break of `RUSTFLAGS='-D warnings' cargo
+   test --workspace --no-run`; no lane owns the file).
+
+### Numbers (same-session base e207b0df vs perf6 HEAD, median of 5)
+
+| probe (20000 iters) | base ms | cur ms | delta | GNU ms | ratio base->cur |
+|---|---:|---:|---:|---:|---:|
+| p6-null `:`          | 661.4 | 633.5 | -4.2%  | 40.3  | 16.0x -> 15.3x |
+| p6-local3            | 4381.7| 3971.3| -9.4%  | 113.9 | 38.4x -> 34.7x |
+| p6-arr `a[1]=$i`     | 3149.4| 1074.2| -65.9% | 39.7  | 78.8x -> 26.6x |
+| OMB load (real HOME) | 1021.1| 973.8 | -4.6%  | —     | (earlier session: 1053.5 -> 956.8, -9.2%) |
+
+Per-op (inner, minus ~20 ms startup): `:` 32 -> 30.5 us (GNU 2.0);
+local3 218 -> 198 us (GNU 5.7); arridx 156 -> 53 us (GNU 2.0).
+
+### Semantics gate
+
+PS1 md5, `declare -p` md5 (_omb_spectrum_fg/FX/FG composite),
+`declare -F` sorted md5 + count, `alias` sorted md5 + count: byte-
+identical base vs current on the real-HOME OMB load (284 functions,
+33 aliases; ombperf's 281/33 delta = OMB tree drift, same on both
+binaries). Error-path matrix 15/15 byte-identical. cargo test --lib
+497/497; --test regression 26/26; RUSTFLAGS='-D warnings' cargo test
+--workspace --no-run clean; cargo fmt clean.
+
+### Remaining hotspots (measured, for the next round)
+
+- `for ((...))` test+update: 23 us/iter pair (465 of 742 ms in p6-null).
+  eval_arithmetic_command_value does per-eval work even for constant
+  expressions: arith_dynamic_values() HashMap build, expression
+  .to_string() snapshot, ARITH_WRITES clear. GNU re-parses per
+  iteration too (execute_cmd.c:3201 evalexp) but at ~1 us; a
+  constant-expression memo is the candidate. One root cause per round.
+- local3 198 us vs GNU 5.7: dispatch/matcmd machinery (matcmd 37 us/cmd
+  debug-profiled) + `local` declaration-family path - the borrow-based
+  CommandNode expansion refactor (deep subsystem, ombperf's original
+  hypothesis) remains open; this round's clone census shows the biggest
+  single clone (strip) already gone, next is the expanded.words snapshot
+  and the expand field set.
+- OMB load: `chain` phase (alias/time/if/pipe matcher per command)
+  1393 ms of 8586 ms instrumented total - attribution only, not yet
+  decomposed.
+
