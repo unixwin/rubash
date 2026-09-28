@@ -40,12 +40,17 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           bash scripts/setup-bashdb-fixture.sh target/bashdb-install
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Run Rust library tests
-        run: cargo test --lib
+        run: cargo nextest run --lib --profile ci
 
       - name: Run compatibility CLI tests
         continue-on-error: true
-        run: cargo test --test cli_tests
+        run: cargo nextest run --test cli_tests --profile ci
 
   rust-macos:
     name: Rust tests (macOS)

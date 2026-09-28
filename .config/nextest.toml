@@ -1,0 +1,7 @@
+[profile.ci]
+# A hung test fails fast and BY NAME instead of eating the 30-minute job:
+# slow tests log after 30s, hard-fail at 90s (cli_tests spawns shells that
+# read stdin; a hang there is a bug to name, not a timeout to nurse).
+slow-timeout = "30s"
+timeout-source = "profile"
+termination-timeout = "10s"
