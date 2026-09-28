@@ -1,5 +1,5 @@
 use crate::executor::{ExecuteError, Executor};
-use crate::parser::CommandNode;
+use crate::parser::{Ast, CommandNode};
 
 pub fn execute_text(executor: &mut Executor, source: &str) -> Result<(), ExecuteError> {
     execute_text_with_args(executor, source, &[])
@@ -10,7 +10,8 @@ pub fn execute_text_with_args(
     source: &str,
     args: &[String],
 ) -> Result<(), ExecuteError> {
-    execute_source_with_args(executor, source, args, None, None)
+    let ast = parse_source_ast(source);
+    execute_ast_with_args(executor, ast, args, None)
 }
 
 pub(super) fn execute_text_maybe_redirected(
@@ -20,174 +21,53 @@ pub(super) fn execute_text_maybe_redirected(
     redirect_cmd: Option<&CommandNode>,
     source_name: Option<&str>,
 ) -> Result<(), ExecuteError> {
+    let mut ast = parse_source_ast(source);
     if let Some(redirect_cmd) = redirect_cmd {
-        // GNU execute_cmd.c applies the command's redirections once for the
-        // whole sourced text (redir.c do_redirection_internal). The outer
-        // scope opens/anchors the targets; each executed group then carries
-        // the inherited per-leaf redirects like the script driver.
+        executor.apply_command_output_redirects(redirect_cmd, &mut ast)?;
         return executor.with_compound_output_redirects(redirect_cmd, |executor| {
-            execute_source_with_args(executor, source, args, source_name, Some(redirect_cmd))
+            execute_ast_with_args(executor, ast, args, source_name)
         });
     }
-    execute_source_with_args(executor, source, args, source_name, None)
+    execute_ast_with_args(executor, ast, args, source_name)
 }
 
-/// GNU builtins/evalfile.c source_file -> evalstring.c parse_and_execute:
-/// sourced text is read and executed one complete command group at a time,
-/// so `alias`/`shopt -s expand_aliases` take effect for later groups — a
-/// whole-file pre-parse would leave group-internal aliases (like modernish's
-/// `forever do ... done` inside function bodies) unexpanded. Each group's
-/// text is alias-expanded with the live table before parsing, and the
-/// STREAMED marker suspends executor-level re-expansion, matching
-/// run_history_group's contract.
-fn run_source_groups(
+fn parse_source_ast(source: &str) -> Ast {
+    let tokens = crate::lexer::tokenize(source);
+    // GNU builtins/evalfile.c:296: a sourced file runs through
+    // parse_and_execute — the SAME parser as the top-level driver, not a
+    // lenient reparse. A stray `)` / `;;` at command position is a syntax
+    // error that aborts the remaining sourced text (rubash#203: `echo )`
+    // was silently accepted, the argument swallowed, rc=0, and the rest of
+    // the file still ran). parse.y yyerror reports
+    // `syntax error near unexpected token `)''; source_text is supplied so
+    // the diagnostic can echo the offending physical line (parse.y:6866
+    // print_offending_line).
+    crate::parser::parse_with_options(
+        &tokens,
+        crate::parser::ParseLoopOptions {
+            stray_close_is_error: true,
+            source_text: Some(source.to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+fn execute_ast_with_args(
     executor: &mut Executor,
-    source: &str,
-    redirect_cmd: Option<&CommandNode>,
-) -> Result<(), ExecuteError> {
-    let raw_lines: Vec<&str> = source.split_inclusive('\n').collect();
-    let mut index = 0usize;
-    let mut ran_any = false;
-    while let Some((pending, start_line)) =
-        crate::script_driver::read_next_source_group(executor, &raw_lines, &mut index)
-    {
-        let line_offset = start_line.saturating_sub(1);
-        let pre_alias_text = pending.clone();
-        let exec_text = crate::script_driver::expand_group_aliases(executor, &pending);
-        if exec_text.trim().is_empty() {
-            continue;
-        }
-        let parse_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-        // A group that ran to EOF while still incomplete (unclosed quote,
-        // unterminated compound) needs run_source_with_line_offset's
-        // unclosed-input diagnostics and prefix execution.
-        if !index_complete_group(&exec_text, parse_posix) {
-            let status = crate::script_driver::run_source_with_line_offset(
-                executor,
-                &exec_text,
-                false,
-                line_offset,
-                redirect_cmd,
-                if exec_text == pre_alias_text {
-                    None
-                } else {
-                    Some(pre_alias_text.as_str())
-                },
-            );
-            ran_any = true;
-            let parse_error = executor.take_parse_error();
-            if parse_error {
-                executor.set_exit_code(status);
-                return Ok(());
-            }
-            continue;
-        }
-        let mut tokens = crate::lexer::tokenize_with_initial_posix(&exec_text, parse_posix);
-        if let Some(line) = crate::lexer::heredoc_overflow_line() {
-            executor.mark_parse_error();
-            eprintln!(
-                "{}maximum here-document count exceeded",
-                executor.parser_diagnostic_prefix_for_line(line)
-            );
-            executor.set_exit_code(2);
-            return Ok(());
-        }
-        if line_offset != 0 {
-            for token in &mut tokens {
-                token.position += line_offset;
-                token.column += line_offset;
-            }
-        }
-        // GNU builtins/evalfile.c:296: a sourced file runs through
-        // parse_and_execute — the SAME parser as the top-level driver, not a
-        // lenient reparse. A stray `)` / `;;` at command position is a syntax
-        // error that aborts the remaining sourced text (rubash#203: `echo )`
-        // was silently accepted, the argument swallowed, rc=0, and the rest
-        // of the file still ran). parse.y yyerror reports `syntax error near
-        // unexpected token `)''; the group's pre-alias text is supplied so
-        // the diagnostic can echo the offending physical line
-        // (parse.y:6866 print_offending_line).
-        let mut ast = crate::parser::parse_with_options(
-            &tokens,
-            crate::parser::ParseLoopOptions {
-                stray_close_is_error: true,
-                source_text: Some(exec_text.clone()),
-                diagnostic_text: if exec_text == pre_alias_text {
-                    None
-                } else {
-                    Some(pre_alias_text.clone())
-                },
-                source_line_offset: line_offset,
-            },
-        );
-        if let Some(cmd) = redirect_cmd {
-            executor.apply_inherited_command_output_redirects(cmd, &mut ast)?;
-        }
-        // The group's words are final: executor-level alias expansion would
-        // expand them a second time (run_history_group precedent). Save the
-        // marker so a nested `.` inside an already-streamed context restores
-        // the caller's value instead of clearing it.
-        let old_streamed = executor
-            .shell_state
-            .env_vars
-            .get("__RUBASH_ALIAS_STREAMED")
-            .cloned();
-        executor
-            .shell_state
-            .env_vars
-            .insert("__RUBASH_ALIAS_STREAMED".to_string(), "1".to_string());
-        let group_result = executor.execute_ast(&ast);
-        match old_streamed {
-            Some(value) => executor
-                .shell_state
-                .env_vars
-                .insert("__RUBASH_ALIAS_STREAMED".to_string(), value),
-            None => executor
-                .shell_state
-                .env_vars
-                .remove("__RUBASH_ALIAS_STREAMED"),
-        };
-        ran_any = true;
-        let parse_error = executor.take_parse_error();
-        match group_result {
-            Ok(()) if !parse_error => {}
-            Ok(()) => {
-                // GNU evalstring.c:585-606: a syntax error aborts the
-                // remaining file; `.` itself returns 2.
-                executor.set_exit_code(2);
-                return Ok(());
-            }
-            Err(ExecuteError::ExitCode(code)) if parse_error => {
-                executor.set_exit_code(code);
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    // GNU builtins/source.def: the return status of `.` is the exit status
-    // of the last command executed in the file, or **zero** when no commands
-    // run (builtins.tests sources a zero-length file and expects $? == 0).
-    if !ran_any {
-        executor.set_exit_code(0);
-    }
-    Ok(())
-}
-
-/// Whether the accumulated group text ended syntactically complete. At EOF
-/// an incomplete tail means the file itself ends inside an unclosed
-/// construct, which is the run_source_with_line_offset unclosed-input path.
-fn index_complete_group(text: &str, posix: bool) -> bool {
-    !crate::lexer::has_unclosed_input_syntax_posix(text, posix)
-        && !crate::script_driver::stdin_source_needs_more_posix(text, posix)
-}
-
-fn execute_source_with_args(
-    executor: &mut Executor,
-    source: &str,
+    ast: Ast,
     args: &[String],
     source_name: Option<&str>,
-    redirect_cmd: Option<&CommandNode>,
 ) -> Result<(), ExecuteError> {
+    // GNU builtins/source.def: the return status of `.` is the exit status of
+    // the last command executed in the file, or **zero** when no commands run
+    // (builtins.tests sources a zero-length file and expects $? == 0). An
+    // empty AST must therefore succeed without touching any shell state —
+    // positional params, BASH_SOURCE frames, and traps stay exactly as the
+    // sourcer left them.
+    if ast.commands.is_empty() {
+        executor.set_exit_code(0);
+        return Ok(());
+    }
     let old_positional_params = executor.positional_params();
     let source_positional_params: Vec<String> = args.to_vec();
     let had_source_args = !source_positional_params.is_empty();
@@ -241,7 +121,7 @@ fn execute_source_with_args(
     if !functrace {
         executor.set_source_debug_suppressed(true);
     }
-    let result = run_source_groups(executor, source, redirect_cmd);
+    let result = executor.execute_ast(&ast);
 
     if source_name.is_some() {
         // evalfile_internal's run_unwind_frame pops the "source" frame and

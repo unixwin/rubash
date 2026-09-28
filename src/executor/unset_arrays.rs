@@ -147,11 +147,6 @@ impl Executor {
                 self.shell_state.function_definition_redirects.remove(name);
                 self.shell_state.function_def_infos.remove(name);
                 unmark_env_name(&mut self.shell_state.env_vars, EXPORTED_FUNCTIONS, name);
-                unmark_env_name(
-                    &mut self.shell_state.env_vars,
-                    UNSTREAMED_FUNCTION_BODIES,
-                    name,
-                );
             }
         }
 
@@ -291,33 +286,6 @@ impl Executor {
             }
             if self.unset_outer_local_variable(&name) {
                 continue;
-            }
-            // GNU builtins/set.def:928 + variables.h:161 non_unsettable_p:
-            // att_nounset dynamic variables refuse unbinding outright
-            // (BASH_SOURCE/BASH_LINENO/BASH_ARGC/BASH_ARGV report
-            // "cannot unset"). All other dynamic variables unbind like
-            // ordinary ones (variables.c:3839 unbind_variable) — they do
-            // not re-materialize, and a later assignment binds a plain
-            // variable. Rubash materializes dynamic values on demand, so
-            // record the unbind in UNSET_DYNAMIC_VARS; readonly names
-            // (SHELLOPTS/BASHOPTS) keep their attribute and fall through
-            // to the readonly diagnostic below.
-            if matches!(
-                name.as_str(),
-                "BASH_SOURCE" | "BASH_LINENO" | "BASH_ARGC" | "BASH_ARGV"
-            ) {
-                writeln!(
-                    stderr,
-                    "{}unset: {name}: cannot unset",
-                    self.diagnostic_prefix()
-                )?;
-                element_status = element_status.max(1);
-                continue;
-            }
-            if !is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &name)
-                && self.dynamic_parameter_is_set(&name)
-            {
-                mark_env_name(&mut self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &name);
             }
             variable_args.push(name);
         }

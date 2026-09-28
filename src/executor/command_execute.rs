@@ -353,35 +353,6 @@ impl Executor {
     ) -> Result<bool, ExecuteError> {
         let _t_scans = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_SCANS);
 
-        // GNU parse.y:3249 alias_expand_token expands aliases in the reader
-        // — inside a function body too — so an alias supplying a compound
-        // opener (`alias forever='while :;'` → `while :; do`) parses
-        // structurally. The token-level body parse is alias-blind; when it
-        // failed, the body text is parked on
-        // FunctionCommand::unparsed_body_source for one alias-aware retry
-        // before the diagnostic fires (modernish `forever do` inside
-        // sourced .mm module bodies).
-        if !self.noexec_enabled() {
-            if let Some(function) = &cmd.function_command {
-                if let Some((source, base_line)) = function.unparsed_body_source.clone() {
-                    if let Some(body) = self.retry_function_body_with_aliases(&source, base_line) {
-                        let mut fixed_cmd = cmd.clone();
-                        fixed_cmd
-                            .assignments
-                            .retain(|(name, _)| !name.starts_with("__RUBASH_PARSE"));
-                        let mut fixed = function.as_ref().clone();
-                        fixed.body = body;
-                        fixed.unparsed_body_source = None;
-                        fixed_cmd.function_command = Some(Box::new(fixed));
-                        let fixed_function =
-                            fixed_cmd.function_command.as_deref().expect("set above");
-                        self.define_function(&fixed_cmd, fixed_function)?;
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-
         // GNU alias_expand_token during parse (parse.y): a reserved-word
         // alias such as `f=fi` can close a compound the first parse missed.
         // Nodes that parked their whole source span get one alias-expanded

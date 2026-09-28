@@ -98,13 +98,6 @@ pub(super) struct ConditionalArithParser<'a> {
     pub(super) env_vars: &'a mut HashMap<String, String>,
     pub(super) resolving: Vec<String>,
     pub(super) random_state: Option<&'a RandomGen>,
-    /// Dynamic-parameter snapshot injected by the Executor (see
-    /// `Executor::arith_dynamic_values`). GNU expr.c:1150 expr_streval
-    /// resolves operand names through find_variable, which materializes
-    /// dynamic variables (BASHPID, BASH_SUBSHELL, ...) exactly like
-    /// `$name` expansion; the evaluator only carries `env_vars`, so the
-    /// Executor supplies their current values here.
-    pub(super) dynamic_values: Option<&'a HashMap<String, String>>,
     pub(super) error_category: Option<super::ArithmeticErrorCategory>,
     pub(super) no_expand: bool,
     /// The first recorded evalerror — GNU longjmps on the first failure, so

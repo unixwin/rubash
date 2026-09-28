@@ -68,7 +68,7 @@ pub fn script_uses_aliases(contents: &str) -> bool {
 /// GNU parse.y alias_expand_token + push_string, run over the text of one
 /// command group. The lookup yields (value, AL_EXPANDNEXT); alias values
 /// store '$' as DATA_DOLLAR when the word carried it in data position.
-pub(crate) fn expand_group_aliases(executor: &Executor, source: &str) -> String {
+fn expand_group_aliases(executor: &Executor, source: &str) -> String {
     if !executor.alias_expansion_enabled() || executor.shell_state.aliases.is_empty() {
         return source.to_string();
     }
@@ -204,70 +204,6 @@ pub fn run_script_with_history_in(
         }
     }
     executor.last_exit_code()
-}
-
-/// builtins/evalfile.c source_file -> evalstring.c parse_and_execute: a
-/// sourced file is read and executed INCREMENTALLY, so an `alias` command
-/// takes effect for every group read after it. This pulls the next
-/// syntactically complete command group out of `raw_lines` using the same
-/// completeness test as run_script_with_history_in — heredoc bodies,
-/// procsub paren depth, and the alias-expanded pending text all decide the
-/// boundary. Returns the group's raw text and its 1-based starting line.
-pub(crate) fn read_next_source_group(
-    executor: &Executor,
-    raw_lines: &[&str],
-    index: &mut usize,
-) -> Option<(String, usize)> {
-    if *index >= raw_lines.len() {
-        return None;
-    }
-    let mut pending = String::new();
-    let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
-    let mut paren_depth: i64 = 0;
-    let mut saw_heredoc = false;
-    let mut heredoc_arith_depth: i64 = 0;
-    let start_line = *index + 1;
-    while *index < raw_lines.len() {
-        let raw = raw_lines[*index];
-        let text = raw.trim_end_matches('\n');
-        *index += 1;
-        let mut is_body = false;
-        if let Some((delimiter, strip_tabs)) = pending_heredocs.first().cloned() {
-            let candidate = if strip_tabs {
-                text.trim_start_matches('\t')
-            } else {
-                text
-            };
-            if candidate == delimiter {
-                pending_heredocs.remove(0);
-            } else {
-                is_body = true;
-            }
-        } else {
-            let expanded_line = expand_group_aliases(executor, text);
-            let declared =
-                stdin_heredoc_line_declarations(&expanded_line, &mut heredoc_arith_depth);
-            saw_heredoc = saw_heredoc
-                || (!declared.is_empty()
-                    && (expanded_line.contains("$(")
-                        || expanded_line.contains("<(")
-                        || expanded_line.contains(">(")));
-            pending_heredocs.extend(declared);
-        }
-        if !is_body {
-            paren_depth += line_paren_delta(&expand_group_aliases(executor, text));
-        }
-        pending.push_str(raw);
-        let expanded_pending = expand_group_aliases(executor, &pending);
-        let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-        if pending_heredocs.is_empty()
-            && (!saw_heredoc || paren_depth <= 0)
-            && !stdin_source_needs_more_posix(&expanded_pending, posix)
-        {
-            break;
-        }
-    }
-    Some((pending, start_line))
 }
 
 /// Process one syntactically complete group: expand (when history expansion
@@ -653,7 +589,7 @@ pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
 /// Net open-paren count for one command line, ignoring quoted spans. Used
 /// by the history driver to keep a group open across a heredoc declared
 /// inside a process substitution.
-pub(crate) fn line_paren_delta(line: &str) -> i64 {
+fn line_paren_delta(line: &str) -> i64 {
     let chars: Vec<char> = line.chars().collect();
     let mut depth = 0i64;
     let mut quote: Option<char> = None;

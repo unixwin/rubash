@@ -44,7 +44,6 @@ pub fn command_substitutions_in_word_public(word: &str) -> Vec<CommandSubstituti
 #[cfg(test)]
 mod tests;
 
-pub(crate) use function_command::find_body_parse_error;
 pub use nodes::*;
 pub use parse_loop::{parse, parse_with_options, ParseLoopOptions};
 pub(crate) use process_substitution::raw_word_has_unquoted_process_substitution;
