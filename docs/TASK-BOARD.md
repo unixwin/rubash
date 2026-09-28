@@ -111,3 +111,12 @@
 - **niubash CI 绿**（run 36420424868）：strict-warnings 三平台全 target 清零（ca93c2a→a8d4c3a，教训：模拟必须 `cargo test --no-run`/`--all-targets`）+ hosted runner ConPTY 跳过（c28c21b，桌面/自托管可强制）+ savannah submodule 网络抖动 rerun。
 - 今日累计：rubash #284 #285 #288 #293 关闭（#294 新开观察中）；niubash #145 关闭（内置栈净删 1.24 万行）；7 车道回收（readhang/arrayesc/ombperf/retire-theme/linuxhang/perf5/resid3+sourcefix）；3 车道退回（merge144/interactive2 待重交）。
 - 用户环境终态：niu.exe @ 引擎 6ea4b037 + retire-theme（48b17e0 后构建）；agnoster 干净渲染；`niu -C` 2.58s→1.53s（OMB 内层 1093→972ms，GNU 锚 781ms）。
+
+## 2026-09-28 深夜第二波（ecosweep 生态战役 + 8 车道清空）
+
+- **11 单关闭**：rubash #284 #285 #286 #288 #292 #293 #296 #298 #299 + niubash #144 #145
+- **8 车道全部回收**：i2re（历史展开）/m144re（输出流单一真路径，捕获-重放家族 grep 零命中）/perf4（configure-head -74%）/perf6（双走查 264→3ms，a[1]=$i -66%）/fieldsplit（#298/#299）/contperf（#292 park/resume+<<< 根源修，OMB 内层 867ms 进 GNU 区间 812-870）/carrier（#296 载体泄漏，83 套件 A/B 零变动）/ecosweep（OMB 83/83 主题全通+#296-#302 七单产出）
+- ecosweep 生态复核：OMB 83 主题/36 插件/9 别名/58 补全 + liquidprompt/bash-sensible/complete-alias/mathiasbynens/direnv hook；bash-preexec 两旧单确认已修；CORPUS-COVERAGE +86 行
+- CI 双绿连续 5 轮稳定（nextest 基建后无隐性挂死）
+- **在途三车道（wt11）**：inter3（#297/#300 交互初始化）、lexmix（#302/#304 解析域）、almix（#301/#303 存储域）
+- 队列：#295（arrayesc 深水）、#294（CI 挂观察）、niubash #146/#147/#148、contperf 同族后续（has_unclosed_quotes/compound 全扫）
