@@ -688,25 +688,6 @@ fn split_parameter_separator(value: &str) -> Option<(&str, &str)> {
                 let close = if chars[index + 1].1 == '(' { ')' } else { '}' };
                 index = skip_matched_span(&chars, index + 1, close);
             }
-            // `$'...'` / `$"..."`: GNU's reader (parse.y:5305+
-            // read_token_word) has already turned the ANSI-C/locale-quoted
-            // span into CTLESC-carried word text before subst.c:2199
-            // skip_to_delim / subst.c:9408 ever scan for the `/`
-            // separator, so a `/` inside the span is never a separator and
-            // the span's quotes never open skip_single_quoted. Rubash
-            // hands the RAW span through, so skip it as a unit here —
-            // ANSI-C quoting processes backslash escapes (`$'\''` is one
-            // quoted `'`), which is the escape-aware double-quote-style
-            // scan, not the plain literal one (nquote2.sub
-            // `t "${v/$'\''/x}"`: without this the span's second `'`
-            // opened a phantom literal span that swallowed the separator
-            // and the replacement never ran).
-            '$' if matches!(chars.get(index + 1).map(|c| c.1), Some('\'')) => {
-                index = skip_double_quoted_span(&chars, index + 1, '\'');
-            }
-            '$' if matches!(chars.get(index + 1).map(|c| c.1), Some('"')) => {
-                index = skip_double_quoted_span(&chars, index + 1, '"');
-            }
             '<' | '>' if chars.get(index + 1).map(|c| c.1) == Some('(') => {
                 index = skip_matched_span(&chars, index + 1, ')')
             }
@@ -786,17 +767,6 @@ fn skip_matched_span(chars: &[(usize, char)], index: usize, close: char) -> usiz
                 '$' if matches!(chars.get(i + 1).map(|c| c.1), Some('(' | '{')) => {
                     let inner = if chars[i + 1].1 == '(' { ')' } else { '}' };
                     i = skip_matched_span(chars, i + 1, inner);
-                }
-                // `$'...'` / `$"..."` — same parse.y:5305+ pre-decoding
-                // argument as split_parameter_separator: the span's quotes
-                // must not open skip_literal_span here (the closing `}`
-                // of the enclosing `${...}` inside such a span would be
-                // mis-located otherwise).
-                '$' if matches!(chars.get(i + 1).map(|c| c.1), Some('\'')) => {
-                    i = skip_double_quoted_span(chars, i + 1, '\'');
-                }
-                '$' if matches!(chars.get(i + 1).map(|c| c.1), Some('"')) => {
-                    i = skip_double_quoted_span(chars, i + 1, '"');
                 }
                 _ => i += 1,
             }

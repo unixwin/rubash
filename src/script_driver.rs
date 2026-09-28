@@ -213,16 +213,6 @@ pub fn run_script_with_history_in(
 /// completeness test as run_script_with_history_in — heredoc bodies,
 /// procsub paren depth, and the alias-expanded pending text all decide the
 /// boundary. Returns the group's raw text and its 1-based starting line.
-///
-/// rubash#281 companion: while the alias table cannot influence the text
-/// (expansion disabled or table empty — the expanded pending IS the raw
-/// pending), the token-level half of the completeness test runs on a
-/// parked `GroupScanFeeder` that advances per appended line instead of
-/// re-tokenizing the whole accumulated group (the O(group^2) amplifier
-/// behind `. ./benchmarks/corpus/nvm.sh --no-use` at 200 s+). With a live
-/// alias table the exact fresh scan is kept: expansion may rewrite any
-/// part of the pending text, so the feeder's append-only checkpoint has no
-/// valid prefix to resume from.
 pub(crate) fn read_next_source_group(
     executor: &Executor,
     raw_lines: &[&str],
@@ -237,20 +227,11 @@ pub(crate) fn read_next_source_group(
     let mut saw_heredoc = false;
     let mut heredoc_arith_depth: i64 = 0;
     let start_line = *index + 1;
-    let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-    let aliases_live =
-        executor.alias_expansion_enabled() && !executor.shell_state.aliases.is_empty();
-    let mut scan = if aliases_live {
-        None
-    } else {
-        Some(crate::lexer::GroupScanFeeder::new(posix))
-    };
     while *index < raw_lines.len() {
         let raw = raw_lines[*index];
         let text = raw.trim_end_matches('\n');
         *index += 1;
         let mut is_body = false;
-        let expanded_line = expand_group_aliases(executor, text);
         if let Some((delimiter, strip_tabs)) = pending_heredocs.first().cloned() {
             let candidate = if strip_tabs {
                 text.trim_start_matches('\t')
@@ -263,6 +244,7 @@ pub(crate) fn read_next_source_group(
                 is_body = true;
             }
         } else {
+            let expanded_line = expand_group_aliases(executor, text);
             let declared =
                 stdin_heredoc_line_declarations(&expanded_line, &mut heredoc_arith_depth);
             saw_heredoc = saw_heredoc
@@ -273,33 +255,16 @@ pub(crate) fn read_next_source_group(
             pending_heredocs.extend(declared);
         }
         if !is_body {
-            paren_depth += line_paren_delta(&expanded_line);
+            paren_depth += line_paren_delta(&expand_group_aliases(executor, text));
         }
         pending.push_str(raw);
-        if let Some(scan) = scan.as_mut() {
-            scan.push_line(text, pending.len());
-        }
-        if pending_heredocs.is_empty() && (!saw_heredoc || paren_depth <= 0) {
-            if let Some(scan) = scan.as_ref() {
-                // Token-level answer FIRST: it is O(1) here (maintained
-                // incrementally by the feeder), while the text-level scans
-                // walk the whole accumulated group. While any `{`/`if`/
-                // `case`... keeps the group open (nvm.sh wraps its entire
-                // body in one brace group), this short-circuits the O(group)
-                // rescans entirely; the text scans then run only at
-                // candidate-complete lines. `||` is commutative, so the
-                // answer is byte-identical to the fresh scan's.
-                let needs_more =
-                    scan.token_level_needs_more() || stdin_source_text_needs_more(&pending, posix);
-                if !needs_more {
-                    break;
-                }
-                continue;
-            }
-            let expanded_pending = expand_group_aliases(executor, &pending);
-            if !stdin_source_needs_more_posix(&expanded_pending, posix) {
-                break;
-            }
+        let expanded_pending = expand_group_aliases(executor, &pending);
+        let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
+        if pending_heredocs.is_empty()
+            && (!saw_heredoc || paren_depth <= 0)
+            && !stdin_source_needs_more_posix(&expanded_pending, posix)
+        {
+            break;
         }
     }
     Some((pending, start_line))
@@ -619,7 +584,19 @@ pub fn stdin_source_needs_more(source: &str) -> bool {
 /// POSIX-aware variant: `set -o posix` changes `'` scanning inside
 /// `"${...}"` (Interp 221), which decides whether the input is complete.
 pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
-    if stdin_source_text_needs_more(source, posix) {
+    if crate::lexer::has_unclosed_input_syntax_posix(source, posix) {
+        return true;
+    }
+    // parse.y:5379-5384: trailing unquoted backslash keeps the physical line
+    // open (PS2 continuation) -- the joined line is assembled later by the
+    // lexer logical-line loop, which removes the backslash-newline pair.
+    if crate::lexer::stdin_line_ends_with_continuation(source) {
+        return true;
+    }
+    if stdin_source_is_function_signature(source) {
+        return true;
+    }
+    if stdin_source_has_unclosed_function_body(source) {
         return true;
     }
 
@@ -671,30 +648,6 @@ pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
             | Some(TokenKind::Pipe)
             | Some(TokenKind::PipeErr)
     )
-}
-
-/// The text-level (non-tokenizing) half of `stdin_source_needs_more_posix`:
-/// the completeness signals computable without the token stream. The
-/// incremental group reader pairs this with a parked `GroupScanFeeder`
-/// (src/lexer/mod.rs), which maintains the token-level half's keyword
-/// stack and trailing-connector answer across appended lines.
-pub fn stdin_source_text_needs_more(source: &str, posix: bool) -> bool {
-    if crate::lexer::has_unclosed_input_syntax_posix(source, posix) {
-        return true;
-    }
-    // parse.y:5379-5384: trailing unquoted backslash keeps the physical line
-    // open (PS2 continuation) -- the joined line is assembled later by the
-    // lexer logical-line loop, which removes the backslash-newline pair.
-    if crate::lexer::stdin_line_ends_with_continuation(source) {
-        return true;
-    }
-    if stdin_source_is_function_signature(source) {
-        return true;
-    }
-    if stdin_source_has_unclosed_function_body(source) {
-        return true;
-    }
-    false
 }
 
 /// Net open-paren count for one command line, ignoring quoted spans. Used

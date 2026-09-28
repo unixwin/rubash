@@ -34,7 +34,7 @@ use brace_scan_cache::BraceScanCache;
 pub(crate) use continuation::has_unclosed_command_substitution;
 pub(crate) use continuation::unclosed_command_substitution_depth;
 pub(crate) use continuation::unclosed_input_close_char_posix;
-use heredoc::{heredoc_delimiters, HereDocDelimiter};
+use heredoc::heredoc_delimiters;
 use scanner::{Lexer, LexerBoundaryState, LexerParseState};
 pub(crate) use skip::command_substitutions_balanced;
 pub(crate) use skip::skip_parenthesized_unit_corrected;
@@ -234,328 +234,120 @@ fn tokenize_with_heredocs(
     start_line: usize,
     in_comsub: bool,
 ) -> Vec<Token> {
-    let mut feeder =
-        GroupScanFeeder::with_origin(initial_posix, input_origin, start_line, in_comsub);
-    // The feeder's per-push TOKENIZE_DEPTH entry/exit reproduces the
-    // original call-long bump: nothing observes the depth between pushes.
-    let mut pieces = input.split('\n').peekable();
-    while let Some(piece) = pieces.next() {
-        // str::lines() drops the trailing empty string that split('\n')
-        // produces when the input ends with '\n'; the parked feeder never
-        // sees that phantom piece, exactly like the loop's peek() break.
-        if piece.is_empty() && pieces.peek().is_none() {
-            break;
-        }
-        feeder.push_line(piece, input.len());
-    }
-    feeder.finish()
+    let result =
+        tokenize_with_heredocs_inner(input, initial_posix, input_origin, start_line, in_comsub);
+    TOKENIZE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    result
 }
 
-/// One here-document whose body lines have not all arrived yet: the parked
-/// remainder of the original pipeline's body-pull loop.
-struct AwaitingHeredocBody {
-    delimiter: HereDocDelimiter,
-    body: String,
-    continued_body_line: String,
-    gather_line: usize,
-}
-
-/// rubash#281 companion for the append-only group readers: the ENTIRE
-/// pipeline state of the batch tokenizer (`tokenize_with_heredocs`),
-/// parked between physical lines so a reader that grows its input one line
-/// at a time (the `.` source group driver, `read_next_source_group`)
-/// ADVANCES the scan instead of restarting it. GNU reads its input once,
-/// token by token (parse.y:3557 read_token); the original loop is this
-/// tokenizer's substitute for that streaming model, and re-running it from
-/// byte zero after every appended line is the O(group^2) amplifier behind
-/// `. ./benchmarks/corpus/nvm.sh` taking minutes (300 lines consumed in
-/// 30 s, 98.5% of it inside `tokenize`, measured 2026-09-28). Pausing the
-/// SAME loop at line boundaries reproduces its decisions exactly: every
-/// carried local (brace cache, boundary checkpoint, quote cache, comsub
-/// heredoc headers, lexer parse state) is the state the loop itself keeps
-/// across its own line iterations.
-///
-/// The feeder additionally maintains the `stdin_source_needs_more_posix`
-/// token-summary (keyword stack + trailing connector) incrementally: the
-/// fresh function re-tokenizes the WHOLE accumulated text per line and
-/// folds; the feeder folds each pass's delta. Resumed passes extend the
-/// previous token list (r#281 equivalence), full re-lexes restore the
-/// snapshot taken at the open logical line's start, and the pass-skipping
-/// paths (unclosed quotes / command substitution / compound assignment /
-/// the #155 inert-line fast path) cannot change the summary's answer
-/// while they are taken: each leaves the cheap text-level checks of
-/// `stdin_source_needs_more_posix` TRUE (unclosed quotes / comsub / a
-/// close-char construct in the accumulated text) or the keyword stack
-/// non-empty (an unclosed `{` group armed the fast path), so the driver's
-/// overall completeness answer matches the fresh scan's byte for byte.
-pub(crate) struct GroupScanFeeder {
+fn tokenize_with_heredocs_inner(
+    input: &str,
     initial_posix: bool,
     input_origin: InputOrigin,
+    start_line: usize,
     in_comsub: bool,
-    output: Vec<Token>,
-    position: usize,
-    line_number: usize,
-    logical_start_line: usize,
-    logical_line: String,
-    continued_line: bool,
-    parse_posix: bool,
-    extglob_flips_allowed: bool,
-    comsub_heredocs: Vec<ComsubHeredocHeader>,
-    header_scan_from: usize,
-    lexer_parse_state: LexerParseState,
-    brace_cache: BraceScanCache,
-    brace_join_active: bool,
-    unclosed_quotes_cache: Option<bool>,
-    boundary: Option<(usize, Vec<Token>, LexerBoundaryState)>,
-    awaiting_bodies: Vec<AwaitingHeredocBody>,
-    /// keyword-stack summary of `stdin_source_needs_more_posix` over the
-    /// tokens emitted so far (committed lines + the open line's last pass).
-    keyword_stack: Vec<&'static str>,
-    last_significant: Option<TokenKind>,
-    /// Tokens of the current open logical line already folded, and the
-    /// (stack, last) state at that line's start for full-re-lex refolds.
-    open_folded: usize,
-    open_snapshot: (Vec<&'static str>, Option<TokenKind>),
-    /// Set when the original loop would `break` out of line processing
-    /// (heredoc overflow): later pushes are inert, like the loop exit.
-    overflowed: bool,
-}
+) -> Vec<Token> {
+    // TODO(parse.y/redir.c): Bash parses here-documents after reading the
+    // complete command and performs delimiter-specific expansion rules. This
+    // line-oriented collector handles the simple `<<word` and `<<'word'`
+    // forms used by early upstream alias tests.
+    let mut output = Vec::new();
+    // GNU bash does NOT strip CR from CRLF line endings: a '\r' left by a
+    // Windows checkout is ordinary word text (e.g. `set ""\r` makes $1 = \r,
+    // not the empty string). Rust's str::lines() strips trailing '\r', which
+    // silently drops the byte. Split on '\n' only and keep '\r' in the line
+    // content, matching GNU parse.y read_secondary_line. The trailing empty
+    // string that split('\n') produces when the input ends with '\n' is
+    // skipped below to match str::lines() semantics.
+    let mut lines = input.split('\n').peekable();
+    let mut position = 0;
+    let mut line_number = start_line;
+    let mut logical_start_line = start_line;
+    let mut logical_line = String::new();
+    let mut continued_line = false;
+    let mut parse_posix = initial_posix;
+    // rubash#131: flips of the parse-time extglob gate are detected only in
+    // the outermost script tokenization. Nested tokenizations (a brace-group
+    // body re-tokenized by the folding parser, a `$(` body parsed inline)
+    // are not execution boundaries in GNU: the enclosing command is parsed
+    // as a unit before any of its lines could run a `shopt'.
+    let mut extglob_flips_allowed = true;
+    let tokenize_depth = TOKENIZE_DEPTH.with(|depth| {
+        let value = depth.get() + 1;
+        depth.set(value);
+        value
+    });
+    // GNU reader state for heredocs opened inside an unclosed command
+    // substitution (parse.y PST_CMDSUBST): body lines stay verbatim in the
+    // accumulated input — the backslash-newline join must not consume them
+    // (make_cmd.c read_secondary_line, comsub4.sub quoted delimiters) — and
+    // a body line starting with the delimiter with `)` later on ends the
+    // heredoc (make_cmd.c:602-611).
+    let mut comsub_heredocs: Vec<ComsubHeredocHeader> = Vec::new();
+    let mut header_scan_from = 0usize;
+    // GNU parse.y keeps one parser_state for the whole input: PST_CASEPAT,
+    // last_read_token and expecting_in_command persist across physical
+    // lines. Carry the same state between the per-logical-line Lexer
+    // instances so `{` in a case pattern on its own line is still word
+    // text, not a group opener.
+    let mut lexer_parse_state = LexerParseState::default();
+    // rubash#176/#178: resumable brace-group scan cache for the accumulating
+    // logical line (see brace_scan_cache.rs). Cleared on every mutation of
+    // `logical_line` that is not a pure append, and when the line is
+    // accepted and flushed.
+    let mut brace_cache = BraceScanCache::default();
+    // rubash#155 / #130: whether the previous physical line was joined by
+    // the token-level brace-group signal (`tokens_open_unclosed_brace_group`
+    // below) with every text-level scan closed at that point. While true, an
+    // appended physical line that provably cannot open or close any
+    // construct takes the fast path below and skips the O(buffer)
+    // re-tokenization and re-scans entirely.
+    let mut brace_join_active = false;
+    // rubash#241 (perf2): checkpoint for the per-line `has_unclosed_quotes`
+    // rescan, same append-only discipline as `brace_cache`. The captain's
+    // scanner (continuation.rs:663) answers `single || double || ansi_single`
+    // from a state whose ONLY quote-state transitions are the bytes
+    // `\ " ' $ \`` (`$` pairing with `{`, `(`, `'` via one-byte lookahead;
+    // `${`/`$(`/backtick spans never cross the text end — an unclosed span
+    // falls through and toggles quotes within the already-scanned text).
+    // Appending "\n" + an inert physical line therefore cannot change the
+    // answer: `\n`, `#` and whitespace only move the comment sub-state, and
+    // every other byte falls to the no-op arm. A line accepted by
+    // `brace_join_fast_path_line` is inert under a SUPERSET of this byte
+    // set, so the brace fast-path `continue` keeps the checkpoint valid.
+    // Invalidated at every non-append mutation of `logical_line` (IFS_GLUE
+    // insert, backslash pop, comsub-heredoc rotation, flush).
+    let mut unclosed_quotes_cache: Option<bool> = None;
+    // rubash#281: complete-command-boundary checkpoint for the per-join
+    // re-tokenization. GNU reads its input once, token by token
+    // (parse.y:3557 read_token): after the tokens of a prefix, the reader
+    // state IS the state the longer input continues from. The batch
+    // tokenizer instead re-lexed the WHOLE accumulated logical line after
+    // every appended physical line — O(buffer) per join, the amplifier
+    // behind nvm.sh `-n` spending ~0.9s in tokenize_plain alone
+    // (5732 passes re-lexing 4.19MB). When a pass ends BETWEEN tokens —
+    // quotes, command substitutions, compound assignments and parameter
+    // expansions all closed (the huq/comsub/compound gates above prove it)
+    // and no open `(`/`((` group or pending extglob split (checked by
+    // `LexerBoundaryState::boundary_state`) — its token list and lexer
+    // state are exactly the full pass's prefix results: the next pass
+    // resumes at the boundary and lexes only the appended tail. Valid
+    // while the logical line only grows by appends; invalidated at every
+    // non-append mutation (same discipline as `brace_cache` and
+    // `unclosed_quotes_cache`) and at a `set -o posix` / `shopt extglob`
+    // flip (the full pass would re-lex the prefix under the new mode).
+    let mut boundary: Option<(usize, Vec<Token>, LexerBoundaryState)> = None;
 
-impl GroupScanFeeder {
-    pub(crate) fn new(initial_posix: bool) -> Self {
-        Self::with_origin(initial_posix, InputOrigin::Direct, 1, false)
-    }
-
-    fn with_origin(
-        initial_posix: bool,
-        input_origin: InputOrigin,
-        start_line: usize,
-        in_comsub: bool,
-    ) -> Self {
-        let open_snapshot = (Vec::new(), None);
-        Self {
-            initial_posix,
-            input_origin,
-            in_comsub,
-            output: Vec::new(),
-            position: 0,
-            line_number: start_line,
-            logical_start_line: start_line,
-            logical_line: String::new(),
-            continued_line: false,
-            parse_posix: initial_posix,
-            extglob_flips_allowed: true,
-            comsub_heredocs: Vec::new(),
-            header_scan_from: 0,
-            lexer_parse_state: LexerParseState::default(),
-            brace_cache: BraceScanCache::default(),
-            brace_join_active: false,
-            unclosed_quotes_cache: None,
-            boundary: None,
-            awaiting_bodies: Vec::new(),
-            keyword_stack: Vec::new(),
-            last_significant: None,
-            open_folded: 0,
-            open_snapshot,
-            overflowed: false,
-        }
-    }
-
-    /// The tokenize-derived half of `stdin_source_needs_more_posix` for the
-    /// accumulated text: keyword stack non-empty, or the last significant
-    /// token is a `&&`/`||`/`|`/`|&` connector. While heredoc bodies are
-    /// still being awaited, a fresh scan at EOF pushes the unterminated-body
-    /// marker token before its separator, so its last significant token is
-    /// the HereDocBody — never a connector — exactly like this formula.
-    pub(crate) fn token_level_needs_more(&self) -> bool {
-        if !self.keyword_stack.is_empty() {
-            return true;
-        }
-        self.awaiting_bodies.is_empty()
-            && matches!(
-                self.last_significant,
-                Some(TokenKind::And)
-                    | Some(TokenKind::Or)
-                    | Some(TokenKind::Pipe)
-                    | Some(TokenKind::PipeErr)
-            )
-    }
-
-    /// Fold one token into the keyword-stack / last-significant summary,
-    /// exactly the loop `stdin_source_needs_more_posix` runs over the fresh
-    /// token list.
-    fn fold_token(&mut self, token: &Token) {
-        if token.kind == TokenKind::Keyword {
-            match token.value.as_str() {
-                "case" => self.keyword_stack.push("esac"),
-                "if" => self.keyword_stack.push("fi"),
-                "for" | "select" | "while" | "until" => self.keyword_stack.push("done"),
-                "{" => self.keyword_stack.push("}"),
-                "esac" | "fi" | "done" | "}" => {
-                    if self.keyword_stack.last().copied() == Some(token.value.as_str()) {
-                        self.keyword_stack.pop();
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !(token.kind == TokenKind::Semicolon && token.line_break) {
-            self.last_significant = Some(token.kind.clone());
-        }
-    }
-
-    fn fold_pass_tokens(&mut self, tokens: &[Token], resumed: bool) {
-        if resumed {
-            for token in &tokens[self.open_folded.min(tokens.len())..] {
-                self.fold_token(token);
-            }
-        } else {
-            // Restore (a COPY of) the open line's start snapshot: the same
-            // snapshot must survive every future full re-lex of this still
-            // open logical line — only emit_line_separator replaces it.
-            let snapshot = self.open_snapshot.clone();
-            self.keyword_stack = snapshot.0;
-            self.last_significant = snapshot.1;
-            for token in tokens {
-                self.fold_token(token);
-            }
-        }
-        self.open_folded = tokens.len();
-    }
-
-    /// Feed one physical line (its raw text without the '\n'). The caller
-    /// passes the byte length of the whole accumulated input AFTER this line
-    /// was appended: the original loop derives `line_had_terminator` from
-    /// its running position against the input length, and the parked feeder
-    /// must keep that arithmetic (a final `...\r` line without '\n' counts
-    /// as terminated there).
-    pub(crate) fn push_line(&mut self, raw_line: &str, total_input_len: usize) {
-        let tokenize_depth = TOKENIZE_DEPTH.with(|depth| {
-            let value = depth.get() + 1;
-            depth.set(value);
-            value
-        });
-        if !self.awaiting_bodies.is_empty() {
-            self.feed_awaiting_body(raw_line);
-            TOKENIZE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-            return;
-        }
-        self.push_main_line(raw_line, total_input_len, tokenize_depth);
-        TOKENIZE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-    }
-
-    /// The parked body-pull loop: one pushed line serves the front awaiting
-    /// heredoc (the original pulls body lines one at a time from the same
-    /// input stream, in delimiter order).
-    fn feed_awaiting_body(&mut self, raw_line: &str) {
-        let body_line = if cfg!(windows) {
-            raw_line.strip_suffix('\r').unwrap_or(raw_line).to_string()
-        } else {
-            raw_line.to_string()
-        };
-        self.position += body_line.len() + 1;
-        self.line_number += 1;
-        let mut raw_line = body_line;
-        let (found, found_with_warning) = {
-            let awaiting = &mut self.awaiting_bodies[0];
-            let mut comparable = if awaiting.delimiter.strip_tabs {
-                raw_line.trim_start_matches('\t').to_string()
-            } else {
-                raw_line.clone()
-            };
-            if !awaiting.delimiter.quoted {
-                let trailing_slashes = raw_line.chars().rev().take_while(|ch| *ch == '\\').count();
-                if trailing_slashes % 2 == 1 {
-                    let mut continued = raw_line;
-                    continued.pop();
-                    awaiting.continued_body_line.push_str(&continued);
-                    return;
-                }
-                if !awaiting.continued_body_line.is_empty() {
-                    awaiting.continued_body_line.push_str(&raw_line);
-                    comparable = std::mem::take(&mut awaiting.continued_body_line);
-                }
-            }
-            let value = awaiting.delimiter.value.clone();
-            let allow_closing_paren = awaiting.delimiter.allow_closing_paren;
-            let strip_suffix_match = comparable
-                .strip_suffix(')')
-                .is_some_and(|value| *value == awaiting.delimiter.value);
-            let mut found = false;
-            let mut found_with_warning = false;
-            if comparable == value {
-                found = true;
-            } else if allow_closing_paren
-                && comparable.starts_with(value.as_str())
-                && comparable[value.len()..].contains(')')
-            {
-                found = true;
-                found_with_warning = true;
-            } else if allow_closing_paren && strip_suffix_match {
-                found = true;
-                found_with_warning = true;
-            } else if self.in_comsub
-                && comparable.starts_with(value.as_str())
-                && comparable[value.len()..].trim().is_empty()
-            {
-                found = true;
-            }
-            if !found {
-                awaiting.body.push_str(&comparable);
-                awaiting.body.push('\n');
-            }
-            (found, found_with_warning)
-        };
-        if found {
-            let mut awaiting = self.awaiting_bodies.remove(0);
-            if found_with_warning {
-                awaiting
-                    .body
-                    .insert(0, crate::executor::markers::HEREDOC_WARNED_BODY_PREFIX);
-            }
-            if awaiting.delimiter.quoted {
-                awaiting.body.insert_str(0, QUOTED_HEREDOC_MARKER);
-            }
-            let token = Token::new(TokenKind::HereDocBody, &awaiting.body, awaiting.gather_line);
-            self.output.push(token.clone());
-            self.fold_token(&token);
-            if self.awaiting_bodies.is_empty() {
-                self.emit_line_separator();
-            }
-        }
-    }
-
-    fn emit_line_separator(&mut self) {
-        let mut separator = Token::new(TokenKind::Semicolon, ";", self.logical_start_line);
-        separator.line_break = true;
-        self.output.push(separator.clone());
-        self.fold_token(&separator);
-        // GNU read_token reads this line break as a '\n' token before the
-        // next line's first token (reserved_word_acceptable, parse.y:5902);
-        // the separator above is emitted downstream of the Lexer, so the
-        // carried reader state must record the break itself.
-        self.lexer_parse_state.note_line_break();
-        // The open logical line is fully committed: the next line starts a
-        // fresh one, and a later full re-lex must refold from here.
-        self.open_folded = 0;
-        self.open_snapshot = (self.keyword_stack.clone(), self.last_significant.clone());
-    }
-
-    /// The parked main loop: the body of the original `while let
-    /// Some(raw_line) = lines.next()` iteration.
-    fn push_main_line(&mut self, raw_line: &str, total_input_len: usize, tokenize_depth: usize) {
-        if self.overflowed {
-            return;
-        }
+    while let Some(raw_line) = lines.next() {
         // niubash #106: a '\r' immediately before the '\n' belongs to the
         // CRLF line terminator, not to the last word — a Windows-native
         // shell must accept CRLF scripts (v1.1.1 did; the shipped
         // oh-my-niu bundle is 100% CRLF). The GNU-fidelity rule this loop
-        // documents below still applies to a '\r' NOT followed by '\n':
+        // documents above still applies to a '\r' NOT followed by '\n':
         // `set ""<CR>` with a bare carriage return keeps $1 = "\r".
         // rubash#140: the tolerance is a Windows product decision
         // (CRT text-mode compensation, niubash#120 family). GNU on unix
-        // keeps the '\r' as literal word data — CRLF scripts there fail
+        // keeps the '\r' as literal word data — a CRLF script there fails
         // with `$'getopts\r': command not found` (parse.y read_token /
         // read_secondary_line have no CR stripping) — so gate it.
         let line = if cfg!(windows) {
@@ -563,17 +355,22 @@ impl GroupScanFeeder {
         } else {
             raw_line
         };
-        if self.logical_line.is_empty() {
-            self.logical_start_line = self.line_number;
+        // str::lines() drops the trailing empty string that split('\n')
+        // produces when the input ends with '\n'. Replicate that here.
+        if line.is_empty() && lines.peek().is_none() {
+            break;
         }
-        if !self.logical_line.is_empty() && !self.continued_line {
-            self.logical_line.push('\n');
+        if logical_line.is_empty() {
+            logical_start_line = line_number;
         }
-        self.continued_line = false;
-        self.logical_line.push_str(line);
-        self.position += line.len() + 1;
-        let line_had_terminator = self.position <= total_input_len;
-        self.line_number += 1;
+        if !logical_line.is_empty() && !continued_line {
+            logical_line.push('\n');
+        }
+        continued_line = false;
+        logical_line.push_str(line);
+        position += line.len() + 1;
+        let line_had_terminator = position <= input.len();
+        line_number += 1;
 
         // rubash#155 / #130 fast path. GNU reads tokens sequentially
         // (parse.y:3557 read_token): one pass over the input, with the
@@ -589,18 +386,40 @@ impl GroupScanFeeder {
         // reaching the join `continue` below proves that), a physical line
         // without any quote, escape, expansion, brace, paren, comment,
         // heredoc or `posix` bytes provably cannot change any of the
-        // decisions this iteration would recompute (full byte-set
-        // justification in the landed r#155/#130 audit). Every other
-        // intermediate result is discarded by the join `continue` and
-        // recomputed by the final full pass, so the accepted token stream
-        // is byte-identical; only the per-line work drops from
+        // decisions this iteration would recompute:
+        //
+        // - has_unclosed_quotes / _command_substitution /
+        //   _compound_assignment / _parameter_expansion: opening any of
+        //   them needs ' " ` $ ( { bytes; closing the already-open `${...}`
+        //   alternative needs `}`.
+        // - tokens_open_unclosed_brace_group: the standalone `{` keyword
+        //   flag persists — the group only folds when skip_brace finds its
+        //   `}`, and `brace_group_contains_heredoc_operator` can only gain
+        //   a `<<` (both need `}` / `<` bytes; even then the `{` stays a
+        //   standalone keyword either way).
+        // - ends_with_unquoted_backslash: needs a `\`; the backslash join
+        //   that popped one cannot have been taken on the previous pass.
+        // - line_posix_mode_change: the `posix` token of `set -o posix`
+        //   requires the contiguous substring once quoting and escaping
+        //   bytes are excluded.
+        // - heredoc_delimiters / relocate_comsub_heredoc_paren / the
+        //   comsub-heredoc header scan: all need `<`, `$` or quote bytes;
+        //   with the command substitution closed, keep header_scan_from
+        //   pacing the accumulated text exactly as the slow path's closed
+        //   branch does.
+        //
+        // Every other intermediate result (token gap capture, heredoc
+        // delimiter line numbers, line_posix_mode_change) is discarded by
+        // the join `continue` and recomputed by the final full pass, which
+        // still runs the unchanged code below — so the accepted token
+        // stream is byte-identical; only the per-line work drops from
         // O(accumulated buffer) to O(this line).
-        if self.brace_join_active && brace_join_fast_path_line(line) {
-            self.header_scan_from = self.logical_line.len();
-            return;
+        if brace_join_active && brace_join_fast_path_line(line) {
+            header_scan_from = logical_line.len();
+            continue;
         }
 
-        let comsub_open = has_unclosed_command_substitution(&self.logical_line);
+        let comsub_open = has_unclosed_command_substitution(&logical_line);
         if !comsub_open {
             // GNU make_cmd.c:602-611: when the `)` closing the command
             // substitution sits on the heredoc delimiter line (e.g. `EOF)`),
@@ -611,7 +430,7 @@ impl GroupScanFeeder {
             // delimiter followed by `)` — NOT when `)` is on the header line
             // (e.g. `cat << EOF)`), which is a different case handled by
             // heredoc_header_closes_command_substitution.
-            if let Some(front) = self.comsub_heredocs.first().cloned() {
+            if let Some(front) = comsub_heredocs.first().cloned() {
                 let comparable = if front.strip_tabs {
                     line.trim_start_matches('\t')
                 } else {
@@ -621,25 +440,26 @@ impl GroupScanFeeder {
                     && comparable[front.delimiter.len()..].contains(')')
                 {
                     // Insert \x1c before the first `)` after the delimiter
-                    // in the logical line. The search is scoped to the
-                    // physical line just appended: `rfind` on the whole
-                    // logical line could land on the pushed-back `)` itself
-                    // (delim `)`) or on a `)` from an earlier line.
-                    let line_start = self.logical_line.len() - line.len();
+                    // in the logical line. command_substitution_heredoc_output_mut_typed
+                    // will detect and remove it before parsing. The search is
+                    // scoped to the physical line just appended: `rfind` on
+                    // the whole logical line could land on the pushed-back
+                    // `)` itself (delim `)`) or on a `)` from an earlier line.
+                    let line_start = logical_line.len() - line.len();
                     let delim_end =
                         line_start + (line.len() - comparable.len()) + front.delimiter.len();
-                    if let Some(rel_pos) = self.logical_line[delim_end..].find(')') {
-                        self.logical_line
+                    if let Some(rel_pos) = logical_line[delim_end..].find(')') {
+                        logical_line
                             .insert(delim_end + rel_pos, crate::executor::markers::IFS_GLUE);
                         // Mid-string rewrite: positional scan cache invalid.
-                        self.brace_cache.clear();
-                        self.unclosed_quotes_cache = None;
-                        self.boundary = None;
+                        brace_cache.clear();
+                        unclosed_quotes_cache = None;
+                        boundary = None;
                     }
                 }
             }
-            self.comsub_heredocs.clear();
-        } else if let Some(front) = self.comsub_heredocs.first().cloned() {
+            comsub_heredocs.clear();
+        } else if let Some(front) = comsub_heredocs.first().cloned() {
             // The appended line is a heredoc body line inside the open
             // substitution: close the heredoc on an exact delimiter line or
             // on a delimiter-prefixed `)` line (GNU make_cmd.c:602-611).
@@ -652,24 +472,24 @@ impl GroupScanFeeder {
                 || (comparable.starts_with(front.delimiter.as_str())
                     && comparable[front.delimiter.len()..].contains(')'))
             {
-                self.comsub_heredocs.remove(0);
+                comsub_heredocs.remove(0);
             }
         }
-        let in_comsub_heredoc_body = comsub_open && !self.comsub_heredocs.is_empty();
+        let in_comsub_heredoc_body = comsub_open && !comsub_heredocs.is_empty();
 
         if line_had_terminator
-            && ends_with_unquoted_backslash(&self.logical_line)
+            && ends_with_unquoted_backslash(&logical_line)
             && !in_comsub_heredoc_body
         {
-            self.logical_line.pop();
+            logical_line.pop();
             // The popped byte changes the text every later offset depends
             // on: positional scan cache invalid.
-            self.brace_cache.clear();
-            self.unclosed_quotes_cache = None;
-            self.boundary = None;
-            self.continued_line = true;
-            self.brace_join_active = false;
-            return;
+            brace_cache.clear();
+            unclosed_quotes_cache = None;
+            boundary = None;
+            continued_line = true;
+            brace_join_active = false;
+            continue;
         }
         // parse.y:5379-5384: a backslash before EOF is NOT removed — GNU's
         // read_token_word ungets EOF and keeps the `\` as a quoted literal
@@ -680,46 +500,42 @@ impl GroupScanFeeder {
         // join decision): a header whose delimiter is completed by the next
         // physical line (`cat <<\EOT\` + `4` = delimiter `EOT4`) is only
         // complete after the join, so the scan resumes from the last `<<`.
-        if comsub_open && self.comsub_heredocs.is_empty() {
-            let slice_from = self.header_scan_from.min(self.logical_line.len());
-            let slice = &self.logical_line[slice_from..];
+        if comsub_open && comsub_heredocs.is_empty() {
+            let slice = &logical_line[header_scan_from.min(logical_line.len())..];
             let (mut headers, consumed) = scan_line_for_comsub_heredoc_headers(slice);
             if consumed == slice.len() || headers.is_empty() {
-                self.header_scan_from = self.logical_line.len();
+                header_scan_from = logical_line.len();
             } else {
-                self.header_scan_from = self.logical_line.len() - slice.len() + consumed;
+                header_scan_from = logical_line.len() - slice.len() + consumed;
             }
-            self.comsub_heredocs.append(&mut headers);
+            comsub_heredocs.append(&mut headers);
         } else if !comsub_open {
             // Keep pace with consumed text: earlier substitutions' headers are
             // already gathered and must not be rediscovered on the next scan.
-            self.header_scan_from = self.logical_line.len();
+            header_scan_from = logical_line.len();
         }
 
-        let hq = match self
-            .unclosed_quotes_cache
-            .filter(|_| line_is_quote_inert(line))
-        {
+        let hq = match unclosed_quotes_cache.filter(|_| line_is_quote_inert(line)) {
             Some(cached) => cached,
             _ => {
-                let value = has_unclosed_quotes(&self.logical_line);
-                self.unclosed_quotes_cache = Some(value);
+                let value = has_unclosed_quotes(&logical_line);
+                unclosed_quotes_cache = Some(value);
                 value
             }
         };
         if hq {
-            self.brace_join_active = false;
-            return;
+            brace_join_active = false;
+            continue;
         }
-        if has_unclosed_command_substitution(&self.logical_line) {
-            self.brace_join_active = false;
-            return;
+        if has_unclosed_command_substitution(&logical_line) {
+            brace_join_active = false;
+            continue;
         }
         // A `name=(` compound array assignment keeps reading physical lines
         // until its matching `)` (parse.y; ISSUE #78).
-        if has_unclosed_compound_assignment(&self.logical_line) {
-            self.brace_join_active = false;
-            return;
+        if has_unclosed_compound_assignment(&logical_line) {
+            brace_join_active = false;
+            continue;
         }
         // GNU parse.y parse_comsub (PST_EOFTOKEN) + print_comsub
         // (parse.y:4632): a `)` on a heredoc header line inside `$(...)`
@@ -728,12 +544,12 @@ impl GroupScanFeeder {
         // reprinted with the body inside the closing `)`. Rotate
         // `$(cat <<EOF)\nfoo\nEOF` into `$(cat <<EOF\nfoo\nEOF)` so every
         // downstream consumer sees the GNU reprint order (heredoc7.sub).
-        if let Some(rotated) = relocate_comsub_heredoc_paren(&self.logical_line) {
-            self.logical_line = rotated;
+        if let Some(rotated) = relocate_comsub_heredoc_paren(&logical_line) {
+            logical_line = rotated;
             // Rotation rewrites the middle of the line: cache invalid.
-            self.brace_cache.clear();
-            self.unclosed_quotes_cache = None;
-            self.boundary = None;
+            brace_cache.clear();
+            unclosed_quotes_cache = None;
+            boundary = None;
         }
         // GNU reads tokens sequentially (parse.y read_token): the reader
         // state feeding reserved_word_acceptable (parse.y:5899) is the state
@@ -746,28 +562,22 @@ impl GroupScanFeeder {
         // made `{)\t: brace ;;` fold after `esac` joined (the previous
         // partial ended with last=esac, so `{` sat in reserved-word
         // position) and swallowed the rest of the function body.
-        let mut line_lex_state = self.lexer_parse_state.clone();
-        let boundary_was_some = self.boundary.is_some();
+        let mut line_lex_state = lexer_parse_state.clone();
         let (mut line_tokens, pass_boundary) = tokenize_with_boundary(
-            self.boundary.take(),
+            boundary.take(),
             !line.contains('}'),
-            &self.logical_line,
-            self.parse_posix,
+            &logical_line,
+            parse_posix,
             &mut line_lex_state,
-            &mut self.brace_cache,
+            &mut brace_cache,
         );
-        // Summary fold BEFORE the join branch moves `line_tokens` into the
-        // next boundary checkpoint: a resumed pass extends the previous
-        // list (fold only the delta), a full re-lex restores the open
-        // line's start snapshot and refolds everything.
-        self.fold_pass_tokens(&line_tokens, boundary_was_some && !line.contains('}'));
         if let Some(updated) = line_posix_mode_change(&line_tokens) {
-            if self.parse_posix != updated {
+            if parse_posix != updated {
                 // The full pass would re-lex the whole line under the new
                 // mode; a resumed tail must not mix modes.
-                self.boundary = None;
+                boundary = None;
             }
-            self.parse_posix = updated;
+            parse_posix = updated;
         }
         // rubash#131: a top-level `shopt -s/-u extglob` executes before the
         // next line parses in GNU's read-execute loop; mirror that for the
@@ -775,21 +585,21 @@ impl GroupScanFeeder {
         // above). Disabled under -n (nothing executes) and after a top-level
         // `set -n` (GNU executes `set -n` and then only parses).
         // `tokenize_depth == 1` is the outermost script tokenization.
-        if parse_execution_expected() && self.extglob_flips_allowed && tokenize_depth == 1 {
+        if parse_execution_expected() && extglob_flips_allowed && tokenize_depth == 1 {
             match line_extglob_mode_change(&line_tokens) {
                 ExtglobFlip::Enable => {
                     if !parse_extended_glob() {
                         set_parse_extended_glob(true);
-                        self.boundary = None;
+                        boundary = None;
                     }
                 }
                 ExtglobFlip::Disable => {
                     if parse_extended_glob() {
                         set_parse_extended_glob(false);
-                        self.boundary = None;
+                        boundary = None;
                     }
                 }
-                ExtglobFlip::ExecutionOff => self.extglob_flips_allowed = false,
+                ExtglobFlip::ExecutionOff => extglob_flips_allowed = false,
                 ExtglobFlip::None => {}
             }
         }
@@ -799,31 +609,30 @@ impl GroupScanFeeder {
         // recover the exact inter-token spacing for raw arithmetic capture.
         let mut previous_end = 0usize;
         for token in line_tokens.iter_mut() {
-            let start = token.column.min(self.logical_line.len());
+            let start = token.column.min(logical_line.len());
             // Some lexer paths emit tokens whose columns do not advance
             // monotonically through the logical line; skip the gap capture
             // for those instead of slicing an inverted byte range.
             if start >= previous_end {
-                let gap = &self.logical_line[previous_end..start];
+                let gap = &logical_line[previous_end..start];
                 if gap.chars().all(char::is_whitespace) {
                     token.leading_ws = gap.to_string();
                 }
             }
             previous_end = previous_end
                 .max(start.saturating_add(token.raw.len()))
-                .min(self.logical_line.len());
+                .min(logical_line.len());
         }
-        let has_heredoc =
-            !heredoc_delimiters(&line_tokens, &self.logical_line, self.in_comsub).is_empty();
+        let has_heredoc = !heredoc_delimiters(&line_tokens, &logical_line, in_comsub).is_empty();
         // Join forward only on signals the tokens themselves prove: an
         // unclosed reserved-word `{` group (see tokens_open_unclosed_brace_group)
         // or an unterminated `${...}` parameter expansion. The old text-level
         // has_unclosed_brace_group counted `case x in {)`'s pattern brace as a
         // group opener, joining the pattern line to far-away text.
         let brace_group_open = tokens_open_unclosed_brace_group(&line_tokens);
-        let param_expansion_open = has_unclosed_parameter_expansion(&self.logical_line);
+        let param_expansion_open = has_unclosed_parameter_expansion(&logical_line);
         if (brace_group_open || param_expansion_open)
-            && !opens_function_body_after_previous_signature(&self.logical_line, &self.output)
+            && !opens_function_body_after_previous_signature(&logical_line, &output)
             && !has_heredoc
         {
             // Reaching here proves quotes, command substitutions and
@@ -837,20 +646,20 @@ impl GroupScanFeeder {
             // ended inside a word span), the pass ended between tokens and
             // `pass_boundary` is Some: checkpoint its tokens + lexer state
             // so the next pass lexes only the appended tail. The token Vec
-            // moves in (the join `return` discards it anyway).
+            // moves in (the join `continue` discards it anyway).
             if brace_group_open && !param_expansion_open {
                 if let Some(state) = pass_boundary {
-                    self.boundary = Some((self.logical_line.len(), line_tokens, state));
+                    boundary = Some((logical_line.len(), line_tokens, state));
                 }
             }
-            self.brace_join_active = true;
-            return;
+            brace_join_active = true;
+            continue;
         }
 
         for token in &mut line_tokens {
-            token.position = self.logical_start_line;
+            token.position = logical_start_line;
         }
-        let delimiters = heredoc_delimiters(&line_tokens, &self.logical_line, self.in_comsub);
+        let delimiters = heredoc_delimiters(&line_tokens, &logical_line, in_comsub);
         // GNU parse.y push_heredoc (shell.h HEREDOC_MAX 16): the 17th heredoc
         // on one command is a fatal parse error. GNU runs report_syntax_error
         // then exit_shell(EX_BADUSAGE), so the shell dies with status 2 and
@@ -862,22 +671,21 @@ impl GroupScanFeeder {
         // its script-relative line and stop tokenizing. `main` converts the
         // recorded flag into the EX_BADUSAGE exit status.
         if delimiters.len() > 16 {
-            crate::lexer::record_heredoc_overflow(self.logical_start_line);
-            self.overflowed = true;
-            return;
+            crate::lexer::record_heredoc_overflow(logical_start_line);
+            break;
         }
-        self.output.append(&mut line_tokens);
-        // Commit only when the logical line is accepted: the `return`s above
-        // discard the partial state so the next, longer retry replays from
+        output.append(&mut line_tokens);
+        // Commit only when the logical line is accepted: `continue` above
+        // discards the partial state so the next, longer retry replays from
         // the same line-start state (see the comment at tokenize_plain).
-        self.lexer_parse_state = line_lex_state;
-        self.logical_line.clear();
-        self.unclosed_quotes_cache = None;
-        self.boundary = None;
+        lexer_parse_state = line_lex_state;
+        logical_line.clear();
+        unclosed_quotes_cache = None;
+        boundary = None;
         // Offsets restart for the next logical line: cache invalid.
-        self.brace_cache.clear();
-        self.header_scan_from = 0;
-        self.brace_join_active = false;
+        brace_cache.clear();
+        header_scan_from = 0;
+        brace_join_active = false;
 
         for delimiter in delimiters {
             // GNU parse.y:3120-3135 gather_here_documents passes the parser's
@@ -887,102 +695,179 @@ impl GroupScanFeeder {
             // any earlier heredoc of the same command consumed.  The
             // "here-document at line N" warning reports this gather line, not
             // the `<<` line, so it must travel with the body token.
-            let gather_line = self.line_number.saturating_sub(1);
+            let gather_line = line_number.saturating_sub(1);
             // Alias reparsing must leave the caller's physical input available:
             // its heredoc body belongs to the outer parse, not this replacement.
-            if self.input_origin == InputOrigin::AliasReplacementDeferredHeredoc {
+            if input_origin == InputOrigin::AliasReplacementDeferredHeredoc {
                 let body = if delimiter.quoted {
                     QUOTED_HEREDOC_MARKER.to_string()
                 } else {
                     String::new()
                 };
-                let token = Token::new(TokenKind::HereDocBody, &body, gather_line);
-                self.output.push(token.clone());
-                self.fold_token(&token);
+                output.push(Token::new(TokenKind::HereDocBody, &body, gather_line));
                 continue;
             }
-            self.awaiting_bodies.push(AwaitingHeredocBody {
-                delimiter,
-                body: String::new(),
-                continued_body_line: String::new(),
-                gather_line,
-            });
+            let mut body = String::new();
+            let mut continued_body_line = String::new();
+            let mut found_delimiter = false;
+            let mut found_with_warning = false;
+            while let Some(body_line) = lines.next() {
+                // Skip the trailing empty string produced by split('\n')
+                // when the input ends with '\n' (matching the main loop's
+                // str::lines() semantics). Without this, an unterminated
+                // heredoc at EOF gets an extra empty body line, making the
+                // warning line number off by 1.
+                if body_line.is_empty() && lines.peek().is_none() {
+                    break;
+                }
+                // niubash #106: heredoc bodies share the main loop's CRLF
+                // rule — a trailing '\r' is the line terminator, so CRLF
+                // scripts can match their own delimiters and bodies stay
+                // clean. Bare '\r' (no following '\n') is preserved.
+                // rubash#140: Windows-only tolerance; GNU on unix keeps
+                // the '\r' as delimiter/body data (make_here_document
+                // compares the raw line, make_cmd.c).
+                let body_line = if cfg!(windows) {
+                    body_line
+                        .strip_suffix('\r')
+                        .unwrap_or(body_line)
+                        .to_string()
+                } else {
+                    body_line.to_string()
+                };
+                position += body_line.len() + 1;
+                line_number += 1;
+                let mut raw_line = body_line.to_string();
+                let mut comparable = if delimiter.strip_tabs {
+                    raw_line.trim_start_matches('\t').to_string()
+                } else {
+                    raw_line.clone()
+                };
+
+                if !delimiter.quoted {
+                    let trailing_slashes =
+                        raw_line.chars().rev().take_while(|ch| *ch == '\\').count();
+                    if trailing_slashes % 2 == 1 {
+                        let mut continued = raw_line;
+                        continued.pop();
+                        continued_body_line.push_str(&continued);
+                        continue;
+                    }
+                    if !continued_body_line.is_empty() {
+                        continued_body_line.push_str(&raw_line);
+                        comparable = std::mem::take(&mut continued_body_line);
+                    }
+                }
+
+                if comparable == delimiter.value {
+                    found_delimiter = true;
+                    break;
+                }
+                // GNU make_cmd.c:602-611 (PST_EOFTOKEN): inside a command
+                // substitution, a body line that starts with the delimiter
+                // and contains `)` (the shell_eof_token) terminates the
+                // heredoc as if it hit EOF; the body keeps only the lines
+                // before it, and a warning is issued (full_line=0).  This
+                // covers `EOF)`, `EOF )`, and `))` (when the delimiter is
+                // `)` itself).
+                if delimiter.allow_closing_paren
+                    && comparable.starts_with(delimiter.value.as_str())
+                    && comparable[delimiter.value.len()..].contains(')')
+                {
+                    found_delimiter = true;
+                    found_with_warning = true;
+                    break;
+                }
+                // GNU make_cmd.c:602: a body line that is exactly the
+                // delimiter followed by `)` (e.g. `EOF)`) also terminates
+                // the heredoc with a warning on the non-comsub path.
+                if delimiter.allow_closing_paren
+                    && comparable
+                        .strip_suffix(')')
+                        .is_some_and(|value| value == delimiter.value)
+                {
+                    found_delimiter = true;
+                    found_with_warning = true;
+                    break;
+                }
+                if in_comsub
+                    && comparable.starts_with(delimiter.value.as_str())
+                    && comparable[delimiter.value.len()..].trim().is_empty()
+                {
+                    found_delimiter = true;
+                    break;
+                }
+                body.push_str(&comparable);
+                body.push('\n');
+            }
+            if !found_delimiter {
+                body.insert(0, DATA_DOLLAR);
+            } else if found_with_warning {
+                body.insert(0, crate::executor::markers::HEREDOC_WARNED_BODY_PREFIX);
+            }
+            if delimiter.quoted {
+                body.insert_str(0, QUOTED_HEREDOC_MARKER);
+            }
+            output.push(Token::new(TokenKind::HereDocBody, &body, gather_line));
         }
-        if self.awaiting_bodies.is_empty() {
-            self.emit_line_separator();
-        }
+        let mut separator = Token::new(TokenKind::Semicolon, ";", logical_start_line);
+        separator.line_break = true;
+        output.push(separator);
+        // GNU read_token reads this line break as a '\n' token before the
+        // next line's first token (reserved_word_acceptable, parse.y:5902);
+        // the separator above is emitted downstream of the Lexer, so the
+        // carried reader state must record the break itself.
+        lexer_parse_state.note_line_break();
     }
 
-    /// End of input: the original loop's post-loop flush (leftover open
-    /// logical line) plus the parked body-pull loops' EOF exits — an
-    /// unterminated heredoc keeps the DATA_DOLLAR "not found" marker.
-    pub(crate) fn finish(&mut self) -> Vec<Token> {
-        if !self.awaiting_bodies.is_empty() {
-            while let Some(mut awaiting) = self.awaiting_bodies.pop() {
-                awaiting.body.insert(0, DATA_DOLLAR);
-                if awaiting.delimiter.quoted {
-                    awaiting.body.insert_str(0, QUOTED_HEREDOC_MARKER);
-                }
-                let token =
-                    Token::new(TokenKind::HereDocBody, &awaiting.body, awaiting.gather_line);
-                self.output.push(token.clone());
-                self.fold_token(&token);
-            }
-            self.emit_line_separator();
+    if !logical_line.is_empty() {
+        // GNU parse.y parse_comsub (PST_EOFTOKEN) + print_comsub
+        // (parse.y:4632): a `)` on a heredoc header line inside `$(...)`
+        // closes the substitution while the still-pending body was gathered
+        // from the following input lines, and the substitution text is
+        // reprinted with the body inside the closing `)`. Rotate
+        // `$(cat <<EOF)\nfoo\nEOF` into `$(cat <<EOF\nfoo\nEOF)` so every
+        // downstream consumer sees the GNU reprint order (heredoc7.sub).
+        if let Some(rotated) = relocate_comsub_heredoc_paren(&logical_line) {
+            logical_line = rotated;
+            brace_cache.clear();
+            boundary = None;
         }
-        if !self.logical_line.is_empty() {
-            // GNU parse.y parse_comsub (PST_EOFTOKEN) + print_comsub
-            // (parse.y:4632): a `)` on a heredoc header line inside `$(...)`
-            // closes the substitution while the still-pending body was gathered
-            // from the following input lines, and the substitution text is
-            // reprinted with the body inside the closing `)`. Rotate
-            // `$(cat <<EOF)\nfoo\nEOF` into `$(cat <<EOF\nfoo\nEOF)` so every
-            // downstream consumer sees the GNU reprint order (heredoc7.sub).
-            if let Some(rotated) = relocate_comsub_heredoc_paren(&self.logical_line) {
-                self.logical_line = rotated;
-                self.brace_cache.clear();
-                self.boundary = None;
-            }
-            let (mut line_tokens, _) = tokenize_with_boundary(
-                self.boundary.take(),
-                false,
-                &self.logical_line,
-                self.parse_posix,
-                &mut self.lexer_parse_state,
-                &mut self.brace_cache,
-            );
-            // The flush's full re-lex replaces the open line's pass results:
-            // refold from the line-start snapshot (a fresh scan folds the
-            // committed tokens plus this list exactly once).
-            self.fold_pass_tokens(&line_tokens, false);
-            // GNU parse.y line_number is PHYSICAL: the reader increments it per
-            // physical line consumed, and the unclosed-construct EOF diagnostics
-            // ("unexpected end of file from `{' command on line N") number both
-            // the innermost opener and the EOF position from it. The leftover
-            // logical line at end of input spans every physical line the open
-            // construct accumulated, so map each token's byte offset (its
-            // `column`) back to its physical line instead of stamping the whole
-            // run with the first line (`{ </n>cmd1 </n>cmd2` reported the EOF at
-            // line 2 where GNU reports line 4, rubash#278).
-            let leftover_spans_lines = self.logical_line.contains('\n');
-            for token in &mut line_tokens {
-                token.position = if leftover_spans_lines {
-                    self.logical_start_line
-                        + self.logical_line[..token.column.min(self.logical_line.len())]
-                            .matches('\n')
-                            .count()
-                } else {
-                    self.logical_start_line
-                };
-            }
-            self.output.append(&mut line_tokens);
-            let mut separator = Token::new(TokenKind::Semicolon, ";", self.logical_start_line);
-            separator.line_break = true;
-            self.output.push(separator.clone());
-            self.fold_token(&separator);
+        let (mut line_tokens, _) = tokenize_with_boundary(
+            boundary.take(),
+            false,
+            &logical_line,
+            parse_posix,
+            &mut lexer_parse_state,
+            &mut brace_cache,
+        );
+        // GNU parse.y line_number is PHYSICAL: the reader increments it per
+        // physical line consumed, and the unclosed-construct EOF diagnostics
+        // ("unexpected end of file from `{' command on line N") number both
+        // the innermost opener and the EOF position from it. The leftover
+        // logical line at end of input spans every physical line the open
+        // construct accumulated, so map each token's byte offset (its
+        // `column`) back to its physical line instead of stamping the whole
+        // run with the first line (`{ </n>cmd1 </n>cmd2` reported the EOF at
+        // line 2 where GNU reports line 4, rubash#278).
+        let leftover_spans_lines = logical_line.contains('\n');
+        for token in &mut line_tokens {
+            token.position = if leftover_spans_lines {
+                logical_start_line
+                    + logical_line[..token.column.min(logical_line.len())]
+                        .matches('\n')
+                        .count()
+            } else {
+                logical_start_line
+            };
         }
-        std::mem::take(&mut self.output)
+        output.append(&mut line_tokens);
+        let mut separator = Token::new(TokenKind::Semicolon, ";", logical_start_line);
+        separator.line_break = true;
+        output.push(separator);
     }
+
+    output
 }
 
 /// A heredoc opened inside an unclosed command substitution, tracked while
