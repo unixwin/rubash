@@ -71,3 +71,21 @@
 - resid1 ✅（997d4a44：#274/#275/#276/#278 四单关闭——print_comsub 全端口+物理行号映射；第 84-87 单）；残余开单 #284（comsub 内空 case）/#285（近词法错误回显重构行）
 - resid2 ✅（475c6dc0：#277/#279/#280/#283 四单关闭——printf 八项修复三平价、ble source 字节平价、#282 电池 PASS 攻至船长文件前）→ **船长接手：#282 的 continuation.rs has_unclosed_quotes 自旋（复现在 issue #282）**；WinuxCmd#1133 已开（hexdump 尾垫）
 | 今日：91 单关闭；开放板=#241/#242/#251?/#282/#284/#285（+interactive 车道在途）——**船长下一动作=修自旋**
+
+## 2026-09-28 下午更新（交互/主题战役 + 车道验收）
+
+**主线（用户环境连环修，均已提交推送）**：
+- 启动挂死根因：宿主内置 `niubash-gitstatus` 后台线程死锁 → niubash#145 立案（LLDB 实锤+二分证据），本地 rc 已迁 oh-my-bash agnoster，**retire-theme 车道在途**（删宿主 git prompt+内置主题栈，wt9/retiretheme）
+- `$-` 无 i：niubash REPL 不设 `__RUBASH_INTERACTIVE` → f93214b 修（enter_interactive）
+- PROMPT_COMMAND 数组执行：引擎零实现 → **899ab036**（eval.c:305 全端口：数组逐元素/assoc 拒绝/标量一次 + run_repl/run_interactive_stdin 接线 + 4 单测）；宿主改调引擎 API
+- bind 警告：无条件告警 → **b25e60f8**（交互静默/脚本保留，对齐 GNU no_line_editing）
+- 数组 += 单引号整词转义：**847ab883** 修 storage 层；**初始复合赋值仍丢 → #288**（agnoster `[e[33m]` 噪声根因），**arrayesc 车道在途**（wt9/arrayesc）
+- OMB 加载性能：-c 0.139s vs -C 2.58s，OMB source 1.44s 且组件裁剪无差异 = 引擎侧固定成本 → **ombperf 车道在途**（wt9/ombperf，owner 定性：我们自己慢，不改 OMB）
+- CI 红根因=builtin2 的 ulimit Linux libc 类型炸 + 6 处 UTF-8 加宽 → **763e2e84** 修复；niubash CI 挂同一雷，rubash 绿后 rerun
+- 新开单：rubash#288（数组转义）、niubash#145（启动挂死+删内置栈）、niubash#146（管道 -i 跳 rc）、niubash#147（真终端 cd 后 EOF+尾挂 `)`，ConPTY 域）
+
+**车道验收（三验收 agent 并行在跑）**：
+- interactive2（b2f3d0da）：❌ 退回——新 test target 7/8 红（`!echo` event not found），证据在 #286 评论，不 cherry-pick
+- sourcefix（93147937+5953be2b）/ merge144（308ee940）/ resid3（bc6e6da7）：验收中（五门禁+GNU 对照）
+- perf4：工作树脏半成品，不验收，待断点续作
+- ConPTY 自动化已建：pywinpty 模板 `target/ombtest/pty_probe2.py`（真终端断言：banner/bind 警告/命令/cd EOF/PS1 噪声）
