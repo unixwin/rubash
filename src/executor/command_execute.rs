@@ -733,7 +733,10 @@ impl Executor {
     /// detects leading array-style assignment words, reports the diagnostic
     /// for each, strips them, and returns the modified command so the
     /// remaining command word(s) reach function/builtin/external dispatch.
-    fn strip_invalid_env_assignment_prefixes(&mut self, cmd: &CommandNode) -> CommandNode {
+    fn strip_invalid_env_assignment_prefixes<'a>(
+        &mut self,
+        cmd: &'a CommandNode,
+    ) -> std::borrow::Cow<'a, CommandNode> {
         // Find the run of leading array-style assignment words.
         let mut prefix_end = 0usize;
         for index in 0..cmd.words.len() {
@@ -745,8 +748,15 @@ impl Executor {
         // Only strip when there is at least one remaining command word.
         // If all words are array-style assignments, the command is
         // assignment-only and execute_array_element_assignment handles it.
+        //
+        // GNU execute_simple_command walks the WORD_LIST by pointer
+        // (execute_cmd.c:4550+; the assignment/word classification is flag
+        // tests on existing nodes, no command copy) — the common nothing-to-
+        // strip case must not pay a whole-CommandNode deep copy, so borrow
+        // instead of cloning (Cow; the copy exists only when words are
+        // actually removed).
         if prefix_end == 0 || prefix_end >= cmd.words.len() {
-            return cmd.clone();
+            return std::borrow::Cow::Borrowed(cmd);
         }
         // Report the diagnostic for each invalid identifier, mirroring
         // GNU assign_in_env -> sh_invalidid -> builtin_error. The name is
@@ -773,7 +783,7 @@ impl Executor {
         if cmd.word_metadata.len() > prefix_end {
             stripped.word_metadata = cmd.word_metadata[prefix_end..].to_vec();
         }
-        stripped
+        std::borrow::Cow::Owned(stripped)
     }
 }
 
