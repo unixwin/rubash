@@ -120,3 +120,10 @@
 - CI 双绿连续 5 轮稳定（nextest 基建后无隐性挂死）
 - **在途三车道（wt11）**：inter3（#297/#300 交互初始化）、lexmix（#302/#304 解析域）、almix（#301/#303 存储域）
 - 队列：#295（arrayesc 深水）、#294（CI 挂观察）、niubash #146/#147/#148、contperf 同族后续（has_unclosed_quotes/compound 全扫）
+
+## 2026-09-29 凌晨第三波（wt11 收官）
+
+- **17 单关闭**（两日累计）：wt11 三车道全回收——almix（#301 别名反斜杠=DATA_BACKSLASH 载体化 / #303 '${@}' 字面量=!in_span 门）、inter3（#297 rcfile exit 三层根因 / #300 COLUMNS/LINES 双机制移植）、lexmix（#302 function 头分组器截断（纠正 extglob 误诊，真实 OMB svn completion source 干净）/ #304 <<< comsub 收集器残余）
+- lexmix 遗留开单：heredoc 词后 # 尾（`echo x <<EOF>#comment`）
+- CI 稳定绿（一次 savannah 500 外部故障 rerun 即愈）；用户环境部署引擎 5f59e621
+- 剩余：#295（arrayesc 深水：$var 拼接引号泄漏/declare 非mut walker）、heredoc-# 新单、niubash #146/#147/#148 + 版本串 stale -dirty 小单、#294 观察、contperf 同族（has_unclosed_quotes/compound 全扫）
