@@ -206,7 +206,7 @@ impl Executor {
         Ok(Some(result))
     }
 
-    fn execute_exit_command_word(
+    pub(in crate::executor) fn execute_exit_command_word(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Result<(), ExecuteError>, ExecuteError> {

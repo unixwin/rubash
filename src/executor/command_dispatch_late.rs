@@ -51,7 +51,12 @@ impl Executor {
         // GNU execute_cmd.c: test's diagnostics go to the shell's CURRENTLY
         // BOUND fd 2 (redir.c) — an enclosing `exec 2>/dev/null` contains
         // them (rubash#218/#222-era leak: the raw process stderr bypassed
-        // every redirect).
+        // every redirect). The write goes through
+        // write_buffered_builtin_output so the COMMAND's own `2>file` /
+        // `2>/dev/null` is honored too — write_default_stderr only
+        // consults the fd-table bindings and leaked the diagnostic to the
+        // real stderr under `command test x =~ y 2>/dev/null`
+        // (modernish TESTERE.t probe).
         let mut stderr = Vec::new();
         let status = crate::builtins::test::execute_with_stderr(
             args.iter().map(String::as_str),
@@ -59,7 +64,7 @@ impl Executor {
             &self.shell_state.env_vars,
             &mut stderr,
         )?;
-        let _ = self.write_default_stderr(&stderr);
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
     }
 

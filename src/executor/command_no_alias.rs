@@ -63,6 +63,10 @@ impl Executor {
                 Ok(())
             }
             "exec" => self.execute_exec_command(cmd),
+            // builtins/command.def execute_builtin -> execute_cmd.c: `command`
+            // suppresses only functions and aliases; `exit` stays a builtin
+            // (modernish calls `command exit "$status"` in _Msh_exit).
+            "exit" => self.execute_exit_command_word(cmd)?,
             "logout" => {
                 self.exit_code = self.execute_logout(cmd)?;
                 Ok(())

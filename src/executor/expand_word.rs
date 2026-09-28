@@ -669,7 +669,7 @@ fn brace_valid_indir_param(byte: u8) -> bool {
 /// name, a `[...]` subscript with a matching `]` is skipped whole, and the
 /// scan stops at the first terminator (an unmatched `[` is an ordinary
 /// character). Returns the extracted head slice.
-fn brace_name_head(bytes: &[u8]) -> &[u8] {
+pub(in crate::executor) fn brace_name_head(bytes: &[u8]) -> &[u8] {
     let mut index = 0usize;
     while index < bytes.len() {
         match bytes[index] {

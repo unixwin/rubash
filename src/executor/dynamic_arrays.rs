@@ -35,6 +35,11 @@ pub(in crate::executor) fn env_derived_dynamic_parameter_value(
 
 impl Executor {
     pub(in crate::executor) fn dynamic_parameter_value(&self, name: &str) -> Option<String> {
+        // GNU variables.c:3839 unbind_variable: `unset -v` unbinds a
+        // dynamic variable for the rest of the shell's lifetime.
+        if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+            return None;
+        }
         match name {
             "SECONDS" | "EPOCHSECONDS" | "EPOCHREALTIME" => {
                 env_derived_dynamic_parameter_value(&self.shell_state.env_vars, name)
@@ -123,6 +128,9 @@ impl Executor {
     }
 
     pub(in crate::executor) fn dynamic_parameter_is_set(&self, name: &str) -> bool {
+        if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+            return false;
+        }
         matches!(
             name,
             "EPOCHSECONDS"
@@ -141,6 +149,34 @@ impl Executor {
                 | "BASHOPTS"
                 | "PIPESTATUS"
         )
+    }
+
+    /// Snapshot the dynamic parameters arithmetic evaluation cannot reach
+    /// on its own. GNU expr.c:1150 expr_streval resolves operand names
+    /// through find_variable, which sees dynamic variables exactly like
+    /// `$name` expansion; rubash's evaluator only carries `env_vars`, so
+    /// the Executor injects this map at each evaluation entry point.
+    /// RANDOM/SRANDOM are excluded (reading them must advance the RNG
+    /// state held inside the evaluator), as are the env-derived names
+    /// (SECONDS/EPOCH*) and LINENO that value.rs resolves directly.
+    pub(in crate::executor) fn arith_dynamic_values(&self) -> HashMap<String, String> {
+        [
+            "BASHPID",
+            "BASH_SUBSHELL",
+            "BASH_ARGV0",
+            "FUNCNAME",
+            "GROUPS",
+            "BASH_COMMAND",
+            "SHELLOPTS",
+            "BASHOPTS",
+            "PIPESTATUS",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            self.dynamic_parameter_value(name)
+                .map(|value| (name.to_string(), value))
+        })
+        .collect()
     }
 
     /// GNU shell.c:1635-1650 (shell_execscript): the synthetic bottom

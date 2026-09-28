@@ -1031,6 +1031,14 @@ pub struct FunctionCommand {
     /// line) before the function-entry DEBUG fire, so a functraced function
     /// reports the body-open line (trap.tests: "func2[43] debug").
     pub body_open_line: Option<usize>,
+    /// The verbatim brace-group body text plus its absolute starting line,
+    /// kept ONLY when the alias-blind body parse produced a parse-error
+    /// node. GNU expands aliases in the reader (parse.y:3249
+    /// alias_expand_token) — an alias supplying a compound opener
+    /// (`alias forever='while :;'`) parses structurally, which a token-level
+    /// body parse cannot see. The executor retries this source through the
+    /// alias stream at definition time before the diagnostic stands.
+    pub unparsed_body_source: Option<(String, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

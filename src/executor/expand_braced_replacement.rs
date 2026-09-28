@@ -17,6 +17,21 @@ thread_local! {
     pub(in crate::executor) static ASSIGNMENT_RHS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Scalar values of the single-char special parameters usable as pattern
+/// substitution names (subst.c:9837-9852 VALID_SPECIAL_LENGTH_PARAM plus
+/// `$`/`0`/`!`). `@`/`*` are handled by the positional-list arm above.
+fn patsub_special_parameter_value(exec: &Executor, var_name: &str) -> Option<String> {
+    match var_name {
+        "#" => Some(exec.shell_state.positional_params.len().to_string()),
+        "?" => Some(exec.exit_code.to_string()),
+        "-" => Some(exec.shell_option_flags()),
+        "$" => Some(exec.shell_pid_value().to_string()),
+        "0" => Some(exec.script_name_value()),
+        "!" => Some(exec.parameter_operator_value("!").unwrap_or_default()),
+        _ => None,
+    }
+}
+
 impl Executor {
     pub(in crate::executor) fn expand_braced_replacement_parameter(
         &self,
@@ -99,6 +114,12 @@ impl Executor {
                     })
                     .unwrap_or_default(),
             );
+        }
+        if let Some(value) = patsub_special_parameter_value(self, var_name) {
+            // subst.c:9837-9852: the single-char specials (`#`, `?`, `-`,
+            // `@`, `*`, `$`, `0`, `!`) are valid pattern-substitution
+            // names — `${#/x/y}` substitutes on $#.
+            return Some(self.replace_patsub_pattern(&value, &pattern, &replacement, global));
         }
         if let Some(value) = self.array_element_parameter_value(var_name) {
             return Some(self.replace_patsub_pattern(&value, &pattern, &replacement, global));

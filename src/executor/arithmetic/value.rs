@@ -10,7 +10,7 @@ use crate::executor::{
     is_shell_name_char, mark_env_name, next_random_from_state, next_srandom_from_state,
     parse_array_subscript, resolve_indexed_array_subscript, set_process_env, unmark_env_name,
     ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS, NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET,
-    SHELL_START_EPOCH,
+    SHELL_START_EPOCH, UNSET_DYNAMIC_VARS,
 };
 
 impl ConditionalArithParser<'_> {
@@ -120,8 +120,12 @@ impl ConditionalArithParser<'_> {
         if stripped.trim().is_empty() {
             return Some(0);
         }
-        let (value, _cat) =
-            eval_mutable_arith_value_with_random(&stripped, self.env_vars, self.random_state);
+        let (value, _cat) = eval_mutable_arith_value_with_random(
+            &stripped,
+            self.env_vars,
+            self.random_state,
+            self.dynamic_values,
+        );
         self.adopt_error(super::super::take_arith_eval_error());
         self.adopt_diags(super::super::take_arith_eval_diags());
         if value.is_none() {
@@ -172,6 +176,7 @@ impl ConditionalArithParser<'_> {
                         &inner,
                         self.env_vars,
                         self.random_state,
+                        self.dynamic_values,
                     );
                     match value {
                         Some(value) => {
@@ -285,29 +290,44 @@ impl ConditionalArithParser<'_> {
             self.record_recursion_error(name);
             return None;
         }
-        if name == "RANDOM" {
-            return self
-                .random_state
-                .map(|state| i128::from(next_random_from_state(state)));
-        }
-        if name == "SRANDOM" {
-            return self
-                .random_state
-                .map(|state| i128::from(next_srandom_from_state(state)));
-        }
-        if name == "LINENO" {
-            return self
-                .env_vars
-                .get("__RUBASH_CURRENT_LINE")
-                .and_then(|line| line.parse::<i128>().ok())
-                .or(Some(1));
-        }
-        // Dynamic parameters ($SECONDS, $EPOCHSECONDS, ...) never have a
-        // stored env_vars entry, so the fallback below would read them as 0.
-        // Resolve them through the same path parameter expansion uses.
-        if let Some(value) = env_derived_dynamic_parameter_value(self.env_vars, name) {
-            if let Ok(number) = value.parse::<i128>() {
-                return Some(bash_arith(number));
+        // GNU variables.c:3839 unbind_variable: `unset -v` unbinds a
+        // dynamic variable permanently — the name then reads like an
+        // ordinary unset variable through the env fallback below.
+        if !is_marked_var(self.env_vars, UNSET_DYNAMIC_VARS, name) {
+            if name == "RANDOM" {
+                return self
+                    .random_state
+                    .map(|state| i128::from(next_random_from_state(state)));
+            }
+            if name == "SRANDOM" {
+                return self
+                    .random_state
+                    .map(|state| i128::from(next_srandom_from_state(state)));
+            }
+            if name == "LINENO" {
+                return self
+                    .env_vars
+                    .get("__RUBASH_CURRENT_LINE")
+                    .and_then(|line| line.parse::<i128>().ok())
+                    .or(Some(1));
+            }
+            // Dynamic parameters ($SECONDS, $EPOCHSECONDS, ...) never have a
+            // stored env_vars entry, so the fallback below would read them as 0.
+            // Resolve them through the same path parameter expansion uses.
+            if let Some(value) = env_derived_dynamic_parameter_value(self.env_vars, name) {
+                if let Ok(number) = value.parse::<i128>() {
+                    return Some(bash_arith(number));
+                }
+            }
+            // Executor-injected dynamic values (BASHPID, BASH_SUBSHELL,
+            // ...) — GNU expr.c:1150 expr_streval reaches them through
+            // find_variable; the evaluator has no Executor handle, so they
+            // arrive as a per-evaluation snapshot. String values
+            // (SHELLOPTS, BASH_COMMAND) re-enter as nested expressions,
+            // matching expr_streval's evalexp recursion.
+            if let Some(value) = self.dynamic_values.and_then(|values| values.get(name)) {
+                let value = value.clone();
+                return self.evaluate_variable_text(name, &value);
             }
         }
 
@@ -361,6 +381,7 @@ impl ConditionalArithParser<'_> {
             env_vars: &mut *self.env_vars,
             resolving,
             random_state: self.random_state,
+            dynamic_values: self.dynamic_values,
             error_category: None,
             no_expand: false,
             error: None,
@@ -598,6 +619,7 @@ impl ConditionalArithParser<'_> {
                         &stripped,
                         self.env_vars,
                         self.random_state,
+                        self.dynamic_values,
                     );
                     if let Some(index) = index {
                         self.set_array_element(

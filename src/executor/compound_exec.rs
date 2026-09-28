@@ -22,6 +22,7 @@ fn rubash_spawn_inherited_state(key: &str) -> bool {
         "__RUBASH_READONLY_VARS",
         "__RUBASH_READONLY_FUNCTIONS",
         "__RUBASH_FUNC_TRACE_FUNCTIONS",
+        "__RUBASH_UNSTREAMED_FUNCTION_BODIES",
         "__RUBASH_TRACE_VARS",
         "__RUBASH_INTEGER_VARS",
         "__RUBASH_UPPERCASE_VARS",

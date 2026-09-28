@@ -12,6 +12,14 @@ pub const EXPORTED_FUNCTIONS: &str = "__RUBASH_EXPORTED_FUNCTIONS";
 pub const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 pub const READONLY_FUNCTIONS: &str = "__RUBASH_READONLY_FUNCTIONS";
 pub const FUNC_TRACE_FUNCTIONS: &str = "__RUBASH_FUNC_TRACE_FUNCTIONS";
+/// Functions whose stored body words were never alias-expanded at read
+/// time: the body was parsed from an executor-level (non-streamed) input
+/// — `.`-sourced file, eval'd text — where expand_aliases runs lazily at
+/// execution (parse.y alias_expand_token happens in the reader under
+/// GNU). At call time the ambient `__RUBASH_ALIAS_STREAMED` marker usually
+/// reflects the CALLER's stream, so execute_function lifts it for these
+/// bodies (modernish: `not` inside readlink.mm/myfn bodies).
+pub const UNSTREAMED_FUNCTION_BODIES: &str = "__RUBASH_UNSTREAMED_FUNCTION_BODIES";
 pub const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 pub const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
 pub const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
@@ -44,6 +52,12 @@ pub const FD_PROCESS_STDIN_TARGET: &str = "__RUBASH_FD_PROCESS_STDIN";
 pub const INHERIT_PROCESS_STDIN: &str = "__RUBASH_INHERIT_PROCESS_STDIN";
 pub const LOCAL_EXPORT_ENV: &str = "__RUBASH_LOCAL_EXPORT_ENV";
 pub const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
+// GNU builtins/set.def:928 + variables.c:3839 unbind_variable: `unset -v`
+// on a dynamic variable (BASHPID, RANDOM, BASH_SUBSHELL, ...) removes it
+// like an ordinary one — the name stays unbound and does not
+// re-materialize. Rubash materializes dynamic values on demand, so the
+// unbind is recorded here instead of deleting an env slot.
+pub const UNSET_DYNAMIC_VARS: &str = "__RUBASH_UNSET_DYNAMIC_VARS";
 pub const COMPOUND_ASSIGNMENT_MARKER: &str = crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER;
 /// Lead-in byte inside a `( ... )` compound-assignment body marking it as a
 /// whole-single-quoted declare operand whose expansion GNU defers to the
