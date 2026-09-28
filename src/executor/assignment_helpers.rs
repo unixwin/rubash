@@ -309,20 +309,32 @@ pub(in crate::executor) fn append_assoc_scalar_value(current: &str, value: &str)
 }
 
 pub(in crate::executor) fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
-    format!(
+    let entries = std::sync::Arc::new(entries);
+    let rendered = format!(
         "({})",
         entries
-            .into_iter()
+            .iter()
             .map(|(key, value)| {
                 format!(
                     "[{}]={}",
-                    quote_assoc_key(&key),
-                    quote_assoc_storage_value(&value)
+                    quote_assoc_key(key),
+                    quote_assoc_storage_value(value)
                 )
             })
             .collect::<Vec<_>>()
             .join(" ")
-    )
+    );
+    // Feed the render back so the next mutation of this array parses
+    // nothing: the memo key is the rendered string itself, and a hit
+    // requires the live value to be byte-identical.
+    let mut cache = assoc_parse_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= 128 {
+        cache.clear();
+    }
+    cache.insert(rendered.clone(), std::sync::Arc::clone(&entries));
+    rendered
 }
 
 pub(in crate::executor) fn quote_assoc_key(key: &str) -> String {
@@ -371,6 +383,52 @@ fn quote_assoc_storage_value_forced(value: &str) -> String {
 }
 
 pub(in crate::executor) fn assoc_entries(value: &str) -> Vec<(String, String)> {
+    assoc_entries_cached(value).as_ref().clone()
+}
+
+/// Content-addressed memo of `assoc_entries_uncached`: the cache key IS the
+/// exact storage string, so a hit can only occur when the live value is
+/// byte-identical to the parsed one — the memo can never serve a stale
+/// parse. Writers feed their freshly rendered string back through
+/// `format_assoc_storage`, so a run of `A[k]=v` assignments over a growing
+/// array hits the previous write's render instead of re-scanning it
+/// (perf: assoc parse was ~244us/call; an OMB-style 256-entry fill paid it
+/// per write, O(n^2) overall, 192x slower than GNU assoc.c hash inserts).
+pub(in crate::executor) fn assoc_entries_cached(
+    value: &str,
+) -> std::sync::Arc<Vec<(String, String)>> {
+    let mut cache = assoc_parse_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(hit) = cache.get(value) {
+        return std::sync::Arc::clone(hit);
+    }
+    drop(cache);
+    let parsed = std::sync::Arc::new(assoc_entries_uncached(value));
+    let mut cache = assoc_parse_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= 128 {
+        // Size cap: a hit needs a byte-identical key, so dropping entries
+        // never changes behavior — the next operation on that array simply
+        // re-parses. Keeps a session touching many distinct arrays from
+        // growing this without bound.
+        cache.clear();
+    }
+    cache.insert(value.to_string(), std::sync::Arc::clone(&parsed));
+    parsed
+}
+
+fn assoc_parse_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, std::sync::Arc<Vec<(String, String)>>>,
+> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Vec<(String, String)>>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn assoc_entries_uncached(value: &str) -> Vec<(String, String)> {
     let Some(inner) = value
         .strip_prefix('(')
         .and_then(|value| value.strip_suffix(')'))
@@ -397,17 +455,20 @@ pub(in crate::executor) fn assoc_entries(value: &str) -> Vec<(String, String)> {
 }
 
 pub(in crate::executor) fn assoc_value_at(value: &str, key: &str) -> Option<String> {
-    assoc_entries(value)
-        .into_iter()
+    // Read paths borrow the memoized parse instead of re-scanning the
+    // storage string (same content-addressed discipline as writes).
+    assoc_entries_cached(value)
+        .iter()
         .rev()
-        .find_map(|(entry_key, entry_value)| (entry_key == key).then_some(entry_value))
+        .find_map(|(entry_key, entry_value)| (entry_key == key).then_some(entry_value.clone()))
 }
 
 pub(in crate::executor) fn assoc_keys(value: &str, nbuckets: usize) -> Vec<String> {
     // bash_assoc_order items are (entry_index, (key, value)); collect keys.
-    bash_assoc_order(&assoc_entries(value), nbuckets)
+    let entries = assoc_entries_cached(value);
+    bash_assoc_order(entries.as_slice(), nbuckets)
         .into_iter()
-        .map(|(_, (key, _))| key)
+        .map(|(_, (key, _))| key.clone())
         .collect()
 }
 

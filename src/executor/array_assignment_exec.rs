@@ -353,20 +353,10 @@ impl Executor {
             } else {
                 entries.push((key, value));
             }
-            let new_value = format!(
-                "({})",
-                entries
-                    .into_iter()
-                    .map(|(key, value)| {
-                        format!(
-                            "[{}]={}",
-                            quote_assoc_key(&key),
-                            quote_assoc_storage_value(&value)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
+            // format_assoc_storage feeds the content-addressed parse cache
+            // with the rendered string, so a run of element assignments over
+            // this array re-parses nothing (perf: OMB spectrum-style fills).
+            let new_value = super::assignment_helpers::format_assoc_storage(entries);
             self.shell_state
                 .env_vars
                 .insert(name.to_string(), new_value);
