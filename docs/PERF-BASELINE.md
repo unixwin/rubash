@@ -581,3 +581,27 @@ slicing from index+2 makes `scan_braced_chars_from` reject every span
 (dolbrace.rs requires `chars[0] == '$'`), which reports every line with a
 `${` as unclosed — that mistake was caught by the regression canaries this
 round, not by timing.
+
+## Attribution profiling (2026-09-28, owner-mandated measurement infrastructure)
+
+Wall-clock tables above answer *which scenario* is slow; they cannot answer
+*where inside the binary* the time goes. The attribution layer:
+
+- **Tool**: [`samply`](https://github.com/mstange/samply) — sampling
+  profiler, Firefox Profiler JSON output, MSVC symbol support.
+  Install: `cargo install samply --locked`.
+- **Driver**: `scripts/profile-startup.sh rubash|niu <args…>` (or
+  `--script file.sh`) — records one run, saves
+  `target/perf-profiles/<kind>-<name>-<ts>.json`. Open the JSON at
+  https://profiler.firefox.com (Import) for the interactive flame graph,
+  or `samply load <file>` for the local viewer.
+- **Reading it**: the flame graph's x-axis is wall time; the tallest
+  self-time columns under `main` are the fix targets. For
+  `niu -C 'echo ok'` the interesting band is everything between process
+  start and the rc-load completion (engine init, rc sourcing, OMB load,
+  first PROMPT_COMMAND) — compare against a WSL GNU bash recording of the
+  same OMB load to see the GNU-side profile shape.
+- **Rules**: never measure a stale binary (build first); close other
+  build jobs (parallel cargo builds skew samples); keep the produced JSON
+  under `target/perf-profiles/` (gitignored) and record the numbers that
+  matter in this file, not the raw profile.
