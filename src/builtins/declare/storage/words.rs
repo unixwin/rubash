@@ -177,6 +177,20 @@ pub(in crate::builtins::declare) fn unquote_storage_value(value: &str) -> String
         return unquote_ansi_c_storage(inner);
     }
 
+    // A whole-token single quote returns its interior verbatim: backslash
+    // is literal inside single quotes (parse.y:5305 read_token_word keeps
+    // `\[` and `\e` as written), so no escape decoding may run. Without
+    // this arm a `'\[\e[33m\]'` element fell through to the bare-word
+    // decoder and lost every backslash (`[e[33m]`), corrupting prompt
+    // strings that oh-my-bash themes store in arrays (agnoster
+    // prompt_status symbols).
+    if let Some(inner) = value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+    {
+        return inner.to_string();
+    }
+
     let Some(inner) = value
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
