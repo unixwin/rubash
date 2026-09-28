@@ -174,7 +174,17 @@ impl Executor {
                     crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
                         &self.shell_state.env_vars,
                     );
-                let (result, writes) = eval_conditional_arith_value_with_writes(&expr, &overlaid);
+                // GNU arrayfunc.c:1353 array_expand_index -> evalexp ->
+                // expr.c:1183 expr_streval: dynamic variables resolve like
+                // `$name` expansion — `${a[$((RANDOM%3))]}` advances the
+                // same RNG state as `$((RANDOM%3))` (rubash#299).
+                let dynamic_values = self.arith_dynamic_values();
+                let (result, writes) = eval_conditional_arith_value_with_writes(
+                    &expr,
+                    &overlaid,
+                    Some(&self.shell_state.random_state),
+                    Some(&dynamic_values),
+                );
                 if !writes.is_empty() {
                     crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES.with(|w| {
                         w.borrow_mut().extend(writes);

@@ -1391,17 +1391,76 @@ impl Executor {
             // `R=( "${@}" )` with params 'a b' 'a c' 'x z' stored six
             // elements instead of three (sort-pos-params example).
             let token_is_quoted_wrap = token != token_stripped;
-            if token_stripped == "$@"
-                || token.strip_prefix(STORAGE_WORD_PREFIX) == Some("${@}")
+            // GNU arrayfunc.c:557 expand_compound_array_assignment ->
+            // parse_string_to_word_list (585) hands every compound word to
+            // expand_words_no_vars (610) -> subst.c:12590
+            // expand_word_list_internal: "Words with the W_QUOTED or
+            // W_NOSPLIT bits set, or for which no expansion is done, do not
+            // undergo word splitting" — every other word is field-split on
+            // the CURRENT IFS. A QUOTED "$@" keeps one word per parameter
+            // (W_DOLLARAT, subst.c:3025 string_list_pos_params); an UNQUOTED
+            // $@ / ${@} joins the parameters into ONE string with the first
+            // IFS character and the standard field splitter runs on the
+            // joined text (subst.c:2957 string_list_dollar_at, quoted == 0;
+            // the verified joined-string model of
+            // field_split_positional_values_with_ifs). Probes 2026-09-28
+            // (GNU 5.3.0): `set -- "a.b" c; IFS=.; A=($@)` stores 3
+            // [a][b][c]; `A=(${@})` with `set -- a b` stores 2 (rubash#298).
+            let token_is_at_word = token_stripped == "$@"
+                || token == "${@}"
                 || (token_is_quoted_wrap && token_stripped == "${@}")
-            {
+                || token.strip_prefix(STORAGE_WORD_PREFIX) == Some("${@}");
+            let token_raw_core = token_raw.trim_matches('\u{E302}');
+            let token_raw_single_quoted = token_raw_core.starts_with('\'')
+                && token_raw_core.ends_with('\'')
+                && token_raw_core.len() >= 2;
+            if token_is_at_word && token_raw_single_quoted {
+                // '$@' / '${@}': single quotes suppress the expansion —
+                // parse.y read_token_word keeps '...' literal, so the
+                // element is the raw text (probe 2026-09-28: A=('${@}')
+                // stores `${@}`, GNU 5.3.0).
+                values.push(store!(&token, token_raw));
+            } else if token_is_at_word {
                 changed = true;
-                values.extend(
-                    self.shell_state
-                        .positional_params
-                        .iter()
-                        .map(|value| store!(value)),
-                );
+                // Quote provenance lives in token_raw: the storage splitter
+                // keeps the delimiters there while `token` is already
+                // unquoted (E302 wrap, a `"`-quoted word, or the \x1d
+                // quoted-RHS marker all mean W_QUOTED).
+                let at_quoted = token_is_quoted_wrap
+                    || token.starts_with(STORAGE_WORD_PREFIX)
+                    || (token_raw_core.starts_with('"')
+                        && token_raw_core.ends_with('"')
+                        && token_raw_core.len() >= 2);
+                if at_quoted {
+                    values.extend(
+                        self.shell_state
+                            .positional_params
+                            .iter()
+                            .map(|value| store!(value)),
+                    );
+                } else {
+                    // UNQUOTED $@ / ${@}: joined with IFS[0], then field
+                    // split; each field is a plain word (ARRAY_FIELD_SPLIT_
+                    // MARKER) so append_array_value keeps one element per
+                    // field and pathname-expands it — GNU
+                    // expand_word_list_internal globs each field after
+                    // splitting.
+                    let fields = field_split_positional_values_with_ifs(
+                        self.shell_state.positional_params.clone(),
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
+                    );
+                    if bare {
+                        values.extend(fields);
+                    } else {
+                        values.extend(fields.into_iter().map(|field| {
+                            format!(
+                                "{}{}",
+                                crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
+                                quote_compound_field_value(&field)
+                            )
+                        }));
+                    }
+                }
             } else if (token_is_quoted_wrap && (token_stripped == "${*}" || token_stripped == "$*"))
                 || token.strip_prefix(STORAGE_WORD_PREFIX) == Some("${*}")
             {
@@ -1894,12 +1953,39 @@ impl Executor {
                                 values.push(store!(&value));
                                 continue;
                             }
-                            let stored = if let Some(p) = prefix {
-                                format!("{p}={value}")
+                            if let Some(p) = prefix {
+                                // [N]=$1: W_ASSIGNMENT|W_NOSPLIT
+                                // (parse.y:5786-5796) — the whole expanded
+                                // value lands at the subscript, unsplit.
+                                values.push(format!("{p}={value}"));
+                                continue;
+                            }
+                            // BARE unquoted $N (rubash#298): GNU
+                            // expand_words_no_vars (arrayfunc.c:609 ->
+                            // subst.c:12590 expand_word_list_internal)
+                            // field-splits the expansion on the CURRENT
+                            // IFS — `set -- a.b.c; IFS=.; A=($1)` stores 3
+                            // elements [a][b][c] (GNU 5.3.0). An expansion
+                            // that produces nothing contributes no field
+                            // (subst.c:13219: `set --; A=($1)` stores 0).
+                            if value.is_empty() {
+                                continue;
+                            }
+                            let fields = field_split_values_with_ifs(
+                                &value,
+                                self.shell_state.env_vars.get("IFS").map(String::as_str),
+                            );
+                            if bare {
+                                values.extend(fields);
                             } else {
-                                value
-                            };
-                            values.push(stored);
+                                values.extend(fields.into_iter().map(|field| {
+                                    format!(
+                                        "{}{}",
+                                        crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
+                                        quote_compound_field_value(&field)
+                                    )
+                                }));
+                            }
                             continue;
                         }
                     }
@@ -1912,12 +1998,32 @@ impl Executor {
                     // avoid breaking $(...) command substitution.
                     if let Some(value) = self.dynamic_parameter_value(name) {
                         changed = true;
-                        let stored = if let Some(p) = prefix {
-                            format!("{p}={value}")
+                        if let Some(p) = prefix {
+                            values.push(format!("{p}={value}"));
                         } else {
-                            value
-                        };
-                        values.push(stored);
+                            // BARE unquoted dynamic word ($EPOCHREALTIME,
+                            // $LINENO...): same GNU expand_words_no_vars
+                            // field-split contract as $N above —
+                            // `IFS=.; A=($EPOCHREALTIME)` stores 2 elements
+                            // (GNU 5.3.0; probe 2026-09-28).
+                            if !value.is_empty() {
+                                let fields = field_split_values_with_ifs(
+                                    &value,
+                                    self.shell_state.env_vars.get("IFS").map(String::as_str),
+                                );
+                                if bare {
+                                    values.extend(fields);
+                                } else {
+                                    values.extend(fields.into_iter().map(|field| {
+                                        format!(
+                                            "{}{}",
+                                            crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
+                                            quote_compound_field_value(&field)
+                                        )
+                                    }));
+                                }
+                            }
+                        }
                         continue;
                     }
                 }
@@ -2155,6 +2261,13 @@ impl Executor {
         // it one element AND pathname-expands it per field
         // (arrays.rs append_array_value marker arm — GNU
         // expand_word_list_internal globs each field after splitting).
+        // An expansion that produces nothing contributes NO field
+        // (subst.c:13219): `set --; A=($1)` stores 0 elements — the
+        // non-whitespace-IFS split of "" would otherwise yield one empty
+        // field (rubash#298).
+        if text.is_empty() {
+            return Vec::new();
+        }
         field_split_values_with_ifs(
             &text,
             self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -2415,6 +2528,13 @@ impl Executor {
                 "{ARRAY_FIELD_SPLIT_MARKER}{}",
                 quote_compound_field_value(&value)
             )]);
+        }
+        // GNU subst.c:13219: an unquoted expansion that produces nothing
+        // contributes NO field — `A=($unsetvar)` stores 0 elements
+        // (rubash#298; the non-whitespace-IFS split of "" would otherwise
+        // yield one empty field).
+        if value.is_empty() {
+            return Some(Vec::new());
         }
         Some(
             field_split_values_with_ifs(

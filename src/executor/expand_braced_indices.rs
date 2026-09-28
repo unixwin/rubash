@@ -532,10 +532,19 @@ impl Executor {
                 .and_then(|e| e.strip_suffix("))"))
             {
                 // `$((...))` keeps its own writes-capturing evaluation so
-                // `count++` side effects survive the cloned env.
+                // `count++` side effects survive the cloned env. Dynamic
+                // variables resolve through the Executor's RNG/dynamic
+                // snapshot like every other subscript evaluation path
+                // (arrayfunc.c:1353 -> expr.c:1183 expr_streval,
+                // rubash#299).
                 let overlaid = env_vars_with_pending_subscript_writes(&self.shell_state.env_vars);
-                let (result, writes) =
-                    eval_conditional_arith_value_with_writes(expr.trim(), &overlaid);
+                let dynamic_values = self.arith_dynamic_values();
+                let (result, writes) = eval_conditional_arith_value_with_writes(
+                    expr.trim(),
+                    &overlaid,
+                    Some(&self.shell_state.random_state),
+                    Some(&dynamic_values),
+                );
                 if !writes.is_empty() {
                     PENDING_SUBSCRIPT_WRITES.with(|w| {
                         w.borrow_mut().extend(writes);

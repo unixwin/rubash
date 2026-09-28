@@ -1162,12 +1162,18 @@ pub(crate) fn eval_conditional_arith_value(
 /// Like eval_conditional_arith_value, but also returns the variables that
 /// were modified by side effects (e.g. count++ in ${arr[$((count++))]}).
 /// The caller is responsible for applying these writes to the real env_vars.
+/// All rubash callers pass the Executor's dynamic state (RANDOM advances
+/// the shell RNG, expr.c:1183 expr_streval -> find_variable); pass None for
+/// both state arguments when no Executor is reachable.
 pub(crate) fn eval_conditional_arith_value_with_writes(
     value: &str,
     env_vars: &HashMap<String, String>,
+    random_state: Option<&RandomGen>,
+    dynamic_values: Option<&HashMap<String, String>>,
 ) -> (Option<i128>, Vec<(String, String)>) {
     let mut cloned = env_vars.clone();
-    let result = eval_mutable_arith_value(value, &mut cloned);
+    let (result, _category) =
+        eval_mutable_arith_value_with_random(value, &mut cloned, random_state, dynamic_values);
     let writes = cloned
         .iter()
         .filter(|(name, _)| name.as_str() != "__RUBASH_ARITH_SUBSCRIPT_EXPR")
