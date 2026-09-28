@@ -89,3 +89,18 @@
 - sourcefix（93147937+5953be2b）/ merge144（308ee940）/ resid3（bc6e6da7）：验收中（五门禁+GNU 对照）
 - perf4：工作树脏半成品，不验收，待断点续作
 - ConPTY 自动化已建：pywinpty 模板 `target/ombtest/pty_probe2.py`（真终端断言：banner/bind 警告/命令/cd EOF/PS1 噪声）
+
+## 2026-09-28 晚终版（交互战役收口 + CI 判定结构清晰化）
+
+**已回收（master 3795ccc4）**：
+- readhang（#293 前身 Windows 域）：b6cc735a 回归根因（fd0 绑定缺 FUNCTION_STDIN 镜像→read 回退阻塞读进程 stdin，GNU read.def 对照）+ 根治 7/26 旧伤（initial_pipeline_input 命令名硬编码表 slurp 整删）；33 例矩阵 GNU 字节一致；niubash host_contract 42/42
+- arrayesc（#288 已关）：四处双重 quote removal 修复，三臂探针+agnoster 门与 GNU 字节一致；两深水遗留单列（$var 拼接引号泄漏/declare 非mut walker）待开单
+- ombperf（性能纪律样板）：assoc O(n²)→内容寻址 memo（assoc.c/hashlib.c 对照）+ indexed memo + GNU 基线锚点文档；OMB 内层 1093→787ms（<GNU-on-NTFS 830ms）；niubash 宿主层 560ms 差距归 retire-theme 后再测；lexer 提交因 sourcefix 重写冲突退回车道新基线重做
+- sourcefix（误 revert 后恢复）：分组驱动+park 两提交；nvm 1.7s；nquote 未重录恢复
+
+**CI 结构判定**：rubash CI 红=且仅=bash-upstream-progress 的 TIMEOUT_FAIL>0（普通 FAIL 是 progress 记录不阻塞，STRICT=0）。当前挂死=execscript/jobs/minimal 三件（Linux）→ **#293 linuxhang 车道在途**，修完即全绿。
+
+**在途**：retire-theme（#145，5 提交交付+收尾）、linuxhang（#293）、continuation perf（#292 船长已批准 A/B 计划）、perf5=lexer join 优化重做（sourcefix 新基线）
+**新开单**：rubash#292（continuation perf）、rubash#293（Linux 三挂死）、niubash#148（--norc 顺序）、niubash#145/#146/#147 前述
+**退回待重交**：merge144（#144 评论：删 legacy 回退+三类输入覆盖）、interactive2（#286 评论：S1 测试红）
+**用户环境**：niu.exe @ 引擎 3795ccc4 待 retire-theme 收口后统一构建部署；agnoster 渲染干净（#288 修复已部署）
