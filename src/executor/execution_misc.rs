@@ -420,6 +420,17 @@ pub(in crate::executor) fn copy_command_substitution_heredoc(
     source.push('<');
     chars.next();
 
+    // parse.y:3692-3704 read_token: a third `<` makes the operator a
+    // here-string (LESS_LESS_LESS, grammar parse.y:664), not a heredoc —
+    // consume it and return so the caller's word loop continues with the
+    // here-string operand (`<<< y)` keeps `)` as the substitution closer,
+    // rubash#304). Without this the third `<` was taken as the first
+    // delimiter byte and ` y` split into a bogus `<<` header.
+    if chars.peek().copied() == Some('<') {
+        source.push(chars.next().expect("herestring third less-than"));
+        return;
+    }
+
     let strip_tabs = if chars.peek().copied() == Some('-') {
         source.push('-');
         chars.next();

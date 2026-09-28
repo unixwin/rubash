@@ -2378,6 +2378,26 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
         if source_ch == '<' && !single && !double && chars.peek().copied() == Some('<') {
             let mut lookahead = chars.clone();
             lookahead.next();
+            if lookahead.peek().copied() == Some('<') {
+                // parse.y:3692-3704 read_token: after `<<` one more char is
+                // read and a third `<` returns LESS_LESS_LESS — `<<<` is ONE
+                // here-string operator (grammar parse.y:664
+                // `LESS_LESS_LESS WORD`), never a heredoc opener. Consume all
+                // three bytes here so the loop does not re-enter this branch
+                // at the second `<` (whose one-char-shifted lookahead no
+                // longer sees the third) and misread `<<< y)` as `<<` with
+                // delimiter `y` plus an unterminated body — rubash#304:
+                // `echo $(echo hi <<< y)#tail` reported an unclosed `)`
+                // because the heredoc header scan ate the closer as body
+                // data. The redirection operator ends the token, so a `#`
+                // after it starts a comment exactly like GNU's read_token
+                // (`$(echo hi <<< #x)` is an unclosed substitution).
+                source.push(source_ch);
+                source.push(chars.next().expect("herestring second less-than"));
+                source.push(chars.next().expect("herestring third less-than"));
+                token_boundary = true;
+                continue;
+            }
             if lookahead.peek().copied() != Some('<') {
                 source.push(source_ch);
                 source.push(chars.next().expect("heredoc second less-than"));

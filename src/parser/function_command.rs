@@ -301,7 +301,7 @@ pub(super) fn parse_function_command_with_diagnostic(
 
     let body_token = tokens.get(i)?;
     if body_token.value.trim() != "{" {
-        // GNU parse.y:6890-6901 (yyerror EOF path): `name() { ...` or
+        // GNU parse.y:6890-6891 (yyerror EOF path): `name() { ...` or
         // `name() ( ...` that reaches EOF unclosed reports
         // "unexpected end of file from `X' command on line N" naming the
         // innermost unclosed compound — not a `(`-unexpected fallback to a
@@ -311,6 +311,46 @@ pub(super) fn parse_function_command_with_diagnostic(
             && !body_token.value.trim_end().ends_with('}')
         {
             let command = unclosed_brace_eof_node(tokens, i);
+            return Some((command, tokens.len()));
+        }
+        // parse.y:1054-1061 function_def: after `function WORD' (with or
+        // without the `'()'` pair) the grammar demands a compound
+        // shell_command body — a plain WORD there is a syntax error
+        // naming that word (`syntax error near unexpected token `g'',
+        // verified vs WSL GNU Bash 5.3.0; compound openers like `if` /
+        // `while` / `for` / `case` are legal bodies). Falling through to a
+        // simple command named `function' ran `function: command not
+        // found' with rc=0 instead (rubash#302 family).
+        if keyword_form
+            && matches!(
+                body_token.kind,
+                TokenKind::Word
+                    | TokenKind::Variable
+                    | TokenKind::Assignment
+                    | TokenKind::CommandSubst
+                    | TokenKind::BraceExpand
+            )
+        {
+            let mut command = CommandNode::new();
+            command.line = Some(body_token.position);
+            command.insert_assignment(
+                "__RUBASH_PARSE_ERROR__".to_string(),
+                format!("unexpected token `{}'", body_token.value),
+            );
+            if let Some(text) = diagnostic_text {
+                if let Some(source) = body_token
+                    .position
+                    .checked_sub(source_line_offset)
+                    .and_then(|line_in_text| {
+                        super::parse_loop::source_line_by_number(text, line_in_text)
+                    })
+                {
+                    command.insert_assignment(
+                        "__RUBASH_PARSE_SOURCE__".to_string(),
+                        source.to_string(),
+                    );
+                }
+            }
             return Some((command, tokens.len()));
         }
         return None;

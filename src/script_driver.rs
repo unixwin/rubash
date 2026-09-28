@@ -932,20 +932,45 @@ fn scan_heredoc_operators_with_state(line: &str, arith_depth: &mut i64) -> Vec<(
     declarations
 }
 
+/// Extract the NAME from the operand of a `function` keyword header.
+/// parse.y:1056-1061 `function_def`: `FUNCTION WORD`, `FUNCTION WORD '(' ')'`
+/// — the operand is the WORD plus at most the optional whitespace-separated
+/// parens pair, so `function f()` / `function f ()` are headers awaiting a
+/// body exactly like `function f` (parse.y:1058). Any trailing content
+/// after the name or parens is not part of a bare header.
+fn function_keyword_operand_name(operand: &str) -> &str {
+    let operand = operand.trim();
+    match operand.strip_suffix(')') {
+        Some(before) => before
+            .trim_end()
+            .strip_suffix('(')
+            .map(str::trim_end)
+            .unwrap_or(operand),
+        None => operand,
+    }
+}
+
 fn stdin_source_is_function_signature(source: &str) -> bool {
     let trimmed = source.trim();
     // `name ()` / `name()` signature: peel the trailing parens with
     // optional whitespace (`'a b c' ( )' is still a signature — GNU's
-    // grammar accepts any WORD; validity is judged at exec time).
+    // grammar accepts any WORD; validity is judged at exec time). A
+    // `function f()` header also peels here, but `function f` is not a
+    // single WORD — fall through to the keyword-form check below instead
+    // of returning (parse.y:1056 FUNCTION WORD '(' ')' newline_list
+    // function_body).
     if let Some(before_close) = trimmed.strip_suffix(')') {
         if let Some(name) = before_close.trim_end().strip_suffix('(') {
-            return is_stdin_function_name(name.trim_end());
+            if is_stdin_function_name(name.trim_end()) {
+                return true;
+            }
         }
     }
 
+    // Keyword form: `function NAME`, `function NAME()`, `function NAME ()`.
     trimmed
         .strip_prefix("function ")
-        .map(str::trim)
+        .map(function_keyword_operand_name)
         .is_some_and(is_stdin_function_keyword_name)
 }
 
@@ -963,15 +988,21 @@ fn stdin_source_has_unclosed_function_delimited_body(source: &str, delimiter: ch
     }
 
     let signature = source[..open_delimiter].trim_end();
+    // Same fall-through as stdin_source_is_function_signature: a
+    // `function f()` header peels to `function f` here, which is not a
+    // single WORD, so the keyword-form check below must still run
+    // (parse.y:1056 FUNCTION WORD '(' ')' newline_list function_body).
     if let Some(before_close) = signature.strip_suffix(')') {
         if let Some(name) = before_close.trim_end().strip_suffix('(') {
-            return is_stdin_function_name(name.trim_end());
+            if is_stdin_function_name(name.trim_end()) {
+                return true;
+            }
         }
     }
 
     signature
         .strip_prefix("function ")
-        .and_then(|rest| rest.split_whitespace().next())
+        .map(function_keyword_operand_name)
         .is_some_and(is_stdin_function_keyword_name)
 }
 
@@ -2391,4 +2422,34 @@ pub fn bytes_to_script_text(bytes: &[u8]) -> String {
 pub fn read_script_bytes(path: &std::path::Path) -> std::io::Result<String> {
     let bytes = std::fs::read(path)?;
     Ok(crate::executor::substitution_metadata::bytes_to_script_text(&bytes))
+}
+
+#[cfg(test)]
+mod issue302_tests {
+    use super::*;
+
+    #[test]
+    fn function_keyword_paren_form_is_a_signature() {
+        // parse.y:1056 FUNCTION WORD '(' ')' newline_list function_body:
+        // `function f()` awaits its body exactly like `f()` (parse.y:1054)
+        // and `function f` (parse.y:1058).
+        assert!(stdin_source_is_function_signature("function f()"));
+        assert!(stdin_source_is_function_signature("function f ()"));
+        assert!(stdin_source_is_function_signature("function f"));
+        assert!(stdin_source_is_function_signature("f()"));
+        assert!(stdin_source_is_function_signature("f ()"));
+        // Complete constructs are not bare signatures.
+        assert!(!stdin_source_is_function_signature("function f() { :; }"));
+        assert!(!stdin_source_is_function_signature("echo function f()"));
+    }
+
+    #[test]
+    fn function_keyword_paren_form_keeps_body_open() {
+        assert!(stdin_source_text_needs_more("function f()\n", false));
+        assert!(stdin_source_text_needs_more("function f()\n{\n", false));
+        assert!(!stdin_source_text_needs_more(
+            "function f()\n{ :; }\n",
+            false
+        ));
+    }
 }
