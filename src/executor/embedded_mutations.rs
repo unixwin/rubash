@@ -1347,6 +1347,24 @@ impl Executor {
                                     }
                                     output.push('"');
                                 }
+                            } else if preserve_quotes {
+                                // GNU parse.y:5564-5571 read_token_word: the
+                                // ansiexpand result is re-wrapped with
+                                // sh_single_quote, so the decoded bytes stay a
+                                // QUOTED span through the single quote-removal
+                                // pass (arrayfunc.c:610 expand_words_no_vars).
+                                // Emitting them raw left them in an unquoted
+                                // region of the storage token, whose bare `\x`
+                                // escape decode then ate the literal
+                                // backslashes (`A=([0]=$'\[\e[33m\]Z')` stored
+                                // `[<ESC>[33m]Z`, rubash#288). E010/E011
+                                // tagging keeps decoded quotes from closing
+                                // the synthetic span.
+                                output.push('\'');
+                                output.push_str(&crate::lexer::escape_decoded_ansi_c_quotes(
+                                    &decoded,
+                                ));
+                                output.push('\'');
                             } else {
                                 // Tag decoded quotes with E010/E011 markers so
                                 // downstream quote removal (remove_shell_quotes in

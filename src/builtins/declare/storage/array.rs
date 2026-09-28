@@ -96,7 +96,18 @@ pub(in crate::builtins) fn append_array_value(
             if let Some((left, rhs)) = unquoted_token.split_once("+=") {
                 if let Some(index) = array_assignment_index(left, &entries) {
                     let current = entries.get(&index).cloned().unwrap_or_default();
-                    let rhs = unquote_storage_value(rhs);
+                    // GNU assign_compound_array_list (arrayfunc.c:839-842)
+                    // stores the value text that the ONE expansion pass
+                    // (expand_words_no_vars, arrayfunc.c:610) already
+                    // dequoted; unquoted_token IS that post-removal text,
+                    // so the split-out rhs is final and a second
+                    // unquote_storage_value pass would re-read literal
+                    // backslashes as escape syntax (rubash#288:
+                    // `declare -a D=([0]='\[\e[33m\]Z')` stored
+                    // `[e[33m]Z`). Only the CTLESC sentinel strip that
+                    // dequote_string (subst.c:4807) performs after globbing
+                    // remains.
+                    let rhs = crate::executor::markers::dequote_ctlesc_pairs(rhs);
                     let value = if integer {
                         (eval_arith_value(&current) + eval_arith_value(&rhs)).to_string()
                     } else {
@@ -113,11 +124,13 @@ pub(in crate::builtins) fn append_array_value(
 
             if let Some((left, rhs)) = unquoted_token.split_once('=') {
                 if let Some(index) = array_assignment_index(left, &entries) {
-                    // GNU dequote_string (subst.c:4807) strips the CTLESC
-                    // sentinels before quoted glob metacharacters after
-                    // globbing passes: `declare -a x=([0]="*y")` stores `*y`.
-                    let stored =
-                        crate::executor::markers::dequote_ctlesc_pairs(&unquote_storage_value(rhs));
+                    // Same single-removal invariant as the `+=` arm above:
+                    // unquoted_token already lost its quote syntax, the rhs
+                    // is stored verbatim (arrayfunc.c:839-842 `val = w +
+                    // len + 2`), and dequote_string's CTLESC strip
+                    // (subst.c:4807) is the only remaining cleanup
+                    // (`declare -a x=([0]="*y")` stores `*y`).
+                    let stored = crate::executor::markers::dequote_ctlesc_pairs(rhs);
                     entries.insert(index, stored);
                     next_index = index + 1;
                     continue;

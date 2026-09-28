@@ -774,9 +774,7 @@ pub(super) fn append_array_value(
         if let Some((left, rhs)) = token.split_once("+=") {
             if let Some(index) = array_assignment_index(left, &entries, env_vars) {
                 let current = entries.get(&index).cloned().unwrap_or_default();
-                let rhs = finalize_comsub_element(&unquote_storage_value(
-                    &dequote_compound_element_rhs(rhs),
-                ));
+                let rhs = finalize_comsub_element(&dequote_compound_element_rhs(rhs));
                 let value = if integer {
                     // GNU make_array_variable_value (arrayfunc.c:173-195) with
                     // ASS_APPEND: both operands go through make_variable_value
@@ -798,9 +796,7 @@ pub(super) fn append_array_value(
 
         if let Some((left, rhs)) = token.split_once('=') {
             if let Some(index) = array_assignment_index(left, &entries, env_vars) {
-                let decoded = finalize_comsub_element(&unquote_storage_value(
-                    &dequote_compound_element_rhs(rhs),
-                ));
+                let decoded = finalize_comsub_element(&dequote_compound_element_rhs(rhs));
                 entries.insert(index, decoded);
                 next_index = index + 1;
                 continue;
@@ -861,7 +857,20 @@ pub(super) fn append_array_value(
         // token, then restore the lexer carrier bytes, then unquote the
         // storage escaping. Unquoting first collapsed `x=(q\"q)` to `qq`
         // and left raw 0x18 carrier bytes in stored elements.
-        let token = if partially_quoted
+        //
+        // scalar_append (`arr+=word`, no parens): the value arriving here
+        // is the assignment pipeline's FINAL expansion result —
+        // expand_string_assignment (subst.c:4345) already performed the one
+        // dequote and the rubash#218 ASSIGN_EXPANSION_BACKSLASH restore
+        // turned expansion backslashes back into real data bytes. GNU
+        // appends that text to element 0 (variables.c assign_array_element
+        // path) without any further quote removal, so a second
+        // unquote_storage_value pass re-read the data backslashes as
+        // escape syntax and ate them (`symbols+=$REPLY'⚡'` with
+        // REPLY='\[\e[33m\]' stored `[e[33m]⚡`, rubash#288).
+        let token = if scalar_append {
+            token
+        } else if partially_quoted
             && !(token.starts_with("$'") && token.ends_with('\''))
             && !token.starts_with(STORAGE_WORD_PREFIX)
         {
@@ -869,7 +878,11 @@ pub(super) fn append_array_value(
         } else {
             token
         };
-        let token = unquote_storage_value(&token);
+        let token = if scalar_append {
+            token
+        } else {
+            unquote_storage_value(&token)
+        };
         // GNU dequote_string (subst.c:4807) strips the CTLESC pairs from
         // every word pathname expansion did not consume, so a stored
         // element keeps the quoted `*` as plain data (`("p"/"*z")` stores
@@ -900,7 +913,10 @@ pub(super) fn append_array_value(
             }
             continue;
         }
-        if split_needed {
+        // GNU `arr+=word` (no parens) binds ONE scalar value to element 0
+        // (variables.c assign_array_element): the word never field-splits —
+        // split_needed applies to compound `(...)` element words only.
+        if split_needed && !scalar_append {
             for value in field_split_values_with_ifs(&token, ifs) {
                 entries.insert(
                     next_index,
@@ -969,24 +985,40 @@ pub(super) fn array_assignment_has_subscript(left: &str) -> bool {
         .is_some()
 }
 
-/// Quote removal for a `[sub]=value` element's value side, mirroring the
-/// element pipeline above: GNU dequotes every quote pair
-/// (subst.c:4807 dequote_string), so `'x'a"y'` stores `xa"y`, not
-/// `x'a"y`. A lone `$'...'` word stays on the unquote_storage_value path,
-/// which ANSI-C decodes and tags decoded quotes itself (issue #109).
+/// Quote removal for a `[sub]=value` element's value side. This function is
+/// the SINGLE owner of that removal: GNU performs exactly one
+/// expand_words_no_vars pass over the raw compound word list
+/// (arrayfunc.c:610 inside expand_compound_array_assignment:557), after
+/// which assign_compound_array_list stores `val = w + len + 2`
+/// (arrayfunc.c:839-842) verbatim — no second removal exists downstream.
+/// The old composition ran unquote_storage_value ON TOP of
+/// remove_shell_quotes output; a quoted element's backslashes (literal in
+/// `'...'` per parse.y:5305 read_token_word; `\e`/`\[` kept both chars in
+/// `"..."` per parse.y:5390-5393 + syntax.h:26 slashify_in_quotes) were
+/// re-read as escape syntax and eaten (`A=([0]='\[\e[33m\]Z')` stored
+/// `[e[33m]Z`, rubash#288).
 fn dequote_compound_element_rhs(rhs: &str) -> String {
     if has_unescaped_quote(rhs)
         && !(rhs.starts_with("$'") && rhs.ends_with('\''))
         && !rhs.starts_with(STORAGE_WORD_PREFIX)
     {
-        // The trailing dequote drops the lexer's CTLESC sentinels before
-        // quoted glob metacharacters (`[0]="*y"` stores `*y`, GNU
-        // dequote_string:4807 strips the pairs after globbing passes).
+        // The raw element still carries quote syntax: one
+        // remove_shell_quotes pass is the whole removal. The trailing
+        // dequote drops the lexer's CTLESC sentinels before quoted glob
+        // metacharacters (`[0]="*y"` stores `*y`, GNU dequote_string:4807
+        // strips the pairs after globbing passes) and the
+        // expansion-whitespace tags their whitespace as data.
         crate::executor::markers::dequote_ctlesc_pairs(&restore_quote_carriers(
             &remove_shell_quotes(rhs),
         ))
+        .replace(crate::executor::markers::IFS_GLUE, "")
+        .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
     } else {
-        crate::executor::markers::dequote_ctlesc_pairs(rhs)
+        // No quote syntax ($'...' whole words, bare values, or internal
+        // storage forms): unquote_storage_value performs the one removal —
+        // ANSI-C decoding for `$'...'` (issue #109) and the unquoted
+        // `\x` -> x escape drop for bare text (parse.y:5368-5397).
+        unquote_storage_value(&crate::executor::markers::dequote_ctlesc_pairs(rhs))
     }
 }
 
