@@ -26,7 +26,8 @@ use brace_scan::{
     tokens_open_unclosed_brace_group,
 };
 use continuation::{
-    ends_with_unquoted_backslash, has_unclosed_compound_assignment, has_unclosed_quotes,
+    comsub_residuals_advance, ends_with_unquoted_backslash, has_unclosed_compound_assignment,
+    has_unclosed_quotes, ComsubResidualState,
 };
 
 pub(crate) use alias_stream::{expand_aliases_in_source, AliasLookup};
@@ -288,6 +289,31 @@ struct AwaitingHeredocBody {
 /// close-char construct in the accumulated text) or the keyword stack
 /// non-empty (an unclosed `{` group armed the fast path), so the driver's
 /// overall completeness answer matches the fresh scan's byte for byte.
+/// rubash#292 plan B: the join gate's command-substitution residual
+/// checkpoint — where the resumable scan (`comsub_residuals_advance`)
+/// continues in `GroupScanFeeder::comsub_chars`, and the scan state at
+/// that offset. `resume` only ever advances past a prefix whose forward
+/// decisions (unit skips, heredoc terminators, `esac)` lookaheads) the
+/// current buffer decided conclusively; an undecided position parks here
+/// and is re-derived line by line, exactly reproducing what a full scan
+/// of each longer buffer would decide (same soundness discipline as
+/// `BraceScanCache`, rubash#241: append-only validity, hard invalidation
+/// at every non-append mutation of the logical line).
+#[derive(Clone)]
+struct ComsubScanCheckpoint {
+    resume: usize,
+    snapshot: ComsubResidualState,
+}
+
+impl ComsubScanCheckpoint {
+    fn initial() -> Self {
+        Self {
+            resume: 0,
+            snapshot: ComsubResidualState::default(),
+        }
+    }
+}
+
 pub(crate) struct GroupScanFeeder {
     initial_posix: bool,
     input_origin: InputOrigin,
@@ -302,6 +328,22 @@ pub(crate) struct GroupScanFeeder {
     extglob_flips_allowed: bool,
     comsub_heredocs: Vec<ComsubHeredocHeader>,
     header_scan_from: usize,
+    /// Char mirror of `logical_line` (rubash#292 plan B): the join gate's
+    /// command-substitution residual scan runs over this persistent
+    /// materialization instead of re-collecting `logical_line.chars()` per
+    /// physical line. Extended in lockstep with the append below; rebuilt
+    /// from `logical_line` at every non-append mutation (see
+    /// `rebuild_comsub_mirror`).
+    comsub_chars: Vec<char>,
+    /// The residual scan's checkpoint over `comsub_chars` (rubash#292 plan
+    /// B): `None` means the next gate call full-scans from char 0. GNU
+    /// parse.y:3557 read_token streams token by token and never re-scans
+    /// consumed text; this checkpoint is the residual scan's stand-in for
+    /// that model — the scan advances over each newly appended line, and
+    /// only the still-open construct (a `$(` whose atomic skip has not
+    /// decided on the text read so far, or a pending heredoc) is re-derived
+    /// per line via the park the advance returns.
+    comsub_checkpoint: Option<ComsubScanCheckpoint>,
     lexer_parse_state: LexerParseState,
     brace_cache: BraceScanCache,
     brace_join_active: bool,
@@ -347,6 +389,8 @@ impl GroupScanFeeder {
             extglob_flips_allowed: true,
             comsub_heredocs: Vec::new(),
             header_scan_from: 0,
+            comsub_chars: Vec::new(),
+            comsub_checkpoint: Some(ComsubScanCheckpoint::initial()),
             lexer_parse_state: LexerParseState::default(),
             brace_cache: BraceScanCache::default(),
             brace_join_active: false,
@@ -543,6 +587,47 @@ impl GroupScanFeeder {
 
     /// The parked main loop: the body of the original `while let
     /// Some(raw_line) = lines.next()` iteration.
+    /// rubash#292 plan B: answer the join gate's command-substitution
+    /// question from the residual checkpoint instead of full-scanning the
+    /// accumulated `logical_line` (and re-collecting its chars) per
+    /// physical line. Restoring the snapshot at `resume` and scanning
+    /// `comsub_chars[resume..]` reproduces the full scan of the current
+    /// buffer bit for bit: everything before `resume` was decided
+    /// conclusively on a shorter prefix (monotone forward skips), and the
+    /// advance's park covers the still-undecided open construct. The OMB
+    /// load paid the full rescan ~984 times per source (2.5 MB re-read);
+    /// with the checkpoint each line pays only its own bytes plus the open
+    /// construct's re-derivation.
+    fn advance_comsub_scan(&mut self) -> bool {
+        let (resume, snapshot) = match self.comsub_checkpoint.take() {
+            Some(checkpoint) => (checkpoint.resume, checkpoint.snapshot),
+            None => (0, ComsubResidualState::default()),
+        };
+        let mut state = snapshot;
+        let park = comsub_residuals_advance(&self.comsub_chars, resume, &mut state);
+        let open = state.is_open();
+        self.comsub_checkpoint = match park {
+            Some(park) => Some(ComsubScanCheckpoint {
+                resume: park.pos,
+                snapshot: park.snapshot,
+            }),
+            None => Some(ComsubScanCheckpoint {
+                resume: self.comsub_chars.len(),
+                snapshot: state,
+            }),
+        };
+        open
+    }
+
+    /// Rebuild the char mirror from `logical_line` after a non-append
+    /// rewrite (IFS_GLUE insert, comsub-heredoc rotation) and drop the
+    /// checkpoint: the scan's offsets and every decided prefix refer to
+    /// byte positions that no longer exist.
+    fn rebuild_comsub_mirror(&mut self) {
+        self.comsub_chars = self.logical_line.chars().collect();
+        self.comsub_checkpoint = None;
+    }
+
     fn push_main_line(&mut self, raw_line: &str, total_input_len: usize, tokenize_depth: usize) {
         if self.overflowed {
             return;
@@ -568,9 +653,11 @@ impl GroupScanFeeder {
         }
         if !self.logical_line.is_empty() && !self.continued_line {
             self.logical_line.push('\n');
+            self.comsub_chars.push('\n');
         }
         self.continued_line = false;
         self.logical_line.push_str(line);
+        self.comsub_chars.extend(line.chars());
         self.position += line.len() + 1;
         let line_had_terminator = self.position <= total_input_len;
         self.line_number += 1;
@@ -600,7 +687,7 @@ impl GroupScanFeeder {
             return;
         }
 
-        let comsub_open = has_unclosed_command_substitution(&self.logical_line);
+        let comsub_open = self.advance_comsub_scan();
         // Between this scan and the join-gate re-scan further down, the only
         // mutation `self.logical_line` can undergo on a path that reaches
         // that re-scan is the IFS_GLUE insert below (the backslash-
@@ -644,6 +731,7 @@ impl GroupScanFeeder {
                         self.brace_cache.clear();
                         self.unclosed_quotes_cache = None;
                         self.boundary = None;
+                        self.rebuild_comsub_mirror();
                         comsub_state_changed = true;
                     }
                 }
@@ -673,7 +761,12 @@ impl GroupScanFeeder {
         {
             self.logical_line.pop();
             // The popped byte changes the text every later offset depends
-            // on: positional scan cache invalid.
+            // on: positional scan cache invalid. The pop also joins the
+            // next line WITHOUT a '\n' separator, so a two-character
+            // lookahead (`$(`, `<<`, ...) can newly straddle the join —
+            // the checkpoint must not survive that (rubash#292).
+            self.comsub_chars.pop();
+            self.comsub_checkpoint = None;
             self.brace_cache.clear();
             self.unclosed_quotes_cache = None;
             self.boundary = None;
@@ -725,10 +818,10 @@ impl GroupScanFeeder {
         // insert rewrote the buffer this iteration (`comsub_open || ...` —
         // an open substitution never takes the insert path, and the un-rewritten
         // buffer answer is the loop-head answer by purity). See the comment
-        // at the loop-head scan.
-        if comsub_open
-            || (comsub_state_changed && has_unclosed_command_substitution(&self.logical_line))
-        {
+        // at the loop-head scan. The insert invalidated the residual
+        // checkpoint (rubash#292), so this advance is the rewritten buffer's
+        // full scan and re-establishes the checkpoint for the next line.
+        if comsub_open || (comsub_state_changed && self.advance_comsub_scan()) {
             self.brace_join_active = false;
             return;
         }
@@ -751,6 +844,7 @@ impl GroupScanFeeder {
             self.brace_cache.clear();
             self.unclosed_quotes_cache = None;
             self.boundary = None;
+            self.rebuild_comsub_mirror();
         }
         // GNU reads tokens sequentially (parse.y read_token): the reader
         // state feeding reserved_word_acceptable (parse.y:5899) is the state
@@ -891,10 +985,15 @@ impl GroupScanFeeder {
         self.logical_line.clear();
         self.unclosed_quotes_cache = None;
         self.boundary = None;
-        // Offsets restart for the next logical line: cache invalid.
+        // Offsets restart for the next logical line: cache invalid. The
+        // residual checkpoint resets to the fresh-scan state (the empty
+        // buffer's full scan is `Default`), so the next logical line's
+        // first gate call resumes instead of full-scanning (rubash#292).
         self.brace_cache.clear();
         self.header_scan_from = 0;
         self.brace_join_active = false;
+        self.comsub_chars.clear();
+        self.comsub_checkpoint = Some(ComsubScanCheckpoint::initial());
 
         for delimiter in delimiters {
             // GNU parse.y:3120-3135 gather_here_documents passes the parser's
@@ -959,6 +1058,9 @@ impl GroupScanFeeder {
                 self.logical_line = rotated;
                 self.brace_cache.clear();
                 self.boundary = None;
+                // End of input: no further gate calls read these offsets,
+                // but keep the mirror honest anyway (rubash#292).
+                self.rebuild_comsub_mirror();
             }
             let (mut line_tokens, _) = tokenize_with_boundary(
                 self.boundary.take(),

@@ -23,6 +23,56 @@ fn test_tokenize_empty() {
 }
 
 #[test]
+fn multiline_dquoted_comsub_join_gate_matches_full_scan() {
+    // rubash#292: the join gate's residual checkpoint must reproduce the
+    // per-prefix full-scan answers. `x="$(fo` alone is OPEN (the unit skip
+    // fails on the prefix and the residual double-quote state would never
+    // let a naive per-line scan close it); only re-deriving the atomic
+    // skip over the joined buffer closes the comsub at the `)` inside the
+    // double quotes — exactly what the full scan of the accumulated
+    // logical line does. Early finalization would split the word and drop
+    // the `echo after` line into the open quote.
+    let multi = tokenize("x=\"$(fo\no)\"\necho after\n");
+    let single = tokenize("x=\"$(foo)\"\necho after\n");
+    // The comsub body keeps the physical newline (GNU runs `fo` and `o` as
+    // two commands), so the values differ by that newline — but the token
+    // SHAPE must match the closed one-line form: one assignment word, then
+    // `echo after` as normal words. An early gate finalization would split
+    // the word and swallow the trailing line into the open quote.
+    assert_eq!(multi.len(), single.len());
+    assert!(multi[0].value.contains("$(fo\no)"));
+    assert!(multi.iter().any(|token| token.value == "echo"));
+    assert!(multi.iter().any(|token| token.value == "after"));
+}
+
+#[test]
+fn backslash_continuation_inside_comsub_invalidates_checkpoint() {
+    // The pop path drops the trailing `\` and appends the next line WITHOUT
+    // the '\n' separator, so a two-character lookahead (`$(`, `<<`, ...)
+    // can newly straddle the join — the checkpoint is hard-invalidated
+    // there and the gate full-scans. The joined text equals the one-line
+    // form byte for byte, so the token values must match it.
+    let multi = tokenize("$(echo a\\\nb)\necho after\n");
+    let single = tokenize("$(echo ab)\necho after\n");
+    assert_eq!(multi.len(), single.len());
+    assert_eq!(multi[0].value, single[0].value);
+    assert!(multi.iter().any(|token| token.value == "after"));
+}
+
+#[test]
+fn multiline_case_in_comsub_stays_one_word_through_gate() {
+    // rubash#292 + the existing fn-level case-pattern tests: through the
+    // feeder, `$(case a in a) echo x` must stay open across the newline
+    // and close at `esac)` (the pattern `)` is gated by case depth both in
+    // the full scan and in the parked re-derivation).
+    let tokens = tokenize("$(case a in a) echo x\nesac)\necho after\n");
+    assert!(tokens.iter().any(|token| token.value == "after"));
+    assert!(tokens
+        .iter()
+        .any(|token| token.value.contains("case a in a) echo x")));
+}
+
+#[test]
 fn test_empty_quoted_heredoc_delimiter_reads_until_eof() {
     let tokens = tokenize("cat <<''\nhi\nthere\n''");
 

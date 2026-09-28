@@ -1183,6 +1183,20 @@ fn classify_top_level_word(
 /// Skip a balanced `(` ... `)` unit starting at `open` (the index of the `(`),
 /// returning the index just past the matching `)`. Returns `None` if unbalanced.
 fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
+    skip_parenthesized_unit_ex(chars, open).map(|(end, _)| end)
+}
+
+/// rubash#292 plan B variant of [`skip_parenthesized_unit`]: the `Some`
+/// payload additionally reports whether the closure decision is *decided*
+/// by the current buffer. The unit's internal `esac)` case-pattern
+/// lookahead (`case_pattern_starts_with_esac_chars_ex`) scans PAST the
+/// unit's closing `)` looking for `;;` / `esac` / `)` evidence; when that
+/// scan runs off the end of the buffer undecided, future text can flip the
+/// internal case depth and move (or undo) this closure point, so the
+/// caller must park at the `$(` instead of trusting the jump. Every other
+/// internal decision is prefix-monotone (a forward scan that already
+/// closed keeps its closure point on longer buffers).
+fn skip_parenthesized_unit_ex(chars: &[char], open: usize) -> Option<(usize, bool)> {
     let mut depth = 0usize;
     let mut index = open;
     let mut single = false;
@@ -1203,6 +1217,7 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
     // non-alphanumeric word characters never reach `word`, so `$(echo $#)`
     // and `$(echo 'a'#b)` would misread `#` as a comment.
     let mut token_boundary = true;
+    let mut undecided = false;
     while index < chars.len() {
         let ch = chars[index];
         if single {
@@ -1242,7 +1257,7 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
         {
             let (next, closes) = skip_heredoc_in_chars_with_closure(chars, index);
             if closes.is_some() {
-                return Some(next);
+                return Some((next, !undecided));
             }
             index = next;
             // A heredoc terminator ends on its own line, so the next
@@ -1276,7 +1291,7 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
         }
         // Quoted text is a literal word and cannot begin a reserved word.
         if !single && !double {
-            update_command_substitution_case_depth(
+            update_command_substitution_case_depth_ex(
                 chars,
                 index,
                 ch,
@@ -1284,10 +1299,11 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
                 &mut case_depth,
                 &mut word_boundary,
                 &mut current_word_boundary,
+                &mut undecided,
             );
             // GNU read_token_word (parse.y:5377-5397): outside quotes a
-            // backslash quotes the next character — it can never act as a
-            // paren delimiter, so `$(echo \)` does not close the
+            // backslash quotes the next character — it can never act as
+            // a paren delimiter, so `$(echo \)` does not close the
             // substitution (comsub-posix.tests:42). The quoted character is
             // word text (a placeholder, since `c\ase` is not `case`), so a
             // following `#` stays mid-word (`\;#` in comsub1.sub); a quoted
@@ -1308,7 +1324,7 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
             ')' if case_depth == 0 => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    return Some(index + 1);
+                    return Some((index + 1, !undecided));
                 }
             }
             _ => {}
@@ -1352,138 +1368,251 @@ pub(crate) fn has_unclosed_command_substitution(input: &str) -> bool {
 
 fn comsub_residuals(input: &str) -> (usize, bool, bool, usize) {
     let chars = input.chars().collect::<Vec<_>>();
-    let mut index = 0usize;
-    let mut depth = 0usize;
-    let mut backtick = false;
-    let mut single = false;
-    let mut double = false;
-    let mut ansi_single = false;
-    let mut escaped = false;
-    let mut comment_start = true;
-    let mut in_comment = false;
-    let mut case_depth = 0usize;
-    let mut parameter_depth = 0usize;
-    let mut parameter_single = false;
-    let mut word = String::new();
-    let mut word_boundary = true;
-    let mut current_word_boundary = true;
+    let mut state = ComsubResidualState::default();
+    let _ = comsub_residuals_advance(&chars, 0, &mut state);
+    (
+        state.depth,
+        state.backtick,
+        state.ansi_single,
+        state.parameter_depth,
+    )
+}
+
+/// Every scan local of the command-substitution residual checker below,
+/// checkpointable across physical lines (rubash#292 plan B).
+///
+/// GNU reads a script once, token by token (`parse.y:3557 read_token`): the
+/// reader state advances per token and never re-scans consumed text. This
+/// checker's char-machine is a left-to-right DFA over exactly the same
+/// bytes, so its locals are, in isolation, resumable: carrying them across
+/// a physical-line boundary reproduces the full-buffer scan bit for bit.
+/// The one thing that is NOT position-local is the set of atomic forward
+/// skips (`skip_parenthesized_unit`, `skip_arithmetic_substitution`, the
+/// heredoc skip, the `esac)` case-pattern lookahead): their outcome is a
+/// function of text up to the END of the current buffer, so a decision
+/// that failed (or ran off the end undecided) on a shorter prefix may
+/// succeed on a longer one. [`comsub_residuals_advance`] reports those
+/// positions as a [`ComsubResidualPark`] so the caller re-derives the
+/// decision instead of committing the shorter prefix's answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ComsubResidualState {
+    pub(crate) depth: usize,
+    pub(crate) backtick: bool,
+    pub(crate) single: bool,
+    pub(crate) double: bool,
+    pub(crate) ansi_single: bool,
+    pub(crate) escaped: bool,
+    pub(crate) comment_start: bool,
+    pub(crate) in_comment: bool,
+    pub(crate) case_depth: usize,
+    pub(crate) parameter_depth: usize,
+    pub(crate) parameter_single: bool,
+    pub(crate) word: String,
+    pub(crate) word_boundary: bool,
+    pub(crate) current_word_boundary: bool,
+}
+
+impl Default for ComsubResidualState {
+    fn default() -> Self {
+        // The original scan's initial locals: only the three boundary
+        // flags start set.
+        Self {
+            depth: 0,
+            backtick: false,
+            single: false,
+            double: false,
+            ansi_single: false,
+            escaped: false,
+            comment_start: true,
+            in_comment: false,
+            case_depth: 0,
+            parameter_depth: 0,
+            parameter_single: false,
+            word: String::new(),
+            word_boundary: true,
+            current_word_boundary: true,
+        }
+    }
+}
+
+impl ComsubResidualState {
+    /// The join gate's question: does any substitution depth or flag still
+    /// keep the logical line open?
+    pub(crate) fn is_open(&self) -> bool {
+        self.depth > 0 || self.backtick || self.ansi_single || self.parameter_depth > 0
+    }
+}
+
+/// A re-derivation point returned by [`comsub_residuals_advance`]: the
+/// scan's trajectory from `pos` onward depends on a forward decision the
+/// current buffer leaves undecided, so a longer buffer may take a
+/// different branch there (an atomic unit skip that failed, a unit that
+/// closed through an `esac)` lookahead that ran off the end, or a
+/// top-level-backtick heredoc whose terminator line has not arrived).
+/// Resuming the scan at `pos` with `snapshot` re-runs that decision with
+/// the longer buffer's text — exactly what the full scan of the longer
+/// buffer does — which is what keeps the per-prefix answers identical to
+/// the full-buffer scan this checkpoint replaces (same soundness rules as
+/// `BraceScanResume`, rubash#176/#178/#241).
+pub(crate) struct ComsubResidualPark {
+    /// Char index (absolute, into the buffer passed to the advance fn)
+    /// where the undecided decision starts.
+    pub(crate) pos: usize,
+    /// Scan state at `pos`, before the undecided arm mutated anything.
+    pub(crate) snapshot: ComsubResidualState,
+}
+
+/// Advance the residual scan over `chars[from..]` starting from `state`
+/// (restored from a previous checkpoint or `Default`), leaving `state` as
+/// the scan's end state, and return the FIRST undecided position, if any.
+///
+/// Equivalence contract: scanning a buffer fully (`from == 0`, `Default`)
+/// reproduces the old whole-buffer loop byte for byte (the arms below are
+/// its arms, unchanged); resuming at a park re-derives every
+/// buffer-length-dependent decision, so the end state after each prefix
+/// equals the full scan of that prefix. Arms that only read
+/// position-local state (quotes, `$'`, `${`, comments, escapes) need no
+/// park: the char-machine is memoryless given position + state, and the
+/// '\n' separators the join loop inserts guarantee no two-character
+/// lookahead (`$(`, `${`, `$'`, `<<`) straddles a resume boundary except
+/// after a backslash-continuation pop — which invalidates the checkpoint
+/// instead (see the feeder).
+pub(crate) fn comsub_residuals_advance(
+    chars: &[char],
+    from: usize,
+    state: &mut ComsubResidualState,
+) -> Option<ComsubResidualPark> {
+    let mut index = from.min(chars.len());
+    let mut park: Option<ComsubResidualPark> = None;
 
     while index < chars.len() {
         let ch = chars[index];
-        if in_comment {
+        if state.in_comment {
             if ch == '\n' {
-                in_comment = false;
-                comment_start = true;
+                state.in_comment = false;
+                state.comment_start = true;
             }
             index += 1;
             continue;
         }
-        if escaped {
-            escaped = false;
-            comment_start = false;
+        if state.escaped {
+            state.escaped = false;
+            state.comment_start = false;
             // A backslash-quoted character is word text (placeholder: `c\ase`
             // is not `case`), so a following `#` stays mid-word (`\;#` in
             // comsub1.sub). A quoted newline is handled by the `\` arm.
-            word.push('\u{1}');
+            state.word.push('\u{1}');
             index += 1;
             continue;
         }
-        if ch == '\n' && !single && !double && !ansi_single && !backtick && depth == 0 {
-            comment_start = true;
+        if ch == '\n'
+            && !state.single
+            && !state.double
+            && !state.ansi_single
+            && !state.backtick
+            && state.depth == 0
+        {
+            state.comment_start = true;
             index += 1;
             continue;
         }
         if ch == '#'
-            && !single
-            && !double
-            && !ansi_single
-            && !backtick
-            && depth == 0
-            && comment_start
+            && !state.single
+            && !state.double
+            && !state.ansi_single
+            && !state.backtick
+            && state.depth == 0
+            && state.comment_start
         {
-            in_comment = true;
+            state.in_comment = true;
             index += 1;
             continue;
         }
-        if ch.is_whitespace() && !single && !double && !ansi_single && !backtick && depth == 0 {
-            comment_start = true;
+        if ch.is_whitespace()
+            && !state.single
+            && !state.double
+            && !state.ansi_single
+            && !state.backtick
+            && state.depth == 0
+        {
+            state.comment_start = true;
             index += 1;
             continue;
         }
-        if ansi_single {
+        if state.ansi_single {
             if ch == '\\' {
-                escaped = true;
+                state.escaped = true;
             } else if ch == '\'' {
-                ansi_single = false;
+                state.ansi_single = false;
             }
-            comment_start = false;
+            state.comment_start = false;
             index += 1;
             continue;
         }
-        if ch == '\\' && !single {
-            escaped = true;
-            comment_start = false;
+        if ch == '\\' && !state.single {
+            state.escaped = true;
+            state.comment_start = false;
             index += 1;
             continue;
         }
-        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
-            ansi_single = true;
-            comment_start = false;
+        if ch == '$' && !state.single && !state.double && chars.get(index + 1) == Some(&'\'') {
+            state.ansi_single = true;
+            state.comment_start = false;
             index += 2;
             continue;
         }
-        if depth > 0 && ch == '`' && !single {
+        if state.depth > 0 && ch == '`' && !state.single {
             index = skip_backtick_substitution(&chars, index);
-            comment_start = false;
+            state.comment_start = false;
             continue;
         }
-        if ch == '\'' && parameter_depth > 0 && !ansi_single {
-            parameter_single = !parameter_single;
+        if ch == '\'' && state.parameter_depth > 0 && !state.ansi_single {
+            state.parameter_single = !state.parameter_single;
             index += 1;
             continue;
         }
-        if ch == '\'' && !double {
-            single = !single;
-            comment_start = false;
+        if ch == '\'' && !state.double {
+            state.single = !state.single;
+            state.comment_start = false;
             index += 1;
             continue;
         }
-        if ch == '"' && !single {
-            double = !double;
-            comment_start = false;
+        if ch == '"' && !state.single {
+            state.double = !state.double;
+            state.comment_start = false;
             index += 1;
             continue;
         }
-        if single {
+        if state.single {
             index += 1;
             continue;
         }
-        if ch == '`' && depth == 0 {
-            backtick = !backtick;
-            comment_start = false;
+        if ch == '`' && state.depth == 0 {
+            state.backtick = !state.backtick;
+            state.comment_start = false;
             index += 1;
             continue;
         }
         if ch == '$'
             && chars.get(index + 1) == Some(&'{')
-            && !single
-            && !ansi_single
-            && !parameter_single
+            && !state.single
+            && !state.ansi_single
+            && !state.parameter_single
         {
-            parameter_depth += 1;
+            state.parameter_depth += 1;
             // parse.y parse_matched_pair: inside `${...}` a `#` is parameter
             // operator text (the length operator in `${#x}`), never a
             // comment introducer — comment_start must clear here like every
             // other consumed non-space character, or `${#x}` is swallowed
             // to EOL and the `}` is never matched.
-            comment_start = false;
+            state.comment_start = false;
             index += 2;
             continue;
         }
-        if ch == '}' && parameter_depth > 0 {
-            parameter_depth = parameter_depth.saturating_sub(1);
-            parameter_single = false;
-            comment_start = false;
+        if ch == '}' && state.parameter_depth > 0 {
+            state.parameter_depth = state.parameter_depth.saturating_sub(1);
+            state.parameter_single = false;
+            state.comment_start = false;
             index += 1;
             continue;
         }
@@ -1491,32 +1620,56 @@ fn comsub_residuals(input: &str) -> (usize, bool, bool, usize) {
         // inside an outer double-quoted word. Keep it atomic here as well as
         // in has_unclosed_quotes; an unbalanced unit falls through so this
         // checker still reports the missing closing delimiter.
-        if ch == '$' && !single && chars.get(index + 1) == Some(&'(') && !parameter_single {
-            if let Some(end) = skip_parenthesized_unit(&chars, index + 1) {
+        if ch == '$'
+            && !state.single
+            && chars.get(index + 1) == Some(&'(')
+            && !state.parameter_single
+        {
+            if let Some((end, unit_decided)) = skip_parenthesized_unit_ex(&chars, index + 1) {
+                // rubash#292: the unit closed, but through an `esac)`
+                // lookahead that ran off the end of the buffer undecided —
+                // future text can move the closure point, so park at this
+                // `$(` and re-derive on the next line.
+                if !unit_decided && park.is_none() {
+                    park = Some(ComsubResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    });
+                }
                 index = end;
-                comment_start = false;
+                state.comment_start = false;
                 continue;
+            }
+            // rubash#292: the atomic skip failed on THIS buffer; a longer
+            // buffer may close the unit (with priority over the `$((`
+            // arithmetic fallback below), so park before committing the
+            // char-by-char fallback.
+            if park.is_none() {
+                park = Some(ComsubResidualPark {
+                    pos: index,
+                    snapshot: state.clone(),
+                });
             }
             if chars.get(index + 2) == Some(&'(') {
                 if let Some(end) = skip_arithmetic_substitution(&chars, index + 3) {
                     index = end;
-                    comment_start = false;
+                    state.comment_start = false;
                     continue;
                 }
                 // POSIX permits command substitution when the text after
                 // "$((" is not a valid arithmetic expression.
             }
-            depth += 1;
-            if depth == 1 {
-                case_depth = 0;
-                word.clear();
-                word_boundary = true;
-                current_word_boundary = true;
+            state.depth += 1;
+            if state.depth == 1 {
+                state.case_depth = 0;
+                state.word.clear();
+                state.word_boundary = true;
+                state.current_word_boundary = true;
             }
             // The fast skip failed, so the body is scanned char-by-char
             // from here — and a substitution body begins at a token
             // boundary: `$(#c` is a comment.
-            comment_start = true;
+            state.comment_start = true;
             index += 2;
             continue;
         }
@@ -1526,37 +1679,41 @@ fn comsub_residuals(input: &str) -> (usize, bool, bool, usize) {
         // other non-alphanumeric word characters never reach `word`
         // (`$(echo $#)`). `parameter_depth` keeps `${#x}` parameter text
         // out of the comment rule.
-        if depth > 0
+        if state.depth > 0
             && ch == '#'
-            && !single
-            && !double
-            && !ansi_single
-            && !backtick
-            && parameter_depth == 0
-            && comment_start
+            && !state.single
+            && !state.double
+            && !state.ansi_single
+            && !state.backtick
+            && state.parameter_depth == 0
+            && state.comment_start
         {
             while index + 1 < chars.len() && chars[index + 1] != '\n' {
                 index += 1;
             }
-            word.clear();
-            word_boundary = true;
-            current_word_boundary = true;
-            comment_start = true;
+            state.word.clear();
+            state.word_boundary = true;
+            state.current_word_boundary = true;
+            state.comment_start = true;
             index += 1;
             continue;
         }
-        if depth > 0 && !ansi_single && !backtick {
+        if state.depth > 0 && !state.ansi_single && !state.backtick {
+            // The `esac)` lookahead inside is re-derived by the enclosing
+            // park whenever it runs off the buffer end (depth > 0 requires
+            // a parked `$(` fallback below it), so its undecided status is
+            // deliberately ignored here.
             update_command_substitution_case_depth(
                 &chars,
                 index,
                 ch,
-                &mut word,
-                &mut case_depth,
-                &mut word_boundary,
-                &mut current_word_boundary,
+                &mut state.word,
+                &mut state.case_depth,
+                &mut state.word_boundary,
+                &mut state.current_word_boundary,
             );
         }
-        if depth > 0
+        if state.depth > 0
             && ch == '<'
             && chars.get(index + 1) == Some(&'<')
             && chars.get(index + 2) == Some(&'<')
@@ -1564,18 +1721,18 @@ fn comsub_residuals(input: &str) -> (usize, bool, bool, usize) {
             index += 3;
             continue;
         }
-        if depth > 0 && ch == '<' && chars.get(index + 1) == Some(&'<') {
+        if state.depth > 0 && ch == '<' && chars.get(index + 1) == Some(&'<') {
             let (next, closes) = skip_heredoc_in_chars_with_closure(&chars, index);
             if closes.is_some() {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return (depth, backtick, ansi_single, parameter_depth);
+                state.depth = state.depth.saturating_sub(1);
+                if state.depth == 0 {
+                    return park;
                 }
             }
             index = next;
             continue;
         }
-        if backtick
+        if state.backtick
             && ch == '<'
             && chars.get(index + 1) == Some(&'<')
             && chars.get(index + 2) == Some(&'<')
@@ -1583,28 +1740,40 @@ fn comsub_residuals(input: &str) -> (usize, bool, bool, usize) {
             index += 3;
             continue;
         }
-        if backtick && ch == '<' && chars.get(index + 1) == Some(&'<') {
-            index = skip_heredoc_in_chars_with_closure(&chars, index).0;
+        if state.backtick && ch == '<' && chars.get(index + 1) == Some(&'<') {
+            let (next, closes) = skip_heredoc_in_chars_with_closure(&chars, index);
+            // rubash#292: the terminator line is not in the buffer yet; a
+            // longer buffer closes this heredoc at a position this prefix
+            // cannot see (and the body lines in between must stay opaque),
+            // so park at the `<<` — no enclosing `$(` park exists at
+            // depth == 0.
+            if closes.is_none() && park.is_none() {
+                park = Some(ComsubResidualPark {
+                    pos: index,
+                    snapshot: state.clone(),
+                });
+            }
+            index = next;
             continue;
         }
         // GNU read_token_word (parse.y:5404-5418): inside double quotes a
         // `)` is literal text — it never balances a `$(` parenthesis. All
         // constructs that stay live inside `"..."` (`\x`, `$(`, `` ` ``,
         // `${`) were handled by the arms above; anything left is inert.
-        if double {
+        if state.double {
             index += 1;
             continue;
         }
-        if depth > 0 && case_depth == 0 && !ansi_single && ch == '(' {
-            depth += 1;
-        } else if depth > 0 && case_depth == 0 && !ansi_single && ch == ')' {
-            depth -= 1;
+        if state.depth > 0 && state.case_depth == 0 && !state.ansi_single && ch == '(' {
+            state.depth += 1;
+        } else if state.depth > 0 && state.case_depth == 0 && !state.ansi_single && ch == ')' {
+            state.depth -= 1;
         }
-        if !single && !double && !ansi_single && !backtick {
+        if !state.single && !state.double && !state.ansi_single && !state.backtick {
             // GNU read_token: a token boundary follows whitespace and the
             // shell separators; every other live character continues or
             // begins a word, so a following `#` is mid-word text.
-            comment_start =
+            state.comment_start =
                 ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         }
         index += 1;
@@ -1615,7 +1784,7 @@ fn comsub_residuals(input: &str) -> (usize, bool, bool, usize) {
     // command substitution `${ command; }` (parser.h:83 FUNSUB_CHAR,
     // parse.y:5407 PST_FUNSUBST close) — comsub2.tests splits
     // `echo ${ printf ...` + `}` across lines and must keep reading.
-    (depth, backtick, ansi_single, parameter_depth)
+    park
 }
 
 fn skip_backtick_substitution(chars: &[char], mut index: usize) -> usize {
@@ -1695,6 +1864,34 @@ fn update_command_substitution_case_depth(
     word_boundary: &mut bool,
     current_word_boundary: &mut bool,
 ) {
+    let mut undecided = false;
+    update_command_substitution_case_depth_ex(
+        chars,
+        index,
+        ch,
+        word,
+        case_depth,
+        word_boundary,
+        current_word_boundary,
+        &mut undecided,
+    );
+}
+
+/// rubash#292 plan B variant: additionally reports (through `undecided`)
+/// whether the `esac` case-pattern lookahead consulted text past the end
+/// of `chars` without concluding. The decision itself is still committed
+/// exactly as the full-buffer scan commits it; only the caller's
+/// checkpoint cares about the flag.
+fn update_command_substitution_case_depth_ex(
+    chars: &[char],
+    index: usize,
+    ch: char,
+    word: &mut String,
+    case_depth: &mut usize,
+    word_boundary: &mut bool,
+    current_word_boundary: &mut bool,
+    undecided: &mut bool,
+) {
     if ch == '_' || ch.is_ascii_alphanumeric() {
         if word.is_empty() {
             *current_word_boundary = *word_boundary;
@@ -1717,9 +1914,18 @@ fn update_command_substitution_case_depth(
             *case_depth += 1;
             false
         }
-        "esac" if *current_word_boundary && !case_pattern_starts_with_esac_chars(chars, index) => {
-            *case_depth = case_depth.saturating_sub(1);
-            true
+        "esac" if *current_word_boundary => {
+            let (starts_with_esac_chars, decided) =
+                case_pattern_starts_with_esac_chars_ex(chars, index);
+            if !decided {
+                *undecided = true;
+            }
+            if !starts_with_esac_chars {
+                *case_depth = case_depth.saturating_sub(1);
+                true
+            } else {
+                false
+            }
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
         | "done"
@@ -1738,21 +1944,29 @@ fn command_substitution_separator_allows_reserved_word(ch: char) -> bool {
     matches!(ch, ';' | '&' | '|' | '(' | ')' | '\n')
 }
 
-fn case_pattern_starts_with_esac_chars(chars: &[char], delimiter_index: usize) -> bool {
+/// rubash#292 plan B variant of the `esac)` case-pattern lookahead: also
+/// reports whether the decision was *decided* by the current buffer. A
+/// scan that runs off `chars.len()` (matching `)` not yet present, or the
+/// post-close `;;` / `esac` / `)` evidence not yet present) returns its
+/// partial-text answer with `decided == false`: future text can flip it,
+/// so checkpoint callers must re-derive instead of committing.
+fn case_pattern_starts_with_esac_chars_ex(chars: &[char], delimiter_index: usize) -> (bool, bool) {
     if !matches!(chars.get(delimiter_index), Some(')' | '|')) {
-        return false;
+        return (false, true);
     }
 
     let mut close = delimiter_index;
     while close < chars.len() {
         match chars[close] {
             ')' => break,
-            ';' | '\n' => return false,
+            ';' | '\n' => return (false, true),
             _ => close += 1,
         }
     }
     if chars.get(close) != Some(&')') {
-        return false;
+        // Ran off the end before the pattern list's `)`: a longer buffer
+        // may find it and continue to opposite evidence.
+        return (false, false);
     }
 
     let mut scan = close + 1;
@@ -1761,7 +1975,7 @@ fn case_pattern_starts_with_esac_chars(chars: &[char], delimiter_index: usize) -
     while scan < chars.len() {
         let ch = chars[scan];
         if ch == ';' && chars.get(scan + 1) == Some(&';') {
-            return true;
+            return (true, true);
         }
         if ch == '_' || ch.is_ascii_alphanumeric() {
             word.push(ch);
@@ -1769,10 +1983,10 @@ fn case_pattern_starts_with_esac_chars(chars: &[char], delimiter_index: usize) -
             continue;
         }
         if word == "esac" && word_boundary {
-            return true;
+            return (true, true);
         }
         if ch == ')' {
-            return false;
+            return (false, true);
         }
         if word.is_empty() {
             if command_substitution_separator_allows_reserved_word(ch) {
@@ -1791,7 +2005,9 @@ fn case_pattern_starts_with_esac_chars(chars: &[char], delimiter_index: usize) -
         scan += 1;
     }
 
-    word == "esac" && word_boundary
+    // Off the end with (at best) a partial trailing word: more text can
+    // still turn this into `;;`, a boundary `esac`, or `)`.
+    (word == "esac" && word_boundary, false)
 }
 
 fn command_substitution_reserved_word_allows_next(word: &str) -> bool {
@@ -1820,5 +2036,182 @@ mod tests {
     fn command_substitution_quotes_do_not_leak_from_outer_double_quote() {
         let input = r#"echo \"$(echo \"\${IFS+'}'z}\")\""#;
         assert!(!has_unclosed_quotes(input));
+    }
+}
+
+#[cfg(test)]
+mod comsub_residual_incremental_tests {
+    use super::{comsub_residuals_advance, ComsubResidualState};
+
+    /// Drive the checkpoint exactly like `GroupScanFeeder::advance_comsub_scan`
+    /// (restore snapshot at `resume`, advance over the buffer, store park or
+    /// stable end) and assert at EVERY physical-line prefix that:
+    ///   1. the advance's end state equals the full scan of that prefix
+    ///      (all fourteen fields), and
+    ///   2. the open flag the join gate would read equals the full-scan flag.
+    /// The logical line is '\n'-joined like `push_main_line` appends (the
+    /// no-separator backslash-join is a feeder-level invalidation, covered by
+    /// the lexer tokenize tests).
+    fn assert_incremental_matches_full(lines: &[&str]) {
+        let mut chars: Vec<char> = Vec::new();
+        let mut resume = 0usize;
+        let mut snapshot = ComsubResidualState::default();
+        for (line_index, line) in lines.iter().enumerate() {
+            if line_index > 0 {
+                chars.push('\n');
+            }
+            chars.extend(line.chars());
+            let mut state = snapshot.clone();
+            let park = comsub_residuals_advance(&chars, resume, &mut state);
+            let mut full = ComsubResidualState::default();
+            let _ = comsub_residuals_advance(&chars, 0, &mut full);
+            assert_eq!(state, full, "end state at prefix {line_index} of {lines:?}");
+            assert_eq!(
+                state.is_open(),
+                full.is_open(),
+                "open flag at prefix {line_index} of {lines:?}"
+            );
+            match park {
+                Some(park) => {
+                    resume = park.pos;
+                    snapshot = park.snapshot;
+                }
+                None => {
+                    resume = chars.len();
+                    snapshot = state;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_matches_full_required_shapes() {
+        // rubash#292 plan B equivalence shapes (task list):
+        // cross-line $(case ... esac)
+        assert_incremental_matches_full(&["echo $(case a in a) echo x", "esac)"]);
+        assert_incremental_matches_full(&["$(case x in", "a) :;;", "esac)"]);
+        // nested ${...}
+        assert_incremental_matches_full(&["echo ${ printf '%s' a", "} ${x}", "}"]);
+        assert_incremental_matches_full(&["echo ${x^${y", "}}"]);
+        // heredoc inside a command substitution (body bytes stay opaque)
+        assert_incremental_matches_full(&["echo $(cat <<eof", "here doc with )", "eof", ")"]);
+        assert_incremental_matches_full(&["echo $(cat <<eof", "body ( \" x", "eof`", ")"]);
+        // backslash continuation state (escaped char on the next line)
+        assert_incremental_matches_full(&["echo $(echo a\\", "b)"]);
+        assert_incremental_matches_full(&["echo $(echo 'q\\", "z')"]);
+        // plain multi-line comsub
+        assert_incremental_matches_full(&["$(echo a", "b)"]);
+        // top-level backtick comsub spanning lines
+        assert_incremental_matches_full(&["echo `date", "+%s` after"]);
+        // $'...' spanning lines
+        assert_incremental_matches_full(&["echo $'a\\n", "b'"]);
+    }
+
+    #[test]
+    fn incremental_matches_full_park_shapes() {
+        // A `$(` opened inside a double-quoted word: the atomic unit skip is
+        // what lets the full scan close the unit past the residual
+        // double-quote state, so the checkpoint MUST re-derive the skip on
+        // the next line (`"$(fo` + `o)"` closes at prefix 2 only via the park).
+        assert_incremental_matches_full(&["x=\"$(fo", "o)\""]);
+        assert_incremental_matches_full(&["x=\"$(a $(b", "c))\""]);
+        // `$((` arithmetic that only balances on a later line.
+        assert_incremental_matches_full(&["echo $((", "1+", "2))"]);
+        // P2: the unit closes through an `esac)` lookahead that runs off the
+        // buffer end undecided; the next line's `;;` flips the internal case
+        // decision and keeps the unit open.
+        assert_incremental_matches_full(&["echo $(case a in x) esac)", ";; )"]);
+        assert_incremental_matches_full(&["echo $(case a in x) esac)", "esac)"]);
+        // P3: a heredoc opened inside a top-level backtick substitution.
+        assert_incremental_matches_full(&["echo `cat <<EOF", "body ) x", "EOF", "` x"]);
+        // Backtick substitution inside a `$(` that stays open across lines.
+        assert_incremental_matches_full(&["echo $(x `date", "`)"]);
+        // Comment at depth 0 split across lines.
+        assert_incremental_matches_full(&["echo a #c", "d", "e"]);
+    }
+
+    /// Deterministic LCG so a failure reproduces bit for bit.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+    }
+
+    /// Seeded fuzz: random token soups from a construct-dense alphabet,
+    /// split into physical lines at fragment boundaries, must satisfy the
+    /// incremental == full contract at every prefix. This is the class
+    /// proof for the park mechanism (a green targeted list only proves the
+    /// listed cases).
+    #[test]
+    fn incremental_matches_full_randomized() {
+        const FRAGMENTS: &[&str] = &[
+            "$( ",
+            ") ",
+            "$((",
+            ")) ",
+            "` ",
+            "${x}",
+            "}",
+            "'a'",
+            "\"q",
+            "q\"",
+            "\\",
+            "#c ",
+            "case ",
+            "esac",
+            "esac)",
+            " in ",
+            "; ",
+            ";; ",
+            "&&",
+            "|",
+            "<<EOF",
+            "EOF",
+            "<<-E",
+            " x ",
+            " y",
+            "echo ",
+            "$(case a in b) esac)",
+            "<<<",
+            " a(",
+            "(( ",
+            " $' ",
+            "'",
+            "\"",
+            "$(",
+            "`",
+            ")",
+            "${ ",
+            "${a:-${b",
+            "}",
+            "\\n",
+        ];
+        let mut rng = Lcg(0x292_0000_0001);
+        for case in 0..4000u64 {
+            let fragment_count = 2 + (rng.next() % 6) as usize;
+            let mut fragments = Vec::with_capacity(fragment_count);
+            for _ in 0..fragment_count {
+                fragments.push(FRAGMENTS[(rng.next() as usize) % FRAGMENTS.len()]);
+            }
+            // Split the fragment list into 1..=4 physical lines.
+            let max_lines = 4.min(fragment_count) as u64;
+            let line_count = (1 + (rng.next() % max_lines)) as usize;
+            let mut lines: Vec<String> = vec![String::new(); line_count];
+            for (i, fragment) in fragments.iter().enumerate() {
+                let target = if line_count == 1 {
+                    0
+                } else {
+                    (i * line_count / fragment_count).min(line_count - 1)
+                };
+                lines[target].push_str(fragment);
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            assert_incremental_matches_full(&lines);
+        }
     }
 }
