@@ -1289,6 +1289,218 @@ pub fn run_source_with_line_offset(
 // instead of driving a terminal REPL that cannot run without a tty.
 // ===========================================================================
 
+/// (rows, cols) of the console attached to `handle`, or None when the
+/// handle is not a console. Only the visible window rectangle is used —
+/// TIOCGWINSZ semantics, not the (usually wider) buffer dwSize.
+#[cfg(windows)]
+fn windows_console_size_of(handle: *mut std::ffi::c_void) -> Option<(i32, i32)> {
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct SmallRect {
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+    }
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct ConsoleScreenBufferInfo {
+        dw_size: Coord,
+        dw_cursor_position: Coord,
+        w_attributes: u16,
+        sr_window: SmallRect,
+        dw_maximum_window_size: Coord,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleScreenBufferInfo(
+            console_output: *mut std::ffi::c_void,
+            console_screen_buffer_info: *mut ConsoleScreenBufferInfo,
+        ) -> i32;
+    }
+    let mut info = ConsoleScreenBufferInfo::default();
+    if unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } == 0 {
+        return None;
+    }
+    let SmallRect {
+        left,
+        top,
+        right,
+        bottom,
+    } = info.sr_window;
+    let rows = i32::from(bottom) - i32::from(top) + 1;
+    let cols = i32::from(right) - i32::from(left) + 1;
+    Some((rows, cols))
+}
+
+#[cfg(not(windows))]
+fn windows_console_size_of(_handle: *mut std::ffi::c_void) -> Option<(i32, i32)> {
+    None
+}
+
+/// Windows analog of the controlling-terminal winsize query
+/// (winsize.c:97 input_tty -> tcgetwinsize): the process console, found via
+/// CONOUT$ so it works even when stdin/stdout/stderr are all redirected,
+/// with the std handles as fallbacks for consoles without a CONOUT$ open.
+#[cfg(windows)]
+fn process_console_size() -> Option<(i32, i32)> {
+    use std::os::windows::io::AsRawHandle;
+    if let Ok(conout) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("CONOUT$")
+    {
+        if let Some(size) = windows_console_size_of(conout.as_raw_handle() as *mut _) {
+            return Some(size);
+        }
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(n_std_handle: u32) -> *mut std::ffi::c_void;
+    }
+    // STD_INPUT_HANDLE / STD_OUTPUT_HANDLE / STD_ERROR_HANDLE
+    for std_handle in [-10i32 as u32, -11i32 as u32, -12i32 as u32] {
+        let handle = unsafe { GetStdHandle(std_handle) };
+        if !handle.is_null() {
+            if let Some(size) = windows_console_size_of(handle) {
+                return Some(size);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn process_console_size() -> Option<(i32, i32)> {
+    None
+}
+
+/// Size of the console on STDIN itself (readline's rl_instream winsize).
+#[cfg(windows)]
+fn stdin_console_size() -> Option<(i32, i32)> {
+    use std::os::windows::io::AsRawHandle;
+    windows_console_size_of(std::io::stdin().as_raw_handle() as *mut _)
+}
+
+#[cfg(not(windows))]
+fn stdin_console_size() -> Option<(i32, i32)> {
+    None
+}
+
+/// variables.c:1040 sh_set_lines_and_columns: bind LINES then COLUMNS as
+/// (non-exported) shell variables. bind_variable does not export, so the
+/// process environment is only updated for names the parent had already
+/// exported (an exported var stays exported across rebinds).
+fn bind_lines_columns(executor: &mut Executor, lines: i32, columns: i32) {
+    executor
+        .shell_state
+        .env_vars
+        .insert("LINES".to_string(), lines.to_string());
+    executor
+        .shell_state
+        .env_vars
+        .insert("COLUMNS".to_string(), columns.to_string());
+    if std::env::var_os("LINES").is_some() {
+        std::env::set_var("LINES", lines.to_string());
+    }
+    if std::env::var_os("COLUMNS").is_some() {
+        std::env::set_var("COLUMNS", columns.to_string());
+    }
+}
+
+/// jobs.c:2618 get_tty_state -> jobs.c:2647-2648 `if (check_window_size)
+/// get_new_window_size(0, NULL, NULL)` -> winsize.c:98-100: with checkwinsize
+/// on (default, config-top.h:148 CHECKWINSIZE_DEFAULT 1), an interactive
+/// shell binds LINES/COLUMNS from the controlling terminal's winsize
+/// (ws_row > 0 && ws_col > 0). Called from initialize_job_control's mirror
+/// (pre-startup-files, shell.c:1969 -> jobs.c:4871 `if (interactive)
+/// get_tty_state ()`) and again after the startup files (shell.c:816) —
+/// rubash's post-file site is prepare_interactive_history, the port of the
+/// shell.c:799-811 block that precedes it. Verified interactive-only: GNU
+/// never binds COLUMNS/LINES for non-interactive shells
+/// (jobs.c:4871 guard).
+pub fn bind_interactive_console_winsize(executor: &mut Executor) {
+    if !crate::builtins::shopt::option_enabled(&executor.shell_state.env_vars, "checkwinsize") {
+        return;
+    }
+    let Some((rows, cols)) = process_console_size() else {
+        return;
+    };
+    // winsize.c:98: both dimensions must be positive for the bind to fire.
+    if rows > 0 && cols > 0 {
+        bind_lines_columns(executor, rows, cols);
+    }
+}
+
+/// lib/readline/terminal.c:293-374 _rl_get_screen_size — the bind readline
+/// performs when it initializes at the first prompt (bashline.c:524
+/// initialize_readline -> rl_initialize readline.c:1313 ->
+/// _rl_init_terminal_io terminal.c:646 -> _rl_get_screen_size ->
+/// sh_set_lines_and_columns terminal.c:374). Precedence, per the C:
+///   1. winsize of rl_instream (stdin): width=ws_col, height=ws_row —
+///      recomputed unconditionally when stdin itself is a console;
+///   2. otherwise the query runs only when no screen size is set yet
+///      (terminal.c:640-643 application-supplied size wins): positive
+///      LINES/COLUMNS shell values bound by the console path survive;
+///   3. env COLUMNS / env LINES (getenv, not shell vars) when unset;
+///   4. the 80x24 defaults (terminal.c:366-371), with `width <= 1 -> 80`
+///      applied last so a degenerate 1-column console still binds 80.
+/// Windows has no termcap/tgetnum("co"/"li") step; the defaults 80/24
+/// replace it exactly (GNU with tgetent but no winsize also lands on
+/// 80/24, verified: no-ctty WSL GNU binds COLUMNS=80 LINES=24 at the
+/// first prompt while the rcfile still sees them unset).
+pub fn bind_interactive_screen_size(executor: &mut Executor) {
+    // terminal.c:318-319 with a working stdin ioctl: wc/ws_col, wr/ws_row.
+    if let Some((rows, cols)) = stdin_console_size() {
+        let mut width = cols;
+        let mut height = rows;
+        // terminal.c:366-371.
+        if width <= 1 {
+            width = 80;
+        }
+        if height <= 0 {
+            height = 24;
+        }
+        bind_lines_columns(executor, height, width);
+        return;
+    }
+    // terminal.c:640-643: an application-provided size (winsize.c:103
+    // rl_set_screen_size from get_new_window_size, or sv_winsize from a
+    // COLUMNS/LINES assignment) suppresses the query when both sides are
+    // already positive.
+    let columns_bound = executor
+        .get_env("COLUMNS")
+        .and_then(|v| v.parse::<i32>().ok())
+        .is_some_and(|v| v > 0);
+    let lines_bound = executor
+        .get_env("LINES")
+        .and_then(|v| v.parse::<i32>().ok())
+        .is_some_and(|v| v > 0);
+    if columns_bound && lines_bound {
+        return;
+    }
+    let env_positive = |name: &str| {
+        std::env::var_os(name)
+            .and_then(|v| v.to_str()?.parse::<i32>().ok())
+            .filter(|v| *v > 0)
+    };
+    let mut width = env_positive("COLUMNS").unwrap_or(-1);
+    let mut height = env_positive("LINES").unwrap_or(-1);
+    if width <= 1 {
+        width = 80;
+    }
+    if height <= 0 {
+        height = 24;
+    }
+    bind_lines_columns(executor, height, width);
+}
+
 /// GNU shell.c:806-811: interactive shells run bash_initialize_history and
 /// load_history at startup. bashhist.c:320-345 load_history: default
 /// HISTSIZE (500) and HISTFILESIZE (=HISTSIZE), apply sv_histsize to the
@@ -1379,6 +1591,29 @@ pub const READ_STDIN_MARKER: &str = "__RUBASH_READ_STDIN";
 pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
     executor.set_env(READ_STDIN_MARKER, "1");
     executor.inherit_process_stdin();
+    // The first primary-prompt read initializes readline
+    // (parse.y:1665 yy_readline_get -> bashline.c:524), which is where GNU
+    // binds LINES/COLUMNS for an interactive shell without a controlling
+    // terminal (terminal.c:374). rubash#300: this driver IS the non-tty
+    // readline port, so the bind belongs at its entry.
+    bind_interactive_screen_size(executor);
+    // variables.c:568-579 (set_if_not PS1/PS2 for interactive shells): GNU
+    // renders the default `\s-\v\$ ` (config-top.h:82 PPROMPT) when no
+    // startup file set PS1 — the clean-env stderr of `bash --rcfile
+    // /dev/null -i </dev/null` shows `bash-5.3# exit`. Bound unexported,
+    // like bind_variable.
+    if executor.get_env("PS1").is_none() {
+        executor
+            .shell_state
+            .env_vars
+            .insert("PS1".to_string(), "\\s-\\v\\$ ".to_string());
+    }
+    if executor.get_env("PS2").is_none() {
+        executor
+            .shell_state
+            .env_vars
+            .insert("PS2".to_string(), "> ".to_string());
+    }
     let mut pending = String::new();
     let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
     let mut group: Vec<(String, bool)> = Vec::new();
@@ -1470,10 +1705,19 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
         if pending.is_empty() {
             executor.execute_prompt_command();
         }
-        // readline.c readline(): print PS1 on stderr, then echo the input
-        // line (non-tty input is echoed by readline's dumb-terminal path).
+        // readline.c readline(): print the EXPANDED PS1 on stderr, then echo
+        // the input line (non-tty input is echoed by readline's
+        // dumb-terminal path). bashline.c:461-462 rl_outstream = stderr;
+        // parse.y:6158-6159 prompt_again passes PS1 through
+        // decode_prompt_string, so raw-byte markers (ESC carriers) must be
+        // rendered as their real bytes — visible ESC noise in the echo was
+        // rubash#297's family symptom.
         let ps1 = executor.get_env("PS1").unwrap_or_default().to_string();
-        eprint!("{ps1}");
+        let rendered =
+            crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(
+                &executor.expand_prompt_string(&ps1),
+            );
+        eprint!("{rendered}");
 
         let mut raw = String::new();
         let line_result = match executor.script_fd0_line(&mut raw) {
@@ -1957,6 +2201,13 @@ pub fn prepare_interactive_history(executor: &mut Executor) {
         executor.set_session_history(Some(session));
     }
     initialize_interactive_history(executor);
+    // shell.c:816: directly after the interactive history setup, GNU runs
+    // get_tty_state() again — re-binding LINES/COLUMNS from the controlling
+    // terminal after the startup files (rubash#300). This runs before the
+    // -c string / script / interactive reader, so prompt-time code
+    // (PROMPT_COMMAND, PS1 expansions) sees console values under GNU, and
+    // now under rubash too.
+    bind_interactive_console_winsize(executor);
 }
 
 /// Outcome of [`pre_process_interactive_line`] (bashhist.c pre_process_line

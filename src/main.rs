@@ -497,6 +497,13 @@ fn apply_startup_job_control(executor: &mut Executor) {
         // -c 'echo $-'` -> `himBHc`, with and without an explicit -m/-o
         // monitor).
         executor.set_shell_option("monitor", true);
+        // jobs.c:4871 `if (interactive) get_tty_state ()` -> jobs.c:2647-2648
+        // -> winsize.c:98-100: initialize_job_control binds LINES/COLUMNS
+        // from the controlling terminal before the startup files run
+        // (shell.c:1969 precedes run_startup_files at shell.c:722), so an
+        // interactive rcfile sees real values (rubash#300; ecosweep GNU
+        // baseline: `--rcfile t3.rc -i` echoes COLUMNS=80 from the console).
+        rubash::script_driver::bind_interactive_console_winsize(executor);
         return;
     }
     // shell_option_enabled semantics via the option's env key (options.rs:323
@@ -812,7 +819,15 @@ fn run_command_string_with_init(
     // then `hBc`).
     apply_startup_job_control(executor);
     if let Some(init_file) = init_file {
-        let _ = run_init_file(executor, init_file);
+        let status = run_init_file(executor, init_file);
+        // rubash#297: `exit` in the rcfile terminates the shell before the
+        // -c string runs (GNU builtins/exit.def -> exit_shell; verified
+        // `bash --rcfile rc -i -c 'echo XC'` with `exit 7` in rc -> `A`
+        // only, rc 7 — the -c string is never executed).
+        if executor.take_exit_jump_pending() {
+            let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
+            return finish_shell(executor, status, interactive);
+        }
     }
     // shell.c:546-547 `-i` forces init_interactive (histexp_flag -> H in
     // `$-`), and shell.c:799-811 runs bash_initialize_history + load_history
@@ -945,7 +960,13 @@ fn run_script_file_with_init(
     executor.inherit_process_stdin();
     executor.set_positional_params(args.to_vec());
     if let Some(init_file) = init_file {
-        let _ = run_init_file(executor, init_file);
+        let status = run_init_file(executor, init_file);
+        // rubash#297: `exit` in the rcfile terminates the shell before the
+        // script body runs (GNU builtins/exit.def -> exit_shell).
+        if executor.take_exit_jump_pending() {
+            let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
+            return finish_shell(executor, status, interactive);
+        }
     }
     // shell.c:546-547 + 799-811: `-i` before a script file still forces
     // init_interactive and the interactive history setup, so `$-` gains
@@ -955,11 +976,18 @@ fn run_script_file_with_init(
     if interactive {
         prepare_interactive_history(executor);
     }
+    // shell.c:1715-1717: `bash -i scriptname` with a non-tty script fd runs
+    // init_interactive_script, which zeroes GNU's `interactive` C global
+    // (keeping interactive_shell=1) — so an `exit` inside the script does
+    // not echo "exit" the way a reader-phase exit does. Only the
+    // exit.def:59-62 echo is suppressed (rubash#297).
+    executor.set_env("__RUBASH_INTERACTIVE_FLAG_OFF", "1");
     let status = if script_uses_history(&contents) || script_uses_aliases(&contents) {
         run_script_with_history(executor, &contents, None)
     } else {
         run_source(executor, &contents, interactive)
     };
+    executor.remove_env("__RUBASH_INTERACTIVE_FLAG_OFF");
     finish_shell(executor, status, interactive)
 }
 
@@ -967,7 +995,17 @@ fn run_no_script_with_init(executor: &mut Executor, init_file: Option<&str>) -> 
     executor.inherit_process_stdin();
     apply_startup_job_control(executor);
     if let Some(init_file) = init_file {
-        let _ = run_init_file(executor, init_file);
+        let status = run_init_file(executor, init_file);
+        // GNU: `exit` in a sourced startup file terminates the shell —
+        // builtins/exit.def exit_builtin -> exit_shell unwinds through the
+        // evalstring parse_and_execute driven by run_startup_files
+        // (shell.c:722), and NOTHING after it runs: not the interactive
+        // reader, not the remaining stdin (rubash#297; verified GNU 5.3.0:
+        // `bash --rcfile rc -i < stdin` with `echo A\nexit 7\necho B` ->
+        // stdout `A`, stderr empty, rc 7, stdin line never read).
+        if executor.take_exit_jump_pending() {
+            return finish_shell(executor, status, true);
+        }
     }
     if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
         // shell.c:806-811 runs after the startup files; the -i no-arg
@@ -998,7 +1036,14 @@ fn run_stdin_script_with_init(executor: &mut Executor, init_file: Option<&str>) 
     // -> `himBHs`).
     apply_startup_job_control(executor);
     if let Some(init_file) = init_file {
-        let _ = run_init_file(executor, init_file);
+        let status = run_init_file(executor, init_file);
+        // rubash#297: `exit` in the rcfile terminates the shell before the
+        // stdin reader starts (GNU builtins/exit.def -> exit_shell; verified
+        // `bash --rcfile rc -i -s < stdin` -> `A`, rc 7, stdin unread).
+        if executor.take_exit_jump_pending() {
+            let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
+            return finish_shell(executor, status, interactive);
+        }
     }
     if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
         prepare_interactive_history(executor);
@@ -1019,13 +1064,25 @@ fn run_init_file(executor: &mut Executor, init_file: &str) -> i32 {
             return 1;
         }
     };
-    run_source(executor, &contents, false)
+    // GNU runs the startup files before the reader-phase `interactive` flag
+    // applies (gdb on WSL GNU 5.3.0: exit_builtin inside a --rcfile sees
+    // interactive=0 while interactive_shell=1), so builtins/exit.def:59-62
+    // does not echo "exit" for an rcfile exit. The marker suppresses only
+    // that echo; everything else interactive (expansion flags, $-) is
+    // unaffected (rubash#297).
+    executor.set_env("__RUBASH_INTERACTIVE_FLAG_OFF", "1");
+    let status = run_source(executor, &contents, false);
+    executor.remove_env("__RUBASH_INTERACTIVE_FLAG_OFF");
+    status
 }
 
 fn run_repl(executor: &mut Executor) {
     // shell.c:787-790: an interactive shell with no script operand reads its
     // commands from stdin, so GNU sets read_from_stdin and `$-` gains `s`.
     executor.set_env(rubash::script_driver::READ_STDIN_MARKER, "1");
+    // First primary-prompt read = readline initialization, which binds
+    // LINES/COLUMNS (terminal.c:374 sh_set_lines_and_columns; rubash#300).
+    rubash::script_driver::bind_interactive_screen_size(executor);
     println!("Rubash - A Rust implementation of GNU Bash");
     println!("Type 'exit' to quit.\n");
 

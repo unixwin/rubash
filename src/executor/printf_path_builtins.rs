@@ -65,8 +65,15 @@ impl Executor {
         let mut stderr = Vec::new();
         // builtins/exit.def:59-62: an interactive shell echoes "exit" (or
         // "logout" in a login shell) to stderr before parsing arguments;
-        // CHECK_HELPOPT runs first, so `exit --help` stays silent.
+        // CHECK_HELPOPT runs first, so `exit --help` stays silent. GNU's
+        // `interactive` C global is 0 while the startup files run (verified
+        // with gdb on WSL GNU 5.3.0: exit_builtin in a --rcfile sees
+        // interactive=0, interactive_shell=1) and for an `bash -i script`
+        // (shell.c:1715-1717 init_interactive_script -> init_noninteractive
+        // zeroes interactive while interactive_shell stays 1), so the echo
+        // is suppressed in those phases (rubash#297).
         if self.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1")
+            && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
             && cmd.words.get(1).map(String::as_str) != Some("--help")
         {
             let login = self.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
