@@ -120,73 +120,19 @@ pub fn run_script_with_history_in(
     let raw_lines: Vec<&str> = contents.split_inclusive('\n').collect();
     let mut index = 0usize;
     while index < raw_lines.len() {
-        let mut pending = String::new();
-        let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
-        let mut group: Vec<(String, bool)> = Vec::new();
-        // Driver-side unbalanced-paren gate: has_unclosed_input_syntax skips
-        // heredoc regions wholesale, which can swallow the open paren of a
-        // process substitution that declares a heredoc (cat <( cat <<EOF).
-        // Track paren depth over non-body lines, but only for groups that
-        // actually declared a heredoc, so other scripts group exactly as before.
-        let mut paren_depth: i64 = 0;
-        let mut saw_heredoc = false;
-        // Carried `((`/`$((` arithmetic depth: a multi-line arithmetic
-        // command keeps its shift operators out of the heredoc scan across
-        // its continuation lines (GNU parse_dparen reads the whole body).
-        let mut heredoc_arith_depth: i64 = 0;
-        let start_line = index + 1;
-        while index < raw_lines.len() {
-            let raw = raw_lines[index];
-            let text = raw.trim_end_matches('\n');
-            // GNU bash does NOT strip CR from CRLF line endings: a '\r'
-            // left by a Windows checkout is ordinary word text. Keep it
-            // so the tokenizer and expansion see the same bytes as GNU.
-            index += 1;
-            let mut is_body = false;
-            if let Some((delimiter, strip_tabs)) = pending_heredocs.first().cloned() {
-                let candidate = if strip_tabs {
-                    text.trim_start_matches('\t')
-                } else {
-                    text
-                };
-                if candidate == delimiter {
-                    pending_heredocs.remove(0);
-                } else {
-                    is_body = true;
-                }
-            } else {
-                let expanded_line = expand_group_aliases(executor, text);
-                let declared =
-                    stdin_heredoc_line_declarations(&expanded_line, &mut heredoc_arith_depth);
-                // Only line-spanning substitutions need the paren gate: a
-                // heredoc declared inside $( ) or <( ) keeps the group open
-                // past its terminator until the substitution closes.
-                saw_heredoc = saw_heredoc
-                    || (!declared.is_empty()
-                        && (expanded_line.contains("$(")
-                            || expanded_line.contains("<(")
-                            || expanded_line.contains(">(")));
-                pending_heredocs.extend(declared);
-            }
-            if !is_body {
-                paren_depth += line_paren_delta(&expand_group_aliases(executor, text));
-            }
-            group.push((text.to_string(), is_body));
-            pending.push_str(raw);
-            // GNU expands aliases while reading (parse.y alias_expand_token
-            // + push_string), so a group boundary is decided on the
-            // alias-expanded text: `alias foo="echo 'Error:"` + `foo bar'`
-            // is ONE complete command, while `foo x` keeps the quote open
-            // through the following lines.
-            let expanded_pending = expand_group_aliases(executor, &pending);
-            let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-            if pending_heredocs.is_empty()
-                && (!saw_heredoc || paren_depth <= 0)
-                && !stdin_source_needs_more_posix(&expanded_pending, posix)
-            {
-                break;
-            }
-        }
+        // One gather implementation for every grouped reader (the `source`
+        // builtin shares it via read_next_source_group). The gather loop
+        // must not re-scan the accumulated pending per physical line: GNU
+        // reads its input token by token (parse.y:3557 read_token) and
+        // never re-tokenizes text it has already consumed; the parked
+        // GroupScanFeeder advances the token-level completeness state per
+        // appended line instead. The alias-live arm keeps the exact fresh
+        // whole-pending scan (expansion may rewrite any part of the text).
+        let Some((pending, start_line, group)) =
+            read_next_source_group(executor, &raw_lines, &mut index)
+        else {
+            break;
+        };
         let status = run_history_group(executor, &session, &group, start_line, redirect_cmd, false);
         let parse_error = executor.take_parse_error();
         // A group that ended by unwinding (exit builtin, errexit, POSIX
@@ -212,7 +158,9 @@ pub fn run_script_with_history_in(
 /// syntactically complete command group out of `raw_lines` using the same
 /// completeness test as run_script_with_history_in — heredoc bodies,
 /// procsub paren depth, and the alias-expanded pending text all decide the
-/// boundary. Returns the group's raw text and its 1-based starting line.
+/// boundary. Returns the group's raw text, its 1-based starting line, and
+/// the per-physical-line `(text, is_heredoc_body)` pairs the history
+/// driver records per group.
 ///
 /// rubash#281 companion: while the alias table cannot influence the text
 /// (expansion disabled or table empty — the expanded pending IS the raw
@@ -227,7 +175,7 @@ pub(crate) fn read_next_source_group(
     executor: &Executor,
     raw_lines: &[&str],
     index: &mut usize,
-) -> Option<(String, usize)> {
+) -> Option<(String, usize, Vec<(String, bool)>)> {
     if *index >= raw_lines.len() {
         return None;
     }
@@ -236,6 +184,7 @@ pub(crate) fn read_next_source_group(
     let mut paren_depth: i64 = 0;
     let mut saw_heredoc = false;
     let mut heredoc_arith_depth: i64 = 0;
+    let mut group: Vec<(String, bool)> = Vec::new();
     let start_line = *index + 1;
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let aliases_live =
@@ -275,6 +224,7 @@ pub(crate) fn read_next_source_group(
         if !is_body {
             paren_depth += line_paren_delta(&expanded_line);
         }
+        group.push((text.to_string(), is_body));
         pending.push_str(raw);
         if let Some(scan) = scan.as_mut() {
             scan.push_line(text, pending.len());
@@ -302,7 +252,7 @@ pub(crate) fn read_next_source_group(
             }
         }
     }
-    Some((pending, start_line))
+    Some((pending, start_line, group))
 }
 
 /// Process one syntactically complete group: expand (when history expansion

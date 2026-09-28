@@ -48,7 +48,7 @@ fn run_source_groups(
     let raw_lines: Vec<&str> = source.split_inclusive('\n').collect();
     let mut index = 0usize;
     let mut ran_any = false;
-    while let Some((pending, start_line)) =
+    while let Some((pending, start_line, _group_lines)) =
         crate::script_driver::read_next_source_group(executor, &raw_lines, &mut index)
     {
         let line_offset = start_line.saturating_sub(1);

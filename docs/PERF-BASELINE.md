@@ -679,3 +679,283 @@ built from git-archive 847ab883 and wt9/ombperf HEAD). cargo test --lib
   op). Root-cause fix = borrow-based expansion refactor (deep subsystem).
 - niu host layer: ~560 ms of `niu -C` beyond engine+floor (precmd hooks,
   gitstatus, completion refresh) — niubash repo, separate lane.
+
+## perf4 round (2026-09-28, wt8/perf4 on 9a13e8f3)
+
+Fourth attack at #241/#242, building on perf3 (walker memo, boundary
+checkpoint, zero-copy scans) and the captain's landed continuation.rs
+slice fix (15f94b9d — that landed AFTER perf3's re-scope, so this lane's
+base already measures nvm -n at 2640ms/132x, not the 12254ms perf3 saw).
+All numbers: debug build, same harness (`scripts/run-perf-suite.sh`,
+median of 3-5 runs); the GNU column re-measured per round, and host load
+varied during the day, so the table ALSO carries back-to-back A/B medians
+against a pristine-base binary built in this round (same session, same
+load) — that column is the honest apples-to-apples.
+
+### Landed changes (13 files; scratch instrumentation removed before commit)
+
+1. **Parse-phase owner: compound-body re-parse source cloning — 272MB on
+   nvm -n.** `parse_body_with_diagnostics` (parse_loop.rs) built
+   `ParseLoopOptions { diagnostic_text: source.map(str::to_string) }` for
+   EVERY nested body parse (if/while/for/case/brace/function/subshell):
+   nvm -n re-parses ~1500 nested bodies, each cloning the WHOLE 173KB
+   script text (measured 272,154,044 bytes of clones). GNU anchor: GNU
+   keeps one input string for the whole parse (parse.y shell_input_line
+   family); the clone was this port's artifact. Fix:
+   `ParseLoopOptions.diagnostic_text`/`source_text` and
+   `ParseState.diagnostic_text` became `Rc<str>` threaded through every
+   compound parser (if/loop/for/case/brace/subshell/function take
+   `Option<&Rc<str>>`; readers keep `as_deref()`; the Rc clone is a
+   refcount bump).
+2. **Duplicate comsub scan in the tokenizer join loop eliminated.** The
+   second `has_unclosed_command_substitution(&logical_line)` consult
+   re-scanned the accumulated text the first consult (same iteration) had
+   already scanned; between them the only mutation is the IFS_GLUE
+   (\x1c) insert, a data byte to `comsub_residuals` (not `$` `` ` `` `(`
+   `)` quote or `\`), so the answers are provably identical (GNU anchor:
+   parse.y:3557 read_token computes its comsub state once per read).
+3. **Admission gates + false-answer caches on the join-loop text scans**
+   (mod.rs, same discipline as `unclosed_quotes_cache`):
+   - comsub scan gated on `$`/backtick presence; a cached FALSE plus an
+     appended line with neither opener byte stays false (every
+     comsub_residuals opener starts with `$` or is a backtick).
+   - compound-assignment scan gated on a literal `=(` byte pair (the
+     opener is a word ending `=` whose next char is `(` — the bytes are
+     adjacent whenever the scan can return true).
+   - `${`-expansion scan gated on `$` (its only true exit is a `${` whose
+     body scan failed); cached FALSE + `$`-free appended line stays false.
+   Same invalidation set as `unclosed_quotes_cache` (IFS_GLUE insert,
+   backslash pop, comsub-heredoc rotation, flush).
+4. **Parse-loop per-token comsub-depth scan gated on `$(`**: the stray-`)`
+   guard's `unclosed_command_substitution_depth(&tokens[i].raw)` ran
+   `comsub_residuals` (with its Vec<char> collect) on EVERY word token;
+   depth can only be non-zero when a literal `$(` byte pair exists.
+5. **Fold-pass fast exits** (parse_loop.rs): each of the six fold passes
+   (pipeline/time-pipeline/time-simple/inverted/and-or/background) is a
+   whole-list identity map when no command carries its trigger field —
+   gated with a list-level `any()` so trigger-free lists skip the
+   rebuild (GNU anchor: the folds model grammar productions the token
+   stream already proved absent, parse.y:1337-1352 etc.).
+6. **Grouped-driver per-line completeness scan made incremental**
+   (script_driver.rs `ConstructScanCheckpoint`): configure contains
+   `set -o posix`, so it runs the GROUPED driver, whose gather loop
+   re-ran `stdin_source_needs_more_posix` over the WHOLE accumulated
+   group per physical line — O(group^2): the 3000-line prefix spent
+   ~8.5s/11s right there. The checkpoint marks a byte offset at which
+   every construct scanner (quotes/comsub/array/close-char) provably
+   sits in its INITIAL state (all four probes false; a trailing `\`
+   blocks the advance — an escaped boundary consumes the join separator
+   differently), then scans only the appended tail per line. `expand_group_aliases`
+   returns `Cow` (the per-line whole-pending String copy was itself
+   O(group^2)); the alias expansion that ran twice per line is computed
+   once; `stdin_line_ends_with_continuation` admits on the trailing byte
+   (`ends_with_unquoted_backslash` re-collects the whole text per call —
+   ~12s of the 6000-line prefix); grouping is byte-identical (verified:
+   same 106 group boundaries on the 3000-line prefix).
+7. **skip.rs `${`-arm zero-copy** (rubash#281 shape, my file):
+   `command_substitutions_balanced` still carried the per-`${`
+   `chars[index+2..].iter().collect::<String>()` copy of the ENTIRE
+   remaining input — O(tail^2) per call (~13s of the 6000-line prefix).
+   Fixed with the `scan_braced_parameter_body_chars` API exactly like
+   the captain's landed continuation.rs pattern (slice INCLUDES `${`;
+   `index += 2 + scan.end`).
+8. **Per-command preamble env stamps made allocation-free when
+   unchanged** (public_accessors.rs): `__RUBASH_CURRENT_LINE` /
+   `__RUBASH_CMD_START_LINE` paid key+value String allocations per
+   command (30k commands on probe 15); now rendered into a stack buffer
+   and assigned only when the line moved.
+
+### Ratios (perf4 round)
+
+| probe | this-lane base (morning, quiet) | perf4 harness | back-to-back A/B vs pristine base (same load) |
+|---|---:|---:|---:|
+| 23-nvm-parse-n | 2640ms / 132.0x | **1643ms / 65.7x** | 3029 -> 1737ms (**-43%**) |
+| 24-nvm-load | 3611ms / 95.0x | 2625ms / 51.5x | 3180 -> 2227ms (**-30%**) |
+| 21-configure-head1374-n | 2554ms / 283.8x | 670ms / 67.0x | 2742 -> 636ms (**-77%**) |
+| 22-configure-full-n | TIMEOUT (>120s) | **TIMEOUT (still >120s; >330s CPU, killed)** | prefix curve 3000: 11.0s->1.4s; 6000: 118s->5.5s; 9000: 107s->35.8s |
+| 17-parse-flat8000-n | 390ms / 39.2x (perf3 day) | 304ms / 23.4x | 390 -> 268ms (**-31%**) |
+| 16-parse-flat8000 | 2219ms (baseline day) | 2213ms / 130.2x | flat (execution dominates) |
+| 04-loop-true-builtin-x2000 | 591ms / 45.5x | 748ms* / 53.4x | 612 -> 584ms (-4.6%) |
+| 05-arith-x5000 | 450ms / 37.5x | — | 472 -> 475ms (flat) |
+| 15-expansion-x5000 | 3191ms / 54.1x | — | 3299 -> 3237ms (-1.9%) |
+| 08-cmdsub-true-x1000 | 1.2x | 1.4x | parity retained |
+| 09-external-uname-x300 | 1.5x | 0.9x | parity retained |
+
+*04's harness run landed during a host-load spike; the A/B column is the
+reliable comparison.
+
+### Acceptance scorecard (honest)
+
+- **nvm -n < 80x: MET** — 132x -> 65.7x (1643ms vs GNU 25ms).
+- **configure-full under 120s: NOT MET** — still TIMEOUT. The per-line
+  completeness scans are now incremental, but configure's m4sh quoting
+  makes the construct scanners report FALSE-POSITIVE open constructs,
+  producing multi-thousand-line groups (one 8676-line group on the
+  9000-line prefix) whose stuck tail still re-scans O(open stretch) per
+  line. ROOT CAUSES (captain-family, with reproducers):
+  1. `has_unclosed_quotes` false positive on the as_fn_mkdir_p quote
+     nesting (`*\'*) as_qdir=\`printf "%s\n" "$as_dir" | sed
+     "s/'/'\\\\\\\\''/g"\`;; #'(` — configure line 337): reproducer
+     `target/perf4/q5.sh` (GNU rc=0 parses; the grouped driver's scans
+     report open through the whole function; batch `-n` also accepts).
+     continuation.rs — captain-exclusive.
+  2. The tokenize-based keyword-stack stage (`stdin_source_needs_more`
+     tokenize arm) keeps groups open on `if`/`case` false positives in
+     the same stretch.
+  With those fixed, groups stay small and the incremental machinery is
+  already linear. Prefix-curve evidence recorded above.
+- **04/05/15 each -25%: NOT MET** — landed only -2..-5% (04 -4.6%, 05
+  flat, 15 -1.9% back-to-back). The per-command preamble env-stamp
+  allocations were removed, but the remaining cost is the distributed
+  expansion/assignment/loop machinery perffix and perf3 already profiled
+  (no single >5% structural win without semantic rework). The perf3
+  conclusion stands.
+- **Spawn parity retained** — 08 at 1.4x, 09 at 0.9x.
+
+### Verification (this round)
+
+- `cargo build` 0 warnings; `cargo fmt`; `cargo test --lib` 486/486;
+  `cargo test --test regression` 24/24; `cargo check --tests` and
+  `cargo check --release --tests` clean.
+- GNU-diff matrices (both shells from script files, rc + stdout +
+  stderr): `target/issue-suites/results/perf4/matrix{1..4}.sh` — m1
+  (multi-line joins: quotes/comsubs/backticks/arrays/heredocs/braces/
+  backslash continuations/comments/posix) and m2 (grouped driver:
+  `set -o posix` + functions/case/if/for/while/heredoc/brace) byte-
+  identical; m3/m4 (parse diagnostics: unterminated `if`, stray `;`)
+  identical modulo the $0 path prefix (invocation artifact, both shells
+  print their own $0).
+- configure prefix diagnostics: 6000-line and 9000-line truncations give
+  GNU-identical rc=2 and error text ("unexpected end of file from
+  `case'/`if' command on line N" — same line numbers).
+- Grouping stability: identical 106 group boundaries on the configure
+  3000-line prefix before/after the incremental checkpoint.
+
+### What remains (next lane / captain)
+
+1. The two scanner false-positive families above (continuation.rs +
+   the needs_more keyword stage) — they gate configure-full AND they
+   are correctness bugs (grouping affects execution semantics in the
+   grouped driver).
+2. nvm -n is now 65.7x; the remaining ~1.6s is ~0.6s tokenize
+   (tokenize_with_boundary over accumulated lines), ~0.4s the join-loop
+   scans on `$`-dense lines (per-line O(line) after this round, but
+   still re-run per join), ~0.6s nested body re-parses (each body runs
+   the full parse loop; GNU parses each token once).
+3. The hot-path -25% target needs the expansion/assignment internals
+   (probe 15's `${a#..}` walker already has the perf3 fast path; the
+   remaining work is the `$a` reference expansion and the `[`/`test`
+   dispatch, distributed).
+
+## perf4-continuation round (2026-09-28, wt8/perf4 rebased on e207b0df)
+
+Fifth attack at #241/#242. Breakpoint disposition first: the predecessor's
+uncommitted work had already landed as wt8/perf4 cd6d1fa7 (clean tree at
+resume). Master had moved 25 commits (sourcefix grouped driver with the
+parked `GroupScanFeeder`, perf5 join-gate re-land, ombperf assoc/arrays
+memos), which superseded two of its eight parts wholesale — the tokenizer
+join-gate dedup (identical fix re-landed on master as e3e539c6) and the
+grouped-driver `ConstructScanCheckpoint` (master's feeder redesign solves
+the same O(group^2) differently). The branch was rebased onto e207b0df
+keeping the unique parts — Rc<str> source threading through the compound
+parsers (the 272MB clone kill), the skip.rs `${`-arm zero-copy fix, the
+env-stamp stack buffer, the `$(`-admission on the stray-`)` guard merged
+with master's rubash#284 balancer gate — and dropping the two superseded
+parts (lexer/mod.rs and script_driver.rs taken from master during the
+rebase conflicts).
+
+### Root cause this round: the history driver kept its own quadratic gather
+
+`run_script_with_history_in` — the driver every `set -o posix` /
+`expand_aliases` / history-bearing script takes (`script_uses_aliases`, so
+configure and every autoconf-generated script) — still carried the OLD
+inline gather loop: per appended physical line it ran
+`expand_group_aliases(&pending)` (a whole-pending String copy even when the
+table is empty) and `stdin_source_needs_more_posix(&expanded_pending)`,
+whose token half TOKENIZES the whole accumulated group. configure-head1374
+measured 13.3 MB of expansion input and 13.3 MB of needs-more input for a
+38 KB script (106 groups, the largest 1050 lines) — O(group^2). Master's
+feeder-based `read_next_source_group` existed but only the `source`
+builtin used it: the history path never got it, and the feeder's own
+alias-live arm (whole-pending fresh scan) is what remains there.
+
+Fix (root cause: the duplicated gather, not a guard): ONE gather
+implementation. `read_next_source_group` now also builds the per-line
+`(text, is_heredoc_body)` vec the history driver records, and
+`run_script_with_history_in` calls it; the inline loop is deleted.
+GNU anchors: parse.y:3557 `read_token` is a streaming reader that never
+re-tokenizes consumed input; builtins/evalfile.c reads command-by-command;
+parse.y:3249 alias_expand_token applies to the token being read (never
+retroactively — the alias table is frozen while a group is gathered, since
+nothing executes between appends). Equivalence obligations documented in
+the code: the frozen-table arm's feeder answer is byte-identical to the
+old fresh scan (expansion is the identity there); the alias-live arm keeps
+the exact fresh whole-pending scan.
+
+### Numbers (debug, back-to-back A/B vs pristine master e207b0df, same load, medians of 3)
+
+| probe | master | lane | delta |
+|---|---:|---:|---:|
+| 21-configure-head1374-n | 2478ms | **656ms** | **-74%** (GNU 8ms: 310x -> 82x) |
+| 23-nvm-parse-n | 2395ms | **1890ms** | -21% (Rc threading from the rebase) |
+| 24-nvm-load | 5769ms | **5315ms** | -8% |
+| 17-parse-flat8000-n | 397ms | **303ms** | -24% |
+| 16-parse-flat8000 | 2076ms | 2089ms | flat |
+| 04-loop-true-builtin-x2000 | 731ms | 725ms | flat |
+| 05-arith-x5000 | 1043ms | 1016ms | -3% |
+| 15-expansion-x5000 | 3569ms | 3534ms | -1% |
+
+configure prefix curve (warm one-shot): 3000L 3.7s; 6000L 16.4s; 9000L
+43.3s (was TIMEOUT-shaped before; still super-linear — see leftovers).
+One-shot timings on a freshly built exe are Defender-inflated (~1.1s
+constant); harness medians above are the honest numbers.
+
+### Verification
+
+- `cargo build` 0 warnings; `cargo fmt --check` clean; lib 497/497;
+  regression 26/26; `cargo check --tests` and `cargo check --release
+  --tests` clean; continuation.rs untouched.
+- GNU-diff matrices m1-m4 (`target/perf4/matrix{1..4}.sh`, both shells
+  from script files): byte-identical modulo the $0 path prefix.
+- NEW matrix5 (`target/perf4/matrix5.sh`): group-boundary identity probe —
+  `set -o history` routes a script through the changed driver and the
+  final `history` listing prints one entry per gathered group; covers
+  multi-line quotes, heredocs (+ <<-), function bodies, case/if spans,
+  trailing connectors, backslash continuations, LIVE aliases including the
+  alias-value-opens-a-quote shape (`alias m5openq="echo 'opened"` closed
+  by a later line) and multi-line alias values. Pristine master and this
+  lane binary produce byte-identical stdout+stderr+history.
+- Boundary identity on real corpus: instrumented master-ref build
+  (throwaway worktree at e207b0df) vs lane, `GROUP start=... lines=...`
+  dumps identical on configure-head1374 and the 3000-line prefix (106
+  groups each).
+- Known pre-existing (NOT from this change, master shows it too): the
+  joined history echo prints `;;;`/`&&;` where GNU prints `;;`/`&&`
+  (history-join display, separate from grouping).
+
+### Leftovers (honest)
+
+1. **configure-full -n still TIMEOUT (>120s).** The remaining quadratic
+   is the TEXT half of the completeness test at candidate lines
+   (`stdin_source_text_needs_more`): 615 calls / 4.6 MB scanned on
+   head1374; per-probe true-answer split: syntax family (quotes/comsub/
+   array/close-char) 315, unclosed-function-body 188, signature 4,
+   continuation 3. A checkpoint cannot skip these — the group is open
+   BECAUSE a construct is open, so the scanner state at each line boundary
+   is legitimately non-initial; the fix is state-carry (resumable)
+   versions of the four text scanners, whose quote/comsub state machines
+   live in src/lexer/continuation.rs (captain-exclusive, #292). The
+   function-body probe is in script_driver.rs (this lane's file) and is
+   the next attackable piece (~188/615 of the calls), but its incremental
+   form must reproduce first_unquoted_function_body_delimiter +
+   unquoted_delimiter_depth semantics exactly — re-implementing them in
+   parallel risks a semantics fork (no-whack-a-mole rule), so it needs the
+   same resumable-scanner discipline, not a copy.
+2. Hot-path -25% (#242c) still NOT met: 04 flat, 05 -3%, 15 -1% vs
+   master. The remaining cost is the distributed expansion/assignment
+   machinery perffix/perf3 characterized (probe 15 is 3534ms vs GNU 57ms).
+3. nvm-parse-n at 1890ms is 105x GNU (GNU 18ms this round; 25ms at the
+   perf4 round — drvfs WSL timing varies); the <80x goal from #241 holds
+   only on GNU-slower days. Remaining time: join-loop scans on $-dense
+   lines and nested body re-parses (both characterized in the perf4
+   round's leftover list).
