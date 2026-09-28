@@ -366,6 +366,25 @@ impl FdTable {
             .and_then(|entry| entry.write.clone())
     }
 
+    /// True when fd 0's read endpoint is a descriptor the shell owns — a
+    /// real file (the enclosing compound's `done < file` binding,
+    /// command_input_scope.rs compound_fd0_regular_file), a virtual text
+    /// fd, a procsub stream or a coproc pipe — rather than the process's
+    /// inherited stdin. GNU builtin_read reads exactly ONE descriptor: fd
+    /// 0 as do_redirections bound it (read.def:294; redir.c:767-955), so
+    /// in this state an exhausted record means EOF on that descriptor —
+    /// read.def:762-768 breaks with eof=1 and :949 returns
+    /// EXECUTION_FAILURE. There is no second transport to fall through
+    /// to: reading the inherited process stdin instead blocks forever on
+    /// the parent's still-open stdin pipe (the readhang regression:
+    /// `while read; done < list.txt` under a piped-open stdin).
+    pub(crate) fn fd0_bound_away_from_process_stdin(&self) -> bool {
+        !matches!(
+            self.read_endpoint(0),
+            None | Some(FdReadEndpoint::InheritedProcessStdin)
+        )
+    }
+
     pub(crate) fn read_text(
         &mut self,
         fd: u32,

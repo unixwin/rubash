@@ -282,6 +282,22 @@ impl Executor {
             return None;
         }
 
+        // GNU builtin_read reads ONE descriptor: fd 0 exactly as
+        // do_redirections bound it (read.def:294; redir.c:767-955). When
+        // the fd table owns fd 0 as a real endpoint — the enclosing
+        // compound's `done < file` binding, an `exec 0<` persistent fd, a
+        // virtual text fd — the None above IS EOF on that descriptor:
+        // read.def:762-768 breaks with eof=1 and :949 returns
+        // EXECUTION_FAILURE. GNU has no second transport to fall through
+        // to, so reaching for the inherited process stdin here would
+        // block forever on the parent's still-open stdin pipe (readhang:
+        // `while read -r f; do :; done < list.txt` never saw loop EOF).
+        // The mirror → inherited chain below stays reachable only while
+        // fd 0 designates the process stdin or has no fd-table entry.
+        if self.fd_table.fd0_bound_away_from_process_stdin() {
+            return None;
+        }
+
         self.read_function_stdin(delimiter, char_limit, exact_char_limit)
             .or_else(|| self.read_inherited_process_stdin(delimiter, char_limit, exact_char_limit))
     }

@@ -2319,6 +2319,30 @@ impl Executor {
                     return self.finish_read_error(cmd, &stderr, assign_status);
                 }
                 142
+            } else if self.fd_table.fd0_bound_away_from_process_stdin() {
+                // The fd table owns fd 0 as a real endpoint (the enclosing
+                // compound's `done < file` binding or an `exec 0<` fd), and
+                // every layer of read_input_for_command is exhausted: that
+                // is EOF on THAT descriptor. GNU read has no other input —
+                // read.def:762-768 sets eof and breaks, :949 returns
+                // EXECUTION_FAILURE — so read_stdin_until (the raw process
+                // stdin) must not run here: it would block forever on the
+                // parent's still-open stdin pipe (readhang regression:
+                // `while read -r f; do :; done < list.txt` under a piped
+                // stdin never finished the loop).
+                let assign_status = self.assign_read_scalar_names(
+                    &scalar_names,
+                    initial_text.as_deref().unwrap_or(""),
+                    raw,
+                );
+                if assign_status != 0 {
+                    return self.finish_read_error(cmd, &stderr, assign_status);
+                }
+                if initial_text.is_none() {
+                    1
+                } else {
+                    0
+                }
             } else {
                 match read_stdin_until(delimiter, char_limit, exact_char_limit) {
                     Ok((0, _, _)) => {

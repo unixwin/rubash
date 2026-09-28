@@ -267,6 +267,46 @@ fn run_rubash_in(dir: &Path, args: &[&str], limit: Duration) -> RunOutcome {
     wait_bounded(&mut child, limit)
 }
 
+/// run_rubash_in with the discriminating stdin state of the readhang
+/// family: a pipe whose write end this test holds open and never writes
+/// to — open, empty, and never EOF. The Child handle keeps that write
+/// end alive for the whole bounded wait; an engine that reaches for the
+/// inherited process stdin where GNU would see EOF (or would not read at
+/// all) blocks until the bound kills it.
+fn run_rubash_piped_stdin_in(dir: &Path, args: &[&str], limit: Duration) -> RunOutcome {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    cmd.args(args)
+        .current_dir(dir)
+        .env_clear()
+        .env("PATH", minimal_path())
+        .env("HOME", dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if cfg!(windows) {
+        for name in [
+            "SystemRoot",
+            "SystemDrive",
+            "WINDIR",
+            "COMSPEC",
+            "PATHEXT",
+            "OS",
+            "TEMP",
+            "TMP",
+        ] {
+            if let Ok(value) = std::env::var(name) {
+                cmd.env(name, value);
+            }
+        }
+    }
+    let mut child = cmd.spawn().expect("spawn rubash");
+    // Deliberately leave child.stdin (the pipe write end) unwritten and
+    // open: this is the "parent stdin stays piped open" condition.
+    let outcome = wait_bounded(&mut child, limit);
+    drop(child.stdin.take());
+    outcome
+}
+
 fn assert_bytes_eq(actual: &[u8], expected: &[u8], label: &str, name: &str) {
     if actual == expected {
         return;
@@ -647,6 +687,120 @@ fn perf_canary_yes_head_read_terminates() {
         "yes|head|read N=10000 took {:.1}s (bound 60s; #206/#243 class)",
         elapsed.as_secs_f32()
     );
+}
+
+/// readhang regression (2026-09-28, bisected to b6cc735a): a script-file
+/// `while IFS= read -r ...; done < file` loop must terminate on the
+/// redirect's own EOF while the parent's stdin stays piped open.
+///
+/// Root cause: b6cc735a's shared-offset binding (command_input_scope.rs
+/// compound_fd0_regular_file) gave the compound's fd 0 a real FileFd
+/// WITHOUT the FUNCTION_STDIN mirror, so the loop-EOF `read` exhausted
+/// every transport and fell through read_input_for_command's legacy
+/// tail into read_inherited_process_stdin — a blocking raw read of the
+/// parent's still-open stdin pipe. GNU builtin_read reads exactly ONE
+/// descriptor, fd 0 as do_redirections bound it (read.def:294;
+/// redir.c:767-955): zread returning <= 0 sets eof and breaks
+/// (read.def:762-768) and the builtin returns EXECUTION_FAILURE
+/// (read.def:949) — there is no second input to fall through to. The
+/// fix keys the process-stdin fallback on fd 0's endpoint
+/// (FdTable::fd0_bound_away_from_process_stdin) in both
+/// read_io.rs::read_input_for_command and read_builtin.rs::execute_read.
+///
+/// Expected bytes verified against WSL GNU Bash 5.3.0
+/// (`/usr/local/bin/bash`, script file, same piped-open parent stdin):
+/// `<alpha>\n<beta>\ncount=2\n` on stdout, empty stderr, rc=0.
+#[test]
+fn script_file_while_read_redirect_does_not_wait_for_parent_stdin() {
+    let dir = std::env::temp_dir().join(format!("rubash-readhang-fs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create readhang scratch");
+    std::fs::write(dir.join("list.txt"), b"alpha\nbeta\n").expect("write list.txt");
+    std::fs::write(
+        dir.join("readlist.sh"),
+        concat!(
+            "count=0\n",
+            "while IFS= read -r file; do\n",
+            "  printf '<%s>\\n' \"$file\"\n",
+            "  count=$((count + 1))\n",
+            "done < list.txt\n",
+            "printf 'count=%s\\n' \"$count\"\n",
+        ),
+    )
+    .expect("write readlist.sh");
+    let out = run_rubash_piped_stdin_in(&dir, &["readlist.sh"], Duration::from_secs(15));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !out.timed_out,
+        "readlist.sh hung: loop-EOF read waited for the parent's piped-open stdin \
+         (read_input_for_command / execute_read fell through to the inherited stdin)"
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "readlist.sh exit status, stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.stdout, b"<alpha>\n<beta>\ncount=2\n",
+        "readlist.sh stdout"
+    );
+    assert_eq!(out.stderr, b"", "readlist.sh stderr");
+}
+
+/// readhang companion (pre-existing since 26780a7b, same macro-symptom):
+/// `cat file | while IFS= read -r ...` in a script file with the parent
+/// stdin piped open must run the pipeline without the shell ever reading
+/// the child's stdin.
+///
+/// Root cause: initial_pipeline_input (pipeline_exec.rs) eagerly slurped
+/// the WHOLE inherited process stdin (`read_to_string`, blocking on an
+/// open pipe) whenever stage 0's command name matched a hardcoded list
+/// (cat/grep/sed/head/...) — even `cat list.txt`, which has an operand
+/// and never reads stdin. GNU execute_cmd.c execute_pipeline forks every
+/// element with the shell's own descriptors: the first element's fd 0 IS
+/// the shell's fd 0, and the parent never reads a child's stdin. The
+/// slurp (and its name-list predicate) was deleted; stage 0 gets the
+/// real handle via execute_pipeline_stage's stdin_inherit arm instead.
+///
+/// Expected bytes verified against WSL GNU Bash 5.3.0: the while runs in
+/// the pipeline's subshell, so the trailing count is 0 —
+/// `<alpha>\n<beta>\ncount=0\n`, empty stderr, rc=0.
+#[test]
+fn script_file_cat_pipe_while_read_does_not_slurp_parent_stdin() {
+    let dir = std::env::temp_dir().join(format!("rubash-readhang-pe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create readhang scratch");
+    std::fs::write(dir.join("list.txt"), b"alpha\nbeta\n").expect("write list.txt");
+    std::fs::write(
+        dir.join("pipeelem.sh"),
+        concat!(
+            "count=0\n",
+            "cat list.txt | while IFS= read -r file; do\n",
+            "  printf '<%s>\\n' \"$file\"\n",
+            "  count=$((count + 1))\n",
+            "done\n",
+            "printf 'count=%s\\n' \"$count\"\n",
+        ),
+    )
+    .expect("write pipeelem.sh");
+    let out = run_rubash_piped_stdin_in(&dir, &["pipeelem.sh"], Duration::from_secs(15));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !out.timed_out,
+        "pipeelem.sh hung: initial_pipeline_input slurped the parent's piped-open stdin"
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "pipeelem.sh exit status, stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.stdout, b"<alpha>\n<beta>\ncount=0\n",
+        "pipeelem.sh stdout"
+    );
+    assert_eq!(out.stderr, b"", "pipeelem.sh stderr");
 }
 
 /// The GNU brace/separator acceptance rules (rubash#241 side-findings,

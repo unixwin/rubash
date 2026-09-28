@@ -2504,13 +2504,22 @@ impl Executor {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
         let from_function_stdin = self.function_stdin_is_command_source(command);
+        // GNU execute_cmd.c execute_pipeline forks every element with the
+        // shell's own descriptors: the first element's fd 0 IS the shell's
+        // fd 0 (the inherited process stdin when nothing rebound it), and
+        // the parent NEVER reads a child's stdin — there is no eager
+        // materialization anywhere in GNU. An earlier version slurped the
+        // whole inherited stdin here for a name list of utilities
+        // (cat/grep/sed/...), which blocked forever on an open pipe
+        // (`cat list.txt | while read ...` in a script whose parent stdin
+        // stayed piped-open never even reached stage 0) and consumed
+        // stdin GNU would leave for later readers. The stage gets the real
+        // handle instead: execute_pipeline_stage's stdin_inherit arm for
+        // external children, and the builtin readers' own inherited-handle
+        // paths (e.g. stream_inherited_cat) — both keyed on fd 0 actually
+        // designating the process stdin, not on the command's name.
         let input = self
             .stdin_string_for_command_mut(command)
-            .or_else(|| {
-                pipeline_stage_reads_stdin_by_default(command)
-                    .then(|| self.read_inherited_process_stdin_to_string())
-                    .flatten()
-            })
             .unwrap_or_default();
         if from_function_stdin {
             self.shell_state
@@ -2537,20 +2546,6 @@ pub(crate) fn command_is_compound_pipeline_stage(command: &CommandNode) -> bool 
         || command.conditional_command.is_some()
         || command.inverted_command.is_some()
         || command.background_command.is_some()
-}
-
-fn pipeline_stage_reads_stdin_by_default(command: &CommandNode) -> bool {
-    let Some(command_name) = command.words.first().map(String::as_str) else {
-        return false;
-    };
-    let command_name = command_name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(command_name);
-    matches!(
-        command_name,
-        "awk" | "cat" | "grep" | "head" | "sed" | "sort" | "tail" | "tr" | "uniq" | "wc"
-    )
 }
 
 pub(in crate::executor) fn head_line_count(args: &[String]) -> Option<usize> {
