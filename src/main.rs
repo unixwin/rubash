@@ -1033,6 +1033,11 @@ fn run_repl(executor: &mut Executor) {
     let mut input = String::new();
 
     loop {
+        // eval.c:336 parse_command runs PROMPT_COMMAND before each primary
+        // prompt read (interactive, non-string input, not mid-alias). The
+        // REPL loop reads one command per iteration, so the hook belongs
+        // at the loop head.
+        executor.execute_prompt_command();
         print!("$ ");
         io::stdout().flush().unwrap();
 

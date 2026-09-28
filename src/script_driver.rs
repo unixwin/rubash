@@ -1403,6 +1403,12 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
     }
 
     while !eof {
+        // eval.c:336 parse_command runs PROMPT_COMMAND before each primary
+        // prompt read; continuation (PS2) reads do not. `pending` empty
+        // marks the start of a new command, i.e. a primary prompt.
+        if pending.is_empty() {
+            executor.execute_prompt_command();
+        }
         // readline.c readline(): print PS1 on stderr, then echo the input
         // line (non-tty input is echoed by readline's dumb-terminal path).
         let ps1 = executor.get_env("PS1").unwrap_or_default().to_string();

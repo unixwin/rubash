@@ -106,6 +106,7 @@ mod parameter_patterns;
 mod parameter_transforms;
 mod parameter_words;
 mod printf_path_builtins;
+mod prompt_command;
 mod prompt_expansion;
 mod public_accessors;
 mod pwd_loop_builtins;
