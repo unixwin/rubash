@@ -98,6 +98,7 @@ golden_fixture!(golden_eco_omb_theme_ps1 => "eco-omb-theme-ps1", timeout 60, cor
 golden_fixture!(golden_extglob_parse_gate => "extglob-parse-gate", timeout 60, corpus []);
 golden_fixture!(golden_fnbody_strict_battery => "fnbody-strict-battery", timeout 90, corpus []);
 golden_fixture!(golden_funsub_valsub => "funsub-valsub", timeout 60, corpus []);
+golden_fixture!(golden_issue296_carrier_adjacent_comsub => "issue296-carrier-adjacent-comsub", timeout 60, corpus []);
 golden_fixture!(golden_nounset_exit_matrix => "nounset-exit-matrix", timeout 60, corpus []);
 golden_fixture!(golden_nvm_load => "nvm-load", timeout 180, corpus ["nvm/nvm.sh"]);
 golden_fixture!(golden_redir_operand_battery => "redir-operand-battery", timeout 60, corpus []);

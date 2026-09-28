@@ -1152,7 +1152,16 @@ impl Executor {
             let prefix = crate::executor::markers::dequote_ctlesc_pairs(
                 &self.expand_embedded_parameters_mut(value.get(cursor..span.start)?),
             );
-            word.append_literal(&prefix, true);
+            // Walker output is storage-domain text, not source text: its
+            // raw-byte marker pairs are transport for payload bytes. GNU's
+            // quoted-context splice re-escapes expansion output uniformly
+            // (subst.c:4773 quote_string via subst.c:11862 add_quoted_string)
+            // and dequote_string (subst.c:4807) restores the bytes at the
+            // store boundary — the E400 literal-char escape is reserved for
+            // source-word characters (parse.y:5694-5706 got_character), so
+            // append the fragment as payload, not as source literal
+            // (rubash#296 carrier leak).
+            word.append_expanded_shell_text(&prefix, true);
             let output = if let Some(source) = raw
                 .strip_prefix("$(")
                 .and_then(|rest| rest.strip_suffix(')'))
@@ -1172,7 +1181,8 @@ impl Executor {
         let suffix = crate::executor::markers::dequote_ctlesc_pairs(
             &self.expand_embedded_parameters_mut(value.get(cursor..)?),
         );
-        word.append_literal(&suffix, true);
+        // Same payload provenance as the prefix fragment above (rubash#296).
+        word.append_expanded_shell_text(&suffix, true);
         self.last_command_substitution_status.set(word.status);
         Some(word.materialize_lossy_at_boundary())
     }

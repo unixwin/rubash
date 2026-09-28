@@ -241,6 +241,34 @@ impl ExpandedWord {
         self.fragments.push(ExpandedFragment::literal(text, quoted));
     }
 
+    /// Append the output of the parameter walker (storage-domain shell text,
+    /// transport carriers intact) as a PAYLOAD fragment.
+    ///
+    /// GNU symmetry anchor: expansion output appended in a quoted word goes
+    /// through quote_string (subst.c:4773, reached from the add_quoted_string
+    /// label at subst.c:11862), which CTLESC-escapes every character of the
+    /// value uniformly, and the assignment store boundary strips those pairs
+    /// again with dequote_string (subst.c:4807). No class of expansion-output
+    /// character is "frozen" mid-encode. The source-text provenance that
+    /// E400-wraps registry-zone chars (LITERAL_CHAR_ESCAPE, the parse.y:5694
+    /// got_character CTLESC-add port) applies only to word text from the
+    /// lexer — walker output is payload, so its raw-byte marker pairs
+    /// (U+E000+U+E0xx) must decode to their bytes here; materialization
+    /// re-tags carrier bytes as pairs, keeping the round trip that the final
+    /// output boundary (echo/printf) decodes exactly once. Passing walker
+    /// output through append_literal instead E400-escaped the pair chars as
+    /// user literals and froze them into storage (rubash#296:
+    /// a="${v}$(true)" stored literal U+E000 U+E01C instead of the ESC byte).
+    pub(in crate::executor) fn append_expanded_shell_text(&mut self, text: &str, quoted: bool) {
+        let bytes = shell_text_to_raw_bytes(text);
+        self.fragments.push(ExpandedFragment {
+            bytes,
+            quoted,
+            splittable: false,
+            ctlesc_markers: false,
+        });
+    }
+
     #[allow(dead_code)]
     pub(in crate::executor) fn append_substitution(&mut self, output: SubstitutionOutput) {
         self.status = Some(output.status);
