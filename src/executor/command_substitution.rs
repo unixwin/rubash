@@ -136,8 +136,9 @@ pub(in crate::executor) fn normalize_comsub_body_statement_lines(
 /// only becomes a canonical newline when the statement did not already end
 /// with an explicit connector (`;` `&` `&&` `||` `|`) — `a; <newline> b`
 /// re-prints as `a; b` on one line — and a run of blank lines collapses to
-/// one boundary because blank lines carry no parse-tree node.
-fn canonical_newline_boundaries(
+/// one boundary because blank lines carry no parse-tree node. Shared by the
+/// comsub line model and the print_comsub text serializer (rubash#274).
+pub(in crate::executor) fn canonical_newline_boundaries(
     tokens: &[crate::lexer::Token],
 ) -> std::collections::HashSet<usize> {
     use crate::lexer::TokenKind;

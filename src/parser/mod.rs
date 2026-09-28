@@ -33,6 +33,14 @@ mod tilde_expansion;
 mod token_actions;
 mod word_quote;
 
+/// Executor-facing wrapper for the parse-time command-substitution scan:
+/// the print_comsub text serializer (rubash#274) re-derives the `$()` spans
+/// of a word the same way `record_command_substitutions_for_word` does at
+/// parse time, so both see identical span boundaries.
+pub fn command_substitutions_in_word_public(word: &str) -> Vec<CommandSubstitutionNode> {
+    command_substitution::command_substitutions_in_word(word)
+}
+
 #[cfg(test)]
 mod tests;
 

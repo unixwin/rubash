@@ -72,16 +72,32 @@ impl Executor {
         };
         let for_xtrace_text = for_text.clone();
         let mut ran_body = false;
-        // GNU execute_cmd.c:3039 sets line_number = for_command->line before
-        // each per-iteration debug fire; without the reset the fire inherits
-        // the last body command's line (dbg-support.tests:146-148 nested for
-        // loops report the for head's line on every iteration).
+        // GNU execute_cmd.c:3039 sets line_number = for_command->line at the
+        // top of each iteration, BEFORE both the head trace (3059
+        // xtrace_print_for_command_head) and the debug fire; without the
+        // reset each inherits the last body command's line
+        // (dbg-support.tests:146-148 nested for loops report the for head's
+        // line on every iteration; rubash#275: iteration-2 head printed the
+        // body line under PS4='$LINENO'). The ambient line is the for
+        // command's own line (execute_for_command_with_redirects pins it
+        // via with_ambient_line); fall back to the reader's current line
+        // when no compound frame is open.
         let for_line = self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_CURRENT_LINE")
-            .cloned();
+            .ambient_line
+            .get()
+            .map(|line| line.to_string())
+            .or_else(|| {
+                self.shell_state
+                    .env_vars
+                    .get("__RUBASH_CURRENT_LINE")
+                    .cloned()
+            });
         for value in values {
+            if let Some(line) = &for_line {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
+            }
             // GNU execute_cmd.c:3062-3063 (eval_arith... execute_for_command
             // iteration loop): `set -x` traces the for head once per
             // iteration, before the loop variable is assigned.
@@ -94,11 +110,6 @@ impl Executor {
             // the trap is in scope (functions without functrace do not
             // inherit it, execute_cmd.c:5270).
             if self.debug_trap_in_scope() {
-                if let Some(line) = &for_line {
-                    self.shell_state
-                        .env_vars
-                        .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
-                }
                 let _ = self.run_debug_trap(&for_text)?;
             }
             ran_body = true;

@@ -785,8 +785,25 @@ fn tokenize_with_heredocs_inner(
             &mut lexer_parse_state,
             &mut brace_cache,
         );
+        // GNU parse.y line_number is PHYSICAL: the reader increments it per
+        // physical line consumed, and the unclosed-construct EOF diagnostics
+        // ("unexpected end of file from `{' command on line N") number both
+        // the innermost opener and the EOF position from it. The leftover
+        // logical line at end of input spans every physical line the open
+        // construct accumulated, so map each token's byte offset (its
+        // `column`) back to its physical line instead of stamping the whole
+        // run with the first line (`{ </n>cmd1 </n>cmd2` reported the EOF at
+        // line 2 where GNU reports line 4, rubash#278).
+        let leftover_spans_lines = logical_line.contains('\n');
         for token in &mut line_tokens {
-            token.position = logical_start_line;
+            token.position = if leftover_spans_lines {
+                logical_start_line
+                    + logical_line[..token.column.min(logical_line.len())]
+                        .matches('\n')
+                        .count()
+            } else {
+                logical_start_line
+            };
         }
         output.append(&mut line_tokens);
         let mut separator = Token::new(TokenKind::Semicolon, ";", logical_start_line);

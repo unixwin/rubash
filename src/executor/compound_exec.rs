@@ -1129,6 +1129,13 @@ impl Executor {
             // is on, print `(( expr ))` before evaluating each for-loop
             // expression (init, test, update).  Use the raw expression to
             // preserve original whitespace (e.g. `i++ ` trailing space).
+            // execute_cmd.c:3236 keeps line_number at the arith-for's own
+            // line across iterations (execute_command_internal restores it
+            // after each body command), so the same restore that precedes
+            // the DEBUG fire must precede this trace — PS4's $LINENO renders
+            // the for line, not the line the last body command left behind
+            // (rubash#275: iteration-2 `(( i++ ))` printed the body line).
+            restore_for_line(self);
             self.xtrace_print_arith_cmd(&arithmetic.init_metadata.expression);
             self.eval_arithmetic_command_value(&arithmetic.init)
                 .is_none()
@@ -1150,7 +1157,10 @@ impl Executor {
             if !arithmetic.test.trim().is_empty() {
                 let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_TEST);
                 // GNU execute_cmd.c:3201: xtrace before test expression.
-                // Use raw expression to preserve original whitespace.
+                // Use raw expression to preserve original whitespace. The
+                // line restore before it mirrors the DEBUG fire above
+                // (execute_cmd.c:3236, rubash#275).
+                restore_for_line(self);
                 self.xtrace_print_arith_cmd(&arithmetic.test_metadata.expression);
                 match self.eval_arithmetic_command_value(&arithmetic.test) {
                     Some(0) => break,
@@ -1204,7 +1214,10 @@ impl Executor {
             if !arithmetic.update.trim().is_empty() {
                 let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_UPDATE);
                 // GNU execute_cmd.c:3201: xtrace before update expression.
-                // Use raw expression to preserve original whitespace.
+                // Use raw expression to preserve original whitespace. The
+                // line restore before it mirrors the DEBUG fire above
+                // (execute_cmd.c:3236, rubash#275).
+                restore_for_line(self);
                 self.xtrace_print_arith_cmd(&arithmetic.update_metadata.expression);
                 if self
                     .eval_arithmetic_command_value(&arithmetic.update)

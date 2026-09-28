@@ -40,19 +40,39 @@ impl Executor {
         // WORDS`) and run_debug_trap fires once before the word list is
         // expanded; the implicit `select x; do` form prints the default
         // `"$@"` list, the same as the `for` head.
+        let words_text = if select_command.default_positional {
+            "\"$@\"".to_string()
+        } else {
+            crate::executor::command_text::command_words_source_text(
+                &select_command.words,
+                &select_command.word_metadata,
+            )
+        };
+        // GNU execute_cmd.c:3513 `line_number = select_command->line` runs
+        // before both the debug fire and the xtrace head print (3536
+        // xtrace_print_select_command_head, print_cmd.c:655
+        // `select %s in ` + words), so PS4's $LINENO renders the select
+        // keyword's line (rubash#275).
+        if let Some(line) = cmd.line {
+            self.shell_state
+                .env_vars
+                .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
+        }
         if self.debug_trap_in_scope() {
-            let words_text = if select_command.default_positional {
-                "\"$@\"".to_string()
-            } else {
-                crate::executor::command_text::command_words_source_text(
-                    &select_command.words,
-                    &select_command.word_metadata,
-                )
-            };
             let _ = self.run_debug_trap(&format!(
                 "select {} in {}",
                 select_command.variable, words_text
             ))?;
+        }
+        if self.xtrace_enabled() {
+            let prefix = self.xtrace_prefix();
+            self.xtrace_write(
+                format!(
+                    "{prefix}select {} in {}\n",
+                    select_command.variable, words_text
+                )
+                .as_bytes(),
+            );
         }
 
         let mut redirect_cmd = cmd.clone();

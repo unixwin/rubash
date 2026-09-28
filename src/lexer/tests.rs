@@ -560,3 +560,95 @@ fn quoted_dolbrace_utf8_alternate_closes_word() {
     // The word ends at the closing quote; `echo` is a separate word.
     assert!(tokens.iter().any(|t| t.value == "echo"));
 }
+
+#[test]
+fn assignment_comsub_body_case_keeps_inner_quotes() {
+    // rubash#276: GNU parse.y:4451 parse_comsub parses the `$(...)` body
+    // with the real grammar, so a case clause inside the body owns its
+    // pattern `)` and the substitution closes at the LAST `)`. The
+    // assignment-value quote removal (remove_shell_quotes_assignment ->
+    // copy_dollar_paren_body_raw) must copy the body verbatim through the
+    // whole `case ... esac` — cutting it at the pattern `)` sent the
+    // following `'z\n'` through ordinary quote removal, and the re-parse
+    // swallowed the backslash (`w=$(case z in z) printf 'z\n' ;; esac)`
+    // stored `zn` where GNU stores `z`).
+    let input: String = std::iter::once("w=$(case z in z) printf 'z")
+        .chain(std::iter::once("\\"))
+        .chain(std::iter::once("n' ;; esac)"))
+        .collect();
+    let tokens = tokenize(&input);
+    assert_eq!(tokens[0].kind, crate::lexer::TokenKind::Assignment);
+    let expected_body: String = std::iter::once("$(case z in z) printf 'z")
+        .chain(std::iter::once("\\"))
+        .chain(std::iter::once("n' ;; esac)"))
+        .collect();
+    assert!(
+        tokens[0].value.contains(&expected_body),
+        "{}",
+        tokens[0].value
+    );
+
+    // Same body inside double quotes: the cooked value still carries the
+    // inner single quotes (verified against WSL GNU Bash 5.3.0,
+    // target/resid1/p276class.sh A2).
+    let quoted = format!("v=\"{input}\"");
+    let tokens = tokenize(&quoted);
+    assert_eq!(tokens[0].kind, crate::lexer::TokenKind::Assignment);
+    assert!(tokens[0].value.contains("'z"), "{}", tokens[0].value);
+}
+
+#[test]
+fn glued_brace_closer_is_word_text_not_group_closer() {
+    // rubash#278: `}` is not in shell_break_chars (syntax.h:29-30), so
+    // read_token_word collects `}}` as ONE word and CHECK_FOR_RESERVED_WORD
+    // (parse.y:3174-3175) never yields the reserved `}` — the brace group
+    // never closes and the parse is GNU's "unexpected end of file from `{'
+    // command" EOF error, never a function definition (verified against WSL
+    // GNU Bash 5.3.0, target/resid1/p278*.sh).
+    let tokens = tokenize("f() { :; }}\necho after\n");
+    assert!(tokens.iter().any(|token| token.value == "}}"));
+    assert!(!tokens.iter().any(|token| token.kind == TokenKind::Keyword
+        && token.value.contains('}')
+        && token.value != "("
+        && token.value != ")"));
+}
+
+#[test]
+fn unclosed_brace_group_tokens_keep_physical_lines_at_eof() {
+    // The leftover logical line at end of input spans every physical line
+    // the open construct accumulated; GNU line_number is physical, so the
+    // EOF diagnostic numbers from the last physical line, not the line
+    // where the group opened (rubash#278: `{\ncmd1\ncmd2` reports the EOF
+    // at line 4, matching GNU).
+    let tokens = tokenize("{\ncmd1\ncmd2\n");
+    let cmd_lines: Vec<usize> = tokens
+        .iter()
+        .filter(|token| matches!(token.value.as_str(), "cmd1" | "cmd2"))
+        .map(|token| token.position)
+        .collect();
+    assert_eq!(cmd_lines, vec![2, 3]);
+}
+
+#[test]
+fn dbg_redirect_fields() {
+    // print_comsub redirect rendering: the ordered redirects list carries
+    // the fd inside the operator and duplications carry a leading `&` on
+    // the target (rubash#274; verified shape for `2> /dev/null 2>&1`).
+    let tokens = crate::lexer::tokenize("nosuchcmd-y > /dev/null 2>&1");
+    let ast = crate::parser::parse(&tokens);
+    let Some(command) = ast.commands.first() else {
+        panic!("no command");
+    };
+    let redirects: Vec<(String, String)> = command
+        .redirects
+        .iter()
+        .map(|redirect| (redirect.operator.clone(), redirect.target.clone()))
+        .collect();
+    assert_eq!(
+        redirects,
+        vec![
+            (">".to_string(), "/dev/null".to_string()),
+            ("2>&".to_string(), "&1".to_string())
+        ]
+    );
+}

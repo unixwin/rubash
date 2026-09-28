@@ -304,7 +304,13 @@ pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
         let value = value
             .strip_prefix(crate::executor::markers::IFS_GLUE)
             .unwrap_or(value);
-        parts.push(format!("{name}={value}"));
+        // GNU parse.y:4451/4632 (parse_comsub -> print_comsub) replaces every
+        // `$()` body with the canonical print_cmd.c serialization at parse
+        // time, so the enclosing command's BASH_COMMAND carries that form:
+        // `v=$(echo    a   b)` exposes `v=$(echo a b)` and multi-clause
+        // bodies expose the re-indented canonical text (rubash#274).
+        let text = format!("{name}={value}");
+        parts.push(super::print_comsub::canonicalize_comsub_spans(&text));
     }
     let words = command_words_source_text_for_command(cmd);
     if !words.is_empty() {
@@ -388,11 +394,15 @@ pub(in crate::executor) fn command_words_source_text(
 }
 
 fn command_word_source_text(index: usize, word: &str, metadata: &[WordMetadata]) -> String {
-    metadata
+    let text = metadata
         .get(index)
         .filter(|metadata| metadata.value == *word && !metadata.raw.is_empty())
         .map(|metadata| metadata.raw.clone())
-        .unwrap_or_else(|| shell_single_quote_assignment_value(word))
+        .unwrap_or_else(|| shell_single_quote_assignment_value(word));
+    // Every `$()` span in the word text is the canonical print_comsub
+    // serialization in GNU (parse.y:4632), not the raw source text
+    // (rubash#274).
+    super::print_comsub::canonicalize_comsub_spans(&text)
 }
 
 fn compound_assignment_source_text(assignment: &crate::parser::CompoundAssignment) -> String {

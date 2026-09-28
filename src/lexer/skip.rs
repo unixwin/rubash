@@ -762,8 +762,23 @@ impl<'a> Lexer<'a> {
                     // into one, `hi}`) it is word text — an argument
                     // (`{ foo } }; }': the first two `}` are foo's
                     // arguments; `{ f() { echo } ; }': the first `}` is
-                    // echo's argument) (rubash#222).
-                    let standalone_closer = scan.word_start && scan.prev_accepts_close;
+                    // echo's argument) (rubash#222). The reserved word is
+                    // the EXACT one-character word: `}` is not in
+                    // shell_break_chars (syntax.h:30), so read_token_word
+                    // collects `}}'/`}x'/`}{' as ONE word and
+                    // CHECK_FOR_RESERVED_WORD's STREQ (parse.y:3174-3175)
+                    // never matches it — the mirror of the opener's
+                    // standalone rule above. Without the peek test
+                    // `f() { :; }}` closed the group at the first `}` of
+                    // the glued pair and defined the function, where GNU
+                    // reads `}}` as one word, never closes the group, and
+                    // reports `syntax error: unexpected end of file from
+                    // `{' command on line 1` at end of input (rubash#278).
+                    let standalone_closer = scan.word_start
+                        && scan.prev_accepts_close
+                        && self
+                            .peek()
+                            .is_none_or(|next| "()<>;&| \t\n\r".contains(next));
                     if !standalone_closer {
                         scan.word_start = false;
                         scan.word_plain = false;
@@ -777,16 +792,11 @@ impl<'a> Lexer<'a> {
                     scan.word_plain = true;
                     if scan.depth == 0 {
                         match self.peek() {
-                            Some('}') => {
-                                scan.depth = 1;
-                                continue;
-                            }
                             // A close decided without consulting past the
                             // current end of input is stable under later
                             // appends and can be cached; a close at
                             // end-of-input is not (the appended bytes could
-                            // be the `}' of a `}}' cascade or a compact-group
-                            // terminator).
+                            // be a compact-group terminator).
                             Some(_) => {
                                 if !scan.saw_top_level_whitespace {
                                     self.record_brace_scan_closed(
@@ -1182,7 +1192,7 @@ fn brace_close_acceptable_word(word: &str) -> bool {
     )
 }
 
-fn update_command_substitution_case_depth(
+pub(super) fn update_command_substitution_case_depth(
     ch: char,
     single: bool,
     double: bool,

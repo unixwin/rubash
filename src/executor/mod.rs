@@ -179,6 +179,7 @@ mod parameter_replace;
 mod parse_helpers;
 mod pipeline_exec;
 mod pipeline_stages;
+mod print_comsub;
 
 mod read_helpers;
 mod read_split;

@@ -736,30 +736,83 @@ fn copy_dollar_paren_body_raw(
     out: &mut String,
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) {
+    // GNU parse.y:4451 parse_comsub parses the `$(...)` body with the real
+    // grammar (yyparse), so a case clause inside the body owns its pattern
+    // `)` — the substitution closes at the LAST `)`, not the pattern's
+    // (parse.y:3465-3468 special_case_tokens: `)` in a case pattern is the
+    // pattern-list delimiter, never the comsub eof token). Mirror the same
+    // word-boundary case-depth tracking skip_cmd_subst uses (skip.rs
+    // update_command_substitution_case_depth) so the verbatim copy spans the
+    // whole `case ... esac` (rubash#276: `w=$(case z in z) printf 'z\n' ;;
+    // esac)` cooked its value as `... printf z\n ;; esac)` — the body was
+    // cut at the pattern `)` and the following `'z\n'` went through ordinary
+    // quote removal, so the re-parse swallowed the backslash and stored
+    // `zn` where GNU stores `z`).
     let mut depth = 1usize;
+    let mut case_depth = 0usize;
+    let mut word = String::new();
+    let mut word_boundary = true;
+    let mut current_word_boundary = true;
     while let Some(ch) = chars.next() {
         out.push(ch);
+        if ch == '\\' {
+            // A backslash-quoted character is word text, never a reserved
+            // word (`c\ase` is not `case`); push the same placeholder
+            // skip_cmd_subst uses so the tracker does not see the raw bytes.
+            if let Some(escaped) = chars.next() {
+                out.push(escaped);
+                word.push('\u{1}');
+            }
+            continue;
+        }
+        // `rest` (input after the delimiter) feeds only the esac-is-a-pattern
+        // lookahead (skip.rs case_pattern_starts_with_esac_rest); compute it
+        // lazily so common bodies pay no O(n) clone per character.
+        let rest = if word == "esac" && matches!(ch, ')' | '|') {
+            chars.clone().collect::<String>()
+        } else {
+            String::new()
+        };
+        super::skip::update_command_substitution_case_depth(
+            ch,
+            false,
+            false,
+            &mut word,
+            &mut case_depth,
+            &mut word_boundary,
+            &mut current_word_boundary,
+            &rest,
+        );
         match ch {
             '$' if chars.peek() == Some(&'\'') => {
                 chars.next();
                 out.push('\'');
                 copy_ansi_c_single_quoted_raw(out, chars);
+                word.clear();
+                word_boundary = false;
             }
             '$' if chars.peek() == Some(&'(') => {
                 chars.next();
                 out.push('(');
                 depth += 1;
             }
-            '\'' => copy_single_quoted_raw(out, chars),
-            '"' => copy_double_quoted_raw(out, chars),
-            '`' => copy_backtick_raw(out, chars),
-            '\\' => {
-                if let Some(escaped) = chars.next() {
-                    out.push(escaped);
-                }
+            '\'' => {
+                copy_single_quoted_raw(out, chars);
+                word.clear();
+                word_boundary = false;
             }
-            '(' => depth += 1,
-            ')' => {
+            '"' => {
+                copy_double_quoted_raw(out, chars);
+                word.clear();
+                word_boundary = false;
+            }
+            '`' => {
+                copy_backtick_raw(out, chars);
+                word.clear();
+                word_boundary = false;
+            }
+            '(' if case_depth == 0 => depth += 1,
+            ')' if case_depth == 0 => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     break;
