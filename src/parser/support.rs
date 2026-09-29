@@ -163,11 +163,96 @@ fn is_case_clause_terminator_token(token: &Token) -> bool {
 /// loop body, so the matching terminator may be "done" or "}".
 const LOOP_BODY_TERMINATOR: &str = "done-or-brace";
 
+/// Case-pattern region sentinels for `update_compound_boundary_stack`,
+/// mirroring GNU's PST_CASEPAT reader state (parser.h:29, set at parse.y
+/// 3379/3396 when the `in` of a case is read, cleared at the clause's `)`
+/// at 3788). While the reader is inside a pattern list, CHECK_FOR_RESERVED
+/// WORD (parse.y:3177-3186) refuses to recognize reserved words — `while'
+/// in `case x in (while|break))' is PATTERN TEXT, never a loop opener
+/// (only `esac' can match, and only when the previous token is not `|',
+/// parse.y:3181 Posix grammar rule 4). The NUL prefix cannot collide with
+/// any token value the stack otherwise holds.
+const CASE_PATTERN_EXPECT: &str = "\u{0}case-pattern";
+/// Entered right after `in' or a clause terminator: the NEXT token may be
+/// the optional clause-opening `(' (parse.y:1231), which is grammar, not
+/// extglob nesting.
+const CASE_PATTERN_MAY_OPEN: &str = "\u{0}case-pattern-may-open";
+/// An extglob `(' opened inside the pattern text (parse.y:5466 absorbs
+/// these into the pattern word in GNU; rubash's tokenizer emits them).
+const CASE_PATTERN_PAREN: &str = "\u{0}case-pattern-paren";
+
+/// The clause `)' that closes a pattern region: expected only when a
+/// pattern sentinel sits on top of the stack.
+fn case_pattern_state_step(tokens: &[Token], index: usize, stack: &mut Vec<&'static str>) -> bool {
+    let top = stack.last().copied();
+    if !matches!(
+        top,
+        Some(CASE_PATTERN_EXPECT) | Some(CASE_PATTERN_MAY_OPEN) | Some(CASE_PATTERN_PAREN)
+    ) {
+        return false;
+    }
+    let token = &tokens[index];
+    // newline_list is legal before the clause's first pattern token and
+    // around clause boundaries (parse.y:1225 pattern_list): a physical
+    // newline never settles the may-open state and never counts as
+    // pattern text (rubash#308: `case x in <newline> ( a ) ...' made the
+    // newline consume the may-open slot, so the clause `(' became extglob
+    // nesting and desynchronized the whole scan).
+    if token.kind == TokenKind::Semicolon && token.line_break {
+        return true;
+    }
+    if top == Some(CASE_PATTERN_MAY_OPEN) {
+        // The optional clause-opening `(' (or anything else) settles the
+        // state; re-dispatch below against CASE_PATTERN_EXPECT.
+        stack.pop();
+        stack.push(CASE_PATTERN_EXPECT);
+        if is_unquoted_operator(token, "(") && token.kind == TokenKind::Keyword {
+            // Consumed as the clause open; pattern text begins after it.
+            return true;
+        }
+    }
+    if is_unquoted_operator(token, "(") && token.kind == TokenKind::Keyword {
+        stack.push(CASE_PATTERN_PAREN);
+        return true;
+    }
+    if is_unquoted_operator(token, ")") && token.kind == TokenKind::Keyword {
+        if stack.last().copied() == Some(CASE_PATTERN_PAREN) {
+            stack.pop();
+        } else {
+            // The clause-closing `)': leaves the pattern region (GNU clears
+            // PST_CASEPAT here, parse.y:3788).
+            stack.pop();
+        }
+        return true;
+    }
+    if token.kind == TokenKind::Keyword
+        && token.value == "esac"
+        && !matches!(index.checked_sub(1).and_then(|i| tokens.get(i)), Some(prev) if prev.value == "|")
+    {
+        // `esac' after `in'/terminator is recognized even in pattern state
+        // (`case x in esac' empty case); pop the pattern sentinel and let
+        // the caller's expect matching run for the "esac" below it.
+        stack.pop();
+        return false;
+    }
+    // Pattern text: words, `|' alternatives, and every reserved word stay
+    // inert — no compound opener is pushed (GNU parse.y:3177-3178).
+    true
+}
+
 pub(super) fn update_compound_boundary_stack(
     tokens: &[Token],
     index: usize,
     stack: &mut Vec<&'static str>,
 ) {
+    // Case-pattern region first: keywords inside `in ... )' are pattern
+    // text (GNU PST_CASEPAT), never compound openers (rubash#308:
+    // `(while|break)' inside a function body opened a phantom loop that
+    // swallowed the function's `}' and corrupted every enclosing scan).
+    if case_pattern_state_step(tokens, index, stack) {
+        return;
+    }
+
     if let Some(expected) = stack.last().copied() {
         let expected_matches = if expected == "esac" {
             is_case_end_keyword(tokens, index)
@@ -180,6 +265,19 @@ pub(super) fn update_compound_boundary_stack(
             stack.pop();
             return;
         }
+    }
+
+    // The case's own `in' (parse.y:3379/3396 sets PST_CASEPAT) and the
+    // clause terminators that restart the pattern list enter the pattern
+    // state regardless of command-boundary position: `in' follows the case
+    // WORD, and `;;' follows the clause body's last command.
+    if is_keyword(tokens, index, "in") && stack.last().copied() == Some("esac") {
+        stack.push(CASE_PATTERN_MAY_OPEN);
+        return;
+    }
+    if is_case_clause_terminator_token(&tokens[index]) && stack.last().copied() == Some("esac") {
+        stack.push(CASE_PATTERN_MAY_OPEN);
+        return;
     }
 
     if !command_boundary_keyword_allowed(tokens, index) {
