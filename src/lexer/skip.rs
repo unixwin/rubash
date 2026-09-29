@@ -2110,6 +2110,158 @@ fn is_pure_identifier(word: &str) -> bool {
             .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
+/// Shape of an unclosed `$( ...` command substitution at end of the eval
+/// string (rubash#318). GNU parses the eval string as fresh parser input
+/// (evalstring.c:357 with_input_from_string) continuing the caller's line
+/// counter (evalstring.c:345-346 `line_number--`, no SEVAL_RESETLINE for
+/// eval), so an EOF-class failure inside a comsub reports under
+/// `<script>: eval: line N:` with two distinct shapes:
+///
+/// * `BareParen` — a subshell `(` that follows body text is immediately
+///   followed by a newline or end of input. The comsub-body yyparse
+///   (parse.y:4549) sees the offending newline token and
+///   report_syntax_error prints `syntax error near unexpected token
+///   \`newline' while looking for matching \`)'` (parse.y:6858-6859,
+///   shell_eof_token == ')' from parse.y:4519) plus the offending source
+///   line (parse.y:6865 print_offending_line), at the `(' line.
+///   Non-interactive shells then exit 1 via parse.y:4588-4596
+///   (r != 0 -> last_command_exit_value = EXECUTION_FAILURE,
+///   jump_to_top_level(FORCE_EOF)). A `(` directly after the `$(` opener
+///   (`$( (`) instead ends as a matched-pair EOF (parse.y:4576-4587) —
+///   verified probe m8 — and falls to the plain shape.
+/// * `NeverClosed` — everything else: `$(` at end of input (empty or
+///   whitespace-only body) or a body that consumed input but never saw its
+///   `)`. matched_pair_error propagates (parse.y:4586) and the plain
+///   `unexpected EOF while looking for matching \`)'` wording reports at
+///   one past the last input line of the string (caller + newlines + 1;
+///   pinned vs WSL GNU 5.3.0 probes m3/m7/m9/m5/m8/m10), with eval's
+///   status 2 and the script continuing.
+///
+/// The second tuple member is the string-relative open line of the failing
+/// construct — everything before it already ran (evalstring.c:359-451
+/// parses and executes command by command).
+pub enum UnclosedComsubShape {
+    BareParen { line: usize },
+    NeverClosed { line: usize },
+}
+
+pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, usize)> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut index = 0usize;
+    // (char index of `(`, string-relative open line, is_command_substitution)
+    let mut stack: Vec<(usize, usize, bool)> = Vec::new();
+    let mut line = 1usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '\'' => single = true,
+            '"' => double = true,
+            '\n' => line += 1,
+            '`' => {
+                // Old-style comsub: skip its balanced body.
+                index += 1;
+                while index < chars.len() {
+                    match chars[index] {
+                        '\\' => index += 1,
+                        '`' => break,
+                        '\n' => line += 1,
+                        _ => {}
+                    }
+                    index += 1;
+                }
+            }
+            '(' => {
+                let is_comsub = index > 0 && chars[index - 1] == '$';
+                stack.push((index, line, is_comsub));
+            }
+            ')' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    let &(open_idx, open_line, is_comsub) = stack.last()?;
+    let newlines = input.matches('\n').count();
+    if !is_comsub {
+        // `$((` is arithmetic (parse.y:4465-4470 -> parse_matched_pair
+        // P_ARITH, EOF reports the open line at parse.y:3912) and `name=(`
+        // is a compound assignment (parse.y:5653-5658
+        // parse_compound_assignment EOF family): both are matched-pair
+        // constructs with their own report/exit rules already handled by
+        // the generic close-char scan — leave them to it.
+        let prev = if open_idx > 0 {
+            Some(chars[open_idx - 1])
+        } else {
+            None
+        };
+        if prev == Some('(') && open_idx >= 2 && chars[open_idx - 2] == '$' {
+            return None;
+        }
+        if prev == Some('=') {
+            return None;
+        }
+        let after = chars.get(open_idx + 1);
+        if after.is_none() || after == Some(&'\n') {
+            // The yacc `near unexpected token `newline'' class fires only
+            // when the subshell `(` follows body text: `$(echo (` is the
+            // bare-paren yacc error (verified probe m6), while `$( (` — the
+            // `(` directly after the opener — is a matched-pair EOF
+            // (probe m8). Require non-whitespace between the enclosing
+            // opener and this `(`.
+            let enclosing_open = stack
+                .iter()
+                .rev()
+                .nth(1)
+                .map(|&(idx, _, _)| idx)
+                .unwrap_or(0);
+            let between = &chars[enclosing_open + 1..open_idx];
+            if between.iter().any(|c| !c.is_whitespace()) {
+                return Some((
+                    UnclosedComsubShape::BareParen { line: open_line },
+                    open_line,
+                ));
+            }
+        }
+        return Some((
+            UnclosedComsubShape::NeverClosed { line: newlines + 1 },
+            open_line,
+        ));
+    }
+    // Both remaining comsub shapes report at one past the last input line:
+    // caller + newlines + 1 (verified probes m3/m7/m9 empty body,
+    // m5/m8/m10 consumed body).
+    Some((
+        UnclosedComsubShape::NeverClosed { line: newlines + 1 },
+        open_line,
+    ))
+}
+
 /// Quote/backslash-aware balanced-paren scan for an extglob pattern group
 /// body (GNU parse_matched_pair, parse.y:3877: quotes nest, backslash
 /// escapes, nested `(`/`)` count). `open` is the index of the `(`; returns

@@ -165,8 +165,97 @@ impl Executor {
                 // Heredoc bodies are raw text, so inputs carrying `<<` skip
                 // this probe like the script driver does.
                 if !source.contains("<<") {
+                    // rubash#318: an unclosed `$( ...` in the eval string is
+                    // NOT the generic close-char shape. GNU re-parses the
+                    // string as fresh parser input continuing the caller's
+                    // line counter (evalstring.c:345-357), and the comsub
+                    // body's own yyparse (parse.y:4549) owns the diagnostic:
+                    // a bare `(` followed by newline/EOF is a yacc error
+                    // printed at the `(' line with the offending source line
+                    // (parse.y:6858-6865) that forces exit 1 via
+                    // jump_to_top_level(FORCE_EOF) (parse.y:4588-4596);
+                    // EOF with an empty body, or an unclosed-but-consumed
+                    // body, keeps the plain `unexpected EOF' wording at the
+                    // last input line (parse.y:6891 / 4576-4587) and lets
+                    // the script continue with eval's status 2.
+                    if let Some((shape, open_line)) =
+                        crate::lexer::unclosed_comsub_eof_shape(&source)
+                    {
+                        let caller_line: usize = self
+                            .shell_state
+                            .env_vars
+                            .get("__RUBASH_CURRENT_LINE")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(1);
+                        // evalstring.c:359-451: complete commands before the
+                        // failing construct's line already ran.
+                        if open_line > 1 {
+                            let prefix = source
+                                .lines()
+                                .take(open_line - 1)
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !prefix.trim().is_empty() {
+                                self.execute_eval_source(&prefix, caller_line, cmd)?;
+                            }
+                        }
+                        let saved_eval_context = self
+                            .shell_state
+                            .env_vars
+                            .insert("__RUBASH_EVAL_CONTEXT".to_string(), "1".to_string());
+                        let diagnostic = match shape {
+                            crate::lexer::UnclosedComsubShape::BareParen { line } => {
+                                // parse.y:6858-6859 + print_offending_line
+                                // (6865); the offending token GNU names is
+                                // the newline that cannot open the
+                                // subshell's command list.
+                                let report = caller_line + line - 1;
+                                let prefix = self.parser_diagnostic_prefix_for_line(report);
+                                let offending =
+                                    source.lines().nth(line - 1).unwrap_or_default().to_string();
+                                format!(
+                                    "{prefix}syntax error near unexpected token `newline' while looking for matching `)'\n{prefix}`{offending}'\n"
+                                )
+                            }
+                            crate::lexer::UnclosedComsubShape::NeverClosed { line } => format!(
+                                "{}unexpected EOF while looking for matching `)'\n",
+                                self.parser_diagnostic_prefix_for_line(caller_line + line)
+                            ),
+                        };
+                        let write_result =
+                            self.write_buffered_builtin_output(cmd, &[], diagnostic.as_bytes());
+                        match saved_eval_context {
+                            Some(previous) => {
+                                self.shell_state
+                                    .env_vars
+                                    .insert("__RUBASH_EVAL_CONTEXT".to_string(), previous);
+                            }
+                            None => {
+                                self.shell_state.env_vars.remove("__RUBASH_EVAL_CONTEXT");
+                            }
+                        }
+                        write_result?;
+                        self.mark_parse_error();
+                        match shape {
+                            // parse.y:4588-4596: non-interactive shells exit
+                            // EXECUTION_FAILURE (1) through FORCE_EOF —
+                            // nothing after the eval runs (verified vs WSL
+                            // GNU 5.3.0: probes m4/m6, the `echo after'
+                            // line never printed, rc 1).
+                            crate::lexer::UnclosedComsubShape::BareParen { .. } => {
+                                return Err(ExecuteError::ExitCode(1));
+                            }
+                            _ => {
+                                if self.errexit_enabled() && self.errexit_is_active() {
+                                    return Err(ExecuteError::ExitCode(2));
+                                }
+                                self.exit_code = 2;
+                                return Ok(());
+                            }
+                        }
+                    }
                     let eval_posix = self.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-                    if let Some((close, open_line, eof_line, report_open, _command, _array)) =
+                    if let Some((close, open_line, eof_line, report_open, _command, array_list)) =
                         crate::lexer::unclosed_input_close_char_posix(&source, eval_posix)
                     {
                         // GNU eval continues the caller's line numbering:
@@ -232,7 +321,12 @@ impl Executor {
                         if self.errexit_enabled() && self.errexit_is_active() {
                             return Err(ExecuteError::ExitCode(2));
                         }
-                        self.exit_code = 2;
+                        // rubash#318: an unclosed `name=(` compound list is
+                        // the parse_compound_assignment EOF family — eval
+                        // returns its exit 1 (verified vs WSL GNU 5.3.0:
+                        // `eval "x=("` -> rc 1), like the script-level path
+                        // (parse.y:7140-7152).
+                        self.exit_code = if array_list { 1 } else { 2 };
                         return Ok(());
                     }
                 }

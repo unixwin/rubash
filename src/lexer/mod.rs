@@ -45,6 +45,7 @@ use heredoc::{heredoc_delimiters, HereDocDelimiter};
 use scanner::{Lexer, LexerBoundaryState, LexerParseState};
 pub(crate) use skip::command_substitutions_balanced;
 pub(crate) use skip::skip_parenthesized_unit_corrected;
+pub use skip::{unclosed_comsub_eof_shape, UnclosedComsubShape};
 
 use crate::executor::markers::DATA_DOLLAR;
 pub(crate) use ansi::decode_ansi_c_quoted;
