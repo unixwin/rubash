@@ -299,6 +299,20 @@ impl Executor {
         if first.words.first().map(String::as_str) != Some("cat") {
             return None;
         }
+        // rubash#320: admission whitelist — this fast path models only
+        // `cat <<EOF` reading its heredoc and echoing it to the captured
+        // stdout. GNU executes `cat <<EOF > /dev/null` with the redirect
+        // bound first (redir.c do_redirection_internal before exec), so the
+        // capture is EMPTY. A command carrying any file redirection (or an
+        // fd duplication) must fall through to the real executor instead of
+        // losing the redirect here — a false admission is a silent semantic
+        // bug; declining only costs the shortcut.
+        if command_has_file_redirect(first) {
+            return None;
+        }
+        if piped_next.is_some_and(command_has_file_redirect) {
+            return None;
+        }
         if closed_by_paren || command_has_warned_heredoc(first) {
             // Deduplicate: the same comsub can be expanded through multiple
             // paths (expand_assignment_value_inner and
@@ -320,6 +334,9 @@ impl Executor {
             for command in &ast.commands {
                 if command.words.first().map(String::as_str) != Some("cat")
                     || command.pipe.is_some()
+                    // rubash#320: redirect-carrying cats are not
+                    // shortcut-eligible (see command_has_file_redirect).
+                    || command_has_file_redirect(command)
                 {
                     return None;
                 }
@@ -393,6 +410,16 @@ impl Executor {
         if first.words.first().map(String::as_str) != Some("cat") {
             return None;
         }
+        // rubash#320: same admission whitelist as the typed path — a file
+        // redirection on the cat (or the piped stage) means the capture is
+        // redirect-owned, not heredoc-owned; fall through to the real
+        // executor (`cat <<EOF > /dev/null` must capture nothing).
+        if command_has_file_redirect(first) {
+            return None;
+        }
+        if piped_next.is_some_and(command_has_file_redirect) {
+            return None;
+        }
 
         // Warning is emitted by command_substitution_heredoc_output_mut_typed
         // (the typed path) to avoid duplicate warnings when both paths are
@@ -405,6 +432,9 @@ impl Executor {
             for command in &ast.commands {
                 if command.words.first().map(String::as_str) != Some("cat")
                     || command.pipe.is_some()
+                    // rubash#320: redirect-carrying cats are not
+                    // shortcut-eligible (see command_has_file_redirect).
+                    || command_has_file_redirect(command)
                 {
                     return None;
                 }
@@ -713,4 +743,23 @@ mod mktemp_display_path_tests {
             );
         }
     }
+}
+
+/// rubash#320 admission predicate for the `cat` heredoc comsub shortcut:
+/// GNU binds file redirections (and fd duplications) before the command
+/// runs (redir.c do_redirection_internal), so `cat <<EOF > /dev/null`
+/// captures nothing. The shortcut only models heredoc/here-string input
+/// (`<<`, `<<-`, `<<<` operators — input plumbing), so any other redirect
+/// operator disqualifies the command and it falls through to the real
+/// executor.
+fn command_has_file_redirect(command: &CommandNode) -> bool {
+    command
+        .redirects
+        .iter()
+        .any(|r| !r.operator.starts_with("<<"))
+        || command.redirect_in.is_some()
+        || command.redirect_out.is_some()
+        || command.append.is_some()
+        || command.redirect_err.is_some()
+        || command.redirect_err_append.is_some()
 }
