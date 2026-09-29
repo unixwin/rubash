@@ -657,6 +657,51 @@ impl Executor {
         &self,
         cmd: &CommandNode,
     ) -> Option<(String, String, i32)> {
+        // rubash#319: GNU expands a command's words left-to-right
+        // (subst.c:11229 expand_word_internal drives each word through
+        // expand_word_list_internal order), and inside a word every
+        // command substitution is forked as the walk reaches it
+        // (subst.c:7143 command_substitute). By the time a later unbound
+        // parameter raises the nounset fatal, every comsub to its left —
+        // across the whole word list — already produced its side effects
+        // (child stderr, files, ...): `w=$(echo hi >&2)${nope}` under
+        // set -u prints the child's `hi` BEFORE `nope: unbound variable`.
+        // The pre-scan cannot interleave, but it honors the order: walk
+        // words and assignments left-to-right collecting comsub bodies,
+        // and when the unbound hit comes, execute the collected prefix
+        // bodies before reporting the fatal.
+        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
+            let mut prefix_comsubs: Vec<String> = Vec::new();
+            let scan = |text: &str, prefix: &mut Vec<String>| {
+                let (unbound, bodies) = self.nounset_unbound_parameter_with_comsubs(text);
+                prefix.extend(bodies);
+                unbound
+            };
+            for word in &cmd.words {
+                if let Some(name) = scan(word, &mut prefix_comsubs) {
+                    for body in &prefix_comsubs {
+                        self.expand_command_substitution(body);
+                    }
+                    return Some((
+                        name,
+                        "unbound variable".to_string(),
+                        Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                    ));
+                }
+            }
+            for value in cmd.assignment_values() {
+                if let Some(name) = scan(&value, &mut prefix_comsubs) {
+                    for body in &prefix_comsubs {
+                        self.expand_command_substitution(body);
+                    }
+                    return Some((
+                        name,
+                        "unbound variable".to_string(),
+                        Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                    ));
+                }
+            }
+        }
         for word in &cmd.words {
             if let Some(error) = self.parameter_expansion_error_in_word(word) {
                 return Some(error);
@@ -1020,6 +1065,140 @@ impl Executor {
             rest = &after_start[end + 1..];
         }
         None
+    }
+
+    /// rubash#319 companion to `nounset_unbound_parameter`: the same
+    /// left-to-right walk, but the command-substitution bodies passed on
+    /// the way (and backtick bodies) are returned alongside the unbound
+    /// hit, so the caller can execute them before reporting the fatal —
+    /// GNU's expand_word_internal (subst.c:11229) forks each comsub as the
+    /// walk reaches it, so a child's stderr output precedes a later
+    /// `unbound variable` diagnostic.
+    fn nounset_unbound_parameter_with_comsubs(&self, word: &str) -> (Option<String>, Vec<String>) {
+        let chars: Vec<char> = word.chars().collect();
+        let mut comsubs = Vec::new();
+        let mut index = 0usize;
+        while index < chars.len() {
+            let ch = chars[index];
+            index += 1;
+            if ch == DATA_DOLLAR {
+                continue;
+            }
+            if ch == '`' {
+                // Backtick command substitution: same forked-child nounset
+                // boundary as `$( ... )` (GNU subst.c:7143 handles both
+                // spellings). Collect the body for ordered execution and
+                // never look inside (rubash#307).
+                let mut body = String::new();
+                while index < chars.len() {
+                    let body_ch = chars[index];
+                    index += 1;
+                    if body_ch == '\\' {
+                        if index < chars.len() {
+                            body.push(chars[index]);
+                            index += 1;
+                        }
+                        continue;
+                    }
+                    if body_ch == '`' {
+                        break;
+                    }
+                    body.push(body_ch);
+                }
+                comsubs.push(body);
+                continue;
+            }
+            if ch != '$' {
+                continue;
+            }
+
+            match chars.get(index).copied() {
+                Some('{') => {
+                    index += 1;
+                    let mut name = String::new();
+                    while index < chars.len() {
+                        let name_ch = chars[index];
+                        index += 1;
+                        if name_ch == '}' {
+                            break;
+                        }
+                        name.push(name_ch);
+                    }
+                    if let Some(reported) = self.nounset_braced_parameter_is_unbound(&name) {
+                        return (Some(reported), comsubs);
+                    }
+                }
+                Some(first) if first.is_ascii_digit() => {
+                    index += 1;
+                    let digit = first.to_digit(10).unwrap_or(0) as usize;
+                    if digit > 0 && self.shell_state.positional_params.get(digit - 1).is_none() {
+                        return (Some(format!("${first}")), comsubs);
+                    }
+                }
+                Some(first) if is_shell_name_start(first) => {
+                    let mut name = String::new();
+                    while index < chars.len() && is_shell_name_char(chars[index]) {
+                        name.push(chars[index]);
+                        index += 1;
+                    }
+                    if let Some(reported) = self.nounset_braced_parameter_is_unbound(&name) {
+                        return (Some(reported), comsubs);
+                    }
+                }
+                Some('?') | Some('$') | Some('@') | Some('*') | Some('#') | Some('-') => {
+                    index += 1;
+                }
+                Some('!') => {
+                    index += 1;
+                    if self.shell_state.last_background_pid.is_none() {
+                        return (Some(String::from("$!")), comsubs);
+                    }
+                }
+                Some('(') => {
+                    index += 1;
+                    if chars.get(index).copied() == Some('(') {
+                        // `$(( ... ))` arithmetic is evaluated in the PARENT
+                        // (no fork): keep scanning the text for `$name'
+                        // references (GNU expr.c expr_streval).
+                        continue;
+                    }
+                    // `$( ... )` command substitution: collect the balanced
+                    // body for ordered execution; the child's own nounset
+                    // check never leaks to this word (rubash#307).
+                    let mut depth = 1usize;
+                    let mut single = false;
+                    let mut double = false;
+                    let mut body = String::new();
+                    while index < chars.len() {
+                        let body_ch = chars[index];
+                        index += 1;
+                        if !single && body_ch == '\\' {
+                            if index < chars.len() {
+                                body.push(chars[index]);
+                                index += 1;
+                            }
+                            continue;
+                        }
+                        if !double && body_ch == '\'' {
+                            single = !single;
+                        } else if !single && body_ch == '"' {
+                            double = !double;
+                        } else if !single && !double && body_ch == '(' {
+                            depth += 1;
+                        } else if !single && !double && body_ch == ')' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        body.push(body_ch);
+                    }
+                    comsubs.push(body);
+                }
+                _ => {}
+            }
+        }
+        (None, comsubs)
     }
 
     pub(in crate::executor) fn nounset_unbound_parameter(&self, word: &str) -> Option<String> {
