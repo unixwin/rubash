@@ -471,69 +471,50 @@ fn push_double_quoted_replacement_char(marked: &mut String, chars: &[char], inde
 }
 
 /// Emit an ANSI-C `$'...'` span starting at `index` (the `$`) as quoted
-/// replacement data; returns the index after the closing quote. Escapes:
-/// `\\xNN` hex, `\\'`, `\\\\`, and backslash+char passes through with the
-/// backslash as quoted data.
+/// replacement data; returns the index after the closing quote.
+///
+/// The body decodes through the SAME canonical decoder as every other
+/// `$'...'` context (lexer ansi.rs decode_ansi_c_quoted — the port of GNU
+/// lib/sh/strtrans.c:51 ansicstr with its full escape table: \a \b \e \E
+/// \f \n \r \t \v, octal \NNN, \xHH, \u/\U, \cX, quote escapes, and
+/// backslash-preserving passthrough for unrecognized escapes). The
+/// hand-rolled table here previously knew only \xHH, \' and \, so the
+/// common C escapes stayed two-character literal text — `${s//,/$'\n'}` /
+/// `$'\t'` stored backslash+n instead of a newline (rubash#323; GNU
+/// subst.c:4462 expand_string_for_rhs hands the replacement through
+/// expand_word_internal, whose $' handling calls ansicstr on the whole
+/// table).
 fn push_ansi_c_replacement_span(marked: &mut String, chars: &[char], index: usize) -> usize {
+    // Find the closing quote: a backslash escapes the next character
+    // (parse_matched_pair semantics for $'...'), so \' and \ never
+    // close the span.
     let mut cursor = index + 2; // skip $ and opening '
+    let mut body = String::new();
     while cursor < chars.len() {
         let ch = chars[cursor];
-        if ch == '\'' {
-            return cursor + 1;
-        }
-        if ch == '\\' {
-            match chars.get(cursor + 1) {
-                Some('x') | Some('X') => {
-                    let mut value = 0u32;
-                    let mut digits = 0;
-                    let mut next = cursor + 2;
-                    while next < chars.len() && digits < 2 {
-                        match chars[next].to_digit(16) {
-                            Some(d) => {
-                                value = value * 16 + d;
-                                digits += 1;
-                                next += 1;
-                            }
-                            None => break,
-                        }
-                    }
-                    if digits > 0 {
-                        if let Some(decoded) = char::from_u32(value) {
-                            push_single_quoted_replacement_char(marked, decoded);
-                        }
-                        cursor = next;
-                    } else {
-                        push_single_quoted_replacement_char(marked, '\\');
-                        push_single_quoted_replacement_char(
-                            marked,
-                            *chars.get(cursor + 1).unwrap_or(&'x'),
-                        );
-                        cursor += 2;
-                    }
-                }
-                Some(&'\'') => {
-                    push_single_quoted_replacement_char(marked, '\'');
-                    cursor += 2;
-                }
-                Some(&'\\') => {
-                    push_single_quoted_replacement_char(marked, '\\');
-                    cursor += 2;
-                }
-                Some(&other) => {
-                    // Unrecognized escape keeps the backslash as data.
-                    push_single_quoted_replacement_char(marked, '\\');
-                    push_single_quoted_replacement_char(marked, other);
-                    cursor += 2;
-                }
-                None => {
-                    push_single_quoted_replacement_char(marked, '\\');
-                    cursor += 1;
-                }
-            }
+        if ch == '\\' && cursor + 1 < chars.len() {
+            body.push(ch);
+            body.push(chars[cursor + 1]);
+            cursor += 2;
             continue;
         }
-        push_single_quoted_replacement_char(marked, ch);
+        if ch == '\'' || ch == crate::executor::markers::DATA_SQUOTE {
+            let decoded = crate::lexer::decode_ansi_c_quoted(&body);
+            for decoded_char in decoded.chars() {
+                push_single_quoted_replacement_char(marked, decoded_char);
+            }
+            return cursor + 1;
+        }
+        body.push(ch);
         cursor += 1;
+    }
+    // Unterminated $' span: decode what is there (GNU parse_matched_pair
+    // would report an unterminated quote; the caller's expander handles
+    // that diagnostic) — keep the old fall-through behavior of emitting
+    // the consumed text.
+    let decoded = crate::lexer::decode_ansi_c_quoted(&body);
+    for decoded_char in decoded.chars() {
+        push_single_quoted_replacement_char(marked, decoded_char);
     }
     cursor
 }
