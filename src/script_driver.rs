@@ -2544,12 +2544,28 @@ mod issue302_tests {
 /// in place of a fresh whole-text re-lex, under the three certified
 /// conditions (non-alias arm / complete break / no effective extglob
 /// toggle — see read_next_source_group's doc). These tests drive the real
-/// gather over corpus texts and assert, for every group where reuse was
-/// certified, that the reused stream (after the caller's
-/// tokenize_comsub_body_with_origin trailing-separator pop) is
+/// gather over corpus texts and assert, for every group the PRODUCT
+/// actually parses through reuse, that the reused stream (after the
+/// caller's tokenize_comsub_body_with_origin trailing-separator pop) is
 /// byte-identical — every Token field — to a fresh re-lex of the same
 /// group bytes, with the same gather-then-parse interleaving production
 /// uses (so the extglob global's timeline matches too).
+///
+/// Trim-empty groups are outside that contract and skipped by the
+/// comparison, mirroring the consumer exactly: run_source_groups gates
+/// `if exec_text.trim().is_empty() { continue; }` BEFORE the token stage
+/// (builtins/source/execution.rs), and the fresh route short-circuits the
+/// same predicate inside tokenize_comsub_body_with_origin — so a group
+/// whose text is Rust-trim-empty parses NOTHING through either route and
+/// the two representations are never compared or parsed. Their internal
+/// difference is real but product-unreachable and platform-dependent: on
+/// non-Windows a `\r`-only line keeps its CR (push_main_line's
+/// cfg!(windows) strip) and reaches scanner.rs's `'\r'` arm, which lexes
+/// it as a line-break Semicolon (GNU keeps `\r` as word data — a CRLF
+/// script under GNU prints `$'\r': command not found`), while the fresh
+/// route's trim shortcut returns []. The skipped-group assertion below
+/// pins the fresh side of that carve-out so the predicate cannot drift
+/// silently.
 #[cfg(test)]
 mod perf10_token_reuse_tests {
     use super::*;
@@ -2564,6 +2580,16 @@ mod perf10_token_reuse_tests {
         while let Some((pending, _start_line, _group, feeder_tokens)) =
             read_next_source_group(&executor, &raw_lines, &mut index)
         {
+            // run_source_groups' own first gate: a trim-empty group is
+            // skipped before any tokens exist on either route.
+            if pending.trim().is_empty() {
+                assert!(
+                    tokenize_with_initial_posix(&pending, false).is_empty(),
+                    "trim-empty group {:?} must lex to nothing via the fresh route",
+                    &pending[..pending.len().min(80)]
+                );
+                continue;
+            }
             let Some(mut tokens) = feeder_tokens else {
                 continue;
             };
@@ -2633,6 +2659,37 @@ mod perf10_token_reuse_tests {
         assert_reuse_matches_fresh("echo a\r\necho b\r\n\r\necho c\n");
         assert_reuse_matches_fresh("echo a\n\n\necho b\n");
         assert_reuse_matches_fresh("echo tail-no-newline");
+    }
+
+    #[test]
+    fn sourced_blank_crlf_line_executes_nothing_on_every_platform() {
+        // Product-level guard for the trim-empty carve-out documented on
+        // assert_reuse_matches_fresh: a line holding ONLY a CR (a blank CRLF
+        // line) must not execute as a command through the source group
+        // driver (where token reuse lands). run_source_groups'
+        // `exec_text.trim().is_empty()` gate skips the group before tokens
+        // exist on either route, and a bare `\r` never forms a word anyway
+        // (scanner.rs's '\r' arm lexes a line-start CR as a line-break
+        // Semicolon — `\r` only becomes word DATA when glued behind a word
+        // character, which is why the commands around the blank line are
+        // LF-terminated here). Observable contract, identical pre- and
+        // post-reuse on every platform: the assignment AFTER the blank line
+        // runs (X == 2) and no stray `$'\r': command not found` leaks into
+        // the sourced status (0).
+        let mut executor = Executor::new();
+        executor.shell_state.aliases.clear();
+        crate::builtins::source::execute_text(&mut executor, "X=1\n\r\nX=2\n")
+            .expect("source of a three-group text with a blank CRLF line");
+        assert_eq!(
+            executor.get_env("X").map(str::to_string),
+            Some("2".to_string()),
+            "the group after the blank CRLF line must run"
+        );
+        assert_eq!(
+            executor.last_exit_code(),
+            0,
+            "blank CRLF group must be skipped, not executed as a command"
+        );
     }
 
     #[test]
