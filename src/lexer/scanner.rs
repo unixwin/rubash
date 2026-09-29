@@ -34,6 +34,21 @@ pub(super) struct LexerParseState {
     /// `time -p { echo; }' keeps `{' a group opener. True when last_token
     /// was such an option word.
     last_was_time_option: bool,
+    /// GNU PST_CONDCMD (parser.h:33): set while the conditional command's
+    /// tokens are being read (parse.y:3654 on `[[', cleared by `]]').
+    in_cond_command: bool,
+    /// GNU PST_REGEXP (parser.h:38): armed after the `=~' operator word of
+    /// a conditional (parse.y:5169) and cleared once the RHS word has been
+    /// read (parse.y:5212). Rubash's tokenizer splits that one GNU word
+    /// into several tokens (`(', fragments, `)'); these three fields model
+    /// the still-open RHS word: whether its first fragment was consumed,
+    /// the open `('/`)' depth inside it, and where the previous token ended
+    /// (a fragment directly abutting the previous token at depth 0 still
+    /// belongs to the word — `[[ a =~ (b)#c ]]' keeps `#c' data).
+    cond_rhs_regexp: bool,
+    cond_rhs_started: bool,
+    cond_rhs_paren_depth: i32,
+    cond_rhs_last_token_end: usize,
 }
 
 /// Snapshot of every cross-token Lexer field at a byte offset where a pass
@@ -295,6 +310,62 @@ impl<'a> Lexer<'a> {
             self.parse_state.case_pattern = false;
             self.parse_state.case_expect_in = false;
         }
+
+        // GNU PST_CONDCMD/PST_REGEXP port. `[[' opens the conditional
+        // (parse.y:3654), `]]' closes it; the `=~' operator arms the
+        // regexp RHS word (parse.y:5169) which stays ONE GNU word —
+        // read_token_word absorbs `('/`)'/`|' and everything between via
+        // parse_matched_pair (parse.y:5443-5461) — until whitespace at
+        // paren depth zero ends it (parse.y:5212 clears the bits after the
+        // RHS token returns). Rubash splits that word into several tokens;
+        // these fields track whether the word is still open so the `#'
+        // branch below can keep a token-initial `#' as DATA the way GNU
+        // does (read_token's `#' comment branch, parse.y:3607, never sees
+        // the inside of the RHS word).
+        let cond_paren_delta = |token: &Token| -> i32 {
+            if token.kind == TokenKind::Keyword {
+                match token.value.as_str() {
+                    "(" => 1,
+                    ")" => -1,
+                    _ => 0,
+                }
+            } else {
+                0
+            }
+        };
+        let token_end = token.position + token.raw.len();
+        if self.reserved_word_position() && (keyword_is("[[") || word_is("[[")) {
+            self.parse_state.in_cond_command = true;
+            self.parse_state.cond_rhs_regexp = false;
+            self.parse_state.cond_rhs_started = false;
+            self.parse_state.cond_rhs_paren_depth = 0;
+        } else if self.parse_state.in_cond_command && (keyword_is("]]") || word_is("]]")) {
+            self.parse_state.in_cond_command = false;
+            self.parse_state.cond_rhs_regexp = false;
+            self.parse_state.cond_rhs_started = false;
+            self.parse_state.cond_rhs_paren_depth = 0;
+        } else if self.parse_state.in_cond_command && word_is("=~") {
+            self.parse_state.cond_rhs_regexp = true;
+            self.parse_state.cond_rhs_started = false;
+            self.parse_state.cond_rhs_paren_depth = 0;
+        } else if self.parse_state.cond_rhs_regexp {
+            if !self.parse_state.cond_rhs_started {
+                // The first fragment after `=~' begins the RHS word
+                // regardless of leading whitespace (GNU's read_token skips
+                // it before read_token_word starts).
+                self.parse_state.cond_rhs_started = true;
+                self.parse_state.cond_rhs_paren_depth += cond_paren_delta(token);
+            } else if !token.leading_ws.is_empty() && self.parse_state.cond_rhs_paren_depth <= 0 {
+                // Whitespace at depth zero: the GNU RHS word ended before
+                // this token (parse.y:5212).
+                self.parse_state.cond_rhs_regexp = false;
+                self.parse_state.cond_rhs_started = false;
+                self.parse_state.cond_rhs_paren_depth = 0;
+            } else {
+                self.parse_state.cond_rhs_paren_depth += cond_paren_delta(token);
+            }
+        }
+        self.parse_state.cond_rhs_last_token_end = token_end;
 
         // TIMEOPT/TIMEIGN recognition (parse.y:3470-3479): `-p' after the
         // `time' keyword and `--' after `time'/`time -p' are dedicated
@@ -649,6 +720,27 @@ impl<'a> Lexer<'a> {
                 // `}' followed a bare word with no terminator). At EOF with
                 // no trailing newline GNU returns yacc_EOF without the
                 // newline token — keep the old fall-through there.
+                //
+                // EXCEPT inside an open `=~' RHS word (PST_REGEXP,
+                // parse.y:5169): GNU's read_token_word consumed the whole
+                // regex as ONE word — `(' groups verbatim through
+                // parse_matched_pair (parse.y:5443-5461) — so its `#'
+                // characters are word DATA and read_token's comment branch
+                // (parse.y:3607) never sees them. Rubash splits that word
+                // into several tokens; when the RHS word is still open
+                // (first fragment consumed, and either inside a `(' group or
+                // directly abutting the previous fragment), a token-initial
+                // `#' must scan as an ordinary word instead of a comment
+                // (rubash#322: `[[ "#FFFFFF" =~ ^(#?([a-fA-F0-9]{6}|...))$ ]]`
+                // died as "unexpected end of file from `('").
+                if self.parse_state.cond_rhs_regexp
+                    && self.parse_state.cond_rhs_started
+                    && (self.parse_state.cond_rhs_paren_depth > 0
+                        || self.parse_state.cond_rhs_last_token_end == start)
+                {
+                    self.skip_word_at(start);
+                    return Some(self.finish_word_token(start, false));
+                }
                 let mut terminated_by_newline = false;
                 loop {
                     match self.advance() {
