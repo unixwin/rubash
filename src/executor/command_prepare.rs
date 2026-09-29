@@ -1675,7 +1675,7 @@ impl Executor {
         ))
     }
 
-    fn braced_alternate_word_values(
+    pub(in crate::executor) fn braced_alternate_word_values(
         &mut self,
         word: &str,
         raw: Option<&str>,
@@ -1965,8 +1965,8 @@ impl Executor {
             // collapses the list to one word. Route the class to the
             // re-parse path, which expands `"${name[@]}"` through the real
             // per-element word machinery (array_at_word_values); a literal
-            // `[@]}` that is not a reference only costs the re-parse.
-            || alternate.contains("[@]}");
+            // `[@]` that is not a reference only costs the re-parse.
+            || alternate_contains_braced_at_list_reference(alternate);
         let posix_literal_quotes = self.posix_mode_enabled()
             && alternate.starts_with("\"")
             && alternate.ends_with("\"")
@@ -2799,6 +2799,29 @@ fn quoted_pure_reference_expands_empty(content: &str, executor: &Executor) -> bo
         .or_else(|| executor.shell_variable_value(name))
         .or_else(|| crate::executor::env_helpers::exact_case_env_var(name))
         .is_none_or(|value| value.is_empty())
+}
+
+/// A braced `[@]` list reference inside an alternate word, in the plain
+/// form (`"${a[@]}"`) or an operator/slice form (`"${a[@]:0:2}"`,
+/// `"${a[@]#p}"`, `${a[@]/x/y}`): every one of these expansions returns
+/// a word list (one word per element). GNU parameter_brace_expand_rhs
+/// routes the alternate through expand_string_for_rhs (subst.c:7993)
+/// and a multi-word result (`l->next`, subst.c:8023-8027) sets
+/// *qdollaratp, so the alternate keeps one field per element —
+/// `${b[@]+"${b[@]:0:2}"}` with b=("" x) yields TWO fields, the first an
+/// empty quoted field (rubash#315). The `-`/`+`/`=`/`?` operators on
+/// `[@]` produce a single word and stay out of this class.
+fn alternate_contains_braced_at_list_reference(alternate: &str) -> bool {
+    let mut search_from = 0usize;
+    while let Some(found) = alternate[search_from..].find("[@]") {
+        let after = search_from + found + "[@]".len();
+        match alternate[after..].chars().next() {
+            Some('}' | ':' | '#' | '%' | '/' | '^' | ',') => return true,
+            _ => {}
+        }
+        search_from += found + 1;
+    }
+    false
 }
 
 /// Field split an alternate expansion that carries QUOTED_NULL_MARKER

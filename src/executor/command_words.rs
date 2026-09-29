@@ -205,6 +205,17 @@ impl Executor {
         let suppress_glob = word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
             || word.starts_with(STORAGE_WORD_PREFIX)
             || super::command_prepare::raw_word_suppresses_pathname_expansion(raw, metadata);
+        // GNU subst.c param_expand expands a for-list word exactly like a
+        // command word, so the braced-alternate word-list fan-outs apply
+        // here too (braced_alternate_word_values): `${b[@]+"${b[@]:0:2}"}`
+        // with b=("" x) iterates over TWO words, the first an empty quoted
+        // field (parameter_brace_expand_rhs sets *qdollaratp for the
+        // multi-word rhs, subst.c:8023-8027; rubash#315).
+        if !word.starts_with(STORAGE_WORD_PREFIX) {
+            if let Some(values) = self.braced_alternate_word_values(word, raw) {
+                return Ok(values);
+            }
+        }
         if let Some(values) = self.quoted_positional_at_word_values_with_raw(word, raw, None) {
             return Ok(values);
         }

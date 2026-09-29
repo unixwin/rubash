@@ -121,7 +121,7 @@ impl Executor {
                 }
             }
             [op, operand, end] if op == "-R" && end == "]]" => {
-                let name = self.expand_word_mut(operand);
+                let name = self.expand_conditional_word(operand);
                 self.xtrace_conditional_term("-R", &name, None);
                 i32::from(!is_marked_var(
                     &self.shell_state.env_vars,
@@ -130,7 +130,7 @@ impl Executor {
                 ))
             }
             [op, operand] if op == "-R" => {
-                let name = self.expand_word_mut(operand);
+                let name = self.expand_conditional_word(operand);
                 self.xtrace_conditional_term("-R", &name, None);
                 i32::from(!is_marked_var(
                     &self.shell_state.env_vars,
@@ -151,12 +151,12 @@ impl Executor {
             // `[[ x ]]` is `[[ -n x ]]` (parse.y:5174-5178 synthesizes the
             // -n node), so the trace prints `-n <arg>`.
             [operand, end] if end == "]]" => {
-                let value = self.expand_word_mut(operand);
+                let value = self.expand_conditional_word(operand);
                 self.xtrace_conditional_term("-n", &value, None);
                 i32::from(value.is_empty())
             }
             [operand] => {
-                let value = self.expand_word_mut(operand);
+                let value = self.expand_conditional_word(operand);
                 self.xtrace_conditional_term("-n", &value, None);
                 i32::from(value.is_empty())
             }
@@ -165,7 +165,7 @@ impl Executor {
             // `X: integer expected` diagnostic. Expand once, trace, then
             // validate and dispatch on the already-expanded operand.
             [op, operand, end] if op == "-t" && end == "]]" => {
-                let w = self.expand_word_mut(operand);
+                let w = self.expand_conditional_word(operand);
                 self.xtrace_conditional_term(op, &w, None);
                 if crate::builtins::test::valid_number(&w).is_none() {
                     self.report_conditional_error(&format!("{}: integer expected", w));
@@ -180,7 +180,7 @@ impl Executor {
                 )
             }
             [op, operand] if op == "-t" => {
-                let w = self.expand_word_mut(operand);
+                let w = self.expand_conditional_word(operand);
                 self.xtrace_conditional_term(op, &w, None);
                 if crate::builtins::test::valid_number(&w).is_none() {
                     self.report_conditional_error(&format!("{}: integer expected", w));
@@ -233,6 +233,18 @@ impl Executor {
             }
             _ => 1,
         }
+    }
+
+    /// GNU cond.c cond_expand_word -> expand_word: the operand reaches the
+    /// test with quote removal complete — a quoted-empty alternate
+    /// expansion (`[[ -n ${a[@]+"${a[2]+x}"} ]]`, rubash#315) is the empty
+    /// string, not the argv splitter's QUOTED_NULL_MARKER carrier. Strip
+    /// the in-band carrier the way remove_quoted_nulls drops CTLNUL at
+    /// dequote (subst.c:4795+); no [[ ]] context consumes the field-
+    /// splitting semantics it encodes.
+    fn expand_conditional_word(&mut self, word: &str) -> String {
+        self.expand_word_mut(word)
+            .replace(crate::executor::embedded_mutations::QUOTED_NULL_MARKER, "")
     }
 
     fn conditional_status_with_metadata(
@@ -334,8 +346,8 @@ impl Executor {
                     && matches!(op.as_str(), "=" | "==" | "!=")
                     && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty()) =>
             {
-                let left = self.expand_word_mut(left);
-                let right = self.expand_word_mut(right);
+                let left = self.expand_conditional_word(left);
+                let right = self.expand_conditional_word(right);
                 self.xtrace_conditional_term(op, &left, Some(&right));
                 let right_pattern = self.quote_aware_glob_rhs(&right, &metadata[2]);
                 let matched =
@@ -349,8 +361,8 @@ impl Executor {
                 if matches!(op.as_str(), "=" | "==" | "!=")
                     && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty()) =>
             {
-                let left = self.expand_word_mut(left);
-                let right = self.expand_word_mut(right);
+                let left = self.expand_conditional_word(left);
+                let right = self.expand_conditional_word(right);
                 self.xtrace_conditional_term(op, &left, Some(&right));
                 let right_pattern = self.quote_aware_glob_rhs(&right, &metadata[2]);
                 let matched =
@@ -377,8 +389,8 @@ impl Executor {
     }
 
     pub(super) fn conditional_string_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
-        let left = self.expand_word_mut(left);
-        let right = self.expand_word_mut(right);
+        let left = self.expand_conditional_word(left);
+        let right = self.expand_conditional_word(right);
         self.xtrace_conditional_term(op, &left, Some(&right));
         let right_pattern = right.clone();
         let extglob = crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extglob")
@@ -434,11 +446,9 @@ impl Executor {
             }
             if chars[index] == '\\' {
                 if unquoted_start < index {
-                    output.push_str(
-                        &self.expand_word_mut(
-                            &chars[unquoted_start..index].iter().collect::<String>(),
-                        ),
-                    );
+                    output.push_str(&self.expand_conditional_word(
+                        &chars[unquoted_start..index].iter().collect::<String>(),
+                    ));
                 }
                 if let Some(next) = chars.get(index + 1) {
                     output.push('\\');
@@ -456,9 +466,9 @@ impl Executor {
                 continue;
             };
             if unquoted_start < index {
-                output.push_str(
-                    &self.expand_word_mut(&chars[unquoted_start..index].iter().collect::<String>()),
-                );
+                output.push_str(&self.expand_conditional_word(
+                    &chars[unquoted_start..index].iter().collect::<String>(),
+                ));
             }
             let body = chars[index + opener_len..end].iter().collect::<String>();
             let value = match kind {
@@ -475,7 +485,7 @@ impl Executor {
                     // marker (the same protection escape_decoded_ansi_c_
                     // quotes applies) so it survives as data.
                     let body = body.replace('\'', crate::lexer::ANSI_C_QUOTE_MARKER_STR);
-                    self.expand_word_mut(&body)
+                    self.expand_conditional_word(&body)
                 }
             };
             append_literal_glob_text(&mut output, &value);
@@ -485,7 +495,7 @@ impl Executor {
 
         if unquoted_start < chars.len() {
             output.push_str(
-                &self.expand_word_mut(&chars[unquoted_start..].iter().collect::<String>()),
+                &self.expand_conditional_word(&chars[unquoted_start..].iter().collect::<String>()),
             );
         }
         output
@@ -506,7 +516,7 @@ impl Executor {
             false,
             &self.shell_state.env_vars,
         );
-        let cooked = self.expand_word_mut(operand);
+        let cooked = self.expand_conditional_word(operand);
         let rewritten = self.rewrite_conditional_v_operand(&cooked, arrayref)?;
 
         Ok(crate::builtins::test::variable_is_set(
@@ -516,7 +526,7 @@ impl Executor {
     }
 
     pub(super) fn conditional_string_unary(&mut self, op: &str, operand: &str) -> bool {
-        let value = self.expand_word_mut(operand);
+        let value = self.expand_conditional_word(operand);
         self.xtrace_conditional_term(op, &value, None);
         match op {
             "-n" => !value.is_empty(),
@@ -574,7 +584,7 @@ impl Executor {
     }
 
     pub(super) fn conditional_shell_option_unary(&mut self, operand: &str) -> bool {
-        let name = self.expand_word_mut(operand);
+        let name = self.expand_conditional_word(operand);
         self.xtrace_conditional_term("-o", &name, None);
         crate::builtins::set::is_shell_option(&name)
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, &name)
@@ -584,15 +594,15 @@ impl Executor {
         if let Some(result) = conditional_process_substitution_unary(op, operand) {
             return result;
         }
-        let value = self.expand_word_mut(operand);
+        let value = self.expand_conditional_word(operand);
         self.xtrace_conditional_term(op, &value, None);
         let args = vec![op.to_string(), value];
         crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
     }
 
     pub(super) fn conditional_file_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
-        let left_exp = self.expand_word_mut(left);
-        let right_exp = self.expand_word_mut(right);
+        let left_exp = self.expand_conditional_word(left);
+        let right_exp = self.expand_conditional_word(right);
         self.xtrace_conditional_term(op, &left_exp, Some(&right_exp));
         let args = vec![left_exp, op.to_string(), right_exp];
         crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
@@ -636,8 +646,8 @@ impl Executor {
     }
 
     pub(super) fn conditional_regex_match_status(&mut self, left: &str, right: &str) -> i32 {
-        let left_exp = self.expand_word_mut(left);
-        let right_exp = self.expand_word_mut(right);
+        let left_exp = self.expand_conditional_word(left);
+        let right_exp = self.expand_conditional_word(right);
         let right_f = restore_numeric_decimal_regex_escapes(&right_exp);
         let left = left_exp;
         let right = right_f;
@@ -663,7 +673,7 @@ impl Executor {
         right: &str,
         metadata: &crate::parser::WordMetadata,
     ) -> i32 {
-        let left = self.expand_word_mut(left);
+        let left = self.expand_conditional_word(left);
         let right = self.quote_aware_regex_rhs(right, metadata);
         let right = restore_numeric_decimal_regex_escapes(&right);
         self.xtrace_conditional_term("=~", &left, Some(&right));
@@ -760,7 +770,7 @@ impl Executor {
                 let quoted = match kind {
                     QuoteKind::Single | QuoteKind::Backslash => body,
                     QuoteKind::AnsiC => decode_ansi_c_escapes(&body),
-                    QuoteKind::Double | QuoteKind::Locale => self.expand_word_mut(&body),
+                    QuoteKind::Double | QuoteKind::Locale => self.expand_conditional_word(&body),
                 };
                 let quoted =
                     crate::executor::substitution_metadata::shell_text_to_raw_bytes(&quoted);
@@ -796,7 +806,7 @@ impl Executor {
                 index += 1;
             }
             let segment = chars[start..index].iter().collect::<String>();
-            let expanded = self.expand_word_mut(&segment);
+            let expanded = self.expand_conditional_word(&segment);
             let expanded =
                 crate::executor::substitution_metadata::shell_text_to_raw_bytes(&expanded);
             let expanded = String::from_utf8_lossy(&expanded);
@@ -819,7 +829,7 @@ impl Executor {
     fn expand_cond_arith_operand(&mut self, raw: &str) -> String {
         let bytes = raw.as_bytes();
         if !raw.contains('[') {
-            return self.expand_word_mut(raw);
+            return self.expand_conditional_word(raw);
         }
         let mut output = String::new();
         let mut literal_start = 0usize;
@@ -855,7 +865,7 @@ impl Executor {
                         continue;
                     }
                     let end = assoc_subscript_end(bytes, index);
-                    output.push_str(&self.expand_word_mut(&raw[literal_start..name_start]));
+                    output.push_str(&self.expand_conditional_word(&raw[literal_start..name_start]));
                     output.push_str(&raw[name_start..index]);
                     output.push('[');
                     let expanded = self.expand_subscript_string(&raw[index + 1..end - 1]);
@@ -875,7 +885,7 @@ impl Executor {
             index += 1;
         }
         if literal_start < raw.len() {
-            output.push_str(&self.expand_word_mut(&raw[literal_start..]));
+            output.push_str(&self.expand_conditional_word(&raw[literal_start..]));
         }
         output
     }

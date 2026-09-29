@@ -1912,6 +1912,23 @@ impl Executor {
                     // see whole_word_parameter_compound_fields).
                     changed = true;
                     values.append(&mut fields);
+                } else if let Some(mut fields) =
+                    self.braced_alternate_compound_element_fields(&token_raw)
+                {
+                    // GNU parameter_brace_expand case '+'/'-' (subst.c:10342/
+                    // 10348) expands the alternate through
+                    // expand_string_for_rhs (subst.c:7993); when the rhs is a
+                    // word list (`l->next`, subst.c:8023-8027 — a quoted
+                    // `"${name[@]}"`, its slice `"${name[@]:X:Y}"`, or a
+                    // quoted-empty alternate) each word is its own element
+                    // (arrayfunc.c:557 expand_compound_array_assignment ->
+                    // expand_words_no_vars per word). The plain-element
+                    // String path joins the list and drops the empty quoted
+                    // element: `c=( ${b[@]+"${b[@]:0:2}"} )` with b=("" x)
+                    // stored ONE element instead of two (rubash#315,
+                    // liquidprompt test_array).
+                    changed = true;
+                    values.append(&mut fields);
                 } else {
                     values.extend(self.compound_plain_element_value_fields(
                         &token_raw,
@@ -2057,6 +2074,16 @@ impl Executor {
                     // element when quoted) — never a re-parseable string
                     // (GNU arrayfunc.c:557 expand_compound_array_assignment,
                     // see whole_word_parameter_compound_fields).
+                    changed = true;
+                    values.append(&mut fields);
+                    continue;
+                }
+                if let Some(mut fields) = self.braced_alternate_compound_element_fields(&token_raw)
+                {
+                    // Braced-alternate element with a word-list rhs
+                    // (`${b[@]+"${b[@]:0:2}"}`, `${b[@]+""}`): one element
+                    // per rhs word, quoted-null retention included
+                    // (parameter_brace_expand_rhs word lists, rubash#315).
                     changed = true;
                     values.append(&mut fields);
                     continue;
@@ -2561,6 +2588,192 @@ impl Executor {
     /// arm of expand_word_internal's caller): ONE element, joined text —
     /// `${arr[*]}` joins with IFS[0] there (issue #194). Single-quoted
     /// tokens are literal data and are not claimed (return None).
+    /// Whole-token `${var+alt}` / `${var-alt}` (and `:+`/`:-`) compound
+    /// elements whose alternate is a double-quoted at-list reference —
+    /// `"${name[@]}"`, its slice `"${name[@]:X:Y}"` — or a quoted-empty
+    /// word. GNU parameter_brace_expand (case '+'/'-', subst.c:10342/
+    /// 10348) expands the alternate via expand_string_for_rhs
+    /// (subst.c:7993); a word-list rhs (`l->next`, subst.c:8023-8027)
+    /// keeps one element per word through expand_compound_array_assignment
+    /// (arrayfunc.c:557), and a quoted-empty alternate is a quoted null
+    /// that stores ONE empty element (subst.c:11940-11944). Everything
+    /// else returns None and keeps the plain-element path (rubash#315:
+    /// `c=( ${b[@]+"${b[@]:0:2}"} )` with b=("" foobar) stores two
+    /// elements, `h=( ${b[@]+""} )` stores one empty).
+    fn braced_alternate_compound_element_fields(&self, token_raw: &str) -> Option<Vec<String>> {
+        let core = token_raw.trim_matches('\u{E302}');
+        let body = whole_word_braced_parameter_body(core)?;
+        let (var_name, alternate, use_when_set, require_non_empty) =
+            if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(body, ":+")
+            {
+                (var_name, alternate, true, true)
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(body, '+')
+            {
+                (var_name, alternate, true, false)
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(body, ":-")
+            {
+                (var_name, alternate, false, true)
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(body, '-')
+            {
+                (var_name, alternate, false, false)
+            } else {
+                return None;
+            };
+        let value = self.parameter_operator_value(var_name);
+        let word_used = if use_when_set {
+            value.is_some() && (!require_non_empty || !value.unwrap_or_default().is_empty())
+        } else {
+            value.is_none() || (require_non_empty && value.unwrap_or_default().is_empty())
+        };
+        if !word_used {
+            // Unused alternate: keep the existing plain-element path (it
+            // already expands the parameter's own value for the used side
+            // of `-`/`:-`); claiming here would drop `${a[@]-x}`-style
+            // value expansions.
+            return None;
+        }
+        // Peel the alternate's ONE outer quote pair (literal `"` or the
+        // lexer's E302 wrap); the class claimed here is the quoted at-list.
+        let (alt_core, quoted) = if alternate.starts_with('"') && alternate.ends_with('"') {
+            (&alternate[1..alternate.len() - 1], true)
+        } else if alternate.starts_with('\u{E302}') && alternate.ends_with('\u{E302}') {
+            (alternate.trim_matches('\u{E302}'), true)
+        } else {
+            (alternate, false)
+        };
+        if quoted && alt_core.is_empty() {
+            // Quoted-empty alternate: one stored empty element (W_HASQUOTEDNULL,
+            // subst.c:11940-11944).
+            return Some(vec![format!(
+                "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                quote_compound_field_value("")
+            )]);
+        }
+        if !quoted {
+            return None;
+        }
+        let empty_element = || {
+            vec![format!(
+                "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                quote_compound_field_value("")
+            )]
+        };
+        let Some(list_body) = whole_word_braced_parameter_body(alt_core) else {
+            // Not a whole-word braced expansion: a quoted-null rhs (nested
+            // unset guard, e.g. `${a[@]+"${a[2]+x}"}`) still stores ONE
+            // empty element (quoted_null_braced_alternate).
+            return self
+                .quoted_null_braced_alternate(alternate)
+                .then(empty_element);
+        };
+        // Slice form `${name[@]:off[:len]}` fans out per element
+        // (mirror of the direct-token slice arm above).
+        if let Some((var_name, offset, length)) = self.parse_parameter_substring(list_body) {
+            let starred = var_name.ends_with("[*]");
+            if let Some(array_name) = var_name
+                .strip_suffix("[@]")
+                .or_else(|| var_name.strip_suffix("[*]"))
+            {
+                let storage = self.parameter_array_storage(array_name)?;
+                let sliced = array_parameter_slice(
+                    &storage,
+                    offset,
+                    length.and_then(|length| usize::try_from(length).ok()),
+                );
+                return Some(if starred {
+                    vec![format!(
+                        "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                        quote_compound_field_value(&sliced.join(&self.ifs_first_char_separator()))
+                    )]
+                } else {
+                    sliced
+                        .iter()
+                        .map(|value| {
+                            format!(
+                                "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                                quote_compound_field_value(value)
+                            )
+                        })
+                        .collect()
+                });
+            }
+            return None;
+        }
+        // Plain `"${name[@]}"` / `"${name[*]}"`: one element per member
+        // ([*] joined with IFS[0]).
+        let Some((array_name, storage)) = list_body
+            .strip_suffix("[@]")
+            .or_else(|| list_body.strip_suffix("[*]"))
+            .filter(|array_name| is_shell_name(array_name))
+            .and_then(|array_name| {
+                self.parameter_array_storage(array_name)
+                    .map(|storage| (array_name, storage))
+            })
+        else {
+            return self
+                .quoted_null_braced_alternate(alternate)
+                .then(empty_element);
+        };
+        if list_body.ends_with("[*]") {
+            return Some(vec![format!(
+                "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                quote_compound_field_value(
+                    &array_values(&storage).join(&self.ifs_first_char_separator())
+                )
+            )]);
+        }
+        Some(
+            array_values(&storage)
+                .into_iter()
+                .map(|value| {
+                    format!(
+                        "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                        quote_compound_field_value(&value)
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// A quoted-null alternate rhs: the quoted word expands to nothing
+    /// (empty literal, or a nested guard whose parameter is unset under
+    /// `+` / empty under `:+`), so the rhs is a QUOTED_NULL word that
+    /// still stores ONE empty element (subst.c:8036-8044 QUOTED_NULL +
+    /// W_HASQUOTEDNULL through expand_compound_array_assignment).
+    /// Decided without expanding the rhs, so expansion side effects
+    /// cannot run twice.
+    fn quoted_null_braced_alternate(&self, alternate: &str) -> bool {
+        let Some(inner) = alternate
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+        else {
+            return false;
+        };
+        if inner.is_empty() {
+            return true;
+        }
+        let Some(body) = whole_word_braced_parameter_body(inner) else {
+            return false;
+        };
+        if let Some((var_name, _)) =
+            super::expand_braced_ops::split_once_outside_subscript_str(body, ":+")
+        {
+            return self
+                .parameter_operator_value(var_name)
+                .is_none_or(|value| value.is_empty());
+        }
+        if let Some((var_name, _)) =
+            super::expand_braced_ops::split_once_outside_subscript(body, '+')
+        {
+            return self.parameter_operator_value(var_name).is_none();
+        }
+        false
+    }
+
     fn whole_word_parameter_compound_fields(
         &self,
         token: &str,
