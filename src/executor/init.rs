@@ -298,6 +298,7 @@ impl Executor {
             comsub_leading_newlines: Cell::new(0),
             current_shell_substitution_exit: Cell::new(None),
             last_command_substitution_parse_error: Cell::new(false),
+            parser_error_errexited: Cell::new(false),
             last_command_inverted: Cell::new(false),
             exit_jump_pending: Cell::new(false),
             special_builtin_failed: Cell::new(false),

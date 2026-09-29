@@ -22,6 +22,30 @@ impl Executor {
         self.parse_error_occurred = true;
     }
 
+    /// GNU error.c:324-327 (parser_error): when `exit_immediately_on_error`
+    /// is live at diagnostic time the first line of a syntax-error report is
+    /// followed by an immediate exit_shell(2). The dynamic state mirrors
+    /// GNU's: errexit enabled and not suspended (execute_cmd.c:4998-5016
+    /// clears exit_immediately_on_error around eval/source under
+    /// CMD_IGNORE_RETURN; rubash's with_errexit_suppressed marks the same
+    /// contexts). Records the exit so the eval containment propagates the
+    /// ExitCode instead of converting it into eval's rc=2.
+    pub(in crate::executor) fn errexit_active_at_diagnostic(&self) -> bool {
+        let active = self.errexit_enabled() && self.errexit_is_active();
+        if active {
+            self.parser_error_errexited.set(true);
+        }
+        active
+    }
+
+    /// Read-only form of GNU's live `exit_immediately_on_error` for callers
+    /// outside crate::executor (the script drivers' parser_error sites):
+    /// true when errexit is enabled and not suspended. GNU error.c:324-327
+    /// forces exit status 2 at a parser_error under this state (rubash#306).
+    pub(crate) fn errexit_live_at_diagnostic(&self) -> bool {
+        self.errexit_enabled() && self.errexit_is_active()
+    }
+
     /// Emit the stored `__RUBASH_PARSE_ERROR__`/`__RUBASH_PARSE_SOURCE__`
     /// diagnostic for a command node — the same text the parse-error arm in
     /// execute_command prints. Shared so a command-substitution body that
@@ -34,6 +58,14 @@ impl Executor {
             .unwrap_or("unexpected token");
         if message.starts_with("syntax error:") || message.starts_with("arithmetic syntax error:") {
             eprintln!("{}{}", self.parser_diagnostic_prefix(), message);
+            // GNU error.c:324-327 (parser_error): with
+            // exit_immediately_on_error set, the first diagnostic line is
+            // followed by an immediate exit_shell(2) — the second line of
+            // the report never prints and no enclosing eval/source
+            // containment applies (rubash#306).
+            if self.errexit_active_at_diagnostic() {
+                return;
+            }
             if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
                 eprintln!(
                     "{}syntax error: `{}'",
@@ -47,6 +79,9 @@ impl Executor {
                 "{}syntax error near {message}",
                 self.parser_diagnostic_prefix(),
             );
+            if self.errexit_active_at_diagnostic() {
+                return;
+            }
             // GNU parse.y:6813-6826 print_offending_line echoes the current
             // shell_input_line verbatim — only trailing newlines are
             // stripped; leading whitespace and the original spacing

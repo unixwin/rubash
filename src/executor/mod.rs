@@ -689,6 +689,15 @@ pub struct Executor {
     /// after word expansion so the enclosing context unwinds.
     current_shell_substitution_exit: Cell<Option<i32>>,
     last_command_substitution_parse_error: Cell<bool>,
+    /// GNU error.c:324-327 (parser_error): when exit_immediately_on_error
+    /// is set at diagnostic time the shell prints only the FIRST line of a
+    /// syntax-error report and immediately exit_shell(2)s — the offending
+    /// -line echo (parse.y:6814 print_offending_line) never runs, and no
+    /// enclosing eval/source containment applies (exit_shell is terminal).
+    /// Errexit-active parse-error reports set this so the eval containment
+    /// (execute_eval_source, rubash#306) propagates the ExitCode instead of
+    /// swallowing it, and the two-line report collapses to one line.
+    parser_error_errexited: Cell<bool>,
     /// GNU execute_cmd.c:626-652: `! CMD` sets CMD_INVERT_RETURN on the
     /// inner command, and with exit_immediately_on_error on it additionally
     /// gains CMD_IGNORE_RETURN (execute_cmd.c:652-656) — an inverted

@@ -402,6 +402,12 @@ impl Executor {
                 "{}syntax error near {message}",
                 self.parser_diagnostic_prefix()
             );
+            // GNU error.c:324-327: parser_error under live errexit prints
+            // only the first line and exit_shell(2)s (rubash#306).
+            if self.errexit_active_at_diagnostic() {
+                self.exit_code = 2;
+                return Err(ExecuteError::ExitCode(2));
+            }
             if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
                 eprintln!(
                     "{}`{}'",
@@ -415,9 +421,16 @@ impl Executor {
 
         if let Some(message) = cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_PAREN__") {
             // parse.y: an unclosed `name=(` compound assignment reports the
-            // bare EOF diagnostic with status 1 and no source echo.
+            // bare EOF diagnostic with status 1 and no source echo — but
+            // GNU error.c:324-327 forces exit status 2 when errexit is live
+            // at the parser_error (probe: `set -e; bad=(' exits 2 while
+            // plain `bad=(' exits 1).
             self.mark_parse_error();
             eprintln!("{}{}", self.parser_diagnostic_prefix(), message);
+            if self.errexit_active_at_diagnostic() {
+                self.exit_code = 2;
+                return Err(ExecuteError::ExitCode(2));
+            }
             self.exit_code = 1;
             return Err(ExecuteError::ExitCode(1));
         }
@@ -471,6 +484,9 @@ impl Executor {
                 "{}syntax error: unexpected end of file from `{compound_name}' command on line {open_line}",
                 self.parser_diagnostic_prefix_for_line(eof_line)
             );
+            // GNU error.c:324-327: parser_error + live errexit exits the
+            // shell immediately (rubash#306).
+            self.errexit_active_at_diagnostic();
             self.exit_code = 2;
             return Err(ExecuteError::ExitCode(2));
         }
@@ -498,17 +514,29 @@ impl Executor {
                     self.parser_diagnostic_prefix_for_line(line),
                     message
                 );
+                // GNU error.c:324-327: every one of these lines is a
+                // parser_error; with live errexit the first one already
+                // exit_shell(2)ed (rubash#306).
+                if self.errexit_active_at_diagnostic() {
+                    self.exit_code = 2;
+                    return Err(ExecuteError::ExitCode(2));
+                }
             }
             if shape == "eof" {
                 eprintln!(
                     "{}syntax error: unexpected end of file from `[[' command on line {aux_a}",
                     self.parser_diagnostic_prefix_for_line(aux_b)
                 );
+                self.errexit_active_at_diagnostic();
             } else {
                 eprintln!(
                     "{}syntax error near `{aux_a}'",
                     self.parser_diagnostic_prefix_for_line(aux_b)
                 );
+                if self.errexit_active_at_diagnostic() {
+                    self.exit_code = 2;
+                    return Err(ExecuteError::ExitCode(2));
+                }
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
                     eprintln!(
                         "{}`{}'",
@@ -562,6 +590,14 @@ impl Executor {
                 "{}syntax error near unexpected token `{token}'",
                 self.parser_diagnostic_prefix_for_line(line)
             );
+            // GNU error.c:324-327: with exit_immediately_on_error live, the
+            // offending-line echo (parse.y:6814 print_offending_line) never
+            // runs — the first parser_error line already exit_shell(2)ed
+            // (rubash#306).
+            if self.errexit_active_at_diagnostic() {
+                self.exit_code = 2;
+                return Err(ExecuteError::ExitCode(2));
+            }
             // The producer stores the verbatim physical line (parse.y
             // y.error echoes it as read); parse_error_source_display would
             // trim GNU's leading whitespace.
@@ -586,6 +622,10 @@ impl Executor {
                 "{}syntax error: unexpected end of file",
                 self.parser_diagnostic_prefix_for_line(eof_line)
             );
+            // Single-line parser_error: GNU error.c:324-327 still
+            // exit_shell(2)s right after it under live errexit — record
+            // that so eval containment propagates the exit (rubash#306).
+            self.errexit_active_at_diagnostic();
             self.exit_code = 2;
             return Err(ExecuteError::ExitCode(2));
         }

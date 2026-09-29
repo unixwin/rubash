@@ -225,6 +225,13 @@ impl Executor {
                                 self.shell_state.env_vars.remove("__RUBASH_EVAL_CONTEXT");
                             }
                         }
+                        // GNU error.c:324-327: this single-line diagnostic is
+                        // also a parser_error, so with live errexit the shell
+                        // exit_shell(2)s right after it — even inside a
+                        // function body — instead of returning eval's rc=2.
+                        if self.errexit_enabled() && self.errexit_is_active() {
+                            return Err(ExecuteError::ExitCode(2));
+                        }
                         self.exit_code = 2;
                         return Ok(());
                     }
@@ -310,9 +317,42 @@ impl Executor {
                 self.shell_state.env_vars.remove("__RUBASH_EVAL_CONTEXT");
             }
         }
+        // GNU evalstring.c:579-599 (parse_and_execute parse-failure arm):
+        // a syntax error in the string being evaluated only `break`s the
+        // parse_and_execute loop and RETURNS EX_BADUSAGE to the builtin;
+        // `should_jump_to_top_level` fires solely when `posixly_correct`
+        // (evalstring.c:583-589). The eval'd parse-error diagnosis sets the
+        // executor's reader-abort flag (command_execute mark_parse_error on
+        // the __RUBASH_PARSE_ERROR__ node) on its way up; take it now so the
+        // containment below cannot leave it set — otherwise the script
+        // driver treats the eval'd parse error as a top-level syntax error
+        // and aborts the whole script instead of continuing with eval's
+        // rc=2 (rubash#306: `eval "echo >"` must not kill the caller).
+        // The flag also covers parse errors diagnosed in nested layers the
+        // top-level AST marker cannot see (comsub bodies inside the eval
+        // string, ast_exec last_command_substitution_parse_error), which
+        // GNU's single yyparse rejects wholesale before running anything.
+        let parse_error_raised_during_eval = self.take_parse_error();
+        // GNU error.c:324-327: a parse-error diagnostic printed while errexit
+        // was live already exit_shell(2)ed inside parser_error — before
+        // parse_and_execute's containment could see it. Such an error is a
+        // real shell exit, not eval's rc=2.
+        let parser_error_errexited = self.parser_error_errexited.take();
         match result {
-            Err(ExecuteError::ExitCode(code)) if has_parse_error && code == 2 => {
+            Err(ExecuteError::ExitCode(code))
+                if code == 2
+                    && !parser_error_errexited
+                    && (has_parse_error || parse_error_raised_during_eval) =>
+            {
                 self.exit_code = code;
+                Ok(())
+            }
+            // Same containment when an inner boundary already absorbed the
+            // error and execute_ast came back Ok with the flag set: GNU's
+            // parse-failure arm still breaks the eval loop with
+            // EX_BADUSAGE, never the caller's reader.
+            Ok(()) if parse_error_raised_during_eval && !parser_error_errexited => {
+                self.exit_code = 2;
                 Ok(())
             }
             // GNU evalstring.c:372 installs a local top_level catch for the
@@ -334,7 +374,15 @@ impl Executor {
                 self.exit_code = code;
                 Ok(())
             }
-            other => other,
+            other => {
+                // Not a contained parse error (e.g. a real `exit`): the
+                // parse-error flag raised inside the eval'd string keeps its
+                // abort meaning for the enclosing reader.
+                if parse_error_raised_during_eval {
+                    self.mark_parse_error();
+                }
+                other
+            }
         }
     }
 

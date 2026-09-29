@@ -1709,7 +1709,12 @@ pub fn run_source_with_line_offset(
             );
             // GNU exits 1 when the subscript opened inside a compound array
             // assignment (parse_compound_assignment EOF family) and 2 for a
-            // command word (parse.y:3567 read_token error path).
+            // command word (parse.y:3567 read_token error path) — but
+            // error.c:324-327 forces exit status 2 whenever errexit is live
+            // at the parser_error (rubash#306).
+            if inside_compassign && executor.errexit_live_at_diagnostic() {
+                return 2;
+            }
             return if inside_compassign { 1 } else { 2 };
         }
         // GNU's incremental reader executes complete input lines before the
@@ -1760,7 +1765,12 @@ pub fn run_source_with_line_offset(
                         executor.parser_diagnostic_prefix_for_line(reported)
                     );
                 }
-                // GNU exits 1 for an unterminated `name=(` array list.
+                // GNU exits 1 for an unterminated `name=(` array list —
+                // but error.c:324-327 forces exit status 2 whenever
+                // errexit is live at the parser_error (rubash#306).
+                if array_list && executor.errexit_live_at_diagnostic() {
+                    return 2;
+                }
                 if array_list {
                     return 1;
                 }
