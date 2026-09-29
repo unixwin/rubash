@@ -425,9 +425,14 @@ impl Executor {
         // /var/tmp use).
         #[cfg(windows)]
         {
-            env_vars
-                .entry("TMPDIR".to_string())
-                .or_insert_with(safe_temp_dir_string);
+            env_vars.entry("TMPDIR".to_string()).or_insert_with(|| {
+                // rubash#331: the injected TMPDIR default is a value WE
+                // produce, so it renders in POSIX form (/d/...) like $PWD
+                // — the doc's FFmpeg-TMPDIR corollary and the form clash
+                // with $PWD both die here. path.rs resolves /d/ paths for
+                // /tmp mapping, so the internal consumers are unaffected.
+                shell_pwd_display(&safe_temp_dir_string().replace('\\', "/"))
+            });
         }
         env_vars
             .entry("SHELL".to_string())

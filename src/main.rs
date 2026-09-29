@@ -52,7 +52,12 @@ fn run_main() -> i32 {
     }
     let mut executor = Executor::new();
     if let Ok(path) = env::current_exe() {
-        let path = path.to_string_lossy().replace('\\', "/");
+        // rubash#331: self-produced path values render in POSIX form
+        // (/d/...) like $PWD — GNU's own BASH is a POSIX path, and the
+        // previous drive-form export made `$BASH` and `$PWD` disagree in
+        // form within one shell.
+        let path =
+            rubash::executor::shell_pwd_display_path(&path.to_string_lossy().replace('\\', "/"));
         executor.export_env("BASH", &path);
     }
     // GNU variables.c:1547-1555 (set_argv0, called from
@@ -70,8 +75,13 @@ fn run_main() -> i32 {
         }
         None => {
             if let Some(shell_name) = args.first() {
-                executor.set_env("__RUBASH_SHELL_NAME", shell_name);
-                executor.set_env("BASH_ARGV0", shell_name);
+                // rubash#331 (#224 legacy): a full-path argv[0] the parent
+                // handed over in Windows form is OUR produced `$0` value —
+                // render it POSIX (/d/...) so `-c 'echo $0'` matches the
+                // PWD family. Relative and bare names stay verbatim.
+                let display = rubash::executor::shell_pwd_display_path(shell_name);
+                executor.set_env("__RUBASH_SHELL_NAME", &display);
+                executor.set_env("BASH_ARGV0", &display);
             }
         }
     }

@@ -3360,7 +3360,7 @@ mod tests {
 /// spelling that matches the startup PWD and GNU's single canonical form
 /// (builtins/cd.def:136-175 bindpwd stores one value; pwd.def echoes it).
 /// A `D:/…/D:/…` doubled-drive artifact is collapsed in native mode.
-pub(crate) fn shell_pwd_display_path(path: &str) -> String {
+pub fn shell_pwd_display_path(path: &str) -> String {
     let value = path.replace('\\', "/");
     if shell_path_style_enabled() {
         if value.len() >= 5
