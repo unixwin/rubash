@@ -657,9 +657,15 @@ fn parse_long_options(
             "pretty-print" => {
                 state.pretty_print = true;
             }
+            "noediting" => {
+                // shell.c:269 --noediting sets no_line_editing=1: both
+                // editing modes report off (`[[ -o emacs ]]` /
+                // `[[ -o vi ]]`, builtins/set.def:446-449) and the REPL
+                // reads plain lines.
+                executor.set_env("__RUBASH_NO_EDITING", "1");
+            }
             // "debug" | "debugger" | "dump-po-strings" | "dump-strings" |
-            // "noediting" | "noprofile" | "norc": accepted, no Windows
-            // counterpart today.
+            // "noprofile" | "norc": accepted, no Windows counterpart today.
             _ => {}
         }
         index += 1;
@@ -818,6 +824,9 @@ fn run_command_string_with_init(
     // command output (empirical: `bash -m -c 'echo $-'` -> two stderr lines
     // then `hBc`).
     apply_startup_job_control(executor);
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+        apply_init_interactive_defaults(executor);
+    }
     if let Some(init_file) = init_file {
         let status = run_init_file(executor, init_file);
         // rubash#297: `exit` in the rcfile terminates the shell before the
@@ -991,9 +1000,39 @@ fn run_script_file_with_init(
     finish_shell(executor, status, interactive)
 }
 
+/// shell.c:1830-1842 init_interactive: `-i` forces the interactive
+/// defaults IMMEDIATELY (shell.c:540-549), long before the startup files
+/// run — expand_aliases, history on, and histexp_flag (the H in `$-`).
+/// init_interactive never sets no_line_editing, so the readline DEFAULT
+/// editing mode applies: `[[ -o emacs ]]` is
+/// `no_line_editing == 0 && rl_editing_mode == 1`
+/// (builtins/set.def:446-449) and readline defaults to emacs — ON for
+/// every interactive shell regardless of stdin being a tty (rubash#312:
+/// `--rcfile`/`-s`/`-c` paths under piped stdin kept it off and killed
+/// ble.sh at its noediting gate). shell.c:1863-1870
+/// init_interactive_script (the `bash -i script` path) instead runs
+/// init_noninteractive first — `no_line_editing = 1` — which is why that
+/// one shape reports emacs OFF; the script-file init path therefore does
+/// NOT call this. `--noediting` (no_line_editing=1) and an explicit
+/// `-o vi` both keep emacs off.
+fn apply_init_interactive_defaults(executor: &mut Executor) {
+    executor.set_shell_option("history", true);
+    executor.set_shell_option("histexpand", true);
+    if executor.get_env("__RUBASH_NO_EDITING").as_deref() == Some("1") {
+        return;
+    }
+    if executor.get_env("__RUBASH_SETOPT_vi").as_deref() == Some("1") {
+        return;
+    }
+    executor.set_shell_option("emacs", true);
+}
+
 fn run_no_script_with_init(executor: &mut Executor, init_file: Option<&str>) -> i32 {
     executor.inherit_process_stdin();
     apply_startup_job_control(executor);
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+        apply_init_interactive_defaults(executor);
+    }
     if let Some(init_file) = init_file {
         let status = run_init_file(executor, init_file);
         // GNU: `exit` in a sourced startup file terminates the shell —
@@ -1035,6 +1074,9 @@ fn run_stdin_script_with_init(executor: &mut Executor, init_file: Option<&str>) 
     // `$-` gains H (rubash#151; empirical GNU: `echo 'echo $-' | bash -i -s`
     // -> `himBHs`).
     apply_startup_job_control(executor);
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+        apply_init_interactive_defaults(executor);
+    }
     if let Some(init_file) = init_file {
         let status = run_init_file(executor, init_file);
         // rubash#297: `exit` in the rcfile terminates the shell before the
