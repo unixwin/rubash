@@ -127,3 +127,14 @@
 - lexmix 遗留开单：heredoc 词后 # 尾（`echo x <<EOF>#comment`）
 - CI 稳定绿（一次 savannah 500 外部故障 rerun 即愈）；用户环境部署引擎 5f59e621
 - 剩余：#295（arrayesc 深水：$var 拼接引号泄漏/declare 非mut walker）、heredoc-# 新单、niubash #146/#147/#148 + 版本串 stale -dirty 小单、#294 观察、contperf 同族（has_unclosed_quotes/compound 全扫）
+
+## 2026-09-29 全天战报（wt12-wt15 四波，48 单关闭）
+
+**wt12**（八车道全清）：perf7（nvm -41/-32%+re-land Rc<str>）、perf8（quotes/compound park 化，feeder 重扫归零）、heredocfix（#305）、comsubfix（#289/#290）、deepvar（#295 载体族深水）、niufix（niubash #146/147/148+版本串）、ctrlcfix（#287 driver 自死锁+#294 后台重生 `&;` 腐蚀=CI 挂死真相）、modinit（#282 modernish 双根因）
+**wt13**：perf9（configure -n 23s→3.8s）、perf10（source 双 tokenize -23%）、ecosweep2（bash-it 221/221、开 #311-316）、fixpack（#306-309）、sweepfix（#311-315 关+#316 部分）
+**wt14**：ecosweep3（pbb 逐 snippet、真实 configure 执行、FFmpeg P0、开 #321-330）、pbbfix（十单全修：P0 后 FFmpeg config.h 784 行=GNU 基准；#321-328/330 关；#329 拍板 A+C→#331+上游 niubash#149）
+**wt15**（2-3x 战役一轮）：parsearch（nvm -n 12.8x、parse -39%、分配 -40%）、execdeep（**VarTable att_* 位标志移植**：local3 13.4x、null 9.1x）、exphot（p15 -13%）
+**基建**：#310 savannah→GitHub 镜像（CI 结构性免疫）、nextest 每测试超时、CI 双绿稳定
+
+**2-3x 剩余路径（全量化有主）**：dispatch 函数指针表（execute_cmd.c:624 轮）、嵌套体内联解析（~150ms）、船长 comsub park 二次方（configure 合流）、arith_dyn 维护条目模型
+**待办**：#316 残留（引号头 glob 回归）、#317-320（fixpack 四单）、#331（自产路径 POSIX）、extglob toggle 残留态（execdeep 报，预存）、#322 continuation 补丁（船长审中）
