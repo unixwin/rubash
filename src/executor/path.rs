@@ -1342,15 +1342,35 @@ pub fn apply_required_windows_child_environment(
 
     if let Some(home) = home.filter(|value| !value.trim().is_empty() && !value.contains('\0')) {
         let native_home = home.replace('/', "\\");
-        process.env("USERPROFILE", &native_home);
-        process.env("HOME", &native_home);
+        // GNU variables.c make_env_array_from_var_list copies the value cell
+        // byte-for-byte: an explicitly exported HOME (any form) wins over
+        // any derived default. Fill-if-missing mirrors the env-builtin
+        // path's materialize_required_windows_env or_insert semantics — the
+        // previous unconditional clobber replaced a user's POSIX-form HOME
+        // with the USERPROFILE-derived native form on every spawn (the
+        // rubash#329 source-(a) family, niubash#149), and the drive colon
+        // then broke child scripts splicing $HOME into s:...: patterns.
+        if !env_vars.contains_key("USERPROFILE") {
+            process.env("USERPROFILE", &native_home);
+        }
+        if !env_vars.contains_key("HOME") {
+            process.env("HOME", &native_home);
+        }
         if let Some((drive, path)) = windows_drive_and_home_path(&native_home) {
-            process.env("HOMEDRIVE", drive);
-            process.env("HOMEPATH", path);
+            if !env_vars.contains_key("HOMEDRIVE") {
+                process.env("HOMEDRIVE", drive);
+            }
+            if !env_vars.contains_key("HOMEPATH") {
+                process.env("HOMEPATH", path);
+            }
         }
         let base = native_home.trim_end_matches('\\');
-        process.env("APPDATA", format!("{base}\\AppData\\Roaming"));
-        process.env("LOCALAPPDATA", format!("{base}\\AppData\\Local"));
+        if !env_vars.contains_key("APPDATA") {
+            process.env("APPDATA", format!("{base}\\AppData\\Roaming"));
+        }
+        if !env_vars.contains_key("LOCALAPPDATA") {
+            process.env("LOCALAPPDATA", format!("{base}\\AppData\\Local"));
+        }
     }
 }
 
