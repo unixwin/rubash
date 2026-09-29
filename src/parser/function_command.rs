@@ -130,7 +130,15 @@ pub(super) fn parse_function_command_with_diagnostic(
                 TokenKind::And | TokenKind::Or | TokenKind::Pipe | TokenKind::PipeErr
             )
         });
-        if tail_dangles {
+        // GNU parse.y:1196 `group_command: '{' compound_list '}'` via
+        // function_def: the body must hold at least one COMMAND — a
+        // comment-only or empty body (`f() { \n # c \n }`) is a syntax
+        // error at the `}' token, not an accepted definition (rubash#327;
+        // comments are reader noise, line breaks are separators).
+        let body_has_command = body_tokens
+            .iter()
+            .any(|token| !(token.kind == TokenKind::Semicolon && token.line_break));
+        if tail_dangles || !body_has_command {
             crate::lexer::set_parse_extended_glob(saved_extglob);
             let mut command = CommandNode::new();
             let close_line = tokens.get(i).map_or(1, |token| {
@@ -382,6 +390,36 @@ pub(super) fn parse_function_command_with_diagnostic(
     };
 
     let body = parse_function_body(&tokens[body_start..i], diagnostic_text, source_line_offset);
+    // GNU parse.y:1196 `group_command: '{' compound_list '}'` via
+    // function_def: the body must hold at least one COMMAND — comments are
+    // reader noise and line breaks are separators, so a body slice of
+    // nothing but line-break separators (`f() { <newline> # c <newline>
+    // }`) is a syntax error at the `}' token, reported with the `}' line
+    // echoed (rubash#327).
+    if !tokens[body_start..i]
+        .iter()
+        .any(|token| !(token.kind == TokenKind::Semicolon && token.line_break))
+    {
+        let mut command = CommandNode::new();
+        command.line = tokens.get(i).map(|token| token.position);
+        command.insert_assignment(
+            "__RUBASH_PARSE_ERROR__".to_string(),
+            "unexpected token `}'".to_string(),
+        );
+        let close_line = tokens.get(i).map_or(1, |token| token.position);
+        if let Some(text) = diagnostic_text {
+            if let Some(source) =
+                close_line
+                    .checked_sub(source_line_offset)
+                    .and_then(|line_in_text| {
+                        super::parse_loop::source_line_by_number(text, line_in_text)
+                    })
+            {
+                command.insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
+            }
+        }
+        return Some((command, i + 1));
+    }
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.function_command = Some(function_command(

@@ -2075,6 +2075,13 @@ pub(super) fn offending_line_text(
         if token.position != line {
             break;
         }
+        // A line-break Semicolon is the physical NEWLINE (GNU read_token
+        // returns a newline token), never source text on this line — echoing its
+        // synthesized `;' raw appended a stray semicolon to the offending
+        // line (`done;' for a bare `done' line, rubash#327 wording note).
+        if token.kind == TokenKind::Semicolon && token.line_break {
+            break;
+        }
         if token.column > prev_end {
             text.push(' ');
         }

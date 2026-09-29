@@ -49,7 +49,17 @@ pub(super) fn parse_brace_group_command(
                 TokenKind::And | TokenKind::Or | TokenKind::Pipe | TokenKind::PipeErr
             )
         });
-        let completed = if inner_tail.is_empty() || tail_dangles {
+        // GNU parse.y:1196 `group_command: '{' compound_list '}'`: the
+        // body must hold at least one COMMAND — comments are reader noise
+        // and line breaks are separators, so a body whose tokens are all
+        // line-break separators (comment-only or empty, the trailing `\n'
+        // included by the fold) is NOT a list (`{ \n # c \n }` ->
+        // `syntax error near unexpected token `}'' at the `}' line,
+        // rubash#327).
+        let body_has_command = body_tokens
+            .iter()
+            .any(|token| !(token.kind == TokenKind::Semicolon && token.line_break));
+        let completed = if inner_tail.is_empty() || tail_dangles || !body_has_command {
             false
         } else if inner_tail.ends_with(';') || inner_tail.ends_with('\n') {
             true
@@ -132,6 +142,37 @@ pub(super) fn parse_brace_group_command(
         let command = unclosed_brace_eof_node(tokens, start);
         return Some((command, tokens.len()));
     };
+
+    // GNU parse.y:1196 `group_command: '{' compound_list '}'` — the body
+    // must contain a command list; a comment-only or empty body is a
+    // syntax error at the `}' token (`{ <newline> # c <newline> }` ->
+    // `syntax error near unexpected token `}'' at the `}' line,
+    // print_offending_line echoes it — rubash#327; comments are reader
+    // noise and line breaks are separators, so a slice of nothing but
+    // line-break separators carries no command).
+    if tokens[start + 1..i]
+        .iter()
+        .all(|token| token.kind == TokenKind::Semicolon && token.line_break)
+    {
+        let mut command = CommandNode::new();
+        command.line = tokens.get(i).map(|token| token.position);
+        command.insert_assignment(
+            "__RUBASH_PARSE_ERROR__".to_string(),
+            "unexpected token `}'".to_string(),
+        );
+        let close_line = tokens.get(i).map_or(1, |token| token.position);
+        let source_line = source.and_then(|text| {
+            close_line
+                .checked_sub(source_line_offset)
+                .and_then(|line_in_text| {
+                    super::parse_loop::source_line_by_number(text, line_in_text)
+                })
+        });
+        if let Some(line) = source_line {
+            command.insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), line);
+        }
+        return Some((command, i + 1));
+    }
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
