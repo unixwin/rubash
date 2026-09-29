@@ -133,6 +133,7 @@ impl<'a> Lexer<'a> {
         } else if raw.starts_with('"')
             && (raw.ends_with('"') || raw.ends_with('\''))
             && raw.contains("${")
+            && !super::quotes::raw_word_has_unquoted_glob_char(raw)
         {
             // TODO(parse.y/subst.c): Preserve full quote state on WORD_DESC
             // instead of a sentinel. This narrow marker lets expansion
@@ -141,6 +142,12 @@ impl<'a> Lexer<'a> {
             // `"${IFS+"'"x ~ x'}'x"}"x}" #'` (dq segment + sq segment):
             // GNU treats the whole word as quoted (no field splitting,
             // quoted alternate expansion, posixexp2 case 28).
+            // rubash#316: first/last-character checks do not make a word
+            // fully quoted — `"$DIR"/*"${empty}"` has an unquoted `*`
+            // between the quoted segments and MUST keep pathname expansion
+            // (GNU subst.c tracks per-character quote flags). Words with an
+            // unquoted glob metacharacter therefore never take the
+            // fully-quoted sentinel (raw_word_has_unquoted_glob_char).
             format!("{STORAGE_WORD_PREFIX_STR}{value}")
         } else {
             value

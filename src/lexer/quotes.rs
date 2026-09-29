@@ -1105,3 +1105,154 @@ mod probe_tests {
         let out = super::remove_shell_quotes("a[\\\" \\\"]=15");
     }
 }
+
+/// True when `raw` contains a glob metacharacter (`*`, `?`, `[`, `]`)
+/// OUTSIDE every quoted region and outside `${...}` / `$(...)` / backtick
+/// units. Such a word is provably not fully quoted and must keep pathname
+/// expansion eligible: `"$DIR"/*"${empty}"` has the bare `*` between the
+/// quoted segments (rubash#316 residue; GNU subst.c expand_word_internal
+/// globs by per-character quote flags, never by first/last characters).
+///
+/// Conservative by construction: anything inside `${...}` bodies is
+/// operator/pattern text of the expansion itself (`${x#*}`'s `*` is not a
+/// pathname glob), and the body end is found by brace nesting alone — when
+/// that scan runs off the end the remainder is treated as body text, so
+/// the worst case keeps the previous (sentinel) behavior rather than
+/// changing it. `$(...)` output and backtick output are never re-globbed
+/// by the parent word either, so their bodies are opaque here too.
+pub(crate) fn raw_word_has_unquoted_glob_char(raw: &str) -> bool {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        match ch {
+            '\\' => index += 2,
+            '\'' => {
+                let mut scan = index + 1;
+                while scan < chars.len() && chars[scan] != '\'' {
+                    scan += 1;
+                }
+                index = scan + 1;
+            }
+            '"' => {
+                let mut scan = index + 1;
+                while scan < chars.len() {
+                    match chars[scan] {
+                        '\\' => scan += 2,
+                        '$' if matches!(chars.get(scan + 1), Some('(')) => {
+                            scan = skip_glob_opaque_unit(&chars, scan + 2, ')');
+                        }
+                        '$' if matches!(chars.get(scan + 1), Some('{')) => {
+                            scan = skip_glob_braced_body(&chars, scan);
+                        }
+                        '`' => {
+                            scan = skip_glob_opaque_unit(&chars, scan + 1, '`');
+                        }
+                        '"' => break,
+                        _ => scan += 1,
+                    }
+                }
+                index = scan + 1;
+            }
+            '$' if matches!(chars.get(index + 1), Some('\'')) => {
+                // ANSI-C `$'...'`: escape-aware, no glob semantics.
+                let mut scan = index + 2;
+                while scan < chars.len() {
+                    if chars[scan] == '\\' {
+                        scan += 2;
+                        continue;
+                    }
+                    if chars[scan] == '\'' {
+                        break;
+                    }
+                    scan += 1;
+                }
+                index = scan + 1;
+            }
+            '$' if matches!(chars.get(index + 1), Some('(')) => {
+                index = skip_glob_opaque_unit(&chars, index + 2, ')');
+            }
+            '$' if matches!(chars.get(index + 1), Some('{')) => {
+                index = skip_glob_braced_body(&chars, index);
+            }
+            '`' => {
+                index = skip_glob_opaque_unit(&chars, index + 1, '`');
+            }
+            '*' | '?' | '[' | ']' => return true,
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+/// Skip a `$(...)` or backtick unit starting at `open` (just past the
+/// opener); returns the index just past its closer, or the slice end when
+/// the unit never closes (conservative: treat the rest as opaque).
+fn skip_glob_opaque_unit(chars: &[char], open: usize, closer: char) -> usize {
+    let mut index = open;
+    let mut depth = 1usize;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            '\'' => {
+                index += 1;
+                while index < chars.len() && chars[index] != '\'' {
+                    index += 1;
+                }
+            }
+            '"' => {
+                index += 1;
+                while index < chars.len() {
+                    if chars[index] == '\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if chars[index] == '"' {
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            '$' if matches!(chars.get(index + 1), Some('(')) => {
+                depth += 1;
+                index += 2;
+            }
+            c if c == closer => {
+                depth -= 1;
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    chars.len()
+}
+
+/// Skip a `${...}` unit starting at the `$` (`open`): brace bodies are
+/// opaque (operator patterns, not pathname globs). The body end is found
+/// by `${`/`}` nesting alone; when it never closes, the remainder counts
+/// as body (conservative).
+fn skip_glob_braced_body(chars: &[char], open: usize) -> usize {
+    let mut index = open + 2;
+    let mut depth = 1usize;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            '$' if matches!(chars.get(index + 1), Some('{')) => {
+                depth += 1;
+                index += 2;
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    chars.len()
+}
