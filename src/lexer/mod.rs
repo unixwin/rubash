@@ -570,7 +570,16 @@ impl GroupScanFeeder {
             if awaiting.delimiter.quoted {
                 awaiting.body.insert_str(0, QUOTED_HEREDOC_MARKER);
             }
-            let token = Token::new(TokenKind::HereDocBody, &awaiting.body, awaiting.gather_line);
+            let mut token =
+                Token::new(TokenKind::HereDocBody, &awaiting.body, awaiting.gather_line);
+            // rubash#305: feed_awaiting_body already advanced line_number
+            // past the closing-delimiter line (one increment per physical
+            // body line, mirroring GNU make_cmd.c:580). rubash's counter
+            // tracks "one past the last consumed line" (same convention as
+            // gather_line above), so the physical closing line — the line
+            // GNU's line_number names for a syntax error on the NEWLINE
+            // after gathering (parse.y:3651) — is line_number - 1.
+            token.heredoc_end_line = Some(self.line_number.saturating_sub(1));
             self.output.push(token.clone());
             self.fold_token(&token);
             if self.awaiting_bodies.is_empty() {
@@ -1101,7 +1110,11 @@ impl GroupScanFeeder {
                 } else {
                     String::new()
                 };
-                let token = Token::new(TokenKind::HereDocBody, &body, gather_line);
+                let mut token = Token::new(TokenKind::HereDocBody, &body, gather_line);
+                // rubash#305: this deferred body never gathers physical
+                // lines (the outer parse owns them), so its gathering
+                // "ends" on the delimiter line itself.
+                token.heredoc_end_line = Some(gather_line);
                 self.output.push(token.clone());
                 self.fold_token(&token);
                 continue;
@@ -1128,8 +1141,12 @@ impl GroupScanFeeder {
                 if awaiting.delimiter.quoted {
                     awaiting.body.insert_str(0, QUOTED_HEREDOC_MARKER);
                 }
-                let token =
+                let mut token =
                     Token::new(TokenKind::HereDocBody, &awaiting.body, awaiting.gather_line);
+                // rubash#305: EOF-unterminated gathering ends at the last
+                // physical line read (GNU's line_number at EOF, make_cmd.c
+                // 580's loop exits on read_secondary_line returning NULL).
+                token.heredoc_end_line = Some(self.line_number.saturating_sub(1));
                 self.output.push(token.clone());
                 self.fold_token(&token);
             }

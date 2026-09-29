@@ -532,6 +532,32 @@ impl Executor {
                 .next()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(1);
+            // rubash#305: a pending here document that hit EOF warned during
+            // gathering (make_cmd.c:626), i.e. BEFORE read_token returned
+            // the NEWLINE whose rejection printed this error — emit any
+            // carried warnings first, at the input-stream prefix GNU's
+            // parser_error used for them (script name, not the parser's
+            // `eval'/`-c' stream tag).
+            for warn_index in 0usize.. {
+                let key = format!("__RUBASH_PARSE_ERROR_HD_WARN_{warn_index}__");
+                let Some(warn) = cmd.get_assignment(&key) else {
+                    break;
+                };
+                let mut parts = warn.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+                let delimiter = parts.next().unwrap_or("");
+                let at_line = parts
+                    .next()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(1);
+                let warn_line = parts
+                    .next()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(1);
+                eprintln!(
+                    "{}warning: here-document at line {at_line} delimited by end-of-file (wanted `{delimiter}')",
+                    self.diagnostic_prefix_for_line(warn_line)
+                );
+            }
             eprintln!(
                 "{}syntax error near unexpected token `{token}'",
                 self.parser_diagnostic_prefix_for_line(line)

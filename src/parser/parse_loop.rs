@@ -193,6 +193,51 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
                 .commands
                 .last()
                 .is_some_and(|command| command.has_assignment("__RUBASH_PARSE_ERROR__"));
+            // rubash#305: a redirection OPERATOR the compound's own
+            // trailing-redirect collector stopped at is not "the next
+            // command" — in GNU it starts another redirection of the
+            // compound (parse.y:672+ `command: ... redirection`), so the
+            // grammar error is the missing WORD operand, diagnosed by the
+            // shared dangling-operand rules (`done <<EOF>#c` gathers the
+            // body at the NEWLINE and reports `newline' on the
+            // post-gathering line; `done << ;` reports `;', ...). Only
+            // when an operand exists (collector break for another reason)
+            // does the unexpected-token fallback keep its old reading.
+            if !separated
+                && !already_error
+                && command_is_empty(&state.current_cmd)
+                && tokens.get(next_i).is_some_and(|next| {
+                    matches!(
+                        next.kind,
+                        TokenKind::RedirectIn
+                            | TokenKind::RedirectOut
+                            | TokenKind::Append
+                            | TokenKind::RedirectErr
+                            | TokenKind::RedirectErrAppend
+                            | TokenKind::HereDoc
+                            | TokenKind::HereString
+                    )
+                })
+            {
+                if let Some(error) = super::token_actions::missing_redirect_target_node(
+                    tokens,
+                    next_i,
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ) {
+                    let pop_line = tokens[next_i].position;
+                    while state
+                        .ast
+                        .commands
+                        .last()
+                        .is_some_and(|command| command.line == Some(pop_line))
+                    {
+                        state.ast.commands.pop();
+                    }
+                    state.current_cmd = error;
+                    break;
+                }
+            }
             if !separated
                 && !already_error
                 && command_is_empty(&state.current_cmd)

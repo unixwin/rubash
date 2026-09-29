@@ -1,7 +1,7 @@
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
-use super::parse_loop::{command_is_pending_inversion, ParseState};
+use super::parse_loop::{command_is_pending_inversion, offending_line_text, ParseState};
 
 pub(super) enum TokenAction {
     Advance,
@@ -21,7 +21,12 @@ pub(super) enum TokenAction {
 /// mksh operators GNU splits into operator + `|' + word).
 /// Word-shaped reserved words (`in', `then', `}') ARE legal targets in GNU
 /// and are deliberately left to their existing paths (None).
-fn missing_redirect_target_node(tokens: &[Token], index: usize) -> Option<CommandNode> {
+pub(super) fn missing_redirect_target_node(
+    tokens: &[Token],
+    index: usize,
+    diagnostic_text: Option<&str>,
+    line_offset: usize,
+) -> Option<CommandNode> {
     let offending = |name: &str, line: usize| {
         let mut command = CommandNode::new();
         command.line = Some(line);
@@ -32,12 +37,47 @@ fn missing_redirect_target_node(tokens: &[Token], index: usize) -> Option<Comman
                 crate::executor::markers::PARSE_ERROR_FIELD_SEP
             ),
         );
+        // GNU report_syntax_error (parse.y:6833) echoes the offending
+        // input line via print_offending_line (parse.y:6814) in every
+        // non-interactive `near unexpected token' report — the physical
+        // line the OPERATOR sits on, taken from the source text because a
+        // comment tail (parse.y:3630) never survives in token raws.
+        command.insert_assignment(
+            "__RUBASH_PARSE_SOURCE__".to_string(),
+            offending_line_text(tokens, index, diagnostic_text, line_offset),
+        );
         command
     };
     match tokens.get(index + 1) {
         None => Some(offending("newline", tokens[index].position)),
         Some(next) => match next.kind {
             TokenKind::Eof => Some(offending("newline", tokens[index].position)),
+            // rubash#305: the operator is last on its delimiter line and a
+            // here document was pending. GNU read_token's '\n' branch
+            // (parse.y:3648-3654) gathers the bodies FIRST (3651) and only
+            // then hands yacc the NEWLINE, so the offending token is
+            // `newline' REPORTED at the post-gathering line (every body
+            // line advanced line_number, make_cmd.c:580) while
+            // print_offending_line still echoes the header line (the
+            // primary reader's shell_input_line). The stream may hold
+            // several bodies (`<<A <<B` gathers both); the line counter
+            // ends at the LAST one's closing delimiter.
+            TokenKind::HereDocBody => {
+                let end_line = tokens[index + 1..]
+                    .iter()
+                    .take_while(|token| token.kind == TokenKind::HereDocBody)
+                    .filter_map(|token| token.heredoc_end_line)
+                    .max()
+                    .unwrap_or(next.position);
+                let mut command = offending("newline", end_line);
+                // GNU gathers before yacc sees the NEWLINE, so an
+                // EOF-unterminated gather has ALREADY warned
+                // (make_cmd.c:626) by the time the syntax error prints —
+                // carry the warnings on the error node for the executor
+                // to emit first (same carrier as push_unclosed_paren_error).
+                attach_pending_heredoc_eof_warnings(tokens, index, &mut command);
+                Some(command)
+            }
             TokenKind::Semicolon if next.line_break => {
                 Some(offending("newline", tokens[index].position))
             }
@@ -67,17 +107,73 @@ fn missing_redirect_target_node(tokens: &[Token], index: usize) -> Option<Comman
     }
 }
 
+/// rubash#305: attach `here-document at line N delimited by end-of-file`
+/// warnings for the bodies following the dangling redirect operator at
+/// `index` (see the HereDocBody arm above). GNU make_here_document warns
+/// DURING gathering (make_cmd.c:626) when read_secondary_line returns
+/// NULL, i.e. before read_token ever returns the NEWLINE whose rejection
+/// produces the syntax error — so the warnings print first. Delimiter
+/// pairing mirrors push_unclosed_paren_error: every `<<` token queues the
+/// following word, every HereDocBody dequeues one; bodies gathered before
+/// the operator already paired theirs.
+fn attach_pending_heredoc_eof_warnings(tokens: &[Token], index: usize, command: &mut CommandNode) {
+    let mut pending_delimiters: std::collections::VecDeque<String> =
+        std::collections::VecDeque::new();
+    for (position, token) in tokens.iter().enumerate().take(index + 1) {
+        if token.kind == TokenKind::HereDoc {
+            let delimiter = tokens
+                .get(position + 1)
+                .map(|next| next.value.clone())
+                .unwrap_or_default();
+            pending_delimiters.push_back(delimiter);
+        }
+    }
+    let mut warn_index = 0usize;
+    for token in tokens[index + 1..]
+        .iter()
+        .take_while(|token| token.kind == TokenKind::HereDocBody)
+    {
+        let delimiter = pending_delimiters.pop_front().unwrap_or_default();
+        let body = token
+            .value
+            .strip_prefix(crate::lexer::QUOTED_HEREDOC_MARKER)
+            .unwrap_or(token.value.as_str());
+        if !body.starts_with(crate::executor::markers::DATA_DOLLAR_STR) {
+            continue;
+        }
+        let body_text = &body[crate::executor::markers::DATA_DOLLAR_STR.len()..];
+        let gather_line = token.position;
+        // An unterminated gather consumed the body lines it read and stops
+        // at EOF on the last one (no closing-delimiter line).
+        let warn_line = gather_line + body_text.lines().count();
+        command.insert_assignment(
+            format!("__RUBASH_PARSE_ERROR_HD_WARN_{warn_index}__"),
+            format!(
+                "{delimiter}{}{gather_line}{}{warn_line}",
+                crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+                crate::executor::markers::PARSE_ERROR_FIELD_SEP
+            ),
+        );
+        warn_index += 1;
+    }
+}
+
 /// Install a `syntax error near unexpected token' node as the parse result
 /// and abort the rest of the input, exactly as GNU's parser does (yyerror
 /// then jumps to top level): commands already parsed from the same
 /// physical line never run (`foo > | cat' runs nothing).
-fn abort_parse_at_syntax_error(state: &mut ParseState, error: CommandNode) {
-    let error_line = error.line;
+/// `pop_line` is the line the parse unit fails on — the OPERATOR's line,
+/// not the reported error line: with a pending here document the report
+/// line is the post-gathering line (parse.y:3651 + make_cmd.c:580), but
+/// the never-to-run list is the whole logical line that carried the
+/// operator (`echo before; echo x <<EOF>#c' runs NOTHING — the
+/// newline-terminated list is one parse unit, rubash#305).
+fn abort_parse_at_syntax_error(state: &mut ParseState, error: CommandNode, pop_line: usize) {
     while state
         .ast
         .commands
         .last()
-        .is_some_and(|command| command.line == error_line)
+        .is_some_and(|command| command.line == Some(pop_line))
     {
         state.ast.commands.pop();
     }
@@ -553,7 +649,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         token.position
                     ),
                 );
-                abort_parse_at_syntax_error(state, error);
+                abort_parse_at_syntax_error(state, error, tokens[*i].position);
                 return TokenAction::Break;
             } else {
                 // Save current command with pipe flag
@@ -679,8 +775,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         state.current_cmd.redirect_in = Some(redirect);
                     }
                     *i += 1;
-                } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
-                    abort_parse_at_syntax_error(state, error);
+                } else if let Some(error) = missing_redirect_target_node(
+                    tokens,
+                    *i,
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ) {
+                    abort_parse_at_syntax_error(state, error, tokens[*i].position);
                     return TokenAction::Break;
                 }
             }
@@ -693,8 +794,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 if let Some(next_i) = assign_redirect_out_target(tokens, *i, &mut state.current_cmd)
                 {
                     *i = next_i;
-                } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
-                    abort_parse_at_syntax_error(state, error);
+                } else if let Some(error) = missing_redirect_target_node(
+                    tokens,
+                    *i,
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ) {
+                    abort_parse_at_syntax_error(state, error, tokens[*i].position);
                     return TokenAction::Break;
                 }
             }
@@ -703,8 +809,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             note_command_line(&mut state.current_cmd, token);
             if let Some(next_i) = assign_append_target(tokens, *i, &mut state.current_cmd) {
                 *i = next_i;
-            } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
-                abort_parse_at_syntax_error(state, error);
+            } else if let Some(error) = missing_redirect_target_node(
+                tokens,
+                *i,
+                state.diagnostic_text.as_deref(),
+                state.source_line_offset,
+            ) {
+                abort_parse_at_syntax_error(state, error, tokens[*i].position);
                 return TokenAction::Break;
             }
         }
@@ -728,8 +839,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 assign_redirect_err_target(tokens, *i, &mut state.current_cmd)
             {
                 *i = next_i;
-            } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
-                abort_parse_at_syntax_error(state, error);
+            } else if let Some(error) = missing_redirect_target_node(
+                tokens,
+                *i,
+                state.diagnostic_text.as_deref(),
+                state.source_line_offset,
+            ) {
+                abort_parse_at_syntax_error(state, error, tokens[*i].position);
                 return TokenAction::Break;
             }
         }
@@ -752,8 +868,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 assign_redirect_err_append_target(tokens, *i, &mut state.current_cmd)
             {
                 *i = next_i;
-            } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
-                abort_parse_at_syntax_error(state, error);
+            } else if let Some(error) = missing_redirect_target_node(
+                tokens,
+                *i,
+                state.diagnostic_text.as_deref(),
+                state.source_line_offset,
+            ) {
+                abort_parse_at_syntax_error(state, error, tokens[*i].position);
                 return TokenAction::Break;
             }
         }
@@ -796,8 +917,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         Some(delimiter.replace(crate::executor::markers::CTLESC, ""));
                 }
                 *i += 1;
-            } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
-                abort_parse_at_syntax_error(state, error);
+            } else if let Some(error) = missing_redirect_target_node(
+                tokens,
+                *i,
+                state.diagnostic_text.as_deref(),
+                state.source_line_offset,
+            ) {
+                abort_parse_at_syntax_error(state, error, tokens[*i].position);
                 return TokenAction::Break;
             }
         }
@@ -829,8 +955,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     redirect_fd_var_prefix(tokens, *i),
                 );
                 *i += 1;
-            } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
-                abort_parse_at_syntax_error(state, error);
+            } else if let Some(error) = missing_redirect_target_node(
+                tokens,
+                *i,
+                state.diagnostic_text.as_deref(),
+                state.source_line_offset,
+            ) {
+                abort_parse_at_syntax_error(state, error, tokens[*i].position);
                 return TokenAction::Break;
             }
         }

@@ -53,6 +53,16 @@ pub struct Token {
     /// the body re-parse must use this snapshot, not the current value.
     /// Defaults to open so legacy producers keep accepting.
     pub extglob_gate: bool,
+    /// rubash#305: for a HereDocBody token, the PHYSICAL line on which its
+    /// gathering ended (the closing-delimiter line). GNU reads the '\n'
+    /// that ends the delimiter line only after gather_here_documents
+    /// (parse.y:3651) consumed the body lines, each advancing line_number
+    /// (make_cmd.c:580), so a syntax error on that NEWLINE is REPORTED at
+    /// the post-gathering line while print_offending_line (parse.y:6814)
+    /// still echoes the header line. `position` carries the gather START
+    /// line (the "here-document at line N" warning line), so the end line
+    /// must travel separately. None for every other kind.
+    pub heredoc_end_line: Option<usize>,
 }
 
 impl Token {
@@ -67,6 +77,7 @@ impl Token {
             leading_ws: String::new(),
             extglob_split: false,
             extglob_gate: true,
+            heredoc_end_line: None,
         }
     }
 
@@ -95,6 +106,7 @@ impl Token {
             leading_ws: String::new(),
             extglob_split: false,
             extglob_gate: true,
+            heredoc_end_line: None,
         }
     }
 }

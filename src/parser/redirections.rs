@@ -387,6 +387,16 @@ pub(super) fn is_redirect_target_token(token: &Token) -> bool {
         // WORDs) and stay rejected: `cat <<< (` remains a syntax error.
         return true;
     }
+    // rubash#305: a HereDocBody token is NEVER a redirection operand. In
+    // GNU the body text is consumed by gather_here_documents (parse.y:3651
+    // — called from read_token's '\n' branch BEFORE the NEWLINE token is
+    // returned), so it never reaches the grammar at all; the operand WORD
+    // must come from the delimiter line itself (parse.y:5305
+    // read_token_word ends the word at the `>` metacharacter, parse.y
+    // 5688 shellbreak). `echo x <<EOF>#c` therefore has GREATER followed
+    // by NEWLINE — `syntax error near unexpected token `newline'' — and
+    // the body lines are data, not the `>`'s filename. Admitting the body
+    // here made rubash open the first body line AS the file.
     matches!(
         token.kind,
         TokenKind::Word
@@ -394,7 +404,6 @@ pub(super) fn is_redirect_target_token(token: &Token) -> bool {
             | TokenKind::Assignment
             | TokenKind::CommandSubst
             | TokenKind::BraceExpand
-            | TokenKind::HereDocBody
     )
 }
 
