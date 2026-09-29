@@ -280,6 +280,16 @@ pub(crate) const ASSIGN_SQ_BACKSLASH: char = '\u{E30C}';
 /// protection scoped to the assignment-RHS walker mode; restored to a real
 /// `\` after the assignment path's final unescape pass.
 pub(crate) const ASSIGN_EXPANSION_BACKSLASH: char = '\u{E30D}';
+/// Data `"` that came out of a parameter/command expansion in a
+/// preserve-quotes compound word (rubash#295): like the backslash carrier
+/// above it must survive the storage tokenizer's quote removal as DATA —
+/// a bare expansion `"` re-entered quote syntax and mangled the element
+/// (`Y=($X'Q')` with X='a"b' stored `ab'Q'`). Decoded at the same
+/// boundaries as ASSIGN_EXPANSION_BACKSLASH.
+pub(crate) const ASSIGN_EXPANSION_DQUOTE: char = '\u{E30E}';
+/// Data `'` from an expansion result — same contract as
+/// ASSIGN_EXPANSION_DQUOTE.
+pub(crate) const ASSIGN_EXPANSION_SQUOTE: char = '\u{E30F}';
 
 // `str::replace` takes the marker as a Pattern (char works) but the
 // replacement argument must be `&str`; provide &str spellings for every
@@ -297,6 +307,8 @@ pub(crate) const ASSIGN_SQ_DOLLAR_STR: &str = "\u{E30A}";
 pub(crate) const ASSIGN_SQ_BACKTICK_STR: &str = "\u{E30B}";
 pub(crate) const ASSIGN_SQ_BACKSLASH_STR: &str = "\u{E30C}";
 pub(crate) const ASSIGN_EXPANSION_BACKSLASH_STR: &str = "\u{E30D}";
+pub(crate) const ASSIGN_EXPANSION_DQUOTE_STR: &str = "\u{E30E}";
+pub(crate) const ASSIGN_EXPANSION_SQUOTE_STR: &str = "\u{E30F}";
 pub(crate) const ANSI_C_QUOTE_MARKER_STR: &str = "\u{E010}";
 pub(crate) const ANSI_C_DQUOTE_MARKER_STR: &str = "\u{E011}";
 pub(crate) const QUOTED_NULL_MARKER_STR: &str = "\u{E002}";
@@ -655,6 +667,18 @@ pub(crate) const MARKERS: &[MarkerInfo] = &[
     MarkerInfo {
         name: "ASSIGN_EXPANSION_BACKSLASH",
         code: ASSIGN_EXPANSION_BACKSLASH as u32,
+        boundaries: &[Boundary::Storage],
+        user_reachable: false,
+    },
+    MarkerInfo {
+        name: "ASSIGN_EXPANSION_DQUOTE",
+        code: ASSIGN_EXPANSION_DQUOTE as u32,
+        boundaries: &[Boundary::Storage],
+        user_reachable: false,
+    },
+    MarkerInfo {
+        name: "ASSIGN_EXPANSION_SQUOTE",
+        code: ASSIGN_EXPANSION_SQUOTE as u32,
         boundaries: &[Boundary::Storage],
         user_reachable: false,
     },

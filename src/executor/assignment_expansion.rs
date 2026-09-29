@@ -2245,6 +2245,33 @@ impl Executor {
             // IFS_GLUE sentinel is field-splitting state (posixexp2 37): a
             // quoted element never splits, so it strips here like GNU's
             // dequote drops CTLESC (subst.c:4807).
+            // A word whose quoting still rides as the assignment hoist's
+            // carriers (E307 single-quote spans, E302 double-quote spans,
+            // E308 hoisted `\\`) had its quote removal happen inside
+            // expand_word_internal already (parse.y:5419-5436
+            // parse_matched_pair drops the `'` delimiters; subst.c:11881+
+            // case '\''), and GNU set_word_flags (subst.c:12177) marks
+            // only WHOLLY quoted words W_QUOTED — this MIXED word still
+            // field-splits on IFS characters outside the spans
+            // (word_list_split -> list_string), while span content and
+            // quoted-expansion output (unmarked by the walker's E302
+            // state) stay glued like CTLESC-protected bytes. Splitting it
+            // as one never-split element stored the expansion adjacent to
+            // LIVE quote delimiters (rubash#295: `Y=($W'Q')` with
+            // W='a b\tc' kept one element instead of [a][b\tcQ]).
+            if token_has_hoisted_quote_carriers(token_raw) {
+                // The splitter re-serializes each field as STORAGE SYNTAX —
+                // span content re-wrapped in `'...'` (literal data, the
+                // CTLESC-protected bytes of add_quoted_string), expansion
+                // and literal text left bare so pathname expansion still
+                // globs it (GNU probes 2026-09-29: `Y=($X'Q2')` with
+                // X='a*b' stores the match aZZbQ2; `("$D"/*.txt)` stores
+                // the directory's files — issue #148).
+                return split_requoted_hoisted_compound_word(
+                    &text,
+                    self.shell_state.env_vars.get("IFS").map(String::as_str),
+                );
+            }
             let text = if token_raw.starts_with('"')
                 && token_raw.ends_with('"')
                 && text.starts_with('"')
@@ -2271,7 +2298,9 @@ impl Executor {
             } else {
                 text
             };
-            let text = text.replace(crate::executor::markers::IFS_GLUE, "");
+            let text = decode_compound_expansion_carriers(
+                &text.replace(crate::executor::markers::IFS_GLUE, ""),
+            );
             return vec![quote_array_value(&text)];
         }
         // Fully unquoted word WITH an expansion: GNU field-splits the whole
@@ -2296,10 +2325,14 @@ impl Executor {
         )
         .into_iter()
         .map(|field| {
+            // The walker protected expansion-result data (backslash/$/
+            // backtick) with the E30D/E30A/E30B carriers (GNU
+            // subst.c:11862 add_quoted_string); decode to visible data
+            // before quote_array_value serializes the final field.
             format!(
                 "{}{}",
                 crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
-                quote_array_value(&field)
+                quote_array_value(&decode_compound_expansion_carriers(&field))
             )
         })
         .collect()
@@ -2688,6 +2721,15 @@ fn compound_element_word_is_quoted(token_raw: &str) -> bool {
             .expect("offset on char boundary");
         let after = &token_raw[offset + ch.len_utf8()..];
         match ch {
+            // The assignment hoist's quote carriers (expand_assignment_
+            // value_hoisting) stand for source quoting: a hoisted `'`
+            // span (E307), `"` span (E302) or `\\` escape (E308) makes
+            // the word W_QUOTED exactly like the raw characters
+            // (parse.y:5781/5387). The span-CONTENT carriers
+            // (E30A/E30B/E30C/E30D) do NOT: they also tag expansion
+            // output, which never sets the outer word's quoted bit
+            // (rubash#295 — `Y=(B$X)` with backslash/$ data in $X must
+            // still field-split).
             '$' if after.starts_with('{') => {
                 match crate::executor::parameter_ops::matching_parameter_brace(&after[1..]) {
                     Some(end) => offset += 1 + 1 + end + 1,
@@ -2734,6 +2776,11 @@ fn compound_element_word_is_quoted(token_raw: &str) -> bool {
                 continue;
             }
             '"' | '\'' | '\\' | '\u{E302}' => return true,
+            ch if ch == crate::executor::markers::ASSIGN_HOISTED_SQUOTE
+                || ch == crate::executor::markers::ASSIGN_HOISTED_BACKSLASH =>
+            {
+                return true
+            }
             ch if ch == crate::executor::markers::DATA_SQUOTE
                 || ch == crate::executor::markers::DATA_DQUOTE =>
             {
@@ -2746,6 +2793,143 @@ fn compound_element_word_is_quoted(token_raw: &str) -> bool {
     false
 }
 
+/// Whether the token still carries the assignment hoist's QUOTE carriers
+/// (single-quote spans E307, double-quote spans E302, hoisted `\\` E308) —
+/// source quoting whose removal belongs to this element pass, not to the
+/// storage tokenizer (see compound_plain_element_value_fields).
+pub(in crate::executor) fn token_has_hoisted_quote_carriers(token_raw: &str) -> bool {
+    token_raw.contains(crate::executor::markers::ASSIGN_HOISTED_SQUOTE)
+        || token_raw.contains(crate::executor::markers::ASSIGN_DATA_DQUOTE)
+        || token_raw.contains(crate::executor::markers::ASSIGN_HOISTED_BACKSLASH)
+}
+
+/// Quote removal + field splitting + re-serialization for the assignment
+/// hoist's carriers, run where a final element token list is produced (GNU
+/// expand_word_internal already removed the quoting and split the merged
+/// word: parse.y:5419-5436 parse_matched_pair drops the `'` delimiters,
+/// subst.c:11881+ case '\''; word_list_split -> list_string splits only
+/// the bytes that are neither inside quote spans nor CTLESC-protected).
+/// Each field is re-serialized as STORAGE SYNTAX so the storage passes
+/// reproduce GNU's per-character provenance: E307/E302 span content is
+/// re-wrapped in `'...'` (literal data — the CTLESC protection GNU's
+/// add_quoted_string gave quoted bytes), while expansion output and bare
+/// literal text stay UNQUOTED so pathname expansion still globs them (GNU
+/// probes 2026-09-29: `Y=($X'Q2')` with X='a*b' globs to the matching
+/// file; `("$D"/*.txt)` stores the directory's files, issue #148). The
+/// expansion carriers E30A/E30B/E30C/E30D re-encode as shell-escaped data
+/// (`$`, `` ` ``, `\\`) that the storage unquote decodes back to one
+/// literal character. Outside the spans, an E309-tagged whitespace
+/// character (the walker's unquoted-expansion mark) and any live IFS
+/// character (from unquoted expansion output or literal word text) end a
+/// field; empty fields drop like GNU's field splitting.
+pub(in crate::executor) fn split_requoted_hoisted_compound_word(
+    text: &str,
+    ifs: Option<&str>,
+) -> Vec<String> {
+    fn push_span_char(current: &mut String, ch: char) {
+        if ch == '\'' {
+            current.push_str("'\\''");
+        } else {
+            current.push(ch);
+        }
+    }
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let in_span = in_single || in_double;
+        match ch {
+            crate::executor::markers::ASSIGN_HOISTED_SQUOTE if !in_double => {
+                in_single = !in_single;
+                current.push('\'');
+            }
+            crate::executor::markers::ASSIGN_DATA_DQUOTE if !in_single => {
+                in_double = !in_double;
+                current.push('\'');
+            }
+            crate::executor::COMPOUND_EXPANSION_WS_TAG if !in_span => {
+                // Unquoted-expansion whitespace: GNU's split boundary
+                // (list_string). Drop the tag and the character.
+                let _ = chars.next();
+                if !current.is_empty() {
+                    fields.push(std::mem::take(&mut current));
+                }
+            }
+            crate::executor::COMPOUND_EXPANSION_WS_TAG => {
+                // Defensive: a tagged character inside a span is glued.
+                if let Some(tagged) = chars.next() {
+                    push_span_char(&mut current, tagged);
+                }
+            }
+            ch if !in_span && ifs.is_some_and(|ifs| ifs.contains(ch)) => {
+                if !current.is_empty() {
+                    fields.push(std::mem::take(&mut current));
+                }
+            }
+            ch if in_span => push_span_char(&mut current, ch),
+            // Data characters ride as their CARRIERS, not decoded text:
+            // the storage boundary's unquote pass decodes them after its
+            // quote removal (unquote_storage_value / restore_quote_
+            // markers), exactly like branch-2 tokens — decoding them to
+            // `\\` here re-armed the double unescape and ate the
+            // backslashes again (rubash#295).
+            crate::executor::markers::ASSIGN_HOISTED_BACKSLASH => {
+                current.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH)
+            }
+            '\\' => {
+                // parse.y:5368-5397 read_token_word: an unquoted backslash
+                // removes itself and keeps the next character literal. The
+                // pair is already valid storage syntax — keep it verbatim
+                // like a branch-2 token.
+                current.push('\\');
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+            }
+            crate::executor::markers::ASSIGN_SQ_DOLLAR
+            | crate::executor::markers::ASSIGN_SQ_BACKTICK
+            | crate::executor::markers::ASSIGN_SQ_BACKSLASH
+            | crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH => current.push(ch),
+            other => current.push(other),
+        }
+    }
+    if !current.is_empty() {
+        fields.push(current);
+    }
+    fields
+}
+
+/// Decode the walker's expansion-result protection carriers (E30D data
+/// backslash, E30A data `$`, E30B data backtick; E30C is the hoisted-span
+/// content form of a data backslash) to their visible characters. Called
+/// where compound element text becomes a FINAL storage token; boundaries
+/// that re-parse the text instead (dequote_compound_element_rhs,
+/// unquote_storage_value, expand_compound_assignment_rhs) decode after
+/// their own unescape pass, mirroring GNU's CTLESC-protected expansion
+/// bytes surviving until the last dequote (subst.c:11862 -> subst.c:4807).
+pub(in crate::executor) fn decode_compound_expansion_carriers(text: &str) -> String {
+    if !text.contains(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH)
+        && !text.contains(crate::executor::markers::ASSIGN_SQ_DOLLAR)
+        && !text.contains(crate::executor::markers::ASSIGN_SQ_BACKTICK)
+        && !text.contains(crate::executor::markers::ASSIGN_SQ_BACKSLASH)
+        && !text.contains(crate::executor::markers::ASSIGN_EXPANSION_DQUOTE)
+        && !text.contains(crate::executor::markers::ASSIGN_EXPANSION_SQUOTE)
+    {
+        return text.to_string();
+    }
+    text.replace(
+        crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
+        "\\",
+    )
+    .replace(crate::executor::markers::ASSIGN_SQ_DOLLAR_STR, "$")
+    .replace(crate::executor::markers::ASSIGN_SQ_BACKTICK_STR, "`")
+    .replace(crate::executor::markers::ASSIGN_SQ_BACKSLASH_STR, "\\")
+    .replace(crate::executor::markers::ASSIGN_EXPANSION_DQUOTE_STR, "\"")
+    .replace(crate::executor::markers::ASSIGN_EXPANSION_SQUOTE_STR, "'")
+}
+
 /// The visible expansion text of a compound element: strip the walker's
 /// U+E309 expansion-whitespace tags (embedded_mutations
 /// mark_expansion_whitespace), the U+E302 wrap, and the \x17/\x18
@@ -2754,12 +2938,25 @@ fn compound_element_word_is_quoted(token_raw: &str) -> bool {
 /// visible text; quote DELIMITERS the walker preserved are the caller's to
 /// strip (only a raw-quoted element carries them).
 fn compound_element_expansion_text(expanded: &str) -> String {
-    let text = expanded
+    let mut text = expanded
         .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
         .replace(crate::executor::markers::DATA_SQUOTE, "'")
-        .replace(crate::executor::markers::DATA_DQUOTE, "\"")
-        .trim_matches('\u{E302}')
-        .to_string();
+        .replace(crate::executor::markers::DATA_DQUOTE, "\"");
+    // The E302 wrap is only removable when it wraps the WHOLE token
+    // (leading AND trailing delimiter — the atomic lexer's DQ_DATA wrap).
+    // A mixed word (`\u{E302}$W\u{E302}Q`) keeps its leading delimiter so
+    // the span-aware splitter still sees the quoted region; a blind
+    // trim_matches dropped it and the span content field-split
+    // (`Z2=("$W"Q)` with W='a b' became two elements, rubash#295).
+    if text.starts_with('\u{E302}') && text.ends_with('\u{E302}') && text.chars().count() >= 2 {
+        let char_count = text.chars().count();
+        text = text
+            .chars()
+            .skip(1)
+            .take(char_count.saturating_sub(2))
+            .collect();
+    }
+    let text = text;
     // Command-substitution output spliced by the walker carries its
     // protection carriers (`$`->\x1f DATA_DOLLAR, backtick->\x1a,
     // backslash->\x15, control bytes as __RUBASH_CSB1_XX; payload

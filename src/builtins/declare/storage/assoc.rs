@@ -81,12 +81,14 @@ pub(in crate::builtins) fn append_assoc_value(
     let explicit_subscripts = tokens
         .first()
         .map(|token| {
-            token.starts_with('[')
-                && token.contains('=')
-                && token
-                    .trim_end_matches(']')
-                    .rfind(']')
-                    .map_or(false, |i| token.find('=').map_or(false, |e| i < e))
+            // The quote-aware [key]=value scanner (the same parse the loop
+            // below runs) decides the mode: a position-based `]`-before-`=`
+            // heuristic misread an element whose VALUE contains `]` —
+            // `declare -A a=([k]=$X'Q')` with X='\[\e[33m\]' arrives here
+            // as `[k]="\[\e[33m\]Q"` and fell into kvpair mode, storing the
+            // whole word as the key with an empty value (rubash#295).
+            // `[x]` (no `=` tail) and `a=b` still parse as None.
+            assoc_assignment_token(token).is_some()
         })
         .unwrap_or(false);
 
@@ -241,6 +243,16 @@ fn assoc_token_scan_state(token: &str) -> (usize, bool, bool) {
 fn merge_assoc_subscript_tokens(tokens: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for token in tokens {
+        // Strip the indexed-storage word-expansion tag (\x10): the assoc
+        // path neither field-splits nor globs (GNU assign_assoc_from_
+        // kvlist), and the tag pushed control-byte elements past
+        // unquote_storage_value's `$'...'` arm into the bare-value
+        // escape-drop loop (assoc15.sub; see the executor-side twin in
+        // assignment_helpers.rs merge_assoc_subscript_tokens).
+        let token = token
+            .strip_prefix(crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER)
+            .map(str::to_string)
+            .unwrap_or(token);
         match out.last_mut() {
             Some(last)
                 if {

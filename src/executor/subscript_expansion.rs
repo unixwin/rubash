@@ -979,8 +979,12 @@ impl Executor {
             .next()
             .and_then(|token| token.value.split_once('=').map(|(_, rhs)| rhs.to_string()));
         match rhs {
-            Some(rhs) => self.expand_assignment_value(name, &rhs),
-            None => self.expand_assignment_value(name, raw_value),
+            Some(rhs) => super::assignment_expansion::decode_compound_expansion_carriers(
+                &self.expand_assignment_value(name, &rhs),
+            ),
+            None => super::assignment_expansion::decode_compound_expansion_carriers(
+                &self.expand_assignment_value(name, raw_value),
+            ),
         }
     }
 }

@@ -18,6 +18,7 @@ pub(super) use storage::{
 
 use std::collections::{BTreeMap, HashMap};
 
+use super::assignment_expansion::decode_compound_expansion_carriers;
 use super::{
     apply_parameter_case_mod, assoc_value_at, eval_arith_value, eval_conditional_arith_value,
     is_marked_var, is_shell_name, parse_indirect_pattern_removal, parse_parameter_case_mod,
@@ -997,7 +998,11 @@ pub(super) fn array_assignment_has_subscript(left: &str) -> bool {
 /// `"..."` per parse.y:5390-5393 + syntax.h:26 slashify_in_quotes) were
 /// re-read as escape syntax and eaten (`A=([0]='\[\e[33m\]Z')` stored
 /// `[e[33m]Z`, rubash#288).
-fn dequote_compound_element_rhs(rhs: &str) -> String {
+/// pub(crate): the executor-side assoc kvpair loop (assignment_helpers
+/// append_assoc_value) shares this dequote so an embedded `$'...'` span in
+/// a mixed kvpair word (`var=( two ab$'\001'cd )`) decodes like an indexed
+/// element instead of leaking its delimiters as data.
+pub(crate) fn dequote_compound_element_rhs(rhs: &str) -> String {
     if has_unescaped_quote(rhs)
         && !(rhs.starts_with("$'") && rhs.ends_with('\''))
         && !rhs.starts_with(STORAGE_WORD_PREFIX)
@@ -1008,17 +1013,32 @@ fn dequote_compound_element_rhs(rhs: &str) -> String {
         // metacharacters (`[0]="*y"` stores `*y`, GNU dequote_string:4807
         // strips the pairs after globbing passes) and the
         // expansion-whitespace tags their whitespace as data.
-        crate::executor::markers::dequote_ctlesc_pairs(&restore_quote_carriers(
-            &remove_shell_quotes(rhs),
-        ))
-        .replace(crate::executor::markers::IFS_GLUE, "")
-        .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
+        //
+        // The walker's expansion-result carriers (E30D/E30A/E30B — GNU
+        // subst.c:11862 add_quoted_string protection) decode only AFTER
+        // the quote-removal pass so remove_shell_quotes never read their
+        // backslashes as escape syntax (rubash#295: `H2=([0]=$X'Q')`
+        // with X='\[\e[33m\]' stored `[e[33m]Q').
+        // remove_shell_quotes can re-inject PARAM_NAME_END_MARKER where a
+        // quote boundary terminates an unbraced `$name` (lexer quotes.rs
+        // contract); storage never re-expands, so the transport-only
+        // marker must not survive into the element value.
+        decode_compound_expansion_carriers(
+            &crate::executor::markers::dequote_ctlesc_pairs(&restore_quote_carriers(
+                &remove_shell_quotes(rhs),
+            ))
+            .replace(crate::executor::markers::IFS_GLUE, "")
+            .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, ""),
+        )
+        .replace(crate::executor::markers::PARAM_NAME_END_MARKER, "")
     } else {
         // No quote syntax ($'...' whole words, bare values, or internal
         // storage forms): unquote_storage_value performs the one removal —
         // ANSI-C decoding for `$'...'` (issue #109) and the unquoted
         // `\x` -> x escape drop for bare text (parse.y:5368-5397).
-        unquote_storage_value(&crate::executor::markers::dequote_ctlesc_pairs(rhs))
+        decode_compound_expansion_carriers(&unquote_storage_value(
+            &crate::executor::markers::dequote_ctlesc_pairs(rhs),
+        ))
     }
 }
 

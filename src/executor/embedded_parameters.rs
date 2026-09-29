@@ -2,6 +2,58 @@ use super::*;
 use crate::executor::embedded_mutations::mark_expansion_whitespace;
 use crate::executor::markers::DATA_DOLLAR;
 
+/// Expansion-result protection for the preserve-quotes compound walker.
+/// GNU subst.c:11862 `add_quoted_string:` -> `quote_string`
+/// (subst.c:4773) CTLESC-protects every parameter/command-substitution
+/// result merged into a word, so no later pass — the declaration builtin's
+/// operand re-lex (`expand_compound_assignment_rhs`), the storage
+/// tokenizer's quote removal — can read expansion bytes as source-word
+/// escape/expansion syntax. This is the non-mut walker's port: data
+/// backslashes ride as ASSIGN_EXPANSION_BACKSLASH (the same registry
+/// carrier the #218 assignment-RHS walker uses), `$`/backtick data as the
+/// hoisted-span content carriers E30A/E30B, and quote data as
+/// E30E/E30F; command-substitution payload carriers (\x15/\x1f/\x1a/
+/// \x18/\x17) normalize to the same family. Every consumer boundary
+/// (compound_element_expansion_text wrap sites,
+/// dequote_compound_element_rhs, unquote_storage_value,
+/// expand_compound_assignment_rhs) decodes them after its final unescape.
+fn push_preserved_expansion_output(output: &mut String, value: &str, in_double: bool) {
+    let tagged = value
+        .replace(
+            '\\',
+            crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
+        )
+        .replace('$', crate::executor::markers::ASSIGN_SQ_DOLLAR_STR)
+        .replace('`', crate::executor::markers::ASSIGN_SQ_BACKTICK_STR)
+        .replace('"', crate::executor::markers::ASSIGN_EXPANSION_DQUOTE_STR)
+        .replace('\'', crate::executor::markers::ASSIGN_EXPANSION_SQUOTE_STR)
+        .replace(
+            crate::executor::markers::PROTECTED_BACKSLASH_STR,
+            crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
+        )
+        .replace(DATA_DOLLAR, crate::executor::markers::ASSIGN_SQ_DOLLAR_STR)
+        .replace(
+            crate::executor::markers::DATA_BACKTICK_STR,
+            crate::executor::markers::ASSIGN_SQ_BACKTICK_STR,
+        )
+        .replace(
+            crate::executor::markers::DATA_DQUOTE,
+            crate::executor::markers::ASSIGN_EXPANSION_DQUOTE_STR,
+        )
+        .replace(
+            crate::executor::markers::DATA_SQUOTE,
+            crate::executor::markers::ASSIGN_EXPANSION_SQUOTE_STR,
+        );
+    if in_double {
+        // Inside a `"` span the result never field-splits, so only the
+        // syntax protection applies (mark_expansion_whitespace is the
+        // !in_double split-boundary tag).
+        output.push_str(&tagged);
+    } else {
+        output.push_str(&mark_expansion_whitespace(&tagged, true));
+    }
+}
+
 thread_local! {
     static EXPAND_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -79,6 +131,14 @@ impl Executor {
         let mut output = String::new();
         let mut chars = word.chars().peekable();
         let mut in_double = false;
+        // Hoisted-carrier quote state (expand_assignment_value_hoisting):
+        // E307 spans are inert — the hoist already carried their expansion
+        // triggers as E30A/E30B/E30C — while an E302 OUTSIDE a hoisted
+        // single-quote span is a live `"` delimiter: expansion inside it
+        // takes double-quote semantics (no E309 whitespace marking, GNU
+        // Q_DOUBLE_QUOTES at subst.c:12177 set_word_flags), and an E302
+        // INSIDE the span is a data `"` (hoist order: dq first, sq wraps).
+        let mut in_hoisted_single = false;
         // Top-level `${` ordinal for the cross-pass subscript-eval memo —
         // matches the pre-scan counter (SUB_RES_XPASS).
         let mut frag_index = 0usize;
@@ -126,6 +186,26 @@ impl Executor {
                 } else {
                     '"'
                 });
+                continue;
+            }
+
+            // Assignment-hoist quote carriers (preserve-quotes mode only —
+            // the non-preserve paths never see them): pass the carrier
+            // through for the boundary decoders while maintaining the
+            // walker's quote state (see the in_hoisted_single comment).
+            if preserve_quotes
+                && ch == crate::executor::markers::ASSIGN_HOISTED_SQUOTE
+                && !in_double
+            {
+                in_hoisted_single = !in_hoisted_single;
+                output.push(ch);
+                continue;
+            }
+            if preserve_quotes && ch == crate::executor::markers::ASSIGN_DATA_DQUOTE {
+                output.push(ch);
+                if !in_hoisted_single {
+                    in_double = !in_double;
+                }
                 continue;
             }
             if ch == crate::lexer::ANSI_C_QUOTE_MARKER {
@@ -273,8 +353,8 @@ impl Executor {
                             &decode_backtick_substitution_source(&source),
                         )),
                     );
-                    if preserve_quotes && !in_double {
-                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    if preserve_quotes {
+                        push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
                         output.push_str(&value);
                     }
@@ -307,8 +387,8 @@ impl Executor {
                 Some('@') => {
                     chars.next();
                     let value = self.shell_state.positional_params.join(" ");
-                    if preserve_quotes && !in_double {
-                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    if preserve_quotes {
+                        push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
                         output.push_str(&value);
                     }
@@ -316,8 +396,8 @@ impl Executor {
                 Some('*') => {
                     chars.next();
                     let value = self.positional_params_star_joined();
-                    if preserve_quotes && !in_double {
-                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    if preserve_quotes {
+                        push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
                         output.push_str(&value);
                     }
@@ -355,11 +435,12 @@ impl Executor {
                                             &self.function_substitute(&body, valsub),
                                         ),
                                     );
-                                    if preserve_quotes && !in_double {
-                                        output.push_str(&mark_expansion_whitespace(
+                                    if preserve_quotes {
+                                        push_preserved_expansion_output(
+                                            &mut output,
                                             &value,
-                                            preserve_quotes,
-                                        ));
+                                            in_double,
+                                        );
                                     } else {
                                         output.push_str(&value);
                                     }
@@ -387,8 +468,8 @@ impl Executor {
                     });
                     let name = collect_braced_parameter_name(&mut chars);
                     let value = self.expand_word(&format!("${{{name}}}"));
-                    if preserve_quotes && !in_double {
-                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    if preserve_quotes {
+                        push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
                         output.push_str(&value);
                     }
@@ -536,8 +617,8 @@ impl Executor {
                         protect_command_substitution_output(&substitution_result_visible_text(
                             &self.expand_command_substitution(&source),
                         ));
-                    if preserve_quotes && !in_double {
-                        output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                    if preserve_quotes {
+                        push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
                         output.push_str(&value);
                     }
@@ -594,8 +675,8 @@ impl Executor {
                             .get(index - 1)
                             .map(String::as_str)
                             .unwrap_or("");
-                        if preserve_quotes && !in_double {
-                            output.push_str(&mark_expansion_whitespace(value, preserve_quotes));
+                        if preserve_quotes {
+                            push_preserved_expansion_output(&mut output, value, in_double);
                         } else {
                             output.push_str(value);
                         }
@@ -617,8 +698,8 @@ impl Executor {
                         let value = shell_safe_value(&value);
                         if heredoc {
                             output.push_str(&protect_command_substitution_output(&value));
-                        } else if preserve_quotes && !in_double {
-                            output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
+                        } else if preserve_quotes {
+                            push_preserved_expansion_output(&mut output, &value, in_double);
                         } else {
                             output.push_str(&value);
                         }

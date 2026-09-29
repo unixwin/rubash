@@ -75,7 +75,12 @@ pub(in crate::executor) fn append_assoc_value(
             let Some(key) = pair.first() else {
                 continue;
             };
-            let key = unquote_storage_value(key);
+            // GNU assign_assoc_from_kvlist (arrayfunc.c:644-665) runs each
+            // kvpair word through the word expander's quote removal, so a
+            // mixed word like `ab$'\001'cd` decodes its embedded ANSI-C
+            // span — the same dequote the indexed element path applies
+            // (assoc15.sub: var=( two ab$'\001'cd ) stored `ab'\001'cd`).
+            let key = crate::executor::arrays::dequote_compound_element_rhs(key);
             // GNU assign_assoc_from_kvlist (arrayfunc.c:644-650): an empty
             // expanded key reports `<word>: bad array subscript` and skips
             // only that pair (continue, not break) — no any_failed, so the
@@ -85,7 +90,7 @@ pub(in crate::executor) fn append_assoc_value(
             }
             let value = pair
                 .get(1)
-                .map(|value| unquote_storage_value(value))
+                .map(|value| crate::executor::arrays::dequote_compound_element_rhs(value))
                 .unwrap_or_default();
             entries.push((key, eval_element(&value)));
         }
@@ -281,6 +286,16 @@ fn assoc_token_scan_state(token: &str) -> (usize, bool, bool) {
 fn merge_assoc_subscript_tokens(tokens: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for token in tokens {
+        // The indexed-storage word-expansion tag (\x10) has no meaning on
+        // the assoc path (GNU assign_assoc_from_kvlist neither field-splits
+        // nor globs) and it defeated unquote_storage_value's `$'...'` arm —
+        // a control-byte element arriving as `\x10$'\001'` fell into the
+        // bare-value escape-drop loop and stored `$'001'` with the `\0`
+        // escapes eaten (assoc15.sub v2=( $v $v$v$v$v )).
+        let token = token
+            .strip_prefix(crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER)
+            .map(str::to_string)
+            .unwrap_or(token);
         match out.last_mut() {
             Some(last)
                 if {
@@ -764,13 +779,20 @@ impl Iterator for StorageWordIter<'_> {
             // Mirror the declare storage splitter (declare/storage/words.rs):
             // whitespace inside EITHER quote family does not split a
             // compound-assignment word ('a b' stores one element, assoc12
-            // "1 2" stays one kvpair key).
-            if ch == '\'' && !in_double {
+            // "1 2" stays one kvpair key). The assignment hoist's quote
+            // carriers are the same operators while they ride the walker
+            // output (expand_assignment_value_hoisting hoists `'`->E307,
+            // `"`->E302): GNU read_token_word keeps `x'y z'w` ONE word
+            // (parse.y:5419-5436), so a hoisted span must not split here
+            // either — splitting it broke adjacency and re-joined the parts
+            // with a synthetic space (`('a b'"$x")` became two storage
+            // words, rubash#295).
+            if (ch == '\'' || ch == crate::executor::markers::ASSIGN_HOISTED_SQUOTE) && !in_double {
                 in_single = !in_single;
                 word.push(ch);
                 continue;
             }
-            if ch == '"' && !in_single {
+            if (ch == '"' || ch == crate::executor::markers::ASSIGN_DATA_DQUOTE) && !in_single {
                 in_double = !in_double;
                 word.push(ch);
                 continue;
@@ -820,6 +842,23 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
             .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
             .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
             .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
+            // Expansion-result protection carriers (GNU subst.c:11862
+            // add_quoted_string port of the preserve walker): decode after
+            // the quote removal so no earlier pass read their backslash/$/
+            // backtick/quote data as syntax (rubash#295).
+            .replace(
+                crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
+                "\\",
+            )
+            .replace(crate::executor::markers::ASSIGN_SQ_DOLLAR_STR, "$")
+            .replace(crate::executor::markers::ASSIGN_SQ_BACKTICK_STR, "`")
+            .replace(crate::executor::markers::ASSIGN_SQ_BACKSLASH_STR, "\\")
+            .replace(crate::executor::markers::ASSIGN_EXPANSION_DQUOTE_STR, "\"")
+            .replace(crate::executor::markers::ASSIGN_EXPANSION_SQUOTE_STR, "'")
+            // PARAM_NAME_END_MARKER is transport-only (a quote boundary
+            // terminating an unbraced `$name`); a stored value never keeps
+            // it.
+            .replace(crate::executor::markers::PARAM_NAME_END_MARKER, "")
     }
 
     if value == "\\\"\\" {
@@ -906,7 +945,17 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
         // whitespace it precedes is data, the tag itself is not.
         return decoded
             .replace(crate::executor::markers::IFS_GLUE, "")
-            .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "");
+            .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
+            .replace(
+                crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
+                "\\",
+            )
+            .replace(crate::executor::markers::ASSIGN_SQ_DOLLAR_STR, "$")
+            .replace(crate::executor::markers::ASSIGN_SQ_BACKTICK_STR, "`")
+            .replace(crate::executor::markers::ASSIGN_SQ_BACKSLASH_STR, "\\")
+            .replace(crate::executor::markers::ASSIGN_EXPANSION_DQUOTE_STR, "\"")
+            .replace(crate::executor::markers::ASSIGN_EXPANSION_SQUOTE_STR, "'")
+            .replace(crate::executor::markers::PARAM_NAME_END_MARKER, "");
     };
 
     let mut unquoted = String::new();
