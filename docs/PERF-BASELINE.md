@@ -1837,3 +1837,161 @@ cloned). PARSE_SHARE of nvm -n wall (tokenize+parse phases): 209 -> 156ms.
 5. cfg-full -n remains gather-dominated (3.1s of 3.4s = the captain's
    park quadratic); with the park fixed, this round's parse-side cuts
    compound (~180ms parse + 107ms tokenize of the remainder).
+## perf12 round (2026-09-29, wt15/execdeep on 837514ff): structured attributes
+
+Deep-subsystem round attacking the perf11 leftover #2 (the marker-string
+attribute model). Three commits on the lane branch, each gated with the
+full battery. All wall numbers RELEASE build; the honest comparison is
+the back-to-back alternating A/B against a pristine 837514ff binary
+built this session in a detached worktree (same load) — the machine
+drifted ~5% during the day, so single-shot "before/after" numbers from
+different hours would lie. GNU anchors re-measured inside WSL this
+session (script files under `target/perf15/`): local3 115.5ms, null
+35.1ms, arr 43.0ms.
+
+### Commit 1 — `VarTable`: the att_* port (a856bf29)
+
+GNU stores every declare-family attribute as `att_*` flag bits on the
+SHELL_VAR (variables.h:124-133). Rubash encoded them as membership in
+`__RUBASH_*_VARS` DATA_DOLLAR-joined name lists inside the flat env
+map — every query a split+scan, every write a collect+join+insert.
+
+`ShellState.env_vars: HashMap` became `VarTable { values, attrs }`
+(src/shell/var_table.rs): `attrs: HashMap<String, VarAttrs>` is the
+structured att_* port, authoritative for the ten attribute keys; the
+marker strings stay as the SERIALIZED form, synchronized on every real
+bit flip (they remain load-bearing at the process boundary —
+`Executor::new` imports a parent rubash's attribute lists from environ;
+a fresh `${THIS_SH}` child rebuilds them via `child_shell_environment`
+-> `from_values` — and for order-preserving list enumeration).
+Deref/DerefMut/`IntoIterator for &VarTable` keep every value-only call
+site compiling unchanged; the migration was compiler-guided up through
+the builtin dispatch chain (declare/setattr/set/shopt/zsh/test/printf/
+read/exec/complete/cd/arithmetic; value-only helpers like
+`option_enabled` stay `&HashMap` and deref-coerce).
+
+Reads: `is_marked_var`/`capture_var_attrs` (10 scans -> 1 lookup) and
+44 builtin `marked_vars(...).contains(...)` sites -> `is_marked`.
+Writes: every mark family funnels through VarTable methods that update
+both forms; `set_attrs` rewrites a serialized list only when its bit
+actually flips. Whole-list snapshot restores (tempenv
+EXPORTED_VARS/NAMEREF_VARS) route through `restore_attr_string`.
+
+Measured effect (decomposition, scratch battery removed): capture
+162ms -> 3ms, set_var_attrs 229ms -> 7ms, builtin marked_vars
+168ms -> (folded into is_marked ~63ms), per-run marker machinery
+~865ms -> ~85ms instrumented. local3 2287 -> 1801ms.
+
+### Commit 2 — process-env mirror gated to exported names (22a45701)
+
+Decomposition found `set_process_env` running 60007x per local3 run
+and 20007x per arr run — three Win32 SetEnvironmentVariable calls per
+loop iteration for NOT-exported names:
+
+1. for-loop variable write (word-list loop AND `i++`/`i=0` in
+   `((;;))` through arith `set_variable`) — now routed through
+   `sync_shell_assignment_process_env` (GNU execute_cmd.c:3201+ binds
+   the loop variable through the ordinary assignment machinery; only
+   exported/host-special names mirror).
+2. `__RUBASH_CURRENT_LINE` stamp for needs-line commands — now skips
+   the OS write when the value equals the last one WE wrote
+   (`Executor::line_env_os_value` tracker). The gate must compare
+   against our last OS write, NOT the env-map value: ambient-line
+   restores write the map directly, and a map-equality gate left the
+   OS env stale (alias diagnostics reported an earlier line — caught
+   by the procenv gate).
+3. Frame restore wrote every restored Some value to the OS env — now
+   gated on the RESTORED attrs' exported bit (GNU pop_var_context
+   reinstalls the saved SHELL_VAR, value + attributes).
+
+### Commit 3 — literal decimal subscript fast path (59599749)
+
+`a[1]=$i` spent 82ms of 613ms evaluating subscript "1" through the
+full arithmetic pipeline. GNU arrayfunc.c:1368 runs evalexp on the
+resolved subscript; for pure ASCII-decimal digits with a non-zero lead
+every pre-evaluation pass is provably the identity, so the subscript
+parses directly (rubash#156 whitelist-admission discipline; leading
+zeros stay on the full path — 0NNN is octal).
+
+### Numbers (release, A/B vs pristine 837514ff, median of 5)
+
+| probe (20000 iters) | base ms | lane ms | delta | GNU ms | ratio |
+|---|---:|---:|---:|---:|---:|
+| p6-local3 | 2326 | 1552 | **-33%** | 115.5 | 20.1x -> **13.4x** |
+| p6-null   | 519  | 339  | **-35%** | 35.1  | 14.8x -> **9.1x** |
+| p6-arr    | 685  | 529  | **-23%** | 43.0  | 16.0x -> **12.0x** |
+| nvm-load  | 612  | 595  | -3%      | —     | parse/dispatch-bound |
+
+(local3/null/arr re-measured after commit 3: 1545 / 318 / 515ms —
+commit 3 only moves arr.)
+
+### Gates (all three commits)
+
+- **matrix-attrs.sh** (20 sections: local -i math, frame roundtrips,
+  nested frames, readonly blocks, declare -p rendering, local -p, attr
+  flip/unflip, subshell+comsub export isolation, unset clears attrs,
+  nameref/case/tempenv/declare -g/array-element/readonly-array):
+  byte-identical base vs lane; vs GNU identical modulo $0 path and one
+  ambient-env export line.
+- **matrix-opts.sh** (15 sections: SHELLOPTS/BASHOPTS flips, readonly
+  rejections, arith dynamic vars, attribute-aware arithmetic, assoc
+  buckets, printf -v, subshell isolation, export -n): byte-identical
+  base vs lane.
+- **matrix-procenv.sh** (14 sections, new this round: exported vs
+  unexported loop vars x arith-for/word-list, arith assignment writes,
+  frame restore of exported/unexported/shadowed names, builtin
+  diagnostic line numbers, SECONDS/PATH special sync, exported array
+  element, tempenv, subshell): byte-identical base vs lane. Remaining
+  GNU deltas are PRE-EXISTING and base-identical: (a) `export v; f() {
+  local v=x; }` — GNU's local inherits att_exported so printenv sees
+  the local inside the frame, rubash's mirror keeps the outer value;
+  (b) an exported ARRAY leaks its storage serialization to printenv
+  (GNU exports nothing for arrays).
+- **Subscript edge matrix** (decimal/` 42 `/i128::MAX/`010`/`00` octal/
+  signs/names/`1+1`/empty/`0x10` + runtime probes): identical to WSL
+  GNU Bash 5.3.0.
+- **true-baseline suites**: varenv, array, assoc, builtins, arith,
+  param, new-exp, dynvar, printf, func, arith-for, traps, subst,
+  errors, exec, exit, read — **18/18 at 0 diff lines** across the
+  three commits' verification runs.
+- cargo test --lib 545/545 (6 VarTable + 2 subscript unit tests new);
+  --test regression 27/27; `RUSTFLAGS='-D warnings' cargo check
+  --tests` and `--release --tests` clean; cargo fmt clean;
+  src/lexer/continuation.rs untouched.
+
+### Leftovers (measured, with owners)
+
+1. **Per-command dispatch floor — the next deep subsystem.** null is
+   now 9.1x GNU and its remaining 318ms is almost pure machinery:
+   the execute_command chain (dispatch-kind matchers, trap consults,
+   CommandNode handling, expand). nvm-load decomposition (exec-profile,
+   405 commands): matcmd 48% of exec time, chain 24%, empty 12%. The
+   lane brief's execute_cmd.c:624 function-pointer-table model
+   (execute_command_internal dispatch as a table instead of the
+   matcher chain) is the structural fix; not attempted this round.
+2. **for-arith pair**: init/test/update still cost ~8us/iteration pair
+   instrumented (163ms of arr's 808) — `arith_dynamic_values()` builds
+   a 9-entry HashMap per evaluation (GNU expr.c resolves dynamic
+   variables at find_variable call sites, no map build). Lazy
+   resolution is the candidate.
+3. **local-export inheritance** (matrix-procenv delta a above): GNU's
+   make_local_variable (variables.c:2651) has the shadowed binding's
+   att_exported survive into the local's child-env visibility; rubash
+   keeps the outer value in the OS env. Semantic ticket, not perf.
+4. **Exported array env leak** (delta b): exported arrays serialize
+   their storage into the process env; GNU exports arrays only to
+  
+   bash-to-bash children via the array export mechanism (and modernish
+   marks exported arrays as not crossing env at all). Ticket.
+5. **PRE-EXISTING lexer bug found while gating — CAPTAIN
+   (continuation.rs)**: `shopt -s extglob; shopt -u extglob` leaves
+   the parser treating subsequent text as extglob — the next `echo
+   $(( x + 5 ))` reports `syntax error near unexpected token '('`
+   (reproducers: target/perf15/b*.sh prefix bisect; the pristine base
+   binary reproduces byte-for-byte, so it predates this round). The
+   gate matrices avoid extglob flips because of it.
+6. **matrices note**: matrix-opts.sh section 3 shows GNU NOT running
+   the `||` fallback after a failed readonly assignment
+   (`SHELLOPTS=xxx 2>&1 || echo rc=$?`) while rubash runs it — the
+   rubash#306 arith-error containment family (pre-existing,
+   base-identical).

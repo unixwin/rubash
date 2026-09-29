@@ -12,7 +12,8 @@ impl Executor {
         self.shell_state
             .env_vars
             .insert("_".to_string(), value.to_string());
-        if let Some(exported) = self.shell_state.env_vars.get(EXPORTED_VARS) {
+        let exported = self.shell_state.env_vars.get(EXPORTED_VARS).cloned();
+        if let Some(exported) = exported {
             let kept: Vec<&str> = exported
                 .split(DATA_DOLLAR)
                 .filter(|name| !name.is_empty() && *name != "_")
