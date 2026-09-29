@@ -23,7 +23,12 @@ pub(super) fn skip_heredoc_in_chars_with_closure(
     // GNU read_token_word: quoting inside the delimiter word makes
     // metacharacters literal — `<< ')'` names `)` as the delimiter, so a
     // quoted `)` (or `;`, `|`, `&`) is delimiter text, not the
-    // substitution closer (comsub-posix.tests).
+    // substitution closer (comsub-posix.tests). UNQUOTED, the delimiter
+    // word ends at ANY shell metacharacter (parse.y:5688 shellbreak within
+    // parse.y:5305 read_token_word), so `<<EOF>#c)` declares `EOF' with
+    // `>' an operator and `#c)' a comment; the `)' inside that comment
+    // never closes the substitution (rubash#305 lexmix family: the old
+    // break set swallowed `>#c' INTO the delimiter).
     let mut delimiter_single = false;
     let mut delimiter_double = false;
     while let Some(next) = chars.get(index).copied() {
@@ -32,10 +37,12 @@ pub(super) fn skip_heredoc_in_chars_with_closure(
             '"' if !delimiter_single => delimiter_double = !delimiter_double,
             _ if !delimiter_single
                 && !delimiter_double
-                && (next.is_whitespace() || matches!(next, ';' | '|' | '&' | ')')) =>
+                && (next.is_whitespace()
+                    || matches!(next, ';' | '|' | '&' | ')' | '(' | '<' | '>')) =>
             {
                 break;
             }
+            '#' if !delimiter_single && !delimiter_double && index == delimiter_start => break,
             // A backslash quotes the next delimiter byte (`<<\)` uses a
             // literal `)` delimiter); consume the escape pair as one unit so
             // the quoted `)` is not mistaken for the substitution closer.
@@ -57,9 +64,23 @@ pub(super) fn skip_heredoc_in_chars_with_closure(
         return (index, None);
     }
     let mut header_close_paren = None;
+    // A word-initial `#' after the delimiter word comments through the end
+    // of the header line (parse.y:3630-3643 parse_comment at the token
+    // boundary the operator left), so a `)' inside the comment tail does
+    // not close the substitution.
+    let mut comment_to_eol = false;
     while chars.get(index).is_some_and(|ch| *ch != '\n') {
-        if chars.get(index) == Some(&')') && header_close_paren.is_none() {
-            header_close_paren = Some(index);
+        if !comment_to_eol {
+            let ch = chars[index];
+            if ch == '#'
+                && (index == 0
+                    || chars[index - 1].is_whitespace()
+                    || matches!(chars[index - 1], ';' | '|' | '&' | '(' | ')' | '<' | '>'))
+            {
+                comment_to_eol = true;
+            } else if ch == ')' && header_close_paren.is_none() {
+                header_close_paren = Some(index);
+            }
         }
         index += 1;
     }

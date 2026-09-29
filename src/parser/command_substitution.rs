@@ -352,7 +352,16 @@ fn skip_command_substitution_heredoc(
                 delimiter.push(chars[index + 1]);
                 index += 1;
             }
-            c if c.is_whitespace() || matches!(c, ';' | '|' | '&' | ')') => break,
+            // GNU parse.y:5305 read_token_word / shellbreak (parse.y:5688):
+            // the heredoc delimiter WORD ends at ANY unquoted shell
+            // metacharacter — not just `;|&)'. `<<EOF>#c)' therefore
+            // declares delimiter `EOF' with `>' a GREATER operator
+            // (parse.y:3667 shellmeta) and `#c)' a comment, so the `)'
+            // inside the comment never closes the substitution and the
+            // input ends hunting `)' (rubash#305 lexmix family: the old
+            // set swallowed `>#c' INTO the delimiter).
+            c if c.is_whitespace() || matches!(c, ';' | '|' | '&' | ')' | '(' | '<' | '>') => break,
+            '#' if delimiter.is_empty() => break,
             _ => delimiter.push(ch),
         }
         index += 1;
@@ -365,7 +374,10 @@ fn skip_command_substitution_heredoc(
     }
 
     // An unquoted `)` anywhere after the delimiter word on the header line
-    // closes the substitution (it is the eof token, not body text).
+    // closes the substitution (it is the eof token, not body text). A
+    // word-initial `#' after an operator comments through the end of the
+    // header line (parse.y:3630-3643 parse_comment), so a `)' inside that
+    // comment — the `#c)' tail — does not close anything.
     let mut header_close_paren = None;
     {
         let mut rest = index;
@@ -386,6 +398,7 @@ fn skip_command_substitution_heredoc(
                     '\'' => rest_single = true,
                     '"' => rest_double = true,
                     '\\' => rest += 1,
+                    '#' if rest == index || chars[rest - 1].is_whitespace() => break,
                     ')' => {
                         header_close_paren = Some(rest);
                         break;
