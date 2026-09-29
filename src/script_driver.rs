@@ -647,30 +647,22 @@ pub fn stdin_source_text_needs_more(source: &str, posix: bool) -> bool {
     false
 }
 
-/// Net open-paren count for one command line, ignoring quoted spans. Used
-/// by the history driver to keep a group open across a heredoc declared
-/// inside a process substitution.
+/// Net open-paren count for one command line, ignoring quoted spans and
+/// comments (parse.y:3922: while LEX_INCOMMENT, "don't bother counting
+/// parens" — a `#` at word start runs to EOL). Used by the history driver
+/// to keep a group open across a heredoc declared inside a process
+/// substitution.
 pub(crate) fn line_paren_delta(line: &str) -> i64 {
-    let chars: Vec<char> = line.chars().collect();
+    let mut scan = CommentAwareScan::new();
     let mut depth = 0i64;
-    let mut quote: Option<char> = None;
-    let mut i = 0usize;
-    while i < chars.len() {
-        let c = chars[i];
-        if let Some(active) = quote {
-            if active == '"' && c == '\\' && i + 1 < chars.len() && chars[i + 1] == '"' {
-                i += 1;
-            } else if c == active {
-                quote = None;
+    for c in line.chars() {
+        if scan.active(c) {
+            if c == '(' {
+                depth += 1;
+            } else if c == ')' {
+                depth -= 1;
             }
-        } else if c == '\'' || c == '"' {
-            quote = Some(c);
-        } else if c == '(' {
-            depth += 1;
-        } else if c == ')' {
-            depth -= 1;
         }
-        i += 1;
     }
     depth
 }
@@ -1041,28 +1033,97 @@ fn is_stdin_function_keyword_name(name: &str) -> bool {
             .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|'))
 }
 
+/// Quote/comment-aware character classification for the text-layer
+/// completeness scanners (`first_unquoted_char`,
+/// `unquoted_delimiter_depth`, `line_paren_delta`).
+///
+/// GNU never lets comment text enter quote state: an unquoted `#` at the
+/// start of a word discards the rest of the line (parse.y:3630 shell_getc
+/// comment branch — `#` when `!interactive || interactive_comments` sets
+/// PST_COMMENT and discards until EOL), and read_token_word only enters
+/// LEX_INCOMMENT when the `#` begins a word (`retind == 0` or the previous
+/// word char is a newline or shellblank, parse.y:3937-3940) — while
+/// LEX_INCOMMENT is set, "don't bother counting parens or doing anything
+/// else" (parse.y:3922-3931), so quote characters inside comments are
+/// inert. Scanning raw text without that rule lets an apostrophe inside a
+/// comment (`# DragonflyBSD's ...`, `# it's known`) toggle single-quote
+/// state and corrupt the brace/paren depth — a complete function body is
+/// then misjudged as an unclosed group (rubash#282: modernish _IN/sig).
+struct CommentAwareScan {
+    single: bool,
+    double: bool,
+    escaped: bool,
+    in_comment: bool,
+    prev: Option<char>,
+}
+
+impl CommentAwareScan {
+    fn new() -> Self {
+        CommentAwareScan {
+            single: false,
+            double: false,
+            escaped: false,
+            in_comment: false,
+            prev: None,
+        }
+    }
+
+    /// Feed the next character; `true` when it is ACTIVE — unquoted,
+    /// unescaped, and outside comment text — so the scanner may count it
+    /// as a delimiter. Comment state ends at the newline itself, which is
+    /// fed through normally on the next call.
+    fn active(&mut self, ch: char) -> bool {
+        if self.in_comment {
+            if ch == '\n' {
+                self.in_comment = false;
+                self.prev = Some('\n');
+            }
+            return false;
+        }
+        if self.escaped {
+            self.escaped = false;
+            self.prev = Some(ch);
+            return false;
+        }
+        if self.single {
+            if ch == '\'' {
+                self.single = false;
+            }
+            self.prev = Some(ch);
+            return false;
+        }
+        if ch == '\\' {
+            self.escaped = true;
+            self.prev = Some(ch);
+            return false;
+        }
+        // parse.y:3937: `#` opens a comment only at word start.
+        if ch == '#'
+            && !self.double
+            && self
+                .prev
+                .map_or(true, |p| p == '\n' || p == ' ' || p == '\t')
+        {
+            self.in_comment = true;
+            self.prev = Some(ch);
+            return false;
+        }
+        match ch {
+            '\'' if !self.double => self.single = true,
+            '"' if !self.double => self.double = true,
+            '"' => self.double = false,
+            _ => {}
+        }
+        let active = !self.single && !self.double && ch != '\'' && ch != '"';
+        self.prev = Some(ch);
+        active
+    }
+}
+
 fn first_unquoted_char(source: &str, target: char) -> Option<usize> {
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
+    let mut scan = CommentAwareScan::new();
     for (index, ch) in source.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && !single {
-            escaped = true;
-            continue;
-        }
-        if ch == '\'' && !double {
-            single = !single;
-            continue;
-        }
-        if ch == '"' && !single {
-            double = !double;
-            continue;
-        }
-        if !single && !double && ch == target {
+        if scan.active(ch) && ch == target {
             return Some(index);
         }
     }
@@ -1092,34 +1153,15 @@ fn unquoted_delimiter_depth(source: &str, open: char) -> usize {
         '(' => ')',
         _ => return 0,
     };
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
+    let mut scan = CommentAwareScan::new();
     let mut depth = 0usize;
     for ch in source.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && !single {
-            escaped = true;
-            continue;
-        }
-        if ch == '\'' && !double {
-            single = !single;
-            continue;
-        }
-        if ch == '"' && !single {
-            double = !double;
-            continue;
-        }
-        if single || double {
-            continue;
-        }
-        match ch {
-            ch if ch == open => depth += 1,
-            ch if ch == close => depth = depth.saturating_sub(1),
-            _ => {}
+        if scan.active(ch) {
+            if ch == open {
+                depth += 1;
+            } else if ch == close {
+                depth = depth.saturating_sub(1);
+            }
         }
     }
     depth

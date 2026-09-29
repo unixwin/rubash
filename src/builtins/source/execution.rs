@@ -62,6 +62,23 @@ fn run_source_groups(
         // unterminated compound) needs run_source_with_line_offset's
         // unclosed-input diagnostics and prefix execution.
         if !index_complete_group(&exec_text, parse_posix) {
+            // The incomplete group's text is still the output of
+            // expand_group_aliases above — aliases already ran at stream
+            // level (parse.y:3249 alias_expand_token fires while reading,
+            // complete or not), so the same __RUBASH_ALIAS_STREAMED
+            // contract as the complete branch applies: executor-level word
+            // expansion must not fire a second time over pre-expanded text
+            // (`alias let='let --'` inside a sourced module's $( ... )
+            // became `let -- --' and killed modernish _IN/sig, rubash#282).
+            let old_streamed = executor
+                .shell_state
+                .env_vars
+                .get("__RUBASH_ALIAS_STREAMED")
+                .cloned();
+            executor
+                .shell_state
+                .env_vars
+                .insert("__RUBASH_ALIAS_STREAMED".to_string(), "1".to_string());
             let status = crate::script_driver::run_source_with_line_offset(
                 executor,
                 &exec_text,
@@ -74,6 +91,16 @@ fn run_source_groups(
                     Some(pre_alias_text.as_str())
                 },
             );
+            match old_streamed {
+                Some(value) => executor
+                    .shell_state
+                    .env_vars
+                    .insert("__RUBASH_ALIAS_STREAMED".to_string(), value),
+                None => executor
+                    .shell_state
+                    .env_vars
+                    .remove("__RUBASH_ALIAS_STREAMED"),
+            };
             ran_any = true;
             let parse_error = executor.take_parse_error();
             if parse_error {

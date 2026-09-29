@@ -122,38 +122,47 @@ Dedicated MIXED evaluation suites run by lane wt4/ecosuite (worktree base
 file runs. Artifacts: `target/issue-suites/results/ecosuite/`; pinned
 fixtures + per-case manifest: `tests/fixtures/ecosuite/`.
 
-## 1. modernish use test suite — BLOCKED AT INIT (rubash-caused)
+## 1. modernish use test suite — PAST CORE INIT (rubash#282 fixed); blocked at sys/cmd/harden parse
 
 - Source: https://github.com/modernish/modernish @ 63bdae02 (0.17.23-dev),
   run as `bin/modernish --test -q -e`.
 - GNU baseline: 389 tests — 384 succeeded, 5 skipped, 0 warnings, 0 xfail,
   0 unexpected failures. (gnu.out/gnu.err)
-- rubash: cannot complete initialisation; the .t test bodies are unreachable
-  until the blockers below are fixed.
-- Blockers, in order:
-  1. rubash-caused — rubash#218: unquoted parameter expansion in assignment
-     RHS collapses `\\` to `\` (fatal.sh FTL_NOFSPLIT builds its comparison
-     string via `t=${#},${1-U},...`; $6 `'\\fo\u\r'` loses its backslashes,
-     the case misses both accepted patterns, fatal.sh exits, the comsub
-     verification trap yields `fatalbug` instead of `$PPID`,
-     `_Msh_initExit "Fatal shell bug(s) detected"` -> exit 128).
-     Workaround for harvesting: `MSH_IGNORE_FATAL_BUGS=1`.
-  2. env-bound — goodsh.sh requires `$PPID` continuity across an exec'd
+- State (2026-09-28, wt12/modinit lane, WSL GNU Bash 5.3.0 script-file oracle):
+  plain `bin/modernish` init and `--use=_IN/sig` complete silently at GNU
+  parity (rc=0, empty stderr); the fatal.sh battery passes; `use safe`
+  works. The historical blockers are all closed: #218, #219 (long fixed),
+  and rubash#282 (the fatal.sh battery / module-load abort this lane fixed:
+  comment apostrophes corrupted quote state in the
+  `stdin_source_has_unclosed_function_body` scanners, the misjudged group
+  ran without the `__RUBASH_ALIAS_STREAMED` marker, and the re-spliced
+  `$( ... )` body applied `alias let='let --'` twice — minimal reproducer
+  and probe outputs under `target/issue-suites/results/issue282/`).
+- Remaining blockers for the 389-test harvest (`--test -q -e`):
+  1. env-bound — goodsh.sh requires `$PPID` continuity across an exec'd
      candidate shell; on Windows every native child reports PPID=1, so no
      candidate can ever match `$$` and modernish aborts with "Can't find any
      suitable POSIX-compliant shell!". This cannot pass on Windows with ANY
      engine (probed: `$(exec /d/Git/usr/bin/sh.exe -c 'echo $PPID')` -> 1).
-     Harvest workaround: patched copy `target/ecosuite/modernish-harvest`
-     accepting the first candidate (GNU on the same patched copy: still
-     389/384 green, so the patch is inert for the oracle).
-  3. rubash-caused — rubash#219: `{ case...esac; cmd # comment }` spurious
-     syntax error; `rubash -n bin/modernish` rejects the whole launcher
-     (rc=2) where GNU accepts. Even past blockers 1-2 the launcher refuses
-     to parse. This is the current hard stop for the 389-test harvest.
-- Verdict: suite NOT runnable under rubash today; 2 rubash-caused bugs filed
-  (#218, #219) with minimal reproducers + full reduction chain under
+     Harvest workaround (used by the LF fixture clone at
+     `target/modernish-lf`): accept `"$$"|1` in goodsh.sh's two case
+     patterns — inert for GNU (PPID==$$ there), 389/384 stays green.
+  2. rubash-caused — `sys/cmd/harden.mm: line 404: syntax error near
+     unexpected token '}'` (`rubash -n` rejects, GNU accepts): a nested
+     eval-string parse divergence, next layer after #282. Kills `use sys`
+     and therefore `--test` startup.
+  3. rubash-caused — `use var` dies at `var/mapr.mm: line 380: File name too
+     long` / "sys/cmd/mapr: failed to get ARG_MAX" (with stray
+     PROCSUBST/PROCREDIR output) — Windows path-length/ARG_MAX layer.
+- CRLF warning: the shared fixture `D:/repo/rubash/target/modernish-fixture`
+  has CRLF line endings (GNU also rejects it — not a rubash signal); the LF
+  clone `target/modernish-lf` (git -c core.autocrlf=false) is the runnable
+  one.
+- Verdict: core init + fatal.sh battery green at GNU parity; the 389-test
+  harvest is blocked by the two rubash-caused layers above (harden.mm parse,
+  mapr ARG_MAX). Older probe chains under
   `target/issue-suites/results/ecosuite/modernish/probes/` (p9, p37 and
-  p11a..p45 bisect artifacts).
+  p11a..p45 bisect artifacts) remain valid history.
 
 ## 2. mvdan/sh (shfmt) parser corpus — RUN COMPLETE: 559 snippets, 16 divergences
 
