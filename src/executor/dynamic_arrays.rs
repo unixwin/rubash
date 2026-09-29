@@ -79,12 +79,40 @@ impl Executor {
                     })
                     .unwrap_or_default(),
             ),
-            "SHELLOPTS" => Some(crate::builtins::set::shellopts_value(
-                &self.shell_state.env_vars,
-            )),
-            "BASHOPTS" => Some(crate::builtins::shopt::bashopts_value(
-                &self.shell_state.env_vars,
-            )),
+            // GNU has no per-read re-render for SHELLOPTS/BASHOPTS: they are
+            // ordinary (readonly) variables whose VALUES are rewritten at
+            // every option change (builtins/set.def set_option ->
+            // reset_option_vars rebinds SHELLOPTS; builtins/shopt.def
+            // toggle_shopts -> set_bashopts rebinds BASHOPTS), and every
+            // read — parameter expansion or find_variable via
+            // expr.c:1150 expr_streval — returns the stored value. Rubash's
+            // flip sites maintain the stored entry the same way
+            // (set_shell_option / sync_shell_option_flag rewrite
+            // SHELLOPTS after every __RUBASH_SETOPT_* write — those two are
+            // the only production writers of the option keys; shopt.rs's
+            // single SHOPT_STATE mutation site rewrites BASHOPTS at :383).
+            // Read the maintained entry; render only when it is absent
+            // (fresh unit-test maps without Executor::new's init binding).
+            // This keeps `(( x ))`/`$(( SHELLOPTS ... ))` from re-walking
+            // the whole option table on every arithmetic evaluation.
+            "SHELLOPTS" => Some(
+                self.shell_state
+                    .env_vars
+                    .get("SHELLOPTS")
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        crate::builtins::set::shellopts_value(&self.shell_state.env_vars)
+                    }),
+            ),
+            "BASHOPTS" => Some(
+                self.shell_state
+                    .env_vars
+                    .get("BASHOPTS")
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        crate::builtins::shopt::bashopts_value(&self.shell_state.env_vars)
+                    }),
+            ),
             "PIPESTATUS" => Some(
                 self.shell_state
                     .pipestatus

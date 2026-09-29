@@ -93,6 +93,21 @@ pub(in crate::executor) fn unmark_env_name(
     key: &str,
     name: &str,
 ) {
+    // GNU variables.c keeps attributes as flag bits on each SHELL_VAR
+    // (att_exported etc., variables.h:124-133), so clearing an attribute
+    // the variable does not have is a no-op bit test. The marker-list
+    // encoding could only express that as collect+retain+join+insert of
+    // an unchanged string — 60 such no-op rewrites per `local a=x b=y
+    // c=z` call (set_var_attrs walks all ten attribute lists). A name
+    // that is not currently marked leaves the stored string byte-identical,
+    // so the membership pre-check (same split comparison is_marked_var
+    // uses) short-circuits without allocating.
+    if !env_vars
+        .get(key)
+        .is_some_and(|value| value.split(DATA_DOLLAR).any(|marked| marked == name))
+    {
+        return;
+    }
     let mut names = marked_env_names(env_vars, key);
     names.retain(|current| current != name);
     env_vars.insert(key.to_string(), names.join(DATA_DOLLAR_STR));

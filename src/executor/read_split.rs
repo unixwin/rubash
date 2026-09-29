@@ -340,6 +340,16 @@ fn read_scalar_fields_internal(
 }
 
 pub(crate) fn mark_env_name(env_vars: &mut HashMap<String, String>, key: &str, name: &str) {
+    // Same no-op fast path as unmark_env_name: marking a name that is
+    // already marked rewrites the stored string with a byte-identical
+    // value, so the membership pre-check (identical split comparison)
+    // short-circuits the collect+join+insert.
+    if env_vars
+        .get(key)
+        .is_some_and(|value| value.split(DATA_DOLLAR).any(|marked| marked == name))
+    {
+        return;
+    }
     let mut names: Vec<String> = env_vars
         .get(key)
         .map(|value| {

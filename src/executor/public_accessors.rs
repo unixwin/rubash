@@ -1,5 +1,28 @@
 use super::*;
 
+/// Stamp a line-number env key without allocating when the value is
+/// unchanged. Byte-identical inserts are idempotent, so the equality gate
+/// is behavior-neutral; it exists because a loop body re-stamps the same
+/// line once per command (GNU's line_number is a C int — execute_cmd.c
+/// SET_LINE_NUMBER — and costs nothing to re-assign).
+fn stamp_env_usize(env_vars: &mut HashMap<String, String>, key: &str, line: usize) {
+    let mut buffer = [0u8; 20];
+    let mut value = line;
+    let mut position = buffer.len();
+    loop {
+        position -= 1;
+        buffer[position] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    let rendered = std::str::from_utf8(&buffer[position..]).unwrap_or("0");
+    if env_vars.get(key).map(String::as_str) != Some(rendered) {
+        env_vars.insert(key.to_string(), rendered.to_string());
+    }
+}
+
 impl Executor {
     pub fn last_exit_code(&self) -> i32 {
         self.exit_code
@@ -836,18 +859,29 @@ impl Executor {
             self.ambient_line.get().or(cmd.end_line).or(cmd.line)
         };
         if let Some(start_line) = start_line {
-            self.shell_state.env_vars.insert(
-                "__RUBASH_CMD_START_LINE".to_string(),
-                start_line.to_string(),
+            stamp_env_usize(
+                &mut self.shell_state.env_vars,
+                "__RUBASH_CMD_START_LINE",
+                start_line,
             );
         }
         if let Some(line) = line {
-            let line = line.to_string();
-            self.shell_state
-                .env_vars
-                .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
+            // GNU's line_number is a C int (execute_cmd.c SET_LINE_NUMBER
+            // sites) — restamping it per command costs nothing. The env
+            // encoding pays a HashMap insert per stamp, and every command
+            // is stamped twice (the reader loop stamps, then
+            // execute_command stamps again); a body command inside a loop
+            // re-stamps the SAME line thousands of times. Insert only when
+            // the rendered value differs from what is already stored —
+            // byte-identical inserts are idempotent, so skipping them
+            // changes nothing observable.
+            stamp_env_usize(
+                &mut self.shell_state.env_vars,
+                "__RUBASH_CURRENT_LINE",
+                line,
+            );
             if command_needs_process_line_env(cmd) {
-                set_process_env("__RUBASH_CURRENT_LINE", line);
+                set_process_env("__RUBASH_CURRENT_LINE", &line.to_string());
             }
         }
     }
@@ -890,18 +924,24 @@ impl Executor {
         // `a | b` text. bash_command_source_text is that renderer;
         // bash_command_text only knows simple commands.
         let command = bash_command_source_text(cmd);
-        self.shell_state
+        // Same equality gate as the line stamps: GNU keeps
+        // the_printed_command in a C global, so recording it is a pointer
+        // store; inserting a byte-identical value into both env keys for
+        // every repeated command in a loop is pure churn.
+        if self
+            .shell_state
             .env_vars
-            .insert("__RUBASH_LAST_COMMAND".to_string(), command.clone());
-        // GNU the_printed_command_except_trap is refreshed unconditionally
-        // for every executed command (execute_cmd.c compound heads), and
-        // variables.c:1558 get_bash_command reads it directly — there is no
-        // "only when the command text names BASH_COMMAND" gate. Indirect
-        // references like ${!name} resolve through the same dynamic var, so
-        // the command text is always recorded.
-        self.shell_state
-            .env_vars
-            .insert("__RUBASH_CURRENT_COMMAND".to_string(), command);
+            .get("__RUBASH_LAST_COMMAND")
+            .map(String::as_str)
+            != Some(command.as_str())
+        {
+            self.shell_state
+                .env_vars
+                .insert("__RUBASH_LAST_COMMAND".to_string(), command.clone());
+            self.shell_state
+                .env_vars
+                .insert("__RUBASH_CURRENT_COMMAND".to_string(), command);
+        }
     }
 
     pub(in crate::executor) fn set_pipestatus<I>(&mut self, statuses: I)

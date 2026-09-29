@@ -1392,3 +1392,177 @@ Windows-port work (command -p toolset pinning, cross-process kill
 mailbox, /var/tmp fixture) — shaving them is sub-ms against a 54 ms
 parent-side constant. No change landed; the honest floor owner is the
 parent spawn path and the debug image, not Executor startup.
+
+## perf11 round (2026-09-29, wt14/perf11 on 61069619): the per-command floor
+
+Owner target "性能必须对齐 GNU": attack the remaining PERF-BASELINE big
+rows item by item (per-command `:` floor, local3, `for ((...))` arith
+pair, configure -n, nvm, OMB). All wall numbers RELEASE build, median of
+7 (3 for configure-full), back-to-back alternating A/B against a pristine
+base binary built this session from 61069619 (same load); GNU anchors
+re-measured inside WSL this session (script files under `target/perf11/`,
+copied from the perf6 fixture). Scratch instrumentation (exec_profile
+phase extensions + a script_driver `perf11_scan` battery) fully removed
+before commit.
+
+### Full-suite panorama at round start (debug, scripts/run-perf-suite.sh)
+
+22-configure-full-n now COMPLETES at 15.0s (was TIMEOUT >120s before
+perf8/9; GNU 37ms → 406x) — the top row by ratio. 23-nvm-parse-n
+71.8x, 24-nvm-load 70.2x, 16-parse-flat8000 131.8x, 19 168.8x (parse
+canary), 04/05 53-85x, 15 61.8x. Spawn parity (08 1.5x, 09 0.9x)
+retained. Release-side gap list (owner table): cfg-full-n ~3.66s,
+nvm-n ~232ms, nvm-load ~454ms.
+
+### Decomposition (scratch timers; nested-inclusive sums, removed)
+
+p6-null `for ((i=0;i<20000;i++)); do :; done` (base 663ms release): the
+`:` command itself costs ~3.5 us (expand 31ms + matcmd 13ms + linecmd
+22ms per 20000) — **65% was the for-arithmetic pair: test 204ms + update
+272ms = 23.8 us/iter**, of which arith_dyn (the 9-entry dynamic-parameter
+HashMap built per evaluation) 182ms, the parse/eval core 247ms.
+
+p6-local3 `f() { local a=$1 b=$2 c=$3; }` (base 3543ms): per call the
+`local` command's execute_local was 72 us, of which the declare core only
+13.6 us — **the surrounding frame machinery 57 us**, and inside it the
+variable-attribute marker strings dominated: `is_marked_var` was called
+1,540,024 times and `set_marked_var` 1,200,000 times (60 marker writes
+per call) in 20000 iterations = 1701ms of the 3.5s wall (48%). The
+per-eval `std::env::var("RUBASH_DEBUG_ARITH")` consult cost ~3 us per
+arithmetic evaluation (Windows environ scan), i.e. ~45% of the whole
+eval; a second one (`RUBASH_DEBUG_ASSIGN`) sat inside the per-assignment
+loop.
+
+configure -n (release 3.66s, gather 2967ms): 95% of the gather is
+`text_scans.needs_more`'s comsub arm — **n_comsub 2812ms over only 3516
+candidate-line calls = 554,841,139 chars walked (158K per call)**. The
+parked `ComsubResidualState` parks at a `$(` whose
+`skip_parenthesized_unit_ex` failed, and every later candidate line
+re-derives from that park through the whole accumulated tail (the park is
+semantically load-bearing: a longer buffer may let the atomic skip close
+the unit and take a different trajectory than the char-by-char fallback,
+so the checkpoint MUST re-derive to keep per-prefix answers identical to
+the fresh scan). See leftovers — captain item.
+
+### Landed changes (6 files; zero-semantic-change gates below)
+
+1. **Marker-list no-op fast paths** (`env_helpers.rs unmark_env_name`,
+   `read_split.rs mark_env_name`). GNU keeps attributes as flag bits on
+   each SHELL_VAR (variables.h:124-133 att_exported etc.) — clearing an
+   absent attribute is a bit test. The `$`-joined marker-string encoding
+   expressed that as collect+retain+join+insert of an UNCHANGED string —
+   60 such no-op rewrites per `local a=x b=y c=z` call
+   (set_var_attrs walks all ten attribute lists), 1.2M per local3 run.
+   A name that is not currently marked leaves the stored string
+   byte-identical, so a zero-alloc membership pre-check (the identical
+   split comparison `is_marked_var` uses) short-circuits both directions.
+2. **SHELLOPTS/BASHOPTS read the maintained value**
+   (`dynamic_arrays.rs dynamic_parameter_value`). GNU never re-renders on
+   read: both are ordinary (readonly) variables whose VALUES are rebound
+   at every option change (builtins/set.def set_option ->
+   reset_option_vars for SHELLOPTS; builtins/shopt.def toggle_shopts ->
+   set_bashopts for BASHOPTS), and every reader — parameter expansion or
+   find_variable via expr.c:1150 expr_streval — returns the stored value.
+   Rubash's flip sites maintain the stored entries the same way
+   (set_shell_option / sync_shell_option_flag rewrite SHELLOPTS after
+   every `__RUBASH_SETOPT_*` write — those two are the only production
+   writers, verified by grep; shopt.rs's single SHOPT_STATE mutation site
+   rewrites BASHOPTS). The read now takes the stored entry and renders
+   only when absent (unit-test maps without Executor::new init). This
+   removes two whole-option-table renders per arithmetic evaluation (the
+   arith snapshot) — 63% of arith_dyn.
+3. **Debug env knobs resolved once** (`arithmetic/mod.rs
+   RUBASH_DEBUG_ARITH`, `temporary_assignments.rs RUBASH_DEBUG_ASSIGN`;
+   the RUBASH_EXEC_PROFILE ensure_init precedent). GNU's expr.c debugging
+   is compiled out entirely (EXPRDEBUG); a per-evaluation environ scan
+   cost more than the parse itself on Windows (~3 us of ~6.6 us per
+   evaluation). Note: the knob must now be present at process start.
+4. **`eval_mutable_arith_result` no longer `into_owned()`s the normalized
+   Cow** (`arithmetic/mod.rs`): a backslash-free expression (the common
+   case — normalize returns Borrowed after a memchr) paid a full-string
+   clone per evaluation; the parser now borrows the Cow directly (the
+   error-record site materializes only on the error path).
+5. **Line stamps insert only when changed** (`public_accessors.rs
+   stamp_env_usize` + equality gate in set_current_command; re-lands the
+   wt8/perf4 fix that was lost from master). GNU's line_number is a C int
+   (execute_cmd.c SET_LINE_NUMBER) and the_printed_command a global —
+   restamping per command is free there. Here every command stamped
+   __RUBASH_CURRENT_LINE/__RUBASH_CMD_START_LINE twice (reader loop +
+   execute_command) plus both command-text keys — a loop body re-inserts
+   byte-identical values thousands of times; the equality gate is
+   idempotence-preserving.
+
+### Numbers (release, A/B vs pristine 61069619, same session/load)
+
+| probe (20000 iters) | base ms | lane ms | delta | GNU ms | ratio |
+|---|---:|---:|---:|---:|---:|
+| p6-null `:`         | 663.1 | 393.7 | **-40.6%** | 40.6 | 16.3x -> **9.7x** |
+| p6-local3           | 3542.5 | 2287.5 | **-35.4%** | 112.4 | 31.5x -> 20.3x |
+| p6-arr `a[1]=$i`    | 1093.0 | 668.9 | **-38.8%** | 39.7 (perf6 day) | 27.5x -> 16.8x |
+| 05-arith-x5000 (debug suite) | 1021 | 590 | -42% | 12 | 85.1x -> 49.2x |
+| 06-strconcat (debug) | 1679 | 1446 | -14% | 23 | 73.0x -> 62.9x |
+| 04-true-loop (debug) | 691 | 617 | -11% | 13 | 53.2x -> 47.5x |
+| 15-expansion (debug) | 3522 | 3275 | -7% | 57 | 61.8x -> 57.5x |
+| nvm-load (release)  | 454.0 | 442.6 | -2.5% | 35-39 | ~12-13x |
+| nvm -n / configure -n | flat | flat | parse-bound | | |
+
+The owner's per-line <10x target is MET for the null-command floor row
+(9.7x release); local3 lands at 20.3x (see leftovers — the remaining cost
+is the marker-string attribute model itself). OMB (real HOME, agnoster):
+727 -> 693ms (-4.7%), gates below.
+
+### Semantics gate (zero-change evidence)
+
+- OMB live load, base vs lane binary: PS1 md5, `declare -p
+  _omb_spectrum_fg`, `declare -F | md5sum`, `alias | md5sum` — 4/4
+  byte-identical.
+- GNU-diff matrices (script files, stdout+stderr+rc separately captured,
+  `target/perf11/matrix{1,2,3}.sh`): matrix1 (SHELLOPTS/BASHOPTS after
+  set -o/shopt flips in both directions, assignment/unset readonly
+  rejections, $SHELLOPTS arithmetic-error text, `local SHELLOPTS`
+  rejection, function-frame flip visibility) and matrix2 (local frames:
+  -i attribute math, unset-after-return, outer-value preservation,
+  nested frames, readonly local blocking, declare -p rendering) are
+  byte-identical modulo each shell's own $0 prefix. matrix3 (arith
+  dynamic vars BASHPID/BASH_SUBSHELL/FUNCNAME, loop + function LINENO,
+  unbound-variable arith diagnostics, precedence/shift/mask/ternary
+  math) fully identical. ONE divergence in matrix1 — GNU discards the
+  whole `||` list after an arithmetic word-expansion error while rubash
+  runs the fallback branch — is PRE-EXISTING (pristine 61069619 base
+  binary reproduces it byte-for-byte; arith-error containment family,
+  cf. rubash#306).
+- cargo test --lib 537/537; --test regression 27/27; `RUSTFLAGS='-D
+  warnings' cargo check --tests` and `--release --tests` clean; cargo
+  fmt --check clean; src/lexer/continuation.rs untouched.
+
+### Leftovers (measured, with owners)
+
+1. **configure -n's comsub-park quadratic — CAPTAIN (continuation.rs)**
+   2812ms of the 3.66s is the parked `ComsubResidualState` re-deriving
+   from a stuck `$(` park on every candidate line (3516 calls, 554M
+   chars, 158K/call avg). The park placement is semantically load-bearing
+   (atomic-skip vs char-by-char trajectories can diverge), so the fix
+   belongs to the #292 park/resume family: either prove the trajectories
+   agree on the end-state `is_open()` answer (then commit incrementally
+   and park only on genuine `esac)`-lookahead ambiguity), or fix the
+   underlying `skip_parenthesized_unit_ex` divergences (the perf4-era
+   as_fn_mkdir_p false-positive class) so parks stop sticking for
+   hundreds of KB. Without this, configure -n cannot move; with it, the
+   measured remainder is ~700ms (gather-feeder 100ms + parse 430ms +
+   tokenize 90ms + prescan 26ms) ≈ 15-19x.
+2. **Marker-string attribute model → attributes on the variable**
+   (deep-subsystem ticket, next round): local3's remaining 114us/op is
+   77 per-iteration `is_marked_var` checks (HashMap get + split of the
+   marker string, ~517ms per run even after the no-op-write fix) plus
+   the l_frame snapshot copies (21us). GNU stores att_* bits on the
+   SHELL_VAR; the refactor keeps the marker strings only as the
+   cross-process export encoding.
+3. **nvm -n 232ms (12-14x) / nvm-load 443ms**: parse-bound (tokenize 90ms
+   + parse 108ms on the batch path) — the perf7-characterized
+   distributed parse-loop costs; no single >5% site.
+4. **OMB chain phase**: 796ms (nested) of the load's profile after this
+   round — the per-command reader-loop chain (dispatch-kind matchers,
+   trap consults); linecmd inside it is now cheap. Next decomposition
+   pass should sub-time the matcher chain.
+5. Startup floor (probe 01, 15.6x): perf10's decomposition stands —
+   ~80% MSYS-parent spawn constant, in-process floor ~14ms.

@@ -2229,7 +2229,6 @@ fn eval_mutable_arith_result(
     if normalized.trim().is_empty() {
         return (Some(0), None);
     }
-    let normalized = normalized.into_owned();
     let mut parser = ConditionalArithParser {
         input: normalized.as_bytes(),
         pos: 0,
@@ -2245,7 +2244,13 @@ fn eval_mutable_arith_result(
         last_tok_operand: false,
         noeval: 0,
     };
-    if std::env::var("RUBASH_DEBUG_ARITH").is_ok() {
+    // Debug knob resolved once (RUBASH_EXEC_PROFILE's own ensure_init
+    // precedent): GNU's expr.c debugging is compiled out entirely
+    // (EXPRDEBUG); a per-evaluation environment-variable scan cost more
+    // than the parse itself on Windows (~3 us of the ~6.6 us a
+    // `for ((...))` test/update pair spent in this function).
+    static DEBUG_ARITH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *DEBUG_ARITH.get_or_init(|| std::env::var("RUBASH_DEBUG_ARITH").is_ok()) {
         eprintln!("ARITH-INPUT: {normalized:?}");
     }
     let value = parser.parse_comma();
@@ -2263,7 +2268,7 @@ fn eval_mutable_arith_result(
             // non-variable" with lasttp at the `=`.
             let tok = normalized.find('=').unwrap_or(0);
             parser.error = Some(ArithEvalError {
-                expr: normalized.clone(),
+                expr: normalized.clone().into_owned(),
                 msg: "attempted assignment to non-variable".to_string(),
                 tok_start: tok,
                 display_end: normalized.len(),

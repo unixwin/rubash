@@ -16,7 +16,12 @@ impl Executor {
                 .then(|| raw_rhs.and_then(|raws| raws.get(index)))
                 .flatten()
                 .map(String::as_str);
-            if std::env::var("RUBASH_DEBUG_ASSIGN").is_ok() {
+            // Debug knob resolved once (RUBASH_EXEC_PROFILE's ensure_init
+            // precedent; GNU has no runtime debug gate at all here — this
+            // loop runs per assignment word, and a per-word environment
+            // scan dominated the assignment cost on Windows).
+            static DEBUG_ASSIGN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *DEBUG_ASSIGN.get_or_init(|| std::env::var("RUBASH_DEBUG_ASSIGN").is_ok()) {
                 eprintln!("ASSIGN {name}={value:?}");
             }
             let expanded_value = self.expand_assignment_value_with_raw(name, value, raw);
