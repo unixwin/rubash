@@ -495,3 +495,104 @@ all 83 themes now source the full lib chain, run PROMPT_COMMAND and build a PS1.
 - Probes + GNU comparisons: `target/issue-suites/results/ecosweep/probes/` (p1–p15 issue
   isolation ladders, b01–b18 ecosystem probes, t1–t3 rcfile probes, diag* theme diagnostics).
 - Corpora (LF): `target/ecosweep-corpus/{oh-my-bash-lf,liquidprompt,bash-sensible,complete-alias,dotfiles-mathiasbynens,dotfiles-thoughtbot,bash-completion,direnv}`.
+
+# ===== SECTION: ecosweep2 lane (wt13/ecosweep2, 2026-09-28) — APPENDED, DO NOT REORDER =====
+
+Fine-grained SECOND-PASS over already-covered corpora + new-corpus mining.
+Worktree base 116b12aa (release build from it); oracle WSL GNU Bash 5.3.0
+(/usr/local/bin/bash), script-file probes only. Sandbox:
+target/issue-suites/results/ecosweep2/; corpora fetched LF via gh-api tarballs under
+target/ecosweep2-corpus/ (pins in ecosweep2-corpus/SOURCES.txt; github.com web
+fetch was down - api.github.com tarballs worked).
+
+Dedup check BEFORE running: sections 1-3 + ecosweep section read in full. Not re-run:
+GNU 83, git-completion, oh-my-bash item matrices, modernish, mvdan, bats,
+bash-sensible/complete-alias/dotfiles/direnv-hook/starship/fzf (all ecosweep-covered).
+Layer additions chosen per mission A/B lists only.
+
+## Method (and pitfalls recorded for future lanes)
+
+- Comparison = same script file on both shells; all output through files
+  (>file 2>file), never terminal-captured - the wsl.exe stdout relay drops/garbles
+  bytes intermittently and produced misleading interleavings twice this lane.
+- while-read loops that invoke wsl inside MUST guard stdin (</dev/null on the wsl
+  call) or wsl.exe consumes the loop's stdin (ate our matrix file on run 1).
+- Path depth: harnesses under results/ecosweep2/<x>/ need ../../../../ to reach
+  target/ecosweep2-corpus/ (bit us three times).
+- GNU-side per-item interactive loops (bash -i --rcfile for bash-it) hang >25 s/item
+  in this WSL instance (oracle-side infra; not counted as any shell's bug) - the
+  bash-it GNU comparison was sampled (15 items, non-interactive) instead.
+- rubash pwd inside command substitution renders D:/-style paths; harmless for
+  sourcing but shows up in diffs (path-domain normalization applied where mattered).
+
+## A. second-pass results
+
+| # | Corpus (prior coverage) | New layer this lane | Verdict | Issues |
+| --- | --- | --- | --- | --- |
+| A1 | bash-completion 2.18 (ecosys1/3: load + 11 driven) | driven interaction matrix: 72 queries over 58 core completions (COMP_WORDS/CWORD/LINE/POINT + complete -p to -F dispatch per ecosys3 probe-bcomp method; harness bc/) | 39/72 byte-parity; 31 DIFF all environment-bound (target binary absent/version drift: curl rsync free etc, awk dialect, watch OSTYPE linux/darwin gate, ip/man read real binaries+config). Engine reds found during the run: false-nounset on the ${var#pat} family kills the whole -n : class under set -u; .gitignore gets sourced at base load (GLOBIGNORE-empty dotglob) | #311 (+widen comment), #313 |
+| A2 | bash-it (ecosys1-3: full load only, #161) | per-component: 50 aliases + 90 completions + 81 plugins enabled one at a time and loaded via real bash_it.sh (interactive rcfile, timeout 20 each) | rubash 221/221 rc=0 loads (ecosys-era full-load break is history). GNU sampled 15 (interactive GNU loop unusable, see pitfalls): 12/15 differ by exactly ONE auto-generated function (_bash-it-component-completion-callback-on-init-aliases, FUNCS 161 vs 162); apt item = env (Git Bash reproduces); 2 identical | #316 |
+| A3 | liquidprompt (ecosweep: load+render only) | its own shunit2 suite (29 test_*.sh files, shunit2 v2.1.8 vendored into tests/) | GNU 28/29 (test_utils fails on drvfs-cwd path-shortening - oracle-side env). rubash 20/29: 3 files die to #311-family nounset (liquidprompt:1736 ${display_path//[!\/]} etc), 2 files unparseable (nested multi-line funcdef in loop-in-function), test_array 2/3 asserts (guard family); test_git/test_terminal_device env (symlinks / no tty) | #314, #315, #311-family |
+| A4 | ble.sh (corpus2: -n parity only, #215 closed) | full source load (--noattach + bleopt_connect_tty TTY-gate bypass; real-PTY GNU run via script -qec) | GNU under real PTY: rc=0, 1902 functions. rubash without PTY passes the TTY gate (33 fns) then aborts at ble.sh:598 noediting gate - interactive startup keeps emacs OFF and $- lacks H without a tty; -i -c $- diverges the other way (hBc vs himBH). PTY-less frameworks (ble.sh, readline replacements) blocked at this layer | #312 |
+| A5 | nvm (ecosuite section 3: 12-file slice, #223 closed) | full fast-suite: all 36 plain test/fast files (cwd=test/fast - the tests source ../../nvm.sh; index-based WSL runner for spacey names) | GNU 36/36. rubash 21/36: 11 also fail under Git Bash (env: node.exe naming, symlinks, hashing, MANPATH); 4 fail under rubash only (uninstall-inferred, use-system, .nvmrc-system, nvm-exec) - trace shows nested-comsub stdout leaking into the outer capture (inner substitution returns empty); standalone reductions PASS, mechanism depends on nvm.sh context | #289 (evidence comment), #223 (status comment) |
+
+## B. new corpora
+
+| Corpus | Source / pin | Verdict | Issues |
+| --- | --- | --- | --- |
+| Homebrew/install install.sh | @04dfcac, 1238 L | 4/4 driven paths byte-parity (--help, -h, -q --help, unknown-flag) - re-verifies ecosys coverage at HEAD | none |
+| Homebrew/install uninstall.sh | @04dfcac, 562 L (never run before) | aborts at platform gate "Unsupported system type MINGW64_NT-10.0-19044" + hard /usr/bin/sudo - by-design env (MSYS identity per #154 policy); GNU proceeds and prints usage | none (env) |
+| Homebrew unattended.sh | - | does not exist in Homebrew/install (only install.sh/uninstall.sh + ruby tests); premise recorded as invalid | - |
+| pyenv rehash/shell/exec paths | @699e27f (section 1 covered via 127-cascade; blockers #154/#171 now CLOSED) | pyenv --version / versions / rehash (shim created) / prefix / shell-integration-error at byte parity; rbenv rehash + versions parity. pyenv init - output diverges via shell-name detection (/proc/$PPID/cmdline gives "rubash.exe"): PYENV_SHELL=rubash.exe, per-shell completion file not sourced, degraded case pattern - faithful process-name detection, product-identity class | none (#154 class) |
+| sdkman sdkman-init.sh chain | @66767df, init + 21 modules | init chain sources rc=0 both sides with byte-parity stdout; sdk function needs a fuller installed layout on BOTH sides (symmetric 127s); only stderr delta is winuxsh find path-prefix wording | none |
+| docker/cli completion | @7fc2dff, contrib/completion/bash/docker 5598 L | -n parity; full source rc=0; complete -F _docker registration parity; 6 driven queries 0/0 parity - candidate generation needs the docker binary (Git-bundled docker exists Windows-side, none in WSL: asymmetric env, candidate layer not measured) | none |
+| kubectl bash completion | - | skip re-confirmed: no kubectl in WSL or Windows (probed), no static upstream copy (section 3 precedent stands); synthesizing from cobra's template rejected as unfaithful | - |
+| ohmyzsh tools/*.sh | @83a0ec7 (tools/ only; repo is zsh-first) | bash-compatible 4 files (install/uninstall/theme_chooser/require_tool) exec-abort parity 4/4 (rc + stdout byte-identical); changelog/check_for_upgrade/upgrade are zsh syntax, rejected by BOTH shells at -n (rc=2/2) | none |
+| concourse task-script family | concourse/git-resource @d915957 - NB: repo restructured, opt/resource/ no longer exists; assets/*.sh (10 files incl. check_branches/tags, common) | 10/10 -n parity; exec drive of check scripts rc-parity with line-for-line identical stderr (jq: command not found on BOTH sides - symmetric env) | none |
+
+## Issue ledger from this lane
+
+| issue | found via | class |
+| --- | --- | --- |
+| rubash#311 | bash-completion _comp_initialize -n : / liquidprompt 3 suite files | rubash-caused: false nounset on expansions with patterns (${var#[[:space:]]}, ${var//[!\/]}, nested "${arr[i]}" - 8-shape matrix in issue comment) |
+| rubash#312 | ble.sh noediting gate / interactive defaults matrix | rubash-caused: no-tty -i keeps emacs off, $- missing H (--rcfile/-s), -i -c $- = himBH vs GNU hBc |
+| rubash#313 | bash-completion compat-dir scan sourcing .gitignore | rubash-caused: GLOBIGNORE set-but-empty wrongly enables implicit dotglob (pathexp.c:507 setup_glob_ignore two-branch semantics) |
+| rubash#314 | liquidprompt test_disk/test_ram rc=2 | rubash-caused: multi-line funcdef in loop-in-function fails to parse (6-line repro) |
+| rubash#315 | liquidprompt test_array 2/3 | rubash-caused: ${a[2]+x} false-SET inside ${a[@]+...}; empty quoted element dropped in unquoted slice assignment |
+| rubash#316 | bash-it sample FUNCS 161 vs 162 | rubash-caused: auto-generated _bash-it-component-completion-callback-on-init-aliases missing (mechanism not isolated - marked unverified in issue) |
+| comments | #289 (nvm nested-comsub leak evidence), #223 (residual status post-close), #311 (8-shape widening) | - |
+
+## Environment-bound findings (no rubash issue)
+
+1. bash-completion 31 DIFF rows: missing/version-drifting target binaries on Windows,
+   winuxsh awk dialect warnings, watch's OSTYPE linux/darwin gate (MINGW64 identity
+   is the #154 policy decision), ip/man needing real binaries + /usr config.
+2. nvm 11/15 diverged files fail identically under Git Bash 5.3.15 (node.exe
+   platform detection in nvm.sh v0.40.8, symlink/hash/MANPATH Windows semantics).
+3. Homebrew uninstall.sh platform gate + /usr/bin/sudo; pyenv init - shell-name
+   detection ("rubash.exe" - faithful /proc/$PPID/cmdline reading); winuxsh find
+   error-prefix wording; docker-binary asymmetry; concourse jq absence (both sides);
+   liquidprompt test_git (symlink fixtures) / test_terminal_device (no ttys) /
+   test_utils (drvfs cwd, fails on GNU too).
+4. Oracle-side infra: GNU bash -i --rcfile for bash-it hangs >25 s/item in this WSL
+   instance (full GNU interactive matrix impossible; sampled).
+
+## Positive parity results worth keeping
+
+- bash-it per-component 221/221 clean loads (first time measured item-by-item).
+- bash-completion driven matrix: 39/72 queries byte-identical including ssh-keygen
+  (59 candidates), tar, gzip, python, gpg (433+), find, lsof, wget classes.
+- Homebrew install.sh still byte-clean at HEAD; docker completion (largest static
+  completion file, 5598 L) loads + registers cleanly.
+- pyenv/rbenv rehash + version management at parity (the old 127-cascade family is
+  dead at HEAD).
+- sdkman init chain, ohmyzsh bash tools, concourse script family: all load/parse
+  parity.
+
+## Artifacts
+
+- Harnesses + verdicts: bc/ (matrix.tsv, drive.sh, run-matrix.sh, verdict.txt,
+  rows/), bit/ (run-item.sh, run-rb.sh, sample-*, fnlist-*), lp/ (run-lp*.sh),
+  nvm/ (run-*2.sh, index.txt, f26-trace.err), ble/, brew/, pyenv/, sdkman/, docker/,
+  omz/, gitres/.
+- Issue-isolation probes: p-*.sh + pv-*.sh ladders with {rb,gnu}* outputs.
+- Corpora pins: target/ecosweep2-corpus/SOURCES.txt.
