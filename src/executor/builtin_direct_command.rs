@@ -200,6 +200,11 @@ impl Executor {
                 Ok(())
             }
             "mapfile" | "readarray" => {
+                // Redirect preflight like the `let` arm above (GNU
+                // execute_builtin applies redirections before the builtin;
+                // rubash#324: `< missing` must report and return 1 with
+                // the array untouched, before option validation).
+                self.apply_no_output_builtin_redirects(&builtin_cmd)?;
                 self.exit_code = self.execute_mapfile(&builtin_cmd);
                 Ok(())
             }

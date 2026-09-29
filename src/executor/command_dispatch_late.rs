@@ -106,6 +106,13 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word) {
                     self.execute_external(cmd)
                 } else {
+                    // GNU execute_builtin (execute_cmd.c:4787+): redirections
+                    // are applied BEFORE the builtin function runs — a
+                    // redirect-open failure reports `line N: file: No such
+                    // file or directory' and returns 1 without executing
+                    // mapfile, so the array is left untouched and option/
+                    // identifier validation never happens (rubash#324).
+                    self.apply_no_output_builtin_redirects(cmd)?;
                     self.exit_code = self.execute_mapfile(cmd);
                     Ok(())
                 }

@@ -197,6 +197,10 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, &cmd.words[0]) {
                     return self.execute_external(cmd);
                 }
+                // Redirect preflight (GNU execute_builtin applies the
+                // redirections before mapfile runs; rubash#324: `< missing`
+                // reports and returns 1 with the array untouched).
+                self.apply_no_output_builtin_redirects(cmd)?;
                 self.exit_code = self.execute_mapfile(cmd);
                 Ok(())
             }
