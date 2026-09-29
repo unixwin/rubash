@@ -17,7 +17,7 @@ use crate::executor::{ExecuteError, Executor};
 use crate::history::SessionHistory;
 use crate::history_expand::{HistChars, HistCtx};
 use crate::lexer::{
-    expand_aliases_in_source, tokenize, tokenize_with_initial_posix, AliasLookup, TokenKind,
+    expand_aliases_in_source, tokenize, tokenize_with_initial_posix, AliasLookup, Token, TokenKind,
 };
 use crate::parser::CommandNode;
 
@@ -128,7 +128,10 @@ pub fn run_script_with_history_in(
         // GroupScanFeeder advances the token-level completeness state per
         // appended line instead. The alias-live arm keeps the exact fresh
         // whole-pending scan (expansion may rewrite any part of the text).
-        let Some((pending, start_line, group)) =
+        // The returned feeder tokens are unused here: this driver's exec
+        // text re-joins the group's line texts (and history expansion may
+        // rewrite them), so run_history_group's parse keeps its own scan.
+        let Some((pending, start_line, group, _feeder_tokens)) =
             read_next_source_group(executor, &raw_lines, &mut index)
         else {
             break;
@@ -158,9 +161,10 @@ pub fn run_script_with_history_in(
 /// syntactically complete command group out of `raw_lines` using the same
 /// completeness test as run_script_with_history_in — heredoc bodies,
 /// procsub paren depth, and the alias-expanded pending text all decide the
-/// boundary. Returns the group's raw text, its 1-based starting line, and
-/// the per-physical-line `(text, is_heredoc_body)` pairs the history
-/// driver records per group.
+/// boundary. Returns the group's raw text, its 1-based starting line, the
+/// per-physical-line `(text, is_heredoc_body)` pairs the history driver
+/// records per group, and — in the non-alias arm — the feeder's committed
+/// tokens for the group text (see the perf10 note below).
 ///
 /// rubash#281 companion: while the alias table cannot influence the text
 /// (expansion disabled or table empty — the expanded pending IS the raw
@@ -171,11 +175,43 @@ pub fn run_script_with_history_in(
 /// alias table the exact fresh scan is kept: expansion may rewrite any
 /// part of the pending text, so the feeder's append-only checkpoint has no
 /// valid prefix to resume from.
+///
+/// perf10 token reuse: `tokenize_with_heredocs` IS a fresh
+/// `GroupScanFeeder` plus one `push_line` per physical line plus
+/// `finish()` — the gather's feeder runs the identical code on the
+/// identical line pieces (the group breaks only at a committed state, so
+/// every batch piece within the group's bytes is one of this feeder's
+/// pushes), with the identical initial posix mode (nothing executes
+/// between the gather's mode capture and the caller's parse, so mid-group
+/// `set -o posix` flips replay at the same logical lines in both). GNU
+/// anchor: parse.y:3557 read_token streams the input once and never
+/// re-tokenizes consumed text — the caller's fresh whole-group re-lex was
+/// this port's substitute for that model. The committed token stream is
+/// therefore returned for the caller to reuse instead of re-lexing, under
+/// exactly the conditions that make it byte-identical to the fresh
+/// re-lex:
+///   - the non-alias arm only (`expand_group_aliases` is the identity
+///     there, so the caller's exec text == pending; with live aliases the
+///     caller keeps its fresh re-lex of the possibly rewritten text —
+///     parse.y:3249 alias_expand_token fires per token while READING);
+///   - the loop broke at a COMPLETE group (an EOF-exhausted incomplete
+///     group takes run_source_with_line_offset's unclosed-diagnostics
+///     re-lex);
+///   - the feeder performed no EFFECTIVE extglob toggle
+///     (`extglob_toggled`): the fresh re-lex replays shopt flips starting
+///     from the group-END global gate, so on a flipping group its
+///     pre-flip lines see a different gate than the streaming feed did —
+///     refusing reuse preserves today's re-lex behavior byte for byte
+///     (parse.y:5466 gates pattern chars per token; tokens snapshot the
+///     gate they were lexed under, `Token::extglob_gate`).
+/// The trailing line-break separator the feeder emits per committed
+/// logical line is left in place; the caller pops it with the same rule
+/// `tokenize_comsub_body_with_origin` applies to the fresh stream.
 pub(crate) fn read_next_source_group(
     executor: &Executor,
     raw_lines: &[&str],
     index: &mut usize,
-) -> Option<(String, usize, Vec<(String, bool)>)> {
+) -> Option<(String, usize, Vec<(String, bool)>, Option<Vec<Token>>)> {
     if *index >= raw_lines.len() {
         return None;
     }
@@ -194,6 +230,7 @@ pub(crate) fn read_next_source_group(
     } else {
         Some(crate::lexer::GroupScanFeeder::new(posix))
     };
+    let mut broke_complete = false;
     while *index < raw_lines.len() {
         let raw = raw_lines[*index];
         let text = raw.trim_end_matches('\n');
@@ -242,17 +279,23 @@ pub(crate) fn read_next_source_group(
                 let needs_more =
                     scan.token_level_needs_more() || stdin_source_text_needs_more(&pending, posix);
                 if !needs_more {
+                    broke_complete = true;
                     break;
                 }
                 continue;
             }
             let expanded_pending = expand_group_aliases(executor, &pending);
             if !stdin_source_needs_more_posix(&expanded_pending, posix) {
+                broke_complete = true;
                 break;
             }
         }
     }
-    Some((pending, start_line, group))
+    let feeder_tokens = match scan {
+        Some(mut scan) if broke_complete && !scan.extglob_toggled() => Some(scan.finish()),
+        _ => None,
+    };
+    Some((pending, start_line, group, feeder_tokens))
 }
 
 /// Process one syntactically complete group: expand (when history expansion
@@ -2493,5 +2536,145 @@ mod issue302_tests {
             "function f()\n{ :; }\n",
             false
         ));
+    }
+}
+
+/// perf10 token-reuse differential: the source driver's gather
+/// (read_next_source_group) may hand its committed tokens to the group parse
+/// in place of a fresh whole-text re-lex, under the three certified
+/// conditions (non-alias arm / complete break / no effective extglob
+/// toggle — see read_next_source_group's doc). These tests drive the real
+/// gather over corpus texts and assert, for every group where reuse was
+/// certified, that the reused stream (after the caller's
+/// tokenize_comsub_body_with_origin trailing-separator pop) is
+/// byte-identical — every Token field — to a fresh re-lex of the same
+/// group bytes, with the same gather-then-parse interleaving production
+/// uses (so the extglob global's timeline matches too).
+#[cfg(test)]
+mod perf10_token_reuse_tests {
+    use super::*;
+
+    fn assert_reuse_matches_fresh(text: &str) -> usize {
+        crate::lexer::set_parse_extended_glob(false);
+        let mut executor = Executor::new();
+        executor.shell_state.aliases.clear();
+        let raw_lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let mut index = 0usize;
+        let mut reused = 0usize;
+        while let Some((pending, _start_line, _group, feeder_tokens)) =
+            read_next_source_group(&executor, &raw_lines, &mut index)
+        {
+            let Some(mut tokens) = feeder_tokens else {
+                continue;
+            };
+            if tokens
+                .last()
+                .is_some_and(|token| token.kind == TokenKind::Semicolon)
+            {
+                tokens.pop();
+            }
+            let fresh = tokenize_with_initial_posix(&pending, false);
+            let head = &pending[..pending.len().min(160)];
+            assert_eq!(
+                format!("{tokens:?}"),
+                format!("{fresh:?}"),
+                "reused vs fresh token streams differ for group starting {head:?}"
+            );
+            reused += 1;
+        }
+        assert!(
+            reused > 0,
+            "no group exercised token reuse for text starting {:?}",
+            &text[..text.len().min(80)]
+        );
+        reused
+    }
+
+    #[test]
+    fn reuse_matches_fresh_plain_and_function_groups() {
+        assert_reuse_matches_fresh("echo hi\necho there\n");
+        assert_reuse_matches_fresh("nvm_install() {\n  echo a\n  echo b\n}\necho done\n");
+        assert_reuse_matches_fresh("{\n  echo one\n  echo two\n}\nafter\n");
+    }
+
+    #[test]
+    fn reuse_matches_fresh_brace_group_with_noise() {
+        // `}` bytes inside strings, comments, and case patterns while the
+        // outer brace group stays open (the nvm.sh shape).
+        assert_reuse_matches_fresh(
+            "{\n  x='str with } inside'\n  # comment with } brace\n  case $x in\n    a) echo A ;;\n    *) echo B ;;\n  esac\n}\n",
+        );
+    }
+
+    #[test]
+    fn reuse_matches_fresh_heredocs() {
+        assert_reuse_matches_fresh("cat <<EOF\nbody line 1\nbody } line\nEOF\necho after\n");
+        assert_reuse_matches_fresh("cat <<'EOF'\nquoted $body }\nEOF\necho after\n");
+        assert_reuse_matches_fresh("cat <<-EOF\n\tindented body\n\tEOF\necho after\n");
+        assert_reuse_matches_fresh("cat <<EOF && cat <<EOF2\nbody1\nEOF\nbody2\nEOF2\n");
+    }
+
+    #[test]
+    fn reuse_matches_fresh_continuations_and_connectors() {
+        assert_reuse_matches_fresh("echo one \\n  two \\n  three\necho next\n");
+        assert_reuse_matches_fresh("echo one &&\n  echo two ||\n  echo three\n");
+        assert_reuse_matches_fresh("a=b \\n c=d \\n echo $a$c\n");
+    }
+
+    #[test]
+    fn reuse_matches_fresh_comsub_and_param_spans() {
+        assert_reuse_matches_fresh("x=$(echo sub\n  continued)\necho $x\n");
+        assert_reuse_matches_fresh("echo ${var:-\n  default}\n");
+        assert_reuse_matches_fresh("arr=(\n  one\n  two\n)\necho ${arr[1]}\n");
+    }
+
+    #[test]
+    fn reuse_matches_fresh_crlf_and_blank_lines() {
+        assert_reuse_matches_fresh("echo a\r\necho b\r\n\r\necho c\n");
+        assert_reuse_matches_fresh("echo a\n\n\necho b\n");
+        assert_reuse_matches_fresh("echo tail-no-newline");
+    }
+
+    #[test]
+    fn reuse_matches_fresh_posix_flip_lines_inside_group() {
+        // `set -o posix` mid-file flips the feeder's internal parse mode per
+        // logical line; both the streaming feed and a fresh re-lex replay
+        // the same flip at the same line, so reuse stays equivalent. (The
+        // EXECUTOR mode only changes at exec time, group by group.)
+        assert_reuse_matches_fresh(
+            "echo before\nset -o posix\necho '\"$x\"' inside\nset +o posix\necho after\n",
+        );
+    }
+
+    #[test]
+    fn extglob_flip_group_refuses_reuse() {
+        crate::lexer::set_parse_extended_glob(false);
+        let mut executor = Executor::new();
+        executor.shell_state.aliases.clear();
+        let text = "echo before-extglob\nshopt -s extglob\ncase x in ?(a)) echo pat ;; esac\n";
+        let raw_lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let mut index = 0usize;
+        let mut refused_seen = false;
+        while let Some((_pending, _start, _group, feeder_tokens)) =
+            read_next_source_group(&executor, &raw_lines, &mut index)
+        {
+            if feeder_tokens.is_none() {
+                refused_seen = true;
+            }
+        }
+        assert!(
+            refused_seen,
+            "a group with an effective shopt extglob toggle must refuse reuse"
+        );
+        crate::lexer::set_parse_extended_glob(false);
+    }
+
+    #[test]
+    fn reuse_matches_fresh_nvm_corpus() {
+        // The vendored nvm.sh v0.40.8 (172906 bytes): the load probe's
+        // exact fixture. Exercises the whole gather over ~4500 lines.
+        let text = std::fs::read_to_string("benchmarks/corpus/nvm.sh")
+            .expect("benchmarks/corpus/nvm.sh vendored in-repo");
+        assert_reuse_matches_fresh(&text);
     }
 }

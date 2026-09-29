@@ -48,7 +48,7 @@ fn run_source_groups(
     let raw_lines: Vec<&str> = source.split_inclusive('\n').collect();
     let mut index = 0usize;
     let mut ran_any = false;
-    while let Some((pending, start_line, _group_lines)) =
+    while let Some((pending, start_line, _group_lines, feeder_tokens)) =
         crate::script_driver::read_next_source_group(executor, &raw_lines, &mut index)
     {
         let line_offset = start_line.saturating_sub(1);
@@ -109,7 +109,32 @@ fn run_source_groups(
             }
             continue;
         }
-        let mut tokens = crate::lexer::tokenize_with_initial_posix(&exec_text, parse_posix);
+        // perf10: reuse the gather feeder's committed tokens when the gather
+        // certified them equivalent to a fresh whole-group re-lex
+        // (read_next_source_group's doc: non-alias arm — exec_text is the
+        // pending verbatim there —, complete break, no effective extglob
+        // toggle). GNU anchor: parse.y:3557 read_token streams input once
+        // and never re-tokenizes consumed text; the previous unconditional
+        // `tokenize_with_initial_posix(&exec_text, ...)` re-read every byte
+        // the feeder had just scanned (perf7: ~1 s of `. ./nvm.sh`, huq
+        // 16009 calls vs 5764 parse-only). The pop applies the exact rule
+        // `tokenize_comsub_body_with_origin` applies to the fresh stream
+        // (the feeder's committed output ends with the per-logical-line
+        // separator); position/column/leading_ws/heredoc_end_line semantics
+        // are identical because both streams are produced by the same
+        // feeder code from the same pushes.
+        let mut tokens = match feeder_tokens {
+            Some(mut tokens) => {
+                if tokens
+                    .last()
+                    .is_some_and(|token| token.kind == crate::lexer::TokenKind::Semicolon)
+                {
+                    tokens.pop();
+                }
+                tokens
+            }
+            None => crate::lexer::tokenize_with_initial_posix(&exec_text, parse_posix),
+        };
         if let Some(line) = crate::lexer::heredoc_overflow_line() {
             executor.mark_parse_error();
             eprintln!(

@@ -427,6 +427,17 @@ pub(crate) struct GroupScanFeeder {
     /// Set when the original loop would `break` out of line processing
     /// (heredoc overflow): later pushes are inert, like the loop exit.
     overflowed: bool,
+    /// Set when this feeder's per-line shopt simulation EFFECTIVELY toggled
+    /// the process-global `PARSE_EXTENDED_GLOB` gate (an Enable/Disable flip
+    /// that actually changed the value). Consumers that want to reuse the
+    /// feeder's tokens in place of a fresh whole-text re-lex must refuse when
+    /// this is set: the re-lex replays the flips starting from the group-END
+    /// global, so its pre-flip lines see a different extglob gate than the
+    /// streaming feed did (parse.y:5466 gates pattern chars per token at
+    /// read time, and tokens carry the gate they were lexed under —
+    /// `Token::extglob_gate`). A fallback to the fresh re-lex preserves
+    /// today's behavior byte for byte on flipping groups.
+    extglob_toggled: bool,
 }
 
 impl GroupScanFeeder {
@@ -470,6 +481,7 @@ impl GroupScanFeeder {
             open_folded: 0,
             open_snapshot,
             overflowed: false,
+            extglob_toggled: false,
         }
     }
 
@@ -491,6 +503,13 @@ impl GroupScanFeeder {
                     | Some(TokenKind::Pipe)
                     | Some(TokenKind::PipeErr)
             )
+    }
+
+    /// Whether this feeder's line loop EFFECTIVELY toggled the process-global
+    /// extglob parse gate (see the field docs). Token-reuse consumers must
+    /// fall back to a fresh whole-text re-lex when this is `true`.
+    pub(crate) fn extglob_toggled(&self) -> bool {
+        self.extglob_toggled
     }
 
     /// Fold one token into the keyword-stack / last-significant summary,
@@ -1081,12 +1100,14 @@ impl GroupScanFeeder {
                     if !parse_extended_glob() {
                         set_parse_extended_glob(true);
                         self.boundary = None;
+                        self.extglob_toggled = true;
                     }
                 }
                 ExtglobFlip::Disable => {
                     if parse_extended_glob() {
                         set_parse_extended_glob(false);
                         self.boundary = None;
+                        self.extglob_toggled = true;
                     }
                 }
                 ExtglobFlip::ExecutionOff => self.extglob_flips_allowed = false,

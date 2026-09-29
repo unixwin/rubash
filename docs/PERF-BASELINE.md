@@ -1269,3 +1269,126 @@ lane's sanctioned files or need a deep-subsystem pass.
 5. Startup floor ~130 ms (probe 01 family, 13x) - unchanged, separate
    lane (#242).
 
+
+## perf10 round (2026-09-29, wt13/perf10 on 116b12aa): source double-tokenize + startup floor
+
+Two perf7 handoffs (leftovers 2 and 5). Base 116b12aa carries perf7/perf8
+and the rubash#295 carrier fix. All numbers debug build. Sibling lanes
+(perf9/ecosweep2/fixpack) were active on this host during the round: the
+harness's absolute numbers moved with their load (probe 16 executed-shape
+380 -> ~2140 ms on BOTH base and lane binary), so every accept/reject
+decision below rests on back-to-back alternating A/B against a pristine
+base binary built this session (target/rubash-base-perf10.exe), same load,
+plus same-morning harness anchors.
+
+### Task 1: source double-tokenize — LANDED
+
+Root cause (perf7's measurement): `read_next_source_group`'s gather feeds
+each physical line to a parked `GroupScanFeeder` (completeness state +
+token stream), then `run_source_groups` re-fed the same joined group text
+through `tokenize_with_initial_posix` — a full second scan of every byte
+(huq calls 16009 on nvm-load vs 5764 parse-only).
+
+The enabling fact: `tokenize_with_heredocs` IS a fresh `GroupScanFeeder`
+plus one `push_line` per physical line plus `finish()` — the batch
+tokenizer and the gather feeder are the same code. The reuse returns the
+feeder's committed tokens instead of re-lexing, gated on the three perf7
+equivalence obligations, each argued against GNU:
+
+1. **Mid-group posix/extglob flips** — posix is per-feeder state
+   (`parse_posix` flipped per logical line at lexer/mod.rs
+   `line_posix_mode_change`); the gather feeder and a fresh re-lex start
+   from the same executor mode (nothing executes between the gather's
+   capture and the caller's parse in `run_source_groups`) and replay flips
+   at identical lines -> identical streams. SAFE. extglob is a
+   process-Global (`PARSE_EXTENDED_GLOB`): the re-lex replays shopt flips
+   from the group-END value, so its pre-flip lines can see a different
+   gate than the streaming feed did (parse.y:5466 gates `?(`/`*(`/...
+   pattern chars per token in read_token_word; tokens snapshot the gate —
+   `Token::extglob_gate`). NOT provably equivalent -> the feeder now
+   tracks `extglob_toggled` (an EFFECTIVE Enable/Disable toggle) and the
+   gather refuses reuse when set, falling back to today's fresh re-lex
+   byte for byte. GNU anchors: parse.y:3248-3249 alias_expand_token,
+   builtins/evalstring.c:315 parse_and_execute (read one command, execute,
+   read the next — mode changes take effect between commands, never
+   retroactively).
+2. **Token::column/position semantics** — identical by construction:
+   committed tokens in both streams carry `position = logical_start_line`
+   (physical line within the group, both start at line 1) and `column` =
+   byte offset into the logical line; `leading_ws` capture and
+   heredoc-end-line arithmetic are the same code. The reuse applies the
+   caller's unchanged `position/column += line_offset` post-pass. The
+   feeder's trailing line-break separator is popped with the exact rule
+   `tokenize_comsub_body_with_origin` applies to the fresh stream.
+3. **Alias-live arm** — untouched: the gather only builds a feeder when
+   the alias table cannot rewrite text (`!enabled || table empty`), which
+   is exactly when `expand_group_aliases` is the identity (exec text ==
+   pending). With live aliases there is no feeder and the caller keeps its
+   fresh re-lex of the rewritten text (parse.y:3249 alias_expand_token
+   fires per token while READING).
+
+A fourth construction-level condition is documented in the code: the
+group must have broken COMPLETE (an EOF-exhausted incomplete group takes
+`run_source_with_line_offset`'s unclosed-diagnostics re-lex), and the
+push-sequence identity (batch `split('\n')` final-empty-piece skip vs the
+gather's committed break point) holds because remaining pieces belong to
+later groups.
+
+**Differential evidence** (new `perf10_token_reuse_tests`, 9 tests): the
+real gather driven over plain/function/brace-group/heredoc/continuation/
+comsub/CRLF/blank-line/posix-flip corpora AND the full vendored nvm.sh
+(172906 bytes, the load probe's exact fixture), asserting every Token
+field byte-identical between the reused stream and a fresh re-lex of the
+same group bytes, with production's gather-then-parse interleaving; plus
+an assertion that a `shopt -s extglob` group REFUSES reuse.
+
+| probe | base (morning harness) | lane harness | A/B medians (same load) | GNU this round |
+|---|---:|---:|---:|---:|
+| 24-nvm-load | 3154 ms / 92.8x | **2475 ms / 72.8x** | 3190 -> 2458 (**-23%**) | 34 ms |
+| 23-nvm-parse-n | 1202 ms / 75.1x | 1196 ms (unchanged, expected) | — | 16 ms |
+| 01-startup-empty | 68 ms | unchanged (A/B medians 53/54 ms) | — | 5 ms |
+| 16-parse-flat8000 | — | — | 2141 -> 2149 (+0.4%, noise) | — |
+
+**Semantics gate (zero change):** nvm `--no-use` load on pristine-base vs
+lane binary: nvm_* `declare -p`, `declare -F`, `compgen -A function`,
+`type nvm`, `nvm --version`, `alias` listing, PS1 — byte-identical (7/7).
+OMB live load (real HOME, agnoster, 252 functions / 33 aliases):
+`_omb_spectrum_fg` md5, PS1 md5, function/alias counts — byte-identical.
+83-suite spot checks (scripts/true-baseline.sh, WSL GNU 5.3.0 oracle):
+dstack byte-parity 0 diff; quote (94/62/4 diff lines) and comsub
+(27/15/0) rubash outputs byte-IDENTICAL base-vs-lane (pre-existing master
+diffs, counts unchanged). cargo test --lib 520/520; --test regression
+27/27; RUSTFLAGS='-D warnings' cargo test --workspace --no-run clean;
+cargo fmt --check clean; cargo check --tests and --release --tests clean;
+src/lexer/continuation.rs untouched.
+
+Files: src/lexer/mod.rs (extglob_toggled flag + getter), src/script_driver.rs
+(read_next_source_group returns feeder tokens; differential tests),
+src/builtins/source/execution.rs (consume reused tokens).
+
+### Task 2: startup floor — decomposed, no rubash-side target >= 20 ms exists
+
+Probe 01 (68 ms from the Git-Bash harness, GNU 5 ms inside WSL) decomposed
+with temporary GetProcessTimes + phase instrumentation (removed):
+
+| component | warm ms | note |
+|---|---:|---|
+| MSYS-parent spawn overhead | ~54 | `cmd /c exit` measures 53 ms from the same parent — NOT rubash's; a native parent (PowerShell) spawns rubash in 13.9 ms vs cmd 13.7 ms |
+| process creation -> main entry | 7.5-8.8 (cold 173-227) | loader + CRT + main-thread spawn of the 16.6 MB debug image; 512 MB stack reserve ruled out by A/B (8 MB: identical) |
+| locale init | 0.1 | |
+| Executor::new total | 3.2 | env vars collect 0.24 + snapshot clone 0.05 + PATH import & POSIX-tools-dir fs probe 0.6 + fresh-shell-env (current_dir/current_exe/THIS_SH is_file/OLDPWD is_dir/var-tmp create) 1.0 + signal-mailbox create_dir_all+write 0.5 + struct+VariableStore::from_environment 0.3 |
+| first parse pipeline (`exit 0`) | 1.2 | debug-build codegen; no lazy regex/table init exists (grepped: none in lexer/parser) |
+| teardown + CRT exit | 1.7 | |
+
+Rubash's whole in-process floor is ~14 ms (debug build) — same order as
+GNU bash's total 5 ms in WSL, and within 0.2 ms of cmd.exe's floor from a
+native parent. The 13.6x probe ratio is ~80% MSYS-parent spawn overhead
+that cmd.exe pays identically. The perf7 expectation ("env large copy /
+Vec prealloc / first lazy init") is falsified by measurement: the env
+triple copy costs 0.35 ms total, and there is no lazy-init site. The
+largest rubash-owned items are fs probes (~1.6 ms across tools-dir,
+THIS_SH/OLDPWD stats, signal-mailbox, var-tmp) each of which is semantic
+Windows-port work (command -p toolset pinning, cross-process kill
+mailbox, /var/tmp fixture) — shaving them is sub-ms against a 54 ms
+parent-side constant. No change landed; the honest floor owner is the
+parent spawn path and the debug image, not Executor startup.
