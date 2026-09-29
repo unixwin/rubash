@@ -6,6 +6,28 @@ pub(super) fn assign_redirect_out_target(
     index: usize,
     command: &mut CommandNode,
 ) -> Option<usize> {
+    // GNU parse.y `LESS_GREATER WORD` accepts a process-substitution WORD
+    // as the `<>` operand — the pbb read_sleep idiom `read -rt 0.1 <>
+    // <(:)` binds fd 0 read-write onto the empty pipe (rubash#325); the
+    // main parse loop reaches this arm before its generic target lookup.
+    if let Some((mut process_substitution, next_i)) =
+        read_write_process_substitution_redirect_target(tokens, index)
+    {
+        let fd = redirect_operator_fd(&tokens[index].value)
+            .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, index));
+        let fd_var = redirect_fd_var_prefix(tokens, index);
+        process_substitution.redirect_fd = fd;
+        let target = process_substitution.target.clone();
+        command.process_substitutions.push(process_substitution);
+        let redirect =
+            redirect_node_with_fd_var(&tokens[index].value, fd, fd_var, &target, false, false);
+        command.redirects.push(redirect.clone());
+        if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
+            command.redirect_in = Some(redirect);
+        }
+        return Some(next_i);
+    }
+
     if let Some((process_substitution, next_i)) =
         combined_process_substitution_redirect_target(tokens, index)
     {

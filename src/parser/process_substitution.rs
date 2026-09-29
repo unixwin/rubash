@@ -26,6 +26,38 @@ pub(super) fn process_substitution_redirect_target(
     collect_process_substitution_target(tokens, index)
 }
 
+/// `<> <(:)` — the read-write operator (tokenized as RedirectOut with a
+/// `<>`-suffixed value) followed by an INPUT process-substitution word.
+/// GNU parse.y's redirection grammar takes any WORD after LESS_GREATER
+/// (`LESS_GREATER WORD`, the `<>` production), and read_token lexes a
+/// word-initial `<(` as a process substitution — make_redirection then
+/// carries r_input_output with the substitution as the filename. The
+/// pbb read_sleep idiom `read -rt 0.1 <> <(:)` (rubash#325) relies on it:
+/// fd 0 binds read-write onto the empty pipe so `read -t` times out.
+pub(super) fn read_write_process_substitution_redirect_target(
+    tokens: &[Token],
+    redirect_index: usize,
+) -> Option<(ProcessSubstitution, usize)> {
+    let operator = tokens.get(redirect_index)?;
+    if operator.kind != TokenKind::RedirectOut || !operator.value.ends_with("<>") {
+        return None;
+    }
+
+    let mut index = redirect_index + 1;
+    if !tokens
+        .get(index)
+        .is_some_and(|token| token.kind == TokenKind::RedirectIn)
+        || !tokens
+            .get(index + 1)
+            .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == "(")
+    {
+        return None;
+    }
+    index += 2;
+
+    collect_process_substitution_target(tokens, index)
+}
+
 pub(super) fn process_substitution_word_target(
     tokens: &[Token],
     redirect_index: usize,

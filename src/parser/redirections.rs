@@ -168,6 +168,36 @@ pub(super) fn collect_trailing_redirections(
             }
             TokenKind::RedirectOut => {
                 if token.value.ends_with("<>") {
+                    // GNU parse.y `LESS_GREATER WORD` accepts a
+                    // process-substitution WORD as the `<>` operand — the
+                    // pbb read_sleep idiom `read -rt 0.1 <> <(:)` binds fd 0
+                    // read-write onto the empty pipe (rubash#325). Mirror the
+                    // RedirectIn + procsub arm above with the `<>` operator's
+                    // ReadWrite kind.
+                    if let Some((mut process_substitution, next_i)) =
+                        read_write_process_substitution_redirect_target(tokens, *index)
+                    {
+                        let fd = redirect_operator_fd(&token.value)
+                            .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
+                        let fd_var = redirect_fd_var_prefix(tokens, *index);
+                        process_substitution.redirect_fd = fd;
+                        let target = process_substitution.target.clone();
+                        command.process_substitutions.push(process_substitution);
+                        let redirect = redirect_node_with_fd_var(
+                            &token.value,
+                            fd,
+                            fd_var,
+                            &target,
+                            false,
+                            false,
+                        );
+                        command.redirects.push(redirect.clone());
+                        if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
+                            command.redirect_in = Some(redirect);
+                        }
+                        *index = next_i + 1;
+                        continue;
+                    }
                     let fd = redirect_operator_fd(&token.value)
                         .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
                     let redirect = redirect_node_with_fd_var_raw(
