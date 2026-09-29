@@ -577,6 +577,24 @@ impl Executor {
                 self.set_env("__RUBASH_ARGV0_AFTER_UNSET", &value);
             }
         }
+        // GNU variables.c:5778 { "GLOBIGNORE", sv_globignore } ->
+        // pathexp.c:507 setup_glob_ignore: assigning a NON-NULL GLOBIGNORE
+        // turns dotfile matching ON and assigning NULL leaves it unchanged;
+        // the effect shares the dotglob cell with the shopt, so the write
+        // lands in the same option storage. Unsetting GLOBIGNORE turns the
+        // cell OFF (handled in the unset builtin). A set-but-null value
+        // must NOT enable dotglob by itself (rubash#313: bash-completion's
+        // `local GLOBIGNORE=""` made `*` match `.gitignore`).
+        if result && base == "GLOBIGNORE" {
+            if self
+                .shell_state
+                .env_vars
+                .get("GLOBIGNORE")
+                .is_some_and(|value| !value.is_empty())
+            {
+                crate::builtins::shopt::set_option(&mut self.shell_state.env_vars, "dotglob", true);
+            }
+        }
         result
     }
 

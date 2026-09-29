@@ -225,6 +225,14 @@ where
     }
 
     let unset_name = unset_name.to_string();
+    // GNU variables.c:5778 { "GLOBIGNORE", sv_globignore } ->
+    // pathexp.c:507-515 setup_glob_ignore: unsetting GLOBIGNORE takes the
+    // `v == 0` branch and turns dotfile matching OFF — the effect shares
+    // the dotglob cell with the shopt, so the write lands in the same
+    // option storage (it clobbers even an explicit `shopt -s dotglob`).
+    if unset_name == "GLOBIGNORE" {
+        crate::builtins::shopt::set_option(env_vars, "dotglob", false);
+    }
     env_vars.remove(&unset_name);
     env::remove_var(&unset_name);
     unmark_variable(env_vars, EXPORTED_VARS, &unset_name);

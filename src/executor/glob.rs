@@ -1178,7 +1178,18 @@ fn split_ignore_specs(value: &str, extglob: bool) -> Vec<String> {
 /// restores the default; pattern filtering itself requires a non-null
 /// value.
 fn globignore_assigned(env_vars: &std::collections::HashMap<String, String>) -> bool {
-    env_vars.contains_key("GLOBIGNORE")
+    // pathexp.c:507-515 setup_glob_ignore: the GLOBIGNORE side effect and
+    // the dotglob shopt share ONE cell (glob_dot_filenames). Assigning a
+    // NON-NULL value parses >=1 ignore spec and turns the cell ON
+    // (materialized at bind time into the shopt storage, see
+    // apply_shell_assignment); a set-but-NULL assignment leaves the cell
+    // untouched (neither branch fires) — it does NOT turn dotglob on by
+    // itself (rubash#313: bash-completion's `local GLOBIGNORE=""` made `*`
+    // match `.gitignore`). Only a NON-NULL value still enables matching
+    // here, covering imports that bypassed the bind hook.
+    env_vars
+        .get("GLOBIGNORE")
+        .is_some_and(|value| !value.is_empty())
 }
 
 /// Filters a collected pathname-expansion match list by GLOBIGNORE (bash
