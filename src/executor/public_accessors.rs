@@ -5,7 +5,7 @@ use super::*;
 /// is behavior-neutral; it exists because a loop body re-stamps the same
 /// line once per command (GNU's line_number is a C int — execute_cmd.c
 /// SET_LINE_NUMBER — and costs nothing to re-assign).
-fn stamp_env_usize(env_vars: &mut HashMap<String, String>, key: &str, line: usize) {
+fn stamp_env_usize(env_vars: &mut HashMap<String, String>, key: &str, line: usize) -> bool {
     let mut buffer = [0u8; 20];
     let mut value = line;
     let mut position = buffer.len();
@@ -20,6 +20,9 @@ fn stamp_env_usize(env_vars: &mut HashMap<String, String>, key: &str, line: usiz
     let rendered = std::str::from_utf8(&buffer[position..]).unwrap_or("0");
     if env_vars.get(key).map(String::as_str) != Some(rendered) {
         env_vars.insert(key.to_string(), rendered.to_string());
+        true
+    } else {
+        false
     }
 }
 
@@ -889,8 +892,20 @@ impl Executor {
                 "__RUBASH_CURRENT_LINE",
                 line,
             );
+            // GNU's line_number is a process-internal C int; the Windows
+            // process-environment mirror only needs the OS write when the
+            // stamped value differs from the last one WE wrote — a loop
+            // body re-stamps the same line thousands of times. The gate
+            // compares against the last OS write, not the map value:
+            // ambient-line restores write the map directly, so a
+            // map-equality gate left the OS env stale (alias/declare
+            // diagnostics reported an earlier line).
             if command_needs_process_line_env(cmd) {
-                set_process_env("__RUBASH_CURRENT_LINE", &line.to_string());
+                let rendered = line.to_string();
+                if self.line_env_os_value.borrow().as_deref() != Some(rendered.as_str()) {
+                    set_process_env("__RUBASH_CURRENT_LINE", &rendered);
+                    *self.line_env_os_value.borrow_mut() = Some(rendered);
+                }
             }
         }
     }

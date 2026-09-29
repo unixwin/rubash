@@ -8,9 +8,9 @@ use crate::executor::{
     env_derived_dynamic_parameter_value, format_assoc_storage, format_indexed_array_storage,
     indexed_array_entries, is_marked_var, is_noassign_bash_array, is_shell_name,
     is_shell_name_char, mark_env_name, next_random_from_state, next_srandom_from_state,
-    parse_array_subscript, resolve_indexed_array_subscript, set_process_env, unmark_env_name,
-    ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS, NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET,
-    SHELL_START_EPOCH, UNSET_DYNAMIC_VARS,
+    parse_array_subscript, resolve_indexed_array_subscript, set_process_env,
+    sync_shell_assignment_process_env, unmark_env_name, ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS,
+    NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH, UNSET_DYNAMIC_VARS,
 };
 
 impl ConditionalArithParser<'_> {
@@ -591,7 +591,7 @@ impl ConditionalArithParser<'_> {
                         let old_value = self.env_vars.get(name).cloned();
                         self.env_vars.insert(name.to_string(), value.clone());
                         super::super::record_arith_write(name, old_value);
-                        set_process_env(name, value);
+                        sync_shell_assignment_process_env(self.env_vars, name, &value);
                     } else {
                         self.env_vars
                             .insert("__RUBASH_ARITH_NAMEREF_ERROR".to_string(), value);
@@ -646,7 +646,11 @@ impl ConditionalArithParser<'_> {
         let old_value = self.env_vars.get(name).cloned();
         self.env_vars.insert(name.to_string(), value.clone());
         super::super::record_arith_write(name, old_value);
-        set_process_env(name, value);
+        // GNU expr.c's assignment lands on the shell variable; the process
+        // env mirror only tracks exported (or host-special) names — same
+        // rule as sync_shell_assignment_process_env. `i++` in a for-update
+        // paid a Win32 SetEnvironmentVariable per iteration.
+        sync_shell_assignment_process_env(self.env_vars, name, &value);
     }
 
     pub(super) fn set_array_element(&mut self, name: &str, index: i128, value: i128) {

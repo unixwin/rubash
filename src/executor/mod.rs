@@ -486,6 +486,14 @@ pub struct Executor {
     debug_trap_running: bool,
     return_trap_running: bool,
     signal_trap_running: bool,
+    /// The last value written to the OS environment's
+    /// __RUBASH_CURRENT_LINE mirror (None = never written this process).
+    /// The stamp path skips the Win32 set only when this equals the newly
+    /// stamped value; direct map writers (ambient-line restores) never
+    /// touch the OS env, so the comparison must be against what WE wrote,
+    /// not against the map value (rubash perf12: the map-value gate
+    /// produced stale alias/declare line numbers after an ambient restore).
+    line_env_os_value: std::cell::RefCell<Option<String>>,
     /// GNU trap.c SIG_INPROGRESS: _run_trap_internal marks a trap
     /// in-progress before executing its action, and run_error_trap refuses
     /// to re-enter while it is set — an ERR trap action that itself fails

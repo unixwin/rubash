@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::local_helpers::shell_assignment_needs_process_env;
 use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 impl Executor {
@@ -270,15 +271,23 @@ impl Executor {
         let mut names = HashSet::new();
         for (name, value) in scope {
             names.insert(name.clone());
+            // GNU variables.c pop_var_context reinstalls the frame's saved
+            // SHELL_VAR — value AND attributes — in one step. Gate the
+            // process-env mirror on the RESTORED attribute set (the saved
+            // outer binding's exported bit), not on the frame's local
+            // attributes: an unexported outer value never reaches a real
+            // child's environment in GNU, and the frame's own writes to
+            // the OS env for an exported-during-frame local must be
+            // undone by the None branch below.
+            let restored_attrs = attr_scope.get(&name).copied().unwrap_or_default();
             match value {
                 Some(value) => {
                     self.shell_state
                         .env_vars
                         .insert(name.clone(), value.clone());
-                    // Internal pseudo-variables (e.g. the getopts scan
-                    // offset saved alongside a local OPTIND) must not
-                    // leak into the child process environment.
-                    if !name.starts_with("__RUBASH_") {
+                    if !name.starts_with("__RUBASH_")
+                        && (restored_attrs.exported || shell_assignment_needs_process_env(&name))
+                    {
                         set_process_env(&name, value);
                     }
                 }
@@ -287,11 +296,7 @@ impl Executor {
                     env::remove_var(&name);
                 }
             }
-            set_var_attrs(
-                &mut self.shell_state.env_vars,
-                &name,
-                attr_scope.get(&name).copied().unwrap_or_default(),
-            );
+            set_var_attrs(&mut self.shell_state.env_vars, &name, restored_attrs);
             remove_local_export_env_value(&mut self.shell_state.env_vars, &name);
         }
         for (name, variable) in typed_scope {

@@ -1336,6 +1336,7 @@ impl Executor {
             pending_scalar_assignment: false,
             suppress_errexit: self.suppress_errexit,
             debug_trap_running: false,
+            line_env_os_value: std::cell::RefCell::new(None),
             return_trap_running: false,
             signal_trap_running: false,
             error_trap_running: false,

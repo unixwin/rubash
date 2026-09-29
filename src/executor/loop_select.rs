@@ -173,7 +173,15 @@ impl Executor {
                     *current = value.clone();
                 }
             }
-            set_process_env(&for_command.variable, value);
+            // GNU execute_cmd.c:3201+ binds the loop variable through the
+            // ordinary assignment machinery — the process-environment
+            // mirror only tracks exported (or host-special) names, the
+            // same rule sync_shell_assignment_process_env enforces.
+            sync_shell_assignment_process_env(
+                &self.shell_state.env_vars,
+                &for_command.variable,
+                &value,
+            );
 
             let body = Ast {
                 commands: for_command.body.clone(),

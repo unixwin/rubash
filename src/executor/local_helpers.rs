@@ -162,7 +162,7 @@ pub(in crate::executor) fn sync_shell_assignment_process_env(
     }
 }
 
-fn shell_assignment_needs_process_env(name: &str) -> bool {
+pub(in crate::executor) fn shell_assignment_needs_process_env(name: &str) -> bool {
     matches!(
         name,
         "HOME" | "OLDPWD" | "PATH" | "PATHEXT" | "PWD" | "TEMP" | "TMP" | "TMPDIR" | "USERPROFILE"
