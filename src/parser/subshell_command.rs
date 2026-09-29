@@ -4,7 +4,7 @@ use crate::lexer::Token;
 pub(super) fn parse_subshell_command(
     tokens: &[Token],
     start: usize,
-    source: Option<&str>,
+    source: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Option<(CommandNode, usize)> {
     if !is_keyword(tokens, start, "(") {

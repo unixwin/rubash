@@ -5,7 +5,7 @@ use crate::lexer::{Token, TokenKind};
 pub(super) fn parse_brace_group_command(
     tokens: &[Token],
     start: usize,
-    source: Option<&str>,
+    source: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Option<(CommandNode, usize)> {
     let token = tokens.get(start)?;

@@ -1274,8 +1274,8 @@ pub fn run_source_with_line_offset(
         &tokens,
         crate::parser::ParseLoopOptions {
             stray_close_is_error: true,
-            source_text: Some(input.to_string()),
-            diagnostic_text: diagnostic_text.map(str::to_string),
+            source_text: Some(input.into()),
+            diagnostic_text: diagnostic_text.map(std::rc::Rc::from),
             source_line_offset: line_offset,
         },
     );

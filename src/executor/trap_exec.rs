@@ -271,7 +271,7 @@ impl Executor {
             crate::parser::ParseLoopOptions {
                 stray_close_is_error: true,
                 diagnostic_text: None,
-                source_text: Some(source.to_string()),
+                source_text: Some(source.into()),
                 source_line_offset: caller_line.saturating_sub(1),
             },
         );

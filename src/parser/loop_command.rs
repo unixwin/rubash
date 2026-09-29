@@ -4,7 +4,7 @@ use crate::lexer::Token;
 pub(super) fn parse_loop_command(
     tokens: &[Token],
     start: usize,
-    source: Option<&str>,
+    source: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Option<(CommandNode, usize)> {
     let (kind, until) = if is_keyword(tokens, start, "while") {
@@ -77,7 +77,7 @@ fn find_loop_do(tokens: &[Token], start: usize) -> Option<usize> {
 fn parse_loop_body(
     tokens: &[Token],
     start: usize,
-    source: Option<&str>,
+    source: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Option<(Vec<CommandNode>, usize)> {
     let mut stack = Vec::new();
@@ -110,7 +110,7 @@ fn parse_loop_body(
 
 fn parse_loop_body_commands(
     tokens: &[Token],
-    source: Option<&str>,
+    source: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Vec<CommandNode> {
     super::parse_loop::parse_body_with_diagnostics(tokens, source, source_line_offset)

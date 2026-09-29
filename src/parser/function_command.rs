@@ -24,7 +24,7 @@ pub(super) fn parse_function_command(
 pub(super) fn parse_function_command_with_diagnostic(
     tokens: &[Token],
     start: usize,
-    diagnostic_text: Option<&str>,
+    diagnostic_text: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Option<(CommandNode, usize)> {
     // TODO(parse.y/execute_cmd.c): Bash has full function_def grammar,
@@ -440,14 +440,14 @@ fn finish_function_command(
 /// parse's `source_line_offset' maps them into that text.
 fn parse_function_body(
     tokens: &[Token],
-    diagnostic_text: Option<&str>,
+    diagnostic_text: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Vec<CommandNode> {
     crate::parser::parse_with_options(
         tokens,
         crate::parser::ParseLoopOptions {
             stray_close_is_error: true,
-            source_text: diagnostic_text.map(str::to_string),
+            source_text: diagnostic_text.cloned(),
             source_line_offset,
             ..Default::default()
         },
@@ -632,7 +632,7 @@ fn delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
 fn parse_function_command_sequence_body(
     tokens: &[Token],
     start: usize,
-    diagnostic_text: Option<&str>,
+    diagnostic_text: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Option<(Vec<CommandNode>, usize)> {
     let end = match tokens.get(start)?.value.as_str() {
@@ -710,7 +710,7 @@ fn parse_function_compound_body(tokens: &[Token], start: usize) -> Option<(Comma
 pub(super) fn parse_parenthesized_function_body(
     tokens: &[Token],
     start: usize,
-    diagnostic_text: Option<&str>,
+    diagnostic_text: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Option<(Vec<CommandNode>, usize)> {
     if !is_keyword(tokens, start, "(") {

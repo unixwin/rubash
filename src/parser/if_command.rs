@@ -5,7 +5,7 @@ use crate::lexer::Token;
 pub(super) fn parse_if_command(
     tokens: &[Token],
     start: usize,
-    source: Option<&str>,
+    source: Option<&std::rc::Rc<str>>,
     line_offset: usize,
 ) -> Option<(CommandNode, usize)> {
     if !is_keyword(tokens, start, "if") {
@@ -81,7 +81,7 @@ pub(super) fn parse_if_command(
         // GNU reports the token that actually arrived where `fi` was
         // expected, at that token's line (`if x; then y; done` →
         // `near unexpected token `done'` at done's line).
-        let command = mismatched_closer_node(tokens, index, source, line_offset);
+        let command = mismatched_closer_node(tokens, index, source.map(|rc| &**rc), line_offset);
         return Some((command, tokens.len()));
     }
 
@@ -147,7 +147,7 @@ fn find_if_then(tokens: &[Token], start: usize) -> Option<usize> {
 fn parse_if_section(
     tokens: &[Token],
     start: usize,
-    source: Option<&str>,
+    source: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Option<(Vec<CommandNode>, usize)> {
     let mut stack = Vec::new();
@@ -184,7 +184,7 @@ fn parse_if_section(
 
 fn parse_if_body_commands(
     tokens: &[Token],
-    source: Option<&str>,
+    source: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Vec<CommandNode> {
     super::parse_loop::parse_body_with_diagnostics(tokens, source, source_line_offset)

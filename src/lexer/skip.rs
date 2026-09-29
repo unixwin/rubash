@@ -1761,15 +1761,21 @@ pub(crate) fn command_substitutions_balanced(input: &str) -> bool {
         // Skip ${...} parameter expansion so a `$(` inside it is not mistaken
         // for a top-level command substitution.
         if ch == '$' && chars.get(index + 1) == Some(&'{') && !double {
-            let body: String = chars[index + 2..].iter().collect();
+            // rubash#281 (perf4 shape; same fix the captain landed in
+            // continuation.rs): the String copy re-collected the ENTIRE
+            // remaining input per `${` — O(tail^2) per call. The zero-copy
+            // chars API (scan_braced_parameter_body_chars, rubash#185)
+            // requires the `${` opener at slice[0], so the slice INCLUDES
+            // it; `scan.end` is the CHAR count of the body past the `}`.
+            let body = &chars[index..];
             let context = super::dolbrace::BraceContext {
                 outer_double_quote: double,
                 posix: false,
                 replacement_context: false,
                 initial_state: super::dolbrace::DolbraceState::Param,
             };
-            if let Some(scan) = super::dolbrace::scan_braced_parameter_body(&body, context) {
-                index += 2 + body[..scan.end].chars().count();
+            if let Some(scan) = super::dolbrace::scan_braced_parameter_body_chars(body, context) {
+                index += 2 + scan.end;
                 comment_start = false;
                 continue;
             }

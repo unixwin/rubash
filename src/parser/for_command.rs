@@ -4,7 +4,7 @@ use crate::lexer::{Token, TokenKind};
 pub(super) fn parse_for_command(
     tokens: &[Token],
     start: usize,
-    source: Option<&str>,
+    source: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Option<(CommandNode, usize)> {
     // TODO(parse.y/execute_cmd.c): GNU Bash supports all `for_command`
@@ -249,7 +249,7 @@ fn synthetic_delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
 
 fn parse_for_body_commands(
     tokens: &[Token],
-    source: Option<&str>,
+    source: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Vec<CommandNode> {
     super::parse_loop::parse_body_with_diagnostics(tokens, source, source_line_offset)
@@ -285,7 +285,7 @@ fn for_brace_body_start(tokens: &[Token], index: usize) -> bool {
 fn parse_for_brace_body(
     tokens: &[Token],
     index: usize,
-    source: Option<&str>,
+    source: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Option<(Vec<CommandNode>, usize)> {
     let token = tokens.get(index)?;

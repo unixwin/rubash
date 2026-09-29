@@ -1113,3 +1113,159 @@ binaries). Error-path matrix 15/15 byte-identical. cargo test --lib
   1393 ms of 8586 ms instrumented total - attribution only, not yet
   decomposed.
 
+
+## perf7 round (2026-09-29, wt12/perf7 on 60418802): nvm.sh special project
+
+Owner-named attack on the two worst rows: 23-nvm-parse-n (852x baseline,
+105x after perf4) and 24-nvm-load (379x baseline). Base 60418802 already
+contains perf4's gather unification (ae7f60f5), contperf's comsub residual
+park/resume (a1f43085) and perf6. All numbers debug build; harness medians
+of 3 PLUS back-to-back A/B against a pristine-base binary built the same
+session (../rubash-wt-perf7-base at 60418802, alternating runs, same load)
+— the GNU column varies with WSL/drvfs load per round, so rubash-ms to
+rubash-ms is the honest comparison.
+
+### This lane's own baseline (morning, harness)
+
+| probe | rubash ms | GNU ms | ratio |
+|---|---:|---:|---:|
+| 23-nvm-parse-n | 2204 | 17 | 129.6x |
+| 24-nvm-load | 5223 | 36 | 145.1x |
+
+### Decomposition (temporary phase timers/counters, fully removed)
+
+nvm -n's 2204 ms: **tokenize 1220** (lextok 695 — of which 1.8 MB of the
+2.2 MB scanned came from 194 `}`-byte-refused full re-lexes, 107 of them
+>= 8 KB buffers; compound scan 185; param scan 137; huq 112; rotate 20;
+comsub advance 15) + **parse 860** (six fold passes 468; per-token balancer
+10; 1577 nested body re-parses cloning **259.5 MB** of source text) +
+unclosed-syntax prescan 26 + process floor ~130.
+
+nvm-load's 5223 ms: exec profile 405 commands, matcmd 4380 ms dominated by
+the single `. nvm.sh` source command: gather feeder ~1000 + the per-group
+one-shot re-tokenize (see leftovers) + group parse + nvm's own commands.
+
+### Landed changes (15 files; instrumentation removed before commit)
+
+1. **`Rc<str>` source threading** (parse_loop.rs ParseLoopOptions/
+   ParseState + if/loop/for/case/brace/subshell/function parsers +
+   script_driver/source/execution/function_calls/job_builtins/trap_exec
+   construction sites). `parse_body_with_diagnostics` cloned the WHOLE
+   script text per nested compound-body re-parse (259.5 MB measured on
+   nvm -n, ~1500 bodies). GNU anchor: parse.y keeps ONE input string per
+   parse (shell_input_line family; yyerror slices it, print_offending_line
+   parse.y:6813-6824). Re-land of the wt8/perf4 fix that was lost in that
+   lane's rebase (master's ae7f60f5 carried only the gather unification).
+   clone counter: 259.5 MB -> 0.
+2. **Fold-pass fast exits** (parse_loop.rs): each of the six whole-list
+   folds (pipeline/time-pipeline/time-simple/inverted/and-or/background)
+   is the identity for lists lacking its trigger field (`pipe`/
+   first-word-`time`/`inverted`/`and_or`/`background`), so a list-level
+   `any()` skips the rebuild. 468 -> 31 ms. GNU anchor: the folds model
+   grammar productions the token stream proved absent (parse.y:1337ff).
+3. **Compound-assignment `=(` admission** (lexer/mod.rs join loop):
+   `has_unclosed_compound_assignment` can only return true when a word
+   ending `=` is immediately followed by `(` (continuation.rs
+   opens_compound arm) — the adjacent byte pair admits the scan. GNU
+   anchor: parse.y:5785-5791 recognizes the compound assignment from
+   exactly this adjacency at token-read time. 185 -> 17 ms (nvm.sh has
+   zero `=(` lines).
+4. **Param-expansion `$` admission + false-answer cache** (`param_open_cache`,
+   lexer/mod.rs): the scan's only true exit is a `${` whose body scan
+   failed, so a `$`-free line admits false and a cached false survives a
+   `$`-free append; same invalidation set as `unclosed_quotes_cache`
+   (IFS_GLUE insert, backslash pop, rotation, commit). 137 -> 86 ms.
+5. **skip.rs `${`-arm zero-copy + balancer admission**:
+   `command_substitutions_balanced`'s per-`${` String copy of the entire
+   remaining input replaced with the `scan_braced_parameter_body_chars`
+   slice API (rubash#185; identical shape to the captain's landed
+   continuation.rs fix — slice INCLUDES `${`, `index += 2 + scan.end`);
+   the parse loop's per-word-token balancer consult is admitted on
+   `$`/backtick presence (all three false-exits of the balancer open with
+   an unquoted `$` or a backtick). 10 ms on nvm (bigger for the
+   configure/m4sh family per wt8 data).
+6. **Brace-fold-aware boundary resume gate** (lexer/mod.rs): the blanket
+   "appended line contains `}` -> refuse resume" (rubash#281 safety gate)
+   is replaced by the exact condition it stood in for: resume is refused
+   only when a pre-checkpoint `{`-arm fold can actually complete — i.e.
+   the checkpoint tokens contain a bare `{` Keyword AND the innermost
+   one's `skip_brace` (resumed from the shared BraceScanCache
+   continuation, O(appended tail)) reports `closed` on the current buffer.
+   No bare `{` -> no pre-offset opener exists -> resume; not closed (the
+   `}` bytes are quoted/word-glued/nested-open) -> braces nest, so no
+   outer group can close either -> resume. Soundness rests on the token
+   `}`-arm and carried parse state being checkpoint-identical (same
+   induction as the existing resume) and on `skip_brace` being the same
+   pure scan the fold runs. GNU anchor: parse.y:3557 read_token reads the
+   input exactly once; 194 refused passes re-lexed 1.8 MB (570 ms) though
+   the fold completes on only a fraction. refused 194 -> 40, scanned
+   2.2 -> 0.5 MB, >= 8 KB passes 107 -> 13.
+
+### Numbers
+
+| probe | base (morning) | perf7 harness | A/B medians (same load) | GNU this round |
+|---|---:|---:|---:|---:|
+| 23-nvm-parse-n | 2204ms / 129.6x | **1375ms / 55.0x** | 2263 -> 1337 (**-41%**) | 25ms (17 morning) |
+| 24-nvm-load | 5223ms / 145.1x | **3564ms / 91.4x** | 5223 -> 3564 (**-32%**) | 39ms |
+| 17-parse-flat8000-n | 390 (perf3 day) | 379ms | 82 -> 77 ms (-6%) | — |
+| 21-configure-head1374-n | 2478 (master, perf4c) | 743ms | 78 -> 73 ms (-6%, warm one-shot) | 9ms |
+| 16/15/04 | — | — | +3% / +1.8% / +2.9% (noise band, spreads overlap) | — |
+
+configure-full -n: still TIMEOUT at 125 s on BOTH binaries (blocked on the
+captain-family scanner false positives documented in the perf4 round; this
+lane's gates do not address them).
+
+### Semantics gate (zero-change evidence)
+
+- nvm `--no-use` load on pristine-base vs lane binary: `declare -p` of
+  every nvm_* variable, `declare -F`, `compgen -A function`, `type nvm`,
+  `nvm --version`, `alias` listing — byte-identical; the ONLY diffs are
+  PPID (per-process) and each binary's own BASH/THIS_SH path.
+- Brace-resume matrices (target/issue-suites/results/perf7/matrix{1,2}.sh):
+  multi-line function bodies with `}` bytes in strings/comments/params,
+  glued `}}` closers (rubash#278), nested same-line folds, heredocs in
+  groups, backslash continuations, comsub-in-group — base binary and lane
+  binary byte-identical stdout+stderr+rc; GNU parity modulo the $0 path
+  prefix and $HOME-derived test data (matrix1's `${HOME##*/}`).
+- cargo test --lib 505/505; --test regression 27/27; RUSTFLAGS='-D
+  warnings' cargo test --workspace --no-run clean; cargo fmt --check
+  clean; cargo check --tests and --release --tests clean;
+  src/lexer/continuation.rs untouched.
+
+### Acceptance (honest)
+
+The <10x / <200 ms target for nvm-parse is NOT met: 129.6x -> 55.0x
+(harness ratio, GNU 25 ms this round; at the morning's GNU 17 ms the same
+1375 ms is 81x). Wall: -41%. nvm-load 145.1x -> 91.4x (-32% wall). The
+remaining costs are characterized below; the biggest two live outside this
+lane's sanctioned files or need a deep-subsystem pass.
+
+### Leftovers (measured, with owners)
+
+1. **huq 112 ms (nvm -n) / 336 ms (load)**: `has_unclosed_quotes`
+   re-scans the whole accumulated logical line per non-quote-inert append
+   (16009 calls on load). The incremental park/resume state machine lives
+   in src/lexer/continuation.rs — captain-exclusive (same shape as the
+   landed comsub residual checkpoint, rubash#292). Hand to captain/perf8.
+2. **Source double-tokenize (~1 s of nvm-load)**: the `.` builtin's
+   gather (read_next_source_group) tokenizes each group incrementally,
+   then the group's parse re-feeds the same text through
+   tokenize_with_heredocs' join loop (huq calls 16009 vs 5764 on -n).
+   Root fix = return the feeder's tokens from read_next_source_group and
+   use them when the group text was not alias-rewritten. Equivalence
+   obligations before landing: mid-group posix/extglob flips (the one-shot
+   re-lex uses the group-END mode while the feeder tracked per-line - a
+   flipping group lexes differently today and the reuse must refuse it),
+   Token::column semantics (byte offset into the logical line vs byte
+   offset into the group text plus the current `column += line_offset`
+   arithmetic), and the alias-live arm keeping the fresh scan. This lane
+   did not attempt it (rubash#117 discipline: a wrong invariant here is a
+   silent semantic bug, cf. the worked counter-example).
+3. **Parse main loop ~390 ms** (after folds 31 ms): distributed per-token
+   costs in handle_token's compound-parser chain; no single >5% site found.
+4. **param scan 86 ms**: `$`-bearing appends inside open spans re-scan
+   the whole buffer; needs a resumable scanner in brace_scan.rs (same
+   discipline as rubash#292; not attempted this round).
+5. Startup floor ~130 ms (probe 01 family, 13x) - unchanged, separate
+   lane (#242).
+

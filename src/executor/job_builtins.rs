@@ -1939,7 +1939,7 @@ impl Executor {
                     crate::parser::ParseLoopOptions {
                         stray_close_is_error: true,
                         diagnostic_text: None,
-                        source_text: Some(edited.clone()),
+                        source_text: Some(edited.as_str().into()),
                         source_line_offset: 0,
                     },
                 );
@@ -1973,7 +1973,7 @@ impl Executor {
                     crate::parser::ParseLoopOptions {
                         stray_close_is_error: true,
                         diagnostic_text: None,
-                        source_text: Some(command.clone()),
+                        source_text: Some(command.as_str().into()),
                         source_line_offset: 0,
                     },
                 );

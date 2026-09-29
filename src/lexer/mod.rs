@@ -348,6 +348,15 @@ pub(crate) struct GroupScanFeeder {
     brace_cache: BraceScanCache,
     brace_join_active: bool,
     unclosed_quotes_cache: Option<bool>,
+    /// rubash#281/perf4 re-land: cached FALSE answer of
+    /// `has_unclosed_parameter_expansion` over `logical_line`. The scan's
+    /// only `true` exit is a `${` whose body scan failed, so a cached false
+    /// plus a `$`-free appended line keeps it false (every arm that can
+    /// newly open a `${` requires a literal `$`). Same invalidation set as
+    /// `unclosed_quotes_cache`: every non-append mutation of `logical_line`
+    /// (IFS_GLUE insert, backslash-join pop, comsub-heredoc rotation,
+    /// commit/flush) drops it.
+    param_open_cache: Option<bool>,
     boundary: Option<(usize, Vec<Token>, LexerBoundaryState)>,
     awaiting_bodies: Vec<AwaitingHeredocBody>,
     /// keyword-stack summary of `stdin_source_needs_more_posix` over the
@@ -395,6 +404,7 @@ impl GroupScanFeeder {
             brace_cache: BraceScanCache::default(),
             brace_join_active: false,
             unclosed_quotes_cache: None,
+            param_open_cache: None,
             boundary: None,
             awaiting_bodies: Vec::new(),
             keyword_stack: Vec::new(),
@@ -730,6 +740,7 @@ impl GroupScanFeeder {
                         // Mid-string rewrite: positional scan cache invalid.
                         self.brace_cache.clear();
                         self.unclosed_quotes_cache = None;
+                        self.param_open_cache = None;
                         self.boundary = None;
                         self.rebuild_comsub_mirror();
                         comsub_state_changed = true;
@@ -769,6 +780,7 @@ impl GroupScanFeeder {
             self.comsub_checkpoint = None;
             self.brace_cache.clear();
             self.unclosed_quotes_cache = None;
+            self.param_open_cache = None;
             self.boundary = None;
             self.continued_line = true;
             self.brace_join_active = false;
@@ -826,8 +838,21 @@ impl GroupScanFeeder {
             return;
         }
         // A `name=(` compound array assignment keeps reading physical lines
-        // until its matching `)` (parse.y; ISSUE #78).
-        if has_unclosed_compound_assignment(&self.logical_line) {
+        // until its matching `)` (parse.y; ISSUE #78). Admission: the opener
+        // is a word ending in `=` (or `+=`) whose NEXT character is the `(`
+        // that flips compound_depth to 1 (continuation.rs
+        // has_unclosed_compound_assignment, `opens_compound` arm) — the
+        // bytes `=` and `(` are therefore adjacent in the input whenever
+        // the scan can return true (`=(` covers `name=(`; the `+=` of
+        // `name+=(` ends in the same `=(` adjacency). Without that byte
+        // pair the scan is provably false. (GNU
+        // anchor: parse.y:5785-5791 recognizes the compound assignment at
+        // token-read time from exactly this adjacency; read_token never
+        // looks for it otherwise. nvm.sh has no `=(` line — the
+        // unconditional scan was 185ms of its 2.2s -n run.)
+        let compound_open = self.logical_line.contains("=(")
+            && has_unclosed_compound_assignment(&self.logical_line);
+        if compound_open {
             self.brace_join_active = false;
             return;
         }
@@ -843,6 +868,7 @@ impl GroupScanFeeder {
             // Rotation rewrites the middle of the line: cache invalid.
             self.brace_cache.clear();
             self.unclosed_quotes_cache = None;
+            self.param_open_cache = None;
             self.boundary = None;
             self.rebuild_comsub_mirror();
         }
@@ -858,10 +884,59 @@ impl GroupScanFeeder {
         // partial ended with last=esac, so `{` sat in reserved-word
         // position) and swallowed the rest of the function body.
         let mut line_lex_state = self.lexer_parse_state.clone();
-        let boundary_was_some = self.boundary.is_some();
+        let boundary_taken = self.boundary.take();
+        let boundary_was_some = boundary_taken.is_some();
+        // rubash#281 resume gate. The blanket rule was "a `}` byte in the
+        // appended line refuses the resume" — but the ONLY thing a `}` can
+        // change in the already-checkpointed prefix is completing the
+        // `{`-arm fold of a still-open brace group (scanner.rs `{` arm:
+        // an open group is emitted as a bare `{` Keyword plus body tokens
+        // and folds into ONE token in exactly the pass where its matching
+        // `}` arrives). Refine the refusal to exactly that case, decided by
+        // the same scan the fold itself would run — `skip_brace` from the
+        // innermost open `{`, which resumes from the shared BraceScanCache
+        // continuation (O(appended tail), rubash#176/#178):
+        //   - no bare `{` Keyword in the checkpoint tokens: no pre-offset
+        //     opener exists, so no fold can complete — resume is safe;
+        //   - the innermost open group's scan says `closed`: this pass
+        //     would fold it — refuse, restoring the full re-lex exactly on
+        //     fold passes (conservative for heredoc-bearing groups, whose
+        //     `{` arm never folds: their scan answer only costs one extra
+        //     tail scan);
+        //   - not closed (the `}` bytes are quoted, word-glued or inside a
+        //     nested construct): braces nest, so while the innermost group
+        //     stays open no outer group's depth can return to zero either —
+        //     no fold can complete anywhere — resume is safe.
+        // GNU anchor: parse.y:3557 read_token reads the input once and
+        // never re-lexes consumed text; the blanket `}` refusal was this
+        // port's stand-in for "the fold may complete" (nvm.sh -n: 194
+        // refused passes re-lexed 1.8MB — 570ms of a 2.2s run — and the
+        // fold completes on only a fraction of them).
+        let resume_allowed = if !line.contains('}') {
+            true
+        } else {
+            let opener_column = boundary_taken.as_ref().and_then(|(_, tokens, _)| {
+                tokens
+                    .iter()
+                    .rposition(|token| token.kind == TokenKind::Keyword && token.value == "{")
+                    .map(|index| tokens[index].column)
+            });
+            match opener_column {
+                None => true,
+                Some(column) => {
+                    let mut probe = Lexer::new_with_cache(
+                        &self.logical_line,
+                        self.parse_posix,
+                        &mut self.brace_cache,
+                    );
+                    probe.position = column + 1;
+                    !probe.skip_brace().closed
+                }
+            }
+        };
         let (mut line_tokens, pass_boundary) = tokenize_with_boundary(
-            self.boundary.take(),
-            !line.contains('}'),
+            boundary_taken,
+            resume_allowed,
             &self.logical_line,
             self.parse_posix,
             &mut line_lex_state,
@@ -871,7 +946,7 @@ impl GroupScanFeeder {
         // next boundary checkpoint: a resumed pass extends the previous
         // list (fold only the delta), a full re-lex restores the open
         // line's start snapshot and refolds everything.
-        self.fold_pass_tokens(&line_tokens, boundary_was_some && !line.contains('}'));
+        self.fold_pass_tokens(&line_tokens, boundary_was_some && resume_allowed);
         if let Some(updated) = line_posix_mode_change(&line_tokens) {
             if self.parse_posix != updated {
                 // The full pass would re-lex the whole line under the new
@@ -932,11 +1007,24 @@ impl GroupScanFeeder {
         // has_unclosed_brace_group counted `case x in {)`'s pattern brace as a
         // group opener, joining the pattern line to far-away text.
         let brace_group_open = tokens_open_unclosed_brace_group(&line_tokens);
-        let param_expansion_open = has_unclosed_parameter_expansion(&self.logical_line);
-        if (brace_group_open || param_expansion_open)
-            && !opens_function_body_after_previous_signature(&self.logical_line, &self.output)
-            && !has_heredoc
-        {
+        // Admission + false-answer cache (`param_open_cache`): the scan's
+        // only `true` exit is a `${` whose body scan failed, so a `$`-free
+        // line admits false outright and a cached false survives a `$`-free
+        // appended line (rubash#281/perf4 re-land; GNU anchor: parse.y:3557
+        // read_token computes no such rescan — the expansion is consumed
+        // with the word that contains it).
+        let param_expansion_open = match self.param_open_cache {
+            Some(false) if !line.contains('$') => false,
+            _ => {
+                let value = self.logical_line.contains('$')
+                    && has_unclosed_parameter_expansion(&self.logical_line);
+                self.param_open_cache = Some(value);
+                value
+            }
+        };
+        let funcheck =
+            opens_function_body_after_previous_signature(&self.logical_line, &self.output);
+        if (brace_group_open || param_expansion_open) && !funcheck && !has_heredoc {
             // Reaching here proves quotes, command substitutions and
             // compound assignments are all closed: the join stands on the
             // token-level brace-group flag (and/or an open `${...}`, which
@@ -984,6 +1072,7 @@ impl GroupScanFeeder {
         self.lexer_parse_state = line_lex_state;
         self.logical_line.clear();
         self.unclosed_quotes_cache = None;
+        self.param_open_cache = None;
         self.boundary = None;
         // Offsets restart for the next logical line: cache invalid. The
         // residual checkpoint resets to the fresh-scan state (the empty

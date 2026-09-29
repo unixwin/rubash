@@ -4,7 +4,7 @@ use crate::lexer::{Token, TokenKind};
 pub(super) fn parse_case_command(
     tokens: &[Token],
     start: usize,
-    source: Option<&str>,
+    source: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> Option<(CommandNode, usize)> {
     // TODO(parse.y/execute_cmd.c): GNU Bash supports nested compound lists and
@@ -62,7 +62,7 @@ pub(super) fn parse_case_command(
             let source = super::parse_loop::offending_line_text(
                 tokens,
                 final_esac,
-                source,
+                source.map(|rc| &**rc),
                 source_line_offset,
             );
             let mut command = CommandNode::new();

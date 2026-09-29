@@ -111,11 +111,11 @@ fn run_source_groups(
             &tokens,
             crate::parser::ParseLoopOptions {
                 stray_close_is_error: true,
-                source_text: Some(exec_text.clone()),
+                source_text: Some(exec_text.as_str().into()),
                 diagnostic_text: if exec_text == pre_alias_text {
                     None
                 } else {
-                    Some(pre_alias_text.clone())
+                    Some(pre_alias_text.as_str().into())
                 },
                 source_line_offset: line_offset,
             },

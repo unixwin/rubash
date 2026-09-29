@@ -238,7 +238,7 @@ impl Executor {
             &tokens,
             crate::parser::ParseLoopOptions {
                 stray_close_is_error: true,
-                source_text: Some(expanded),
+                source_text: Some(expanded.into()),
                 ..Default::default()
             },
         )

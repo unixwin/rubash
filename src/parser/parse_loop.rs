@@ -2,6 +2,7 @@ use crate::lexer::{Token, TokenKind};
 
 use super::*;
 use crate::executor::markers::{DATA_DOLLAR, PARSE_ERROR_FIELD_SEP};
+use std::rc::Rc;
 
 #[derive(Default)]
 pub struct ParseLoopOptions {
@@ -11,14 +12,18 @@ pub struct ParseLoopOptions {
     /// The ORIGINAL text being parsed, when the caller has it (eval reparse).
     /// GNU echoes the offending input line verbatim; token reconstruction
     /// cannot recover the original spacing, so the guard slices this text.
-    pub source_text: Option<String>,
+    /// Shared by reference count: compound-body re-parses thread the SAME
+    /// buffer (nvm.sh -n re-parses ~1500 nested bodies; cloning the String
+    /// per body copied 259.5MB and dominated the parse phase — GNU keeps
+    /// ONE input string for the whole parse, parse.y shell_input_line).
+    pub source_text: Option<Rc<str>>,
     /// Pre-alias-expansion text for the same parse, when the caller spliced
     /// aliases into `source_text` first (grouped driver). GNU's y.error echoes
     /// the input line as read — `math1)`, not its expansion
     /// `echo $( date ))` — so diagnostics slice this text when present.
     /// Lines align with `source_text` because group splices preserve line
     /// structure.
-    pub diagnostic_text: Option<String>,
+    pub diagnostic_text: Option<Rc<str>>,
     /// How much the caller shifted token positions by before parsing, so the
     /// guard can map a token position back to the source-text byte offset.
     pub source_line_offset: usize,
@@ -38,7 +43,9 @@ pub(super) struct ParseState {
     /// source_text) so a `syntax error near unexpected token 'X'` node can
     /// echo the physical offending line the way parse.y y.error does —
     /// token reconstruction cannot recover the original whitespace.
-    pub(super) diagnostic_text: Option<String>,
+    /// Rc<str> (see ParseLoopOptions::source_text): the nested compound
+    /// parsers share this handle instead of cloning the text per body.
+    pub(super) diagnostic_text: Option<Rc<str>>,
     /// options.source_line_offset: how far token positions were shifted,
     /// so a diagnostic computed from `diagnostic_text` line counts maps
     /// back to absolute script lines.
@@ -88,7 +95,19 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
             // the guard below swallow the line's real `;;'/`)' tokens as
             // closers and run `... echo hi;; esac)` instead of GNU's
             // `syntax error near unexpected token `;;''.
-            if !crate::lexer::command_substitutions_balanced(&tokens[i].raw) {
+            // Admission: every `return false` arm of
+            // command_substitutions_balanced (skip.rs) opens with an
+            // unquoted `$` (unterminated `${`, unterminated `$(`) or a
+            // backtick — a token raw with neither byte provably balances,
+            // so the scan is skipped (GNU anchor: parse.y:3557 read_token
+            // derives comsub state from the token text itself; this gate
+            // only skips scans whose answer is provably "balanced").
+            let balanced = if tokens[i].raw.contains('$') || tokens[i].raw.contains('`') {
+                crate::lexer::command_substitutions_balanced(&tokens[i].raw)
+            } else {
+                true
+            };
+            if !balanced {
                 state.pending_comsub +=
                     crate::lexer::unclosed_command_substitution_depth(&tokens[i].raw);
             }
@@ -243,12 +262,69 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         state.ast.commands.push(state.current_cmd);
     }
 
-    state.ast.commands = fold_pipeline_commands(state.ast.commands);
-    state.ast.commands = fold_time_pipeline_commands(state.ast.commands);
-    state.ast.commands = fold_time_simple_commands(state.ast.commands);
-    state.ast.commands = fold_inverted_commands(state.ast.commands);
-    state.ast.commands = fold_and_or_list_commands(state.ast.commands);
-    state.ast.commands = fold_background_commands(state.ast.commands);
+    // Fast-exit admissions: each fold below is a whole-list pass whose map
+    // is the identity for commands lacking its trigger field, so a list
+    // with no trigger anywhere returns unchanged — skipping the
+    // per-command rebuild. (GNU anchor: the folds model grammar
+    // productions the token stream already proved absent; a list with no
+    // pipe connector has no pipeline production to fold — parse.y:1337ff
+    // — and so on for `time'/`!'/`&&'/`&'. nvm.sh -n runs 1578
+    // parse_with_options calls for nested bodies whose commands carry no
+    // trigger at all; the six unconditional passes cost 468ms of its
+    // 848ms parse phase.)
+
+    let has_pipeline = state
+        .ast
+        .commands
+        .iter()
+        .any(|command| command.pipe.is_some());
+    let c = if has_pipeline {
+        fold_pipeline_commands(state.ast.commands)
+    } else {
+        state.ast.commands
+    };
+    // time_prefix_from_command fires only when a command's first word is
+    // the literal `time'; fold_time_pipeline_commands looks through
+    // pipeline_command stages' first words, fold_time_simple_commands at
+    // the command's own words — the gate covers both.
+    let has_time_prefix = c.iter().any(|command| {
+        command.words.first().is_some_and(|word| word == "time")
+            || command
+                .pipeline_command
+                .as_ref()
+                .and_then(|pipeline| pipeline.stages.first())
+                .and_then(|stage| stage.words.first())
+                .is_some_and(|word| word == "time")
+    });
+    let c = if has_time_prefix {
+        fold_time_pipeline_commands(c)
+    } else {
+        c
+    };
+    let c = if has_time_prefix {
+        fold_time_simple_commands(c)
+    } else {
+        c
+    };
+    let has_inverted = c.iter().any(|command| command.inverted);
+    let c = if has_inverted {
+        fold_inverted_commands(c)
+    } else {
+        c
+    };
+    let has_and_or = c.iter().any(|command| command.and_or.is_some());
+    let c = if has_and_or {
+        fold_and_or_list_commands(c)
+    } else {
+        c
+    };
+    let has_background = c.iter().any(|command| command.background);
+    let c = if has_background {
+        fold_background_commands(c)
+    } else {
+        c
+    };
+    state.ast.commands = c;
     mark_parse_time_extglob_errors(&mut state.ast, tokens);
     state.ast
 }
@@ -765,7 +841,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         if let Some((if_cmd, next_i)) = parse_if_command(
             tokens,
             i,
-            state.diagnostic_text.as_deref(),
+            state.diagnostic_text.as_ref(),
             state.source_line_offset,
         ) {
             push_compound_command(state, if_cmd);
@@ -837,7 +913,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         if let Some((loop_cmd, next_i)) = parse_loop_command(
             tokens,
             i,
-            state.diagnostic_text.as_deref(),
+            state.diagnostic_text.as_ref(),
             state.source_line_offset,
         ) {
             push_compound_command(state, loop_cmd);
@@ -899,7 +975,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         if let Some((for_cmd, next_i)) = parse_for_command(
             tokens,
             i,
-            state.diagnostic_text.as_deref(),
+            state.diagnostic_text.as_ref(),
             state.source_line_offset,
         ) {
             push_compound_command(state, for_cmd);
@@ -1011,7 +1087,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         if let Some((function_cmd, next_i)) = parse_function_command_with_diagnostic(
             tokens,
             i,
-            state.diagnostic_text.as_deref(),
+            state.diagnostic_text.as_ref(),
             state.source_line_offset,
         ) {
             push_compound_command(state, function_cmd);
@@ -1026,7 +1102,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         if let Some((case_cmd, next_i)) = parse_case_command(
             tokens,
             i,
-            state.diagnostic_text.as_deref(),
+            state.diagnostic_text.as_ref(),
             state.source_line_offset,
         ) {
             push_compound_command(state, case_cmd);
@@ -1206,7 +1282,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         if let Some((subshell_cmd, next_i)) = parse_subshell_command(
             tokens,
             i,
-            state.diagnostic_text.as_deref(),
+            state.diagnostic_text.as_ref(),
             state.source_line_offset,
         ) {
             push_compound_command(state, subshell_cmd);
@@ -1235,7 +1311,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         if let Some((brace_cmd, next_i)) = parse_brace_group_command(
             tokens,
             i,
-            state.diagnostic_text.as_deref(),
+            state.diagnostic_text.as_ref(),
             state.source_line_offset,
         ) {
             push_compound_command(state, brace_cmd);
@@ -1273,13 +1349,15 @@ fn command_allows_compound_start(command: &CommandNode) -> bool {
 /// and keep the fragment-join fallback.
 pub(super) fn parse_body_with_diagnostics(
     tokens: &[Token],
-    source: Option<&str>,
+    source: Option<&Rc<str>>,
     source_line_offset: usize,
 ) -> Vec<CommandNode> {
     parse_with_options(
         tokens,
         ParseLoopOptions {
-            diagnostic_text: source.map(str::to_string),
+            // Rc clone: refcount bump, not a text copy (see
+            // ParseLoopOptions::diagnostic_text docs).
+            diagnostic_text: source.cloned(),
             source_line_offset,
             ..ParseLoopOptions::default()
         },
@@ -2353,7 +2431,7 @@ mod stray_close_tests {
             &tokens,
             ParseLoopOptions {
                 stray_close_is_error: true,
-                source_text: Some(source_text.clone()),
+                source_text: Some(source_text.clone().into()),
                 source_line_offset: 198,
                 ..ParseLoopOptions::default()
             },
