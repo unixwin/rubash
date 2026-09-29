@@ -413,12 +413,31 @@ fn compound_assignment_source_text(assignment: &crate::parser::CompoundAssignmen
 }
 
 pub(in crate::executor) fn bash_command_sequence_text(commands: &[CommandNode]) -> String {
-    commands
+    // print_cmd.c:1520-1529 semicolon(): GNU suppresses the `;' separator
+    // when the printed command ends with `" &"` — after `&` the list
+    // grammar admits only a newline_list (parse.y:1275/1290
+    // `list1 '&' newline_list [list1]`; a `;' at list start is the
+    // parse.y:1326 error arm). Joining a serialized `... &` command with
+    // `"; "` produced `true &; while ...`, a syntax error that killed
+    // every respawned background child whose enclosing script carried a
+    // function definition (rubash#294: the async `kill $$` never ran, so
+    // a trap-terminated `until` loop hung forever).
+    let mut text = String::new();
+    for part in commands
         .iter()
         .map(bash_command_source_text)
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("; ")
+        .filter(|part| !part.trim().is_empty())
+    {
+        if !text.is_empty() {
+            if text.ends_with('&') {
+                text.push('\n');
+            } else {
+                text.push_str("; ");
+            }
+        }
+        text.push_str(&part);
+    }
+    text
 }
 
 pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String {

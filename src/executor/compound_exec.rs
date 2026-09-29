@@ -920,8 +920,18 @@ impl Executor {
             if is_exportable_function_name(name) {
                 source.push_str(name);
                 source.push_str("() { ");
-                source.push_str(&bash_command_sequence_text(&body.commands));
-                source.push_str("; }; ");
+                let body_text = bash_command_sequence_text(&body.commands);
+                source.push_str(&body_text);
+                // print_cmd.c:1520-1529 semicolon(): no `;' after a body
+                // whose last command printed as `... &` — parse.y:1275/1290
+                // only admits newline_list after `&`, and `& ; }` is the
+                // syntax error that killed respawned background children
+                // (rubash#294). `&\n}` is the valid GNU spelling.
+                if body_text.ends_with('&') {
+                    source.push_str("\n}; ");
+                } else {
+                    source.push_str("; }; ");
+                }
             }
         }
         source.push_str(&bash_command_source_text(command));

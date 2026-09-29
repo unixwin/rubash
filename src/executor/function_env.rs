@@ -160,7 +160,17 @@ pub(in crate::executor) fn exported_function_env_value(
             let command_has_heredoc = body
                 .get(index)
                 .is_some_and(|command| command.heredoc.is_some());
-            if index + 1 < commands.len() && !command_has_heredoc && !command.ends_with(';') {
+            // print_cmd.c:1520-1529 semicolon(): the `;' separator is
+            // suppressed after a command printed as `... &` (parse.y:1275/
+            // 1290 admit only newline_list after `&`). Appending `;' after
+            // a backgrounded body command corrupted the exportstr value
+            // (`true &;` does not re-parse), breaking re-imported
+            // functions in child shells (rubash#294).
+            if index + 1 < commands.len()
+                && !command_has_heredoc
+                && !command.ends_with(';')
+                && !command.ends_with('&')
+            {
                 output.push(';');
             }
         }
