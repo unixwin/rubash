@@ -596,3 +596,170 @@ Layer additions chosen per mission A/B lists only.
   omz/, gitres/.
 - Issue-isolation probes: p-*.sh + pv-*.sh ladders with {rb,gnu}* outputs.
 - Corpora pins: target/ecosweep2-corpus/SOURCES.txt.
+
+# ===== SECTION: ecosweep3 lane (wt14/ecosweep3, 2026-09-28) — APPENDED, DO NOT REORDER =====
+
+Third wave: DENSE + COMPLEX + EXECUTION-PLANE corpora (waves 1-2 were
+source/loading-plane). Worktree base `61069619`, carrier = release build from
+it. Oracle: WSL GNU Bash 5.3.0 (`/usr/local/bin/bash`), script-file probes
+only, outputs via files. Sandbox: `target/issue-suites/results/ecosweep3/`;
+corpora under `target/ecosweep3-corpus/` (pins below).
+
+Dedup check BEFORE running: sections 1-4 + ecosweep + ecosweep2 read in full.
+Not re-run: GNU 83, oh-my-bash matrices, bash-it, bash-completion driven
+matrix, liquidprompt, ble.sh, nvm.sh body + fastsuite (nvm *install.sh* is a
+distinct artifact and was run), modernish, mvdan, rustup, rbenv/ruby-build,
+pyenv CLI (pyenv-*installer* script distinct, run), Homebrew, get-docker.sh
+plain run (only the NEW `--dry-run` driven path was added), docker completion.
+
+## Method + pitfalls recorded for future lanes
+
+- **Git-MSYS `timeout` drops custom env vars when PATH is modified in the
+  same invocation** (`PATH=... timeout ... prog` keeps PATH but loses e.g.
+  HOME/NVM_DIR; verified with a native python child). Either export vars
+  WITHOUT touching PATH, or pass them inside `rubash -c 'export ...; exec'`.
+- winuxsh `env` swallowing child output (ecosweep pitfall) re-confirmed; never
+  use `env` as a wrapper.
+- Background parallel tasks race on `cp`-prepared directories — launch the
+  GNU-side background run only AFTER the shared `cp -r` finished (bit us once).
+- github.com git-over-HTTPS TLS is down from this host while api.github.com
+  works (ecosweep2 precedent). Installer git-clones were redirected to LOCAL
+  BARE MIRRORS (`target/ecosweep3-corpus/mirrors/*.git`): nvm via its own
+  NVM_SOURCE override; pyenv-installer via a harvest patch (GITHUB prefix →
+  mirrors/) applied IDENTICALLY on both sides.
+- rubash default TMPDIR (unset) = `<cwd>/target` rendered in BACKSLASH Windows
+  form; FFmpeg configure's `eval`-based tmpfile handling legitimately eats
+  backslashes there (GNU-consistent per eval semantics) — workaround for runs:
+  export a POSIX TMPDIR explicitly (rubash converts it to `D:/` forward-slash
+  form, which survives). Root cause = #329 family (path value form).
+
+## A. pure-bash-bible — 84 sections / 86 driven usage commands, RUN PER SNIPPET
+
+Source: dylanaraps/pure-bash-bible @ master (README.md 2200 L + manuscript
+chapters 0-19). Extractor `pbb-extract.py` → one standalone script per `##`
+section: function defs + every documented usage command (prompt-stripped,
+`@@CMD:n` markers), sections without sessions driven by their own
+`# Usage:` comments. Runners: `pbb/run-rub.sh` (Windows carrier, sandboxed
+HOME/TMPDIR per snippet) vs `pbb/run-gnu.sh` (WSL, index filelist). Every run
+timeout 60, stdin </dev/null.
+
+**51/84 byte-identical PASS.** Of the 33 non-pass:
+
+| class | sections | note |
+| --- | --- | --- |
+| rubash-caused → new issues | 001+013 ($_), 003 ([[ =~ ]] parens), 004+013-repl ($'\n' in //), 030/031/032 (mapfile redirect), 053 (brace-body over-lax), 074 (bare `<> <(:)`), 076 (%l/%k/%u + UTC), 028/081/082 (TMPDIR var/tmp) | **#321-#328** |
+| env: message path rendering (/mnt/d vs /d vs D:/) | 027 029 033 036 037 052 055 057 058 061 062 075 | identical modulo path domain |
+| env: platform/external | 056 (real vim launched both sides, version strings), 059 (WSL genuinely has /usr/bin/x86_64), 060 ($MACHTYPE msys vs linux-gnu) | |
+| nondeterministic (RANDOM/urandom) | 020 063 078 | rc + structure parity |
+| by-design (unbounded loop under timeout) | 070 | rubash emitted MORE lines in 60s (faster echo loop) |
+| GNU-side quirk (policy note, NOT filed) | 018 | GNU 5.3.0 without `compat44` returns STALE BASH_ARGV on the 2nd extdebug call (`5 4 3 2 1` again); rubash returns fresh args (= GNU-with-compat44, = the bible's documented intent). Probe `probe-out/p16.*`. Captain decision whether to mimic the 5.3 default. |
+
+Positive parity worth keeping: trim/regex-with-variable/split/multi-char
+delimiters, arrays (reverse/dups/random/contains), loops, `$_`-independent
+internal variables, FUNCNAME chain, percent-decode, hex/rgb, ${var@Q} forms
+(part for p3's carrier rendering), code-golf loops, alias/function bypass.
+
+## B. configure REAL EXECUTION (not -n) to config.status / Makefile stage
+
+| project | rub side (Windows carrier, gcc 13.2 mingw) | GNU side (WSL, gcc 13.3) | verdict |
+| --- | --- | --- | --- |
+| zlib @ master (configure 700+ L hand-written) | rc=0, Makefile + configure.log generated | rc=0, same | **near byte-identical**: 2 diff lines only — MINGW hint line (platform branch) + attribute(visibility) cc probe No vs Yes (compiler, env). All other checking lines identical. |
+| libpng @ libpng16 (autoconf, 18501 L) | rc=0 in 113 lines: config.status executed, Makefile/libpng.pc/config.h created | rc=0 in 110 lines (after feeding it the locally-built zlib) | platform diffs only (a.exe/a.out, mingw64/linux-gnu triplets, UID/GID, fs-timestamp-resolution). **rubash vs real Windows bash (Git Bash) same-platform comparison: stdout differs ONLY in tool path rendering (/usr/bin/X vs /d/Git/usr/bin/X = same files); stderr identical.** |
+| FFmpeg n7.1.1 (8345 L, --disable-x86asm --disable-programs --disable-doc) | rc=0, 774 lines, config.h + ffbuild/config.mak written | rc=0, 674 lines | runs end-to-end BUT **#330 corrupts the generated files**: config.h has 15 lines vs GNU's 783 (all ARCH_*/HAVE_*/CONFIG_* defines missing, config.mak equally gutted) with 5 `bad substitution` stderr lines and rc still 0 — silent breakage. Also needed the TMPDIR workaround (#329 family). |
+
+Harness notes: rub side needs a space-free tool dir in front of PATH
+(autoconf's unquoted `$SED` breaks when sed resolves under
+`C:/Program Files/Git` — environment, Git Bash survives it only via its
+`/usr/bin` aliasing); GNU side needed zlib built locally
+(`zlib-gnu` + CPPFLAGS/LDFLAGS) since WSL lacks zlib-dev.
+
+## C. installer family (real execution, sandboxed HOME/pkg roots, timeout 120)
+
+| installer | result | issue |
+| --- | --- | --- |
+| nvm install.sh @ master (533 L, local mirror clone via NVM_SOURCE) | full chain parity (clone, profile detect/append, bash_completion, instructions) EXCEPT the written/printed `export NVM_DIR=""` (GNU: full path) + 1 sed error line — D:/-colon × `sed "s:^$HOME:..."` delimiter collision (path-value-form family) | **#329** |
+| pyenv-installer @ master (91 L, harvest-patched GITHUB prefix → local mirrors, symmetric) | 4/4 clones + plugin layout + stub init output **byte-identical modulo path rendering** | none |
+| webinstall.dev bootstrap (_webi/curl-pipe-bootstrap.tpl.sh, 349 L rendered) | GNU: full bootstrap installs ~/.local/bin/webi (34 lines, rc=0). rubash: dies at template line 138 `sed "s:^${my_rel}:~:"` — same #329 collision | **#329** |
+| webi node/install.sh standalone (100 L) | both sides rc=0 silent no-op (functions-only script without the template env) — symmetric | none |
+| get-docker.sh NEW driven path `--dry-run` (deepening of target-tools A coverage; plain run NOT repeated) | rubash: `ERROR: Unsupported distribution ''` (no /etc/os-release on Windows — env, prior-coverage class); GNU/WSL: prints the full Ubuntu apt dry-run command list (14 lines) | none (env) |
+| minikube install | **premise invalid**: no user-facing install shell script exists (hack/install/ absent; `installers/{darwin,linux,windows}` are packaging dirs; docs use direct binary download). Probed via repo tree + code search. | — |
+
+## D. sharness (felipec/sharness @ master) - self-hosted test framework
+
+- `t/simple.t`: **byte-identical, rc=0** both shells.
+- `t/sharness.t`: GNU 35/35 (+1 known-breakage TODO) rc=0; rubash 26/35 rc=1.
+  All 9 failures share the run_sub_test_lib_test nested-harness wrapper
+  (heredoc-fed stdin, subshell, `PS4=+ $prefix $SHELL_PATH ./x.t $opt
+  --chain-lint >out 2>err`, then the check_sub_test_lib_test err/expect
+  comparison). A sub-test body runs CORRECTLY standalone under rubash
+  (verified manually: ok/not ok/plan output exact), so the divergence is in
+  the wrapper mechanics - suspects: heredoc-stdin + pipeline + "$@" (#330
+  family) and the `! test -s err` gate. NOT root-caused this lane (recorded
+  as partial; artifacts under `sharness/`).
+
+## E. git hooks corpus (aitemr/awesome-git-hooks @ master, 10 hook scripts)
+
+Each hook run standalone (no repo context) under both shells: **10/10 rc
+parity, 9/10 stdout byte-identical**. Diffs: error-message path rendering
+(env), GNU-git-vs-Windows-git worktree discovery inside the shared repo tree
+(prepare-commit-msg-jira matched branch wt14 only on the Windows side -
+sandbox placement, env). No rubash-caused divergence.
+
+## Issue ledger from this lane
+
+| issue | corpus | class |
+| --- | --- | --- |
+| rubash#321 | pbb 001/013 | `$_` never updated by command execution |
+| rubash#322 | pbb 003 | `[[ =~ ^(a|b)$ ]]` unquoted paren regex breaks parse (anchor parse.y:5439 COND_REGEXP) |
+| rubash#323 | pbb 004 | `$'\n'` / `$'\t'` not decoded in `${var//pat/repl}` replacement (`\xHH` is) |
+| rubash#324 | pbb 030-032 | mapfile redirect-open failure silent, rc=0 |
+| rubash#325 | pbb 074 | bare `<>` + `<(:)` parse reject |
+| rubash#326 | pbb 076 | printf %(fmt)T: %l/%k/%u missing + UTC instead of localtime |
+| rubash#327 | pbb 053 | over-lax: empty/comment-only brace-group bodies accepted (GNU: syntax error) |
+| rubash#328 | pbb harness | rubash unconditionally creates $TMPDIR/var/tmp (default TMPDIR = `<cwd>/target`) |
+| rubash#329 | installers nvm+webi (+FFmpeg TMPDIR corollary) | env-inherited POSIX paths re-rendered D:/ drive form; colon breaks sed s:...:...: splices |
+| rubash#330 | FFmpeg configure | **P0**: function in pipeline receives caller "$@" as ONE space-joined arg -> silently corrupts FFmpeg config.h/config.mak |
+
+## Environment-bound findings (no issue, or evidence-only)
+
+1. WSL has a real /usr/bin/x86_64 binary (pbb 059 parity confusion).
+2. libpng GNU side needed local zlib (no zlib-dev in WSL).
+3. gcc visibility-attribute probe differs (mingw vs linux) - zlib line.
+4. autoconf unquoted $SED/$GREP break with SPACED Windows tool paths
+   (C:/Program Files) - environment; Git Bash survives only via MSYS /usr/bin
+   aliasing; rubash runs used a space-free PATH prefix.
+5. get-docker.sh distro detection needs /etc/os-release (Windows: absent).
+6. prepare-commit-msg-jira branch match asymmetry (git worktree discovery).
+7. Harness: Git-MSYS timeout env-drop with modified PATH (see pitfalls).
+
+## Positive parity worth keeping
+
+- zlib configure real-exec: byte-clean except 2 platform lines.
+- libpng configure real-exec to config.status: engine-level clean (the
+  same-platform Git-Bash comparison proves it); rubash handled the full
+  autoconf probe machinery (fd 5 logging, as_fn_* functions, config.status
+  reruns) correctly.
+- FFmpeg configure completes rc=0 with 774 lines of correct summary (the
+  corruption is the single #330 mechanism, not general configure breakage).
+- pyenv-installer: byte-identical modulo path form (4-repo clone chain).
+- nvm install.sh: everything except the #329 path-form line.
+- sharness framework self-hosts (TAP emission, plan lines, TODO/breakage
+  accounting); simple.t fully green; sub-tests execute correctly standalone.
+- git hooks corpus: 10/10 rc parity.
+- pbb 51/84 byte-clean including the heaviest string/array/loop idiom classes.
+
+## Artifacts
+
+- pbb: `pbb/{snips/,manifest.tsv,run-rub.sh,run-gnu.sh,cmp.py,verdict.tsv}`,
+  per-side `pbb/{rub,gnu}/<section>.{out,err,rc}` + workdirs.
+- configure: `cfg/{zlib,libpng,ffmpeg}.{rub,gnu}.{out,err,rc}` + build trees
+  `cfg/{zlib,libpng,ff}-{rub,gnu}/` (+ `libpng-gb/` Git-Bash control,
+  `ff-dbg*/` instrumented copies, `mapdbg.{gnu,rub}.log`).
+- installers: `inst/{run-rub.sh,run-gnu.sh}` + `inst/{rub,gnu}/<name>.*`.
+- sharness: `sharness/{sharness,simple}.{rub,gnu}.{out,err,rc}` + repo copies.
+- hooks: `hooks/{run-rub.sh,run-gnu.sh,filelist.txt}` + `hooks/{rub,gnu}/`.
+- isolation probes: `target/p1..p31.sh` + `target/probe-out/*` (rb/gnu).
+- Corpora pins: `target/ecosweep3-corpus/` (pbb.tgz, sharness.tgz, zlib.tgz,
+  libpng.tgz, ffmpeg.tgz @ n7.1.1, hooks.tgz, nvm-install.sh,
+  pyenv-installer.sh, docker-install.sh, docker-rootless-install.sh, webi/*,
+  mirrors/).
