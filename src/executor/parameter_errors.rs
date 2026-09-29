@@ -40,6 +40,61 @@ fn split_leading_array_ref(name: &str) -> Option<(&str, &str)> {
     Some((base, subscript))
 }
 
+/// Byte length of the parameter-reference portion of a `${...}` body,
+/// mirroring GNU `subst.c:791 string_extract` with `SX_VARNAME` as called
+/// from `parameter_brace_expand` (`subst.c:9807`, delimiter set
+/// `#%^,:-=?+/@}`): the reference ends at the first unescaped operator
+/// character, and a well-formed `[...]` subscript group is skipped as
+/// part of the reference (`subst.c:812-818`, `skipsubscript` + the
+/// `string[ni] == RBRACK` check). Brackets *after* the operator are
+/// pattern/replacement text, never a subscript — `${line#[[:space:]]}`
+/// references `line` (rubash#311), and `${a[5]#z}` references the
+/// element `a[5]`, not an array named `a[5]#z`.
+fn parameter_reference_len(body: &str) -> usize {
+    const OPERATOR_SET: &[u8] = b"#%^,:-=?+/@}";
+    let bytes = body.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if ch == b'\\' {
+            if index + 1 < bytes.len() {
+                index += 1;
+            } else {
+                break;
+            }
+        } else if ch == b'[' {
+            // skipsubscript: nested brackets adjust depth, a backslash
+            // protects the next character; an unterminated group leaves
+            // the `[` as ordinary reference text.
+            let mut depth = 1usize;
+            let mut scan = index + 1;
+            let mut close = None;
+            while scan < bytes.len() {
+                match bytes[scan] {
+                    b'\\' => scan += 1,
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(scan);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                scan += 1;
+            }
+            if let Some(closed) = close {
+                index = closed;
+            }
+        } else if OPERATOR_SET.contains(&ch) {
+            break;
+        }
+        index += 1;
+    }
+    index
+}
+
 /// Byte index of the next `${` in `text` that starts a parameter expansion
 /// of the word itself, skipping spans whose contents belong to another
 /// expansion layer (GNU subst.c: string_extract_double_quoted copies a
@@ -1180,16 +1235,32 @@ impl Executor {
             return (!bound).then(|| format!("!{base}"));
         }
 
+        // GNU subst.c:9807 parameter_brace_expand: the parameter reference
+        // ends at the first `#%^,:-=?+/@}` operator character (string_extract
+        // with SX_VARNAME, subst.c:791, skipping well-formed `[...]`
+        // subscripts at subst.c:812-818). The unbound check at
+        // subst.c:10170-10180 applies only to the substring / patsub /
+        // casemod / attribute / `#` / `%` / bare forms — the default,
+        // assign and alternate operators (`-`, `=`, `+`, the `:`-prefixed
+        // versions) never report unbound, so bail only when the OPERATOR is
+        // one of those. A `-`/`=`/`+` inside a pattern after `#`/`%`/`/` is
+        // pattern text, not an operator (`${x#[a-]}` still reports x,
+        // rubash#311).
+        let brace_core = name.strip_prefix('#').unwrap_or(name);
+        let operator_tail = &brace_core[parameter_reference_len(brace_core)..];
+        let operator_head = operator_tail.as_bytes().first().copied();
+        let default_value_operator = matches!(operator_head, Some(b'-') | Some(b'=') | Some(b'+'))
+            || (operator_head == Some(b':')
+                && matches!(
+                    operator_tail.as_bytes().get(1),
+                    Some(b'-') | Some(b'=') | Some(b'+') | Some(b'?')
+                ));
+
         if name.is_empty()
             || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
             || name.starts_with('!')
             || parse_parameter_error_operator(name, self.posix_mode_enabled()).is_some()
-            || name.contains(":-")
-            || name.contains(":=")
-            || name.contains(":+")
-            || name.contains('-')
-            || name.contains('=')
-            || name.contains('+')
+            || default_value_operator
         {
             return None;
         }
@@ -1214,7 +1285,15 @@ impl Executor {
             return (!self.nounset_variable_bound(&resolved)).then(|| stripped.to_string());
         }
 
-        if name.contains('@') {
+        // GNU subst.c:10170-10180: `c == '@'` (attribute/transform
+        // operator) IS in the unbound-check list, so `${UNSET@Q}` and
+        // `${UNSET@[Q]}` report `UNSET`. Only `@` inside the parameter
+        // REFERENCE — `[@]`/`[*]` subscripts or @-bearing subscript
+        // text — keeps the never-unbound bail (all-element forms are
+        // excluded by the `(name[0] == '@' || name[0] == '*') &&
+        // name[1] == 0` / all_element_arrayref guard at subst.c:10177).
+        let reference_portion = &brace_core[..brace_core.len() - operator_tail.len()];
+        if reference_portion.contains('@') {
             return None;
         }
 
@@ -1241,10 +1320,32 @@ impl Executor {
             // `#a[0]` reports `a[0]`; issue #200). `core` is `name`
             // unchanged when there is no leading `#`.
             if let Ok(index) = base.parse::<usize>() {
+                // GNU err_unboundvar(name) carries the bare reference
+                // (`1`, not `1#pat`).
+                let reference = &core[..parameter_reference_len(core)];
                 return (index > 0 && self.shell_state.positional_params.get(index - 1).is_none())
-                    .then(|| core.to_string());
+                    .then(|| reference.to_string());
             }
             if is_shell_name(base) {
+                // GNU subst.c:9807: the parameter reference ends at the
+                // first `#%^,:-=?+/@}` operator. With an operator tail,
+                // the unbound check at subst.c:10170-10180 runs on the
+                // PRE-OPERATOR reference only: `${a[5]#z}` checks element
+                // 5 and reports `a[5]`, and err_unboundvar(name) reports
+                // the bare reference — `${UNSET#pat}` reports `UNSET`,
+                // never the pattern text (rubash#311). Without a tail
+                // the value/length forms below keep their routes.
+                let reference_end = parameter_reference_len(core);
+                if reference_end < core.len() {
+                    let reference = &core[..reference_end];
+                    if let Some((abase, sub)) = parse_array_subscript(reference) {
+                        return self.nounset_array_element_unbound(abase, sub, reference);
+                    }
+                    return (!self.dynamic_parameter_is_set(base)
+                        && !self.shell_state.env_vars.contains_key(base)
+                        && std::env::var(base).is_err())
+                    .then(|| reference.to_string());
+                }
                 // GNU subst.c: the VALUE form `${a[k]}` is unbound when the
                 // element itself does not exist, reporting the full `a[k]`
                 // reference (nameref25.sub ok 1 reports `a[k]: unbound
@@ -1343,6 +1444,20 @@ impl Executor {
     fn nounset_variable_bound(&self, name: &str) -> bool {
         if self.dynamic_parameter_is_set(name) {
             return true;
+        }
+        // GNU variables.c find_variable returns the CELL; boundness for the
+        // scalar form is decided by the cell TYPE (array_p/assoc_p), never
+        // by the value text — a scalar like x='()' (read from a doc line,
+        // rubash #311 blast radius: liquidprompt tools/config-from-doc.sh)
+        // is bound, while an empty array cell (`e=()`, new-exp15 `-uc`) is
+        // not. The typed store carries the type; consult it first and fall
+        // back to the flat-mirror heuristics only for env-only names.
+        if let Some(variable) = self.shell_state.variables.get(name) {
+            return match &variable.value {
+                crate::shell::ShellValue::Scalar(_) => true,
+                crate::shell::ShellValue::IndexedArray(entries) => !entries.is_empty(),
+                crate::shell::ShellValue::AssociativeArray(entries) => !entries.is_empty(),
+            };
         }
         let has_array_marker = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name)
             || is_marked_array_var(&self.shell_state.env_vars, name);
