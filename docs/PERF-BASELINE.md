@@ -1566,3 +1566,138 @@ is the marker-string attribute model itself). OMB (real HOME, agnoster):
    pass should sub-time the matcher chain.
 5. Startup floor (probe 01, 15.6x): perf10's decomposition stands —
    ~80% MSYS-parent spawn constant, in-process floor ~14ms.
+
+## exphot round (2026-09-29, wt15/exphot on 837514ff): the expansion main loop
+
+Owner goal "all suites 2-3x": attack PERF-BASELINE 04/05 (debug 53-85x at
+round start) and probe 15 (3534ms vs GNU 57ms) via the expansion hot path.
+Base 837514ff carries perf6 (glob/materialize, `$`-admission pre-scan) and
+perf11 (per-command floor round 2). All A/B numbers same-session alternating
+runs against a pristine 837514ff binary (../rubash-wt-exphot-base), medians.
+
+### Decomposition (scratch phase timers + counting allocator, removed)
+
+Probe 15 debug (5867ms instrumented run) split as: **empty_rhs 1248ms**
+(assignment-RHS expansion; 25000 RHS x 50µs, **75 allocations per `${a#pat}`
+fragment**), empty_apply 350ms (apply_shell_assignment), empty_pre 167ms
+(parameter-error pre-scan), expand 349ms (`[ "$i" -lt N ]` word pipeline,
+23 allocs/word), chain 274, matcmd 205, linecmd 168, scans 101, jobs 92,
+while-loop machinery ~240. Probe 05: arith 313ms = **arith_dyn 137 (the
+per-eval dynamic-values HashMap build)** + arith_parse 137 + sync 7; loop
+machinery ~90. Probe 04: test-command expand 155ms (60000 words; `[`/`]`/
+`"$i"` ~13-26µs each), matcmd 84, empty 111.
+
+Allocation attribution inside one `${a#alpha}` fragment (probe 15):
+43 in the pattern arm — of which the bulk was **two `Vec<char>` stagings per
+CANDIDATE BOUNDARY inside `case_pattern_matches`** (the `${a%%:*}` /
+`${a%%gamma*}` removal loops call it once per boundary); ~12 in the
+operator-dispatch chain (sequential `split_once_outside_subscript` probes,
+each a full quote/bracket state-machine re-scan, `Vec<u8>` per `_str` op);
+the rest in guards/marker chains/value fetches. The RHS walker tail paid
+4-6 chained `str::replace` calls (each a full String copy even with ZERO
+markers present), the assignment quote-removal tail 6 more.
+
+### Landed changes (11 files; instrumentation removed)
+
+1. **TopLevelOpIndex** (expand_braced_ops.rs + parameter_words.rs chain):
+   GNU `parameter_brace_expand` (subst.c:9777) extracts the name up to the
+   FIRST operator char in ONE `string_extract(..., "#%^,:-=?+/@}", SX_VARNAME)`
+   pass (subst.c:9799-9802) and dispatches on that character
+   (subst.c:9886-9917). The port ran ~8 sequential split probes per
+   fragment, each re-scanning with the same state machine;
+   `expand_quoted_parameter_word_mut` now builds one index per fragment
+   (state machine copied verbatim from `split_once_outside_subscript_impl`;
+   an operator byte at a top-level position never alters the machine's
+   state, so pair/single answers are byte-identical). All 8 split sites in
+   the chain now O(1) lookups; `split_once_outside_subscript_str` no longer
+   allocates a `Vec<u8>` per call.
+2. **simple_glob_matches** (conditional/pattern.rs): direct char-wise match
+   with one saved backtrack point for the printable-ASCII literal + `*` +
+   `?` class — the gnulib strmatch.c `gmatch` shape (no staging). The staged
+   matcher (2 `Vec<char>` per call) was paid once per candidate boundary by
+   the removal loops: pattern-arm allocations 43 -> 15 per fragment.
+   nocase folds ASCII-only (`eq_ignore_ascii_case`, same as `chars_match`).
+3. **arith_dynamic_values** snapshot: `HashMap<&'static str, String>` +
+   `with_capacity(9)` (kills 9 per-name key clones + 4+ table growth
+   reallocs per arithmetic evaluation). GNU has no snapshot (expr.c:1150
+   expr_streval -> find_variable on maintained entries) — the map is port
+   scaffolding; its build cost 137 -> 87ms per probe-05 run (instrumented).
+4. **cow_replace + borrowing restore helpers** (markers.rs cow_replace /
+   dequote_ctlesc_pairs_cow, parameter_ops.rs restore_cow,
+   command_subst_helpers.rs unescape_cow; applied in the walker tail, the
+   RHS hoist/restore and quote-removal tails): GNU restores markers IN
+   PLACE (subst.c:4807 dequote_string / subst.c:4692 dequote_escapes walk
+   once; a marker-free value is never copied) — every restore link now
+   borrows when its sentinel is absent (output byte-identical).
+   RHS-phase allocations 2.21M -> 565K per probe-15 run.
+
+### Numbers (alternating A/B vs pristine 837514ff)
+
+| probe | release base | release lane | delta | debug base | debug lane | delta |
+|---|---:|---:|---:|---:|---:|---:|
+| 15-expansion-x5000 | 612 | **530** | **-13%** | 3171 | 2942 | -7% |
+| p15rel (4-assign x20000) | 2224 | **1943** | **-12%** | — | — | — |
+| 05-arith-x5000 | 163 | 153 | -6% | 541 | 490 | -9% |
+| p6arr `a[1]=$i` x20000 | 1258 | 1206 | -4% | — | — | — |
+| p6-null `:` loop | 915 | 881 | -3% | — | — | — |
+| 04-loop-true-builtin | — | — | — | 588 | 565 | -3% |
+| 06-strconcat | — | — | — | 1414 | 1343 | -5% |
+
+Release ratios (GNU anchors 57ms p15 / 13ms p05): probe 15 ~10.4x -> **9.3x**
+(release), probe 05 ~12.5x -> ~11.8x. The 04/05-to-10x debug target is NOT
+met (debug 04 ~44x, 05 ~38x): the remaining wall is distributed per-command
+machinery (linecmd/chain/scans/jobs ≈ 40% of probe 04) and the RHS walker's
+guard/memo/thread-local layer, not a single >5% site.
+
+### Semantics gate (zero-change evidence)
+
+- `cargo test --lib` 537/537; `--test regression` 27/27 (includes the
+  golden issue296 carrier-adjacent-comsub fixture);
+  issue315_guard_alternate 10/10; issue301_303_storage_literal 5/5;
+  marker_leak_golden 6/6. `RUSTFLAGS='-D warnings' cargo check --tests` and
+  `cargo check --release --tests` clean; cargo fmt clean;
+  src/lexer/continuation.rs untouched.
+- GNU-diff matrices under `target/exphot/matrix{1..4}.sh` (operator
+  dispatch incl. error arms; pattern removal + literal/glob/nocase class;
+  arith dynamic vars BASHPID/BASH_SUBSHELL/SHELLOPTS/BASHOPTS/PIPESTATUS/
+  FUNCNAME/GROUPS + assignment marker restores + `${x@Q}`; set -u nounset
+  interplay): **byte-identical base-vs-lane** (rc + stdout + stderr).
+- 14 upstream suite slices (exp new-exp more-exp posixexp quote comsub
+  comsub2 arith cond case errors varenv array assoc) run from
+  third_party/bash/tests: **byte-identical base-vs-lane** (rc + stdout +
+  stderr, binary-path prefix normalized).
+- One rubash-vs-GNU divergence surfaced by matrix1 and verified
+  PRE-EXISTING at 837514ff (base binary reproduces byte-for-byte):
+  `set -u; echo "${u:=y} $u"` reports `u: unbound variable` while GNU
+  continues — the nounset pre-scan does not model a preceding `${u:=y}`
+  assignment in the SAME word (owner: parameter_errors.rs
+  nounset_unbound_parameter; NOT from this lane's changes).
+
+### Leftovers (measured, with the shape of the next fix)
+
+1. **`"$i"`-class quoted-parameter words** (~24µs/word, probe 04/15 test
+   commands): a fast path needs the exact GNU param_expand port for the
+   single-name class — each special parameter (`@ * # ? - $ ! 0-9`) has
+   distinct semantics and the class is NOT closed under a simple byte test;
+   a hand-rolled admission here is exactly the rubash#117 counter-example
+   shape. Next lane: mirror the walker's `$name` arm functions for an
+   admitted class, skipping only provably-identity guard steps.
+2. **Double pre-scan per RHS**: `apply_parameter_assignment_expansions_in_
+   word` runs on the same text at assignment_expansion.rs (RHS entry) AND
+   again inside the walker (embedded_mutations.rs:343). The second is
+   memo-deduped (SubXpassFrame) but still a full quote-walk. Skippable by
+   threading a "pre-applied" flag when `hoisted_value == value` (byte
+   equality makes it provably redundant; subscript side effects are
+   memo-keyed) — not attempted this round to keep the walker's parameter
+   list untouched.
+3. **arith_dyn 87ms remains** (probe 05): the 9-name snapshot still renders
+   BASHPID/BASH_ARGV0/GROUPS/BASH_COMMAND/PIPESTATUS per evaluation. Root
+   fix is GNU's model — maintained entries read via find_variable (the
+   invalidation surface: subshell depth, function depth, per-command
+   BASH_COMMAND stamp, option flips, pipeline status — wide; deep
+   subsystem).
+4. **empty_apply 350ms / empty_pre 167ms** (probe 15): assignment-store machinery
+   (6 allocs/apply) and the command-level parameter-error pre-scan (perf6
+   decided to KEEP the pre-scan for error ownership; GNU has none —
+   subst.c expands once and reports inline — so the full fix is the
+   perf6-deferred per-arm lazy-error refactor).
