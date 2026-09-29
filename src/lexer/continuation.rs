@@ -672,29 +672,118 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
     // scans these nested contexts with their own quote rules; a `'` inside
     // `${IFS+'}'z}` is balanced within the expansion and must not leak a
     // dangling single-quote into the rest of the line.
-    let mut single = false;
-    let mut double = false;
-    let mut ansi_single = false;
-    let mut escaped = false;
-    let mut comment_start = true;
-    let mut in_comment = false;
+    //
+    // rubash#292 plan-B shape (perf8): this is the full-buffer oracle; the
+    // join gate (GroupScanFeeder::advance_quotes_scan) drives
+    // quotes_residuals_advance incrementally over the same bytes.
     let chars = input.chars().collect::<Vec<_>>();
-    let mut index = 0usize;
+    let mut state = QuotesResidualState::default();
+    let _ = quotes_residuals_advance(&chars, 0, &mut state);
+    state.is_open()
+}
+
+/// Every scan local of the unclosed-quote checker above, checkpointable
+/// across physical lines (rubash#292 plan-B shape, perf8 lane).
+///
+/// GNU anchor: parse.y:3557 read_token — a streaming reader whose quote
+/// state (parse.y:5305 read_token_word) advances character by character and
+/// never re-scans consumed text. The full-buffer loop above is this port's
+/// substitute for that streaming model; its locals are a left-to-right DFA
+/// over the same bytes, so in isolation they are resumable: carrying them
+/// across a physical-line boundary reproduces the full-buffer scan bit for
+/// bit. The one thing that is NOT position-local is the set of atomic
+/// forward skips (`${` span scan, `$(...)`/backtick unit skips): their
+/// outcome is a function of text up to the END of the current buffer, so a
+/// skip that failed on a shorter prefix may succeed on a longer one.
+/// [`quotes_residuals_advance`] reports those positions as a
+/// [`QuotesResidualPark`] so the caller re-derives the decision instead of
+/// committing the shorter prefix's answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QuotesResidualState {
+    pub(crate) single: bool,
+    pub(crate) double: bool,
+    pub(crate) ansi_single: bool,
+    pub(crate) escaped: bool,
+    pub(crate) comment_start: bool,
+    pub(crate) in_comment: bool,
+}
+
+impl Default for QuotesResidualState {
+    fn default() -> Self {
+        // The original scan's initial locals: only comment_start starts set.
+        Self {
+            single: false,
+            double: false,
+            ansi_single: false,
+            escaped: false,
+            comment_start: true,
+            in_comment: false,
+        }
+    }
+}
+
+impl QuotesResidualState {
+    /// The join gate's question: does any quote flag still keep the logical
+    /// line open?
+    pub(crate) fn is_open(&self) -> bool {
+        self.single || self.double || self.ansi_single
+    }
+}
+
+/// A re-derivation point returned by [`quotes_residuals_advance`]: the
+/// scan's trajectory from `pos` onward depends on a forward decision the
+/// current buffer leaves undecided (a `${` span, `$(` unit or backtick unit
+/// whose atomic skip failed, or a unit that closed through an `esac)`
+/// lookahead that ran off the end), so a longer buffer may take a different
+/// branch there. Resuming at `pos` with `snapshot` re-runs that decision
+/// with the longer buffer's text — exactly what the full scan of the longer
+/// buffer does (same soundness rules as [`ComsubResidualPark`], rubash#292).
+pub(crate) struct QuotesResidualPark {
+    /// Char index (absolute, into the buffer passed to the advance fn)
+    /// where the undecided decision starts.
+    pub(crate) pos: usize,
+    /// Scan state at `pos`, before the undecided arm mutated anything.
+    pub(crate) snapshot: QuotesResidualState,
+}
+
+/// Advance the unclosed-quote scan over `chars[from..]` starting from
+/// `state` (restored from a previous checkpoint or `Default`), leaving
+/// `state` as the scan's end state, and return the FIRST undecided
+/// position, if any.
+///
+/// Equivalence contract (same discipline as `comsub_residuals_advance`):
+/// scanning a buffer fully (`from == 0`, `Default`) reproduces the old
+/// whole-buffer loop byte for byte (the arms below are its arms,
+/// unchanged); resuming at a park re-derives every buffer-length-dependent
+/// decision, so the end state after each prefix equals the full scan of
+/// that prefix. Arms that only read position-local state (quote toggles,
+/// `$'`, comments, escapes) need no park: the machine is memoryless given
+/// position + state, and the '\n' separators the join loop inserts
+/// guarantee no two-character lookahead (`$(`, `${`, `$'`) straddles a
+/// resume boundary except after a backslash-continuation pop — which
+/// invalidates the checkpoint instead (see the feeder).
+pub(crate) fn quotes_residuals_advance(
+    chars: &[char],
+    from: usize,
+    state: &mut QuotesResidualState,
+) -> Option<QuotesResidualPark> {
+    let mut index = from.min(chars.len());
+    let mut park: Option<QuotesResidualPark> = None;
 
     while index < chars.len() {
         let ch = chars[index];
-        if in_comment {
+        if state.in_comment {
             if ch == '\n' {
-                in_comment = false;
-                comment_start = true;
+                state.in_comment = false;
+                state.comment_start = true;
             }
             index += 1;
             continue;
         }
 
-        if escaped {
-            escaped = false;
-            comment_start = false;
+        if state.escaped {
+            state.escaped = false;
+            state.comment_start = false;
             index += 1;
             continue;
         }
@@ -710,40 +799,41 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
         // quote into a following comment's backtick, leaving a dangling
         // ansi_single that held the line open to EOF (rubash#215:
         // `w=$'a\'b`c' # bug `>` reported "unexpected end of file").
-        // Same arm shape as has_unclosed_compound_assignment below and
-        // comsub_residuals further down.
-        if ansi_single {
+        // Same arm shape as compound_residuals_advance below and
+        // comsub_residuals_advance further down.
+        if state.ansi_single {
             if ch == '\\' {
-                escaped = true;
+                state.escaped = true;
             } else if ch == '\'' {
-                ansi_single = false;
+                state.ansi_single = false;
             }
-            comment_start = false;
+            state.comment_start = false;
             index += 1;
             continue;
         }
 
-        if ch == '\n' && !single && !double && !ansi_single {
-            comment_start = true;
+        if ch == '\n' && !state.single && !state.double && !state.ansi_single {
+            state.comment_start = true;
             index += 1;
             continue;
         }
 
-        if ch == '#' && !single && !double && !ansi_single && comment_start {
-            in_comment = true;
+        if ch == '#' && !state.single && !state.double && !state.ansi_single && state.comment_start
+        {
+            state.in_comment = true;
             index += 1;
             continue;
         }
 
-        if ch.is_whitespace() && !single && !double && !ansi_single {
-            comment_start = true;
+        if ch.is_whitespace() && !state.single && !state.double && !state.ansi_single {
+            state.comment_start = true;
             index += 1;
             continue;
         }
 
-        if ch == '\\' && (!single || ansi_single) {
-            escaped = true;
-            comment_start = false;
+        if ch == '\\' && (!state.single || state.ansi_single) {
+            state.escaped = true;
+            state.comment_start = false;
             index += 1;
             continue;
         }
@@ -758,16 +848,25 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
         // POSIX honors the Interp 221 big hammer (`'` literal, first `}`
         // closes), non-POSIX honors quotes — so try POSIX first and fall back
         // to the non-POSIX scan; if neither closes, the line is unclosed.
-        if ch == '$' && !single && chars.get(index + 1) == Some(&'{') {
-            // rubash#281 (captain-applied perf3 proposal): zero-copy body
-            // view via the rubash#185 chars API — the String copy
-            // re-collected the ENTIRE remaining input per `${` (nvm.sh: 1644
-            // occurrences -> O(n^2); prescan 4540ms -> 27ms). The slice
-            // INCLUDES the `${` opener: scan_braced_parameter_body_chars
-            // requires it at position 0 — slicing from index+2 would report
-            // every span unclosed.
+        //
+        // rubash#281 (captain-applied perf3 proposal): zero-copy body
+        // view via the rubash#185 chars API — the String copy
+        // re-collected the ENTIRE remaining input per `${` (nvm.sh: 1644
+        // occurrences -> O(n^2); prescan 4540ms -> 27ms). The slice
+        // INCLUDES the `${` opener: scan_braced_parameter_body_chars
+        // requires it at position 0 — slicing from index+2 would report
+        // every span unclosed.
+        //
+        // perf8 park (rubash#292 discipline): a span that did not close on
+        // THIS buffer is not decided — a longer buffer may close it and
+        // jump past body quotes that the committed fall-through below let
+        // toggle the outer state. A successful close IS decided (the span
+        // scanner is a forward scan that stops at its own `}`; it never
+        // reads past the close it found, so a longer buffer takes the same
+        // trajectory).
+        if ch == '$' && !state.single && chars.get(index + 1) == Some(&'{') {
             let body = &chars[index..];
-            if !double {
+            if !state.double {
                 let context = crate::lexer::dolbrace::BraceContext {
                     outer_double_quote: false,
                     posix: false,
@@ -778,11 +877,18 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
                     crate::lexer::dolbrace::scan_braced_parameter_body_chars(body, context)
                 {
                     index += 2 + scan.end;
-                    comment_start = false;
+                    state.comment_start = false;
                     continue;
                 }
                 // Unterminated/odd expansion: fall through and let the caller
-                // treat the input as having unclosed syntax.
+                // treat the input as having unclosed syntax — but park first
+                // so a longer buffer re-derives the span decision.
+                if park.is_none() {
+                    park = Some(QuotesResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    });
+                }
             } else {
                 let mut closed = false;
                 for posix_mode in [true, false] {
@@ -796,7 +902,7 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
                         crate::lexer::dolbrace::scan_braced_parameter_body_chars(body, context)
                     {
                         index += 2 + scan.end;
-                        comment_start = false;
+                        state.comment_start = false;
                         closed = true;
                         break;
                     }
@@ -804,9 +910,16 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
                 if closed {
                     continue;
                 }
-                // Neither scan closes the span: fall through; the trailing
-                // quote toggles leave the state as-is and the caller reports
-                // unclosed input, matching the lexer's own fallback swallow.
+                // Neither scan closes the span: park (the trailing quote
+                // toggles leave the state as-is and the caller reports
+                // unclosed input, matching the lexer's own fallback swallow)
+                // — a longer buffer may still close the span.
+                if park.is_none() {
+                    park = Some(QuotesResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    });
+                }
             }
         }
 
@@ -814,53 +927,84 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
         // self-contained unit.
         // A balanced command substitution owns its nested quote state, even
         // when the substitution itself appears inside an outer double quote.
-        if ch == '$' && !single && chars.get(index + 1) == Some(&'(') {
-            if let Some(end) = skip_parenthesized_unit(&chars, index + 1) {
+        //
+        // perf8 parks (rubash#292 discipline): (P1) the atomic skip failed on
+        // THIS buffer — the committed fall-through consumes `$` and `(` as
+        // ordinary text, but a longer buffer may close the unit atomically
+        // and jump its whole body (whose quote bytes then never toggle the
+        // outer state); (P2) the unit closed through an `esac)` case-pattern
+        // lookahead that ran off the buffer end undecided — future text can
+        // flip the internal case depth and move (or undo) the closure point.
+        // Every other internal decision of the skip is prefix-monotone.
+        if ch == '$' && !state.single && chars.get(index + 1) == Some(&'(') {
+            if let Some((end, unit_decided)) = skip_parenthesized_unit_ex(chars, index + 1) {
+                if !unit_decided && park.is_none() {
+                    park = Some(QuotesResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    });
+                }
                 index = end;
-                comment_start = false;
+                state.comment_start = false;
                 continue;
+            }
+            if park.is_none() {
+                park = Some(QuotesResidualPark {
+                    pos: index,
+                    snapshot: state.clone(),
+                });
             }
         }
 
         // Skip a backtick command substitution as a self-contained unit.
-        if ch == '`' && !single && !double {
-            if let Some(end) = skip_backtick_unit(&chars, index) {
+        // perf8 park: an unclosed backtick unit is not decided — the
+        // committed fall-through lets the body's `"`/`'` bytes toggle the
+        // outer quote state, but a longer buffer closes the unit and jumps
+        // its body wholesale.
+        if ch == '`' && !state.single && !state.double {
+            if let Some(end) = skip_backtick_unit(chars, index) {
                 index = end;
-                comment_start = false;
+                state.comment_start = false;
                 continue;
+            }
+            if park.is_none() {
+                park = Some(QuotesResidualPark {
+                    pos: index,
+                    snapshot: state.clone(),
+                });
             }
         }
 
-        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
-            ansi_single = true;
-            comment_start = false;
+        if ch == '$' && !state.single && !state.double && chars.get(index + 1) == Some(&'\'') {
+            state.ansi_single = true;
+            state.comment_start = false;
             index += 2;
             continue;
         }
 
         match ch {
-            '\'' if ansi_single => {
-                ansi_single = false;
-                comment_start = false;
+            '\'' if state.ansi_single => {
+                state.ansi_single = false;
+                state.comment_start = false;
             }
-            '\'' if !double && !ansi_single => {
-                single = !single;
-                comment_start = false;
+            '\'' if !state.double && !state.ansi_single => {
+                state.single = !state.single;
+                state.comment_start = false;
             }
-            '"' if !single && !ansi_single => {
-                double = !double;
-                comment_start = false;
+            '"' if !state.single && !state.ansi_single => {
+                state.double = !state.double;
+                state.comment_start = false;
             }
             _ => {
-                if !single && !double && !ansi_single {
-                    comment_start = false;
+                if !state.single && !state.double && !state.ansi_single {
+                    state.comment_start = false;
                 }
             }
         }
         index += 1;
     }
 
-    single || double || ansi_single
+    park
 }
 
 const DECLARATION_COMMAND_WORDS: [&str; 5] = ["declare", "typeset", "local", "export", "readonly"];
@@ -910,109 +1054,217 @@ fn assignment_prefix_word(word: &str) -> bool {
 /// the following lines: the collector finalizes the logical line and the
 /// parser reports the error.
 pub(super) fn has_unclosed_compound_assignment(input: &str) -> bool {
+    // rubash#292 plan-B shape (perf8): this is the full-buffer oracle; the
+    // join gate (GroupScanFeeder::advance_compound_scan) drives
+    // compound_residuals_advance incrementally over the same bytes.
     let chars = input.chars().collect::<Vec<_>>();
-    let mut index = 0usize;
-    let mut compound_depth = 0usize;
-    let mut single = false;
-    let mut double = false;
-    let mut ansi_single = false;
-    let mut escaped = false;
-    let mut in_comment = false;
-    let mut comment_start = true;
-    let mut word = String::new();
-    let mut word_pure = true;
-    let mut seen_command_word = false;
-    let mut declaration_context = false;
+    let mut state = CompoundResidualState::default();
+    let _ = compound_residuals_advance(&chars, 0, &mut state);
+    state.is_open()
+}
+
+/// Every scan local of the unclosed-compound-assignment checker,
+/// checkpointable across physical lines (rubash#292 plan-B shape, perf8
+/// lane).
+///
+/// GNU anchor: parse.y:3557 read_token streams tokens (the `name=(`
+/// compound-assignment word keeps the reader open until its matching `)`,
+/// parse.y read_token_word assignment handling / gather the array list);
+/// this checker's char-machine is a left-to-right DFA over the same bytes,
+/// so its locals are resumable in isolation. The non-position-local
+/// decisions are the atomic forward skips (`${` span, `$(...)`/backtick
+/// units) plus the two EARLY TERMINALS (`return false` on an unbalanced
+/// `$(`/backtick unit): both overrode any accumulated `compound_depth`,
+/// which [`CompoundResidualState::forced_closed`] records so the parked
+/// answer stays exact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CompoundResidualState {
+    pub(crate) compound_depth: usize,
+    pub(crate) single: bool,
+    pub(crate) double: bool,
+    pub(crate) ansi_single: bool,
+    pub(crate) escaped: bool,
+    pub(crate) in_comment: bool,
+    pub(crate) comment_start: bool,
+    pub(crate) word: String,
+    pub(crate) word_pure: bool,
+    pub(crate) seen_command_word: bool,
+    pub(crate) declaration_context: bool,
+    /// An unbalanced `$(`/backtick unit forced the original loop's early
+    /// `return false` — the terminal answer is false regardless of the
+    /// accumulated `compound_depth` at that point.
+    pub(crate) forced_closed: bool,
+}
+
+impl Default for CompoundResidualState {
+    fn default() -> Self {
+        // The original scan's initial locals: comment_start and word_pure
+        // start set; everything else is empty/false.
+        Self {
+            compound_depth: 0,
+            single: false,
+            double: false,
+            ansi_single: false,
+            escaped: false,
+            in_comment: false,
+            comment_start: true,
+            word: String::new(),
+            word_pure: true,
+            seen_command_word: false,
+            declaration_context: false,
+            forced_closed: false,
+        }
+    }
+}
+
+impl CompoundResidualState {
+    /// The join gate's question: is a `name=(` compound assignment still
+    /// open? `forced_closed` encodes the original scan's early `return
+    /// false` (an unbalanced `$(`/backtick unit reports "no compound
+    /// assignment" even at compound_depth > 0).
+    pub(crate) fn is_open(&self) -> bool {
+        !self.forced_closed && self.compound_depth > 0
+    }
+}
+
+/// A re-derivation point returned by [`compound_residuals_advance`] (same
+/// soundness rules as [`QuotesResidualPark`] / [`ComsubResidualPark`],
+/// rubash#292).
+pub(crate) struct CompoundResidualPark {
+    /// Char index (absolute, into the buffer passed to the advance fn)
+    /// where the undecided decision starts.
+    pub(crate) pos: usize,
+    /// Scan state at `pos`, before the undecided arm mutated anything.
+    pub(crate) snapshot: CompoundResidualState,
+}
+
+/// Advance the compound-assignment scan over `chars[from..]` starting from
+/// `state`, leaving `state` as the scan's end state, and return the FIRST
+/// undecided position, if any. See [`quotes_residuals_advance`] for the
+/// equivalence contract; the compound machine's parks are:
+/// - a `${` span whose body scan did not close on this buffer (the
+///   committed path steps past `${` and scans the body as ordinary text,
+///   whose `(`/`)`/quote bytes a longer buffer would jump wholesale);
+/// - a `$(` unit whose atomic skip failed (the original loop's early
+///   `return false` — `forced_closed` — is committed for THIS prefix, and
+///   the park re-derives the skip on the next line);
+/// - a unit that closed through an off-the-end `esac)` lookahead;
+/// - an unclosed backtick unit (early `return false`, same treatment).
+pub(crate) fn compound_residuals_advance(
+    chars: &[char],
+    from: usize,
+    state: &mut CompoundResidualState,
+) -> Option<CompoundResidualPark> {
+    let mut index = from.min(chars.len());
+    let mut park: Option<CompoundResidualPark> = None;
 
     while index < chars.len() {
         let ch = chars[index];
 
-        if in_comment {
+        if state.in_comment {
             if ch == '\n' {
-                in_comment = false;
-                comment_start = true;
-                if compound_depth == 0 {
-                    seen_command_word = false;
-                    declaration_context = false;
+                state.in_comment = false;
+                state.comment_start = true;
+                if state.compound_depth == 0 {
+                    state.seen_command_word = false;
+                    state.declaration_context = false;
                 }
             }
             index += 1;
             continue;
         }
 
-        if escaped {
-            escaped = false;
-            comment_start = false;
+        if state.escaped {
+            state.escaped = false;
+            state.comment_start = false;
             index += 1;
             continue;
         }
 
-        if ch == '\n' && !single && !double && !ansi_single {
-            comment_start = true;
-            if compound_depth == 0 {
-                if !word.is_empty() {
+        if ch == '\n' && !state.single && !state.double && !state.ansi_single {
+            state.comment_start = true;
+            if state.compound_depth == 0 {
+                if !state.word.is_empty() {
+                    let mut seen_command_word = state.seen_command_word;
+                    let mut declaration_context = state.declaration_context;
                     classify_top_level_word(
-                        &word,
+                        &state.word,
                         &mut seen_command_word,
                         &mut declaration_context,
                     );
-                    word.clear();
-                    word_pure = true;
+                    state.seen_command_word = seen_command_word;
+                    state.declaration_context = declaration_context;
+                    state.word.clear();
+                    state.word_pure = true;
                 }
-                seen_command_word = false;
-                declaration_context = false;
+                state.seen_command_word = false;
+                state.declaration_context = false;
             }
             index += 1;
             continue;
         }
 
-        if ch == '#' && !single && !double && !ansi_single && comment_start {
-            in_comment = true;
+        if ch == '#' && !state.single && !state.double && !state.ansi_single && state.comment_start
+        {
+            state.in_comment = true;
             index += 1;
             continue;
         }
 
-        if ch.is_whitespace() && !single && !double && !ansi_single {
-            comment_start = true;
-            if compound_depth == 0 && !word.is_empty() {
-                classify_top_level_word(&word, &mut seen_command_word, &mut declaration_context);
-                word.clear();
-                word_pure = true;
+        if ch.is_whitespace() && !state.single && !state.double && !state.ansi_single {
+            state.comment_start = true;
+            if state.compound_depth == 0 && !state.word.is_empty() {
+                let mut seen_command_word = state.seen_command_word;
+                let mut declaration_context = state.declaration_context;
+                classify_top_level_word(
+                    &state.word,
+                    &mut seen_command_word,
+                    &mut declaration_context,
+                );
+                state.seen_command_word = seen_command_word;
+                state.declaration_context = declaration_context;
+                state.word.clear();
+                state.word_pure = true;
             }
             index += 1;
             continue;
         }
 
-        if ansi_single {
+        if state.ansi_single {
             if ch == '\\' {
-                escaped = true;
+                state.escaped = true;
             } else if ch == '\'' {
-                ansi_single = false;
+                state.ansi_single = false;
             }
-            comment_start = false;
-            word_pure = false;
+            state.comment_start = false;
+            state.word_pure = false;
             index += 1;
             continue;
         }
 
-        if ch == '\\' && !single {
-            escaped = true;
-            comment_start = false;
-            word_pure = false;
+        if ch == '\\' && !state.single {
+            state.escaped = true;
+            state.comment_start = false;
+            state.word_pure = false;
             index += 1;
             continue;
         }
 
-        if ch == '$' && !single && chars.get(index + 1) == Some(&'\'') {
-            ansi_single = true;
-            comment_start = false;
-            word_pure = false;
+        if ch == '$' && !state.single && chars.get(index + 1) == Some(&'\'') {
+            state.ansi_single = true;
+            state.comment_start = false;
+            state.word_pure = false;
             index += 2;
             continue;
         }
 
         // A `${...}` parameter expansion is opaque to parenthesis balancing.
-        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'{') {
+        // perf8 park (rubash#292 discipline): a span that did not close on
+        // THIS buffer is not decided — the committed path below steps past
+        // `${` and scans the body as ordinary text (its `(`/`)` bytes
+        // balancing parens, its quotes toggling), but a longer buffer closes
+        // the span and jumps its whole body.
+        if ch == '$' && !state.single && !state.double && chars.get(index + 1) == Some(&'{') {
             // rubash#281 (captain-applied perf3 proposal): zero-copy view;
             // slice includes the `${` opener per the chars API contract.
             let body = &chars[index..];
@@ -1027,137 +1279,187 @@ pub(super) fn has_unclosed_compound_assignment(input: &str) -> bool {
             {
                 index += 2 + scan.end;
             } else {
+                if park.is_none() {
+                    park = Some(CompoundResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    });
+                }
                 index += 2;
             }
-            comment_start = false;
-            word_pure = false;
+            state.comment_start = false;
+            state.word_pure = false;
             continue;
         }
 
         // A `$(...)` / `$((...))` command substitution is opaque to
         // parenthesis balancing; an unbalanced one is reported by
-        // has_unclosed_command_substitution instead.
-        if ch == '$' && !single && chars.get(index + 1) == Some(&'(') {
-            if let Some(end) = skip_parenthesized_unit(&chars, index + 1) {
+        // has_unclosed_command_substitution instead — the original loop
+        // returned false IMMEDIATELY there (`forced_closed`), and the park
+        // re-derives the skip so a longer buffer that closes the unit
+        // resumes the scan instead.
+        if ch == '$' && !state.single && chars.get(index + 1) == Some(&'(') {
+            if let Some((end, unit_decided)) = skip_parenthesized_unit_ex(chars, index + 1) {
+                if !unit_decided && park.is_none() {
+                    park = Some(CompoundResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    });
+                }
                 index = end;
-                comment_start = false;
-                word_pure = false;
+                state.comment_start = false;
+                state.word_pure = false;
                 continue;
             }
-            return false;
+            if park.is_none() {
+                park = Some(CompoundResidualPark {
+                    pos: index,
+                    snapshot: state.clone(),
+                });
+            }
+            state.forced_closed = true;
+            return park;
         }
 
-        if ch == '`' && !single && !double {
-            if let Some(end) = skip_backtick_unit(&chars, index) {
+        if ch == '`' && !state.single && !state.double {
+            if let Some(end) = skip_backtick_unit(chars, index) {
                 index = end;
-                comment_start = false;
-                word_pure = false;
+                state.comment_start = false;
+                state.word_pure = false;
                 continue;
             }
-            return false;
+            if park.is_none() {
+                park = Some(CompoundResidualPark {
+                    pos: index,
+                    snapshot: state.clone(),
+                });
+            }
+            state.forced_closed = true;
+            return park;
         }
 
-        if ch == '\'' && !double {
-            single = !single;
-            comment_start = false;
-            word_pure = false;
+        if ch == '\'' && !state.double {
+            state.single = !state.single;
+            state.comment_start = false;
+            state.word_pure = false;
             index += 1;
             continue;
         }
 
-        if ch == '"' && !single {
-            double = !double;
-            comment_start = false;
-            word_pure = false;
+        if ch == '"' && !state.single {
+            state.double = !state.double;
+            state.comment_start = false;
+            state.word_pure = false;
             index += 1;
             continue;
         }
 
-        if single || double {
+        if state.single || state.double {
             index += 1;
             continue;
         }
 
-        if ch == '(' && compound_depth == 0 {
-            let opens_compound = word_pure
-                && word
+        if ch == '(' && state.compound_depth == 0 {
+            let opens_compound = state.word_pure
+                && state
+                    .word
                     .strip_suffix('=')
                     .map(|head| {
                         let head = head.strip_suffix('+').unwrap_or(head);
                         valid_identifier(head)
                     })
                     .unwrap_or(false)
-                && (!seen_command_word || declaration_context);
+                && (!state.seen_command_word || state.declaration_context);
             if opens_compound {
-                compound_depth = 1;
-                word.clear();
-                word_pure = true;
+                state.compound_depth = 1;
+                state.word.clear();
+                state.word_pure = true;
                 // A `#` may start a comment right after the opening paren.
-                comment_start = true;
+                state.comment_start = true;
                 index += 1;
                 continue;
             }
             // A subshell/grouping paren ends the assignment-prefix region:
             // GNU reports `echo a=(b` immediately instead of continuing.
-            if !word.is_empty() {
-                classify_top_level_word(&word, &mut seen_command_word, &mut declaration_context);
-                word.clear();
-                word_pure = true;
+            if !state.word.is_empty() {
+                let mut seen_command_word = state.seen_command_word;
+                let mut declaration_context = state.declaration_context;
+                classify_top_level_word(
+                    &state.word,
+                    &mut seen_command_word,
+                    &mut declaration_context,
+                );
+                state.seen_command_word = seen_command_word;
+                state.declaration_context = declaration_context;
+                state.word.clear();
+                state.word_pure = true;
             }
-            seen_command_word = true;
-            comment_start = true;
+            state.seen_command_word = true;
+            state.comment_start = true;
             index += 1;
             continue;
         }
 
-        if ch == '(' && compound_depth > 0 {
-            compound_depth += 1;
-            comment_start = true;
+        if ch == '(' && state.compound_depth > 0 {
+            state.compound_depth += 1;
+            state.comment_start = true;
             index += 1;
             continue;
         }
 
         if ch == ')' {
-            if compound_depth > 0 {
-                compound_depth -= 1;
-                word.clear();
-                word_pure = true;
+            if state.compound_depth > 0 {
+                state.compound_depth -= 1;
+                state.word.clear();
+                state.word_pure = true;
             } else {
-                if !word.is_empty() {
+                if !state.word.is_empty() {
+                    let mut seen_command_word = state.seen_command_word;
+                    let mut declaration_context = state.declaration_context;
                     classify_top_level_word(
-                        &word,
+                        &state.word,
                         &mut seen_command_word,
                         &mut declaration_context,
                     );
-                    word.clear();
-                    word_pure = true;
+                    state.seen_command_word = seen_command_word;
+                    state.declaration_context = declaration_context;
+                    state.word.clear();
+                    state.word_pure = true;
                 }
-                seen_command_word = true;
+                state.seen_command_word = true;
             }
-            comment_start = true;
+            state.comment_start = true;
             index += 1;
             continue;
         }
 
         if ch == ';' || ch == '|' || ch == '&' {
-            if compound_depth == 0 && !word.is_empty() {
-                classify_top_level_word(&word, &mut seen_command_word, &mut declaration_context);
-                word.clear();
-                word_pure = true;
-                seen_command_word = false;
-                declaration_context = false;
+            if state.compound_depth == 0 && !state.word.is_empty() {
+                let mut seen_command_word = state.seen_command_word;
+                let mut declaration_context = state.declaration_context;
+                classify_top_level_word(
+                    &state.word,
+                    &mut seen_command_word,
+                    &mut declaration_context,
+                );
+                state.seen_command_word = seen_command_word;
+                state.declaration_context = declaration_context;
+                state.word.clear();
+                state.word_pure = true;
+                state.seen_command_word = false;
+                state.declaration_context = false;
             }
-            comment_start = true;
+            state.comment_start = true;
             index += 1;
             continue;
         }
 
-        word.push(ch);
-        comment_start = false;
+        state.word.push(ch);
+        state.comment_start = false;
         index += 1;
     }
 
-    compound_depth > 0
+    park
 }
 
 fn classify_top_level_word(
@@ -2218,6 +2520,367 @@ mod comsub_residual_incremental_tests {
                 fragments.push(FRAGMENTS[(rng.next() as usize) % FRAGMENTS.len()]);
             }
             // Split the fragment list into 1..=4 physical lines.
+            let max_lines = 4.min(fragment_count) as u64;
+            let line_count = (1 + (rng.next() % max_lines)) as usize;
+            let mut lines: Vec<String> = vec![String::new(); line_count];
+            for (i, fragment) in fragments.iter().enumerate() {
+                let target = if line_count == 1 {
+                    0
+                } else {
+                    (i * line_count / fragment_count).min(line_count - 1)
+                };
+                lines[target].push_str(fragment);
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            assert_incremental_matches_full(&lines);
+        }
+    }
+}
+
+#[cfg(test)]
+mod quotes_residual_incremental_tests {
+    use super::{has_unclosed_quotes, quotes_residuals_advance, QuotesResidualState};
+
+    /// Drive the checkpoint exactly like `GroupScanFeeder::advance_quotes_scan`
+    /// (restore snapshot at `resume`, advance over the buffer, store park or
+    /// stable end) and assert at EVERY physical-line prefix that:
+    ///   1. the advance's end state equals the full scan of that prefix
+    ///      (all six fields), and
+    ///   2. the open flag the join gate would read equals the full-scan flag
+    ///      (and the full-buffer oracle `has_unclosed_quotes`).
+    /// The logical line is '\n'-joined like `push_main_line` appends (the
+    /// no-separator backslash-join is a feeder-level invalidation, covered by
+    /// the lexer tokenize tests).
+    fn assert_incremental_matches_full(lines: &[&str]) {
+        let mut chars: Vec<char> = Vec::new();
+        let mut resume = 0usize;
+        let mut snapshot = QuotesResidualState::default();
+        for (line_index, line) in lines.iter().enumerate() {
+            if line_index > 0 {
+                chars.push('\n');
+            }
+            chars.extend(line.chars());
+            let mut state = snapshot.clone();
+            let park = quotes_residuals_advance(&chars, resume, &mut state);
+            let mut full = QuotesResidualState::default();
+            let _ = quotes_residuals_advance(&chars, 0, &mut full);
+            let text: String = chars.iter().collect();
+            assert_eq!(
+                state, full,
+                "end state at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            assert_eq!(
+                state.is_open(),
+                full.is_open(),
+                "open flag at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            assert_eq!(
+                state.is_open(),
+                has_unclosed_quotes(&text),
+                "oracle answer at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            match park {
+                Some(park) => {
+                    resume = park.pos;
+                    snapshot = park.snapshot;
+                }
+                None => {
+                    resume = chars.len();
+                    snapshot = state;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_matches_full_required_shapes() {
+        // plain multi-line comsub keeps quotes inside the unit
+        assert_incremental_matches_full(&["echo $(echo 'a", "b') x"]);
+        // nested ${...} inside a comsub body
+        assert_incremental_matches_full(&["echo $(echo ${x", "})"]);
+        // heredoc inside a command substitution (body bytes stay opaque)
+        assert_incremental_matches_full(&["echo $(cat <<eof", "here doc with )", "eof", ")"]);
+        // backslash continuation state (escaped char on the next line)
+        assert_incremental_matches_full(&["echo $(echo a\\", "b)"]);
+        assert_incremental_matches_full(&["echo $(echo 'q\\", "z')"]);
+        // top-level backtick comsub spanning lines
+        assert_incremental_matches_full(&["echo `date", "+%s` after"]);
+        // $'...' spanning lines
+        assert_incremental_matches_full(&["echo $'a\\n", "b'"]);
+        // plain multi-line single/double quotes
+        assert_incremental_matches_full(&["echo 'a", "b'"]);
+        assert_incremental_matches_full(&["echo \"a", "b\""]);
+        // comments do not eat quote state
+        assert_incremental_matches_full(&["echo a # 'x", "b"]);
+    }
+
+    #[test]
+    fn incremental_matches_full_park_shapes() {
+        // A `$(` opened inside a double-quoted word: the atomic unit skip is
+        // what lets the full scan close the unit past the residual
+        // double-quote state, so the checkpoint MUST re-derive the skip on
+        // the next line (`x="$(fo` + `o)"` closes at prefix 2 only via the park).
+        assert_incremental_matches_full(&["x=\"$(fo", "o)\""]);
+        assert_incremental_matches_full(&["x=\"$(a $(b", "c))\""]);
+        // `$(` whose body only closes on a later line.
+        assert_incremental_matches_full(&["echo $(a", "b)"]);
+        // `${` span that only closes on a later line: the park must
+        // re-derive the span jump (body quotes are data inside the span).
+        assert_incremental_matches_full(&["echo ${x", "\"} y"]);
+        assert_incremental_matches_full(&["echo ${a:-${b", "}}"]);
+        // `${` span inside double quotes: the two-context scan (posix then
+        // non-posix) is re-derived per line until one closes.
+        assert_incremental_matches_full(&["v=\"${IFS+'}", "'z}\" x"]);
+        // backtick unit that only closes on a later line.
+        assert_incremental_matches_full(&["echo `a", "b` c"]);
+        // P2: the unit closes through an `esac)` lookahead that runs off the
+        // buffer end undecided; the next line's `;;` flips the internal case
+        // decision and moves the closure point.
+        assert_incremental_matches_full(&["echo $(case a in x) esac)", ";; )"]);
+        assert_incremental_matches_full(&["echo $(case a in x) esac)", "esac)"]);
+        // Comment at top level split across lines.
+        assert_incremental_matches_full(&["echo a #c", "d", "e"]);
+    }
+
+    /// Deterministic LCG (same generator as the comsub fuzz module).
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+    }
+
+    /// Seeded fuzz for the quotes class (rubash#292 discipline, perf8):
+    /// random quote/comsub/span-dense soups split into physical lines must
+    /// satisfy incremental == full at every prefix, and the incremental open
+    /// flag must equal the `has_unclosed_quotes` oracle.
+    #[test]
+    fn incremental_matches_full_randomized() {
+        const FRAGMENTS: &[&str] = &[
+            "'",
+            "\"",
+            "`",
+            "$(",
+            "${",
+            "$'",
+            "}",
+            ")",
+            "'a'",
+            "\"q",
+            "q\"",
+            "`x`",
+            "${x}",
+            "${a:-${b",
+            "$( ",
+            "$((",
+            ")) ",
+            "\\",
+            "\\\\",
+            "#c ",
+            " x ",
+            "echo ",
+            "case ",
+            "esac",
+            "esac)",
+            ";; ",
+            "; ",
+            "&&",
+            "in ",
+            "<<EOF",
+            "EOF",
+            "<<<",
+            "a=(",
+            "declare -a ",
+            "local ",
+        ];
+        let mut rng = Lcg(0x7066_3800_0001);
+        for case in 0..3000u64 {
+            let fragment_count = 2 + (rng.next() % 6) as usize;
+            let mut fragments = Vec::with_capacity(fragment_count);
+            for _ in 0..fragment_count {
+                fragments.push(FRAGMENTS[(rng.next() as usize) % FRAGMENTS.len()]);
+            }
+            let max_lines = 4.min(fragment_count) as u64;
+            let line_count = (1 + (rng.next() % max_lines)) as usize;
+            let mut lines: Vec<String> = vec![String::new(); line_count];
+            for (i, fragment) in fragments.iter().enumerate() {
+                let target = if line_count == 1 {
+                    0
+                } else {
+                    (i * line_count / fragment_count).min(line_count - 1)
+                };
+                lines[target].push_str(fragment);
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            assert_incremental_matches_full(&lines);
+        }
+    }
+}
+
+#[cfg(test)]
+mod compound_residual_incremental_tests {
+    use super::{
+        compound_residuals_advance, has_unclosed_compound_assignment, CompoundResidualState,
+    };
+
+    /// Drive the checkpoint exactly like
+    /// `GroupScanFeeder::advance_compound_scan` and assert at EVERY
+    /// physical-line prefix that the advance's end state equals the full
+    /// scan of that prefix (all twelve fields, `forced_closed` included)
+    /// and the open flag equals both the full scan and the
+    /// `has_unclosed_compound_assignment` oracle.
+    fn assert_incremental_matches_full(lines: &[&str]) {
+        let mut chars: Vec<char> = Vec::new();
+        let mut resume = 0usize;
+        let mut snapshot = CompoundResidualState::default();
+        for (line_index, line) in lines.iter().enumerate() {
+            if line_index > 0 {
+                chars.push('\n');
+            }
+            chars.extend(line.chars());
+            let mut state = snapshot.clone();
+            let park = compound_residuals_advance(&chars, resume, &mut state);
+            let mut full = CompoundResidualState::default();
+            let _ = compound_residuals_advance(&chars, 0, &mut full);
+            let text: String = chars.iter().collect();
+            assert_eq!(
+                state, full,
+                "end state at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            assert_eq!(
+                state.is_open(),
+                full.is_open(),
+                "open flag at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            assert_eq!(
+                state.is_open(),
+                has_unclosed_compound_assignment(&text),
+                "oracle answer at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            match park {
+                Some(park) => {
+                    resume = park.pos;
+                    snapshot = park.snapshot;
+                }
+                None => {
+                    resume = chars.len();
+                    snapshot = state;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_matches_full_required_shapes() {
+        // ISSUE #78 family: multi-line compound array assignment.
+        assert_incremental_matches_full(&["plugins=(", "a", "b", ")"]);
+        assert_incremental_matches_full(&["declare -a d=(", "1", "2", ")"]);
+        assert_incremental_matches_full(&["local arr+=(", "x", ")"]);
+        // nested parens inside the compound list
+        assert_incremental_matches_full(&["a=(", "b (", "c))"]);
+        // words straddling the line boundary (word accumulation is carried)
+        assert_incremental_matches_full(&["plug", "ins=(a b", ")"]);
+        // `${` span inside the list closing on a later line
+        assert_incremental_matches_full(&["arr=(${x", "})"]);
+        // `$(` inside the list closing on a later line
+        assert_incremental_matches_full(&["arr=($(echo a", "))"]);
+        // comments inside the list do not close it
+        assert_incremental_matches_full(&["a=(", "1 # ) not a closer", "2", ")"]);
+        // quotes inside the list elements
+        assert_incremental_matches_full(&["a=(", "'b ()'", "\"c )\"", ")"]);
+        // backtick unit inside the list closing on a later line
+        assert_incremental_matches_full(&["a=(x `echo y", "`)"]);
+    }
+
+    #[test]
+    fn incremental_matches_full_park_shapes() {
+        // Unbalanced `$(` inside a compound list: forced_closed (the
+        // original early `return false`) commits for every prefix where the
+        // unit does not close, and the park re-derives it so the prefix
+        // that finally closes the unit re-opens the compound answer.
+        assert_incremental_matches_full(&["a=(x $(b", "c"]);
+        assert_incremental_matches_full(&["a=(x $(b", "c))"]);
+        assert_incremental_matches_full(&["a=(x $(b", "c)", ")"]);
+        // Unbalanced backtick: same forced_closed discipline.
+        assert_incremental_matches_full(&["a=(x `b", "c"]);
+        assert_incremental_matches_full(&["a=(x `b", "c`)"]);
+        // `${` span whose jump is only decided on the later line.
+        assert_incremental_matches_full(&["a=(${x:-'", "'} b", ")"]);
+        // An `esac)` lookahead inside a `$(` unit that runs off the end.
+        assert_incremental_matches_full(&["a=($(case a in x) esac)", ";; )"]);
+        // A `name=(` that only appears on the second line.
+        assert_incremental_matches_full(&["echo x", "a=(b", ")"]);
+    }
+
+    /// Deterministic LCG (same generator as the comsub fuzz module).
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+    }
+
+    /// Seeded fuzz for the compound class: random assignment/command-dense
+    /// soups split into physical lines must satisfy incremental == full at
+    /// every prefix (including the forced_closed early-terminal).
+    #[test]
+    fn incremental_matches_full_randomized() {
+        const FRAGMENTS: &[&str] = &[
+            "a=(",
+            "b=(",
+            "declare -a ",
+            "declare ",
+            "local ",
+            "export ",
+            "readonly ",
+            "typeset ",
+            "a+=",
+            "a=",
+            "echo ",
+            "x ",
+            ")",
+            "(",
+            "${",
+            "}",
+            "${x}",
+            "$(",
+            "$( ",
+            ")) ",
+            "`",
+            "`x`",
+            "'",
+            "\"",
+            "'q'",
+            "\"q\"",
+            "$'",
+            "\\",
+            "#c ",
+            "; ",
+            "&&",
+            "|",
+            " in ",
+            "case ",
+            "esac",
+            "esac)",
+            ";; ",
+            "-a ",
+            "-f ",
+        ];
+        let mut rng = Lcg(0x636f_6d70_0001);
+        for case in 0..3000u64 {
+            let fragment_count = 2 + (rng.next() % 6) as usize;
+            let mut fragments = Vec::with_capacity(fragment_count);
+            for _ in 0..fragment_count {
+                fragments.push(FRAGMENTS[(rng.next() as usize) % FRAGMENTS.len()]);
+            }
             let max_lines = 4.min(fragment_count) as u64;
             let line_count = (1 + (rng.next() % max_lines)) as usize;
             let mut lines: Vec<String> = vec![String::new(); line_count];

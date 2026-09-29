@@ -26,8 +26,9 @@ use brace_scan::{
     tokens_open_unclosed_brace_group,
 };
 use continuation::{
-    comsub_residuals_advance, ends_with_unquoted_backslash, has_unclosed_compound_assignment,
-    has_unclosed_quotes, ComsubResidualState,
+    compound_residuals_advance, comsub_residuals_advance, ends_with_unquoted_backslash,
+    has_unclosed_quotes, quotes_residuals_advance, CompoundResidualState, ComsubResidualState,
+    QuotesResidualState,
 };
 
 pub(crate) use alias_stream::{expand_aliases_in_source, AliasLookup};
@@ -314,6 +315,48 @@ impl ComsubScanCheckpoint {
     }
 }
 
+/// rubash#292 plan-B shape (perf8): the join gate's unclosed-quote scan
+/// checkpoint over the same `comsub_chars` mirror the comsub residual scan
+/// uses — `resume` only ever advances past a prefix whose forward decisions
+/// (`${` span scans, `$(`/backtick unit skips, `esac)` lookaheads) the
+/// current buffer decided conclusively; an undecided position parks here
+/// and is re-derived line by line, exactly reproducing what a full scan of
+/// each longer buffer would decide. Replaces the old
+/// `unclosed_quotes_cache` boolean + `line_is_quote_inert` admission
+/// (answer-level caching) with the exact per-prefix state carry.
+#[derive(Clone)]
+struct QuoteScanCheckpoint {
+    resume: usize,
+    snapshot: QuotesResidualState,
+}
+
+impl QuoteScanCheckpoint {
+    fn initial() -> Self {
+        Self {
+            resume: 0,
+            snapshot: QuotesResidualState::default(),
+        }
+    }
+}
+
+/// rubash#292 plan-B shape (perf8): the join gate's compound-assignment
+/// scan checkpoint over the same mirror (parks + `forced_closed` early
+/// terminals; see `CompoundResidualState`).
+#[derive(Clone)]
+struct CompoundScanCheckpoint {
+    resume: usize,
+    snapshot: CompoundResidualState,
+}
+
+impl CompoundScanCheckpoint {
+    fn initial() -> Self {
+        Self {
+            resume: 0,
+            snapshot: CompoundResidualState::default(),
+        }
+    }
+}
+
 pub(crate) struct GroupScanFeeder {
     initial_posix: bool,
     input_origin: InputOrigin,
@@ -344,18 +387,32 @@ pub(crate) struct GroupScanFeeder {
     /// decided on the text read so far, or a pending heredoc) is re-derived
     /// per line via the park the advance returns.
     comsub_checkpoint: Option<ComsubScanCheckpoint>,
+    /// The unclosed-quote scan's checkpoint over `comsub_chars` (perf8,
+    /// rubash#292 plan-B shape): same streaming model for
+    /// `quotes_residuals_advance` — per line the scan advances over the
+    /// appended tail, and only a still-undecided `${`/`$(`/backtick skip is
+    /// re-derived via its park. `None` means full-scan from char 0 (the
+    /// mirror was rebuilt after a non-append mutation). This replaces the
+    /// pre-perf8 `unclosed_quotes_cache: Option<bool>` +
+    /// `line_is_quote_inert` answer cache.
+    quotes_checkpoint: Option<QuoteScanCheckpoint>,
+    /// The compound-assignment scan's checkpoint over `comsub_chars`
+    /// (perf8, rubash#292 plan-B shape): same model for
+    /// `compound_residuals_advance`. Before perf8 this gate had no cache at
+    /// all — every physical line re-collected and re-scanned the whole
+    /// accumulated logical line (nvm.sh: 5749 calls / 4.2 M chars for
+    /// `-n`, 15 984 calls / 12.5 M chars for load).
+    compound_checkpoint: Option<CompoundScanCheckpoint>,
     lexer_parse_state: LexerParseState,
     brace_cache: BraceScanCache,
     brace_join_active: bool,
-    unclosed_quotes_cache: Option<bool>,
     /// rubash#281/perf4 re-land: cached FALSE answer of
     /// `has_unclosed_parameter_expansion` over `logical_line`. The scan's
     /// only `true` exit is a `${` whose body scan failed, so a cached false
     /// plus a `$`-free appended line keeps it false (every arm that can
-    /// newly open a `${` requires a literal `$`). Same invalidation set as
-    /// `unclosed_quotes_cache`: every non-append mutation of `logical_line`
-    /// (IFS_GLUE insert, backslash-join pop, comsub-heredoc rotation,
-    /// commit/flush) drops it.
+    /// newly open a `${` requires a literal `$`). Same invalidation set the
+    /// residual checkpoints use (perf8): every non-append mutation of
+    /// `logical_line` drops it.
     param_open_cache: Option<bool>,
     boundary: Option<(usize, Vec<Token>, LexerBoundaryState)>,
     awaiting_bodies: Vec<AwaitingHeredocBody>,
@@ -400,10 +457,11 @@ impl GroupScanFeeder {
             header_scan_from: 0,
             comsub_chars: Vec::new(),
             comsub_checkpoint: Some(ComsubScanCheckpoint::initial()),
+            quotes_checkpoint: Some(QuoteScanCheckpoint::initial()),
+            compound_checkpoint: Some(CompoundScanCheckpoint::initial()),
             lexer_parse_state: LexerParseState::default(),
             brace_cache: BraceScanCache::default(),
             brace_join_active: false,
-            unclosed_quotes_cache: None,
             param_open_cache: None,
             boundary: None,
             awaiting_bodies: Vec::new(),
@@ -638,13 +696,70 @@ impl GroupScanFeeder {
         open
     }
 
+    /// rubash#292 plan-B shape (perf8): answer the join gate's
+    /// unclosed-quote question from the quotes checkpoint over
+    /// `comsub_chars` instead of full-scanning the accumulated
+    /// `logical_line` per physical line. Restoring the snapshot at `resume`
+    /// and scanning `comsub_chars[resume..]` reproduces the full scan of
+    /// the current buffer bit for bit (same contract as
+    /// `advance_comsub_scan` above; parks cover the undecided `${`/`$(`/
+    /// backtick skips). On nvm.sh `-n` the old per-line full scan walked
+    /// 3.6 M chars for a 173 KB script; with the checkpoint each line pays
+    /// only its own bytes plus the open construct's re-derivation.
+    fn advance_quotes_scan(&mut self) -> bool {
+        let (resume, snapshot) = match self.quotes_checkpoint.take() {
+            Some(checkpoint) => (checkpoint.resume, checkpoint.snapshot),
+            None => (0, QuotesResidualState::default()),
+        };
+        let mut state = snapshot;
+        let park = quotes_residuals_advance(&self.comsub_chars, resume, &mut state);
+        let open = state.is_open();
+        self.quotes_checkpoint = match park {
+            Some(park) => Some(QuoteScanCheckpoint {
+                resume: park.pos,
+                snapshot: park.snapshot,
+            }),
+            None => Some(QuoteScanCheckpoint {
+                resume: self.comsub_chars.len(),
+                snapshot: state,
+            }),
+        };
+        open
+    }
+
+    /// rubash#292 plan-B shape (perf8): the compound-assignment gate's
+    /// checkpoint driver, mirroring `advance_quotes_scan` (parks + the
+    /// `forced_closed` early terminal; see `CompoundResidualState`).
+    fn advance_compound_scan(&mut self) -> bool {
+        let (resume, snapshot) = match self.compound_checkpoint.take() {
+            Some(checkpoint) => (checkpoint.resume, checkpoint.snapshot),
+            None => (0, CompoundResidualState::default()),
+        };
+        let mut state = snapshot;
+        let park = compound_residuals_advance(&self.comsub_chars, resume, &mut state);
+        let open = state.is_open();
+        self.compound_checkpoint = match park {
+            Some(park) => Some(CompoundScanCheckpoint {
+                resume: park.pos,
+                snapshot: park.snapshot,
+            }),
+            None => Some(CompoundScanCheckpoint {
+                resume: self.comsub_chars.len(),
+                snapshot: state,
+            }),
+        };
+        open
+    }
+
     /// Rebuild the char mirror from `logical_line` after a non-append
-    /// rewrite (IFS_GLUE insert, comsub-heredoc rotation) and drop the
-    /// checkpoint: the scan's offsets and every decided prefix refer to
-    /// byte positions that no longer exist.
+    /// rewrite (IFS_GLUE insert, comsub-heredoc rotation) and drop every
+    /// residual checkpoint: the scans' offsets and every decided prefix
+    /// refer to byte positions that no longer exist.
     fn rebuild_comsub_mirror(&mut self) {
         self.comsub_chars = self.logical_line.chars().collect();
         self.comsub_checkpoint = None;
+        self.quotes_checkpoint = None;
+        self.compound_checkpoint = None;
     }
 
     fn push_main_line(&mut self, raw_line: &str, total_input_len: usize, tokenize_depth: usize) {
@@ -746,9 +861,8 @@ impl GroupScanFeeder {
                     if let Some(rel_pos) = self.logical_line[delim_end..].find(')') {
                         self.logical_line
                             .insert(delim_end + rel_pos, crate::executor::markers::IFS_GLUE);
-                        // Mid-string rewrite: positional scan cache invalid.
+                        // Mid-string rewrite: positional scan caches invalid.
                         self.brace_cache.clear();
-                        self.unclosed_quotes_cache = None;
                         self.param_open_cache = None;
                         self.boundary = None;
                         self.rebuild_comsub_mirror();
@@ -781,14 +895,17 @@ impl GroupScanFeeder {
         {
             self.logical_line.pop();
             // The popped byte changes the text every later offset depends
-            // on: positional scan cache invalid. The pop also joins the
+            // on: positional scan caches invalid. The pop also joins the
             // next line WITHOUT a '\n' separator, so a two-character
             // lookahead (`$(`, `<<`, ...) can newly straddle the join —
-            // the checkpoint must not survive that (rubash#292).
+            // every residual checkpoint must be dropped, not just advanced
+            // back (rubash#292; same rule for the quotes/compound
+            // checkpoints, perf8).
             self.comsub_chars.pop();
             self.comsub_checkpoint = None;
+            self.quotes_checkpoint = None;
+            self.compound_checkpoint = None;
             self.brace_cache.clear();
-            self.unclosed_quotes_cache = None;
             self.param_open_cache = None;
             self.boundary = None;
             self.continued_line = true;
@@ -820,17 +937,14 @@ impl GroupScanFeeder {
             self.header_scan_from = self.logical_line.len();
         }
 
-        let hq = match self
-            .unclosed_quotes_cache
-            .filter(|_| line_is_quote_inert(line))
-        {
-            Some(cached) => cached,
-            _ => {
-                let value = has_unclosed_quotes(&self.logical_line);
-                self.unclosed_quotes_cache = Some(value);
-                value
-            }
-        };
+        // rubash#292 plan-B shape (perf8): the unclosed-quote gate reads the
+        // quotes checkpoint over the persistent `comsub_chars` mirror —
+        // per line only the appended tail is scanned, plus the re-derivation
+        // of any parked `${`/`$(`/backtick skip. This replaces the old
+        // `unclosed_quotes_cache` + `line_is_quote_inert` answer cache
+        // (which only covered appended lines with no quote-state bytes and
+        // full-rescanned every quote-bearing line).
+        let hq = self.advance_quotes_scan();
         if hq {
             self.brace_join_active = false;
             return;
@@ -847,21 +961,13 @@ impl GroupScanFeeder {
             return;
         }
         // A `name=(` compound array assignment keeps reading physical lines
-        // until its matching `)` (parse.y; ISSUE #78). Admission: the opener
-        // is a word ending in `=` (or `+=`) whose NEXT character is the `(`
-        // that flips compound_depth to 1 (continuation.rs
-        // has_unclosed_compound_assignment, `opens_compound` arm) — the
-        // bytes `=` and `(` are therefore adjacent in the input whenever
-        // the scan can return true (`=(` covers `name=(`; the `+=` of
-        // `name+=(` ends in the same `=(` adjacency). Without that byte
-        // pair the scan is provably false. (GNU
-        // anchor: parse.y:5785-5791 recognizes the compound assignment at
-        // token-read time from exactly this adjacency; read_token never
-        // looks for it otherwise. nvm.sh has no `=(` line — the
-        // unconditional scan was 185ms of its 2.2s -n run.)
-        let compound_open = self.logical_line.contains("=(")
-            && has_unclosed_compound_assignment(&self.logical_line);
-        if compound_open {
+        // until its matching `)` (parse.y; ISSUE #78). rubash#292 plan-B
+        // shape (perf8): answered from the compound checkpoint over the
+        // mirror, replacing the unconditional whole-buffer rescan per line
+        // (perf7 previously gated this on a `=(` byte admission —
+        // parse.y:5785-5791 adjacency — which the checkpoint model now
+        // subsumes: the opener bytes are carried in the residual state).
+        if self.advance_compound_scan() {
             self.brace_join_active = false;
             return;
         }
@@ -874,9 +980,8 @@ impl GroupScanFeeder {
         // downstream consumer sees the GNU reprint order (heredoc7.sub).
         if let Some(rotated) = relocate_comsub_heredoc_paren(&self.logical_line) {
             self.logical_line = rotated;
-            // Rotation rewrites the middle of the line: cache invalid.
+            // Rotation rewrites the middle of the line: caches invalid.
             self.brace_cache.clear();
-            self.unclosed_quotes_cache = None;
             self.param_open_cache = None;
             self.boundary = None;
             self.rebuild_comsub_mirror();
@@ -1080,18 +1185,20 @@ impl GroupScanFeeder {
         // the same line-start state (see the comment at tokenize_plain).
         self.lexer_parse_state = line_lex_state;
         self.logical_line.clear();
-        self.unclosed_quotes_cache = None;
         self.param_open_cache = None;
         self.boundary = None;
-        // Offsets restart for the next logical line: cache invalid. The
+        // Offsets restart for the next logical line: cache invalid. Every
         // residual checkpoint resets to the fresh-scan state (the empty
         // buffer's full scan is `Default`), so the next logical line's
-        // first gate call resumes instead of full-scanning (rubash#292).
+        // first gate call resumes instead of full-scanning (rubash#292;
+        // quotes + compound, perf8).
         self.brace_cache.clear();
         self.header_scan_from = 0;
         self.brace_join_active = false;
         self.comsub_chars.clear();
         self.comsub_checkpoint = Some(ComsubScanCheckpoint::initial());
+        self.quotes_checkpoint = Some(QuoteScanCheckpoint::initial());
+        self.compound_checkpoint = Some(CompoundScanCheckpoint::initial());
 
         for delimiter in delimiters {
             // GNU parse.y:3120-3135 gather_here_documents passes the parser's
@@ -1500,20 +1607,6 @@ fn brace_join_fast_path_line(line: &str) -> bool {
         return false;
     }
     !line.contains("posix")
-}
-
-/// True when the physical line contains no byte that can move the quote
-/// state of `has_unclosed_quotes` (continuation.rs:663): the scanner's only
-/// quote-state transitions are `\ " ' $ \`` (with `$` pairing via one-byte
-/// lookahead); everything else — including `#`, whitespace and newlines —
-/// only touches the comment sub-state, which the answer ignores. The
-/// checkpoint `unclosed_quotes_cache` reuses its previous
-/// `has_unclosed_quotes` answer exactly when the appended physical line is
-/// inert under this predicate (rubash#241).
-fn line_is_quote_inert(line: &str) -> bool {
-    !line
-        .bytes()
-        .any(|b| matches!(b, b'\\' | b'"' | b'\'' | b'$' | b'`'))
 }
 
 thread_local! {
