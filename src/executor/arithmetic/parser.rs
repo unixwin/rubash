@@ -104,7 +104,7 @@ pub(super) struct ConditionalArithParser<'a> {
     /// dynamic variables (BASHPID, BASH_SUBSHELL, ...) exactly like
     /// `$name` expansion; the evaluator only carries `env_vars`, so the
     /// Executor supplies their current values here.
-    pub(super) dynamic_values: Option<&'a HashMap<String, String>>,
+    pub(super) dynamic_values: Option<&'a HashMap<&'static str, String>>,
     pub(super) error_category: Option<super::ArithmeticErrorCategory>,
     pub(super) no_expand: bool,
     /// The first recorded evalerror — GNU longjmps on the first failure, so

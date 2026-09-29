@@ -364,26 +364,51 @@ impl Executor {
                 // quotes back into syntax (assoc compound elements).
                 expanded
             } else {
-                unescape_remaining_shell_escapes(&expanded)
-                    .replace("\\\\'", "'")
-                    .replace("\\'", "'")
+                // cow_replace: each restore link borrows when its marker is
+                // absent (GNU dequote_string/dequote_escapes walk in place —
+                // no copy for marker-free values).
+                let unescaped = unescape_remaining_shell_escapes_cow(&expanded);
+                let unescaped = crate::executor::markers::cow_replace(&unescaped, "\\\\'", "'");
+                let unescaped = crate::executor::markers::cow_replace(&unescaped, "\\'", "'");
+                unescaped.into_owned()
             }
         } else {
             expanded
         };
-        let restored = restore_protected_replacement_quotes(&expanded)
-            .replace(DATA_DOLLAR, "$")
-            .replace(crate::executor::markers::DATA_BACKTICK, "`")
-            .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
-            .replace(crate::lexer::PARAM_NAME_END_MARKER, "");
+        let restored = restore_protected_replacement_quotes_cow(&expanded);
+        let restored = crate::executor::markers::cow_replace(
+            &restored,
+            crate::executor::markers::DATA_DOLLAR_STR,
+            "$",
+        );
+        let restored = crate::executor::markers::cow_replace(
+            &restored,
+            crate::executor::markers::DATA_BACKTICK_STR,
+            "`",
+        );
+        let restored = crate::executor::markers::cow_replace(
+            &restored,
+            crate::executor::markers::DATA_BACKSLASH_STR,
+            "\\",
+        );
+        let restored = crate::executor::markers::cow_replace(
+            &restored,
+            crate::executor::markers::PARAM_NAME_END_MARKER_STR,
+            "",
+        );
         // Quoted-null markers only matter to the alternate field splitter
         // (unquoted_outer_braced_alternate_values); every other consumer
         // (assignment rhs, quoted alternates) drops them like GNU's
         // dequote_list.
         if alternate {
-            restored
+            restored.into_owned()
         } else {
-            restored.replace(QUOTED_NULL_MARKER, "")
+            crate::executor::markers::cow_replace(
+                &restored,
+                crate::executor::markers::QUOTED_NULL_MARKER_STR,
+                "",
+            )
+            .into_owned()
         }
     }
 

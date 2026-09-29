@@ -743,8 +743,14 @@ pub(crate) fn push_ctlesc_escaped(output: &mut String, data: char) {
 /// decided not to consume the word — a stored element like `"p"/"*z"`
 /// keeps the quoted `*` as data, never the sentinel.
 pub(crate) fn dequote_ctlesc_pairs(value: &str) -> String {
+    dequote_ctlesc_pairs_cow(value).into_owned()
+}
+
+/// Borrowing form of [`dequote_ctlesc_pairs`]: a value with no CTLESC byte
+/// is the identity, so the marker-restore chains borrow instead of copying.
+pub(crate) fn dequote_ctlesc_pairs_cow(value: &str) -> std::borrow::Cow<'_, str> {
     if !value.contains(CTLESC) {
-        return value.to_string();
+        return std::borrow::Cow::Borrowed(value);
     }
     let mut output = String::with_capacity(value.len());
     let mut chars = value.chars();
@@ -757,7 +763,7 @@ pub(crate) fn dequote_ctlesc_pairs(value: &str) -> String {
             output.push(ch);
         }
     }
-    output
+    std::borrow::Cow::Owned(output)
 }
 
 // ==========================================================================
@@ -792,6 +798,24 @@ pub(crate) fn push_literal_char(output: &mut String, c: char) {
         output.push(LITERAL_CHAR_ESCAPE);
     }
     output.push(c);
+}
+
+/// `str::replace` that borrows when the needle is absent.
+///
+/// GNU's expansion passes restore markers IN PLACE over C strings — a value
+/// carrying no marker bytes is never copied (subst.c dequote_string /
+/// dequote_escapes walk the string once). Rust's `str::replace` always
+/// allocates a fresh String, so the marker-restore chains on the expansion
+/// hot paths (assignment RHS hoist/restore, the embedded walker tail, the
+/// assignment quote-removal tail — five to eight chained replaces per word)
+/// paid a full copy per link even when zero markers were present. This
+/// helper scans first and returns `Cow::Borrowed` when the needle never
+/// occurs; the output is byte-identical to `s.replace(from, to)` either way.
+pub(crate) fn cow_replace<'a>(s: &'a str, from: &str, to: &str) -> std::borrow::Cow<'a, str> {
+    if !s.contains(from) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    std::borrow::Cow::Owned(s.replace(from, to))
 }
 
 #[cfg(test)]

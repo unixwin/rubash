@@ -2,6 +2,9 @@ pub(in crate::executor) fn case_pattern_matches(pattern: &str, word: &str) -> bo
     if let Some(verdict) = literal_pattern_equality(pattern, word, false) {
         return verdict;
     }
+    if let Some(verdict) = simple_glob_matches(pattern, word, false) {
+        return verdict;
+    }
     if pattern_contains_raw_byte_markers(pattern) && !pattern.contains('[') {
         let pattern: Vec<char> = flatten_pattern_to_byte_chars(pattern);
         let word: Vec<char> = flatten_word_to_byte_chars(word);
@@ -16,6 +19,9 @@ pub(in crate::executor) fn case_pattern_matches_nocase(pattern: &str, word: &str
     if let Some(verdict) = literal_pattern_equality(pattern, word, true) {
         return verdict;
     }
+    if let Some(verdict) = simple_glob_matches(pattern, word, true) {
+        return verdict;
+    }
     if pattern_contains_raw_byte_markers(pattern) && !pattern.contains('[') {
         let pattern: Vec<char> = flatten_pattern_to_byte_chars(pattern);
         let word: Vec<char> = flatten_word_to_byte_chars(word);
@@ -24,6 +30,95 @@ pub(in crate::executor) fn case_pattern_matches_nocase(pattern: &str, word: &str
     let pattern: Vec<char> = pattern.chars().collect();
     let word: Vec<char> = word.chars().collect();
     case_pattern_matches_at_with_case(&pattern, 0, &word, 0, true)
+}
+
+/// Direct char-wise match for the simple-glob class: a pattern whose every
+/// byte is printable ASCII (or space) with no byte in `[ ] \ + @ ! ( )` —
+/// only literals, `*` and `?` remain. GNU gnulib strmatch.c `gmatch` walks
+/// exactly this class with a single saved backtrack point (pattern and word
+/// positions at the most recent `*`) and no buffer staging; the Vec<char>
+/// staging this port paid per call is charged once per CANDIDATE BOUNDARY
+/// by the `${v#pat}`/`${v%pat}` removal loops (parameter_decode.rs), which
+/// is the hot per-fragment cost of expansion-heavy scripts.
+///
+/// The single-backtrack-point algorithm is correct for this class: a
+/// mismatch resumes from the MOST RECENT `*` with the word advanced by one
+/// char; an earlier star's continuation is always subsumed by the later
+/// star matching fewer chars (`*` matches any sequence, and nothing else in
+/// the class can consume across a star). Returns None when the pattern is
+/// outside the class (caller falls through to the staged matcher, which
+/// owns brackets, extglob groups and raw-byte markers).
+fn simple_glob_matches(pattern: &str, word: &str, nocase: bool) -> Option<bool> {
+    if !pattern.bytes().all(|b| {
+        (b.is_ascii_graphic() || b == b' ')
+            && !matches!(b, b'[' | b']' | b'\\' | b'+' | b'@' | b'!' | b'(' | b')')
+    }) {
+        return None;
+    }
+    let matches_char = |pat: char, target: char| {
+        pat == '?'
+            || (if nocase {
+                pat.to_ascii_lowercase() == target.to_ascii_lowercase()
+            } else {
+                pat == target
+            })
+    };
+    let mut p = pattern.chars();
+    let mut w = word.chars();
+    let mut star_p: Option<std::str::Chars<'_>> = None;
+    let mut star_w: Option<std::str::Chars<'_>> = None;
+    // Resume from the most recent `*` with the word advanced by one char;
+    // an exhausted word at the backtrack point means the star could not be
+    // extended, and no earlier star exists — the match fails.
+    macro_rules! backtrack {
+        () => {
+            match (star_p.take(), star_w.take()) {
+                (Some(saved_p), Some(saved_w)) => {
+                    let mut next_w = saved_w;
+                    if next_w.next().is_none() {
+                        // The word is exhausted at the star: the star has
+                        // absorbed everything. The match succeeds exactly
+                        // when the pattern tail after the star is empty
+                        // (literals/`?` left over would need more chars).
+                        return Some(saved_p.clone().next().is_none());
+                    }
+                    p = saved_p;
+                    w = next_w.clone();
+                    star_p = Some(p.clone());
+                    star_w = Some(next_w);
+                }
+                _ => return Some(false),
+            }
+        };
+    }
+    loop {
+        match p.clone().next() {
+            None => {
+                if w.clone().next().is_none() {
+                    return Some(true);
+                }
+                // Pattern exhausted but word has chars left: only a pending
+                // star can absorb them.
+                backtrack!();
+            }
+            Some('*') => {
+                // Collapse consecutive stars: the backtrack point after a
+                // run of `*` is the position past all of them.
+                while p.clone().next() == Some('*') {
+                    p.next();
+                }
+                star_p = Some(p.clone());
+                star_w = Some(w.clone());
+            }
+            Some(pat) => match w.clone().next() {
+                Some(target) if matches_char(pat, target) => {
+                    p.next();
+                    w.next();
+                }
+                _ => backtrack!(),
+            },
+        }
+    }
 }
 
 /// rubash#281 (rubash#117 whitelist): a pattern whose every byte is

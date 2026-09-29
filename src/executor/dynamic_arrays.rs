@@ -187,8 +187,16 @@ impl Executor {
     /// RANDOM/SRANDOM are excluded (reading them must advance the RNG
     /// state held inside the evaluator), as are the env-derived names
     /// (SECONDS/EPOCH*) and LINENO that value.rs resolves directly.
-    pub(in crate::executor) fn arith_dynamic_values(&self) -> HashMap<String, String> {
-        [
+    pub(in crate::executor) fn arith_dynamic_values(&self) -> HashMap<&'static str, String> {
+        // with_capacity(9): the map is built per arithmetic evaluation
+        // (eval_arithmetic_command_value_with_flags) and the default
+        // grow-from-zero path re-allocated the table 4+ times per build;
+        // &'static str keys avoid the 9 per-name String clones. GNU keeps
+        // no such map at all — expr.c:1150 expr_streval resolves every name
+        // through find_variable on maintained entries — so this snapshot is
+        // pure port scaffolding; its cost should stay minimal.
+        let mut values = HashMap::with_capacity(9);
+        for name in [
             "BASHPID",
             "BASH_SUBSHELL",
             "BASH_ARGV0",
@@ -198,13 +206,12 @@ impl Executor {
             "SHELLOPTS",
             "BASHOPTS",
             "PIPESTATUS",
-        ]
-        .into_iter()
-        .filter_map(|name| {
-            self.dynamic_parameter_value(name)
-                .map(|value| (name.to_string(), value))
-        })
-        .collect()
+        ] {
+            if let Some(value) = self.dynamic_parameter_value(name) {
+                values.insert(name, value);
+            }
+        }
+        values
     }
 
     /// GNU shell.c:1635-1650 (shell_execscript): the synthetic bottom

@@ -183,7 +183,18 @@ fn push_backtick_source_char(output: &mut String, ch: char, single: bool) {
 }
 
 pub(super) fn unescape_remaining_shell_escapes(value: &str) -> String {
-    unescape_remaining_shell_escapes_inner(value)
+    unescape_remaining_shell_escapes_cow(value).into_owned()
+}
+
+/// Borrowing form: the escape-consuming loop only rewrites positions at a
+/// `\`; a value with none copies through verbatim, so the marker-restore
+/// chains on the expansion hot path can borrow instead of staging an output
+/// String (GNU dequote_string walks the string in place).
+pub(super) fn unescape_remaining_shell_escapes_cow(value: &str) -> std::borrow::Cow<'_, str> {
+    if !value.contains('\\') {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    std::borrow::Cow::Owned(unescape_remaining_shell_escapes_inner(value))
 }
 
 fn unescape_remaining_shell_escapes_inner(value: &str) -> String {

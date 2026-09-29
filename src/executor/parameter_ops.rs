@@ -127,7 +127,21 @@ pub(in crate::executor) fn decode_parameter_word_quotes(word: &str) -> String {
 }
 
 pub(in crate::executor) fn restore_protected_replacement_quotes(value: &str) -> String {
-    value.replace(crate::executor::markers::PROTECTED_ESCAPED_SQUOTE, "\\'")
+    restore_protected_replacement_quotes_cow(value).into_owned()
+}
+
+/// Borrowing form: a value without the protected-escape sentinel is the
+/// identity (the walker tail's marker-restore chain borrows through — GNU
+/// dequote walks in place).
+pub(in crate::executor) fn restore_protected_replacement_quotes_cow(
+    value: &str,
+) -> std::borrow::Cow<'_, str> {
+    if !value.contains(crate::executor::markers::PROTECTED_ESCAPED_SQUOTE) {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    std::borrow::Cow::Owned(
+        value.replace(crate::executor::markers::PROTECTED_ESCAPED_SQUOTE, "\\'"),
+    )
 }
 
 pub(in crate::executor) fn parse_parameter_error_operator(

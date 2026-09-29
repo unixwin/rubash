@@ -1169,7 +1169,7 @@ pub(crate) fn eval_conditional_arith_value_with_writes(
     value: &str,
     env_vars: &HashMap<String, String>,
     random_state: Option<&RandomGen>,
-    dynamic_values: Option<&HashMap<String, String>>,
+    dynamic_values: Option<&HashMap<&'static str, String>>,
 ) -> (Option<i128>, Vec<(String, String)>) {
     let mut cloned = env_vars.clone();
     let (result, _category) =
@@ -2190,7 +2190,7 @@ pub(super) fn eval_mutable_arith_value_with_random(
     value: &str,
     env_vars: &mut HashMap<String, String>,
     random_state: Option<&RandomGen>,
-    dynamic_values: Option<&HashMap<String, String>>,
+    dynamic_values: Option<&HashMap<&'static str, String>>,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
     eval_mutable_arith_value_with_random_flags(value, env_vars, random_state, dynamic_values, false)
 }
@@ -2199,7 +2199,7 @@ pub(super) fn eval_mutable_arith_value_with_random_flags(
     value: &str,
     env_vars: &mut HashMap<String, String>,
     random_state: Option<&RandomGen>,
-    dynamic_values: Option<&HashMap<String, String>>,
+    dynamic_values: Option<&HashMap<&'static str, String>>,
     no_expand: bool,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
     // GNU Bash's subexpr() treats an empty arithmetic expression as zero.
@@ -2217,7 +2217,7 @@ fn eval_mutable_arith_result(
     value: &str,
     env_vars: &mut HashMap<String, String>,
     random_state: Option<&RandomGen>,
-    dynamic_values: Option<&HashMap<String, String>>,
+    dynamic_values: Option<&HashMap<&'static str, String>>,
     no_expand: bool,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
     // Fresh evaluation: a stale record/diagnostic from an earlier

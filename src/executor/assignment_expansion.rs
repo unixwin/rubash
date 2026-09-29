@@ -493,12 +493,13 @@ impl Executor {
         let hoisted_sq = hoist_data_single_quotes(&hoisted_dq, SQ_DATA);
         let hoisted_bs = hoist_data_backslashes(&hoisted_sq, BS_DATA);
         let expanded = self.expand_assignment_value_inner(name, &hoisted_bs);
-        restore_sq_content_markers(
-            expanded
-                .replace(DQ_DATA, "\"")
-                .replace(SQ_DATA, "'")
-                .replace(BS_DATA, "\\\\"),
-        )
+        // cow_replace chain: a value with no hoisted markers borrows through
+        // instead of paying a full String copy per restore link (GNU
+        // dequote_list walks in place).
+        let restored = crate::executor::markers::cow_replace(&expanded, DQ_DATA, "\"");
+        let restored = crate::executor::markers::cow_replace(&restored, SQ_DATA, "'");
+        let restored = crate::executor::markers::cow_replace(&restored, BS_DATA, "\\\\");
+        restore_sq_content_markers(restored.into_owned())
     }
 
     /// GNU subst.c:4357 expand_string_assignment (reached with
@@ -980,15 +981,20 @@ impl Executor {
             // and leaves an unclosed quote that swallows the rest of the
             // list (assoc11.sub). Only the \x17/\x18 quote sentinels still
             // need hoisting for this path.
-            let hoisted_value = if compound_paren_value {
-                value
-                    .replace(crate::executor::markers::DATA_SQUOTE, DATA_SINGLE_QUOTE)
-                    .replace(crate::executor::markers::DATA_DQUOTE, DATA_DOUBLE_QUOTE)
-            } else {
-                value
-                    .replace(crate::executor::markers::DATA_SQUOTE, DATA_SINGLE_QUOTE)
-                    .replace(crate::executor::markers::DATA_DQUOTE, DATA_DOUBLE_QUOTE)
-            };
+            // cow_replace: the hoist borrows through when no DATA_SQUOTE /
+            // DATA_DQUOTE sentinel rides in the value (the common unquoted
+            // `${a#pat}`-style RHS), instead of copying per link.
+            let hoisted = crate::executor::markers::cow_replace(
+                value,
+                crate::executor::markers::DATA_SQUOTE_STR,
+                DATA_SINGLE_QUOTE,
+            );
+            let hoisted_value = crate::executor::markers::cow_replace(
+                &hoisted,
+                crate::executor::markers::DATA_DQUOTE_STR,
+                DATA_DOUBLE_QUOTE,
+            )
+            .into_owned();
             // GNU arrayfunc.c:557 expand_compound_array_assignment tokenizes
             // the raw parenthesized text first; each element's own quote
             // syntax must survive the walker so split_storage_words sees the
@@ -1031,9 +1037,12 @@ impl Executor {
                 && word_level_quote_syntax(&hoisted_value)
                 && !contains_command_substitution_payload(&expanded_value)
             {
-                crate::lexer::remove_shell_quotes(&expanded_value)
+                std::borrow::Cow::Owned(crate::lexer::remove_shell_quotes(&expanded_value))
             } else {
-                expanded_value.clone()
+                // cow_replace discipline: the no-quote case borrows instead
+                // of cloning the expanded value (GNU dequote_word walks in
+                // place; nothing is removed).
+                std::borrow::Cow::Borrowed(expanded_value.as_str())
             };
             // GNU parse.y:5368-5397 read_token_word: a backslash outside any
             // quote removes itself and keeps the next char literal. In a
@@ -1056,23 +1065,39 @@ impl Executor {
                 // expansion (ASSIGN_EXPANSION_BACKSLASH) are data — GNU's
                 // add_quoted_string CTLESC-protected them, so the unescape
                 // pass above never saw them as `\` (rubash#218) — restore
-                // them to real backslashes here.
-                crate::executor::markers::dequote_ctlesc_pairs(&unescape_remaining_shell_escapes(
-                    &stripped,
-                ))
-                .replace(crate::executor::markers::IFS_GLUE, "")
-                .replace(
+                // them to real backslashes here. Nested single-expression
+                // chain keeps every Cow's source alive to the end of the
+                // statement, so a marker-free value borrows all the way
+                // through with zero intermediate copies.
+                let unescaped = unescape_remaining_shell_escapes_cow(&stripped);
+                let unescaped = crate::executor::markers::dequote_ctlesc_pairs_cow(&unescaped);
+                let unescaped = crate::executor::markers::cow_replace(
+                    &unescaped,
+                    crate::executor::markers::IFS_GLUE_STR,
+                    "",
+                );
+                crate::executor::markers::cow_replace(
+                    &unescaped,
                     crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
                     "\\",
                 )
+                .into_owned()
+                .into()
             };
-            unescaped
-                .replace(DATA_SINGLE_QUOTE, "'")
-                .replace(DATA_DOUBLE_QUOTE, "\"")
-                .replace(DATA_BACKTICK, "\\`")
-                .replace(DATA_ESCAPED_DQUOTE, "\\\"")
-                .replace(DATA_ESCAPED_SQUOTE, "\\'")
-                .replace(DATA_ESCAPED_BACKSLASH, "\\\\")
+            // Final data-marker restores: every link borrows when its
+            // sentinel is absent (the common plain-value case pays exactly
+            // one materialization instead of six copies).
+            let restored =
+                crate::executor::markers::cow_replace(&unescaped, DATA_SINGLE_QUOTE, "'");
+            let restored =
+                crate::executor::markers::cow_replace(&restored, DATA_DOUBLE_QUOTE, "\"");
+            let restored = crate::executor::markers::cow_replace(&restored, DATA_BACKTICK, "\\`");
+            let restored =
+                crate::executor::markers::cow_replace(&restored, DATA_ESCAPED_DQUOTE, "\\\"");
+            let restored =
+                crate::executor::markers::cow_replace(&restored, DATA_ESCAPED_SQUOTE, "\\'");
+            crate::executor::markers::cow_replace(&restored, DATA_ESCAPED_BACKSLASH, "\\\\")
+                .into_owned()
         };
         let mut expanded = decode_command_substitution_payload(&expanded);
         if expanded.contains("<(") || expanded.contains(">(") {

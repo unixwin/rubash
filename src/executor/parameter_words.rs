@@ -658,9 +658,16 @@ impl Executor {
         let _site_guard = (!crate::executor::expand_braced_indices::sub_site_active())
             .then(|| crate::executor::expand_braced_indices::SubSiteGuard::new(0));
 
-        if let Some((var_name, default)) =
-            super::expand_braced_ops::split_once_outside_subscript_str(name, ":-")
-        {
+        // One-pass operator-boundary index for the dispatch chain below:
+        // GNU parameter_brace_expand (subst.c:9777) extracts the name up to
+        // the FIRST operator character in a single string_extract pass and
+        // dispatches on that character; this index answers the same
+        // first-top-level-occurrence questions for every operator probe at
+        // once (byte-identical to the per-operator splits it replaces —
+        // see TopLevelOpIndex).
+        let ops = super::expand_braced_ops::TopLevelOpIndex::new(name);
+
+        if let Some((var_name, default)) = ops.split_colon_pair(name, b'-') {
             if is_parameter_error_name(var_name) {
                 if let Some((joined, _)) = self.list_operand_joined_word(var_name) {
                     if !joined.is_empty() {
@@ -680,9 +687,7 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, alternate)) =
-            super::expand_braced_ops::split_once_outside_subscript_str(name, ":+")
-        {
+        if let Some((var_name, alternate)) = ops.split_colon_pair(name, b'+') {
             if is_parameter_error_name(var_name) {
                 if let Some((joined, _)) = self.list_operand_joined_word(var_name) {
                     if !joined.is_empty() {
@@ -702,9 +707,7 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, error_word)) =
-            super::expand_braced_ops::split_once_outside_subscript_str(name, ":?")
-        {
+        if let Some((var_name, error_word)) = ops.split_colon_pair(name, b'?') {
             if is_parameter_error_name(var_name) {
                 if self
                     .parameter_operator_value(var_name)
@@ -720,9 +723,7 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, error_word)) =
-            super::expand_braced_ops::split_once_outside_subscript(name, '?')
-        {
+        if let Some((var_name, error_word)) = ops.split_byte(name, b'?') {
             // GNU subst.c parameter_brace_expand: `${#?}` is the length of
             // `$?`, not `$#` with the `?` error operator. Only the bare `#?`
             // form (no error word) is the length-of-special case; `${#?word}`
@@ -738,9 +739,7 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, word)) =
-            super::expand_braced_ops::split_once_outside_subscript_str(name, ":=")
-        {
+        if let Some((var_name, word)) = ops.split_colon_pair(name, b'=') {
             if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
@@ -764,9 +763,7 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, word)) =
-            super::expand_braced_ops::split_once_outside_subscript(name, '=')
-        {
+        if let Some((var_name, word)) = ops.split_byte(name, b'=') {
             if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
@@ -832,9 +829,7 @@ impl Executor {
                 .unwrap_or_default();
         }
 
-        if let Some((var_name, alternate)) =
-            super::expand_braced_ops::split_once_outside_subscript(name, '+')
-        {
+        if let Some((var_name, alternate)) = ops.split_byte(name, b'+') {
             if is_parameter_error_name(var_name) {
                 if let Some((_, non_empty)) = self.list_operand_joined_word(var_name) {
                     if non_empty {
@@ -851,9 +846,7 @@ impl Executor {
             }
         }
 
-        if let Some((var_name, default)) =
-            super::expand_braced_ops::split_once_outside_subscript(name, '-')
-        {
+        if let Some((var_name, default)) = ops.split_byte(name, b'-') {
             if is_parameter_error_name(var_name) {
                 if let Some((joined, non_empty)) = self.list_operand_joined_word(var_name) {
                     if non_empty {

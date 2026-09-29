@@ -221,8 +221,172 @@ pub(in crate::executor) fn split_once_outside_subscript_str<'a>(
     name: &'a str,
     op: &str,
 ) -> Option<(&'a str, &'a str)> {
+    // Operators reaching here are 1-2 ASCII bytes (`:`-led pairs); a stack
+    // buffer avoids the per-call Vec the hot parameter-operator chain paid
+    // (8 splits per `${}` fragment). Longer ops (none today) fall back.
+    let mut stack_buf = [0u8; 8];
+    let op_bytes: &[u8] = if op.len() <= stack_buf.len() {
+        stack_buf[..op.len()].copy_from_slice(op.as_bytes());
+        &stack_buf[..op.len()]
+    } else {
+        return split_once_outside_subscript_alloc(name, op);
+    };
+    split_once_outside_subscript_impl(name, op_bytes)
+}
+
+fn split_once_outside_subscript_alloc<'a>(name: &'a str, op: &str) -> Option<(&'a str, &'a str)> {
     let op_bytes: Vec<u8> = op.bytes().collect();
     split_once_outside_subscript_impl(name, &op_bytes)
+}
+
+/// One-pass operator-boundary index over a braced-parameter body, answering
+/// the same "first top-level occurrence" questions the
+/// `split_once_outside_subscript*` family answers, without re-running the
+/// quote/bracket state machine per operator.
+///
+/// GNU anchor: subst.c:9777 `parameter_brace_expand` extracts the parameter
+/// name in ONE `string_extract(string, &t_index, "#%^,:-=?+/@}", SX_VARNAME)`
+/// pass and dispatches on the single character that ended the name
+/// (subst.c:9886-9917: `:` + VALID_PARAM_EXPAND_CHAR -> null-test operator,
+/// bare `-=?+` -> operators, `/` -> patsub, `^`,`,~` -> casemod). The Rust
+/// port instead runs a sequence of `split_once_outside_subscript` probes,
+/// each a full re-scan with the same state machine; this index restores the
+/// GNU shape — one scan, many O(1) queries — while keeping each probe's
+/// answer byte-identical to the split function it replaces (the state
+/// machine below is copied verbatim from
+/// `split_once_outside_subscript_impl`, and an operator byte at a top-level
+/// position never alters the machine's state, so the byte following a
+/// top-level operator byte is itself top-level — exactly the condition the
+/// pair match in the impl checks).
+pub(in crate::executor) struct TopLevelOpIndex {
+    /// First top-level byte offset of each ASCII byte, or u32::MAX.
+    first: [u32; 128],
+    /// First top-level offset of the `:`-led pairs `:-`, `:=`, `:+`, `:?` —
+    /// indexed [first_byte_is_colon? no: by second byte] as offsets into
+    /// `PAIR_SECONDS` (b'-', b'=', b'+', b'?').
+    first_pairs: [u32; 4],
+}
+
+const PAIR_SECONDS: [u8; 4] = [b'-', b'=', b'+', b'?'];
+const NO_POS: u32 = u32::MAX;
+
+impl TopLevelOpIndex {
+    /// Build the index with one pass (the `split_once_outside_subscript_impl`
+    /// state machine, recording instead of returning).
+    pub(in crate::executor) fn new(name: &str) -> Self {
+        let mut index = TopLevelOpIndex {
+            first: [NO_POS; 128],
+            first_pairs: [NO_POS; 4],
+        };
+        let bytes = name.as_bytes();
+        let mut bracket_depth = 0usize;
+        let mut brace_depth = 0usize;
+        let mut escaped = false;
+        let mut single = false;
+        let mut double = false;
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            if escaped {
+                escaped = false;
+                offset += 1;
+                continue;
+            }
+            let ch = bytes[offset];
+            if ch == b'\\' && !single {
+                escaped = true;
+                offset += 1;
+                continue;
+            }
+            if ch == b'\'' && !double {
+                single = !single;
+                offset += 1;
+                continue;
+            }
+            if ch == b'"' && !single {
+                double = !double;
+                offset += 1;
+                continue;
+            }
+            if single || double {
+                offset += 1;
+                continue;
+            }
+            if ch == b'`' {
+                offset = skip_backtick_span(bytes, offset + 1);
+                continue;
+            }
+            if ch == b'$' && bytes.get(offset + 1) == Some(&b'{') {
+                brace_depth += 1;
+                offset += 2;
+                continue;
+            }
+            if ch == b'$' && bytes.get(offset + 1) == Some(&b'(') {
+                offset = skip_parenthesized_span(bytes, offset + 2);
+                continue;
+            }
+            if ch == b'}' && brace_depth > 0 {
+                brace_depth -= 1;
+                offset += 1;
+                continue;
+            }
+            if brace_depth == 0 && ch == b'[' {
+                bracket_depth += 1;
+                offset += 1;
+                continue;
+            }
+            if brace_depth == 0 && ch == b']' && bracket_depth > 0 {
+                bracket_depth -= 1;
+                offset += 1;
+                continue;
+            }
+            if bracket_depth == 0 && brace_depth == 0 && ch < 128 {
+                if index.first[ch as usize] == NO_POS {
+                    index.first[ch as usize] = offset as u32;
+                }
+                if ch == b':' {
+                    if let Some(next) = bytes.get(offset + 1).copied() {
+                        if let Some(pair) = PAIR_SECONDS.iter().position(|sec| *sec == next) {
+                            if index.first_pairs[pair] == NO_POS {
+                                index.first_pairs[pair] = offset as u32;
+                            }
+                        }
+                    }
+                }
+            }
+            offset += 1;
+        }
+        index
+    }
+
+    /// Equivalent of `split_once_outside_subscript(name, op)` for a
+    /// single-byte `op`.
+    pub(in crate::executor) fn split_byte<'a>(
+        &self,
+        name: &'a str,
+        op: u8,
+    ) -> Option<(&'a str, &'a str)> {
+        let first = self.first.get(op as usize).copied().unwrap_or(NO_POS);
+        if first == NO_POS {
+            return None;
+        }
+        let at = first as usize;
+        Some((&name[..at], &name[at + 1..]))
+    }
+
+    /// Equivalent of `split_once_outside_subscript_str(name, ":<second>")`.
+    pub(in crate::executor) fn split_colon_pair<'a>(
+        &self,
+        name: &'a str,
+        second: u8,
+    ) -> Option<(&'a str, &'a str)> {
+        let pair = PAIR_SECONDS.iter().position(|sec| *sec == second)?;
+        let first = self.first_pairs[pair];
+        if first == NO_POS {
+            return None;
+        }
+        let at = first as usize;
+        Some((&name[..at], &name[at + 2..]))
+    }
 }
 
 fn split_once_outside_subscript_impl<'a>(name: &'a str, op: &[u8]) -> Option<(&'a str, &'a str)> {
