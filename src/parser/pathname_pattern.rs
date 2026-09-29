@@ -1,21 +1,17 @@
-use super::{CommandNode, PathnamePattern};
-
-pub(super) fn record_pathname_patterns_for_word(
-    command: &mut CommandNode,
-    word_index: usize,
-    word: &str,
-    raw: &str,
-) {
-    let patterns = pathname_patterns_in_word(word, raw)
-        .into_iter()
-        .map(|mut pattern| {
-            pattern.word_index = Some(word_index);
-            pattern
-        });
-    command.pathname_patterns.extend(patterns);
-}
+use super::PathnamePattern;
 
 pub(super) fn pathname_patterns_in_word(word: &str, raw: &str) -> Vec<PathnamePattern> {
+    // Provably-empty admission (rubash#117 whitelist discipline): every
+    // production this scan can find requires the trigger byte below, so its
+    // absence proves the empty answer and skips the char collect + walk.
+    // GNU anchor: parse.y:5305 read_token_word reads a word once; GNU runs
+    // NO per-word expansion scans at parse time at all (subst.c analyzes at
+    // execution) — this port's scans are the executor-facing metadata
+    // source, and the gate only skips scans that cannot match.
+    if !raw.contains('*') && !raw.contains('?') && !raw.contains('[') {
+        return Vec::new();
+    }
+
     if word.contains('=') {
         return Vec::new();
     }

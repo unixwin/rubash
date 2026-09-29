@@ -1,13 +1,5 @@
 use super::{CommandNode, QuoteKind, WordQuote};
 
-pub(super) fn record_word_quotes_for_word(command: &mut CommandNode, word_index: usize, raw: &str) {
-    let quotes = word_quotes_in_raw(raw).into_iter().map(|mut quote| {
-        quote.word_index = Some(word_index);
-        quote
-    });
-    command.word_quotes.extend(quotes);
-}
-
 pub(super) fn record_word_quotes_for_assignment(
     command: &mut CommandNode,
     assignment_name: &str,
@@ -23,6 +15,17 @@ pub(super) fn record_word_quotes_for_assignment(
 }
 
 pub(super) fn word_quotes_in_raw(raw: &str) -> Vec<WordQuote> {
+    // Provably-empty admission (rubash#117 whitelist discipline): every
+    // production this scan can find requires the trigger byte below, so its
+    // absence proves the empty answer and skips the char collect + walk.
+    // GNU anchor: parse.y:5305 read_token_word reads a word once; GNU runs
+    // NO per-word expansion scans at parse time at all (subst.c analyzes at
+    // execution) — this port's scans are the executor-facing metadata
+    // source, and the gate only skips scans that cannot match.
+    if !raw.contains('\'') && !raw.contains('"') && !raw.contains('`') {
+        return Vec::new();
+    }
+
     let chars = raw.chars().collect::<Vec<_>>();
     let mut quotes = Vec::new();
     let mut index = 0usize;

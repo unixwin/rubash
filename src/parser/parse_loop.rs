@@ -519,10 +519,17 @@ fn operator_metadata(operator: &str) -> Box<WordMetadata> {
 }
 
 fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
+    let mut commands = commands;
     let mut folded = Vec::new();
     let mut index = 0;
     while index < commands.len() {
-        let command = commands[index].clone();
+        // GNU parse.y's list reduction (parse.y:1264 `list: list ';' list1`)
+        // links the ALREADY-BUILT command into the list — make_cmd.c never
+        // copies a COMMAND. The index below only ever advances, so moving
+        // the element out (the empty replacement is never re-read: every
+        // later access is `commands.get(j)` with j > the taken slot)
+        // reproduces the old deep-clone result without copying it.
+        let command = std::mem::replace(&mut commands[index], CommandNode::new());
         if command.and_or.is_none() {
             folded.push(command);
             index += 1;
@@ -539,9 +546,10 @@ fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             while commands.get(index).is_some_and(command_is_empty) {
                 index += 1;
             }
-            let Some(next) = commands.get(index).cloned() else {
+            if index >= commands.len() {
                 break;
-            };
+            }
+            let next = std::mem::replace(&mut commands[index], CommandNode::new());
             list_commands.push(next);
             index += 1;
         }
@@ -584,10 +592,16 @@ fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
 }
 
 fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
+    let mut commands = commands;
     let mut folded = Vec::new();
     let mut index = 0;
     while index < commands.len() {
-        let command = commands[index].clone();
+        // Same move-not-clone discipline as fold_and_or_list_commands: GNU's
+        // pipeline production (parse.y:1378 pipeline: pipeline '|' command)
+        // links the parsed stages; the taken slot is never re-read (the
+        // index only advances, and skip_empty_pipeline_separators starts
+        // from the current, untaken index).
+        let command = std::mem::replace(&mut commands[index], CommandNode::new());
         if command.pipe.is_none() {
             folded.push(command);
             index += 1;
@@ -598,13 +612,15 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         let mut operators = Vec::new();
         index += 1;
         skip_empty_pipeline_separators(&commands, &mut index);
-        while let Some(command) = commands.get(index) {
+        while index < commands.len() {
             if let Some(pipe) = stages.last().and_then(|stage| stage.pipe) {
                 operators.push(if pipe == 2 { "|&" } else { "|" }.to_string());
             }
-            stages.push(command.clone());
+            let command = std::mem::replace(&mut commands[index], CommandNode::new());
+            let pipe_done = command.pipe.is_none();
+            stages.push(command);
             index += 1;
-            if command.pipe.is_none() {
+            if pipe_done {
                 break;
             }
             skip_empty_pipeline_separators(&commands, &mut index);

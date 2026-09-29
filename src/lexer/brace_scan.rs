@@ -43,85 +43,129 @@ pub(super) fn has_unclosed_brace_group(input: &str) -> bool {
     (has_group && unquoted_brace_group_depth(input) > 0) || has_unclosed_parameter_expansion(input)
 }
 
-pub(super) fn has_unclosed_parameter_expansion(input: &str) -> bool {
-    let chars = input.chars().collect::<Vec<_>>();
-    let mut index = 0usize;
+/// Checkpointable state of the `has_unclosed_parameter_expansion` scan.
+/// Every field is finite-local scanner state, so a snapshot taken at a char
+/// offset plus the chars from that offset on reproduce the remainder of a
+/// fresh whole-buffer scan bit for bit — the same append-only contract as
+/// the comsub/quotes/compound residual checkpoints (rubash#292, perf8).
+/// GNU anchor: parse.y:3557 read_token streams the input once; the
+/// per-appended-line whole-buffer rescans this state replaces were this
+/// port's substitute for that model.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct ParamScanState {
+    single: bool,
+    double: bool,
+    ansi_single: bool,
+    escaped: bool,
+    comment_start: bool,
+    in_comment: bool,
+}
+
+impl Default for ParamScanState {
+    fn default() -> Self {
+        Self {
+            single: false,
+            double: false,
+            ansi_single: false,
+            escaped: false,
+            // The fresh scan starts word-initial: a '#' there opens a
+            // comment (parse_comment), so comment state begins armed.
+            comment_start: true,
+            in_comment: false,
+        }
+    }
+}
+
+/// Advance the parameter-expansion scan over `chars[resume..]` from
+/// `state`, returning the char index of a `${` whose body scan is still
+/// undecided (the park — the fresh scan would return `true` there; a
+/// longer buffer may let the body close, so the answer must be re-derived
+/// from exactly this position) or `None` when the scan consumed the whole
+/// slice without an unterminated `${` (the fresh scan's `false`).
+pub(crate) fn param_residuals_advance(
+    chars: &[char],
+    resume: usize,
+    state: &mut ParamScanState,
+) -> Option<usize> {
+    let mut index = resume;
     // GNU parse.y consumes a shell comment in the lexer (read_token hands a
     // word-initial '#' to parse_comment) before any expansion scanning, so a
     // dollar-brace opener inside a comment never starts a parameter
     // expansion. Track just enough quote state to keep quoted '#' literal.
-    let mut single = false;
-    let mut double = false;
-    let mut ansi_single = false;
-    let mut escaped = false;
-    let mut comment_start = true;
-    let mut in_comment = false;
+    let ParamScanState {
+        single,
+        double,
+        ansi_single,
+        escaped,
+        comment_start,
+        in_comment,
+    } = state;
     while index < chars.len() {
         let ch = chars[index];
-        if in_comment {
+        if *in_comment {
             if ch == '\n' {
-                in_comment = false;
-                comment_start = true;
+                *in_comment = false;
+                *comment_start = true;
             }
             index += 1;
             continue;
         }
-        if escaped {
-            escaped = false;
-            comment_start = false;
+        if *escaped {
+            *escaped = false;
+            *comment_start = false;
             index += 1;
             continue;
         }
-        if ch == '\n' && !single && !double && !ansi_single {
-            comment_start = true;
+        if ch == '\n' && !*single && !*double && !*ansi_single {
+            *comment_start = true;
             index += 1;
             continue;
         }
-        if ch == '#' && !single && !double && !ansi_single && comment_start {
-            in_comment = true;
+        if ch == '#' && !*single && !*double && !*ansi_single && *comment_start {
+            *in_comment = true;
             index += 1;
             continue;
         }
-        if ch.is_whitespace() && !single && !double && !ansi_single {
-            comment_start = true;
+        if ch.is_whitespace() && !*single && !*double && !*ansi_single {
+            *comment_start = true;
             index += 1;
             continue;
         }
-        if ansi_single {
+        if *ansi_single {
             if ch == '\\' {
-                escaped = true;
+                *escaped = true;
             } else if ch == '\'' {
-                ansi_single = false;
+                *ansi_single = false;
             }
-            comment_start = false;
+            *comment_start = false;
             index += 1;
             continue;
         }
-        if ch == '\\' && !single {
-            escaped = true;
-            comment_start = false;
+        if ch == '\\' && !*single {
+            *escaped = true;
+            *comment_start = false;
             index += 1;
             continue;
         }
-        if ch == '\'' && !double {
-            single = !single;
-            comment_start = false;
+        if ch == '\'' && !*double {
+            *single = !*single;
+            *comment_start = false;
             index += 1;
             continue;
         }
-        if ch == '"' && !single {
-            double = !double;
-            comment_start = false;
+        if ch == '"' && !*single {
+            *double = !*double;
+            *comment_start = false;
             index += 1;
             continue;
         }
-        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
-            ansi_single = true;
-            comment_start = false;
+        if ch == '$' && !*single && !*double && chars.get(index + 1) == Some(&'\'') {
+            *ansi_single = true;
+            *comment_start = false;
             index += 2;
             continue;
         }
-        if chars[index] == '$' && !single && chars.get(index + 1) == Some(&'{') {
+        if chars[index] == '$' && !*single && chars.get(index + 1) == Some(&'{') {
             // GNU parse.y:5305 read_token_word(): text inside single quotes
             // is literal until the closing `'` — `${` there never opens a
             // parameter expansion, so an unclosed-looking `${` in a quoted
@@ -139,6 +183,10 @@ pub(super) fn has_unclosed_parameter_expansion(input: &str) -> bool {
             // `${` arm). The slice INCLUDES the `${` opener (the scanner
             // requires it at position 0) and `scan.end` is the CHAR count
             // of the body past the closing `}`.
+            //
+            // Checkpoint (perf15): an undecided body scan PARKS here and is
+            // re-derived on the next appended text; the fresh scan returns
+            // `true` at this position, so park = answer true.
             let body = &chars[index..];
             let context = BraceContext {
                 outer_double_quote: false,
@@ -147,16 +195,22 @@ pub(super) fn has_unclosed_parameter_expansion(input: &str) -> bool {
                 initial_state: DolbraceState::Param,
             };
             let Some(scan) = scan_braced_parameter_body_chars(body, context) else {
-                return true;
+                return Some(index);
             };
             index += 2 + scan.end;
-            comment_start = false;
+            *comment_start = false;
             continue;
         }
-        comment_start = false;
+        *comment_start = false;
         index += 1;
     }
-    false
+    None
+}
+
+pub(super) fn has_unclosed_parameter_expansion(input: &str) -> bool {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut state = ParamScanState::default();
+    param_residuals_advance(&chars, 0, &mut state).is_some()
 }
 pub(super) fn opens_function_body_after_previous_signature(input: &str, output: &[Token]) -> bool {
     if input.trim() != "{" {

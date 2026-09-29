@@ -775,6 +775,61 @@ impl WordMetadata {
             raw,
         }
     }
+
+    /// Build metadata from scans the CALLER already ran. GNU parse.y
+    /// read_token_word (parse.y:5305) assembles a word in ONE pass and
+    /// make_cmd.c make_simple_command stores the WORD_DESC once — the
+    /// parser must not re-run the per-word expansion scans that the
+    /// `record_*_for_word` calls of the same word intake already
+    /// performed (the duplicated scans also re-parsed every `$(...)`
+    /// body a second time). The tagging applied here is exactly
+    /// `WordMetadata::new`'s: command and process substitutions carry
+    /// `word_index`; every other kind stays untagged, byte-identical to
+    /// `new`'s output for the same word.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_scans(
+        word_index: usize,
+        value: String,
+        raw: String,
+        brace_expansions: Vec<BraceExpansion>,
+        command_substitutions: Vec<CommandSubstitutionNode>,
+        process_substitutions: Vec<ProcessSubstitution>,
+        parameter_expansions: Vec<ParameterExpansion>,
+        arithmetic_expansions: Vec<ArithmeticExpansion>,
+        extglob_patterns: Vec<ExtglobPattern>,
+        tilde_expansions: Vec<TildeExpansion>,
+        pathname_patterns: Vec<PathnamePattern>,
+        word_quotes: Vec<WordQuote>,
+    ) -> Self {
+        let command_substitutions = command_substitutions
+            .into_iter()
+            .map(|mut substitution| {
+                substitution.word_index = Some(word_index);
+                substitution
+            })
+            .collect();
+        let process_substitutions = process_substitutions
+            .into_iter()
+            .map(|mut substitution| {
+                substitution.word_index = Some(word_index);
+                substitution
+            })
+            .collect();
+        Self {
+            word_index,
+            brace_expansions,
+            command_substitutions,
+            process_substitutions,
+            parameter_expansions,
+            arithmetic_expansions,
+            extglob_patterns,
+            tilde_expansions,
+            pathname_patterns,
+            word_quotes,
+            value,
+            raw,
+        }
+    }
 }
 
 /// Represents a narrow `case` compound command.

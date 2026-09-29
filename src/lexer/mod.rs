@@ -21,10 +21,7 @@ mod word;
 #[cfg(test)]
 mod tests;
 
-use brace_scan::{
-    has_unclosed_parameter_expansion, opens_function_body_after_previous_signature,
-    tokens_open_unclosed_brace_group,
-};
+use brace_scan::{opens_function_body_after_previous_signature, tokens_open_unclosed_brace_group};
 use continuation::{compound_residuals_advance, ends_with_unquoted_backslash, has_unclosed_quotes};
 pub(crate) use continuation::{
     comsub_residuals_advance, quotes_residuals_advance, CompoundResidualState, ComsubResidualState,
@@ -365,6 +362,29 @@ impl CompoundScanCheckpoint {
     }
 }
 
+/// perf15: the join gate's parameter-expansion scan checkpoint over the
+/// same `comsub_chars` mirror — `resume` only ever advances past a prefix
+/// whose forward decisions (quote/comment state transitions, `${` body
+/// skips) the current buffer decided conclusively; the single undecided
+/// position (a `${` whose body scan failed) parks and is re-derived line
+/// by line, exactly reproducing what a full scan of each longer buffer
+/// would decide (same soundness discipline as the quotes/compound
+/// checkpoints above).
+#[derive(Clone)]
+struct ParamScanCheckpoint {
+    resume: usize,
+    snapshot: brace_scan::ParamScanState,
+}
+
+impl ParamScanCheckpoint {
+    fn initial() -> Self {
+        Self {
+            resume: 0,
+            snapshot: brace_scan::ParamScanState::default(),
+        }
+    }
+}
+
 pub(crate) struct GroupScanFeeder {
     initial_posix: bool,
     input_origin: InputOrigin,
@@ -422,6 +442,15 @@ pub(crate) struct GroupScanFeeder {
     /// residual checkpoints use (perf8): every non-append mutation of
     /// `logical_line` drops it.
     param_open_cache: Option<bool>,
+    /// The parameter-expansion scan's checkpoint over `comsub_chars`
+    /// (perf15, rubash#292 plan-B shape): `param_residuals_advance` follows
+    /// the same streaming model as the quotes/compound checkpoints — per
+    /// line the scan advances over the appended tail from its snapshot, and
+    /// only a still-undecided `${` body (the park) is re-derived. Before
+    /// perf15 the gate re-collected the WHOLE accumulated logical line into
+    /// a fresh `Vec<char>` and re-scanned it on every `$`-bearing appended
+    /// line (nvm.sh `-n`: the one giant logical line re-scanned ~419 MB).
+    param_checkpoint: Option<ParamScanCheckpoint>,
     boundary: Option<(usize, Vec<Token>, LexerBoundaryState)>,
     awaiting_bodies: Vec<AwaitingHeredocBody>,
     /// keyword-stack summary of `stdin_source_needs_more_posix` over the
@@ -482,6 +511,7 @@ impl GroupScanFeeder {
             brace_cache: BraceScanCache::default(),
             brace_join_active: false,
             param_open_cache: None,
+            param_checkpoint: Some(ParamScanCheckpoint::initial()),
             boundary: None,
             awaiting_bodies: Vec::new(),
             keyword_stack: Vec::new(),
@@ -778,6 +808,33 @@ impl GroupScanFeeder {
         open
     }
 
+    /// perf15: the parameter-expansion gate's checkpoint driver, mirroring
+    /// `advance_quotes_scan`. The park is a single still-undecided `${`
+    /// body; `open` (the fresh scan's `true`) is exactly "a park exists".
+    fn advance_param_scan(&mut self) -> bool {
+        let (resume, snapshot) = match self.param_checkpoint.take() {
+            Some(checkpoint) => (checkpoint.resume, checkpoint.snapshot),
+            None => (0, brace_scan::ParamScanState::default()),
+        };
+        let mut state = snapshot;
+        match brace_scan::param_residuals_advance(&self.comsub_chars, resume, &mut state) {
+            Some(park) => {
+                self.param_checkpoint = Some(ParamScanCheckpoint {
+                    resume: park,
+                    snapshot: state,
+                });
+                true
+            }
+            None => {
+                self.param_checkpoint = Some(ParamScanCheckpoint {
+                    resume: self.comsub_chars.len(),
+                    snapshot: state,
+                });
+                false
+            }
+        }
+    }
+
     /// Rebuild the char mirror from `logical_line` after a non-append
     /// rewrite (IFS_GLUE insert, comsub-heredoc rotation) and drop every
     /// residual checkpoint: the scans' offsets and every decided prefix
@@ -787,6 +844,7 @@ impl GroupScanFeeder {
         self.comsub_checkpoint = None;
         self.quotes_checkpoint = None;
         self.compound_checkpoint = None;
+        self.param_checkpoint = None;
     }
 
     fn push_main_line(&mut self, raw_line: &str, total_input_len: usize, tokenize_depth: usize) {
@@ -932,6 +990,7 @@ impl GroupScanFeeder {
             self.comsub_checkpoint = None;
             self.quotes_checkpoint = None;
             self.compound_checkpoint = None;
+            self.param_checkpoint = None;
             self.brace_cache.clear();
             self.param_open_cache = None;
             self.boundary = None;
@@ -1155,12 +1214,15 @@ impl GroupScanFeeder {
         // line admits false outright and a cached false survives a `$`-free
         // appended line (rubash#281/perf4 re-land; GNU anchor: parse.y:3557
         // read_token computes no such rescan — the expansion is consumed
-        // with the word that contains it).
+        // with the word that contains it). perf15: the scan itself now runs
+        // incrementally from `param_checkpoint` (only the appended tail,
+        // plus re-derivation of a still-undecided `${` park), replacing the
+        // whole-`logical_line` recollect-and-rescan that every `$`-bearing
+        // appended line paid.
         let param_expansion_open = match self.param_open_cache {
             Some(false) if !line.contains('$') => false,
             _ => {
-                let value = self.logical_line.contains('$')
-                    && has_unclosed_parameter_expansion(&self.logical_line);
+                let value = self.advance_param_scan();
                 self.param_open_cache = Some(value);
                 value
             }
@@ -1228,6 +1290,7 @@ impl GroupScanFeeder {
         self.comsub_checkpoint = Some(ComsubScanCheckpoint::initial());
         self.quotes_checkpoint = Some(QuoteScanCheckpoint::initial());
         self.compound_checkpoint = Some(CompoundScanCheckpoint::initial());
+        self.param_checkpoint = Some(ParamScanCheckpoint::initial());
 
         for delimiter in delimiters {
             // GNU parse.y:3120-3135 gather_here_documents passes the parser's

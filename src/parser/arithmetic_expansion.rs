@@ -3,20 +3,6 @@ use super::{
     is_arithmetic_comparison_operator, ArithmeticExpansion, CommandNode,
 };
 
-pub(super) fn record_arithmetic_expansions_for_word(
-    command: &mut CommandNode,
-    word_index: usize,
-    word: &str,
-) {
-    let expansions = arithmetic_expansions_in_word(word)
-        .into_iter()
-        .map(|mut expansion| {
-            expansion.word_index = Some(word_index);
-            expansion
-        });
-    command.arithmetic_expansions.extend(expansions);
-}
-
 pub(super) fn record_arithmetic_expansions_for_assignment(
     command: &mut CommandNode,
     assignment_name: &str,
@@ -34,6 +20,17 @@ pub(super) fn record_arithmetic_expansions_for_assignment(
 }
 
 pub(super) fn arithmetic_expansions_in_word(word: &str) -> Vec<ArithmeticExpansion> {
+    // Provably-empty admission (rubash#117 whitelist discipline): every
+    // production this scan can find requires the trigger byte below, so its
+    // absence proves the empty answer and skips the char collect + walk.
+    // GNU anchor: parse.y:5305 read_token_word reads a word once; GNU runs
+    // NO per-word expansion scans at parse time at all (subst.c analyzes at
+    // execution) — this port's scans are the executor-facing metadata
+    // source, and the gate only skips scans that cannot match.
+    if !word.contains('$') {
+        return Vec::new();
+    }
+
     let chars = word.chars().collect::<Vec<_>>();
     let mut expansions = Vec::new();
     let mut index = 0;

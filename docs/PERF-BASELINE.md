@@ -1701,3 +1701,139 @@ guard/memo/thread-local layer, not a single >5% site.
    decided to KEEP the pre-scan for error ownership; GNU has none —
    subst.c expands once and reports inline — so the full fix is the
    perf6-deferred per-arm lazy-error refactor).
+## perf15 round (2026-09-29, wt15/parsearch on 837514ff): parse-layer structural alignment
+
+Owner target "下一波所有套件 2-3x 之内": structural GNU alignment of the
+parse layer (tokenize+parse), the biggest remaining block of configure -n
+(12-14x) and nvm -n (12-14x). All numbers RELEASE build, alternating A/B
+against a pristine base binary built this session from 837514ff (same
+load); GNU anchors re-measured inside WSL this session (nvm -n 18ms,
+configure-head1374 -n 7ms). Scratch phase/alloc instrumentation (a
+counting global allocator + phase timers) fully removed before commit.
+
+### Decomposition (instrumented lane binary, nvm -n, 276ms base wall)
+
+Whole-run totals at round start: **1,356,509 allocations / 251.6 MB** for
+a 172 KB script; 2283 parse_with_options calls (1577 nested compound-body
+re-parses), 15048 tokens, 7583 CommandNode::new. Struct sizes: Token 112
+bytes, CommandNode **2240 bytes** (GNU make_cmd.h COMMAND is a ~32-byte
+header whose union holds POINTERS to per-kind bodies). Phase ranking:
+
+| # | parse-side cost | measured | owner |
+|---|---|---:|---|
+| 1 | Double per-word analysis: `push_command_word` ran 9 `record_*` scans, then `WordMetadata::new` re-ran the same scans (and re-PARSED every `$(...)` body a second time) into a duplicate store | word intake ~60ms/670K allocs nested-incl. | this lane |
+| 2 | Feeder boundary re-lex (40 refused resumes re-lexing the whole accumulated line) | 45.3ms/211K allocs | #281/#292 captain family (untouched) |
+| 3 | Join-gate param scan: `has_unclosed_parameter_expansion` re-collected the WHOLE logical line into a fresh `Vec<char>` per `$`-bearing appended line (nvm joins to one ~172KB logical line) | ~11ms + 18MB Vec<char> garbage (release memcpy is fast; debug far worse) | this lane |
+| 4 | Fold clone chain: `fold_and_or_list`/`fold_pipeline` deep-cloned EVERY command (`commands[index].clone()`) whenever the fold ran (698 clones on nvm) | folds 13.9ms | this lane |
+| 5 | Per-scan `chars().collect::<Vec<char>>()` even for scans that provably find nothing (plain identifiers) | ~9 allocs/word | this lane |
+
+configure-head1374 cross-check: GATHER 11.8 / TOKENIZE 7.2 / PARSE 13.5ms
+(grouped path); configure-full: GATHER 3170ms (the captain's comsub-park
+quadratic — 86% of wall), PARSE 181.7ms.
+
+### Landed changes (14 files; instrumentation removed before commit)
+
+1. **Single-scan word intake** (`parser/support.rs push_command_word` +
+   `parser/nodes.rs WordMetadata::from_scans`). Each analysis runs ONCE;
+   the findings feed both stores — the CommandNode-level vectors (tagged
+   clones, free for the empty Vecs that dominate real scripts) and the
+   per-word WordMetadata (owning the scans' output). `from_scans` applies
+   exactly `new`'s tagging (comsubs/procsubs carry word_index; the rest
+   stay untagged), so both stores stay byte-identical to the double-scan
+   output. GNU anchor: parse.y:5305 read_token_word assembles a word in
+   ONE pass; make_cmd.c make_simple_command stores the WORD_DESC once —
+   GNU has no per-word expansion scans at parse time at all. The eight
+   now-dead `record_*_for_word` wrappers were removed.
+2. **Param-scan incremental checkpoint** (`lexer/brace_scan.rs
+   ParamScanState/param_residuals_advance` + `lexer/mod.rs
+   ParamScanCheckpoint/advance_param_scan`). Same streaming model as the
+   landed quotes/compound checkpoints (rubash#292 plan-B shape, perf8):
+   per appended line the scan advances over the new tail from its
+   snapshot; the single undecided position (a `${` whose body scan
+   failed) parks and is re-derived, byte-identical to a fresh full scan
+   by append-only induction. Invalidations mirror the sibling
+   checkpoints (IFS_GLUE insert + rotation via rebuild_comsub_mirror,
+   backslash-continuation pop, logical-line commit). GNU anchor:
+   parse.y:3557 read_token streams input once; the whole-line
+   recollect-and-rescan per appended line was this port's substitute.
+   NOTE: the park/resume ADVANCE functions for quotes/comsub/compound
+   live in continuation.rs (captain-exclusive) — this one lives in
+   brace_scan.rs next to the scan it advances.
+3. **Provably-empty scan admissions** (9 `_in_word`/`_in_raw` functions).
+   Each scan's productions all require a trigger byte, so its absence
+   proves the empty answer (rubash#117 whitelist discipline — class
+   proof per scan, not a symptom blacklist): comsub needs `$`/backtick,
+   arith `$`, param `$`, brace `{`, extglob `(`, tilde `~`, pathname one
+   of `*?[`, word-quotes one of `'"\``, procsub `(`. Benefits the word
+   intake AND all 101 standalone metadata sites (keywords, delimiters).
+   GNU anchor: parse.y:5305 one-pass word assembly; GNU runs no per-word
+   scans at parse time.
+4. **Fold clone-chain → moves** (`parser/parse_loop.rs
+   fold_and_or_list_commands`, `fold_pipeline_commands`).
+   `std::mem::replace(&mut commands[index], CommandNode::new())` replaces
+   `commands[index].clone()` — the index only ever advances and the taken
+   slot is never re-read (skip-empty loops start from the current,
+   untaken index), so the moved-out node reproduces the clone's result
+   without the deep copy. GNU anchor: parse.y:1264 list / parse.y:1378
+   pipeline productions LINK the already-built commands; make_cmd.c
+   never copies a COMMAND.
+
+### Numbers (release, A/B medians vs pristine 837514ff; GNU this session)
+
+| probe | base ms | lane ms | delta | GNU ms | ratio |
+|---|---:|---:|---:|---:|---:|
+| nvm -n | 278 | 230 | **-17%** | 18 | 15.4x -> **12.8x** |
+| nvm load (`--no-use`) | 486 | 427 | **-12%** | — | — |
+| configure-head1374 -n | 87 | 80 | -8% | 7 | 12.4x -> 11.4x |
+| configure-full -n | 3639 | 3364 | -7% | 37-46 (perf11) | parse share small vs 3.1s gather |
+| 16-parse-flat8000-n | 47 | 46 | flat | — | per-line shape, no joins |
+
+Instrumented phase deltas (nvm -n, same binary before/after each change):
+PARSE 112.4 -> 68.7ms (**-39%**), TOKENIZE 96.7 -> 87.7ms (-9%), whole-run
+allocations 1.357M -> 0.818M (**-40%**), fold passes 13.9 -> 1.9ms,
+comsub parse fan-out 2283 -> 2131 parse calls (bodies parsed once, then
+cloned). PARSE_SHARE of nvm -n wall (tokenize+parse phases): 209 -> 156ms.
+
+### Semantics gate (zero-change evidence)
+
+- nvm `--no-use` load, base vs lane (and vs the FINAL clean binary):
+  declare -p of NVM_DIR/NVM_* env, `declare -F nvm_*` md5, compgen count,
+  `nvm --version`, `type nvm` — byte-identical.
+- OMB live load (real HOME, agnoster): PS1 md5, `declare -p` md5 of
+  _omb_spectrum_fg/_omb_spectrum_f/FX/FG, `declare -F` md5 (284
+  functions), `alias` md5 (33 aliases) — byte-identical.
+- true-baseline spot checks (WSL GNU 5.3.0 oracle, scripts/true-baseline.sh):
+  quote comsub dstack braces extglob arith case comsub-posix cond errors
+  exp func heredoc read — rubash stdout+stderr byte-identical base vs
+  lane for ALL 14 suites (pre-existing master diff counts unchanged:
+  quote 85, comsub 25, dstack 0, braces 4, extglob 178, arith 0, case 3,
+  comsub-posix 5, cond 12, errors 2, exp 264, func 0, heredoc 5, read 24).
+- cargo test --lib 537/537; --test regression 27/27; RUSTFLAGS='-D
+  warnings' cargo check --tests and --release --tests clean; cargo fmt
+  --check clean; src/lexer/continuation.rs untouched (verified by diff).
+
+### Leftovers (measured, with owners)
+
+1. **Feeder boundary re-lex 45ms** (40 refused resumes × whole-line
+   re-lex, 211K allocs/104MB) — the #281/#292 resume-refuse family,
+   overlaps the captain's comsub-park work in continuation.rs. Not
+   touched by this lane.
+2. **Nested body re-parse fan-out** (1577 parse_body_with_diagnostics
+   calls, ~150ms nested-inclusive): GNU parses compound bodies inline in
+   the SAME reader pass (parse.y grammar recursion consumes body tokens
+   directly); rubash re-runs the full parse pipeline per body slice. The
+   deep fix is a single-pass recursive-descent body parse — a
+   whole-parser architecture change, next-round scale.
+3. **Word string triple-store** (token.value + cmd.words[i] +
+   metadata.value/.raw — 3 copies per word; GNU stores each word string
+   ONCE in the WORD_DESC): dedup needs WordMetadata field-type changes
+   across 84 reader sites — assessed, deliberately deferred (churn/risk
+   vs ~6ms estimate).
+4. **CommandNode 2240 bytes** (18 Vecs + 5 inline Option<Redirect> +
+   5 wrapper Options): measured impact on -n workloads is small (moves
+   are rare after Change 4; the deep-clone costs are already gone);
+   boxing the cold fields is a possible follow-up but not paying for
+   itself now.
+5. cfg-full -n remains gather-dominated (3.1s of 3.4s = the captain's
+   park quadratic); with the park fixed, this round's parse-side cuts
+   compound (~180ms parse + 107ms tokenize of the remainder).
