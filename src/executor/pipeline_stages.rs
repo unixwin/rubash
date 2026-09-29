@@ -205,10 +205,19 @@ impl Executor {
         // it, leaving $1 as the literal <(date) string.
         let (materialized_command, procsub_files) =
             self.command_with_process_substitution_files(command)?;
-        let args = materialized_command.words[1..]
-            .iter()
-            .map(|word| self.expand_word(word))
-            .collect::<Vec<_>>();
+        // GNU expands a pipeline element's words through the same word-list
+        // machinery as any simple command (execute_cmd.c:624
+        // execute_command_internal -> execute_simple_command ->
+        // subst.c:13219 expand_word_list_internal): "$@" becomes a LIST of
+        // individually quoted words (subst.c:10691 case '@'), unquoted $*/$@
+        // field-split, and unquoted patterns pathname-expand — none of that
+        // depends on pipeline membership. The old per-word `expand_word`
+        // joined "$@" into ONE space-joined argument (rubash#330: FFmpeg's
+        // `map ... "$@" | awk` lost every per-arg word), left `g*.g`
+        // unexpanded, and produced an empty word for an empty "$@".
+        // expand_stage_tail_words is the same argv builder the external and
+        // builtin stages use (field split + marker restore + glob).
+        let args = self.expand_stage_tail_words(&materialized_command);
         let mut call = materialized_command.clone();
         call.words = std::iter::once(function_name.clone())
             .chain(args.iter().cloned())
