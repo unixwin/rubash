@@ -31,14 +31,36 @@ pub(super) struct LocalTimeParts {
 
 impl TimeZoneRule {
     pub(super) fn from_env(tz: Option<&str>) -> Self {
-        tz.and_then(parse_posix_timezone).unwrap_or_else(|| Self {
+        // glibc localtime (GNU printf.def:633 calls localtime after
+        // sv_tz): a set TZ string is parsed as POSIX rules; TZ="" is UTC;
+        // an UNSET TZ falls back to the system default timezone — on
+        // Windows that is the registry timezone (GetTimeZoneInformation),
+        // on other platforms UTC (rubash#326: %(fmt)T formatted UTC on a
+        // CST host because the unset-TZ case defaulted to UTC).
+        match tz {
+            // glibc maps an empty TZ to UTC under the name "Universal".
+            Some(value) if value.is_empty() => Self {
+                standard_name: "Universal".to_string(),
+                daylight_name: None,
+                standard_offset: 0,
+                daylight_offset: 0,
+                start_rule: None,
+                end_rule: None,
+            },
+            Some(_) => tz.and_then(parse_posix_timezone).unwrap_or_else(Self::utc),
+            None => system_timezone().unwrap_or_else(Self::utc),
+        }
+    }
+
+    fn utc() -> Self {
+        Self {
             standard_name: "UTC".to_string(),
             daylight_name: None,
             standard_offset: 0,
             daylight_offset: 0,
             start_rule: None,
             end_rule: None,
-        })
+        }
     }
 
     pub(super) fn local_time(&self, epoch: i64) -> LocalTimeParts {
@@ -116,6 +138,24 @@ fn parse_posix_timezone(value: &str) -> Option<TimeZoneRule> {
             index += 1;
             end_rule = parse_month_weekday_rule(value, &mut index);
         }
+    } else if daylight_name.is_some() {
+        // POSIX 8.1.3: a DST name without explicit rules gets
+        // implementation-defined defaults — glibc uses the current USA
+        // rules (second Sunday in March to the first Sunday in November,
+        // 02:00 local), so `TZ=EST5EDT` observes EDT in summer exactly
+        // like GNU localtime (verified WSL GNU 5.3.0).
+        start_rule = Some(MonthWeekdayRule {
+            month: 3,
+            week: 2,
+            weekday: 0,
+            seconds: 2 * 3600,
+        });
+        end_rule = Some(MonthWeekdayRule {
+            month: 11,
+            week: 1,
+            weekday: 0,
+            seconds: 2 * 3600,
+        });
     }
 
     Some(TimeZoneRule {
@@ -224,6 +264,70 @@ fn nth_weekday_of_month(year: i32, month: u8, week: u8, weekday: u8) -> u8 {
 fn weekday_from_date(year: i32, month: u8, day: u8) -> u8 {
     let days = days_from_civil(year, u32::from(month), u32::from(day));
     (days + 4).rem_euclid(7) as u8
+}
+
+/// Weekday (0=Sunday) of a civil date — the strftime %V/%G ISO-week
+/// computation needs it for arbitrary dates, not just the rendered one.
+pub(super) fn weekday_of(year: i32, month: u8, day: u8) -> u8 {
+    weekday_from_date(year, month, day)
+}
+
+/// The system default timezone, used when TZ is unset (glibc localtime's
+/// /etc/localtime role). Windows: GetTimeZoneInformation (the registry
+/// timezone, Bias + optional DST rules); other platforms: None (UTC).
+#[cfg(windows)]
+fn system_timezone() -> Option<TimeZoneRule> {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::Time::{
+        GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
+    };
+
+    let mut info = TIME_ZONE_INFORMATION::default();
+    // SAFETY: `info` is a valid, fully-owned TIME_ZONE_INFORMATION; the
+    // API only writes into it.
+    let result = unsafe { GetTimeZoneInformation(&mut info) };
+    if result == TIME_ZONE_ID_INVALID {
+        return None;
+    }
+    let name_from_utf16 = |raw: &[u16]| -> String {
+        let len = raw.iter().position(|ch| *ch == 0).unwrap_or(raw.len());
+        String::from_utf16_lossy(&raw[..len])
+    };
+    // TIME_ZONE_INFORMATION: UTC = local + Bias. Offsets here are seconds
+    // EAST of UTC, so standard = -(bias + standard_bias) * 60.
+    let has_dst = info.DaylightDate.wMonth != 0 && info.StandardDate.wMonth != 0;
+    let standard_offset = -(info.Bias + info.StandardBias) * 60;
+    let daylight_offset = if has_dst {
+        -(info.Bias + info.DaylightBias) * 60
+    } else {
+        standard_offset
+    };
+    // Windows' rule struct maps directly onto the POSIX `Mm.w.d`
+    // MonthWeekdayRule: wDay 1-5 (5 = last), wDayOfWeek 0=Sunday.
+    let rule = |raw: &SYSTEMTIME| -> Option<MonthWeekdayRule> {
+        if raw.wMonth == 0 {
+            return None;
+        }
+        Some(MonthWeekdayRule {
+            month: raw.wMonth as u8,
+            week: raw.wDay as u8,
+            weekday: raw.wDayOfWeek as u8,
+            seconds: i32::from(raw.wHour) * 3600 + i32::from(raw.wMinute) * 60,
+        })
+    };
+    Some(TimeZoneRule {
+        standard_name: name_from_utf16(&info.StandardName),
+        daylight_name: has_dst.then(|| name_from_utf16(&info.DaylightName)),
+        standard_offset,
+        daylight_offset,
+        start_rule: has_dst.then(|| rule(&info.DaylightDate)).flatten(),
+        end_rule: has_dst.then(|| rule(&info.StandardDate)).flatten(),
+    })
+}
+
+#[cfg(not(windows))]
+fn system_timezone() -> Option<TimeZoneRule> {
+    None
 }
 
 fn days_in_month(year: i32, month: u8) -> u8 {
