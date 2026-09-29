@@ -564,34 +564,51 @@ fn arithmetic_command_source_text(arithmetic_command: &ArithmeticCommand) -> Str
 }
 
 fn if_command_source_text(if_command: &IfCommand) -> String {
+    // print_cmd.c print_if_command: each body ends with
+    // `semicolon(); newline("elif"/"else"/"fi")' — the print_cmd.c:1519-1529
+    // semicolon() suppression applies after a body ending in `... &'
+    // (rubash#294 family).
     let mut text = format!(
         "if {}; then {}",
         bash_command_sequence_text(&if_command.condition),
         bash_command_sequence_text(&if_command.then_body)
     );
     for branch in &if_command.elif_branches {
+        push_command_separator(&mut text);
         text.push_str(&format!(
-            "; elif {}; then {}",
+            "elif {}; then {}",
             bash_command_sequence_text(&branch.condition),
             bash_command_sequence_text(&branch.body)
         ));
     }
     if let Some(body) = &if_command.else_body {
-        text.push_str(&format!("; else {}", bash_command_sequence_text(body)));
+        push_command_separator(&mut text);
+        text.push_str("else ");
+        text.push_str(&bash_command_sequence_text(body));
     }
-    text.push_str("; fi");
+    push_command_separator(&mut text);
+    text.push_str("fi");
     text
 }
 
 fn loop_command_source_text(loop_command: &LoopCommand) -> String {
-    format!(
-        "{} {}; {} {}; {}",
+    // print_cmd.c:800-832 print_until_or_while: the body is printed, then
+    // `semicolon(); newline("done")' — semicolon() (print_cmd.c:1519-1529)
+    // suppresses the `;' after a body whose last command printed as
+    // `... &' (only newline_list may follow `&': parse.y:1275/1290), so a
+    // body ending in `&' joins its `done' with a newline, never `&; done'
+    // (rubash#294 family: an alias-spliced `while ...; do break &; done'
+    // inside a respawned background function corrupted every respawn).
+    let mut text = format!(
+        "{} {}; {} ",
         if loop_command.until { "until" } else { "while" },
         bash_command_sequence_text(&loop_command.condition),
-        loop_command.body_open_delimiter,
-        bash_command_sequence_text(&loop_command.body),
-        loop_command.body_close_delimiter
-    )
+        loop_command.body_open_delimiter
+    );
+    text.push_str(&bash_command_sequence_text(&loop_command.body));
+    push_command_separator(&mut text);
+    text.push_str(&loop_command.body_close_delimiter);
+    text
 }
 
 fn conditional_command_source_text(conditional_command: &ConditionalCommand) -> String {
@@ -623,26 +640,45 @@ fn select_command_source_text(select_command: &SelectCommand) -> String {
     }
 }
 
+/// print_cmd.c:1519-1529 semicolon(): GNU suppresses the `;' separator
+/// when the printed command ends with `" &"` or a newline — after `&` the
+/// list grammar admits only newline_list (parse.y:1275/1290; a `;' at list
+/// start is the parse.y:1326 error arm). Serializers joining a trailing
+/// `... &' command with the next text (or a compound closer — print_cmd.c
+/// 626-631 emits `semicolon(); newline("done")') must join with a newline
+/// instead (rubash#294 `&;' corruption family).
+pub(in crate::executor) fn push_command_separator(source: &mut String) {
+    if source.ends_with('&') {
+        source.push('\n');
+    } else if !source.ends_with('\n') {
+        source.push_str("; ");
+    }
+}
+
 fn command_body_source_text(
     body_kind: CommandBodyKind,
     open_delimiter: Option<&str>,
     close_delimiter: Option<&str>,
     body: &[CommandNode],
 ) -> String {
-    let body = bash_command_sequence_text(body);
+    let mut body = bash_command_sequence_text(body);
+    // print_cmd.c:626-631/646-651: GNU prints the body then
+    // `semicolon(); newline("done")' — the semicolon() suppression rule
+    // (print_cmd.c:1519-1529) applies, so a body ending in `... &' joins
+    // its closer with a newline, never `&; done' (rubash#294 family).
     match body_kind {
-        CommandBodyKind::DoDone => format!(
-            "{} {}; {}",
-            open_delimiter.unwrap_or("do"),
-            body,
-            close_delimiter.unwrap_or("done")
-        ),
-        CommandBodyKind::BraceGroup => format!(
-            "{} {}; {}",
-            open_delimiter.unwrap_or("{"),
-            body,
-            close_delimiter.unwrap_or("}")
-        ),
+        CommandBodyKind::DoDone => {
+            body = format!("{} ", open_delimiter.unwrap_or("do")) + &body;
+            push_command_separator(&mut body);
+            body.push_str(close_delimiter.unwrap_or("done"));
+            body
+        }
+        CommandBodyKind::BraceGroup => {
+            body = format!("{} ", open_delimiter.unwrap_or("{")) + &body;
+            push_command_separator(&mut body);
+            body.push_str(close_delimiter.unwrap_or("}"));
+            body
+        }
     }
 }
 

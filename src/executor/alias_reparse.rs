@@ -47,7 +47,7 @@ impl Executor {
                     bash_command_source_text(next_command)
                 };
                 if !command_source.is_empty() {
-                    source.push_str("; ");
+                    push_command_separator(&mut source);
                     source.push_str(&command_source);
                 }
                 next_index = command_index + 1;
@@ -209,7 +209,7 @@ impl Executor {
                 };
                 let command_source = alias_reparse_command_source(next_command);
                 if !command_source.is_empty() {
-                    source.push_str("; ");
+                    push_command_separator(&mut source);
                     source.push_str(&command_source);
                 }
                 next_index += 1;
@@ -504,14 +504,14 @@ impl Executor {
                 redirect_command = next_command;
                 next_index = command_index + 1;
                 if !command_source.is_empty() {
-                    source.push_str("; ");
+                    push_command_separator(&mut source);
                     source.push_str(&command_source);
                 }
                 break;
             }
 
             if !command_source.is_empty() {
-                source.push_str("; ");
+                push_command_separator(&mut source);
                 source.push_str(&command_source);
             }
             next_index = command_index + 1;
@@ -613,7 +613,7 @@ fn alias_group_source(
         };
         let command_source = alias_reparse_command_source(next_command);
         if !command_source.is_empty() {
-            source.push_str("; ");
+            push_command_separator(&mut source);
             source.push_str(&command_source);
         }
         next_index = command_index + 1;
@@ -623,7 +623,7 @@ fn alias_group_source(
         }
     }
     if !closed {
-        source.push_str("; ");
+        push_command_separator(&mut source);
         source.push_str(close_word);
         append_source_redirects(&mut source, command);
     }
@@ -654,7 +654,7 @@ fn alias_time_source(
         };
         let command_source = alias_reparse_command_source(next_command);
         if !command_source.is_empty() {
-            source.push_str("; ");
+            push_command_separator(&mut source);
             source.push_str(&command_source);
         }
         next_index = command_index + 1;
