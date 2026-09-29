@@ -27,10 +27,13 @@ fn stdin_script_uses_s_positional_arguments() {
 
     assert!(output.status.success());
     // GNU shell.c:1613 rebinds $0 only in shell_execscript (script FILE);
-    // a stdin script keeps dollar_vars[0] = argv[0] verbatim
-    // (variables.c initialize_shell_variables), so $0 is the full path the
-    // test harness invoked (probe 2026-09-27: `printf ... | bash -s alpha`).
-    let invoked = env!("CARGO_BIN_EXE_rubash");
+    // a stdin script keeps dollar_vars[0] = argv[0]
+    // (variables.c initialize_shell_variables), so $0 is the invoked
+    // executable path — rendered in rubash's POSIX self-produced form
+    // (/d/...) per rubash#331 (option A of #329): the raw Windows argv[0]
+    // the parent handed over is our own produced `$0` value.
+    let invoked = env!("CARGO_BIN_EXE_rubash").replace('\\', "/");
+    let invoked = rubash::executor::shell_pwd_display_path(&invoked);
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         format!("{invoked}:alpha:2\n")
