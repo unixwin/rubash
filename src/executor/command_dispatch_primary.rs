@@ -241,12 +241,18 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Result<(), ExecuteError>, ExecuteError> {
-        let described = if command_has_output_redirects(cmd) {
-            self.execute_command_describe_redirected(cmd)?
-        } else {
-            false
-        };
-        if described || self.execute_command_describe(&cmd.words[1..]) {
+        // rubash#289d: `command -v/-V` describe output must ALWAYS take the
+        // buffered single-truth path (execute_command_describe_with_io →
+        // write_buffered_builtin_output → fd table → comsub capture). The
+        // old split ran a raw `println!` describe whenever the command had
+        // no redirects of its own — under `$(FOO=1 command -v sed)` or
+        // `$(PATH=/usr/bin; command -v sed)` that bypassed STDOUT_CAPTURE,
+        // leaking the path to the terminal and leaving the substitution
+        // empty. GNU has no such bypass: subst.c:7320 command_substitute()
+        // dup2s the pipe onto fd 1, and describe_command prints via printf
+        // (builtins/command.def:113 → type.def describe_command), so every
+        // fd-1 write is captured.
+        if self.execute_command_describe_redirected(cmd)? {
             return Ok(Ok(()));
         }
         // GNU execute_cmd.c: the builtin's own diagnostics go to the

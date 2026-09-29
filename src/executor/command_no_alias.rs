@@ -209,12 +209,10 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
-        let described = if command_has_output_redirects(cmd) {
-            self.execute_command_describe_redirected(cmd)?
-        } else {
-            false
-        };
-        if described || self.execute_command_describe(&cmd.words[1..]) {
+        // rubash#289d: describe output always takes the buffered
+        // single-truth path — the former raw `println!` fallback leaked
+        // under comsub capture (see command_dispatch_primary.rs).
+        if self.execute_command_describe_redirected(cmd)? {
             return Ok(());
         }
 

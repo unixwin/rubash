@@ -1,33 +1,12 @@
 use super::*;
 
 impl Executor {
-    pub(in crate::executor) fn execute_command_describe(&mut self, args: &[String]) -> bool {
-        // TODO(builtins/command.def/type.def/findcmd.c): `command -v/-V`
-        // shares Bash's command-description machinery with `type`. Keep this
-        // executor-local bridge while functions and aliases live on Executor.
-        let Some((mode, use_standard_path, first_name)) = parse_command_describe_args(args) else {
-            return false;
-        };
-        let saved_path = self.use_standard_path_for_lookup(use_standard_path);
-        let mut status = 0;
-        for name in &args[first_name..] {
-            // GNU findcmd.c:364-365: phash_search is skipped for absolute
-            // names and CMDSRCH_STDPATH (`command -p`) lookups; a hit bumps
-            // times_found (hashlib.c:254).
-            if !use_standard_path && !name.contains('/') && !name.contains('\\') {
-                crate::builtins::hash::bump_hashed_path_hit(&mut self.shell_state.env_vars, name);
-            }
-            if !self.describe_name(name, mode, false, false) {
-                status = 1;
-                if mode == TypeDescribeMode::Verbose {
-                    eprintln!("{}command: {name}: not found", self.diagnostic_prefix());
-                }
-            }
-        }
-        self.restore_lookup_path(saved_path);
-        self.exit_code = status;
-        true
-    }
+    // rubash#289d: the raw-stdout `execute_command_describe` (raw println!
+    // describe, no buffering) was removed — every `command -v/-V`
+    // invocation must go through `execute_command_describe_redirected`,
+    // whose buffered output reaches the comsub capture via
+    // write_buffered_builtin_output and honors redirections elsewhere
+    // (mirrors the niubash #108 `type` precedent on this file).
 
     pub(in crate::executor) fn execute_command_describe_redirected(
         &mut self,

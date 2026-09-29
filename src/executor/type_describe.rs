@@ -1,100 +1,10 @@
 use super::*;
 
 impl Executor {
-    pub(in crate::executor) fn describe_name(
-        &self,
-        name: &str,
-        mode: TypeDescribeMode,
-        force_path: bool,
-        skip_functions: bool,
-    ) -> bool {
-        if !force_path {
-            if self.alias_expansion_enabled() {
-                if let Some(alias) = self.shell_state.aliases.get(name) {
-                    match mode {
-                        TypeDescribeMode::Verbose => {
-                            println!("{name} is aliased to `{}'", alias.value);
-                        }
-                        TypeDescribeMode::Reusable => println!("alias {name}='{}'", alias.value),
-                        TypeDescribeMode::TypeOnly => println!("alias"),
-                        TypeDescribeMode::PathOnly => {}
-                    }
-                    return true;
-                }
-            }
-
-            // GNU describe_command order (builtins/type.def:240-330):
-            // reserved words, then -- in posix mode -- special builtins
-            // BEFORE functions (execute_cmd.c:4659 "Posix.2 says special
-            // builtins are found before functions"), then functions, then
-            // other builtins.
-            if is_shell_keyword(name) {
-                match mode {
-                    TypeDescribeMode::Verbose => println!("{name} is a shell keyword"),
-                    TypeDescribeMode::Reusable => println!("{name}"),
-                    TypeDescribeMode::TypeOnly => println!("keyword"),
-                    TypeDescribeMode::PathOnly => {}
-                }
-                return true;
-            }
-
-            if self.posix_mode_enabled()
-                && self.is_enabled_shell_builtin_name(name)
-                && is_posix_special_builtin(name)
-            {
-                match mode {
-                    TypeDescribeMode::Verbose => println!("{name} is a special shell builtin"),
-                    TypeDescribeMode::Reusable => println!("{name}"),
-                    TypeDescribeMode::TypeOnly => println!("builtin"),
-                    TypeDescribeMode::PathOnly => {}
-                }
-                return true;
-            }
-
-            if !skip_functions {
-                if let Some(body) = self.shell_state.functions.get(name) {
-                    match mode {
-                        TypeDescribeMode::Verbose => {
-                            self.print_function_description(name, &body.commands)
-                        }
-                        TypeDescribeMode::Reusable => println!("{name}"),
-                        TypeDescribeMode::TypeOnly => println!("function"),
-                        TypeDescribeMode::PathOnly => {}
-                    }
-                    return true;
-                }
-            }
-
-            if self.is_enabled_shell_builtin_name(name) {
-                match mode {
-                    TypeDescribeMode::Verbose => println!("{name} is a shell builtin"),
-                    TypeDescribeMode::Reusable => println!("{name}"),
-                    TypeDescribeMode::TypeOnly => println!("builtin"),
-                    TypeDescribeMode::PathOnly => {}
-                }
-                return true;
-            }
-        }
-
-        if let Some(path) = self.command_path(name, force_path) {
-            match mode {
-                TypeDescribeMode::Verbose => {
-                    if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
-                        .is_some()
-                    {
-                        println!("{name} is hashed ({path})");
-                    } else {
-                        println!("{name} is {path}");
-                    }
-                }
-                TypeDescribeMode::Reusable | TypeDescribeMode::PathOnly => println!("{path}"),
-                TypeDescribeMode::TypeOnly => println!("file"),
-            }
-            return true;
-        }
-
-        false
-    }
+    // rubash#289d: the raw-stdout `describe_name` (println! describe) was
+    // removed with its only caller — describes must go through
+    // describe_name_with_io so output reaches the buffered single-truth
+    // path (comsub capture, redirects, fd table).
 
     pub(in crate::executor) fn describe_name_with_io<W>(
         &self,
