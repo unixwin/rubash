@@ -117,6 +117,52 @@ pub(in crate::executor) enum TrailingInputKind {
     InvalidOperator,
 }
 
+/// A subscript that is nothing but ASCII decimal digits with a non-zero
+/// lead (or a lone `0`): arithmetic-evaluates to itself, so the whole
+/// pre-evaluation pipeline is skippable (GNU arrayfunc.c:1368 evalexp on
+/// `a[N]`).
+fn literal_decimal_subscript(resolved: &str) -> Option<i128> {
+    let text = resolved.trim();
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if text.len() > 1 && text.starts_with('0') {
+        return None; // 0NNN is octal in shell arithmetic — full evaluator
+    }
+    text.parse::<i128>().ok()
+}
+
+#[cfg(test)]
+mod literal_subscript_tests {
+    use super::literal_decimal_subscript;
+
+    #[test]
+    fn decimal_literals_are_their_own_value() {
+        assert_eq!(literal_decimal_subscript("0"), Some(0));
+        assert_eq!(literal_decimal_subscript("1"), Some(1));
+        assert_eq!(literal_decimal_subscript(" 42 "), Some(42));
+        assert_eq!(
+            literal_decimal_subscript("170141183460469231731687303715884105727"),
+            Some(i128::MAX)
+        );
+    }
+
+    #[test]
+    fn everything_else_takes_the_full_path() {
+        // Octal spellings, signs, names, expansions, quotes, empty.
+        assert_eq!(literal_decimal_subscript("010"), None);
+        assert_eq!(literal_decimal_subscript("00"), None);
+        assert_eq!(literal_decimal_subscript("-1"), None);
+        assert_eq!(literal_decimal_subscript("+1"), None);
+        assert_eq!(literal_decimal_subscript("i"), None);
+        assert_eq!(literal_decimal_subscript("$i"), None);
+        assert_eq!(literal_decimal_subscript("1+1"), None);
+        assert_eq!(literal_decimal_subscript(""), None);
+        assert_eq!(literal_decimal_subscript("  "), None);
+        assert_eq!(literal_decimal_subscript("0x10"), None);
+    }
+}
+
 impl Executor {
     /// Snapshot the arithmetic error flags so a subshell boundary (command
     /// substitution, pipeline element) can restore them afterwards; errors
@@ -434,6 +480,18 @@ impl Executor {
         &mut self,
         resolved: &str,
     ) -> Option<i128> {
+        // Pure decimal literal fast path: GNU arrayfunc.c:1368 runs
+        // evalexp on the resolved subscript; for text made only of ASCII
+        // decimal digits with a non-zero lead every pre-evaluation pass
+        // (re-expansion, assoc-subscript scan, quote normalization, the
+        // nounset name scan) is provably the identity — the value IS the
+        // literal. Leading-zero subscripts stay on the full path (shell
+        // arithmetic reads 0NN as octal). Whitelist admission, not a
+        // symptom guard: a non-matching subscript falls through to the
+        // real pipeline unchanged.
+        if let Some(index) = literal_decimal_subscript(resolved) {
+            return Some(index);
+        }
         // Same resolved text at the same `${}` site already produced its
         // index (and its side effects) in an earlier pass; GNU's
         // array_expand_index evaluates it once.
