@@ -973,6 +973,25 @@ impl Executor {
             if ch == DATA_DOLLAR {
                 continue;
             }
+            if ch == '`' {
+                // Backtick command substitution: same forked-child nounset
+                // boundary as `$( ... )` (GNU subst.c:7143 command_substitute
+                // handles both spellings; probe p5: `echo `echo $U`` prints
+                // an empty substitution and the script continues). Skip the
+                // whole body — backslash-escaped backticks included — so the
+                // parent scan never fires on the child's variables
+                // (rubash#307).
+                while let Some(body_ch) = chars.next() {
+                    if body_ch == '\\' {
+                        chars.next();
+                        continue;
+                    }
+                    if body_ch == '`' {
+                        break;
+                    }
+                }
+                continue;
+            }
             if ch != '$' {
                 continue;
             }
@@ -1035,6 +1054,45 @@ impl Executor {
                 }
                 Some('(') => {
                     chars.next();
+                    if chars.peek().copied() == Some('(') {
+                        // `$(( ... ))` is arithmetic expansion, evaluated in
+                        // the PARENT (no fork): an unbound name inside is a
+                        // parent-side fatal error (GNU expr.c expr_streval;
+                        // probe p3: `x=$(($U))' under set -u exits the
+                        // script with 1), so keep scanning the arithmetic
+                        // text for `$name' references.
+                        continue;
+                    }
+                    // `$( ... )` command substitution: GNU forks
+                    // (subst.c:7143 command_substitute -> the child's
+                    // parse_and_execute does the nounset check), so an
+                    // unbound variable in the body ends only the forked
+                    // substitution — the parent word keeps expanding
+                    // (rubash#307: `x=$(echo $U)' continues, assignment
+                    // takes the comsub status). The parent scan must treat
+                    // the whole span as a unit and never look inside — skip
+                    // it balanced and quote-aware, like the byte-index
+                    // comsub skipper in next_quoted_parameter_expansion_start.
+                    let mut depth = 1usize;
+                    let mut single = false;
+                    let mut double = false;
+                    while let Some(body_ch) = chars.next() {
+                        match body_ch {
+                            '\\' if !single => {
+                                chars.next();
+                            }
+                            '\'' if !double => single = !single,
+                            '"' if !single => double = !double,
+                            '(' if !single && !double => depth += 1,
+                            ')' if !single && !double => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 Some(_) | None => {}
             }
