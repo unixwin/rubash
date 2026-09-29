@@ -234,13 +234,15 @@ impl Executor {
     fn execute_bare_arithmetic_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         self.exit_code = self.execute_arithmetic_command(cmd);
         // The generic path's execute_materialized_command tail behaviors for
-        // an arithmetic command: `_` binding and the errexit check (GNU
+        // an arithmetic command: the errexit check (GNU
         // set_pipestatus_from_exit at execute_cmd.c:1217 is the exit_code
         // itself; execute_command_internal applies errexit after the
-        // dispatch). The nounset FORCE_EOF exit is the `((` dispatch arm's
-        // behavior (command_dispatch_late.rs, GNU expr.c FORCE_EOF under
-        // `set -u`).
-        self.update_underscore_parameter(cmd);
+        // dispatch). `(( ))` is cm_arith, NOT a simple command, so GNU never
+        // runs execute_simple_command's bind_lastarg for it — `$_` keeps its
+        // previous value across `((v=1))` (probe 2026-09-28: `: one;
+        // ((v=1)); echo $_` prints `one`). The nounset FORCE_EOF exit is the
+        // `((` dispatch arm's behavior (command_dispatch_late.rs, GNU expr.c
+        // FORCE_EOF under `set -u`).
         if self.shell_state.arithmetic_nounset_error.get() {
             self.shell_state.arithmetic_nounset_error.set(false);
             self.shell_state.arithmetic_expansion_error.set(false);
@@ -2365,6 +2367,13 @@ impl Executor {
             &materialized_cmd.words[1..],
             &materialized_cmd,
         );
+        // GNU execute_cmd.c:4746/4943 — the CALL's expanded last word is
+        // bound to `$_` at return_result AFTER execute_function returns, so a
+        // body command's own `$_` write is overwritten by the call's last
+        // argument (`f arg1 arg2` leaves `$_`=arg2 even though the body ran
+        // `: inner`). execute_function_command_invocation bypasses
+        // execute_materialized_command, so the bind must happen here.
+        self.update_underscore_parameter(&materialized_cmd);
         let finish_result = self.finish_process_substitutions(process_substitution_files);
         let assignment_finish_result =
             self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
@@ -2390,6 +2399,13 @@ impl Executor {
         cmd: &CommandNode,
     ) -> bool {
         if self.execute_integer_assignment_suffix(cmd) || self.execute_assignment_words(cmd) {
+            // GNU execute_cmd.c:4625-4640 execute_simple_command: assignment
+            // words are peeled by separate_out_assignments, leaving WORDS==0,
+            // and the null command path binds `$_` to the NULL string
+            // (4638 bind_lastarg((char *)NULL)) — `v=5; echo $_` prints an
+            // empty `$_`. Comments never execute (reader-level skip), so the
+            // comment arm below keeps the previous value.
+            self.bind_underscore("");
             // GNU execute_cmd.c execute_simple_command: a failed standalone
             // assignment jumps to top level (DISCARD) — the rest of the
             // command list is discarded (`a[]=v; echo after` prints nothing).
@@ -2399,6 +2415,7 @@ impl Executor {
             return true;
         }
         if self.execute_array_element_assignment(cmd) {
+            self.bind_underscore("");
             if self.exit_code != 0 {
                 self.raise_evalerror_abort();
             }

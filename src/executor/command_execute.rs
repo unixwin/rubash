@@ -83,7 +83,16 @@ impl Executor {
         }
 
         if cmd.words.is_empty() {
-            return self.execute_empty_words_command(cmd);
+            let result = self.execute_empty_words_command(cmd);
+            // GNU execute_cmd.c:4625-4640: with WORDS==0 the null command
+            // path binds `$_` to the null string (4638 bind_lastarg((char
+            // *)NULL)) after the command (including its assignment
+            // expansions) runs — in the current shell, so `x=$(: sub)`
+            // leaves `$_`="" in the parent.
+            if result.is_ok() {
+                self.bind_underscore("");
+            }
+            return result;
         }
 
         if let Some((name, message, status)) = self.parameter_heredoc_expansion_error(cmd) {
@@ -224,19 +233,8 @@ impl Executor {
                 self.exit_code = 0;
             }
             // GNU execute_cmd.c:4638 bind_lastarg((char *)NULL): a null
-            // command binds `$_` to the null string. The typed variable
-            // store shadows env_vars in shell_variable_value, so both maps
-            // must carry the binding.
-            self.shell_state
-                .env_vars
-                .insert("_".to_string(), String::new());
-            if let Some(old) = self.shell_state.variables.get("_") {
-                let replacement = crate::shell::Variable {
-                    value: crate::shell::ShellValue::Scalar(String::new()),
-                    ..old.clone()
-                };
-                let _ = self.shell_state.variables.set("_", replacement);
-            }
+            // command binds `$_` to the null string.
+            self.bind_underscore("");
             if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
                 return Err(ExecuteError::ExitCode(self.exit_code));
             }

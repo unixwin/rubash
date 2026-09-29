@@ -1,20 +1,50 @@
 use super::*;
-use crate::executor::markers::STORAGE_WORD_PREFIX;
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR, STORAGE_WORD_PREFIX};
 
 impl Executor {
+    /// GNU execute_cmd.c:4188 bind_lastarg: bind `$_` to `value`, strip the
+    /// export attribute (4191-4192 VUNSETATTR att_exported), and keep BOTH
+    /// stores in sync — the typed variable store shadows env_vars in
+    /// shell_variable_value (variable_state.rs), so a binding that lands only
+    /// in env_vars is invisible to `$_` expansion while `declare -p _` shows
+    /// the new value (rubash#321).
+    pub(in crate::executor) fn bind_underscore(&mut self, value: &str) {
+        self.shell_state
+            .env_vars
+            .insert("_".to_string(), value.to_string());
+        if let Some(exported) = self.shell_state.env_vars.get(EXPORTED_VARS) {
+            let kept: Vec<&str> = exported
+                .split(DATA_DOLLAR)
+                .filter(|name| !name.is_empty() && *name != "_")
+                .collect();
+            self.shell_state
+                .env_vars
+                .insert(EXPORTED_VARS.to_string(), kept.join(DATA_DOLLAR_STR));
+        }
+        if let Some(old) = self.shell_state.variables.get("_") {
+            let replacement = crate::shell::Variable {
+                value: crate::shell::ShellValue::Scalar(value.to_string()),
+                ..old.clone()
+            };
+            let _ = self.shell_state.variables.set("_", replacement);
+        }
+    }
+
     pub(in crate::executor) fn update_underscore_parameter(&mut self, cmd: &CommandNode) {
         if let Some(value) = cmd.words.last() {
-            // GNU execute_cmd.c:4188 bind_lastarg binds `$_` to the last
-            // word's text — a plain string with internal quoting already
-            // removed; GNU has no in-band carriers. Rubash's parse-time
-            // word for a compound-assignment operand (`w=()`) still
-            // carries the COMPOUND_ASSIGNMENT_MARKER flag
-            // (`w=__RUBASH_CA1__()`), which must never reach a variable
-            // cell: `declare`'s full listing renders `$_` verbatim and the
-            // marker would leak into output (bashdb `info variables` runs
-            // a bare `declare` inside a process substitution).
+            // GNU execute_cmd.c:4746 (lastarg = lastword->word->word, the
+            // EXPANDED word list) + execute_cmd.c:4943 bind_lastarg(lastarg):
+            // `$_` is bound to the last word's text after execution — a plain
+            // string with internal quoting already removed; GNU has no
+            // in-band carriers. Rubash's parse-time word for a
+            // compound-assignment operand (`w=()`) still carries the
+            // COMPOUND_ASSIGNMENT_MARKER flag (`w=__RUBASH_CA1__()`), which
+            // must never reach a variable cell: `declare`'s full listing
+            // renders `$_` verbatim and the marker would leak into output
+            // (bashdb `info variables` runs a bare `declare` inside a process
+            // substitution).
             let visible = value.replace(COMPOUND_ASSIGNMENT_MARKER, "");
-            self.shell_state.env_vars.insert("_".to_string(), visible);
+            self.bind_underscore(&visible);
         }
     }
 
