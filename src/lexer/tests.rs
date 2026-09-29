@@ -702,3 +702,34 @@ fn dbg_redirect_fields() {
         ]
     );
 }
+
+#[test]
+fn extglob_group_swallows_bracket_for_subscript_scan() {
+    // GNU parse.y:5464-5490: while extended_glob is live, PATTERN_CHAR + `(`
+    // hands the balanced group to parse_matched_pair — the body's `[`/`|`
+    // never open an array-subscript hunt. `shopt -s extglob` has already run
+    // when the later line parses (incremental read-then-execute), so the
+    // pre-scan must track it and keep `echo +(a|b[)*` a plain word
+    // (rubash#317; extglob.tests:220 179-line band).
+    assert_eq!(
+        unclosed_array_subscript_line("shopt -s extglob\necho +(a|b[)*\n"),
+        None
+    );
+    // Without the shopt the old (extglob-off) model is unchanged: GNU's
+    // error there is the yacc `(` syntax error, not a `]` EOF.
+    assert!(unclosed_array_subscript_line("echo +(a|b[)*\n").is_some());
+    // A genuinely unclosed group is a `)`-shaped EOF, owned by the generic
+    // close-char scan, not this one.
+    assert_eq!(
+        unclosed_array_subscript_line("shopt -s extglob\necho +(a|b[\n"),
+        None
+    );
+    // Unchanged true positive: `|` puts `b` at command position, `[` opens
+    // the subscript (parse.y:5635-5643, rubash#221).
+    assert_eq!(unclosed_array_subscript_line("a | b[c\n"), Some((1, false)));
+    // shopt -u restores the extglob-off model mid-script.
+    assert!(
+        unclosed_array_subscript_line("shopt -s extglob\nshopt -u extglob\necho +(a|b[)*\n")
+            .is_some()
+    );
+}

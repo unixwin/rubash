@@ -1848,6 +1848,15 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
     let mut compassign_depth = 0usize;
     let mut element_start = false;
     let mut line = 1usize;
+    // Runtime `extended_glob` mirror (rubash#317). GNU parses scripts
+    // incrementally — each command is executed before the next line is
+    // read — so a bare top-level `shopt -s extglob` has already run by the
+    // time a later `+(a|b[)*` word is parsed (parse.y:5466 gates the group
+    // consumption on the live `extended_glob`). Track those commands so
+    // extglob pattern groups are consumed as word units, exactly like
+    // read_token_word does.
+    let mut extglob = false;
+    let mut line_start = 0usize;
 
     while index < chars.len() {
         let ch = chars[index];
@@ -1858,6 +1867,8 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
                 command_position = true;
                 word.clear();
                 element_start = false;
+                extglob = shopt_line_sets_extglob(&chars[line_start..index], extglob);
+                line_start = index + 1;
             }
             index += 1;
             continue;
@@ -1930,6 +1941,8 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
                 command_position = true;
                 word.clear();
                 element_start = false;
+                extglob = shopt_line_sets_extglob(&chars[line_start..index], extglob);
+                line_start = index + 1;
             } else {
                 // `if`, `then`, `while`, ... keep the next word in command
                 // position — but only when they themselves stood at command
@@ -1946,6 +1959,29 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
             }
             index += 1;
             continue;
+        }
+        // GNU parse.y:5464-5490 (read_token_word): while `extended_glob`
+        // is live, a PATTERN_CHAR (`@*+?!`, syntax.h:90) immediately
+        // followed by `(` hands the whole balanced group to
+        // parse_matched_pair and appends it to the token verbatim — the
+        // body's `[`, `|`, `(`, `)` never participate in token-level
+        // decisions. Mirror that here so `echo +(a|b[)*` (rubash#317) is
+        // not misread as a top-level `|` + `b[` subscript hunt. An
+        // unbalanced group is a `)`-shaped EOF error owned by the generic
+        // close-char scan, not a `]` error — bail out to it.
+        if extglob
+            && matches!(ch, '@' | '*' | '+' | '?' | '!')
+            && chars.get(index + 1) == Some(&'(')
+        {
+            match skip_extglob_group_chars(&chars, index + 1) {
+                Some(end) => {
+                    word.push(ch);
+                    word.push('(');
+                    index = end;
+                    continue;
+                }
+                None => return None,
+            }
         }
         // `[` opens a subscript when the word prefix is a pure shell
         // identifier at command position (parse.y:5637), or we are at
@@ -2072,6 +2108,96 @@ fn is_pure_identifier(word: &str) -> bool {
         && word
             .chars()
             .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+/// Quote/backslash-aware balanced-paren scan for an extglob pattern group
+/// body (GNU parse_matched_pair, parse.y:3877: quotes nest, backslash
+/// escapes, nested `(`/`)` count). `open` is the index of the `(`; returns
+/// the index past its matching `)` or `None` when EOF is reached first.
+fn skip_extglob_group_chars(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let c = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if single {
+            if c == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '\'' => single = true,
+            '"' => double = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Runtime `extended_glob` mirror for the text-level subscript pre-scan:
+/// given one physical line's chars, return the updated extglob state. GNU
+/// reads a script incrementally and executes each command before parsing
+/// the next (so a `shopt -s extglob` line has already run when later lines
+/// are parsed); only bare top-level `shopt` commands on this line are
+/// recognized — `;`-separated segments each get a chance, quoted or
+/// indirected flips stay out of scope and keep the previous state.
+fn shopt_line_sets_extglob(line: &[char], current: bool) -> bool {
+    let text: String = line.iter().collect();
+    let mut result = current;
+    for segment in text.split(';') {
+        let mut tokens = segment.split_whitespace();
+        if tokens.next() != Some("shopt") {
+            continue;
+        }
+        let mut set: Option<bool> = None;
+        for tok in tokens {
+            if tok.starts_with('-') && tok != "--" && tok.len() > 1 {
+                for flag in tok.chars().skip(1) {
+                    match flag {
+                        's' => set = Some(true),
+                        'u' => set = Some(false),
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+            if tok == "extglob" {
+                if let Some(value) = set {
+                    result = value;
+                }
+                // A later `-s`/`-u` + `extglob` on the same line wins.
+                set = None;
+            }
+        }
+    }
+    result
 }
 
 fn is_command_position_boundary(word: &str) -> bool {
