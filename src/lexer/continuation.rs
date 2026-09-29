@@ -320,6 +320,16 @@ pub(crate) fn unclosed_input_close_char_posix(
                 // `)` is a shell separator: a following `#` starts a
                 // comment (`x=$(a)#c`). Quote/`}` closes stay mid-word.
                 comment_start = d.close == ')';
+                // A completed '...'/"..." span is WORD MATERIAL for the
+                // at_command tracker (rubash#322): read_token returns one
+                // WORD token for `"#F"`, so the whitespace after it marks
+                // a non-command position exactly like a bare word does —
+                // otherwise `[[ "#F" =~ (a #c) ]]` kept at_command through
+                // the quoted LHS and the regexp `(` opened a phantom
+                // subshell whose `#` commented out the closing `) ]]`.
+                if d.close == '"' || d.close == '\'' {
+                    cur_word.push('"');
+                }
                 i += 1;
                 continue;
             }
@@ -3376,6 +3386,12 @@ pub(crate) fn close_char_residuals_advance(
                 // `)` is a shell separator: a following `#` starts a
                 // comment (`x=$(a)#c`). Quote/`}` closes stay mid-word.
                 state.comment_start = d.close == ')';
+                // Completed quote span is word material for the at_command
+                // tracker (rubash#322) — keeps the incremental residual
+                // consistent with the one-shot scan above.
+                if d.close == '"' || d.close == '\'' {
+                    state.cur_word.push('"');
+                }
                 i += 1;
                 continue;
             }
