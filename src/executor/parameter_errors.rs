@@ -1018,12 +1018,19 @@ impl Executor {
                     chars.next();
                 }
                 Some('!') => {
-                    // GNU subst.c: the last-background-pid parameter is unset
-                    // until a background job runs and errors under nounset
+                    // GNU subst.c param_expand case '!' (10533-10550): a
+                    // BARE `$!` with no asynchronous pid reports uerror =
+                    // "$" + '!' — the diagnostic name carries the sigil
+                    // (`$!: unbound variable`, rubash#290), exactly like
+                    // the bare `$1`..`$9` arm above (uerror at 10489).
+                    // The BRACED `${!}` form is different: it goes through
+                    // parameter_brace_expand (10163-10170), whose
+                    // err_unboundvar(name) has no `$` — that path is
+                    // nounset_braced_parameter_is_unbound and stays "!"
                     // (posixexp1).
                     chars.next();
                     if self.shell_state.last_background_pid.is_none() {
-                        return Some(String::from("!"));
+                        return Some(String::from("$!"));
                     }
                 }
                 Some('(') => {
