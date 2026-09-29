@@ -14,7 +14,11 @@ const READ_USAGE: &str =
 /// `VA_NOEXPAND` alone takes the first (`read 'a[80's]'` keys on `80's`
 /// but `A[]]` is invalid), and flag-0 runs the quote-aware matched-pair
 /// scan (`read a[80's]` reports not-a-valid-identifier).
-fn is_valid_read_name(name: &str, w_arrayref: bool, env_vars: &HashMap<String, String>) -> bool {
+fn is_valid_read_name(
+    name: &str,
+    w_arrayref: bool,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> bool {
     // W_ARRAYREF arrives in-band as an ARRAYREF_FLAG prefix on the operand
     // text; it is a word flag, not name bytes, so strip it before the
     // identifier/reference checks (execute_cmd.c:4366 fix_arrayref_words).

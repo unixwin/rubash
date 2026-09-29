@@ -53,7 +53,7 @@ pub(in crate::builtins) fn append_assoc_value(
     current: &str,
     value: &str,
     integer: bool,
-    variables: &std::collections::HashMap<String, String>,
+    variables: &crate::shell::var_table::VarTable,
 ) -> String {
     // GNU arrayfunc.c assign_compound_array_list / bind_assoc_variable: when
     // the array carries the integer attribute, every element value is
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn alternating_bracket_words_are_literal_keys() {
-        let variables = std::collections::HashMap::new();
+        let variables = crate::shell::var_table::VarTable::default();
         assert_eq!(
             append_assoc_value("()", "([x] one [y] two)", false, &variables),
             "([\"[x]\"]=one [\"[y]\"]=two)"

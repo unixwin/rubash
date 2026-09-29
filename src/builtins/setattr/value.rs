@@ -1,7 +1,5 @@
-use std::collections::HashMap;
 use std::env;
 
-use super::marks::marked_vars;
 use super::COMPOUND_ASSIGNMENT_MARKER;
 use super::{ARRAY_VARS, ASSOC_VARS, INTEGER_VARS};
 use crate::builtins::declare::storage::{append_array_value, append_assoc_value};
@@ -19,7 +17,7 @@ pub(super) fn array_attribute_assignment_value(
     array: bool,
     assoc: bool,
     append: bool,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     name: &str,
 ) -> (String, bool) {
     // The bool reports whether the bind produced array storage (a compound
@@ -48,10 +46,10 @@ pub(super) fn array_attribute_assignment_value(
         } else {
             "()".to_string()
         };
-        let integer = marked_vars(env_vars, INTEGER_VARS).contains(name);
+        let integer = env_vars.is_marked(INTEGER_VARS, name);
         let assoc_target = assoc
-            || marked_vars(env_vars, ASSOC_VARS).contains(name)
-            || marked_vars(env_vars, crate::executor::types::ASSOC_128_VARS).contains(name);
+            || env_vars.is_marked(ASSOC_VARS, name)
+            || env_vars.is_marked(crate::executor::types::ASSOC_128_VARS, name);
         return (
             if assoc_target {
                 append_assoc_value(&current, compound, integer, env_vars)
@@ -68,17 +66,17 @@ pub(super) fn array_attribute_assignment_value(
     // routes it to element 0 and keeps the remaining elements
     // (`readonly 'a=(x)'` on a=(p q) stores "(x)" at [0]); on a plain or
     // missing target it is a scalar literal.
-    let integer = marked_vars(env_vars, INTEGER_VARS).contains(name);
+    let integer = env_vars.is_marked(INTEGER_VARS, name);
     let literal = if integer {
         eval_arith_value(compound).to_string()
     } else {
         compound.to_string()
     };
     let assoc_target = assoc
-        || marked_vars(env_vars, ASSOC_VARS).contains(name)
-        || marked_vars(env_vars, crate::executor::types::ASSOC_128_VARS).contains(name);
+        || env_vars.is_marked(ASSOC_VARS, name)
+        || env_vars.is_marked(crate::executor::types::ASSOC_128_VARS, name);
     let array_target = array
-        || marked_vars(env_vars, ARRAY_VARS).contains(name)
+        || env_vars.is_marked(ARRAY_VARS, name)
         || env_vars.get(name).is_some_and(|current| {
             current.starts_with(STORAGE_WORD_PREFIX)
                 || (current.starts_with('(') && current.ends_with(')'))

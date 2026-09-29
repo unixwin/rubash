@@ -1,12 +1,11 @@
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
-use std::collections::HashMap;
 use std::env;
 
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const UNSET_DYNAMIC_VARS: &str = "__RUBASH_UNSET_DYNAMIC_VARS";
 
-pub(crate) fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>) -> bool {
+pub(crate) fn variable_is_set(operand: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
     if let Some(name) = operand
         .strip_suffix("[@]")
         .or_else(|| operand.strip_suffix("[*]"))
@@ -91,7 +90,7 @@ pub(crate) fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>)
 // GNU builtins/set.def:928: `unset -v` unbinds a dynamic variable like an
 // ordinary one; the UNSET_DYNAMIC_VARS mark records that unbind so `-v`
 // reports the name as unset.
-fn dynamic_parameter_is_set(name: &str, env_vars: &HashMap<String, String>) -> bool {
+fn dynamic_parameter_is_set(name: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
     if marked_vars(env_vars, UNSET_DYNAMIC_VARS)
         .iter()
         .any(|marked| marked == name)
@@ -281,7 +280,7 @@ fn strip_array_value_quotes(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-fn marked_vars(env_vars: &HashMap<String, String>, key: &str) -> Vec<String> {
+fn marked_vars(env_vars: &crate::shell::var_table::VarTable, key: &str) -> Vec<String> {
     env_vars
         .get(key)
         .map(|value| {

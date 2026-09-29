@@ -95,7 +95,7 @@ impl ArithEvalError {
 pub(super) struct ConditionalArithParser<'a> {
     pub(super) input: &'a [u8],
     pub(super) pos: usize,
-    pub(super) env_vars: &'a mut HashMap<String, String>,
+    pub(super) env_vars: &'a mut crate::shell::var_table::VarTable,
     pub(super) resolving: Vec<String>,
     pub(super) random_state: Option<&'a RandomGen>,
     /// Dynamic-parameter snapshot injected by the Executor (see

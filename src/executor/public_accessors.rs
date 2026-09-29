@@ -703,7 +703,10 @@ impl Executor {
         true
     }
 
-    pub(in crate::executor) fn restore_shell_env(&mut self, saved_env: HashMap<String, String>) {
+    pub(in crate::executor) fn restore_shell_env(
+        &mut self,
+        saved_env: crate::shell::var_table::VarTable,
+    ) {
         let old_names: Vec<String> = self.shell_state.env_vars.keys().cloned().collect();
         for name in old_names {
             if !saved_env.contains_key(&name) {
@@ -772,10 +775,16 @@ impl Executor {
     }
 
     pub fn env_vars_snapshot(&self) -> HashMap<String, String> {
-        self.shell_state.env_vars.clone()
+        self.shell_state.env_vars.values_map().clone()
     }
 
     pub fn env_vars(&self) -> &HashMap<String, String> {
+        self.shell_state.env_vars.values_map()
+    }
+
+    /// The full variable table (values + structured attributes) for
+    /// in-crate consumers that query attributes.
+    pub(crate) fn env_vars_table(&self) -> &crate::shell::var_table::VarTable {
         &self.shell_state.env_vars
     }
 

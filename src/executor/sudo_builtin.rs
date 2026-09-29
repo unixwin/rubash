@@ -46,7 +46,7 @@ impl Executor {
             .first()
             .and_then(|name| find_user_command(name, &self.shell_state.env_vars));
         let environment = if invocation.preserve_environment {
-            self.shell_state.env_vars.clone()
+            self.shell_state.env_vars.values_map().clone()
         } else {
             self.child_shell_environment()
         };

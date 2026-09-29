@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
 
@@ -37,7 +36,7 @@ pub(super) struct DeclareOptions {
 pub(super) fn apply_declare_attrs<W>(
     command_name: &str,
     names: &[&str],
-    variables: &mut HashMap<String, String>,
+    variables: &mut crate::shell::var_table::VarTable,
     options: DeclareOptions,
     mut attr_status: i32,
     deleted_names: &std::collections::HashSet<String>,
@@ -169,7 +168,7 @@ where
         for name in names {
             let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
             let name = name.strip_suffix('+').unwrap_or(name);
-            if unset_readonly && marked_vars(variables, READONLY_VARS).contains(name) {
+            if unset_readonly && variables.is_marked(READONLY_VARS, name) {
                 writeln!(
                     stderr,
                     "{}{command_name}: {}: readonly variable",
@@ -222,7 +221,7 @@ where
                 // GNU declare.def:704-735 (+n): removing the nameref
                 // attribute from a readonly nameref that still carries a
                 // cell is refused; a readonly valueless nameref may drop it.
-                if marked_vars(variables, READONLY_VARS).contains(name)
+                if variables.is_marked(READONLY_VARS, name)
                     && variables.get(name).map_or(false, |cell| !cell.is_empty())
                 {
                     writeln!(
@@ -255,7 +254,7 @@ where
             // variable it goes through convert_var_to_assoc (arrayfunc.c:111),
             // whose assoc_create(0) yields the 128-bucket default. The bucket
             // count decides iteration order, so record which path ran.
-            if !marked_vars(variables, ASSOC_VARS).contains(name) {
+            if !variables.is_marked(ASSOC_VARS, name) {
                 if preexisting_vars.contains(name) {
                     mark_typed(variables, ASSOC_128_VARS, name);
                 } else {
@@ -285,7 +284,7 @@ where
             // GNU declare.def:959-962: making_array_special converts the
             // variable to an indexed array even without -a (array.tests:62
             // `declare -r c[100]` lists as "declare -ar c").
-            if !marked_vars(variables, ASSOC_VARS).contains(name) {
+            if !variables.is_marked(ASSOC_VARS, name) {
                 mark_array(variables, name);
             }
         }

@@ -1,6 +1,5 @@
 use super::*;
 use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
-use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 pub(in crate::executor) fn read_array_storage(values: &[String]) -> String {
     let rendered = values
@@ -339,29 +338,10 @@ fn read_scalar_fields_internal(
     fields
 }
 
-pub(crate) fn mark_env_name(env_vars: &mut HashMap<String, String>, key: &str, name: &str) {
-    // Same no-op fast path as unmark_env_name: marking a name that is
-    // already marked rewrites the stored string with a byte-identical
-    // value, so the membership pre-check (identical split comparison)
-    // short-circuits the collect+join+insert.
-    if env_vars
-        .get(key)
-        .is_some_and(|value| value.split(DATA_DOLLAR).any(|marked| marked == name))
-    {
-        return;
-    }
-    let mut names: Vec<String> = env_vars
-        .get(key)
-        .map(|value| {
-            value
-                .split(DATA_DOLLAR)
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    if !names.iter().any(|current| current == name) {
-        names.push(name.to_string());
-    }
-    env_vars.insert(key.to_string(), names.join(DATA_DOLLAR_STR));
+pub(crate) fn mark_env_name(
+    env_vars: &mut crate::shell::var_table::VarTable,
+    key: &str,
+    name: &str,
+) {
+    env_vars.mark_name(key, name);
 }

@@ -257,7 +257,12 @@ impl Executor {
             self.tempenv_previous.clear();
         }
         if fresh_shell {
-            let mut child_env = self.child_shell_environment();
+            // from_values imports child_shell_environment's serialized
+            // EXPORTED_VARS list (and any attribute lists a parent rubash
+            // exported) into the structured map; the fresh-shell
+            // initializer below then maintains both forms.
+            let mut child_env =
+                crate::shell::var_table::VarTable::from_values(self.child_shell_environment());
             // GNU variables.c:511-526 (initialize_shell_variables): a fresh
             // shell rebuilds its managed variables (BASH_CMDS/BASH_ALIASES
             // assoc marks, FUNCNAME/DIRSTACK array marks, BASH_VERSINFO
@@ -527,7 +532,7 @@ impl Executor {
             for (name, _) in env::vars() {
                 env::remove_var(&name);
             }
-            for (name, value) in &self.shell_state.env_vars {
+            for (name, value) in self.shell_state.env_vars.values_map() {
                 if crate::executor::local_helpers::is_valid_process_env(name, value) {
                     env::set_var(name, value);
                 }

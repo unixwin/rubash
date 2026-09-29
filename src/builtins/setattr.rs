@@ -3,7 +3,6 @@
 //! GNU Bash source ownership:
 //! - builtins/setattr.def (`export_builtin`, `readonly_builtin`)
 
-use std::collections::HashMap;
 use std::io::{self, Write};
 
 mod apply;
@@ -34,7 +33,10 @@ pub(super) enum ExportMode {
     Unset,
 }
 
-pub fn export(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
+pub fn export(
+    args: &[String],
+    env_vars: &mut crate::shell::var_table::VarTable,
+) -> io::Result<i32> {
     let mut stdout = crate::executor::GlobalStdout;
     let mut stderr = io::stderr().lock();
     export_with_io(
@@ -46,7 +48,10 @@ pub fn export(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Re
 }
 
 /// Execute `readonly` with arguments after the command name.
-pub fn readonly(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
+pub fn readonly(
+    args: &[String],
+    env_vars: &mut crate::shell::var_table::VarTable,
+) -> io::Result<i32> {
     let mut stdout = crate::executor::GlobalStdout;
     let mut stderr = io::stderr().lock();
     readonly_with_io(
@@ -60,7 +65,7 @@ pub fn readonly(args: &[String], env_vars: &mut HashMap<String, String>) -> io::
 
 pub(crate) fn export_with_io<'a, I, W, E>(
     args: I,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -147,7 +152,7 @@ where
 
 pub(crate) fn readonly_with_io<'a, I, W, E>(
     args: I,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
     context_name: Option<&str>,

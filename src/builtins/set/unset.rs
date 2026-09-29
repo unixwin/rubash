@@ -3,8 +3,7 @@ use super::{
     EXECUTION_SUCCESS, EXPORTED_VARS, INTEGER_VARS, LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS,
     UPPERCASE_VARS,
 };
-use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
-use std::collections::HashMap;
+use crate::executor::markers::DATA_DOLLAR;
 use std::env;
 use std::io::{self, Write};
 
@@ -28,14 +27,14 @@ struct UnsetOptions {
 }
 
 /// Execute `unset` with arguments after the command name.
-pub fn unset(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
+pub fn unset(args: &[String], env_vars: &mut crate::shell::var_table::VarTable) -> io::Result<i32> {
     let mut stderr = io::stderr().lock();
     unset_with_stderr(args.iter().map(String::as_str), env_vars, &mut stderr)
 }
 
 pub(crate) fn unset_with_stderr<'a, I, W>(
     args: I,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     stderr: &mut W,
 ) -> io::Result<i32>
 where
@@ -76,7 +75,7 @@ where
 
 fn parse_unset_options<W>(
     args: &[&str],
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     stderr: &mut W,
 ) -> io::Result<Result<(UnsetOptions, usize), i32>>
 where
@@ -122,7 +121,7 @@ where
 fn unset_name<W>(
     name: &str,
     options: UnsetOptions,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     stderr: &mut W,
 ) -> io::Result<i32>
 where
@@ -249,7 +248,7 @@ where
 }
 
 pub(super) fn is_marked_variable(
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     key: &str,
     name: &str,
 ) -> bool {
@@ -259,20 +258,11 @@ pub(super) fn is_marked_variable(
         .unwrap_or(false)
 }
 
-fn unmark_variable(env_vars: &mut HashMap<String, String>, key: &str, name: &str) {
-    let Some(value) = env_vars.get(key).cloned() else {
-        return;
-    };
-    let marked = value
-        .split(DATA_DOLLAR)
-        .filter(|marked| !marked.is_empty() && *marked != name)
-        .collect::<Vec<_>>()
-        .join(DATA_DOLLAR_STR);
-    if marked.is_empty() {
-        env_vars.remove(key);
-    } else {
-        env_vars.insert(key.to_string(), marked);
-    }
+fn unmark_variable(env_vars: &mut crate::shell::var_table::VarTable, key: &str, name: &str) {
+    // VarTable::unmark_name clears the structured attribute bit (for the
+    // ten SHELL_VAR attribute keys) and rewrites the serialized list only
+    // when the membership actually changes (variables.h:124-133).
+    env_vars.unmark_name(key, name);
 }
 
 pub(super) fn valid_identifier(name: &str) -> bool {
@@ -302,7 +292,7 @@ fn is_unsettable_bash_variable(name: &str) -> bool {
     matches!(name, "BASH_LINENO" | "BASH_SOURCE")
 }
 
-fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
+fn diagnostic_prefix(env_vars: &crate::shell::var_table::VarTable) -> String {
     if let (Some(script), Some(line)) = (
         env_vars.get("__RUBASH_SCRIPT_NAME"),
         env_vars.get("__RUBASH_CURRENT_LINE"),

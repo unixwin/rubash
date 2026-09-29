@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::{self, Write};
 
 use super::attrs::DeclareOptions;
@@ -16,7 +16,7 @@ use super::{
 pub(super) fn print_declare_names<W, E>(
     command_name: &str,
     names: &[&str],
-    variables: &HashMap<String, String>,
+    variables: &crate::shell::var_table::VarTable,
     options: DeclareOptions,
     plain: bool,
     mut status: i32,
@@ -81,7 +81,7 @@ where
             lowercase: lowercase.contains(&name),
             capcase: capcase.contains(&name),
             nameref: namerefs.contains(&name),
-            trace: marked_vars(variables, super::TRACE_VARS).contains(&name),
+            trace: variables.is_marked(super::TRACE_VARS, &name),
         };
         if let Some(value) = variables.get(&name) {
             let nbuckets = crate::executor::assoc_nbuckets(variables, &name);
@@ -107,7 +107,7 @@ where
 }
 
 pub(super) fn declaration_names_to_print(
-    variables: &HashMap<String, String>,
+    variables: &crate::shell::var_table::VarTable,
     export: bool,
     readonly: bool,
     array: bool,

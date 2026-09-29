@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::{self, Write};
 
 use super::marks::marked_vars;
@@ -9,7 +9,7 @@ use super::{
 };
 
 pub(super) fn print_readonly<W>(
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     array_filter: bool,
     assoc_filter: bool,
     posix_mode: bool,
@@ -124,7 +124,7 @@ where
 }
 
 pub(super) fn print_exported<W>(
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     stdout: &mut W,
 ) -> io::Result<()>
 where

@@ -20,13 +20,12 @@ use std::rc::Rc;
 
 use crate::builtins::alias::Alias;
 use crate::builtins::complete::CompletionRegistry;
-use crate::executor::{
-    FunctionBody, FunctionDefInfo, FunctionDefinitionLocation, RandomGen, VarAttrs,
-};
+use crate::executor::{FunctionBody, FunctionDefInfo, FunctionDefinitionLocation, RandomGen};
 use crate::history::SessionHistory;
 use crate::parser::CommandNode;
 use crate::shell::Variable;
 
+use super::var_table::{VarAttrs, VarTable};
 use super::variables::VariableStore;
 
 #[derive(Debug)]
@@ -34,10 +33,11 @@ pub struct ShellState {
     /// variables.c shell_variables — typed store carrying attributes,
     /// arrays, and assoc maps.
     pub(crate) variables: VariableStore,
-    /// variables.c shell_variables flat mirror — env/option carrier map.
-    /// Kept in sync with `variables` at mutation sites during the ongoing
-    /// typed-store migration.
-    pub(crate) env_vars: HashMap<String, String>,
+    /// variables.c shell_variables flat mirror — env/option carrier map,
+    /// plus the structured attribute map (variables.h:124-133 att_* port;
+    /// see `var_table`). Kept in sync with `variables` at mutation sites
+    /// during the ongoing typed-store migration.
+    pub(crate) env_vars: VarTable,
     /// alias.c aliases.
     pub(crate) aliases: HashMap<String, Alias>,
     /// variables.c shell_functions.

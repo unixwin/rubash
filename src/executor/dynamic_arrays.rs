@@ -381,13 +381,15 @@ impl Executor {
         // empty in a shell that never named DIRSTACK (array.tests
         // `declare -a | ignore_builtin_arrays` lines). See
         // sync_dirstack_cell for the named-access materialization.
+        let storage = self.bash_aliases_storage();
         self.shell_state
             .env_vars
-            .insert("BASH_ALIASES".to_string(), self.bash_aliases_storage());
+            .insert("BASH_ALIASES".to_string(), storage);
         mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_ALIASES");
+        let storage = self.bash_cmds_storage();
         self.shell_state
             .env_vars
-            .insert("BASH_CMDS".to_string(), self.bash_cmds_storage());
+            .insert("BASH_CMDS".to_string(), storage);
         mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_CMDS");
     }
 
@@ -398,9 +400,10 @@ impl Executor {
     /// the stored cell untouched (variables.c:1618 get_dirstack,
     /// builtins/pushd.def:669 get_directory_stack).
     pub(in crate::executor) fn sync_dirstack_cell(&mut self) {
+        let storage = self.dirstack_storage();
         self.shell_state
             .env_vars
-            .insert("DIRSTACK".to_string(), self.dirstack_storage());
+            .insert("DIRSTACK".to_string(), storage);
         mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, "DIRSTACK");
     }
 

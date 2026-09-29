@@ -1,5 +1,4 @@
 use super::*;
-use crate::executor::markers::DATA_DOLLAR;
 
 pub(in crate::executor) fn command_node_source_line(command: &CommandNode) -> String {
     command.words.join(" ")
@@ -211,13 +210,14 @@ pub(in crate::executor) fn push_ansi_c_codepoint(output: &mut String, value: Opt
     }
 }
 
+/// Marker-list membership. The ten declare-family attribute keys read
+/// the structured `VarTable` attribute map (GNU variables.h:124-133
+/// att_* bits on the SHELL_VAR — one lookup); every other marker key
+/// (function marks, capcase, assoc-128, ...) scans its serialized list.
 pub(in crate::executor) fn is_marked_var(
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     key: &str,
     name: &str,
 ) -> bool {
-    env_vars
-        .get(key)
-        .map(|value| value.split(DATA_DOLLAR).any(|marked| marked == name))
-        .unwrap_or(false)
+    env_vars.is_marked(key, name)
 }

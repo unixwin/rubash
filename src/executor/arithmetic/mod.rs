@@ -1012,7 +1012,7 @@ pub(crate) fn arithmetic_expansion_is_fatal(expression: &str) -> bool {
 }
 
 pub(crate) fn arithmetic_error_category(expression: &str) -> Option<ArithmeticErrorCategory> {
-    let mut env_vars = HashMap::new();
+    let mut env_vars = crate::shell::var_table::VarTable::default();
     let (_, category) = eval_mutable_arith_result(expression, &mut env_vars, None, None, false);
     category
 }
@@ -1036,7 +1036,7 @@ pub(in crate::executor) fn trailing_input_token(
     if numeric_assignment_expression(&normalized) {
         return None;
     }
-    let mut env_vars = HashMap::new();
+    let mut env_vars = crate::shell::var_table::VarTable::default();
     let mut parser = ConditionalArithParser {
         input: normalized.as_bytes(),
         pos: 0,
@@ -1089,7 +1089,7 @@ pub(in crate::executor) fn trailing_input_token(
 /// the real subscript evaluation.
 fn indexed_noexpand_error_token(resolved: &str) -> String {
     let normalized = normalize_arithmetic_quotes(resolved);
-    let mut env_vars = HashMap::new();
+    let mut env_vars = crate::shell::var_table::VarTable::default();
     let mut parser = ConditionalArithParser {
         input: normalized.as_bytes(),
         pos: 0,
@@ -1153,7 +1153,7 @@ fn token_starts_with_non_arith_char(token: &str) -> bool {
 
 pub(crate) fn eval_conditional_arith_value(
     value: &str,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> Option<i128> {
     let mut env_vars = env_vars.clone();
     eval_mutable_arith_value(value, &mut env_vars)
@@ -1167,7 +1167,7 @@ pub(crate) fn eval_conditional_arith_value(
 /// both state arguments when no Executor is reachable.
 pub(crate) fn eval_conditional_arith_value_with_writes(
     value: &str,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     random_state: Option<&RandomGen>,
     dynamic_values: Option<&HashMap<&'static str, String>>,
 ) -> (Option<i128>, Vec<(String, String)>) {
@@ -1190,7 +1190,7 @@ pub(crate) fn eval_conditional_arith_value_with_writes(
 /// `x+=2` with `x` declared only disappear under a fresh environment).
 pub(crate) fn eval_conditional_arith_value_categorized(
     value: &str,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
     let mut env_vars = env_vars.clone();
     eval_mutable_arith_result(value, &mut env_vars, None, None, false)
@@ -1203,7 +1203,7 @@ pub(crate) fn eval_conditional_arith_value_categorized(
 /// mutable caller to apply.
 pub(crate) fn eval_conditional_arith_value_categorized_with_writes(
     value: &str,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> (
     Option<i128>,
     Vec<(String, String)>,
@@ -1222,7 +1222,7 @@ pub(crate) fn eval_conditional_arith_value_categorized_with_writes(
 
 pub(super) fn arithmetic_unbound_variable(
     expression: &str,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> Option<String> {
     let mut chars = expression.chars().peekable();
     let mut previous = None;
@@ -1617,7 +1617,7 @@ pub(crate) fn decode_arithmetic_assoc_key(text: &str) -> Option<String> {
 /// subscript. GNU rejects `(( '1' ))` — a quoted operand is not a number — but
 /// accepts a quoted assoc subscript (`(( A['a b']++ ))`), which is a string
 /// key, so those quotes must not trigger the operand error.
-fn has_bare_single_quote(expression: &str, env_vars: &HashMap<String, String>) -> bool {
+fn has_bare_single_quote(expression: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
     let bytes = expression.as_bytes();
     let mut index = 0usize;
     while index < bytes.len() {
@@ -2182,13 +2182,16 @@ pub(super) fn arithmetic_division_by_zero_token(expression: &str) -> Option<Stri
     None
 }
 
-fn eval_mutable_arith_value(value: &str, env_vars: &mut HashMap<String, String>) -> Option<i128> {
+fn eval_mutable_arith_value(
+    value: &str,
+    env_vars: &mut crate::shell::var_table::VarTable,
+) -> Option<i128> {
     eval_mutable_arith_value_with_random(value, env_vars, None, None).0
 }
 
 pub(super) fn eval_mutable_arith_value_with_random(
     value: &str,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     random_state: Option<&RandomGen>,
     dynamic_values: Option<&HashMap<&'static str, String>>,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
@@ -2197,7 +2200,7 @@ pub(super) fn eval_mutable_arith_value_with_random(
 
 pub(super) fn eval_mutable_arith_value_with_random_flags(
     value: &str,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     random_state: Option<&RandomGen>,
     dynamic_values: Option<&HashMap<&'static str, String>>,
     no_expand: bool,
@@ -2215,7 +2218,7 @@ pub(super) fn eval_mutable_arith_value_with_random_flags(
 
 fn eval_mutable_arith_result(
     value: &str,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     random_state: Option<&RandomGen>,
     dynamic_values: Option<&HashMap<&'static str, String>>,
     no_expand: bool,

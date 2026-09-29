@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
 
@@ -17,7 +16,7 @@ pub(super) fn apply_export_arg<W>(
     mode: ExportMode,
     array: bool,
     assoc: bool,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     stderr: &mut W,
 ) -> io::Result<i32>
 where
@@ -54,7 +53,7 @@ where
 
     match mode {
         ExportMode::Set => {
-            if value.is_some() && marked_vars(env_vars, READONLY_VARS).contains(name) {
+            if value.is_some() && env_vars.is_marked(READONLY_VARS, name) {
                 writeln!(stderr, "{}{}: readonly variable", diagnostic_prefix(), name)?;
                 return Ok(EXECUTION_FAILURE);
             }
@@ -106,7 +105,7 @@ pub(super) fn apply_readonly_arg<W>(
     arg: &str,
     array: bool,
     assoc: bool,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     stderr: &mut W,
     context_name: Option<&str>,
 ) -> io::Result<i32>

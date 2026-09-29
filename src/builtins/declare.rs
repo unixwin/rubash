@@ -3,7 +3,6 @@
 //! GNU Bash source ownership:
 // - builtins/declare.def
 
-use std::collections::HashMap;
 use std::io::{self, Write};
 
 mod assign;
@@ -50,7 +49,12 @@ pub(crate) fn format_array_for_output(value: &str) -> String {
 /// `export` when they need to create an associative array from a kvpair
 /// compound assignment like `( one 1 two 2 three 3 )`.
 pub(crate) fn create_assoc_from_compound(value: &str) -> String {
-    storage::append_assoc_value("()", value, false, &HashMap::new())
+    storage::append_assoc_value(
+        "()",
+        value,
+        false,
+        &crate::shell::var_table::VarTable::default(),
+    )
 }
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
@@ -72,7 +76,7 @@ const EX_USAGE: i32 = 2;
 /// legacy builtin path has applied its attribute and encoding rules.
 pub(crate) fn sync_typed_assignments(
     args: &[String],
-    variables: &HashMap<String, String>,
+    variables: &crate::shell::var_table::VarTable,
     store: &mut VariableStore,
 ) {
     let arrays = marked_vars(variables, ARRAY_VARS);
@@ -106,7 +110,7 @@ pub(crate) fn sync_typed_assignments(
 /// Synchronize the final declare attribute markers into the typed variable owner.
 pub(crate) fn sync_typed_attributes(
     args: &[String],
-    variables: &HashMap<String, String>,
+    variables: &crate::shell::var_table::VarTable,
     store: &mut VariableStore,
 ) {
     let exported = marked_vars(variables, EXPORTED_VARS);
@@ -203,7 +207,10 @@ pub(crate) fn sync_typed_attributes(
     }
 }
 
-pub fn execute(args: &[String], variables: &mut HashMap<String, String>) -> io::Result<i32> {
+pub fn execute(
+    args: &[String],
+    variables: &mut crate::shell::var_table::VarTable,
+) -> io::Result<i32> {
     let mut stdout = crate::executor::GlobalStdout;
     let mut stderr = io::stderr();
     execute_with_io(args, variables, &mut stdout, &mut stderr)
@@ -248,7 +255,7 @@ pub(crate) fn declare_nameref_flags(args: &[String]) -> (bool, bool) {
 /// find_variable_last_nameref traversal).
 pub(crate) fn nameref_assignment_targets(
     args: &[String],
-    variables: &HashMap<String, String>,
+    variables: &crate::shell::var_table::VarTable,
 ) -> Vec<(String, String)> {
     let mut targets = Vec::new();
     for arg in args {
@@ -272,10 +279,10 @@ pub(crate) fn nameref_assignment_targets(
 /// NAME is not a nameref or the chain does not resolve to a variable-like
 /// cell (GNU then keeps operating on the nameref itself).
 fn declare_nameref_chain(
-    variables: &HashMap<String, String>,
+    variables: &crate::shell::var_table::VarTable,
     name: &str,
 ) -> Option<(String, String)> {
-    if !marked_vars(variables, NAMEREF_VARS).contains(name) {
+    if !variables.is_marked(NAMEREF_VARS, name) {
         return None;
     }
     let namerefs = marked_vars(variables, NAMEREF_VARS);
@@ -305,7 +312,7 @@ fn declare_nameref_chain(
 /// Returns the resolved operand names (bare names of `x[i]` cells included).
 pub(crate) fn nameref_resolved_operand_names(
     args: &[String],
-    variables: &HashMap<String, String>,
+    variables: &crate::shell::var_table::VarTable,
 ) -> Vec<String> {
     let mut resolved = Vec::new();
     for arg in args {
@@ -329,7 +336,7 @@ pub(crate) fn nameref_resolved_operand_names(
 
 pub(crate) fn execute_with_io<W, E>(
     args: &[String],
-    variables: &mut HashMap<String, String>,
+    variables: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -343,7 +350,7 @@ where
 pub(crate) fn execute_with_io_named<W, E>(
     command_name: &str,
     args: &[String],
-    variables: &mut HashMap<String, String>,
+    variables: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -362,7 +369,7 @@ where
 pub(crate) fn execute_with_io_named_in_context<W, E>(
     command_name: &str,
     args: &[String],
-    variables: &mut HashMap<String, String>,
+    variables: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
     in_function: bool,
@@ -784,15 +791,15 @@ where
                     // keeps the nameref (nameref17.sub: typeset +n foo4 with
                     // cell -> existing bar4 errors, cell -> missing stays).
                     let cell = variables.get(&last_nameref).cloned().unwrap_or_default();
-                    let readonly_with_cell = marked_vars(variables, READONLY_VARS)
-                        .contains(last_nameref.as_str())
+                    let readonly_with_cell = variables
+                        .is_marked(READONLY_VARS, last_nameref.as_str())
                         && !cell.is_empty();
                     if readonly_with_cell {
                         let cell_base = cell.split('[').next().unwrap_or(cell.as_str());
                         let target_exists = !in_function
                             || variables.contains_key(cell_base)
-                            || marked_vars(variables, ARRAY_VARS).contains(cell_base)
-                            || marked_vars(variables, ASSOC_VARS).contains(cell_base);
+                            || variables.is_marked(ARRAY_VARS, cell_base)
+                            || variables.is_marked(ASSOC_VARS, cell_base);
                         if target_exists {
                             writeln!(
                                 stderr,

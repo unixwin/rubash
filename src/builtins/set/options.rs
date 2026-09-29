@@ -292,7 +292,7 @@ pub(crate) fn shellopts_value(env_vars: &HashMap<String, String>) -> String {
 /// flag (+ SHELLOPTS) without running the binary-option side effects —
 /// used when the VARIABLE was assigned/unset rather than the option.
 pub(crate) fn sync_shell_option_flag(
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     name: &str,
     enabled: bool,
 ) {
@@ -300,15 +300,21 @@ pub(crate) fn sync_shell_option_flag(
         shell_option_key(name),
         if enabled { "1" } else { "0" }.to_string(),
     );
-    env_vars.insert("SHELLOPTS".to_string(), shellopts_value(env_vars));
+    let shelopts = shellopts_value(env_vars);
+    env_vars.insert("SHELLOPTS".to_string(), shelopts);
 }
 
-pub(crate) fn set_shell_option(env_vars: &mut HashMap<String, String>, name: &str, enabled: bool) {
+pub(crate) fn set_shell_option(
+    env_vars: &mut crate::shell::var_table::VarTable,
+    name: &str,
+    enabled: bool,
+) {
     env_vars.insert(
         shell_option_key(name),
         if enabled { "1" } else { "0" }.to_string(),
     );
-    env_vars.insert("SHELLOPTS".to_string(), shellopts_value(env_vars));
+    let shelopts = shellopts_value(env_vars);
+    env_vars.insert("SHELLOPTS".to_string(), shelopts);
     // GNU builtins/set.def:388-399 set_ignoreeof: `set -o ignoreeof` binds
     // IGNOREEOF=10 (which sv_ignoreeof then reads back); `set +o` unbinds
     // the variable entirely.
@@ -339,7 +345,8 @@ pub(crate) fn set_shell_option(env_vars: &mut HashMap<String, String>, name: &st
                 if enabled { "1" } else { "0" }.to_string(),
             );
         }
-        env_vars.insert("SHELLOPTS".to_string(), shellopts_value(env_vars));
+        let shelopts = shellopts_value(env_vars);
+        env_vars.insert("SHELLOPTS".to_string(), shelopts);
     }
 }
 

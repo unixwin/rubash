@@ -48,7 +48,10 @@ pub(crate) fn bashopts_value(env_vars: &HashMap<String, String>) -> String {
         .join(":")
 }
 
-pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
+pub fn execute(
+    args: &[String],
+    env_vars: &mut crate::shell::var_table::VarTable,
+) -> io::Result<i32> {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
     execute_with_io(args, env_vars, &mut stdout, &mut stderr)
@@ -56,7 +59,7 @@ pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::R
 
 pub(crate) fn execute_with_io<W, E>(
     args: &[String],
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -181,7 +184,7 @@ fn execute_set_option_mode<W, E>(
     mode: ShoptMode,
     print: bool,
     names: &[&str],
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -330,7 +333,11 @@ fn state_contains(env_vars: &HashMap<String, String>, name: &str) -> bool {
     }
 }
 
-pub(crate) fn set_option(env_vars: &mut HashMap<String, String>, name: &str, enabled: bool) {
+pub(crate) fn set_option(
+    env_vars: &mut crate::shell::var_table::VarTable,
+    name: &str,
+    enabled: bool,
+) {
     // rubash#131: keep the parse-time extglob gate in step with the runtime
     // shopt (GNU builtins/shopt.def updates extglob_flag; reset_parser
     // parse.y:3502 propagates it into the parser's extended_glob). Later
@@ -380,7 +387,8 @@ pub(crate) fn set_option(env_vars: &mut HashMap<String, String>, name: &str, ena
     // GNU shopt.def toggle_shopts -> set_bashopts: every shopt change
     // rebinds the BASHOPTS variable, so an export of BASHOPTS carries the
     // live state to child shells (invocation1.sub:28-31).
-    env_vars.insert("BASHOPTS".to_string(), bashopts_value(env_vars));
+    let bashopts = bashopts_value(env_vars);
+    env_vars.insert("BASHOPTS".to_string(), bashopts);
 }
 
 fn state(env_vars: &HashMap<String, String>) -> HashSet<String> {
@@ -415,8 +423,8 @@ fn diagnostic_prefix() -> String {
 mod tests {
     use super::*;
 
-    fn fresh_env() -> HashMap<String, String> {
-        HashMap::new()
+    fn fresh_env() -> crate::shell::var_table::VarTable {
+        crate::shell::var_table::VarTable::default()
     }
 
     #[test]

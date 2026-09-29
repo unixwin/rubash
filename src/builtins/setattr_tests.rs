@@ -1,8 +1,7 @@
 use super::*;
-use std::collections::HashMap;
 
-fn env_map() -> HashMap<String, String> {
-    HashMap::new()
+fn env_map() -> crate::shell::var_table::VarTable {
+    crate::shell::var_table::VarTable::default()
 }
 
 #[test]
@@ -37,7 +36,7 @@ fn rejects_invalid_identifier() {
 fn prints_exported_variables() {
     let mut vars = env_map();
     vars.insert("NAME".to_string(), "value".to_string());
-    vars.insert(EXPORTED_VARS.to_string(), "NAME".to_string());
+    vars.mark_name(EXPORTED_VARS, "NAME");
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 

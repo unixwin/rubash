@@ -24,7 +24,11 @@ pub static RESPAWNED_CHILD: std::sync::atomic::AtomicBool =
 impl Executor {
     pub fn new() -> Self {
         let process_env_snapshot: HashMap<String, String> = std::env::vars().collect();
-        let mut env_vars = process_env_snapshot.clone();
+        // VarTable::from_values also imports any __RUBASH_*_VARS attribute
+        // lists a parent rubash left in the environment — the structured
+        // form of the cross-process attribute transport.
+        let mut env_vars =
+            crate::shell::var_table::VarTable::from_values(process_env_snapshot.clone());
         // On Windows, std::env::vars() returns PATH as "Path" (capital P).
         // Every rubash command-lookup site reads env_vars.get("PATH") (all caps),
         // which is a case-sensitive HashMap lookup — it misses on Windows.
@@ -369,7 +373,7 @@ impl Executor {
     /// fresh shell inherits (exported names, BASH_FUNC_* payloads, and the
     /// required Windows host vars).
     pub(in crate::executor) fn initialize_fresh_shell_env_vars(
-        env_vars: &mut HashMap<String, String>,
+        env_vars: &mut crate::shell::var_table::VarTable,
     ) {
         env_vars.remove("BASH_ARGV0");
         env_vars.remove("BASH_EXECUTION_STRING");
@@ -509,15 +513,11 @@ impl Executor {
                 }
             }
         }
-        env_vars.insert(
-            "SHELLOPTS".to_string(),
-            crate::builtins::set::shellopts_value(env_vars),
-        );
+        let shelopts = crate::builtins::set::shellopts_value(env_vars);
+        env_vars.insert("SHELLOPTS".to_string(), shelopts);
         mark_env_name(env_vars, READONLY_VARS, "SHELLOPTS");
-        env_vars.insert(
-            "BASHOPTS".to_string(),
-            crate::builtins::shopt::bashopts_value(env_vars),
-        );
+        let bashopts = crate::builtins::shopt::bashopts_value(env_vars);
+        env_vars.insert("BASHOPTS".to_string(), bashopts);
         mark_env_name(env_vars, READONLY_VARS, "BASHOPTS");
         mark_env_name(env_vars, ARRAY_VARS, "PIPESTATUS");
         env_vars.insert("OPTIND".to_string(), "1".to_string());

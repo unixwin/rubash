@@ -712,7 +712,7 @@ pub(super) fn append_array_value(
     value: &str,
     integer: bool,
     ifs: Option<&str>,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> Result<String, String> {
     let mut entries = indexed_array_entries(current);
     let mut next_index = entries
@@ -965,7 +965,7 @@ pub(super) fn append_array_value(
 pub(super) fn array_assignment_index(
     left: &str,
     entries: &BTreeMap<usize, String>,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> Option<usize> {
     let expression = left.strip_prefix('[')?.strip_suffix(']')?;
     let index = eval_conditional_arith_value(expression, env_vars)?;

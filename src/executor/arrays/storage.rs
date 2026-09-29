@@ -233,7 +233,7 @@ fn feed_indexed_parse_cache(storage: &str, entries: &std::sync::Arc<BTreeMap<usi
 }
 
 pub(in crate::executor) fn store_indexed_array(
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     name: &str,
     values: Vec<String>,
 ) {

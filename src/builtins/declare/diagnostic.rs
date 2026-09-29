@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::env;
 
 /// GNU bash prints diagnostics as "<script>: line <n>: builtin: message"
@@ -7,7 +6,7 @@ use std::env;
 /// executions (a command substitution inside an array subscript re-runs the
 /// child init that strips these markers from the *process* environment), so
 /// prefer the executor map and fall back to the process environment.
-pub(super) fn diagnostic_prefix(variables: &HashMap<String, String>) -> String {
+pub(super) fn diagnostic_prefix(variables: &crate::shell::var_table::VarTable) -> String {
     let script = variables
         .get("__RUBASH_SCRIPT_NAME")
         .cloned()

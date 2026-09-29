@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
+use crate::executor::markers::DATA_DOLLAR;
 
 impl Executor {
     pub(crate) fn alias_expansion_enabled(&self) -> bool {
@@ -458,25 +458,9 @@ impl Executor {
     }
 
     pub(in crate::executor) fn mark_exported(&mut self, name: &str) {
-        let mut exported: Vec<String> = self
-            .shell_state
-            .env_vars
-            .get(EXPORTED_VARS)
-            .map(|value| {
-                value
-                    .split(DATA_DOLLAR)
-                    .filter(|name| !name.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if !exported.iter().any(|exported_name| exported_name == name) {
-            exported.push(name.to_string());
-        }
-        self.shell_state
-            .env_vars
-            .insert(EXPORTED_VARS.to_string(), exported.join(DATA_DOLLAR_STR));
+        // VarTable keeps the structured att_exported bit and the serialized
+        // EXPORTED_VARS list in sync in one call (variables.h:124-133).
+        self.shell_state.env_vars.mark_name(EXPORTED_VARS, name);
     }
 
     pub(in crate::executor) fn keeps_temporary_assignments(&self, cmd: &CommandNode) -> bool {
@@ -560,6 +544,26 @@ impl Executor {
                 continue;
             }
             if promoted.iter().any(|promoted_name| promoted_name == &name) {
+                continue;
+            }
+            if crate::shell::var_table::VarAttrs::default()
+                .flag(name.as_str())
+                .is_some()
+            {
+                // A whole serialized attribute list (EXPORTED_VARS /
+                // NAMEREF_VARS are tempenv entries themselves): restore the
+                // string through VarTable so the structured attribute bits
+                // follow it. The process-env sync the generic path does is
+                // kept for parity with the pre-VarTable behavior (the
+                // __RUBASH_* names ride the process environment to real
+                // children).
+                let process_value = value.clone();
+                self.shell_state.env_vars.restore_attr_string(&name, value);
+                if let Some(value) = process_value {
+                    set_process_env(&name, value);
+                } else {
+                    env::remove_var(&name);
+                }
                 continue;
             }
             if let Some(value) = value {

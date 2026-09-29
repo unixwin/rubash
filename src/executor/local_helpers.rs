@@ -124,41 +124,21 @@ pub(in crate::executor) fn restore_optional_shell_var(
 }
 
 pub(in crate::executor) fn capture_var_attrs(
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     name: &str,
 ) -> VarAttrs {
-    VarAttrs {
-        exported: is_marked_var(env_vars, EXPORTED_VARS, name),
-        readonly: is_marked_var(env_vars, READONLY_VARS, name),
-        integer: is_marked_var(env_vars, INTEGER_VARS, name),
-        uppercase: is_marked_var(env_vars, UPPERCASE_VARS, name),
-        lowercase: is_marked_var(env_vars, LOWERCASE_VARS, name),
-        nameref: is_marked_var(env_vars, NAMEREF_VARS, name),
-        array: is_marked_var(env_vars, ARRAY_VARS, name),
-        assoc: is_marked_var(env_vars, ASSOC_VARS, name),
-        trace: is_marked_var(env_vars, TRACE_VARS, name),
-        declared_unset: is_marked_var(env_vars, DECLARED_UNSET_VARS, name),
-    }
+    env_vars.attr_of(name)
 }
 
 pub(in crate::executor) fn set_var_attrs(
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     name: &str,
     attrs: VarAttrs,
 ) {
-    set_marked_var(env_vars, EXPORTED_VARS, name, attrs.exported);
-    set_marked_var(env_vars, READONLY_VARS, name, attrs.readonly);
-    set_marked_var(env_vars, INTEGER_VARS, name, attrs.integer);
-    set_marked_var(env_vars, UPPERCASE_VARS, name, attrs.uppercase);
-    set_marked_var(env_vars, LOWERCASE_VARS, name, attrs.lowercase);
-    set_marked_var(env_vars, NAMEREF_VARS, name, attrs.nameref);
-    set_marked_var(env_vars, ARRAY_VARS, name, attrs.array);
-    set_marked_var(env_vars, ASSOC_VARS, name, attrs.assoc);
-    set_marked_var(env_vars, TRACE_VARS, name, attrs.trace);
-    // GNU variables.c pop_scope: the frame owns the declared-but-unset
-    // mark too — a valueless `local x` (and `readonly`/`export` binding one)
-    // must not leave the name visible to `declare -p` after return.
-    set_marked_var(env_vars, DECLARED_UNSET_VARS, name, attrs.declared_unset);
+    // GNU variables.c pop_scope restores the frame's saved attribute word
+    // in one assignment; VarTable::set_attrs rewrites only the serialized
+    // lists whose bits actually flipped.
+    env_vars.set_attrs(name, attrs);
 }
 
 pub(in crate::executor) fn is_valid_process_env(name: &str, value: &str) -> bool {
@@ -173,7 +153,7 @@ pub(in crate::executor) fn set_process_env(name: &str, value: impl AsRef<str>) {
 }
 
 pub(in crate::executor) fn sync_shell_assignment_process_env(
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     name: &str,
     value: impl AsRef<str>,
 ) {
@@ -214,7 +194,7 @@ pub(in crate::executor) fn safe_temp_dir_string() -> String {
 }
 
 pub(in crate::executor) fn set_marked_var(
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     key: &str,
     name: &str,
     marked: bool,

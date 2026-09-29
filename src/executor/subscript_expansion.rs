@@ -1456,7 +1456,7 @@ pub(crate) fn valid_array_reference_env(
     name: &str,
     noexpand: bool,
     oneword: bool,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> bool {
     let Some(open) = name.find('[') else {
         return false;

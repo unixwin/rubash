@@ -1,11 +1,10 @@
 use super::*;
-use std::collections::HashMap;
 
 #[path = "printf_tests/float_numeric.rs"]
 mod float_numeric;
 
-fn run(args: &[&str]) -> (i32, String, String, HashMap<String, String>) {
-    let mut env_vars = HashMap::new();
+fn run(args: &[&str]) -> (i32, String, String, crate::shell::var_table::VarTable) {
+    let mut env_vars = crate::shell::var_table::VarTable::default();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let status = execute_with_io(
@@ -25,7 +24,7 @@ fn run(args: &[&str]) -> (i32, String, String, HashMap<String, String>) {
 }
 
 fn run_bytes(args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
-    let mut env_vars = HashMap::new();
+    let mut env_vars = crate::shell::var_table::VarTable::default();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let status = execute_with_io(

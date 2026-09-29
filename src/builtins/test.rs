@@ -41,7 +41,7 @@ const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 pub fn execute(
     args: &[String],
     bracket: bool,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> io::Result<i32> {
     let mut stderr = io::stderr().lock();
     execute_with_stderr(
@@ -55,7 +55,7 @@ pub fn execute(
 pub(crate) fn execute_with_stderr<'a, I, W>(
     args: I,
     bracket: bool,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     stderr: &mut W,
 ) -> io::Result<i32>
 where
@@ -110,7 +110,7 @@ struct TestParser<'a> {
     args: &'a [&'a str],
     pos: usize,
     bracket: bool,
-    env_vars: &'a HashMap<String, String>,
+    env_vars: &'a crate::shell::var_table::VarTable,
 }
 
 impl TestParser<'_> {
@@ -428,7 +428,7 @@ impl TestParser<'_> {
 fn eval_expr_with_bracket(
     args: &[&str],
     bracket: bool,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> Result<bool, String> {
     let mut parser = TestParser {
         args,
@@ -480,7 +480,11 @@ fn is_unary_operator(op: &str) -> bool {
     )
 }
 
-fn eval_unary(op: &str, operand: &str, env_vars: &HashMap<String, String>) -> Result<bool, String> {
+fn eval_unary(
+    op: &str,
+    operand: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> Result<bool, String> {
     if let Some(result) = virtual_device_test(op, operand) {
         return Ok(result);
     }
@@ -597,11 +601,11 @@ fn virtual_device_test(op: &str, operand: &str) -> Option<bool> {
     None
 }
 
-fn test_path(operand: &str, env_vars: &HashMap<String, String>) -> std::path::PathBuf {
+fn test_path(operand: &str, env_vars: &crate::shell::var_table::VarTable) -> std::path::PathBuf {
     crate::executor::path::shell_path_to_windows_for_lookup(operand, env_vars)
 }
 
-fn marked_vars(env_vars: &HashMap<String, String>, key: &str) -> Vec<String> {
+fn marked_vars(env_vars: &crate::shell::var_table::VarTable, key: &str) -> Vec<String> {
     env_vars
         .get(key)
         .map(|value| {
@@ -637,7 +641,7 @@ fn eval_binary(
     left: &str,
     op: &str,
     right: &str,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> Result<bool, String> {
     match op {
         "=" | "==" => Ok(left == right),
@@ -695,13 +699,16 @@ fn is_andor(s: &str) -> bool {
     s == "-a" || s == "-o"
 }
 
-fn modified(path: &str, env_vars: &HashMap<String, String>) -> Option<std::time::SystemTime> {
+fn modified(
+    path: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> Option<std::time::SystemTime> {
     fs::metadata(test_path(path, env_vars))
         .and_then(|metadata| metadata.modified())
         .ok()
 }
 
-fn modified_since_last_read(path: &str, env_vars: &HashMap<String, String>) -> bool {
+fn modified_since_last_read(path: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
     // GNU test.c:569-574 (`-N`): stat must succeed, then mtime > atime —
     // strictly newer, so a just-touched file (atime == mtime) is false.
     let Ok(metadata) = fs::metadata(test_path(path, env_vars)) else {
@@ -716,7 +723,7 @@ fn modified_since_last_read(path: &str, env_vars: &HashMap<String, String>) -> b
     modified > accessed
 }
 
-fn fd_is_terminal(operand: &str, env_vars: &HashMap<String, String>) -> bool {
+fn fd_is_terminal(operand: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
     let Ok(fd) = operand.parse::<i32>() else {
         return false;
     };
@@ -744,7 +751,11 @@ enum UnixFileKind {
 }
 
 #[cfg(unix)]
-fn file_type_matches(path: &str, env_vars: &HashMap<String, String>, kind: UnixFileKind) -> bool {
+fn file_type_matches(
+    path: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+    kind: UnixFileKind,
+) -> bool {
     use std::os::unix::fs::FileTypeExt;
 
     let Ok(metadata) = fs::metadata(test_path(path, env_vars)) else {
@@ -760,7 +771,11 @@ fn file_type_matches(path: &str, env_vars: &HashMap<String, String>, kind: UnixF
 }
 
 #[cfg(windows)]
-fn file_type_matches(path: &str, env_vars: &HashMap<String, String>, kind: UnixFileKind) -> bool {
+fn file_type_matches(
+    path: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+    kind: UnixFileKind,
+) -> bool {
     // S_ISCHR port: the only character devices the path map can resolve
     // are the console (CON via /dev/tty, CONIN$/CONOUT$ via /dev/std*)
     // and NUL. Open and ask GetFileType rather than probing metadata —
@@ -784,7 +799,7 @@ fn file_type_matches(
 }
 
 #[cfg(unix)]
-fn file_mode_has_bit(path: &str, env_vars: &HashMap<String, String>, bit: u32) -> bool {
+fn file_mode_has_bit(path: &str, env_vars: &crate::shell::var_table::VarTable, bit: u32) -> bool {
     use std::os::unix::fs::PermissionsExt;
 
     let Ok(metadata) = fs::metadata(test_path(path, env_vars)) else {
@@ -800,7 +815,7 @@ fn file_mode_has_bit(path: &str, env_vars: &HashMap<String, String>, bit: u32) -
 #[cfg(unix)]
 fn test_unix_eaccess(
     operand: &str,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     mode: std::os::raw::c_int,
 ) -> bool {
     let path = test_path(operand, env_vars);
@@ -816,7 +831,7 @@ fn file_mode_has_bit(_path: &str, _env_vars: &HashMap<String, String>, _bit: u32
 }
 
 #[cfg(unix)]
-fn file_owned_by_effective_user(path: &str, env_vars: &HashMap<String, String>) -> bool {
+fn file_owned_by_effective_user(path: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
     use std::os::unix::fs::MetadataExt;
 
     let Ok(metadata) = fs::metadata(test_path(path, env_vars)) else {
@@ -826,12 +841,12 @@ fn file_owned_by_effective_user(path: &str, env_vars: &HashMap<String, String>) 
 }
 
 #[cfg(not(unix))]
-fn file_owned_by_effective_user(path: &str, env_vars: &HashMap<String, String>) -> bool {
+fn file_owned_by_effective_user(path: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
     test_path(path, env_vars).exists()
 }
 
 #[cfg(unix)]
-fn file_owned_by_effective_group(path: &str, env_vars: &HashMap<String, String>) -> bool {
+fn file_owned_by_effective_group(path: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
     use std::os::unix::fs::MetadataExt;
 
     let Ok(metadata) = fs::metadata(test_path(path, env_vars)) else {
@@ -841,11 +856,11 @@ fn file_owned_by_effective_group(path: &str, env_vars: &HashMap<String, String>)
 }
 
 #[cfg(not(unix))]
-fn file_owned_by_effective_group(path: &str, env_vars: &HashMap<String, String>) -> bool {
+fn file_owned_by_effective_group(path: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
     test_path(path, env_vars).exists()
 }
 
-fn same_file(left: &str, right: &str, env_vars: &HashMap<String, String>) -> bool {
+fn same_file(left: &str, right: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
     // GNU general.c:652-670 same_file: stat both operands and compare
     // (st_dev, st_ino) — hardlinks are distinct paths sharing one inode,
     // so a canonical-path comparison misses them. On Windows the
@@ -912,7 +927,10 @@ pub(crate) const EMULATED_FILE_MODES: &str = "__RUBASH_FILE_MODES";
 /// Windows-port-only layer: unix reads the real inode mode (faccessat /
 /// PermissionsExt) and never consults this store.
 #[cfg_attr(unix, allow(dead_code))]
-pub(crate) fn emulated_file_mode(operand: &str, env_vars: &HashMap<String, String>) -> Option<u32> {
+pub(crate) fn emulated_file_mode(
+    operand: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> Option<u32> {
     let windows = test_path(operand, env_vars).to_string_lossy().to_string();
     let entries = env_vars.get(EMULATED_FILE_MODES)?;
     for entry in entries.split(DATA_DOLLAR) {

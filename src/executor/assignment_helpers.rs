@@ -43,7 +43,7 @@ pub(in crate::executor) fn append_assoc_value(
     current: &str,
     value: &str,
     integer: bool,
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> String {
     // GNU arrayfunc.c assign_compound_array_list / bind_assoc_variable: when
     // the array carries the integer attribute, every element value is
@@ -496,7 +496,7 @@ pub(in crate::executor) fn assoc_keys(value: &str, nbuckets: usize) -> Vec<Strin
 /// BASH_ALIASES from aliases (alias.c:49 ALIAS_HASH_BUCKETS=64)
 /// (variables.c:1692,1762). assoc_copy preserves the source count
 /// (hashlib.c:174 hash_copy -> hash_create(table->nbuckets)).
-pub(crate) fn assoc_nbuckets(env_vars: &HashMap<String, String>, name: &str) -> usize {
+pub(crate) fn assoc_nbuckets(env_vars: &crate::shell::var_table::VarTable, name: &str) -> usize {
     match name {
         "BASH_CMDS" => 256,
         "BASH_ALIASES" => 64,

@@ -1,5 +1,4 @@
 use super::names::valid_declare_name;
-use std::collections::HashMap;
 
 use super::execute_with_io_named;
 
@@ -15,7 +14,7 @@ fn invalid_declare_names_are_rejected_before_assignment() {
 
 #[test]
 fn capcase_attribute_transforms_assignments_and_prints() {
-    let mut variables = HashMap::new();
+    let mut variables = crate::shell::var_table::VarTable::default();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     execute_with_io_named(
@@ -53,7 +52,7 @@ fn capcase_attribute_transforms_assignments_and_prints() {
 // entries still reach child processes (niubash issue #102).
 #[test]
 fn export_p_listing_skips_invalid_identifier_names() {
-    let mut variables = HashMap::new();
+    let mut variables = crate::shell::var_table::VarTable::default();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     execute_with_io_named(
@@ -100,7 +99,7 @@ fn export_p_listing_skips_invalid_identifier_names() {
 // listing (niubash issue #102).
 #[test]
 fn declare_p_rejected_operand_prints_error_not_full_listing() {
-    let mut variables = HashMap::new();
+    let mut variables = crate::shell::var_table::VarTable::default();
     variables.insert("VALID".to_string(), "kept".to_string());
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();

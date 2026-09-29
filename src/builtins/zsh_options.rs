@@ -12,13 +12,19 @@ const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const ZSH_OPTION_STATE: &str = "__RUBASH_ZSH_OPTIONS";
 
-pub fn setopt(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
+pub fn setopt(
+    args: &[String],
+    env_vars: &mut crate::shell::var_table::VarTable,
+) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
     execute_with_io("setopt", true, args, env_vars, &mut stdout, &mut stderr)
 }
 
-pub fn unsetopt(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
+pub fn unsetopt(
+    args: &[String],
+    env_vars: &mut crate::shell::var_table::VarTable,
+) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
     execute_with_io("unsetopt", false, args, env_vars, &mut stdout, &mut stderr)
@@ -28,7 +34,7 @@ pub(crate) fn execute_with_io<W, E>(
     command_name: &str,
     enable: bool,
     args: &[String],
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -91,7 +97,11 @@ pub(crate) fn enabled_options(env_vars: &HashMap<String, String>) -> HashSet<Str
         .unwrap_or_default()
 }
 
-fn set_option(env_vars: &mut HashMap<String, String>, option: &'static str, enabled: bool) {
+fn set_option(
+    env_vars: &mut crate::shell::var_table::VarTable,
+    option: &'static str,
+    enabled: bool,
+) {
     let mut state = enabled_options(env_vars);
     if enabled {
         state.insert(option.to_string());
@@ -146,7 +156,7 @@ fn shell_option_equivalent(option: &str) -> Option<&'static str> {
     }
 }
 
-fn print_options<W>(env_vars: &HashMap<String, String>, stdout: &mut W) -> io::Result<()>
+fn print_options<W>(env_vars: &crate::shell::var_table::VarTable, stdout: &mut W) -> io::Result<()>
 where
     W: Write,
 {

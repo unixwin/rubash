@@ -35,7 +35,7 @@ pub(super) const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 pub(super) const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
 
 /// Execute `set` with arguments after the command name.
-pub fn set(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
+pub fn set(args: &[String], env_vars: &mut crate::shell::var_table::VarTable) -> io::Result<i32> {
     let mut stdout = crate::executor::GlobalStdout;
     let mut stderr = io::stderr().lock();
     set_with_io(
@@ -85,7 +85,7 @@ pub fn builtin_error_prefix(env_vars: &HashMap<String, String>) -> String {
 
 pub(crate) fn set_with_io<'a, I, W, E>(
     args: I,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -201,7 +201,10 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
-fn print_shell_variables<W>(env_vars: &HashMap<String, String>, stdout: &mut W) -> io::Result<()>
+fn print_shell_variables<W>(
+    env_vars: &crate::shell::var_table::VarTable,
+    stdout: &mut W,
+) -> io::Result<()>
 where
     W: Write,
 {
@@ -345,13 +348,16 @@ fn contains_shell_metas(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn run(args: &[&str], env_vars: &mut HashMap<String, String>) -> (i32, String) {
+    fn run(args: &[&str], env_vars: &mut crate::shell::var_table::VarTable) -> (i32, String) {
         let mut stderr = Vec::new();
         let status = unset_with_stderr(args.iter().copied(), env_vars, &mut stderr).unwrap();
         (status, String::from_utf8(stderr).unwrap())
     }
 
-    fn run_set(args: &[&str], env_vars: &HashMap<String, String>) -> (i32, String, String) {
+    fn run_set(
+        args: &[&str],
+        env_vars: &crate::shell::var_table::VarTable,
+    ) -> (i32, String, String) {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut env_vars = env_vars.clone();
@@ -371,7 +377,10 @@ mod tests {
 
     #[test]
     fn set_without_arguments_prints_variables() {
-        let env_vars = HashMap::from([("NAME".to_string(), "value".to_string())]);
+        let env_vars = crate::shell::var_table::VarTable::from_values(HashMap::from([(
+            "NAME".to_string(),
+            "value".to_string(),
+        )]));
         let (status, stdout, stderr) = run_set(&[], &env_vars);
 
         assert_eq!(status, EXECUTION_SUCCESS);
@@ -381,7 +390,7 @@ mod tests {
 
     #[test]
     fn set_rejects_unknown_flag() {
-        let env_vars = HashMap::new();
+        let env_vars = crate::shell::var_table::VarTable::default();
         let (status, _stdout, stderr) = run_set(&["-Z"], &env_vars);
 
         assert_eq!(status, EX_USAGE);
@@ -390,7 +399,7 @@ mod tests {
 
     #[test]
     fn set_o_invalid_name_is_usage_error() {
-        let env_vars = HashMap::new();
+        let env_vars = crate::shell::var_table::VarTable::default();
         let (status, _stdout, stderr) = run_set(&["-o", "no_such"], &env_vars);
 
         assert_eq!(status, EX_USAGE);
@@ -399,7 +408,7 @@ mod tests {
 
     #[test]
     fn restricted_short_option_is_enabled() {
-        let mut env_vars = HashMap::new();
+        let mut env_vars = crate::shell::var_table::VarTable::default();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         assert_eq!(
@@ -411,7 +420,7 @@ mod tests {
 
     #[test]
     fn restricted_option_cannot_be_unset() {
-        let mut env_vars = HashMap::new();
+        let mut env_vars = crate::shell::var_table::VarTable::default();
         set_shell_option(&mut env_vars, "restricted", true);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -424,7 +433,10 @@ mod tests {
 
     #[test]
     fn unsets_variable() {
-        let mut env_vars = HashMap::from([("NAME".to_string(), "value".to_string())]);
+        let mut env_vars = crate::shell::var_table::VarTable::from_values(HashMap::from([(
+            "NAME".to_string(),
+            "value".to_string(),
+        )]));
 
         assert_eq!(run(&["NAME"], &mut env_vars).0, EXECUTION_SUCCESS);
         assert!(!env_vars.contains_key("NAME"));
@@ -437,7 +449,7 @@ mod tests {
         // name is treated as a potential function name and unset silently.
         // The raw status is EX_UTILERROR (263 > EX_SHERRBASE); the executor
         // converts it to EXECUTION_FAILURE (1) via builtin_status.
-        let mut env_vars = HashMap::new();
+        let mut env_vars = crate::shell::var_table::VarTable::default();
         let (status, stderr) = run(&["-v", "1BAD"], &mut env_vars);
 
         assert_eq!(status, super::unset::EX_UTILERROR);
@@ -450,7 +462,7 @@ mod tests {
 
     #[test]
     fn rejects_function_and_variable_modes_together() {
-        let mut env_vars = HashMap::new();
+        let mut env_vars = crate::shell::var_table::VarTable::default();
         let (status, stderr) = run(&["-fv", "NAME"], &mut env_vars);
 
         assert_eq!(status, EXECUTION_FAILURE);

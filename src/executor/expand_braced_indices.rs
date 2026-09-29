@@ -17,8 +17,8 @@ thread_local! {
 /// the clone must start from the accumulated writes, and the returned
 /// write list then holds only that evaluation's own deltas.
 pub(in crate::executor) fn env_vars_with_pending_subscript_writes<'a>(
-    env_vars: &'a HashMap<String, String>,
-) -> std::borrow::Cow<'a, HashMap<String, String>> {
+    env_vars: &'a crate::shell::var_table::VarTable,
+) -> std::borrow::Cow<'a, crate::shell::var_table::VarTable> {
     PENDING_SUBSCRIPT_WRITES.with(|pending| {
         let pending = pending.borrow();
         if pending.is_empty() {

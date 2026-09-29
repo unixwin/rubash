@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io::{self, Write};
 
 use super::diagnostic::diagnostic_prefix;
@@ -20,7 +19,7 @@ use crate::executor::types::ARRAY_FIELD_SPLIT_MARKER;
 pub(super) fn assign_declare_names<W>(
     command_name: &str,
     names: &[&str],
-    variables: &mut HashMap<String, String>,
+    variables: &mut crate::shell::var_table::VarTable,
     frame_locals: &[String],
     nameref: bool,
     in_function: bool,
@@ -49,14 +48,14 @@ where
             let bare = declare_indexed_element(stripped)
                 .map(|(base, _)| base)
                 .unwrap_or(stripped);
-            if bare != stripped && !marked_vars(variables, ASSOC_VARS).contains(bare) {
+            if bare != stripped && !variables.is_marked(ASSOC_VARS, bare) {
                 mark_typed(variables, ARRAY_VARS, bare);
             }
             // GNU declare.def -> get_universal_initial_value / assocconvert:
             // converting an existing scalar to an associative array moves
             // the value into element "0" (assoc.tests: assoc=assoc;
             // declare -A assoc then prints [0]="assoc" and ${assoc[@]}).
-            if marked_vars(variables, ASSOC_VARS).contains(bare) {
+            if variables.is_marked(ASSOC_VARS, bare) {
                 if let Some(current) = variables.get(bare).cloned() {
                     let is_array_storage = current.starts_with(STORAGE_WORD_PREFIX)
                         || (current.starts_with('(') && current.ends_with(')'));
@@ -75,7 +74,7 @@ where
             // declared-unset here.
             if mark_unset_declarations
                 && !variables.contains_key(bare)
-                && !marked_vars(variables, NAMEREF_VARS).contains(bare)
+                && !variables.is_marked(NAMEREF_VARS, bare)
             {
                 mark_typed(variables, DECLARED_UNSET_VARS, bare);
             }
@@ -121,7 +120,7 @@ where
                 diagnostic_prefix(variables)
             )?;
             status = EXECUTION_FAILURE;
-            if !assoc && !marked_vars(variables, ASSOC_VARS).contains(base) {
+            if !assoc && !variables.is_marked(ASSOC_VARS, base) {
                 mark_typed(variables, ARRAY_VARS, base);
             }
             if mark_unset_declarations && !variables.contains_key(base) {
@@ -142,7 +141,7 @@ where
             let paren_value = !append_elem && value.starts_with('(') && value.ends_with(')');
             if paren_value && (array || assoc) {
                 let expanded_value = expand_compound_array_value(value, variables);
-                if assoc || marked_vars(variables, ASSOC_VARS).contains(base) {
+                if assoc || variables.is_marked(ASSOC_VARS, base) {
                     if let Some(bare) = assoc_bare_element(&expanded_value) {
                         writeln!(
                             stderr,
@@ -158,10 +157,9 @@ where
                         .get(base)
                         .cloned()
                         .unwrap_or_else(|| "()".to_string());
-                    variables.insert(
-                        base.to_string(),
-                        append_assoc_value(&current, &expanded_value, integer, variables),
-                    );
+                    let appended =
+                        append_assoc_value(&current, &expanded_value, integer, variables);
+                    variables.insert(base.to_string(), appended);
                     mark_typed(variables, ASSOC_VARS, base);
                 } else {
                     match append_array_value("()", &expanded_value, integer, variables) {
@@ -184,8 +182,8 @@ where
                 continue;
             }
             if paren_value
-                && !marked_vars(variables, ARRAY_VARS).contains(base)
-                && !marked_vars(variables, ASSOC_VARS).contains(base)
+                && !variables.is_marked(ARRAY_VARS, base)
+                && !variables.is_marked(ASSOC_VARS, base)
                 && !variables.get(base).is_some_and(|v| {
                     v.starts_with(STORAGE_WORD_PREFIX) || (v.starts_with('(') && v.ends_with(')'))
                 })
@@ -196,7 +194,7 @@ where
                     diagnostic_prefix(variables)
                 )?;
             }
-            if assoc || marked_vars(variables, ASSOC_VARS).contains(base) {
+            if assoc || variables.is_marked(ASSOC_VARS, base) {
                 if readonly.contains(base) {
                     writeln!(
                         stderr,
@@ -223,10 +221,8 @@ where
                         super::storage::quote_assoc_key(&key),
                         quote_assoc_storage_value(value)
                     );
-                    variables.insert(
-                        base.to_string(),
-                        append_assoc_value(&current, &element, integer, variables),
-                    );
+                    let appended = append_assoc_value(&current, &element, integer, variables);
+                    variables.insert(base.to_string(), appended);
                     mark_typed(variables, ASSOC_VARS, base);
                     unmark_typed(variables, DECLARED_UNSET_VARS, base);
                 }
@@ -247,7 +243,7 @@ where
                 // where a -> b -> a[1] rewrites the operand to a[1]=v)
                 // removes the attribute with a warning and drops the cell --
                 // it never becomes element 0 (nameref15.sub).
-                if marked_vars(variables, NAMEREF_VARS).contains(base) {
+                if variables.is_marked(NAMEREF_VARS, base) {
                     writeln!(
                         stderr,
                         "{}warning: {base}: removing nameref attribute",
@@ -293,7 +289,7 @@ where
                     // b='a[0]'; declare b+=1 bumps a[0] to 5).
                     let element = if append_elem {
                         let current_element = entries.get(&index).cloned().unwrap_or_default();
-                        if integer || marked_vars(variables, INTEGER_VARS).contains(base) {
+                        if integer || variables.is_marked(INTEGER_VARS, base) {
                             let left = eval_conditional_arith_value(&current_element, variables)
                                 .unwrap_or(0);
                             let right = eval_conditional_arith_value(value, variables).unwrap_or(0);
@@ -318,10 +314,10 @@ where
                 // a[$bad]=42` -> `declare -ai a=()`; an already
                 // declared-but-unset target keeps its null cell ->
                 // `declare -ai a`).
-                if !marked_vars(variables, ASSOC_VARS).contains(base) {
+                if !variables.is_marked(ASSOC_VARS, base) {
                     mark_typed(variables, ARRAY_VARS, base);
                     if !variables.contains_key(base)
-                        && !marked_vars(variables, DECLARED_UNSET_VARS).contains(base)
+                        && !variables.is_marked(DECLARED_UNSET_VARS, base)
                     {
                         variables.insert(
                             base.to_string(),
@@ -352,10 +348,10 @@ where
         // a later `typeset foo1=bar2` is a silent no-op).
         if !append
             && !var_name.contains('[')
-            && marked_vars(variables, NAMEREF_VARS).contains(var_name)
+            && variables.is_marked(NAMEREF_VARS, var_name)
             && variables.get(var_name).map_or(true, |cell| cell.is_empty())
         {
-            if marked_vars(variables, DECLARED_UNSET_VARS).contains(var_name) {
+            if variables.is_marked(DECLARED_UNSET_VARS, var_name) {
                 unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
             } else if !in_function {
                 continue;
@@ -396,7 +392,7 @@ where
         // typeset -n foo; typeset foo=12345). This is the assignment path —
         // the `invalid variable name for name reference` wording belongs to
         // declare.def's `-n name=value` declaration-time check only.
-        if marked_vars(variables, NAMEREF_VARS).contains(var_name) {
+        if variables.is_marked(NAMEREF_VARS, var_name) {
             let current = variables.get(var_name).cloned().unwrap_or_default();
             if !append && !valid_nameref_value(&current) {
                 if !valid_nameref_value(value) {
@@ -473,7 +469,7 @@ where
             };
         let value = if append {
             let current = variables.get(var_name).cloned().unwrap_or_default();
-            if assoc || marked_vars(variables, ASSOC_VARS).contains(var_name) {
+            if assoc || variables.is_marked(ASSOC_VARS, var_name) {
                 if value.starts_with('(') && value.ends_with(')') {
                     if let Some(bare) = assoc_bare_element(value) {
                         writeln!(
@@ -502,7 +498,7 @@ where
                 append_assoc_value(&current, value, integer, variables)
             } else if compound_marked
                 || array
-                || marked_vars(variables, ARRAY_VARS).contains(var_name)
+                || variables.is_marked(ARRAY_VARS, var_name)
                 || current.starts_with(STORAGE_WORD_PREFIX)
                 || current.starts_with('(') && current.ends_with(')')
             {
@@ -526,7 +522,7 @@ where
                 current.push_str(value);
                 current
             }
-        } else if (assoc || marked_vars(variables, ASSOC_VARS).contains(var_name))
+        } else if (assoc || variables.is_marked(ASSOC_VARS, var_name))
             && value.starts_with('(')
             && value.ends_with(')')
         {
@@ -583,7 +579,7 @@ where
             && value.ends_with(')')
             && (compound_marked
                 || array
-                || marked_vars(variables, ARRAY_VARS).contains(var_name)
+                || variables.is_marked(ARRAY_VARS, var_name)
                 || variables.get(var_name).is_some_and(|current| {
                     current.starts_with(STORAGE_WORD_PREFIX)
                         || (current.starts_with('(') && current.ends_with(')'))
@@ -618,11 +614,11 @@ where
             // (array19.sub: `declare -l foo="$value"` keeps [1]/[2]).
             if !append && !compound_marked {
                 let current = variables.get(var_name).cloned().unwrap_or_default();
-                if marked_vars(variables, ASSOC_VARS).contains(var_name) {
+                if variables.is_marked(ASSOC_VARS, var_name) {
                     let element = format!("([0]={})", quote_assoc_storage_value(value));
                     append_assoc_value(&current, &element, integer, variables)
                 } else {
-                    let is_indexed = marked_vars(variables, ARRAY_VARS).contains(var_name)
+                    let is_indexed = variables.is_marked(ARRAY_VARS, var_name)
                         || current.starts_with(STORAGE_WORD_PREFIX)
                         || (current.starts_with('(') && current.ends_with(')'));
                     if is_indexed {
@@ -680,17 +676,17 @@ where
 fn scalar_assign_to_array(
     var_name: &str,
     scalar: &str,
-    variables: &HashMap<String, String>,
+    variables: &crate::shell::var_table::VarTable,
 ) -> Option<String> {
     let current = variables.get(var_name)?;
-    if marked_vars(variables, ASSOC_VARS).contains(var_name) {
+    if variables.is_marked(ASSOC_VARS, var_name) {
         let mut entries = parse_assoc_words(current);
         match entries.iter_mut().find(|(key, _)| key == "0") {
             Some((_, existing)) => *existing = scalar.to_string(),
             None => entries.insert(0, ("0".to_string(), scalar.to_string())),
         }
         Some(format_assoc_storage(entries))
-    } else if marked_vars(variables, ARRAY_VARS).contains(var_name)
+    } else if variables.is_marked(ARRAY_VARS, var_name)
         || current.starts_with('')
         || (current.starts_with('(') && current.ends_with(')'))
     {
@@ -756,7 +752,10 @@ fn declare_indexed_element(name: &str) -> Option<(&str, &str)> {
 /// a parenthesized value like `(${d[@]})`, it re-parses and expands the inner
 /// words. This function handles the common case of `${var[@]}` / `${var[*]}`
 /// in compound array assignment values (array.tests:115).
-fn expand_compound_array_value(value: &str, variables: &HashMap<String, String>) -> String {
+fn expand_compound_array_value(
+    value: &str,
+    variables: &crate::shell::var_table::VarTable,
+) -> String {
     let inner = value
         .strip_prefix('(')
         .and_then(|v| v.strip_suffix(')'))
@@ -832,7 +831,10 @@ fn expand_compound_array_value(value: &str, variables: &HashMap<String, String>)
 /// For `[@]`, returns \x10-tagged elements (one per array member, matching
 /// GNU's multi-word expansion of "${d[@]}" in double quotes).
 /// For `[*]`, returns a single quoted element (all members joined).
-fn expand_array_parameter(expr: &str, variables: &HashMap<String, String>) -> Option<String> {
+fn expand_array_parameter(
+    expr: &str,
+    variables: &crate::shell::var_table::VarTable,
+) -> Option<String> {
     let inner = expr.strip_prefix("${")?.strip_suffix("}")?;
 
     // Look for [@] or [*] suffix

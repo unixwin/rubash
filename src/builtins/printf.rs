@@ -79,7 +79,10 @@ struct ParsedNumber<T> {
 }
 
 /// Execute `printf` with arguments after the command name.
-pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
+pub fn execute(
+    args: &[String],
+    env_vars: &mut crate::shell::var_table::VarTable,
+) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
     execute_with_io(
@@ -92,7 +95,7 @@ pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::R
 
 pub(crate) fn execute_with_io<'a, I, W, E>(
     args: I,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -106,7 +109,7 @@ where
 
 pub(crate) fn execute_with_io_and_store<'a, I, W, E>(
     args: I,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     mut variables: Option<&mut VariableStore>,
     stdout: &mut W,
     stderr: &mut E,
@@ -254,7 +257,7 @@ fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
     "rubash: ".to_string()
 }
 
-fn valid_printf_array_target(name: &str, env_vars: &HashMap<String, String>) -> bool {
+fn valid_printf_array_target(name: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
     // GNU printf.def:305: valid_array_reference(vname, arrayflags) with the
     // VA_NOEXPAND flags SET_VFLAGS derives from array_expand_once
     // (builtins/common.h:279) — a malformed quoted subscript (`a[80's]`)
@@ -282,7 +285,7 @@ fn valid_printf_array_target(name: &str, env_vars: &HashMap<String, String>) -> 
 /// (variables.c find_variable_nameref_for_assignment). An empty nameref
 /// cell assigns the cell itself (the nameref value), matching
 /// `declare -n er; printf -v er z` -> `declare -n er="z"`.
-fn resolve_printf_bind_name(env_vars: &HashMap<String, String>, name: &str) -> String {
+fn resolve_printf_bind_name(env_vars: &crate::shell::var_table::VarTable, name: &str) -> String {
     if !valid_identifier(name) || !is_marked(env_vars, "__RUBASH_NAMEREF_VARS", name) {
         return name.to_string();
     }
@@ -307,7 +310,7 @@ fn resolve_printf_bind_name(env_vars: &HashMap<String, String>, name: &str) -> S
 }
 
 fn assign_printf_output(
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     name: &str,
     output: String,
     mut variables: Option<&mut VariableStore>,
@@ -396,7 +399,7 @@ fn parse_printf_array_target(name: &str) -> Option<(&str, &str)> {
 }
 
 fn resolve_printf_indexed_subscript(
-    env_vars: &HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
     name: &str,
     subscript: &str,
 ) -> Option<usize> {
@@ -419,7 +422,7 @@ fn resolve_printf_indexed_subscript(
 }
 
 fn assign_printf_indexed_element(
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     name: &str,
     index: usize,
     output: String,
@@ -434,7 +437,7 @@ fn assign_printf_indexed_element(
 }
 
 fn assign_printf_assoc_element(
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
     name: &str,
     key: &str,
     output: String,
@@ -653,14 +656,11 @@ fn split_storage_words(value: &str) -> Vec<String> {
     parts
 }
 
-fn is_marked(env_vars: &HashMap<String, String>, marker: &str, name: &str) -> bool {
-    env_vars
-        .get(marker)
-        .map(|value| value.split(DATA_DOLLAR).any(|marked| marked == name))
-        .unwrap_or(false)
+fn is_marked(env_vars: &crate::shell::var_table::VarTable, marker: &str, name: &str) -> bool {
+    env_vars.is_marked(marker, name)
 }
 
-fn mark_printf_var(env_vars: &mut HashMap<String, String>, marker: &str, name: &str) {
+fn mark_printf_var(env_vars: &mut crate::shell::var_table::VarTable, marker: &str, name: &str) {
     if is_marked(env_vars, marker, name) {
         return;
     }
@@ -675,7 +675,11 @@ fn mark_printf_var(env_vars: &mut HashMap<String, String>, marker: &str, name: &
         .or_insert_with(|| name.to_string());
 }
 
-fn render(format: &str, args: &[&str], env_vars: &mut HashMap<String, String>) -> RenderedPrintf {
+fn render(
+    format: &str,
+    args: &[&str],
+    env_vars: &mut crate::shell::var_table::VarTable,
+) -> RenderedPrintf {
     let mut output = String::new();
     let mut arg_index = 0;
     let mut errors = Vec::new();
@@ -724,7 +728,7 @@ fn render_one_pass(
     args: &[&str],
     arg_index: &mut usize,
     mut output: String,
-    env_vars: &mut HashMap<String, String>,
+    env_vars: &mut crate::shell::var_table::VarTable,
 ) -> RenderedPrintf {
     let mut chars = format.chars().peekable();
     let mut errors = Vec::new();

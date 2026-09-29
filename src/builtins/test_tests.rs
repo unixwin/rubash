@@ -1,5 +1,4 @@
 use super::*;
-use std::collections::HashMap;
 use std::fs;
 use std::io::IsTerminal;
 #[cfg(unix)]
@@ -15,11 +14,15 @@ fn make_fifo(path: &str) {
 }
 
 fn run(args: &[&str], bracket: bool) -> (i32, String) {
-    let env_vars = HashMap::new();
+    let env_vars = crate::shell::var_table::VarTable::default();
     run_with_env(args, bracket, &env_vars)
 }
 
-fn run_with_env(args: &[&str], bracket: bool, env_vars: &HashMap<String, String>) -> (i32, String) {
+fn run_with_env(
+    args: &[&str],
+    bracket: bool,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> (i32, String) {
     let mut stderr = Vec::new();
     let status = execute_with_stderr(args.iter().copied(), bracket, env_vars, &mut stderr).unwrap();
     (status, String::from_utf8(stderr).unwrap())
@@ -51,7 +54,7 @@ fn supports_not_and_logical_operators() {
 
 #[test]
 fn supports_shell_option_unary_operator() {
-    let mut env_vars = HashMap::new();
+    let mut env_vars = crate::shell::var_table::VarTable::default();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     crate::builtins::set::set_with_io(["-o", "errexit"], &mut env_vars, &mut stdout, &mut stderr)

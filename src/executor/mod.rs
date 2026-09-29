@@ -446,19 +446,11 @@ impl From<std::io::Error> for ExecuteError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct VarAttrs {
-    exported: bool,
-    readonly: bool,
-    integer: bool,
-    uppercase: bool,
-    lowercase: bool,
-    nameref: bool,
-    array: bool,
-    assoc: bool,
-    trace: bool,
-    declared_unset: bool,
-}
+/// The ten declare-family SHELL_VAR attributes (GNU variables.h:124-133
+/// att_* port). Defined in `shell::var_table` beside the structured
+/// storage; re-exported here for the executor call sites that captured it
+/// under `use super::*`.
+pub(crate) use crate::shell::var_table::VarAttrs;
 
 #[derive(Debug)]
 struct SavedGlobalDeclareLocal {
