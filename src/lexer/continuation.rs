@@ -203,8 +203,8 @@ pub(super) fn ends_with_unquoted_backslash(input: &str) -> bool {
 }
 
 /// One pending matched-pair construct on the delimiter stack.
-#[derive(Clone, Copy)]
-struct UnclosedDelim {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UnclosedDelim {
     /// Close delimiter of this construct.
     close: char,
     /// Line the construct opened on.
@@ -2176,6 +2176,1599 @@ fn skip_arithmetic_substitution(chars: &[char], mut index: usize) -> Option<usiz
     None
 }
 
+// ---------------------------------------------------------------------------
+// perf9 (#292B family, third wave): the candidate-line TEXT scanners of
+// stdin_source_text_needs_more, parked per appended group line.
+//
+// GNU anchor: parse.y:3557 read_token — a streaming reader that advances
+// token by token and never re-scans consumed text. The group reader
+// (script_driver.rs read_next_source_group) instead re-ran the FULL text
+// scan battery over the whole accumulated `pending` group at every
+// candidate line: has_unclosed_quotes, has_unclosed_command_substitution &&
+// !command_substitutions_balanced, unclosed_array_subscript_line,
+// unclosed_input_close_char_posix, and the function-body delimiters — an
+// O(group^2) amplifier measured at 3.56 G chars per arm for GNU bash's own
+// configure (24 753 lines): full `-n` 22.7 s vs GNU 5.3.0's 37 ms. The
+// quotes and comsub residual machines above (perf8) cover the first two
+// predicates; the machines below cover the remaining text scanners.
+//
+// Same discipline as the #292 family: each advance fn's arms are the
+// oracle's arms, unchanged; every forward decision whose outcome depends on
+// text past the current buffer end (a `$(` unit skip, a `${` span scan, an
+// `esac)` case-pattern lookahead, a buffer-tail `${`/`$(`/`$'`/`\` whose
+// two-character lookahead is not fully visible) parks at its position, so
+// the next appended line re-derives exactly the decision the full scan of
+// the longer buffer would make. The oracles in skip.rs stay authoritative
+// and untouched (their callers unchanged); equivalence is enforced by the
+// per-prefix + fuzz tests at the bottom of this file.
+// ---------------------------------------------------------------------------
+
+/// Mirror of skip.rs `skip_backtick_corrected` (verbatim; private there).
+/// Prefix-monotone: `Some(end)` stops at its own closing backtick.
+fn skip_backtick_corrected_chars(chars: &[char], mut index: usize) -> Option<usize> {
+    index += 1;
+    while index < chars.len() {
+        if chars[index] == '\\' {
+            index += 2;
+            continue;
+        }
+        if chars[index] == '`' {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Mirror of skip.rs `skip_arith_substitution_corrected` (verbatim; private
+/// there). Prefix-monotone: the `))` close reads only two visible chars.
+fn skip_arith_substitution_corrected_chars(chars: &[char], mut index: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == '\\' {
+                index += 2;
+                continue;
+            }
+            if ch == '"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '\\' => {
+                index += 2;
+                continue;
+            }
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            ')' if chars.get(index + 1) == Some(&')') => {
+                return Some(index + 2);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Mirror of skip.rs `case_pattern_starts_with_esac_rest` over the char
+/// slice directly (the original materializes `[delimiter] + rest` per call;
+/// both scan the same span starting at the delimiter). Returns
+/// (starts_with_esac_chars, eof_based): `eof_based` marks every branch whose
+/// answer consulted text up to the buffer end without concluding — the
+/// park-relevant undecided signal for checkpoint callers.
+fn case_pattern_starts_with_esac_rest_chars(all: &[char], at: usize) -> (bool, bool) {
+    if !matches!(all.get(at), Some(')' | '|')) {
+        return (false, false);
+    }
+
+    let mut close = at;
+    while close < all.len() {
+        match all[close] {
+            ')' => break,
+            ';' | '\n' => return (false, false),
+            _ => close += 1,
+        }
+    }
+    if all.get(close) != Some(&')') {
+        // No `)` before the end of input: the answer was decided by EOF,
+        // and more appended text could still supply the closer.
+        return (false, true);
+    }
+
+    let mut scan = close + 1;
+    let mut word = String::new();
+    let mut word_boundary = true;
+    while scan < all.len() {
+        let ch = all[scan];
+        if ch == ';' && all.get(scan + 1) == Some(&';') {
+            // `;;` right after `esac)` can be either a case-list separator
+            // (esac is a pattern) or an arithmetic-for separator that lives
+            // *outside* the command substitution (esac is the keyword and `)`
+            // closes the `$(...)`).  GNU arith-for.tests:
+            //   for (( $(case x in x) esac);; )); do break; done
+            // After `;;`, a `)` (possibly following whitespace/newlines)
+            // closes an enclosing `$(...)` or `(( ))`; that cannot be a
+            // case-list context, so `esac` is the keyword, not a pattern.
+            let mut after = scan + 2;
+            while after < all.len() && all[after].is_whitespace() {
+                after += 1;
+            }
+            if all.get(after) == Some(&')') {
+                return (false, false);
+            }
+            // Whitespace running to the end of input leaves the `)` check
+            // undecided until more text arrives.
+            return (true, after >= all.len());
+        }
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            word.push(ch);
+            scan += 1;
+            continue;
+        }
+        if word == "esac" && word_boundary {
+            return (true, false);
+        }
+        if ch == ')' {
+            return (false, false);
+        }
+        if word.is_empty() {
+            if command_substitution_separator_allows_reserved_word(ch) {
+                word_boundary = true;
+            } else if !ch.is_whitespace() {
+                word_boundary = false;
+            }
+            scan += 1;
+            continue;
+        }
+        let reserved_word_allows_next =
+            word_boundary && command_substitution_reserved_word_allows_next(&word);
+        word.clear();
+        word_boundary =
+            reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
+        scan += 1;
+    }
+    // The trailing word ends at end-of-input: a longer input could extend
+    // it into `esac' (or past it), so this answer is EOF-based.
+    (word == "esac" && word_boundary, true)
+}
+
+/// Mirror of skip.rs `update_command_substitution_case_depth` (verbatim
+/// arms) plus the `undecided` report: the `esac` arm's case-pattern
+/// lookahead consulted text past the buffer end without concluding.
+#[allow(clippy::too_many_arguments)]
+fn update_command_substitution_case_depth_corrected_ex(
+    ch: char,
+    single: bool,
+    double: bool,
+    word: &mut String,
+    case_depth: &mut usize,
+    word_boundary: &mut bool,
+    current_word_boundary: &mut bool,
+    lookahead: (&[char], usize),
+    case_in_stage: &mut u8,
+    undecided: &mut bool,
+) {
+    if single || double {
+        word.clear();
+        *word_boundary = false;
+        return;
+    }
+
+    if ch == '_' || ch.is_ascii_alphanumeric() {
+        if word.is_empty() {
+            *current_word_boundary = *word_boundary;
+        }
+        word.push(ch);
+        return;
+    }
+
+    if word.is_empty() {
+        if command_substitution_separator_allows_reserved_word(ch) {
+            *word_boundary = true;
+        } else if !ch.is_whitespace() {
+            *word_boundary = false;
+        }
+        return;
+    }
+
+    // The word completing while `case' awaits its subject IS the subject
+    // (stage 1 -> 2); specific arms below may then rewrite the stage.
+    let completing_after_case = *case_in_stage == 1;
+    if completing_after_case {
+        *case_in_stage = 2;
+    }
+
+    let reserved_word_allows_next = match word.as_str() {
+        "case" if *current_word_boundary => {
+            *case_depth += 1;
+            *case_in_stage = 1;
+            false
+        }
+        "in" if *case_in_stage == 2 => {
+            // GNU special_case_tokens rule 6 (parse.y:3369-3386): this `in'
+            // follows the case subject, so it is the IN token even off a
+            // reserved-word boundary (`in` after `case SUBJECT `).
+            *case_in_stage = 3;
+            true
+        }
+        "esac" if *case_in_stage == 3 => {
+            // GNU parse.y:3433-3441: `esac' directly after IN is ESAC —
+            // the empty case `case WORD in esac'. Unconditional there, so
+            // no case_pattern lookahead guard on this arm: the `)` right
+            // after `esac` is a stray top-level token, exactly how GNU
+            // reports `case x in esac) echo hi;; esac` (syntax error near
+            // unexpected token `)', verified vs WSL GNU 5.3.0).
+            *case_depth = case_depth.saturating_sub(1);
+            *case_in_stage = 0;
+            true
+        }
+        "esac" if *current_word_boundary => {
+            let (starts, eof_based) =
+                case_pattern_starts_with_esac_rest_chars(lookahead.0, lookahead.1);
+            if eof_based {
+                *undecided = true;
+            }
+            if !starts {
+                *case_depth = case_depth.saturating_sub(1);
+                *case_in_stage = 0;
+                true
+            } else {
+                false
+            }
+        }
+        "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
+        | "done"
+            if *current_word_boundary =>
+        {
+            *case_in_stage = 0;
+            true
+        }
+        _ => {
+            if !completing_after_case {
+                *case_in_stage = 0;
+            }
+            false
+        }
+    };
+    word.clear();
+    *word_boundary =
+        reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
+}
+
+/// Mirror of skip.rs `skip_parenthesized_unit_corrected` (the corrected
+/// case-depth unit skipper; verbatim arms) reporting whether the closure is
+/// *decided* by this buffer. A closure whose internal `esac)` case-pattern
+/// lookahead (or a nested unit's closure) ran off the buffer end
+/// undecided can move on a longer buffer, so checkpoint callers must park
+/// at the `$(` instead of trusting the jump; every other internal decision
+/// is prefix-monotone. skip.rs's original stays the authoritative oracle.
+fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(usize, bool)> {
+    let mut depth = 0usize;
+    let mut index = open;
+    let mut single = false;
+    let mut double = false;
+    let mut case_depth = 0usize;
+    let mut word = String::new();
+    let mut word_boundary = true;
+    let mut current_word_boundary = true;
+    let mut parameter_depth = 0usize;
+    // `case WORD in' chain tracker (GNU special_case_tokens,
+    // parse.y:3369-3386 + 3433-3441) — see the corrected case-depth update.
+    let mut case_in_stage = 0u8;
+    // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
+    // a token boundary — after whitespace, a separator (`;&|()<>`), or at
+    // the start. `word.is_empty()` alone is wrong: `$`, quotes and other
+    // non-alphanumeric word characters never reach `word`, so `$(echo $#)`
+    // and `$(echo 'a'#b)` would misread `#` as a comment.
+    let mut token_boundary = true;
+    let mut undecided = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == '\\' {
+                index += 2;
+                continue;
+            }
+            if ch == '"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        // Skip heredoc body so its `)` chars stay opaque.
+        // GNU parse.y read_token: `<<<` is the here-string redirection
+        // operator (LESS_LESS_LESS) whose operand is the next ordinary
+        // word — there is no body to skip, and the comsub's `)` after the
+        // word still closes the substitution (`$(cat <<< hi)`). Check it
+        // BEFORE the `<<` heredoc arm (rubash#168).
+        if ch == '<' && chars.get(index + 1) == Some(&'<') && chars.get(index + 2) == Some(&'<') {
+            index += 3;
+            token_boundary = true;
+            continue;
+        }
+        if ch == '<' && chars.get(index + 1) == Some(&'<') && chars.get(index + 2) != Some(&'<') {
+            let (next, _closes) =
+                super::heredoc_scan::skip_heredoc_in_chars_with_closure(chars, index);
+            index = next;
+            // A heredoc terminator ends on its own line, so the next
+            // character begins a fresh token.
+            token_boundary = true;
+            continue;
+        }
+        // `parameter_depth` keeps `${#x}` text out of the comment rule.
+        if ch == '#' && token_boundary && parameter_depth == 0 {
+            while index + 1 < chars.len() && chars[index + 1] != '\n' {
+                index += 1;
+            }
+            word.clear();
+            word_boundary = true;
+            current_word_boundary = true;
+            token_boundary = true;
+            index += 1;
+            continue;
+        }
+        if ch == '$' && chars.get(index + 1) == Some(&'{') {
+            parameter_depth += 1;
+            token_boundary = false;
+            index += 2;
+            continue;
+        }
+        if ch == '}' && parameter_depth > 0 {
+            parameter_depth -= 1;
+            token_boundary = false;
+            index += 1;
+            continue;
+        }
+        // The suffix is consulted ONLY by the corrected case-depth update's
+        // `esac` arm — and that scan returns (false, false) without reading
+        // the suffix unless the terminating char is `)` or `|` (mirror of
+        // the skip.rs materialization rule; see
+        // case_pattern_starts_with_esac_rest_chars).
+        let lookahead: (&[char], usize) = if word == "esac" && matches!(ch, ')' | '|') {
+            (chars, index)
+        } else {
+            (&[], usize::MAX)
+        };
+        update_command_substitution_case_depth_corrected_ex(
+            ch,
+            false,
+            false,
+            &mut word,
+            &mut case_depth,
+            &mut word_boundary,
+            &mut current_word_boundary,
+            lookahead,
+            &mut case_in_stage,
+            &mut undecided,
+        );
+        match ch {
+            '\'' => single = true,
+            '"' => double = true,
+            // GNU read_token_word (parse.y:5377-5397): outside quotes a
+            // backslash quotes the next character — it can never act as a
+            // paren delimiter, so `$(echo \)` does not close the
+            // substitution (comsub-posix.tests:42). The quoted character is
+            // word text (a placeholder, since `c\ase` is not `case`), so a
+            // following `#` stays mid-word (`\;#` in comsub1.sub); a quoted
+            // newline is a line continuation, not word content.
+            '\\' => {
+                if chars.get(index + 1).is_some_and(|next| *next != '\n') {
+                    word.push('\u{1}');
+                }
+                token_boundary = false;
+                index += 2;
+                continue;
+            }
+            '`' => {
+                if let Some(end) = skip_backtick_corrected_chars(chars, index) {
+                    index = end;
+                    token_boundary = false;
+                    continue;
+                }
+            }
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                index += 2;
+                while index < chars.len() {
+                    if chars[index] == '\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if chars[index] == '\'' {
+                        index += 1;
+                        break;
+                    }
+                    index += 1;
+                }
+                token_boundary = false;
+                continue;
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                if chars.get(index + 2) == Some(&'(') {
+                    if let Some(end) = skip_arith_substitution_corrected_chars(chars, index + 3) {
+                        index = end;
+                        token_boundary = false;
+                        continue;
+                    }
+                } else if let Some((end, inner_decided)) =
+                    skip_parenthesized_unit_corrected_ex(chars, index + 1)
+                {
+                    // A nested unit that closed undecidedly can move on a
+                    // longer buffer, which moves this unit's resume point:
+                    // propagate the undecided signal so the caller parks.
+                    if !inner_decided {
+                        undecided = true;
+                    }
+                    index = end;
+                    token_boundary = false;
+                    continue;
+                }
+            }
+            '(' if case_depth == 0 => depth += 1,
+            ')' if case_depth == 0 => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some((index + 1, !undecided));
+                }
+            }
+            _ => {}
+        }
+        token_boundary =
+            ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+        index += 1;
+    }
+    None
+}
+
+/// Every scan local of the corrected command-substitution balance checker
+/// (`skip::command_substitutions_balanced`, the oracle), checkpointable
+/// across appended group lines (perf9, #292B family).
+///
+/// GNU anchor: parse.y:3557 read_token — a streaming reader; the oracle's
+/// char-machine is a left-to-right DFA over the same bytes, so its locals
+/// are resumable in isolation. The non-local decisions are the atomic
+/// forward skips (`${` span, backtick unit, `$(...` unit + `$((...))`
+/// arithmetic fallback) whose failure makes the oracle return `false`
+/// immediately: a failure on a shorter prefix may succeed on a longer one,
+/// so the machine parks at the failing opener and the next line re-derives
+/// (the `failed` flag carries the oracle's committed `false` answer for the
+/// current prefix).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BalancedResidualState {
+    pub(crate) single: bool,
+    pub(crate) double: bool,
+    pub(crate) ansi_single: bool,
+    pub(crate) escaped: bool,
+    pub(crate) comment_start: bool,
+    pub(crate) in_comment: bool,
+    /// The oracle returned `false` at a failing skip on the current prefix.
+    pub(crate) failed: bool,
+}
+
+impl Default for BalancedResidualState {
+    fn default() -> Self {
+        // The oracle's initial locals: only comment_start starts set.
+        Self {
+            single: false,
+            double: false,
+            ansi_single: false,
+            escaped: false,
+            comment_start: true,
+            in_comment: false,
+            failed: false,
+        }
+    }
+}
+
+impl BalancedResidualState {
+    /// The oracle's answer for the current prefix:
+    /// `!command_substitutions_balanced(input)`.
+    pub(crate) fn is_unbalanced(&self) -> bool {
+        self.failed
+    }
+}
+
+/// A re-derivation point returned by [`balanced_residuals_advance`] (same
+/// contract as [`ComsubResidualPark`]).
+pub(crate) struct BalancedResidualPark {
+    /// Char index where the undecided decision starts.
+    pub(crate) pos: usize,
+    /// Scan state at `pos`, before the undecided arm mutated anything.
+    pub(crate) snapshot: BalancedResidualState,
+}
+
+/// Advance the corrected-balance scan over `chars[from..]` starting from
+/// `state` (restored from a checkpoint or `Default`), leaving `state` as
+/// the committed end state for this prefix, and return the FIRST undecided
+/// position, if any.
+///
+/// Equivalence contract: a full advance (`from == 0`, `Default`) answers
+/// exactly `!skip::command_substitutions_balanced(chars)` — `failed` is set
+/// iff the oracle returned `false`; resuming at a park re-derives every
+/// buffer-length-dependent decision, so each prefix's committed answer
+/// equals the oracle's answer for that prefix. Parks:
+/// (B1) a `${` span scan that did not close on this buffer (the oracle
+/// returns false; a longer buffer may close it and jump its body quotes);
+/// (B2) a backtick unit that did not close (same shape);
+/// (B3) a `$(` whose corrected unit skip failed and whose `$((` arithmetic
+/// fallback also failed (the oracle returns false);
+/// (B4) a `$` at the buffer tail — the `$'`/`${`/`$(` two-character
+/// lookahead is not visible;
+/// (B5) a `$(` unit that closed through an `esac)` case-pattern lookahead
+/// (or nested-unit closure) that ran off the buffer end undecided — the
+/// jump is committed but the closure point can move, so the park re-derives
+/// (commit + park, the scan continues, exactly like comsub's P2).
+pub(crate) fn balanced_residuals_advance(
+    chars: &[char],
+    from: usize,
+    state: &mut BalancedResidualState,
+) -> Option<BalancedResidualPark> {
+    let mut index = from.min(chars.len());
+    let mut park: Option<BalancedResidualPark> = None;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if state.in_comment {
+            if ch == '\n' {
+                state.in_comment = false;
+                state.comment_start = true;
+            }
+            index += 1;
+            continue;
+        }
+        if state.escaped {
+            state.escaped = false;
+            state.comment_start = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\n' && !state.single && !state.double && !state.ansi_single {
+            state.comment_start = true;
+            index += 1;
+            continue;
+        }
+        if ch == '#' && !state.single && !state.double && !state.ansi_single && state.comment_start
+        {
+            state.in_comment = true;
+            index += 1;
+            continue;
+        }
+        if ch.is_whitespace() && !state.single && !state.double && !state.ansi_single {
+            state.comment_start = true;
+            index += 1;
+            continue;
+        }
+        if state.ansi_single {
+            if ch == '\\' {
+                state.escaped = true;
+            } else if ch == '\'' {
+                state.ansi_single = false;
+            }
+            state.comment_start = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !state.single {
+            state.escaped = true;
+            state.comment_start = false;
+            index += 1;
+            continue;
+        }
+        // B4: a `$` at the buffer tail — the `$'`/`${`/`$(` lookahead is
+        // undecided. Commit the fall-through (below) and park at the `$`.
+        if ch == '$' && chars.get(index + 1).is_none() && park.is_none() {
+            park = Some(BalancedResidualPark {
+                pos: index,
+                snapshot: state.clone(),
+            });
+        }
+        if ch == '$' && !state.single && !state.double && chars.get(index + 1) == Some(&'\'') {
+            state.ansi_single = true;
+            state.comment_start = false;
+            index += 2;
+            continue;
+        }
+        if ch == '\'' && !state.double && !state.ansi_single {
+            state.single = !state.single;
+            state.comment_start = false;
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !state.single && !state.ansi_single {
+            state.double = !state.double;
+            state.comment_start = false;
+            index += 1;
+            continue;
+        }
+        if state.single {
+            index += 1;
+            continue;
+        }
+        // Skip ${...} parameter expansion so a `$(` inside it is not mistaken
+        // for a top-level command substitution.
+        if ch == '$' && chars.get(index + 1) == Some(&'{') && !state.double {
+            let body = &chars[index..];
+            let context = crate::lexer::dolbrace::BraceContext {
+                outer_double_quote: state.double,
+                posix: false,
+                replacement_context: false,
+                initial_state: crate::lexer::dolbrace::DolbraceState::Param,
+            };
+            if let Some(scan) =
+                crate::lexer::dolbrace::scan_braced_parameter_body_chars(body, context)
+            {
+                index += 2 + scan.end;
+                state.comment_start = false;
+                continue;
+            }
+            // B1: unterminated ${...}: the oracle returns false; park so a
+            // longer buffer re-derives the span decision. A park recorded
+            // earlier in this pass (B5) is the re-derivation point — the
+            // resume re-runs everything after it, this failing arm included.
+            state.failed = true;
+            return Some(park.take().unwrap_or(BalancedResidualPark {
+                pos: index,
+                snapshot: BalancedResidualState {
+                    failed: false,
+                    ..state.clone()
+                },
+            }));
+        }
+        // Skip backtick command substitution.
+        if ch == '`' && !state.double {
+            if let Some(end) = skip_backtick_corrected_chars(chars, index) {
+                index = end;
+                state.comment_start = false;
+                continue;
+            }
+            // B2: the backtick unit did not close on this buffer (a park
+            // recorded earlier in this pass stays the resume point).
+            state.failed = true;
+            return Some(park.take().unwrap_or(BalancedResidualPark {
+                pos: index,
+                snapshot: BalancedResidualState {
+                    failed: false,
+                    ..state.clone()
+                },
+            }));
+        }
+        if ch == '$' && !state.single && chars.get(index + 1) == Some(&'(') {
+            if let Some((end, decided)) = skip_parenthesized_unit_corrected_ex(chars, index + 1) {
+                // B5: closed undecidedly — commit the jump, park for the
+                // re-derivation (first park wins).
+                if !decided && park.is_none() {
+                    park = Some(BalancedResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    });
+                }
+                index = end;
+                state.comment_start = false;
+                continue;
+            }
+            // Check for $((...)) arithmetic.
+            if chars.get(index + 2) == Some(&'(') {
+                if let Some(end) = skip_arith_substitution_corrected_chars(chars, index + 3) {
+                    index = end;
+                    state.comment_start = false;
+                    continue;
+                }
+            }
+            // B3: genuinely unbalanced command substitution (a park
+            // recorded earlier in this pass stays the resume point).
+            state.failed = true;
+            return Some(park.take().unwrap_or(BalancedResidualPark {
+                pos: index,
+                snapshot: BalancedResidualState {
+                    failed: false,
+                    ..state.clone()
+                },
+            }));
+        }
+        if !state.single && !state.double && !state.ansi_single {
+            state.comment_start = false;
+        }
+        index += 1;
+    }
+    park
+}
+
+/// Every scan local of the unclosed array-subscript checker
+/// (`skip::unclosed_array_subscript_line`, the oracle), checkpointable
+/// across appended group lines (perf9, #292B family).
+///
+/// GNU anchor: parse.y:5635-5643 read_token_word — an unquoted `[` at a
+/// command-position identifier (or compound-assignment element start)
+/// opens `parse_matched_pair ('[', ']', ..., P_ARRAYSUB)` (parse.y:3906),
+/// a forward scan that reads across lines until the matching `]`; EOF
+/// reports the `[` line (start_lineno). The oracle is this port's
+/// whole-buffer substitute for that streaming read; its locals are a
+/// left-to-right DFA over the same bytes, resumable in isolation. The
+/// non-local decisions are the array-subscript matched pair itself (an
+/// unclosed `[` makes the oracle RETURN its `Some((line, compassign))`
+/// answer immediately), the `$(...` corrected unit skip, and the backtick
+/// unit skip — each parks so the next line re-derives exactly what the
+/// full scan of the longer buffer would decide.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SubscriptResidualState {
+    pub(crate) single: bool,
+    pub(crate) double: bool,
+    pub(crate) ansi_single: bool,
+    pub(crate) escaped: bool,
+    pub(crate) in_comment: bool,
+    /// Command-position tracking (parse.y:5899 assignment_acceptable): true
+    /// at input start, after a separator/operator or `('/`{', and after the
+    /// reserved words that may be followed by a command.
+    pub(crate) command_position: bool,
+    pub(crate) word: String,
+    /// Compound-assignment `name=( ... )` depth (PST_COMPASSIGN); at element
+    /// start (right after `(` or whitespace inside the list) a `[` opens a
+    /// subscript with no identifier prefix needed.
+    pub(crate) compassign_depth: usize,
+    pub(crate) element_start: bool,
+    pub(crate) line: usize,
+    /// The oracle returned `Some((line, compassign))` on the current
+    /// prefix: an unclosed `[` swallowed the rest of the buffer
+    /// (parse.y:5635: the subscript owns everything ahead of any other
+    /// construct).
+    pub(crate) reported: Option<(usize, bool)>,
+}
+
+impl Default for SubscriptResidualState {
+    fn default() -> Self {
+        // The oracle's initial locals (skip.rs unclosed_array_subscript_line).
+        Self {
+            single: false,
+            double: false,
+            ansi_single: false,
+            escaped: false,
+            in_comment: false,
+            command_position: true,
+            word: String::new(),
+            compassign_depth: 0,
+            element_start: false,
+            line: 1,
+            reported: None,
+        }
+    }
+}
+
+impl SubscriptResidualState {
+    /// The oracle's answer for the current prefix:
+    /// `unclosed_array_subscript_line(input).is_some()`.
+    pub(crate) fn is_open(&self) -> bool {
+        self.reported.is_some()
+    }
+}
+
+/// A re-derivation point returned by [`subscript_residuals_advance`]
+/// (same contract as [`ComsubResidualPark`]).
+pub(crate) struct SubscriptResidualPark {
+    /// Char index where the undecided decision starts.
+    pub(crate) pos: usize,
+    /// Scan state at `pos`, before the undecided arm mutated anything.
+    pub(crate) snapshot: SubscriptResidualState,
+}
+
+/// Advance the array-subscript scan over `chars[from..]` starting from
+/// `state` (restored from a checkpoint or `Default`), leaving `state` as
+/// the committed end state for this prefix, and return the FIRST undecided
+/// position, if any.
+///
+/// Equivalence contract: a full advance (`from == 0`, `Default`) leaves
+/// `reported == skip::unclosed_array_subscript_line(chars)` — payload
+/// included ((line, compassign_depth > 0) at the reporting `[`). Parks:
+/// (S1) an array subscript `[` whose quote-aware matched-pair scan ran off
+/// the buffer end — the oracle RETURNS its `Some` answer there, and a
+/// longer buffer may close the pair and continue past it, so the park (at
+/// the `[`) re-derives; `reported` carries the committed answer. The
+/// advance stops there exactly like the oracle.
+/// (S2) a `$(` whose corrected unit skip failed on this buffer (the oracle
+/// falls through and treats `$` as word text; a longer buffer may close
+/// the unit and skip its whole body) or closed undecidedly (esac-lookahead
+/// closure; commit + park, scan continues).
+/// (S3) a backtick whose unit did not close on this buffer (the oracle
+/// consumes to the buffer end; a longer buffer closes it and jumps).
+/// (S4) a `$` at the buffer tail — the `$'`/`$(` two-character lookahead
+/// is not visible (the oracle pushes `$` to the word; a longer buffer may
+/// take either arm).
+pub(crate) fn subscript_residuals_advance(
+    chars: &[char],
+    from: usize,
+    state: &mut SubscriptResidualState,
+) -> Option<SubscriptResidualPark> {
+    let mut index = from.min(chars.len());
+    let mut park: Option<SubscriptResidualPark> = None;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if state.in_comment {
+            if ch == '\n' {
+                state.in_comment = false;
+                state.line += 1;
+                state.command_position = true;
+                state.word.clear();
+                state.element_start = false;
+            }
+            index += 1;
+            continue;
+        }
+        if state.escaped {
+            state.escaped = false;
+            index += 1;
+            continue;
+        }
+        if state.ansi_single {
+            if ch == '\\' {
+                state.escaped = true;
+            } else if ch == '\'' {
+                state.ansi_single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if state.single {
+            if ch == '\'' {
+                state.single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if state.double {
+            if ch == '\\' {
+                state.escaped = true;
+            } else if ch == '"' {
+                state.double = false;
+            }
+            index += 1;
+            continue;
+        }
+        // S4: a `$` at the buffer tail — park before the guards commit the
+        // word-text fall-through.
+        if ch == '$' && chars.get(index + 1).is_none() && park.is_none() {
+            park = Some(SubscriptResidualPark {
+                pos: index,
+                snapshot: state.clone(),
+            });
+        }
+        match ch {
+            '\\' => {
+                state.escaped = true;
+                state.word.clear();
+                index += 1;
+                continue;
+            }
+            '#' if state.word.is_empty() => {
+                state.in_comment = true;
+                index += 1;
+                continue;
+            }
+            '\'' => {
+                state.single = true;
+                state.word.clear();
+                index += 1;
+                continue;
+            }
+            '"' => {
+                state.double = true;
+                state.word.clear();
+                index += 1;
+                continue;
+            }
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                state.ansi_single = true;
+                state.word.clear();
+                index += 2;
+                continue;
+            }
+            _ => {}
+        }
+        if ch.is_whitespace() {
+            if ch == '\n' {
+                state.line += 1;
+                state.command_position = true;
+                state.word.clear();
+                state.element_start = false;
+            } else {
+                // `if`, `then`, `while`, ... keep the next word in command
+                // position — but only when they themselves stood at command
+                // position (`echo if a[b` keeps `a` an argument); a command
+                // word like `echo` ends it. Whitespace directly after a
+                // delimiter (`; `) keeps the delimiter's decision.
+                if !state.word.is_empty() {
+                    state.command_position = state.command_position
+                        && skip_word_is_command_position_boundary(&state.word);
+                }
+                state.word.clear();
+                if state.compassign_depth > 0 {
+                    state.element_start = true;
+                }
+            }
+            index += 1;
+            continue;
+        }
+        // `[` opens a subscript when the word prefix is a pure shell
+        // identifier at command position (parse.y:5637), or we are at
+        // element start inside a compound assignment (parse.y:5638,
+        // token_index == 0 && PST_COMPASSIGN).
+        if ch == '['
+            && ((state.command_position && skip_word_is_pure_identifier(&state.word))
+                || (state.compassign_depth > 0 && state.element_start && state.word.is_empty()))
+        {
+            let snapshot = state.clone();
+            // parse_matched_pair ('[', ']'): quote/escape aware, nested
+            // `[ ... ]` pairs nest, newlines are consumed by the scan.
+            let mut depth = 1usize;
+            let mut scan = index + 1;
+            let mut q_single = false;
+            let mut q_double = false;
+            let mut q_escaped = false;
+            while scan < chars.len() {
+                let c = chars[scan];
+                if q_escaped {
+                    q_escaped = false;
+                    scan += 1;
+                    continue;
+                }
+                if q_single {
+                    if c == '\'' {
+                        q_single = false;
+                    }
+                    scan += 1;
+                    continue;
+                }
+                if q_double {
+                    if c == '\\' {
+                        q_escaped = true;
+                    } else if c == '"' {
+                        q_double = false;
+                    }
+                    scan += 1;
+                    continue;
+                }
+                match c {
+                    '\\' => q_escaped = true,
+                    '\'' => q_single = true,
+                    '"' => q_double = true,
+                    '[' => depth += 1,
+                    ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                scan += 1;
+            }
+            if depth > 0 {
+                // S1: EOF inside the subscript — report at the `[` line
+                // (parse.y:3906 start_lineno), with the compound-assignment
+                // context deciding the exit status (1 inside `name=(`).
+                // The oracle returns here; `reported` carries the answer
+                // and the park re-derives the pair on the next line.
+                state.reported = Some((state.line, state.compassign_depth > 0));
+                // A park recorded earlier in this pass (S2/S3/S4) stays the
+                // resume point: the re-derivation re-runs this `[` too.
+                return Some(park.take().unwrap_or(SubscriptResidualPark {
+                    pos: index,
+                    snapshot,
+                }));
+            }
+            index = scan + 1;
+            state.word.clear();
+            state.element_start = false;
+            state.command_position = false;
+            continue;
+        }
+        if ch == '(' {
+            // `name=(` opens a compound-assignment list; any other `(` is a
+            // subshell/grouping whose body starts a fresh command position.
+            if state.word.ends_with('=') {
+                state.compassign_depth += 1;
+                state.element_start = true;
+            } else {
+                state.command_position = true;
+            }
+            state.word.clear();
+            index += 1;
+            continue;
+        }
+        if ch == ')' {
+            state.compassign_depth = state.compassign_depth.saturating_sub(1);
+            state.element_start = false;
+            state.command_position = true;
+            state.word.clear();
+            index += 1;
+            continue;
+        }
+        if matches!(ch, ';' | '&' | '|' | '{' | '}') {
+            state.command_position = true;
+            state.word.clear();
+            state.element_start = false;
+            index += 1;
+            continue;
+        }
+        if ch == '`' {
+            let snapshot = state.clone();
+            let mut scan = index + 1;
+            while scan < chars.len() && chars[scan] != '`' {
+                if chars[scan] == '\\' {
+                    scan += 1;
+                }
+                scan += 1;
+            }
+            // S3: the unit did not close on this buffer — commit the
+            // consume-to-end, park at the backtick for the re-derivation.
+            if scan >= chars.len() && park.is_none() {
+                park = Some(SubscriptResidualPark {
+                    pos: index,
+                    snapshot,
+                });
+            }
+            index = (scan + 1).min(chars.len());
+            state.word.clear();
+            continue;
+        }
+        if ch == '$' && chars.get(index + 1) == Some(&'(') {
+            // Command-substitution body: its internals own their scans in
+            // the recursive parse; skip the balanced unit.
+            if let Some((end, decided)) = skip_parenthesized_unit_corrected_ex(chars, index + 1) {
+                // S2u: closed undecidedly — commit the jump, park for the
+                // re-derivation.
+                if !decided && park.is_none() {
+                    park = Some(SubscriptResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    });
+                }
+                index = end;
+                state.word.clear();
+                continue;
+            }
+            // S2f: the skip failed on this buffer — the oracle commits the
+            // fall-through (`$` becomes word text); park at the `$`.
+            if park.is_none() {
+                park = Some(SubscriptResidualPark {
+                    pos: index,
+                    snapshot: state.clone(),
+                });
+            }
+        }
+        state.word.push(ch);
+        index += 1;
+    }
+    park
+}
+
+/// Every scan local of the matched-pair close-char checker
+/// (`unclosed_input_close_char_posix` above, the oracle), checkpointable
+/// across appended group lines (perf9, #292B family).
+///
+/// GNU anchor: parse.y:3557 read_token — a streaming reader whose
+/// matched-pair state (parse.y:3877 parse_matched_pair, quotes at
+/// parse.y:5305 read_token_word) advances character by character and never
+/// re-scans consumed text. The oracle's delimiter stack, line counter,
+/// comment/command-position/word trackers are position-local state; the
+/// non-local decisions are the buffer-tail two-character lookaheads of the
+/// `$` dispatcher and the top-level backslash escape, each of which parks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CloseCharResidualState {
+    pub(crate) stack: Vec<UnclosedDelim>,
+    pub(crate) line: usize,
+    pub(crate) comment_start: bool,
+    /// A bare `(` only opens a subshell/array-list at command position or
+    /// after `=` in an assignment word (the oracle's at_command tracker).
+    pub(crate) at_command: bool,
+    pub(crate) cur_word: String,
+}
+
+impl Default for CloseCharResidualState {
+    fn default() -> Self {
+        // The oracle's initial locals.
+        Self {
+            stack: Vec::new(),
+            line: 1,
+            comment_start: true,
+            at_command: true,
+            cur_word: String::new(),
+        }
+    }
+}
+
+impl CloseCharResidualState {
+    /// The oracle's answer for the current prefix:
+    /// `unclosed_input_close_char_posix(input, _).is_some()` — some
+    /// matched-pair construct is still pending. (The diagnostic payload —
+    /// close char, open line, report_open/command/array_list — is only
+    /// consumed at final-EOF diagnostics, which full-scan the oracle.)
+    pub(crate) fn is_open(&self) -> bool {
+        !self.stack.is_empty()
+    }
+}
+
+/// A re-derivation point returned by [`close_char_residuals_advance`]
+/// (same contract as [`ComsubResidualPark`]).
+pub(crate) struct CloseCharResidualPark {
+    /// Char index where the undecided decision starts.
+    pub(crate) pos: usize,
+    /// Scan state at `pos`, before the undecided arm mutated anything.
+    pub(crate) snapshot: CloseCharResidualState,
+}
+
+/// Advance the close-char scan over `chars[from..]` starting from `state`
+/// (restored from a checkpoint or `Default`), leaving `state` as the
+/// committed end state for this prefix, and return the FIRST undecided
+/// position, if any. The arms are `unclosed_input_close_char_posix`'s
+/// arms, unchanged.
+///
+/// Parks (all commit + park + continue — the oracle never stops early):
+/// (K1) a `${` at the buffer tail — the FUNSUB_CHAR lookahead
+/// (parser.h:85) is not visible, so the funsub/report_open split of the
+/// pushed delimiter is undecided; the oracle commits the parameter-brace
+/// push (funsub=false) for this prefix.
+/// (K2) a `$(` at the buffer tail — the `$((` arithmetic lookahead decides
+/// report_open and the second (inner-paren) push; the oracle commits the
+/// plain `$(` push.
+/// (K3) a `$` at the buffer tail — the `$'` ANSI-C arm (guarded by the
+/// stack top) is undecided; the oracle commits the inert fall-through.
+/// (K4) a top-level `\` at the buffer tail — the escaped-character pair
+/// (which feeds cur_word and the array-list `name=(` decision) is
+/// undecided; the oracle commits the lone backslash as plain text.
+/// Every other decision is position-local or backward-looking
+/// (`chars[i-1] == '('`); comment consumption and matched-pair closes are
+/// forward-monotone. The loop-head effects at a parked `$`/`\` are pure
+/// idempotent assignments (line counting only runs at '\n', which never
+/// parks), so resume-at-park reproduces the full scan bit for bit.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn close_char_residuals_advance(
+    chars: &[char],
+    from: usize,
+    state: &mut CloseCharResidualState,
+    posix: bool,
+) -> Option<CloseCharResidualPark> {
+    let mut i = from.min(chars.len());
+    let mut park: Option<CloseCharResidualPark> = None;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        let top = state.stack.last().copied();
+        if ch == '\n' {
+            state.line += 1;
+        }
+        if let Some(d) = top {
+            if d.escapes && ch == '\\' {
+                // An escaped character is word text everywhere.
+                state.comment_start = false;
+                i += 2;
+                continue;
+            }
+            if ch == d.close && !(d.funsub && !d.term_ready) {
+                state.stack.pop();
+                // A closed subshell or brace group is a complete command:
+                // an enclosing function substitution's `}' may now close.
+                if let Some(parent) = state.stack.last_mut() {
+                    if parent.funsub && d.command {
+                        parent.term_ready = true;
+                    }
+                }
+                // `)` is a shell separator: a following `#` starts a
+                // comment (`x=$(a)#c`). Quote/`}` closes stay mid-word.
+                state.comment_start = d.close == ')';
+                i += 1;
+                continue;
+            }
+            if d.close == '\'' {
+                // Literal context: nothing else is special inside '...'.
+                i += 1;
+                continue;
+            }
+            // Inside `$(...)` / `( ... )` / `${ cmds; }` (report_open false —
+            // the `$((` inner paren reports open and is arithmetic text
+            // where `#` is the base operator, never a comment) a `#` at a
+            // token boundary comments through end of line, so the `)` in
+            // `$(# c )` cannot close the substitution (comsub-posix). An
+            // array list (`name=(`, also report_open — parse_matched_pair's
+            // start_lineno report) is element text where `#` IS a comment:
+            // a `)` inside the comment must not close the list (probe
+            // 2026-09-27: `declare -a x=(\n 1 # c )` at EOF → GNU reports
+            // "unexpected EOF while looking for matching `)'" + exit 1).
+            if d.close == ')' || d.funsub {
+                if !(d.close == ')' && d.report_open && !d.array_list)
+                    && ch == '#'
+                    && state.comment_start
+                {
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                state.comment_start =
+                    ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+            }
+            if d.funsub {
+                // Track command-terminator state: `${ cmd }' without a
+                // separator before `}' never terminates (parse_comsub).
+                let d = state.stack.last_mut().unwrap();
+                match ch {
+                    ';' | '&' | '|' | '\n' => d.term_ready = true,
+                    c if !c.is_whitespace() => d.term_ready = false,
+                    _ => {}
+                }
+            }
+        } else {
+            // Top-level `\` quotes the next character as literal word text
+            // (parse.y read_token_word): an escaped `(` in `\<...` must not
+            // open a paren delimiter. `\<newline>` is a continuation that
+            // joins the word across lines.
+            if ch == '\\' && i + 1 < chars.len() {
+                if chars[i + 1] == '\n' {
+                    state.line += 1;
+                } else if chars[i + 1] != '=' {
+                    state.cur_word.push(chars[i + 1]);
+                }
+                state.comment_start = false;
+                i += 2;
+                continue;
+            }
+            // K4: a top-level `\` at the buffer tail — the pair is
+            // undecided; the oracle commits the plain-text fall-through.
+            if ch == '\\' && i + 1 >= chars.len() && park.is_none() {
+                park = Some(CloseCharResidualPark {
+                    pos: i,
+                    snapshot: state.clone(),
+                });
+            }
+            // Top-level comment: a word-initial '#' consumes to EOL
+            // (parse.y read_token -> parse_comment).
+            if ch == '#' && state.comment_start {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if ch.is_whitespace()
+                || matches!(ch, ';' | '&' | '|' | '(' | ')' | '{' | '}' | '<' | '>')
+            {
+                state.comment_start = true;
+            } else {
+                state.comment_start = false;
+            }
+            match ch {
+                // `(` is excluded: the push arm below gates on the state
+                // BEFORE it — a mid-command `(` must not mark itself as
+                // command position. `)` likewise: a stray `)` is a parse
+                // error left to the parser, but after it a command follows.
+                '\n' | ';' | '&' | '|' | ')' | '{' | '}' => {
+                    state.at_command = true;
+                    state.cur_word.clear();
+                }
+                '<' | '>' => {
+                    // Redirect operator: a filename word follows, so `>(` is
+                    // not command position.
+                    state.cur_word.clear();
+                }
+                c if c.is_whitespace() => {
+                    if !state.cur_word.is_empty() {
+                        state.at_command = matches!(
+                            state.cur_word.as_str(),
+                            "if" | "then"
+                                | "else"
+                                | "elif"
+                                | "while"
+                                | "until"
+                                | "do"
+                                | "in"
+                                | "!"
+                                | "time"
+                                | "coproc"
+                                | "case"
+                        );
+                        state.cur_word.clear();
+                    }
+                }
+                c if c.is_alphanumeric()
+                    || c == '_'
+                    || (c == '=' && !state.cur_word.is_empty()) =>
+                {
+                    state.cur_word.push(c)
+                }
+                _ => {}
+            }
+        }
+        let in_double = top.is_some_and(|d| d.close == '"');
+        match ch {
+            '\'' if !in_double => {
+                // POSIX + Interp 221: `'` inside `"${...}"` is literal.
+                if posix && squote_is_literal_in_posix_braced_dquote(&state.stack) {
+                    state.comment_start = false;
+                    i += 1;
+                    continue;
+                }
+                // parse_matched_pair reports start_lineno for quotes.
+                state.stack.push(UnclosedDelim {
+                    close: '\'',
+                    open_line: state.line,
+                    escapes: false,
+                    report_open: true,
+                    funsub: false,
+                    command: false,
+                    term_ready: false,
+                    array_list: false,
+                });
+            }
+            '"' => {
+                state.stack.push(UnclosedDelim {
+                    close: '"',
+                    open_line: state.line,
+                    escapes: true,
+                    report_open: true,
+                    funsub: false,
+                    command: false,
+                    term_ready: false,
+                    array_list: false,
+                });
+            }
+            '`' => {
+                state.stack.push(UnclosedDelim {
+                    close: '`',
+                    open_line: state.line,
+                    escapes: true,
+                    report_open: true,
+                    funsub: false,
+                    command: false,
+                    term_ready: false,
+                    array_list: false,
+                });
+            }
+            '$' => {
+                match chars.get(i + 1) {
+                    // K3: a `$` at the buffer tail — the arm dispatch is
+                    // undecided; the oracle commits the inert fall-through.
+                    None if park.is_none() => {
+                        park = Some(CloseCharResidualPark {
+                            pos: i,
+                            snapshot: state.clone(),
+                        });
+                    }
+                    Some('{') => {
+                        // parse.y:5506: `${' followed by a FUNSUB_CHAR is a
+                        // function substitution parsed as commands; a
+                        // parameter expansion takes parse_matched_pair
+                        // (yyerror path: EOF line either way).
+                        // FUNSUB_CHAR is parser.h:85 (`#else' arm): blank,
+                        // newline or `|' only — NOT `(' (that spelling is
+                        // the `#if 0' dead arm at parser.h:83), so `${(M)x}'
+                        // is a parameter brace whose first unquoted `}'
+                        // closes (P_FIRSTCLOSE).
+                        //
+                        // K1: `${` at the buffer tail — the FUNSUB_CHAR
+                        // lookahead is undecided; the oracle commits
+                        // funsub=false (parameter brace, report_open).
+                        if chars.get(i + 2).is_none() && park.is_none() {
+                            park = Some(CloseCharResidualPark {
+                                pos: i,
+                                snapshot: state.clone(),
+                            });
+                        }
+                        let funsub = chars
+                            .get(i + 2)
+                            .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|'));
+                        state.stack.push(UnclosedDelim {
+                            close: '}',
+                            open_line: state.line,
+                            escapes: true,
+                            // `${param` is a parse_matched_pair: EOF names
+                            // the `${` line. The `${ ' funsub variant is a
+                            // command context and reports the EOF line.
+                            report_open: !funsub,
+                            funsub,
+                            command: false,
+                            term_ready: false,
+                            array_list: false,
+                        });
+                        if funsub {
+                            state.comment_start = true;
+                        }
+                        i += 1;
+                    }
+                    Some('(') => {
+                        // $( EOF takes the yyerror path: line_number at EOF.
+                        // `$((` is a single arithmetic construct parsed by
+                        // parse_matched_pair instead: EOF names the `$(`
+                        // line even when only the inner `)` was closed.
+                        //
+                        // K2: `$(` at the buffer tail — the `$((` lookahead
+                        // is undecided; the oracle commits the plain `$(`
+                        // push (report_open=false, no inner-paren push).
+                        if chars.get(i + 2).is_none() && park.is_none() {
+                            park = Some(CloseCharResidualPark {
+                                pos: i,
+                                snapshot: state.clone(),
+                            });
+                        }
+                        state.stack.push(UnclosedDelim {
+                            close: ')',
+                            open_line: state.line,
+                            escapes: true,
+                            report_open: chars.get(i + 2) == Some(&'('),
+                            funsub: false,
+                            command: false,
+                            term_ready: false,
+                            array_list: false,
+                        });
+                        // A fresh substitution body starts at a token
+                        // boundary: `$(#c` is a comment.
+                        state.comment_start = true;
+                        if chars.get(i + 2) == Some(&'(') {
+                            // $(( ... )) arithmetic nests a second ')' and is
+                            // parsed by parse_matched_pair: start_lineno.
+                            state.stack.push(UnclosedDelim {
+                                close: ')',
+                                open_line: state.line,
+                                escapes: true,
+                                report_open: true,
+                                funsub: false,
+                                command: false,
+                                term_ready: false,
+                                array_list: false,
+                            });
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    Some('\'')
+                        if top
+                            .is_none_or(|d| d.close == '}' || d.close == ')' || d.close == '`') =>
+                    {
+                        // ANSI-C $'...': single-quote close, escapes live.
+                        // parse.y:4062-4068 parse_matched_pair: inside a
+                        // grouping construct ($(...), ${...}, subshell,
+                        // backtick) a `$'` opens a nested P_ALLOWESC unit —
+                        // its \' escapes stay inside and the enclosing
+                        // construct's quote state never sees them
+                        // (rubash#222/t0286: `${foo/$a/$''}` must not read
+                        // as an unclosed `'`). Double quotes stay excluded:
+                        // `"` is not in the guard set.
+                        state.stack.push(UnclosedDelim {
+                            close: '\'',
+                            open_line: state.line,
+                            escapes: true,
+                            report_open: true,
+                            funsub: false,
+                            command: false,
+                            term_ready: false,
+                            array_list: false,
+                        });
+                        i += 1;
+                    }
+                    _ => {}
+                }
+            }
+            '(' if top.is_none() => {
+                // Command-position `(` opens a subshell; `name=(` in an
+                // assignment word opens an array list (`declare -a ddd=(aaa`
+                // continues on the next line). A `(` elsewhere is a parse
+                // error for the parser, not a pending delimiter.
+                if state.at_command || (state.cur_word.len() > 1 && state.cur_word.ends_with('=')) {
+                    let is_subshell = state.at_command && state.cur_word.is_empty();
+                    let is_array_list = !is_subshell;
+                    state.stack.push(UnclosedDelim {
+                        close: ')',
+                        open_line: state.line,
+                        escapes: true,
+                        // Array lists take parse_matched_pair's start_lineno
+                        // report (`ddd=(aaa` EOF names the `(` line); a
+                        // command-position subshell reports the EOF line.
+                        report_open: !is_subshell,
+                        funsub: false,
+                        // GNU yyerror "from `(' command" applies only to a
+                        // command-position subshell; `name=(...` is an
+                        // array-list matched pair ("matching `)'"). The
+                        // `at_command` flag is only refreshed at word
+                        // boundaries, so a pending `name=` word means this
+                        // `(` is array text, not a subshell.
+                        command: is_subshell,
+                        term_ready: false,
+                        array_list: is_array_list,
+                    });
+                }
+                state.comment_start = true;
+                state.at_command = true;
+                state.cur_word.clear();
+            }
+            '(' if top.is_some_and(|d| d.close == ')' || (d.close == '}' && d.funsub)) => {
+                // Subshell nested inside `$(...)`/`( ... )`/`${ ...; }`:
+                // the body is command context where `(` is legal. An
+                // immediately adjacent `(` (`((x`) is the arithmetic
+                // construct's inner paren — a matched pair, not a command.
+                state.stack.push(UnclosedDelim {
+                    close: ')',
+                    open_line: state.line,
+                    escapes: true,
+                    // `((x` arithmetic takes parse_matched_pair's
+                    // start_lineno report like `$((` does; a real nested
+                    // subshell reports the EOF line (yyerror).
+                    report_open: i > 0 && chars[i - 1] == '(',
+                    funsub: false,
+                    command: !(i > 0 && chars[i - 1] == '('),
+                    term_ready: false,
+                    array_list: false,
+                });
+                state.comment_start = true;
+            }
+            '{' if top.is_some_and(|d| d.close == '}' && d.funsub) => {
+                // `{ cmd; }' group inside a function substitution: `}' only
+                // closes after a command terminator, same rule.
+                state.stack.push(UnclosedDelim {
+                    close: '}',
+                    open_line: state.line,
+                    escapes: true,
+                    report_open: false,
+                    funsub: true,
+                    command: true,
+                    term_ready: false,
+                    array_list: false,
+                });
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    park
+}
+
+/// Mirror of skip.rs `is_pure_identifier` (verbatim; private there).
+fn skip_word_is_pure_identifier(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+/// Mirror of skip.rs `is_command_position_boundary` (verbatim; private
+/// there).
+fn skip_word_is_command_position_boundary(word: &str) -> bool {
+    matches!(
+        word,
+        "if" | "then"
+            | "elif"
+            | "else"
+            | "fi"
+            | "while"
+            | "until"
+            | "do"
+            | "done"
+            | "esac"
+            | "!"
+            | "time"
+            | "coproc"
+            | "{"
+            | "}"
+    )
+}
+
 fn update_command_substitution_case_depth(
     chars: &[char],
     index: usize,
@@ -2347,6 +3940,628 @@ fn command_substitution_reserved_word_allows_next(word: &str) -> bool {
             | "done"
             | "esac"
     )
+}
+
+#[cfg(test)]
+mod balanced_residual_incremental_tests {
+    use super::balanced_residuals_advance;
+    use super::BalancedResidualState;
+    use crate::lexer::skip::command_substitutions_balanced as oracle;
+
+    /// Drive the checkpoint exactly like `GroupTextScans::advance_balanced`
+    /// (restore snapshot at `resume`, advance over the pending mirror,
+    /// store park or stable end) and assert at EVERY appended-line prefix
+    /// that the committed answer equals the oracle's answer for that
+    /// prefix, and the end state equals the full scan of that prefix. The
+    /// mirror grows one RAW line (text + '\n') per prefix, exactly like
+    /// read_next_source_group accumulates `pending`.
+    fn assert_incremental_matches_full(lines: &[&str]) {
+        let mut chars: Vec<char> = Vec::new();
+        let mut resume = 0usize;
+        let mut snapshot = BalancedResidualState::default();
+        for (line_index, line) in lines.iter().enumerate() {
+            chars.extend(line.chars());
+            chars.push('\n');
+            let mut state = snapshot.clone();
+            let park = balanced_residuals_advance(&chars, resume, &mut state);
+            let mut full = BalancedResidualState::default();
+            let _ = balanced_residuals_advance(&chars, 0, &mut full);
+            let text: String = chars.iter().collect();
+            assert_eq!(
+                state, full,
+                "end state at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            assert_eq!(
+                state.is_unbalanced(),
+                !oracle(&text),
+                "answer at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            match park {
+                Some(park) => {
+                    resume = park.pos;
+                    snapshot = park.snapshot;
+                }
+                None => {
+                    resume = chars.len();
+                    snapshot = state;
+                }
+            }
+        }
+        // The same driving pattern without the final '\n' (the group's last
+        // line may be un-terminated): parks cover the tail lookahead.
+        let mut chars: Vec<char> = Vec::new();
+        let mut resume = 0usize;
+        let mut snapshot = BalancedResidualState::default();
+        for (line_index, line) in lines.iter().enumerate() {
+            chars.extend(line.chars());
+            if line_index + 1 < lines.len() {
+                chars.push('\n');
+            }
+            let mut state = snapshot.clone();
+            let park = balanced_residuals_advance(&chars, resume, &mut state);
+            let mut full = BalancedResidualState::default();
+            let _ = balanced_residuals_advance(&chars, 0, &mut full);
+            let text: String = chars.iter().collect();
+            assert_eq!(state, full, "no-final-nl state at prefix {line_index}");
+            assert_eq!(
+                state.is_unbalanced(),
+                !oracle(&text),
+                "no-final-nl answer at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            match park {
+                Some(park) => {
+                    resume = park.pos;
+                    snapshot = park.snapshot;
+                }
+                None => {
+                    resume = chars.len();
+                    snapshot = state;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_matches_full_required_shapes() {
+        // Multi-line plain command substitution.
+        assert_incremental_matches_full(&["echo $(a", "b)"]);
+        // The residual false-positive override this checker exists for
+        // (skip.rs bb09aa28): `$(case x in x) esac)` is BALANCED.
+        assert_incremental_matches_full(&["echo $(case a in a) echo x", "esac)"]);
+        assert_incremental_matches_full(&["$(case x in", "a) :;;", "esac)"]);
+        // Unclosed `$(`: unbalanced until the closing line arrives.
+        assert_incremental_matches_full(&["x=$(gzip", "-dc file.gz)"]);
+        // Backtick substitutions, open and closed.
+        assert_incremental_matches_full(&["echo `date", "+%s` after"]);
+        assert_incremental_matches_full(&["echo `cat f", "| sort`"]);
+        // `$((` arithmetic fallback shapes.
+        assert_incremental_matches_full(&["echo $((", "1+", "2))"]);
+        assert_incremental_matches_full(&["echo $((", "case x in x) esac;; ", ")"]);
+        // `${...}` span skipping with nested quotes in the body.
+        assert_incremental_matches_full(&["x=${a:-${b", "}}"]);
+        assert_incremental_matches_full(&["x=\"${IFS+'}'z", "}\""]);
+        // `$'...'` ANSI-C strings.
+        assert_incremental_matches_full(&["echo $'a\\n", "b'"]);
+        // Comments and escapes across lines.
+        assert_incremental_matches_full(&["echo a #c (", "d", "e"]);
+        assert_incremental_matches_full(&["echo a \\", "b ( c"]);
+        // Heredoc bodies inside a comsub unit stay opaque to the balancer.
+        assert_incremental_matches_full(&["echo $(cat <<eof", "here ) doc", "eof", ")"]);
+    }
+
+    #[test]
+    fn incremental_matches_full_park_shapes() {
+        // B1: a `${` span that only closes on a later line.
+        assert_incremental_matches_full(&["echo ${a", "} x"]);
+        assert_incremental_matches_full(&["echo ${a:-'", "'}"]);
+        // B2: a backtick that only closes on a later line.
+        assert_incremental_matches_full(&["echo `a", "b` c"]);
+        // B3: a `$(` that only closes on a later line (the failing skip is
+        // re-derived per line until the unit closes).
+        assert_incremental_matches_full(&["echo $(a", "(b) c)"]);
+        assert_incremental_matches_full(&["x=\"$(fo", "o)\""]);
+        // B4: a `$` at the buffer tail (`$` then a line break, then the
+        // two-character lookahead materializes).
+        assert_incremental_matches_full(&["echo $", "(a) b"]);
+        assert_incremental_matches_full(&["echo $", "'a' b"]);
+        assert_incremental_matches_full(&["echo $", "{a} b"]);
+        // B5: closure through an `esac)` lookahead that runs off the buffer
+        // end undecided; the following `;;` / `esac` flips the decision.
+        assert_incremental_matches_full(&["echo $(case a in x) esac)", ";; )"]);
+        assert_incremental_matches_full(&["echo $(case a in x) esac)", "esac)"]);
+        // Nested units closing in the opposite order they opened.
+        assert_incremental_matches_full(&["echo $(a $(b", "c))"]);
+        // quote state straddling a line boundary inside a unit.
+        assert_incremental_matches_full(&["echo $(echo 'q", "z')"]);
+    }
+
+    /// Deterministic LCG so a failure reproduces bit for bit.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+    }
+
+    /// Seeded fuzz (>=2000 required; 4000 for parity with the perf8
+    /// classes): construct-dense random token soups must satisfy the
+    /// incremental == full contract at every prefix.
+    #[test]
+    fn incremental_matches_full_randomized() {
+        const FRAGMENTS: &[&str] = &[
+            "$( ",
+            ") ",
+            "$((",
+            ")) ",
+            "` ",
+            "${x}",
+            "${ ",
+            "}",
+            "'a'",
+            "\"q",
+            "q\"",
+            "\\",
+            "#c ",
+            "case ",
+            "esac",
+            "esac)",
+            " in ",
+            "; ",
+            ";; ",
+            "&&",
+            "|",
+            "<<EOF",
+            "EOF",
+            "<<<",
+            " x ",
+            "echo ",
+            "$(case a in b) esac)",
+            " a(",
+            "(( ",
+            " $' ",
+            "'",
+            "\"",
+            "$(",
+            "`",
+            ")",
+            "${a:-${b",
+            "${x}'",
+            "$('",
+            "}\"",
+        ];
+        let mut rng = Lcg(0x292_0000_0002);
+        for _case in 0..4000u64 {
+            let fragment_count = 2 + (rng.next() % 6) as usize;
+            let mut fragments = Vec::with_capacity(fragment_count);
+            for _ in 0..fragment_count {
+                fragments.push(FRAGMENTS[(rng.next() as usize) % FRAGMENTS.len()]);
+            }
+            let max_lines = 4.min(fragment_count) as u64;
+            let line_count = (1 + (rng.next() % max_lines)) as usize;
+            let mut lines: Vec<String> = vec![String::new(); line_count];
+            for (i, fragment) in fragments.iter().enumerate() {
+                let target = if line_count == 1 {
+                    0
+                } else {
+                    (i * line_count / fragment_count).min(line_count - 1)
+                };
+                lines[target].push_str(fragment);
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            assert_incremental_matches_full(&lines);
+        }
+    }
+}
+
+#[cfg(test)]
+mod subscript_residual_incremental_tests {
+    use super::subscript_residuals_advance;
+    use super::SubscriptResidualState;
+    use crate::lexer::skip::unclosed_array_subscript_line as oracle;
+
+    /// Same driving pattern as the balanced tests: one raw line (with its
+    /// '\n') per prefix; end state and reported payload must equal the full
+    /// scan / the skip.rs oracle at every prefix.
+    fn assert_incremental_matches_full(lines: &[&str]) {
+        let mut chars: Vec<char> = Vec::new();
+        let mut resume = 0usize;
+        let mut snapshot = SubscriptResidualState::default();
+        for (line_index, line) in lines.iter().enumerate() {
+            chars.extend(line.chars());
+            chars.push('\n');
+            let mut state = snapshot.clone();
+            let park = subscript_residuals_advance(&chars, resume, &mut state);
+            let mut full = SubscriptResidualState::default();
+            let _ = subscript_residuals_advance(&chars, 0, &mut full);
+            let text: String = chars.iter().collect();
+            assert_eq!(
+                state, full,
+                "end state at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            assert_eq!(
+                state.reported,
+                oracle(&text),
+                "reported payload at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            assert_eq!(
+                state.is_open(),
+                oracle(&text).is_some(),
+                "open flag at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            match park {
+                Some(park) => {
+                    resume = park.pos;
+                    snapshot = park.snapshot;
+                }
+                None => {
+                    resume = chars.len();
+                    snapshot = state;
+                }
+            }
+        }
+        // Without the final '\n'.
+        let mut chars: Vec<char> = Vec::new();
+        let mut resume = 0usize;
+        let mut snapshot = SubscriptResidualState::default();
+        for (line_index, line) in lines.iter().enumerate() {
+            chars.extend(line.chars());
+            if line_index + 1 < lines.len() {
+                chars.push('\n');
+            }
+            let mut state = snapshot.clone();
+            let park = subscript_residuals_advance(&chars, resume, &mut state);
+            let mut full = SubscriptResidualState::default();
+            let _ = subscript_residuals_advance(&chars, 0, &mut full);
+            let text: String = chars.iter().collect();
+            assert_eq!(state, full, "no-final-nl state at prefix {line_index}");
+            assert_eq!(
+                state.reported,
+                oracle(&text),
+                "no-final-nl reported at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            match park {
+                Some(park) => {
+                    resume = park.pos;
+                    snapshot = park.snapshot;
+                }
+                None => {
+                    resume = chars.len();
+                    snapshot = state;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_matches_full_required_shapes() {
+        // parse.y:5635-5643: an unclosed `[` at a command-position
+        // identifier swallows the rest of the input (rubash#221).
+        assert_incremental_matches_full(&["a[b", "c"]);
+        assert_incremental_matches_full(&["arr[x", "=1"]);
+        // Inside a compound assignment the subscript reports compassign.
+        assert_incremental_matches_full(&["x=([a", "b]=1)"]);
+        assert_incremental_matches_full(&["declare -a d=([0", "]=a [1]=b)"]);
+        // `echo a[b` stays literal: `a` is an argument, not command
+        // position (parse.y:5899).
+        assert_incremental_matches_full(&["echo a[b", "c"]);
+        // x=a[b has no identifier prefix at `[` — stays an assignment value.
+        assert_incremental_matches_full(&["x=a[b", "c"]);
+        // Closed subscripts never report.
+        assert_incremental_matches_full(&["arr[0]=1", "arr[1]=2"]);
+        assert_incremental_matches_full(&["x=([a]=1", "[b]=2)"]);
+        // Reserved words keep the next word in command position.
+        assert_incremental_matches_full(&["if a[b", "then", "fi"]);
+        // Command substitutions own their internals (balanced units skip).
+        assert_incremental_matches_full(&["echo $(a [b", "c)"]);
+        // Backtick bodies.
+        assert_incremental_matches_full(&["echo `a [b", "c`"]);
+        // Comments: `#` at word start swallows the line.
+        assert_incremental_matches_full(&["# a[b", "c"]);
+        // $'...' ANSI-C bodies.
+        assert_incremental_matches_full(&["echo $'a[b'", "x[y"]);
+    }
+
+    #[test]
+    fn incremental_matches_full_park_shapes() {
+        // S1: the `[` only closes on a later line — the report fires on
+        // every intermediate prefix and clears when the `]` arrives.
+        assert_incremental_matches_full(&["a[b", "] =1", "c"]);
+        assert_incremental_matches_full(&["a[0", "]", "+1]=x"]);
+        // Nested `[ ... ]` pairs inside the subscript.
+        assert_incremental_matches_full(&["a[b[0", "]]", "=x"]);
+        // Quotes inside the subscript body.
+        assert_incremental_matches_full(&["a['b", "']", "=1"]);
+        assert_incremental_matches_full(&["a[\"b", "\"]", "=1"]);
+        // S2: a `$(...` unit whose skip fails per line until it closes.
+        assert_incremental_matches_full(&["a[$(b", "c)]", "=1"]);
+        assert_incremental_matches_full(&["a[$(case x in x) esac)", ";; )]", "=1"]);
+        // S3: a backtick that only closes on a later line.
+        assert_incremental_matches_full(&["a[`b", "c`]", "=1"]);
+        // S4: a `$` at the buffer tail whose `$'`/`$(` lookahead
+        // materializes on the next line.
+        assert_incremental_matches_full(&["a[$", "(b)]"]);
+        assert_incremental_matches_full(&["a[$", "'b']"]);
+        // Command position tracking across newlines and separators.
+        assert_incremental_matches_full(&["x=1;", "a[b", "] =2"]);
+        assert_incremental_matches_full(&["f () {", "a[b", "] =1;", "}"]);
+    }
+
+    /// Deterministic LCG so a failure reproduces bit for bit.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+    }
+
+    /// Seeded fuzz (>=2000 required; 4000 for parity).
+    #[test]
+    fn incremental_matches_full_randomized() {
+        const FRAGMENTS: &[&str] = &[
+            "a[",
+            "b]",
+            "[",
+            "]",
+            "=[",
+            "x=(",
+            "(",
+            ")",
+            "'q'",
+            "\"q",
+            "q\"",
+            "$(",
+            "))",
+            "$((",
+            "`",
+            "`x",
+            "$'",
+            "'",
+            "\"",
+            "\\",
+            "#c ",
+            "if ",
+            "then",
+            "fi",
+            "while ",
+            "do",
+            "done",
+            "case ",
+            "esac",
+            " in ",
+            "; ",
+            "&&",
+            "|",
+            " a ",
+            "echo ",
+            " ] ",
+            "$(case a in b) esac)",
+            " a[0]",
+            "[[",
+            "]]",
+            "${x[",
+            "]}",
+        ];
+        let mut rng = Lcg(0x292_0000_0003);
+        for _case in 0..4000u64 {
+            let fragment_count = 2 + (rng.next() % 6) as usize;
+            let mut fragments = Vec::with_capacity(fragment_count);
+            for _ in 0..fragment_count {
+                fragments.push(FRAGMENTS[(rng.next() as usize) % FRAGMENTS.len()]);
+            }
+            let max_lines = 4.min(fragment_count) as u64;
+            let line_count = (1 + (rng.next() % max_lines)) as usize;
+            let mut lines: Vec<String> = vec![String::new(); line_count];
+            for (i, fragment) in fragments.iter().enumerate() {
+                let target = if line_count == 1 {
+                    0
+                } else {
+                    (i * line_count / fragment_count).min(line_count - 1)
+                };
+                lines[target].push_str(fragment);
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            assert_incremental_matches_full(&lines);
+        }
+    }
+}
+
+#[cfg(test)]
+mod close_char_residual_incremental_tests {
+    use super::close_char_residuals_advance;
+    use super::unclosed_input_close_char_posix as oracle;
+    use super::CloseCharResidualState;
+
+    fn assert_incremental_matches_full(lines: &[&str], posix: bool) {
+        let mut chars: Vec<char> = Vec::new();
+        let mut resume = 0usize;
+        let mut snapshot = CloseCharResidualState::default();
+        for (line_index, line) in lines.iter().enumerate() {
+            chars.extend(line.chars());
+            chars.push('\n');
+            let mut state = snapshot.clone();
+            let park = close_char_residuals_advance(&chars, resume, &mut state, posix);
+            let mut full = CloseCharResidualState::default();
+            let _ = close_char_residuals_advance(&chars, 0, &mut full, posix);
+            let text: String = chars.iter().collect();
+            assert_eq!(
+                state, full,
+                "end state at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            assert_eq!(
+                state.is_open(),
+                oracle(&text, posix).is_some(),
+                "open flag at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            match park {
+                Some(park) => {
+                    resume = park.pos;
+                    snapshot = park.snapshot;
+                }
+                None => {
+                    resume = chars.len();
+                    snapshot = state;
+                }
+            }
+        }
+        // Without the final '\n'.
+        let mut chars: Vec<char> = Vec::new();
+        let mut resume = 0usize;
+        let mut snapshot = CloseCharResidualState::default();
+        for (line_index, line) in lines.iter().enumerate() {
+            chars.extend(line.chars());
+            if line_index + 1 < lines.len() {
+                chars.push('\n');
+            }
+            let mut state = snapshot.clone();
+            let park = close_char_residuals_advance(&chars, resume, &mut state, posix);
+            let mut full = CloseCharResidualState::default();
+            let _ = close_char_residuals_advance(&chars, 0, &mut full, posix);
+            let text: String = chars.iter().collect();
+            assert_eq!(state, full, "no-final-nl state at prefix {line_index}");
+            assert_eq!(
+                state.is_open(),
+                oracle(&text, posix).is_some(),
+                "no-final-nl open at prefix {line_index} of {lines:?} ({text:?})"
+            );
+            match park {
+                Some(park) => {
+                    resume = park.pos;
+                    snapshot = park.snapshot;
+                }
+                None => {
+                    resume = chars.len();
+                    snapshot = state;
+                }
+            }
+        }
+    }
+
+    fn assert_both_modes(lines: &[&str]) {
+        assert_incremental_matches_full(lines, false);
+        assert_incremental_matches_full(lines, true);
+    }
+
+    #[test]
+    fn incremental_matches_full_required_shapes() {
+        // Multi-line quotes, backticks, `$(...)`, `${...}`.
+        assert_both_modes(&["echo 'a", "b' c"]);
+        assert_both_modes(&["echo \"a", "b\" c"]);
+        assert_both_modes(&["echo `a", "b` c"]);
+        assert_both_modes(&["echo $(a", "b) c"]);
+        assert_both_modes(&["echo ${a", "} c"]);
+        assert_both_modes(&["echo $((", "1+2))"]);
+        // Subshells and array lists at command position.
+        assert_both_modes(&["(a", "b)"]);
+        assert_both_modes(&["x=(1", "2)"]);
+        assert_both_modes(&["declare -a d=(a", "b)"]);
+        // `${ x; }` function substitution (parse.y:5506 FUNSUB_CHAR).
+        assert_both_modes(&["echo ${ a", "; } b"]);
+        assert_both_modes(&["echo ${ a", "b"]); // never closed
+                                                // `{ cmd; }` group inside a funsub.
+        assert_both_modes(&["echo ${ { a; }", "} b"]);
+        // Nested subshell inside `$( )`.
+        assert_both_modes(&["echo $(( (a", ") ))"]);
+        assert_both_modes(&["echo $( (a", ") )"]);
+        // Comments at top level and inside substitutions.
+        assert_both_modes(&["echo a # ) ' \"", "b"]);
+        assert_both_modes(&["echo $(a # ) ' ", "b)"]);
+        // `$'` ANSI-C inside grouping constructs (rubash#222).
+        assert_both_modes(&["echo ${foo/$a/$'", "'}"]);
+        // Escapes and word continuations.
+        assert_both_modes(&["echo a\\", "b"]);
+        assert_both_modes(&["echo $(a \\", "b)"]);
+        // POSIX Interp 221: `'` inside `"${...}"` is literal text.
+        assert_both_modes(&["echo \"${IFS+'bar", "}\" x"]);
+        // Closed everything.
+        assert_both_modes(&["echo a b", "c d"]);
+    }
+
+    #[test]
+    fn incremental_matches_full_park_shapes() {
+        // K1: `${` at the buffer tail — the FUNSUB_CHAR lookahead
+        // materializes on the next line (both outcomes).
+        assert_both_modes(&["echo ${", " x; } b"]);
+        assert_both_modes(&["echo ${", "a} b"]);
+        assert_both_modes(&["echo ${", ""]);
+        // K2: `$(` at the buffer tail — the `$((` lookahead decides the
+        // stack shape (one push vs two).
+        assert_both_modes(&["echo $(", "(1+2))"]);
+        assert_both_modes(&["echo $(", "a)"]);
+        assert_both_modes(&["echo $(", ""]);
+        // K3: `$` at the buffer tail.
+        assert_both_modes(&["echo $", "'a'"]);
+        assert_both_modes(&["echo $", "x"]);
+        assert_both_modes(&["echo $", ""]);
+        // K4: top-level `\` at the buffer tail.
+        assert_both_modes(&["echo a\\", "b"]);
+        assert_both_modes(&["echo x=\\", "(a)"]);
+        // term_ready funsub closure across lines (`${ a` then `; }`).
+        assert_both_modes(&["echo ${ a", "; }"]);
+        assert_both_modes(&["echo ${ a; }", ""]);
+        // The funsub `}` only closes at command position after a
+        // terminator; a closed subshell inside arms it.
+        assert_both_modes(&["echo ${ (a)", "; }"]);
+        assert_both_modes(&["echo ${ (a", "); }"]);
+        // Mid-command `(` is not a delimiter (echo ( stays open? no —
+        // oracle decides; the incremental must just agree).
+        assert_both_modes(&["echo (a", "b)"]);
+        // Backslash-escaped newlines feeding cur_word (array list shape).
+        assert_both_modes(&["x=a\\", "=(1 2)"]);
+    }
+
+    /// Deterministic LCG so a failure reproduces bit for bit.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+    }
+
+    /// Seeded fuzz (>=2000 required; 4000 for parity) over both POSIX
+    /// modes.
+    #[test]
+    fn incremental_matches_full_randomized() {
+        const FRAGMENTS: &[&str] = &[
+            "$( ", ") ", "$((", ")) ", "` ", "${", "${ ", "${x}", "}", "'a'", "\"q", "q\"", "\\",
+            "#c ", "case ", "esac", " in ", "; ", ";; ", "&&", "|", " x ", "echo ", " a(", "(( ",
+            " $' ", "'", "\"", "$(", "`", ")", "={", "${a:-${b", "${x'}", "}\"", "( ", " { ", "} ",
+            "a=(", "a=(1 ", "$('", "((", "time ", "coproc ",
+        ];
+        let mut rng = Lcg(0x292_0000_0004);
+        for _case in 0..4000u64 {
+            let fragment_count = 2 + (rng.next() % 6) as usize;
+            let mut fragments = Vec::with_capacity(fragment_count);
+            for _ in 0..fragment_count {
+                fragments.push(FRAGMENTS[(rng.next() as usize) % FRAGMENTS.len()]);
+            }
+            let max_lines = 4.min(fragment_count) as u64;
+            let line_count = (1 + (rng.next() % max_lines)) as usize;
+            let mut lines: Vec<String> = vec![String::new(); line_count];
+            for (i, fragment) in fragments.iter().enumerate() {
+                let target = if line_count == 1 {
+                    0
+                } else {
+                    (i * line_count / fragment_count).min(line_count - 1)
+                };
+                lines[target].push_str(fragment);
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let posix = _case % 2 == 0;
+            assert_incremental_matches_full(&lines, posix);
+        }
+    }
 }
 
 #[cfg(test)]

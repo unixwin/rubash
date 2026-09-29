@@ -231,6 +231,15 @@ pub(crate) fn read_next_source_group(
         Some(crate::lexer::GroupScanFeeder::new(posix))
     };
     let mut broke_complete = false;
+    // perf9 (#292B third wave): the parked text-scan battery over the exact
+    // `pending` mirror. `pending` is append-only inside this loop (only
+    // push_str(raw) ever touches it), so the checkpoints never invalidate:
+    // each candidate line advances every still-undecided machine over its
+    // own tail instead of re-scanning the whole group (GNU parse.y:3557
+    // read_token streams token by token and never re-reads consumed text).
+    // The alias-live arm below keeps the exact fresh whole-pending scan:
+    // alias expansion may rewrite any part of the text.
+    let mut text_scans = GroupTextScans::new(posix);
     while *index < raw_lines.len() {
         let raw = raw_lines[*index];
         let text = raw.trim_end_matches('\n');
@@ -263,6 +272,7 @@ pub(crate) fn read_next_source_group(
         }
         group.push((text.to_string(), is_body));
         pending.push_str(raw);
+        text_scans.push_raw_line(raw);
         if let Some(scan) = scan.as_mut() {
             scan.push_line(text, pending.len());
         }
@@ -276,8 +286,17 @@ pub(crate) fn read_next_source_group(
                 // rescans entirely; the text scans then run only at
                 // candidate-complete lines. `||` is commutative, so the
                 // answer is byte-identical to the fresh scan's.
-                let needs_more =
-                    scan.token_level_needs_more() || stdin_source_text_needs_more(&pending, posix);
+                //
+                // perf9 (#292B third wave): the text-level half now advances
+                // the parked GroupTextScans machines instead of full-scanning
+                // `pending` through every scanner per candidate line — arm
+                // for arm the same predicates stdin_source_text_needs_more
+                // evaluates, each answered from its checkpoint over the
+                // append-only pending mirror (quotes / comsub residual +
+                // corrected balance / array subscript / matched-pair close
+                // char / function-body delimiters). Per-prefix equivalence
+                // is enforced by the continuation.rs incremental tests.
+                let needs_more = scan.token_level_needs_more() || text_scans.needs_more(&pending);
                 if !needs_more {
                     broke_complete = true;
                     break;
@@ -296,6 +315,438 @@ pub(crate) fn read_next_source_group(
         _ => None,
     };
     Some((pending, start_line, group, feeder_tokens))
+}
+
+/// One parked text-scan checkpoint over the group's `pending` mirror:
+/// the char offset the scan resumes from, and the machine state there.
+/// `None` (in the owning struct) means the next call full-scans from 0.
+struct ScanCheckpoint<S> {
+    resume: usize,
+    snapshot: S,
+}
+
+/// Phase of a function-body delimiter scan
+/// (incremental mirror of stdin_source_has_unclosed_function_delimited_body).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FnBodyPhase {
+    /// Still scanning for the first unquoted delimiter.
+    Search,
+    /// Delimiter found: counting its unquoted depth from that fixed point.
+    /// `signature` is the once-computed function-signature answer for the
+    /// text BEFORE the delimiter — that prefix never changes again (the
+    /// group only appends), so the oracle's per-call signature re-check
+    /// collapses to this stored bit.
+    Depth { signature: bool },
+}
+
+/// Incremental state of one function-body delimiter scan
+/// (`stdin_source_has_unclosed_function_delimited_body(source, delim)`).
+///
+/// The oracle, per candidate line: (1) `first_unquoted_function_body_delimiter`
+/// scans for the first unquoted `{` (or `(`), where a `(` followed by
+/// optional whitespace and `)` is a `name ()` signature, not a body opener —
+/// and after such a rejection the search RESTARTS with a fresh
+/// `CommentAwareScan` from just past the rejected `(`; (2) if found at `d`
+/// and `unquoted_delimiter_depth(source[d..]) != 0`, the text before `d`
+/// must look like a function signature. Append-only prefix model: the
+/// search advances monotonically (a found delimiter is fixed forever), the
+/// depth scan is a fresh fold from `d`, and the only forward decision that
+/// can flip on a longer buffer is the `(`-rejection test when only
+/// whitespace remains to the buffer end — that one position parks (the
+/// committed trajectory still accepts the `(` for THIS prefix, exactly like
+/// the oracle's trim_start-at-EOF; the park re-derives from `search_from`
+/// with a fresh scan, exactly like the oracle's next loop iteration).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FnBodyResidualState {
+    phase: FnBodyPhase,
+    scan: CommentAwareScan,
+    depth: usize,
+    search_from: usize,
+}
+
+impl Default for FnBodyResidualState {
+    fn default() -> Self {
+        Self {
+            phase: FnBodyPhase::Search,
+            scan: CommentAwareScan::new(),
+            depth: 0,
+            search_from: 0,
+        }
+    }
+}
+
+impl FnBodyResidualState {
+    /// The oracle's answer for the current prefix:
+    /// `stdin_source_has_unclosed_function_delimited_body`.
+    fn is_open(&self) -> bool {
+        matches!(self.phase, FnBodyPhase::Depth { signature: true }) && self.depth != 0
+    }
+}
+
+/// A re-derivation point returned by [`fnbody_residuals_advance`].
+struct FnBodyResidualPark {
+    pos: usize,
+    snapshot: FnBodyResidualState,
+}
+
+/// Advance one function-body delimiter scan over `chars[from..]`. `pending`
+/// is the whole accumulated group text (needed once, at the delimiter-found
+/// transition, for the signature check over the text before the delimiter).
+fn fnbody_residuals_advance(
+    chars: &[char],
+    from: usize,
+    state: &mut FnBodyResidualState,
+    delim: char,
+    pending: &str,
+) -> Option<FnBodyResidualPark> {
+    let close = match delim {
+        '{' => '}',
+        '(' => ')',
+        _ => return None,
+    };
+    let mut index = from.min(chars.len());
+    let mut park: Option<FnBodyResidualPark> = None;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if let FnBodyPhase::Search = state.phase {
+            let is_active = state.scan.active(ch);
+            if is_active && ch == delim {
+                if delim == '(' {
+                    // The `name ()` rejection test consults unbounded
+                    // forward text (whitespace run, then `)` or not).
+                    let mut look = index + 1;
+                    while look < chars.len() && chars[look].is_whitespace() {
+                        look += 1;
+                    }
+                    if look >= chars.len() {
+                        // Undecided: only whitespace to the buffer end. The
+                        // oracle accepts this `(` for THIS prefix
+                        // (trim_start at EOF leaves no `)`); commit that,
+                        // and park a fresh search iteration at search_from
+                        // so the next line re-derives the rejection.
+                        if park.is_none() {
+                            park = Some(FnBodyResidualPark {
+                                pos: state.search_from,
+                                snapshot: FnBodyResidualState {
+                                    phase: FnBodyPhase::Search,
+                                    scan: CommentAwareScan::new(),
+                                    depth: 0,
+                                    search_from: state.search_from,
+                                },
+                            });
+                        }
+                    } else if chars[look] == ')' {
+                        // Decided rejection (`name ()` signature): restart
+                        // the search FRESH from just past the `(`, exactly
+                        // the oracle's next first_unquoted_char iteration.
+                        state.search_from = index + 1;
+                        state.scan = CommentAwareScan::new();
+                        index += 1;
+                        continue;
+                    }
+                }
+                // Accept: the delimiter is fixed forever; compute the
+                // signature ONCE and start the depth fold fresh AT the
+                // delimiter (the oracle's unquoted_delimiter_depth(source[d..]).
+                let signature = fnbody_signature_before(chars, index, pending);
+                state.phase = FnBodyPhase::Depth { signature };
+                state.scan = CommentAwareScan::new();
+                state.depth = 0;
+            }
+        }
+        if let FnBodyPhase::Depth { .. } = state.phase {
+            if state.scan.active(ch) {
+                if ch == delim {
+                    state.depth += 1;
+                } else if ch == close {
+                    state.depth = state.depth.saturating_sub(1);
+                }
+            }
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+    park
+}
+
+/// The signature check the oracle runs over `source[..delimiter].trim_end()`
+/// (stdin_source_has_unclosed_function_delimited_body's tail): the peeled
+/// `name ()` form or the `function NAME` keyword form. `delimiter` is a
+/// CHAR index into the pending mirror; `pending` carries the same text.
+fn fnbody_signature_before(chars: &[char], delimiter: usize, pending: &str) -> bool {
+    let byte = pending
+        .char_indices()
+        .nth(delimiter)
+        .map(|(byte, _)| byte)
+        .unwrap_or(pending.len());
+    let signature = pending[..byte].trim_end();
+    function_body_opener_signature(signature)
+}
+
+/// Signature forms shared by stdin_source_has_unclosed_function_delimited_body
+/// (the oracle) and the incremental FnBody scanner (perf9).
+fn function_body_opener_signature(signature: &str) -> bool {
+    // Same fall-through as stdin_source_is_function_signature: a
+    // `function f()` header peels to `function f`, which is not a single
+    // WORD, so the keyword-form check below must still run
+    // (parse.y:1056 FUNCTION WORD '(' ')' newline_list function_body).
+    if let Some(before_close) = signature.strip_suffix(')') {
+        if let Some(name) = before_close.trim_end().strip_suffix('(') {
+            if is_stdin_function_name(name.trim_end()) {
+                return true;
+            }
+        }
+    }
+
+    signature
+        .strip_prefix("function ")
+        .map(function_keyword_operand_name)
+        .is_some_and(is_stdin_function_keyword_name)
+}
+
+/// The parked text scanners of the group reader's candidate-line
+/// completeness battery (perf9, #292B third wave).
+///
+/// `stdin_source_text_needs_more(pending, posix)` re-ran every text
+/// predicate over the WHOLE accumulated group per candidate line —
+/// measured at 3.56 G chars per arm for GNU bash's configure (`-n` 22.7 s
+/// vs GNU 5.3.0's 37 ms). This struct mirrors `pending` char-for-char
+/// (append-only: only push_raw_line ever extends it) and answers each
+/// predicate from a checkpointed scan machine that advances over the
+/// appended tail, parking wherever a forward decision
+/// (`$(`/`${`/backtick/`[`/`esac)` lookaheads, buffer-tail two-char
+/// lookaheads) is not yet decided by the text read so far. The machines
+/// live next to the #292 family in lexer/continuation.rs; the oracles
+/// (has_unclosed_quotes, has_unclosed_command_substitution +
+/// command_substitutions_balanced, unclosed_array_subscript_line,
+/// unclosed_input_close_char_posix, the function-body checks) stay
+/// authoritative for every other call site, and the per-prefix equivalence
+/// is enforced by the incremental tests there.
+struct GroupTextScans {
+    /// Exact char mirror of the accumulated `pending` group text.
+    chars: Vec<char>,
+    posix: bool,
+    quotes: Option<ScanCheckpoint<crate::lexer::QuotesResidualState>>,
+    comsub: Option<ScanCheckpoint<crate::lexer::ComsubResidualState>>,
+    balanced: Option<ScanCheckpoint<crate::lexer::BalancedResidualState>>,
+    subscript: Option<ScanCheckpoint<crate::lexer::SubscriptResidualState>>,
+    close_char: Option<ScanCheckpoint<crate::lexer::CloseCharResidualState>>,
+    fnbody_brace: Option<ScanCheckpoint<FnBodyResidualState>>,
+    fnbody_paren: Option<ScanCheckpoint<FnBodyResidualState>>,
+}
+
+impl GroupTextScans {
+    fn new(posix: bool) -> Self {
+        Self {
+            chars: Vec::new(),
+            posix,
+            quotes: Some(ScanCheckpoint {
+                resume: 0,
+                snapshot: crate::lexer::QuotesResidualState::default(),
+            }),
+            comsub: Some(ScanCheckpoint {
+                resume: 0,
+                snapshot: crate::lexer::ComsubResidualState::default(),
+            }),
+            balanced: Some(ScanCheckpoint {
+                resume: 0,
+                snapshot: crate::lexer::BalancedResidualState::default(),
+            }),
+            subscript: Some(ScanCheckpoint {
+                resume: 0,
+                snapshot: crate::lexer::SubscriptResidualState::default(),
+            }),
+            close_char: Some(ScanCheckpoint {
+                resume: 0,
+                snapshot: crate::lexer::CloseCharResidualState::default(),
+            }),
+            fnbody_brace: Some(ScanCheckpoint {
+                resume: 0,
+                snapshot: FnBodyResidualState::default(),
+            }),
+            fnbody_paren: Some(ScanCheckpoint {
+                resume: 0,
+                snapshot: FnBodyResidualState::default(),
+            }),
+        }
+    }
+
+    /// Extend the mirror with one raw group line (the same `raw` the caller
+    /// pushed into `pending`, newline included).
+    fn push_raw_line(&mut self, raw: &str) {
+        self.chars.extend(raw.chars());
+    }
+
+    /// The parked equivalent of `stdin_source_text_needs_more(pending,
+    /// posix)`: arm for arm the same predicates, each answered from its
+    /// checkpoint. `pending` must be exactly the text whose chars were
+    /// pushed so far (the signature-once check inside the function-body
+    /// scanners reads it).
+    fn needs_more(&mut self, pending: &str) -> bool {
+        // has_unclosed_input_syntax_posix:
+        if self.advance_quotes() {
+            return true;
+        }
+        if self.advance_comsub() && !self.advance_balanced() {
+            return true;
+        }
+        if self.advance_subscript() {
+            return true;
+        }
+        if self.advance_close_char() {
+            return true;
+        }
+        // parse.y:5379-5384: trailing unquoted backslash keeps the line
+        // open — an O(tail) fresh probe over the group text's end.
+        if crate::lexer::stdin_line_ends_with_continuation(pending) {
+            return true;
+        }
+        // O(tail) fresh probe (fast-reject on the last char / `function `
+        // prefix; the peel only runs on signature-shaped tails).
+        if stdin_source_is_function_signature(pending) {
+            return true;
+        }
+        if self.advance_fnbody('{', pending) {
+            return true;
+        }
+        if self.advance_fnbody('(', pending) {
+            return true;
+        }
+        false
+    }
+
+    fn advance_quotes(&mut self) -> bool {
+        let (resume, snapshot) = match self.quotes.take() {
+            Some(checkpoint) => (checkpoint.resume, checkpoint.snapshot),
+            None => (0, crate::lexer::QuotesResidualState::default()),
+        };
+        let mut state = snapshot;
+        let park = crate::lexer::quotes_residuals_advance(&self.chars, resume, &mut state);
+        let open = state.is_open();
+        self.quotes = Some(match park {
+            Some(park) => ScanCheckpoint {
+                resume: park.pos,
+                snapshot: park.snapshot,
+            },
+            None => ScanCheckpoint {
+                resume: self.chars.len(),
+                snapshot: state,
+            },
+        });
+        open
+    }
+
+    fn advance_comsub(&mut self) -> bool {
+        let (resume, snapshot) = match self.comsub.take() {
+            Some(checkpoint) => (checkpoint.resume, checkpoint.snapshot),
+            None => (0, crate::lexer::ComsubResidualState::default()),
+        };
+        let mut state = snapshot;
+        let park = crate::lexer::comsub_residuals_advance(&self.chars, resume, &mut state);
+        let open = state.is_open();
+        self.comsub = Some(match park {
+            Some(park) => ScanCheckpoint {
+                resume: park.pos,
+                snapshot: park.snapshot,
+            },
+            None => ScanCheckpoint {
+                resume: self.chars.len(),
+                snapshot: state,
+            },
+        });
+        open
+    }
+
+    fn advance_balanced(&mut self) -> bool {
+        let (resume, snapshot) = match self.balanced.take() {
+            Some(checkpoint) => (checkpoint.resume, checkpoint.snapshot),
+            None => (0, crate::lexer::BalancedResidualState::default()),
+        };
+        let mut state = snapshot;
+        let park = crate::lexer::balanced_residuals_advance(&self.chars, resume, &mut state);
+        let balanced = !state.is_unbalanced();
+        self.balanced = Some(match park {
+            Some(park) => ScanCheckpoint {
+                resume: park.pos,
+                snapshot: park.snapshot,
+            },
+            None => ScanCheckpoint {
+                resume: self.chars.len(),
+                snapshot: state,
+            },
+        });
+        balanced
+    }
+
+    fn advance_subscript(&mut self) -> bool {
+        let (resume, snapshot) = match self.subscript.take() {
+            Some(checkpoint) => (checkpoint.resume, checkpoint.snapshot),
+            None => (0, crate::lexer::SubscriptResidualState::default()),
+        };
+        let mut state = snapshot;
+        let park = crate::lexer::subscript_residuals_advance(&self.chars, resume, &mut state);
+        let open = state.is_open();
+        self.subscript = Some(match park {
+            Some(park) => ScanCheckpoint {
+                resume: park.pos,
+                snapshot: park.snapshot,
+            },
+            None => ScanCheckpoint {
+                resume: self.chars.len(),
+                snapshot: state,
+            },
+        });
+        open
+    }
+
+    fn advance_close_char(&mut self) -> bool {
+        let (resume, snapshot) = match self.close_char.take() {
+            Some(checkpoint) => (checkpoint.resume, checkpoint.snapshot),
+            None => (0, crate::lexer::CloseCharResidualState::default()),
+        };
+        let mut state = snapshot;
+        let park =
+            crate::lexer::close_char_residuals_advance(&self.chars, resume, &mut state, self.posix);
+        let open = state.is_open();
+        self.close_char = Some(match park {
+            Some(park) => ScanCheckpoint {
+                resume: park.pos,
+                snapshot: park.snapshot,
+            },
+            None => ScanCheckpoint {
+                resume: self.chars.len(),
+                snapshot: state,
+            },
+        });
+        open
+    }
+
+    fn advance_fnbody(&mut self, delim: char, pending: &str) -> bool {
+        let slot = match delim {
+            '{' => &mut self.fnbody_brace,
+            _ => &mut self.fnbody_paren,
+        };
+        let (resume, snapshot) = match slot.take() {
+            Some(checkpoint) => (checkpoint.resume, checkpoint.snapshot),
+            None => (0, FnBodyResidualState::default()),
+        };
+        let mut state = snapshot;
+        let park = fnbody_residuals_advance(&self.chars, resume, &mut state, delim, pending);
+        let open = state.is_open();
+        *slot = Some(match park {
+            Some(park) => ScanCheckpoint {
+                resume: park.pos,
+                snapshot: park.snapshot,
+            },
+            None => ScanCheckpoint {
+                resume: self.chars.len(),
+                snapshot: state,
+            },
+        });
+        open
+    }
 }
 
 /// Process one syntactically complete group: expand (when history expansion
@@ -1023,22 +1474,9 @@ fn stdin_source_has_unclosed_function_delimited_body(source: &str, delimiter: ch
     }
 
     let signature = source[..open_delimiter].trim_end();
-    // Same fall-through as stdin_source_is_function_signature: a
-    // `function f()` header peels to `function f` here, which is not a
-    // single WORD, so the keyword-form check below must still run
-    // (parse.y:1056 FUNCTION WORD '(' ')' newline_list function_body).
-    if let Some(before_close) = signature.strip_suffix(')') {
-        if let Some(name) = before_close.trim_end().strip_suffix('(') {
-            if is_stdin_function_name(name.trim_end()) {
-                return true;
-            }
-        }
-    }
-
-    signature
-        .strip_prefix("function ")
-        .map(function_keyword_operand_name)
-        .is_some_and(is_stdin_function_keyword_name)
+    // Shared with the incremental FnBody scanner (perf9): the peeled
+    // `name ()` form or the `function NAME` keyword form.
+    function_body_opener_signature(signature)
 }
 
 /// `name ()` signature form: GNU accepts non-identifier words
@@ -1092,6 +1530,7 @@ fn is_stdin_function_keyword_name(name: &str) -> bool {
 /// comment (`# DragonflyBSD's ...`, `# it's known`) toggle single-quote
 /// state and corrupt the brace/paren depth — a complete function body is
 /// then misjudged as an unclosed group (rubash#282: modernish _IN/sig).
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct CommentAwareScan {
     single: bool,
     double: bool,
@@ -2507,6 +2946,308 @@ pub fn bytes_to_script_text(bytes: &[u8]) -> String {
 pub fn read_script_bytes(path: &std::path::Path) -> std::io::Result<String> {
     let bytes = std::fs::read(path)?;
     Ok(crate::executor::substitution_metadata::bytes_to_script_text(&bytes))
+}
+
+#[cfg(test)]
+mod group_text_scans_tests {
+    use super::{
+        fnbody_residuals_advance, stdin_source_has_unclosed_function_delimited_body,
+        stdin_source_is_function_signature, stdin_source_text_needs_more, FnBodyResidualState,
+        GroupTextScans,
+    };
+
+    /// Drive one FnBody delimiter scanner exactly like
+    /// GroupTextScans::advance_fnbody (raw line + '\n' per prefix) and
+    /// assert the answer equals the oracle's at EVERY prefix.
+    fn assert_fnbody_matches_full(lines: &[&str], delim: char) {
+        let mut chars: Vec<char> = Vec::new();
+        let mut pending = String::new();
+        let mut resume = 0usize;
+        let mut snapshot = FnBodyResidualState::default();
+        for (line_index, line) in lines.iter().enumerate() {
+            chars.extend(line.chars());
+            chars.push('\n');
+            pending.push_str(line);
+            pending.push('\n');
+            let mut state = snapshot.clone();
+            let park = fnbody_residuals_advance(&chars, resume, &mut state, delim, &pending);
+            assert_eq!(
+                state.is_open(),
+                stdin_source_has_unclosed_function_delimited_body(&pending, delim),
+                "fnbody {delim} answer at prefix {line_index} of {lines:?} ({pending:?})"
+            );
+            match park {
+                Some(park) => {
+                    resume = park.pos;
+                    snapshot = park.snapshot;
+                }
+                None => {
+                    resume = chars.len();
+                    snapshot = state;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fnbody_incremental_matches_full_required_shapes() {
+        // Classic function definitions: the body delimiter holds the group
+        // open until its closer arrives.
+        for delim in ['{', '('] {
+            assert_fnbody_matches_full(&["f() {", "  :", "}"], delim);
+            assert_fnbody_matches_full(&["function f {", "  :", "}"], delim);
+            assert_fnbody_matches_full(&["f()", "{", "}"], delim);
+            // Non-signature prefixes: the delimiter is found but the
+            // signature check fails — never open.
+            assert_fnbody_matches_full(&["echo {", "a", "}"], delim);
+            assert_fnbody_matches_full(&["x=(1", "2)", "y"], delim);
+            // Quoted/commented delimiters are not openers.
+            assert_fnbody_matches_full(&["f() '#{'", "x", "y"], delim);
+            // Deeply nested same-delimiter bodies.
+            assert_fnbody_matches_full(&["f() {", "{ {", "} }", "}"], delim);
+            // Subshell in the signature area (rejected `(` for the paren
+            // scanner, plain text for the brace scanner).
+            assert_fnbody_matches_full(&["(a", "b)", "f() {", "}"], delim);
+        }
+    }
+
+    #[test]
+    fn fnbody_incremental_matches_full_park_shapes() {
+        // The paren scanner's undecided `(`-followed-by-whitespace tail:
+        // prefix 1 accepts the `(` as the body delimiter (EOF decides),
+        // prefix 2's `)` flips the rejection and the search restarts fresh
+        // from just past it.
+        assert_fnbody_matches_full(&["f (", ")", "{ :; }"], '(');
+        assert_fnbody_matches_full(&["f (  ", "\t)", "{ :; }"], '(');
+        assert_fnbody_matches_full(&["f (", ") { :; }", ""], '(');
+        assert_fnbody_matches_full(&["a=1 f (", ")"], '(');
+        // The brace scanner has no park (monotone search + depth fold) but
+        // must still agree on every shape that CAN flip: a `{` arriving on
+        // a later line inside a still-open group.
+        assert_fnbody_matches_full(&["f() {", "{", "}"], '{');
+        // CRLF-shaped input: the '\r' before '\n' is word data.
+        assert_fnbody_matches_full(&["f() {\r", "\r}\r"], '{');
+    }
+
+    /// Deterministic LCG so a failure reproduces bit for bit.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+    }
+
+    /// Seeded fuzz (>=2000 required; 4000 for parity) over both delimiters.
+    #[test]
+    fn fnbody_incremental_matches_full_randomized() {
+        const FRAGMENTS: &[&str] = &[
+            "f() ",
+            "function f ",
+            "{ ",
+            "} ",
+            "( ",
+            ") ",
+            "((",
+            ")) ",
+            "'q'",
+            "\"q",
+            "q\"",
+            "$( ",
+            "$(( ",
+            "` ",
+            "${x}",
+            "#c ",
+            "case ",
+            "esac",
+            " in ",
+            "; ",
+            "&&",
+            "|",
+            " a ",
+            "echo ",
+            "x=( ",
+            "\\ ",
+            "f1 (",
+            ") ",
+            "name ()",
+            " { ",
+            "if ",
+            "then",
+            "fi",
+        ];
+        let mut rng = Lcg(0x292_0000_0005);
+        for case in 0..4000u64 {
+            let fragment_count = 2 + (rng.next() % 6) as usize;
+            let mut fragments = Vec::with_capacity(fragment_count);
+            for _ in 0..fragment_count {
+                fragments.push(FRAGMENTS[(rng.next() as usize) % FRAGMENTS.len()]);
+            }
+            let max_lines = 4.min(fragment_count) as u64;
+            let line_count = (1 + (rng.next() % max_lines)) as usize;
+            let mut lines: Vec<String> = vec![String::new(); line_count];
+            for (i, fragment) in fragments.iter().enumerate() {
+                let target = if line_count == 1 {
+                    0
+                } else {
+                    (i * line_count / fragment_count).min(line_count - 1)
+                };
+                lines[target].push_str(fragment);
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            assert_fnbody_matches_full(&lines, if case % 2 == 0 { '{' } else { '(' });
+        }
+    }
+
+    /// The whole battery: GroupTextScans::needs_more must equal
+    /// stdin_source_text_needs_more (the fresh scan it replaces) at EVERY
+    /// appended-line prefix, for both POSIX modes — covering the quotes and
+    /// comsub machines re-driven over the pending mirror as well as the
+    /// perf9 machines and the fresh-tail probes.
+    fn assert_battery_matches_fresh(lines: &[&str], posix: bool) {
+        let mut scans = GroupTextScans::new(posix);
+        let mut pending = String::new();
+        for (line_index, line) in lines.iter().enumerate() {
+            let raw = format!("{line}\n");
+            pending.push_str(&raw);
+            scans.push_raw_line(&raw);
+            assert_eq!(
+                scans.needs_more(&pending),
+                stdin_source_text_needs_more(&pending, posix),
+                "battery at prefix {line_index} of {lines:?} posix={posix} ({pending:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn battery_matches_fresh_required_shapes() {
+        for posix in [false, true] {
+            // Multi-line quotes / comsub / subshell / funsub / subscript.
+            assert_battery_matches_fresh(&["echo 'a", "b' c"], posix);
+            assert_battery_matches_fresh(&["echo $(a", "b) c"], posix);
+            assert_battery_matches_fresh(&["echo ${ a", "; } b"], posix);
+            assert_battery_matches_fresh(&["(a", "b)"], posix);
+            assert_battery_matches_fresh(&["x=(1", "2)"], posix);
+            assert_battery_matches_fresh(&["a[b", "c"], posix);
+            // Function bodies keep the group open (the delimiter scans).
+            assert_battery_matches_fresh(&["f() {", "  :", "}"], posix);
+            assert_battery_matches_fresh(&["f (", ") { :; }", ""], posix);
+            assert_battery_matches_fresh(&["function f {", ":"], posix);
+            // Backslash continuations.
+            assert_battery_matches_fresh(&["echo a \\", "b"], posix);
+            assert_battery_matches_fresh(&["f() { \\", ":"], posix);
+            // The residual-false-positive override family: the corrected
+            // balancer says balanced, the group must NOT stay open on this
+            // arm (whatever the token level does with it).
+            assert_battery_matches_fresh(&["echo $(case a in a) echo x", "esac)"], posix);
+            // POSIX Interp 221: `'` inside `"${...}"` is literal.
+            assert_battery_matches_fresh(&["echo \"${IFS+'bar", "}\" x"], posix);
+            // Closed everything.
+            assert_battery_matches_fresh(&["echo a b", "c d"], posix);
+        }
+    }
+
+    #[test]
+    fn battery_matches_fresh_park_shapes() {
+        for posix in [false, true] {
+            // Every tail-lookahead park, exercised by a second line that
+            // materializes the lookahead.
+            assert_battery_matches_fresh(&["echo ${", " x; } b"], posix);
+            assert_battery_matches_fresh(&["echo $(", "(1+2))"], posix);
+            assert_battery_matches_fresh(&["echo $", "'a'"], posix);
+            assert_battery_matches_fresh(&["echo x=\\", "(1 2)"], posix);
+            assert_battery_matches_fresh(&["a[$", "(b)]"], posix);
+            assert_battery_matches_fresh(&["a[`b", "c`]", "=1"], posix);
+            assert_battery_matches_fresh(&["echo $(case a in x) esac)", ";; )"], posix);
+            // The fnbody paren park flipping on the next line.
+            assert_battery_matches_fresh(&["f (", ")", "{ :; }"], posix);
+        }
+    }
+
+    /// Seeded fuzz (>=2000 required; 4000, both POSIX modes).
+    #[test]
+    fn battery_matches_fresh_randomized() {
+        const FRAGMENTS: &[&str] = &[
+            "$( ",
+            ") ",
+            "$((",
+            ")) ",
+            "` ",
+            "${",
+            "${ ",
+            "${x}",
+            "}",
+            "'a'",
+            "\"q",
+            "q\"",
+            "\\",
+            "#c ",
+            "case ",
+            "esac",
+            "esac)",
+            " in ",
+            "; ",
+            ";; ",
+            "&&",
+            "|",
+            "f() ",
+            "function f ",
+            "{ ",
+            "} ",
+            "( ",
+            "a[",
+            "] ",
+            "x=(",
+            " a ",
+            "echo ",
+            " $' ",
+            "'",
+            "\"",
+            "$(",
+            "`",
+            ")",
+            "${a:-${b",
+            "name ()",
+            "if ",
+            "then",
+            "fi",
+        ];
+        let mut rng = Lcg(0x292_0000_0006);
+        for case in 0..4000u64 {
+            let fragment_count = 2 + (rng.next() % 6) as usize;
+            let mut fragments = Vec::with_capacity(fragment_count);
+            for _ in 0..fragment_count {
+                fragments.push(FRAGMENTS[(rng.next() as usize) % FRAGMENTS.len()]);
+            }
+            let max_lines = 4.min(fragment_count) as u64;
+            let line_count = (1 + (rng.next() % max_lines)) as usize;
+            let mut lines: Vec<String> = vec![String::new(); line_count];
+            for (i, fragment) in fragments.iter().enumerate() {
+                let target = if line_count == 1 {
+                    0
+                } else {
+                    (i * line_count / fragment_count).min(line_count - 1)
+                };
+                lines[target].push_str(fragment);
+            }
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            assert_battery_matches_fresh(&lines, case % 2 == 0);
+        }
+    }
+
+    /// The fresh signature probe the battery keeps (fast-reject) must agree
+    /// with the oracle's own shapes at group prefixes.
+    #[test]
+    fn function_signature_probe_shapes() {
+        assert!(stdin_source_is_function_signature("f()\n"));
+        assert!(stdin_source_is_function_signature("function f\n"));
+        assert!(stdin_source_is_function_signature("'a b c' ()\n"));
+        assert!(!stdin_source_is_function_signature("echo hi\n"));
+        assert!(!stdin_source_is_function_signature("a=2 (\n"));
+    }
 }
 
 #[cfg(test)]

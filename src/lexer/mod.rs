@@ -25,9 +25,9 @@ use brace_scan::{
     has_unclosed_parameter_expansion, opens_function_body_after_previous_signature,
     tokens_open_unclosed_brace_group,
 };
-use continuation::{
-    compound_residuals_advance, comsub_residuals_advance, ends_with_unquoted_backslash,
-    has_unclosed_quotes, quotes_residuals_advance, CompoundResidualState, ComsubResidualState,
+use continuation::{compound_residuals_advance, ends_with_unquoted_backslash, has_unclosed_quotes};
+pub(crate) use continuation::{
+    comsub_residuals_advance, quotes_residuals_advance, CompoundResidualState, ComsubResidualState,
     QuotesResidualState,
 };
 
@@ -36,6 +36,14 @@ use brace_scan_cache::BraceScanCache;
 pub(crate) use continuation::has_unclosed_command_substitution;
 pub(crate) use continuation::unclosed_command_substitution_depth;
 pub(crate) use continuation::unclosed_input_close_char_posix;
+// perf9 (#292B third wave): the parked text scanners of the group driver's
+// candidate-line completeness battery (script_driver.rs GroupTextScans).
+pub(crate) use continuation::balanced_residuals_advance;
+pub(crate) use continuation::close_char_residuals_advance;
+pub(crate) use continuation::subscript_residuals_advance;
+pub(crate) use continuation::BalancedResidualState;
+pub(crate) use continuation::CloseCharResidualState;
+pub(crate) use continuation::SubscriptResidualState;
 use heredoc::{heredoc_delimiters, HereDocDelimiter};
 use scanner::{Lexer, LexerBoundaryState, LexerParseState};
 pub(crate) use skip::command_substitutions_balanced;
