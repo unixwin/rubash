@@ -274,7 +274,30 @@ impl Executor {
             // word_expand: split on IFS whitespace and delimiters), not on
             // generic Unicode whitespace. `IFS=$'\001' for x in $a` must
             // split on \001 exactly like an external command's word list.
-            return Ok(self.field_split_values(&expanded));
+            //
+            // GNU subst.c:13219 expand_word_list_internal splits the word
+            // and THEN pathname-expands each resulting field
+            // (glob_expand_word_list): a glob character that reaches the
+            // field only through an expansion boundary still expands —
+            // bash-it's reloader `for f in "$BASH_IT/enabled"/*"${type}.bash"`
+            // with type='' never matched its enabled components because the
+            // split-only path returned the literal `*.bash`
+            // (rubash#316: the aliases completion and its
+            // _bash-it-component-completion-callback-on-init-aliases were
+            // never sourced).
+            let fields = self.field_split_values(&expanded);
+            if suppress_glob {
+                return Ok(fields);
+            }
+            let mut values = Vec::with_capacity(fields.len());
+            for field in fields {
+                match glob::pathname_expand_word(&field, &self.shell_state.env_vars) {
+                    glob::PathnameExpansion::Matches(matches) => values.extend(matches),
+                    glob::PathnameExpansion::NoMatch => values.push(field),
+                    glob::PathnameExpansion::Fail(pattern) => return Err(pattern),
+                }
+            }
+            return Ok(values);
         }
         if suppress_glob {
             return Ok(vec![expanded]);
