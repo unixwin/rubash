@@ -165,19 +165,33 @@ impl Executor {
                 // Heredoc bodies are raw text, so inputs carrying `<<` skip
                 // this probe like the script driver does.
                 if !source.contains("<<") {
-                    // rubash#318: an unclosed `$( ...` in the eval string is
+                    // rubash#318/#333: an unclosed `(' in the eval string is
                     // NOT the generic close-char shape. GNU re-parses the
                     // string as fresh parser input continuing the caller's
-                    // line counter (evalstring.c:345-357), and the comsub
-                    // body's own yyparse (parse.y:4549) owns the diagnostic:
-                    // a bare `(` followed by newline/EOF is a yacc error
-                    // printed at the `(' line with the offending source line
-                    // (parse.y:6858-6865) that forces exit 1 via
-                    // jump_to_top_level(FORCE_EOF) (parse.y:4588-4596);
-                    // EOF with an empty body, or an unclosed-but-consumed
-                    // body, keeps the plain `unexpected EOF' wording at the
-                    // last input line (parse.y:6891 / 4576-4587) and lets
-                    // the script continue with eval's status 2.
+                    // line counter (evalstring.c:345-357), and the failure
+                    // class decides both the diagnostic and the abort:
+                    //
+                    // 1. A token error inside a comsub body (`$(echo (`)
+                    //    fails the comsub's own yyparse and parse.y:4588-
+                    //    4596 jumps FORCE_EOF — exit 1, nothing after the
+                    //    eval, no `command' gate.
+                    // 2. A token error inside a compound-assignment list
+                    //    (`x=((`) dies the same way in posix mode
+                    //    (parse.y:7173-7179, exit 1) and is otherwise
+                    //    contained with eval status 1 (DISCARD arm).
+                    // 3. Everything else — an unclosed comsub at EOF
+                    //    (parse.y:4576-4587 returns matched_pair_error
+                    //    without jumping), a plain subshell at the main
+                    //    level, or a main-level token error — fails the
+                    //    MAIN yyparse into evalstring.c:584-600. That arm
+                    //    only exits when posixly_correct AND the builtin is
+                    //    eval/source AND NOT under `command'
+                    //    (executing_command_builtin, execute_cmd.c:4735):
+                    //    ERREXIT exit 2 before the || branch runs. In every
+                    //    other case the error is CONTAINED to the eval
+                    //    string — push_stream/pop_stream clear EOF_Reached
+                    //    per stream (parse.y:1908/1915), so it can never
+                    //    stop the outer script's reader by itself.
                     if let Some((shape, open_line)) =
                         crate::lexer::unclosed_comsub_eof_shape(&source)
                     {
@@ -203,24 +217,72 @@ impl Executor {
                             .shell_state
                             .env_vars
                             .insert("__RUBASH_EVAL_CONTEXT".to_string(), "1".to_string());
-                        let diagnostic = match shape {
-                            crate::lexer::UnclosedComsubShape::BareParen { line } => {
-                                // parse.y:6858-6859 + print_offending_line
-                                // (6865); the offending token GNU names is
-                                // the newline that cannot open the
-                                // subshell's command list.
+                        let diagnostic = match &shape {
+                            crate::lexer::UnclosedComsubShape::ComsubBodyTokenError {
+                                line,
+                                token,
+                            } => {
+                                // parse.y:6858-6865 with shell_eof_token==')'
+                                // (parse.y:4519): the paren shifted as a
+                                // function-definition candidate, the NEXT
+                                // token named, plus the offending source
+                                // line, all at the paren's line.
                                 let report = caller_line + line - 1;
                                 let prefix = self.parser_diagnostic_prefix_for_line(report);
                                 let offending =
                                     source.lines().nth(line - 1).unwrap_or_default().to_string();
                                 format!(
-                                    "{prefix}syntax error near unexpected token `newline' while looking for matching `)'\n{prefix}`{offending}'\n"
+                                    "{prefix}syntax error near unexpected token `{token}' while looking for matching `)'\n{prefix}`{offending}'\n"
                                 )
                             }
-                            crate::lexer::UnclosedComsubShape::NeverClosed { line } => format!(
+                            crate::lexer::UnclosedComsubShape::ComsubEof { line } => format!(
                                 "{}unexpected EOF while looking for matching `)'\n",
                                 self.parser_diagnostic_prefix_for_line(caller_line + line)
                             ),
+                            crate::lexer::UnclosedComsubShape::PlainSubshellEof {
+                                line,
+                                open_line,
+                            } => {
+                                // y.tab.c:9258-9260: the bash-5.3 compoundcmd
+                                // EOF report — a plain `(` leaves
+                                // shell_eof_token == 0, so yyerror's EOF
+                                // branch names the construct instead of a
+                                // close delimiter. Reported at one past the
+                                // last input line; the `('s line is in the
+                                // message text.
+                                format!(
+                                    "{}syntax error: unexpected end of file from `(' command on line {}\n",
+                                    self.parser_diagnostic_prefix_for_line(caller_line + line),
+                                    caller_line + open_line - 1
+                                )
+                            }
+                            crate::lexer::UnclosedComsubShape::MainLevelTokenError {
+                                line,
+                                token,
+                            } => {
+                                // y.tab.c:9208-9215 yyerror branch 1 with
+                                // shell_eof_token == 0: same token naming as
+                                // the comsub class but WITHOUT the
+                                // "while looking for matching" suffix.
+                                let report = caller_line + line - 1;
+                                let prefix = self.parser_diagnostic_prefix_for_line(report);
+                                let offending =
+                                    source.lines().nth(line - 1).unwrap_or_default().to_string();
+                                format!(
+                                    "{prefix}syntax error near unexpected token `{token}'\n{prefix}`{offending}'\n"
+                                )
+                            }
+                            crate::lexer::UnclosedComsubShape::CompassignTokenError { line } => {
+                                // parse.y:7141-7151: the compound-assignment
+                                // word list rejects the `(' itself.
+                                let report = caller_line + line - 1;
+                                let prefix = self.parser_diagnostic_prefix_for_line(report);
+                                let offending =
+                                    source.lines().nth(line - 1).unwrap_or_default().to_string();
+                                format!(
+                                    "{prefix}syntax error near unexpected token `('\n{prefix}`{offending}'\n"
+                                )
+                            }
                         };
                         let write_result =
                             self.write_buffered_builtin_output(cmd, &[], diagnostic.as_bytes());
@@ -235,18 +297,65 @@ impl Executor {
                             }
                         }
                         write_result?;
-                        self.mark_parse_error();
+                        let posix_mode =
+                            self.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
+                        let interactive = self
+                            .shell_state
+                            .env_vars
+                            .get("__RUBASH_INTERACTIVE")
+                            .map(String::as_str)
+                            == Some("1");
+                        // evalstring.c:588-595: the ONLY exit for a
+                        // main-grammar parse error in the eval'd string —
+                        // non-interactive + posix + bare eval/source (not
+                        // under `command`). ERREXIT unwinds before the ||
+                        // branch runs (GNU probes p3/p5a/p8a/p17/p18: rc 2,
+                        // empty stdout).
+                        let posix_errexit =
+                            posix_mode && !interactive && self.command_builtin_depth == 0;
                         match shape {
-                            // parse.y:4588-4596: non-interactive shells exit
-                            // EXECUTION_FAILURE (1) through FORCE_EOF —
-                            // nothing after the eval runs (verified vs WSL
-                            // GNU 5.3.0: probes m4/m6, the `echo after'
-                            // line never printed, rc 1).
-                            crate::lexer::UnclosedComsubShape::BareParen { .. } => {
+                            // parse.y:4588-4596: the comsub body's own
+                            // yyparse failed (r != 0) — FORCE_EOF exits 1
+                            // with no `command' gate (GNU probes p12a-c:
+                            // `command eval '$(echo ('` dies rc 1 too). The
+                            // status is stored like exit.def does so the
+                            // grouped reader's break keeps it as the shell's
+                            // exit status.
+                            crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { .. } => {
+                                self.exit_code = 1;
                                 return Err(ExecuteError::ExitCode(1));
                             }
+                            // parse.y:7173-7179: a token error inside a
+                            // compound assignment — posix dies rc 1 with no
+                            // `command' gate (GNU probe p24), otherwise the
+                            // DISCARD arm contains it with status 1.
+                            crate::lexer::UnclosedComsubShape::CompassignTokenError { .. } => {
+                                // error.c:324-327: a parser_error printed
+                                // while errexit is live exits 2 before the
+                                // FORCE_EOF/DISCARD decision.
+                                if self.errexit_enabled() && self.errexit_is_active() {
+                                    self.exit_code = 2;
+                                    return Err(ExecuteError::ExitCode(2));
+                                }
+                                if posix_mode && !interactive {
+                                    self.exit_code = 1;
+                                    return Err(ExecuteError::ExitCode(1));
+                                }
+                                self.exit_code = 1;
+                                return Ok(());
+                            }
+                            // Main-grammar parse errors: contained to the
+                            // eval string (never a reader abort — pop_stream
+                            // clears EOF_Reached, parse.y:1915), except the
+                            // posix ERREXIT gate above. eval returns 2
+                            // (EX_BADUSAGE, evalstring.c:586).
                             _ => {
                                 if self.errexit_enabled() && self.errexit_is_active() {
+                                    self.exit_code = 2;
+                                    return Err(ExecuteError::ExitCode(2));
+                                }
+                                if posix_errexit {
+                                    self.exit_code = 2;
                                     return Err(ExecuteError::ExitCode(2));
                                 }
                                 self.exit_code = 2;
@@ -319,13 +428,23 @@ impl Executor {
                         // exit_shell(2)s right after it — even inside a
                         // function body — instead of returning eval's rc=2.
                         if self.errexit_enabled() && self.errexit_is_active() {
+                            self.exit_code = 2;
                             return Err(ExecuteError::ExitCode(2));
                         }
                         // rubash#318: an unclosed `name=(` compound list is
                         // the parse_compound_assignment EOF family — eval
                         // returns its exit 1 (verified vs WSL GNU 5.3.0:
                         // `eval "x=("` -> rc 1), like the script-level path
-                        // (parse.y:7140-7152).
+                        // (parse.y:7140-7152). In posix mode the failure is
+                        // fatal instead: parse.y:7173-7179 jumps FORCE_EOF
+                        // with status 1 and NO `command'-builtin gate (GNU
+                        // probe p13/p24: `command eval 'x=('` posix dies
+                        // rc 1, nothing after the eval runs), while
+                        // non-posix keeps the DISCARD containment (p6b).
+                        if array_list && eval_posix {
+                            self.exit_code = 1;
+                            return Err(ExecuteError::ExitCode(1));
+                        }
                         self.exit_code = if array_list { 1 } else { 2 };
                         return Ok(());
                     }

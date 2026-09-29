@@ -255,6 +255,22 @@ impl Executor {
         cmd: &CommandNode,
         use_standard_path: bool,
     ) -> Result<(), ExecuteError> {
+        // GNU execute_cmd.c:4732-4736: the re-dispatched argument of the
+        // `command' builtin runs with executing_command_builtin set (unwind-
+        // protected, restored on the way out). The eval/source parse-error
+        // containment reads it (evalstring.c:590): `command eval '( '' must
+        // not take the posix ERREXIT exit that bare `eval '( '' takes.
+        self.command_builtin_depth += 1;
+        let result = self.execute_command_without_aliases_with_path_inner(cmd, use_standard_path);
+        self.command_builtin_depth -= 1;
+        result
+    }
+
+    fn execute_command_without_aliases_with_path_inner(
+        &mut self,
+        cmd: &CommandNode,
+        use_standard_path: bool,
+    ) -> Result<(), ExecuteError> {
         if !use_standard_path {
             return self.execute_command_without_aliases(cmd);
         }

@@ -265,6 +265,7 @@ impl Executor {
             assignment_output_process_substitutions: HashMap::new(),
             pending_scalar_assignment: false,
             suppress_errexit: 0,
+            command_builtin_depth: 0,
             debug_trap_running: false,
             line_env_os_value: std::cell::RefCell::new(None),
             return_trap_running: false,

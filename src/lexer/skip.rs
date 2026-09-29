@@ -2137,19 +2137,87 @@ fn is_pure_identifier(word: &str) -> bool {
 ///   pinned vs WSL GNU 5.3.0 probes m3/m7/m9/m5/m8/m10), with eval's
 ///   status 2 and the script continuing.
 ///
-/// The second tuple member is the string-relative open line of the failing
-/// construct — everything before it already ran (evalstring.c:359-451
-/// parses and executes command by command).
+/// The eval-string unclosed-paren classification, GNU Bash 5.3 taxonomy.
+/// Every variant's message wording, report line, and abort class was
+/// byte-verified against WSL GNU Bash 5.3.0 (probes p1-p28,
+/// 2026-09-28 snaprec lane). The second tuple member returned by
+/// [`unclosed_comsub_eof_shape`] is the string-relative line at which the
+/// parse stopped — complete commands on earlier lines already ran
+/// (evalstring.c:359-451 parses and executes command by command).
 pub enum UnclosedComsubShape {
-    BareParen { line: usize },
-    NeverClosed { line: usize },
+    /// `$( ...body... (` — a yacc token error inside a comsub body (the `(`
+    /// follows body text; the grammar shifts it as a possible function
+    /// definition and then chokes on the NEXT token). Message:
+    /// "syntax error near unexpected token `<tok>' while looking for
+    /// matching `)'" plus the offending source line, both at the `('s line
+    /// (parse.y:6858-6865 with shell_eof_token == ')' from parse.y:4519).
+    /// Abort: the comsub's own yyparse fails (r != 0) and parse.y:4588-4596
+    /// jumps FORCE_EOF — exit 1, nothing after the eval runs, with NO
+    /// `command'-builtin gate (verified: `command eval '$(echo ('` also
+    /// dies, rc 1).
+    ComsubBodyTokenError { line: usize, token: String },
+    /// Unclosed command substitution at EOF — `$( `, `$(`, or `$( (` (a `(`
+    /// directly after the opener opens a legal nested subshell, GNU probe
+    /// m8). Message: "unexpected EOF while looking for matching `)'" at ONE
+    /// PAST the last input line (parse.y:6891). Abort: the EOF_Reached arm
+    /// of parse_comsub (parse.y:4576-4587) does NOT jump — the error is
+    /// contained to the eval string; only the posix ERREXIT gate
+    /// (evalstring.c:588-595) can exit, and `command eval` suppresses even
+    /// that (executing_command_builtin, execute_cmd.c:4735).
+    ComsubEof { line: usize },
+    /// Plain subshell `(` in command position at the eval-string main level
+    /// (`( `, `( hi`, `echo a\n( hi`). Message: "syntax error: unexpected
+    /// end of file from `(' command on line N" — the bash-5.3 compoundcmd
+    /// report (y.tab.c:9258-9260; yyerror's EOF branch fires this shape
+    /// because a plain `(` leaves shell_eof_token == 0 and pushes a
+    /// compoundcmd_lineno record). Reported at ONE PAST the last input line
+    /// with N = the `('s line. Abort: same contained/ERREXIT gate as
+    /// ComsubEof (errors8.sub: `command eval '( '` must keep running the
+    /// script — GNU prints ok 1..ok 8).
+    PlainSubshellEof { line: usize, open_line: usize },
+    /// `(` in an invalid position at the eval-string main level (after a
+    /// complete word: `echo (`, `echo ((`, `echo (hi`). Message: "syntax
+    /// error near unexpected token `<tok>'" plus the offending line, at the
+    /// `('s line — yyerror branch 1 (y.tab.c:9208-9215) WITHOUT the
+    /// "while looking for matching" suffix, because shell_eof_token is 0
+    /// outside a comsub. The named token is the one AFTER the `(` (the
+    /// function-definition shift consumes the paren first). Abort: the
+    /// failing yyparse is the MAIN one, so parse_and_execute's else arm
+    /// (evalstring.c:584-600) applies the posix ERREXIT gate — no
+    /// unconditional exit.
+    MainLevelTokenError { line: usize, token: String },
+    /// A `(` inside a compound-assignment list (`x=((`): parse_compound_
+    /// assignment expects WORDs, so any `(` is a token error naming itself
+    /// (parse.y:7141-7151, yyerror branch 1 with current_token == '(').
+    /// Abort: parse.y:7173-7179 — posix non-interactive shells jump
+    /// FORCE_EOF with status 1 (no `command' gate; GNU `command eval
+    /// 'x=('` posix dies rc 1), otherwise the DISCARD arm contains it and
+    /// eval returns 1.
+    CompassignTokenError { line: usize },
 }
 
+/// Classify the unclosed-paren shape of an eval string the way GNU's parser
+/// does, or return None to defer to the generic close-char scan (the `x=(`
+/// compound-assignment EOF family and the `(( `/`$(( ` arithmetic roots keep
+/// their own report lines there).
+///
+/// GNU structure being ported (all line references are the vendored
+/// bash.git @b4608166 tree):
+/// - a `(` immediately after `$` opens a command substitution; after `=` a
+///   compound assignment; anything else is a plain subshell paren;
+/// - inside a comsub, the body's own yyparse owns the diagnostic: a token
+///   error exits 1 through FORCE_EOF (parse.y:4588-4596), an EOF returns
+///   matched_pair_error without jumping (parse.y:4576-4587);
+/// - at the eval-string main level the main yyparse fails into
+///   evalstring.c:584-600, whose only exit is the posix ERREXIT gate —
+///   never a reader abort (push_stream/pop_stream clear EOF_Reached per
+///   stream, parse.y:1908/1915, so an eval-string parse error cannot stop
+///   the outer script by itself).
 pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, usize)> {
     let chars: Vec<char> = input.chars().collect();
     let mut index = 0usize;
-    // (char index of `(`, string-relative open line, is_command_substitution)
-    let mut stack: Vec<(usize, usize, bool)> = Vec::new();
+    // (char index of `(`, string-relative open line, opener kind)
+    let mut stack: Vec<(usize, usize, OpenerKind)> = Vec::new();
     let mut line = 1usize;
     let mut single = false;
     let mut double = false;
@@ -2196,8 +2264,22 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
                 }
             }
             '(' => {
-                let is_comsub = index > 0 && chars[index - 1] == '$';
-                stack.push((index, line, is_comsub));
+                // parse.y:7173-7179: inside a compound-assignment word list
+                // every `(` is a token error naming itself — `x=((`.
+                if matches!(stack.last().map(|e| e.2), Some(OpenerKind::Compassign)) {
+                    return Some((UnclosedComsubShape::CompassignTokenError { line }, line));
+                }
+                let prev = if index > 0 {
+                    Some(chars[index - 1])
+                } else {
+                    None
+                };
+                let kind = match prev {
+                    Some('$') => OpenerKind::Comsub,
+                    Some('=') => OpenerKind::Compassign,
+                    _ => OpenerKind::Plain,
+                };
+                stack.push((index, line, kind));
             }
             ')' => {
                 stack.pop();
@@ -2206,60 +2288,127 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
         }
         index += 1;
     }
-    let &(open_idx, open_line, is_comsub) = stack.last()?;
+    let &(open_idx, open_line, open_kind) = stack.last()?;
     let newlines = input.matches('\n').count();
-    if !is_comsub {
-        // `$((` is arithmetic (parse.y:4465-4470 -> parse_matched_pair
-        // P_ARITH, EOF reports the open line at parse.y:3912) and `name=(`
-        // is a compound assignment (parse.y:5653-5658
-        // parse_compound_assignment EOF family): both are matched-pair
-        // constructs with their own report/exit rules already handled by
-        // the generic close-char scan — leave them to it.
-        let prev = if open_idx > 0 {
-            Some(chars[open_idx - 1])
+
+    // `x=(` is the compound-assignment EOF family — its own report/exit
+    // rules live in the generic close-char scan.
+    if open_kind == OpenerKind::Compassign {
+        return None;
+    }
+
+    // The first `(` that does not open in command position is where the
+    // grammar fails: after a complete word it is shifted as a possible
+    // function-definition paren and the NEXT token becomes the yacc error
+    // (`echo (` -> `newline', `echo ((` -> `(', `echo (hi` -> `hi'). This
+    // check precedes the arithmetic exemption: `echo ((` is this class
+    // (GNU probe p16), while `(( `/`$(( ` in command position are not.
+    let invalid = stack
+        .iter()
+        .find(|&&(idx, _, kind)| {
+            kind == OpenerKind::Plain && !opens_in_command_position(&chars, idx)
+        })
+        .map(|&(idx, line, _)| (idx, line));
+    if let Some((idx, line)) = invalid {
+        let inside_comsub = stack
+            .iter()
+            .any(|&(enc_idx, _, kind)| enc_idx < idx && kind == OpenerKind::Comsub);
+        let token = token_after_paren(&chars, idx);
+        return if inside_comsub {
+            Some((
+                UnclosedComsubShape::ComsubBodyTokenError { line, token },
+                line,
+            ))
         } else {
-            None
+            Some((
+                UnclosedComsubShape::MainLevelTokenError { line, token },
+                line,
+            ))
         };
-        if prev == Some('(') && open_idx >= 2 && chars[open_idx - 2] == '$' {
-            return None;
-        }
-        if prev == Some('=') {
-            return None;
-        }
-        let after = chars.get(open_idx + 1);
-        if after.is_none() || after == Some(&'\n') {
-            // The yacc `near unexpected token `newline'' class fires only
-            // when the subshell `(` follows body text: `$(echo (` is the
-            // bare-paren yacc error (verified probe m6), while `$( (` — the
-            // `(` directly after the opener — is a matched-pair EOF
-            // (probe m8). Require non-whitespace between the enclosing
-            // opener and this `(`.
-            let enclosing_open = stack
-                .iter()
-                .rev()
-                .nth(1)
-                .map(|&(idx, _, _)| idx)
-                .unwrap_or(0);
-            let between = &chars[enclosing_open + 1..open_idx];
-            if between.iter().any(|c| !c.is_whitespace()) {
-                return Some((
-                    UnclosedComsubShape::BareParen { line: open_line },
-                    open_line,
-                ));
-            }
-        }
+    }
+
+    // `(( `/`$(( ` arithmetic roots: matched-pair constructs with their
+    // own report/exit rules — leave them to the generic close-char scan
+    // (GNU probes p27/p28: both report at the OPEN line, which is the
+    // generic path's behavior).
+    if open_idx > 0 && chars[open_idx - 1] == '(' {
+        return None;
+    }
+
+    // EOF shapes. A comsub anywhere in the enclosing chain keeps the
+    // comsub EOF wording (probe m8: `$( (` is a matched-pair EOF inside the
+    // comsub's own yyparse, shell_eof_token == ')').
+    let any_comsub = stack.iter().any(|&(_, _, kind)| kind == OpenerKind::Comsub);
+    if any_comsub {
         return Some((
-            UnclosedComsubShape::NeverClosed { line: newlines + 1 },
+            UnclosedComsubShape::ComsubEof { line: newlines + 1 },
             open_line,
         ));
     }
-    // Both remaining comsub shapes report at one past the last input line:
-    // caller + newlines + 1 (verified probes m3/m7/m9 empty body,
-    // m5/m8/m10 consumed body).
+    // Plain subshell at the main level: the bash-5.3 compoundcmd EOF report.
     Some((
-        UnclosedComsubShape::NeverClosed { line: newlines + 1 },
+        UnclosedComsubShape::PlainSubshellEof {
+            line: newlines + 1,
+            open_line,
+        },
         open_line,
     ))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenerKind {
+    /// `$(`
+    Comsub,
+    /// `name=(`
+    Compassign,
+    /// any other `(`
+    Plain,
+}
+
+/// Does the `(` at `idx` open in command position? Scanning backwards over
+/// horizontal whitespace, a boundary character (start of input, newline,
+/// `;`, `&`, `|`, or an enclosing `(`) means a command may start here;
+/// anything else (a word character, `)`, `=`, a redirection operator, a
+/// closing quote) means the `(` follows body text — an invalid position.
+fn opens_in_command_position(chars: &[char], idx: usize) -> bool {
+    let mut i = idx;
+    while i > 0 {
+        i -= 1;
+        match chars[i] {
+            ' ' | '\t' | '\r' => continue,
+            '\n' | ';' | '&' | '|' | '(' => return true,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// The token a yacc error names for a `(` in invalid position: the grammar
+/// shifts the paren (function-definition candidate) and fails on the NEXT
+/// token — EOF/newline is reported as `newline' (GNU probe p14: `eval
+/// 'echo ('` names `newline' though the string has none), another `(` as
+/// `(', otherwise the following word's text (p21: `echo (hi' names `hi').
+fn token_after_paren(chars: &[char], open_idx: usize) -> String {
+    let mut i = open_idx + 1;
+    while i < chars.len() && matches!(chars[i], ' ' | '\t' | '\r') {
+        i += 1;
+    }
+    if i >= chars.len() || matches!(chars[i], '\n') {
+        return "newline".to_string();
+    }
+    if chars[i] == '(' {
+        return "(".to_string();
+    }
+    let start = i;
+    while i < chars.len()
+        && !matches!(
+            chars[i],
+            ' ' | '\t' | '\r' | '\n' | '(' | ')' | ';' | '&' | '|' | '<' | '>' | '`'
+        )
+    {
+        i += 1;
+    }
+    chars[start..i].iter().collect()
 }
 
 /// Quote/backslash-aware balanced-paren scan for an extglob pattern group

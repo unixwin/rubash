@@ -487,6 +487,14 @@ pub struct Executor {
     assignment_output_process_substitutions: HashMap<String, String>,
     pending_scalar_assignment: bool,
     suppress_errexit: usize,
+    /// GNU execute_cmd.c:273 `executing_command_builtin`: set while a
+    /// command runs as the argument of the `command` builtin
+    /// (execute_cmd.c:4732-4736 wraps the CMD_COMMAND_BUILTIN re-dispatch,
+    /// execute_cmd.c:5096 the `command` builtin itself). Read by the
+    /// eval/source parse-error containment: evalstring.c:590 suppresses
+    /// the posix ERREXIT for `command eval '...broken...'` — errors8.sub
+    /// `command eval '( '` must not exit the shell.
+    command_builtin_depth: usize,
     debug_trap_running: bool,
     return_trap_running: bool,
     signal_trap_running: bool,
