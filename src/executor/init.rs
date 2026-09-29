@@ -412,12 +412,17 @@ impl Executor {
         // bash -c 'echo ${TMPDIR-UNSET}'` prints UNSET). The injection below
         // is the Windows fixture: suites write unquoted `$TMPDIR/...` paths
         // and /tmp resolution needs a backing directory, so keep it there.
+        // The /var/tmp backing directory is NOT created here: GNU touches
+        // $TMPDIR only when a scratch file is actually needed (rubash#328 —
+        // an eager `var/tmp` subtree below every TMPDIR, including the
+        // caller's cwd, was visible to `ls`/globs of untouched directories;
+        // the mapping in path.rs now materializes it lazily on first
+        // /var/tmp use).
         #[cfg(windows)]
         {
             env_vars
                 .entry("TMPDIR".to_string())
                 .or_insert_with(safe_temp_dir_string);
-            crate::executor::path::ensure_var_tmp_dir(env_vars);
         }
         env_vars
             .entry("SHELL".to_string())

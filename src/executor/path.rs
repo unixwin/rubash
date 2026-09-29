@@ -1605,14 +1605,21 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
     // <safe-temp>/var/tmp/<x>, which keeps it distinct from /tmp
     // (=<safe-temp> itself) and away from the generic file names other
     // Windows processes create directly in %TEMP%.
-    if cfg!(windows) {
+    if cfg!(windows) && (normalized == "/var/tmp" || normalized.starts_with("/var/tmp/")) {
         if let Some(var_tmp) = windows_var_tmp_dir() {
-            if normalized == "/var/tmp" {
-                return var_tmp;
-            }
-            if let Some(rest) = normalized.strip_prefix("/var/tmp/") {
-                return var_tmp.join(rest);
-            }
+            // Lazy materialization (rubash#328): the backing directory is
+            // created only when a /var/tmp path is actually resolved — GNU
+            // creates nothing at startup and an eager create_dir_all below
+            // every TMPDIR (including a caller-owned cwd) leaked a visible
+            // `var' entry into `ls'/glob output of untouched directories.
+            // create_dir_all on the existing directory is a no-op, so
+            // repeated /var/tmp resolution costs one metadata check.
+            let _ = std::fs::create_dir_all(&var_tmp);
+            return if normalized == "/var/tmp" {
+                var_tmp
+            } else {
+                var_tmp.join(normalized.strip_prefix("/var/tmp/").unwrap_or_default())
+            };
         }
     }
 
