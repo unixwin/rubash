@@ -239,6 +239,14 @@ fn case_pattern_state_step(tokens: &[Token], index: usize, stack: &mut Vec<&'sta
     // inert — no compound opener is pushed (GNU parse.y:3177-3178).
     true
 }
+/// GNU parse.y:879-880 select_command/for_command have TWO body forms —
+/// `... do list done` and `... '{' list '}'`. Once the `do` of the do-form
+/// has been read, the only legal closer is `done`; a `}` inside the body
+/// closes the innermost open brace group (a nested group or a function
+/// definition body), never the loop. The frame is transformed at `do` so
+/// the LOOP_BODY_TERMINATOR `}` shortcut keeps applying only to the
+/// brace-form production.
+const LOOP_DO_TERMINATOR: &str = "done";
 
 pub(super) fn update_compound_boundary_stack(
     tokens: &[Token],
@@ -258,11 +266,23 @@ pub(super) fn update_compound_boundary_stack(
             is_case_end_keyword(tokens, index)
         } else if expected == LOOP_BODY_TERMINATOR {
             is_keyword(tokens, index, "done") || is_boundary_keyword(tokens, index, "}")
+        } else if expected == LOOP_DO_TERMINATOR {
+            is_keyword(tokens, index, "done")
+        } else if expected == "}" {
+            is_boundary_keyword(tokens, index, "}")
         } else {
             is_keyword(tokens, index, expected)
         };
         if expected_matches {
             stack.pop();
+            // GNU parse.y for_command/select_command brace-form body: the
+            // `'}' that closes the '{' list '}' body also ends the loop —
+            // one token, one grammar role. A do-form loop sits on
+            // LOOP_DO_TERMINATOR here, so this only fires for the
+            // brace-form frame directly beneath a just-closed brace group.
+            if expected == "}" && stack.last().copied() == Some(LOOP_BODY_TERMINATOR) {
+                stack.pop();
+            }
             return;
         }
     }
@@ -293,6 +313,20 @@ pub(super) fn update_compound_boundary_stack(
         stack.push(LOOP_BODY_TERMINATOR);
     } else if is_keyword(tokens, index, "case") {
         stack.push("esac");
+    } else if is_keyword(tokens, index, "do") && stack.last().copied() == Some(LOOP_BODY_TERMINATOR)
+    {
+        // parse.y:882-884 `do newline_list list done`: with the `do` read,
+        // `done` is the only terminator (see LOOP_DO_TERMINATOR).
+        stack.pop();
+        stack.push(LOOP_DO_TERMINATOR);
+    } else if is_boundary_keyword(tokens, index, "{") || word_command_open_brace(tokens, index) {
+        // A brace group opened inside any open keyword frame is its own
+        // nesting level (parse.y:936 simple_command '{' list '}'): its '}'
+        // must not serve as an enclosing loop's terminator or an outer
+        // group's closer (rubash#314: a multi-line `g() { ... }` as a
+        // direct statement of a loop body inside a function lost its
+        // closing brace to the enclosing function's group scan).
+        stack.push("}");
     }
 }
 
@@ -607,8 +641,14 @@ pub(super) fn matching_brace_group_end(tokens: &[Token], start: usize) -> Option
     let mut stack = Vec::new();
     let mut index = start + 1;
     while index < tokens.len() {
+        // A token that popped (or pushed) a keyword/brace frame this pass
+        // has already served its grammar role for this scan (e.g. a `}`
+        // that closed a nested brace group inside an open loop frame) —
+        // it must not ALSO adjust the brace depth, or an inner group's
+        // closer terminates the outer group (rubash#314).
+        let stack_depth_before = stack.len();
         update_compound_boundary_stack(tokens, index, &mut stack);
-        if !stack.is_empty() {
+        if stack.len() != stack_depth_before || !stack.is_empty() {
             index += 1;
             continue;
         }
