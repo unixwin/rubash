@@ -129,6 +129,17 @@ impl Executor {
         // executed with `command builtin' fails"). The depth gate is the
         // same state GNU tracks as executing_command_builtin
         // (execute_cmd.c:4731-4735; errors8.sub ok 5/ok 6).
+        // GNU order (rubash#344): the ERR trap for a failing simple command
+        // fires inside execute_simple_command (run_error_trap callers,
+        // execute_cmd.c:1000/1166) — DEEPER than the ERREXIT jump in
+        // execute_command_internal (execute_cmd.c:624) — so `set -e; trap
+        // 'echo E' ERR; false` prints E and exits 1. This dispatch-level
+        // errexit conversion is the shell's jump site; fire the trap here
+        // when it is about to kill the command, before converting. The
+        // non-errexit path keeps firing at the ast_exec loop sites (a fire
+        // here would double it once the Ok result reaches them), and
+        // maybe_run_error_trap's own gates (inverted / &&-|| context /
+        // errtrace function depth) match the errexit conditions.
         let outcome = if result.is_ok()
             && self.special_builtin_failed.get()
             && self.command_builtin_depth == 0
@@ -140,8 +151,10 @@ impl Executor {
                 .map(String::as_str)
                 != Some("1")
         {
+            self.maybe_run_error_trap(cmd)?;
             Err(ExecuteError::ExitCode(self.exit_code))
         } else if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
+            self.maybe_run_error_trap(cmd)?;
             Err(ExecuteError::ExitCode(self.exit_code))
         } else {
             result

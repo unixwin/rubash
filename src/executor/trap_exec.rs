@@ -777,9 +777,20 @@ impl Executor {
             return false;
         }
         if self.shell_state.subshell_depth.get() > 0 {
+            // Table-driven (rubash#345): every subshell entry marks an
+            // inherited DEBUG trap reset unless functrace is on
+            // (trap.rs reset_for_subshell, GNU trap.c:1588), so an ACTIVE
+            // action inside a subshell was armed there and must fire for
+            // the remaining subshell commands
+            // (`echo "$(trap 'echo DC' DEBUG; echo x)"` prints DC then x).
+            // functrace keeps the inherited action active instead.
             return crate::builtins::set::shell_option_enabled(
                 &self.shell_state.env_vars,
                 "functrace",
+            ) || crate::builtins::trap::has_active_trap_action(
+                &self.shell_state.env_vars,
+                "DEBUG",
+                "__RUBASH_TRAP_DEBUG",
             );
         }
         true
@@ -1198,12 +1209,26 @@ impl Executor {
             return Ok(());
         }
         // Bash only fires a RETURN trap for function returns when the
-        // function inherits the DEBUG/RETURN traps, which tracks the
-        // functrace flag alone (execute_cmd.c:5295 checks
-        // function_trace_mode, not debugging_mode; shopt extdebug reaches it
-        // only through the functrace it enables, shopt.def:621).
+        // function inherits the DEBUG/RETURN traps. GNU execute_cmd.c:5291-
+        // 5293: "Shell functions inherit the RETURN trap if function
+        // tracing is on globally or on individually for this function" —
+        // the gate is `trace_p (var) == 0 && function_trace_mode == 0`
+        // (execute_cmd.c:5295; function_trace_mode is the functrace set -o
+        // flag, NOT debugging_mode — shopt extdebug reaches it only through
+        // the functrace it enables, shopt.def:621). trace_p(var) is the
+        // per-function attribute `declare -ft name` sets, so a traced
+        // function fires the RETURN trap even with the global option off
+        // (rubash#343: `declare -ft f; trap 'echo R' RETURN; f` prints R).
+        // The name stack is still holding this call's frame at the fire
+        // site (function_calls.rs pops it after run_function_return_trap).
+        let current_function_traced = self
+            .shell_state
+            .function_name_stack
+            .first()
+            .is_some_and(|name| self.function_has_trace_attribute(name));
         let traced =
-            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "functrace");
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "functrace")
+                || current_function_traced;
         let function_scoped = self
             .shell_state
             .env_vars

@@ -897,6 +897,12 @@ impl Executor {
                 if command.inverted {
                     self.exit_code = invert_exit_status(self.exit_code);
                 }
+                // GNU order: the ERR trap for a failing pipeline
+                // (run_error_trap callers, execute_cmd.c:773/874/1000/1166)
+                // fires BEFORE the errexit jump in execute_command_internal
+                // (execute_cmd.c:624) — `set -e; trap 'echo E' ERR; false`
+                // prints E and exits 1, never dying silently (rubash#344).
+                self.maybe_run_error_trap(command)?;
                 if self.errexit_enabled()
                     && self.errexit_is_active()
                     && self.suppress_errexit == 0
@@ -906,10 +912,6 @@ impl Executor {
                 {
                     return Err(ExecuteError::ExitCode(self.exit_code));
                 }
-                // GNU fires the ERR trap for a failing pipeline just like a
-                // failing simple command (trap3.sub: "trap: 8" after
-                // false | false | false; trap2.sub "exit 42 | command false").
-                self.maybe_run_error_trap(command)?;
                 if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
                     index = next_index;
                 } else {
@@ -1197,6 +1199,13 @@ impl Executor {
             }
             self.set_pipestatus([self.exit_code]);
 
+            // GNU order (rubash#344): the ERR trap fires for the failed
+            // simple command (execute_cmd.c:1000/1166 run_error_trap)
+            // BEFORE the errexit jump at execute_command_internal
+            // (execute_cmd.c:624): `set -e; trap 'echo E' ERR; false`
+            // prints E and exits 1.
+            self.maybe_run_error_trap(command)?;
+
             // GNU execute_cmd.c:1004-1018 (simple command errexit): after a
             // simple command finishes, if errexit is active and the command's
             // exit status is non-zero, jump_to_top_level (ERREXIT) exits the
@@ -1210,10 +1219,6 @@ impl Executor {
             {
                 return Err(ExecuteError::ExitCode(self.exit_code));
             }
-
-            // Execute ERR trap if command failed and not in &&/||/! context
-            // (trap_exec.rs maybe_run_error_trap; GNU execute_cmd.c).
-            self.maybe_run_error_trap(command)?;
 
             if command.subshell_end {
                 // A pending evalerror was raised inside the subshell that just

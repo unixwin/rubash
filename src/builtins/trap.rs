@@ -758,8 +758,26 @@ pub(crate) fn reset_for_subshell(env_vars: &mut HashMap<String, String>) {
     let mut reset = reset_trap_signals(env_vars);
     for signal in trap_list(env_vars) {
         // DEBUG and RETURN are tracing hooks, not OS signal dispositions;
-        // functrace/extdebug controls their inheritance separately.
+        // functrace/extdebug controls their inheritance separately
+        // (subshell setup -> trap.c:1588 reset_or_restore_signal_handlers:
+        // a subshell keeps the DEBUG trap only when function_trace_mode is
+        // set). Without functrace the inherited hook is reset here —
+        // get_trap_action then reports it unset, so nothing fires, while
+        // the listing still shows the entry. A trap ARMED INSIDE the
+        // subshell re-arms the disposition (set_trap removes the reset
+        // marker, GNU set_signal) and fires for the remaining subshell
+        // commands (rubash#345: `echo "$(trap 'echo DC' DEBUG; echo x)"`
+        // prints DC then x).
         if matches!(signal.as_str(), "DEBUG" | "RETURN") {
+            if crate::builtins::set::shell_option_enabled(env_vars, "functrace") {
+                continue;
+            }
+            if env_vars
+                .get(&trap_key(&signal))
+                .is_some_and(|action| !action.is_empty())
+            {
+                reset.insert(signal);
+            }
             continue;
         }
         let key = trap_key(&signal);
