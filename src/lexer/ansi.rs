@@ -344,6 +344,30 @@ fn push_ansi_c_codepoint(output: &mut String, value: u32) {
     // u32cconv as printf (lib/sh/unicode.c:239): wctomb on a 4-byte-wchar_t
     // UTF-8 platform encodes every value <= 0x7fffffff, including surrogates
     // (ED A0 80) and the 5/6-byte forms; larger values produce nothing.
+    //
+    // Locale gate (rubash#353): strtrans.c:174 translates values <= 0x7f
+    // directly (ASCII needs no conversion), everything else goes through
+    // u32cconv, whose non-UTF-8-locale fallback is u32tocesc
+    // (unicode.c:141: `\u%04X` / `\U%08X`, ISO C99 escape with UPPERCASE
+    // hex) — under `LC_ALL=C` GNU keeps `$'\u00e9'` as the six literal
+    // characters `\u00E9`. The locale name is read dynamically, so an
+    // `export LC_ALL=...` earlier in the script is honored.
+    // Only an EXPLICITLY selected non-UTF-8 locale closes the gate: with
+    // no locale variables rubash's platform default stays UTF-8 (its whole
+    // text layer is UTF-8 on Windows; GNU would default to the C locale —
+    // a documented platform divergence).
+    let explicit_non_utf8_locale = {
+        let name = crate::locale::locale_name();
+        !name.is_empty() && !crate::locale::is_utf8_locale_name(&name)
+    };
+    if value > 0x7f && explicit_non_utf8_locale {
+        if value < 0x1_0000 {
+            output.push_str(&format!("\\u{value:04X}"));
+        } else {
+            output.push_str(&format!("\\U{value:08X}"));
+        }
+        return;
+    }
     let decoded = crate::executor::substitution_metadata::u32cconv_utf8_text(value);
     // Registry-zone chars (U+E000..=U+E3FF) are user-reachable here —
     // $'\uE314' is real data, but the same codepoint is a transport guard.

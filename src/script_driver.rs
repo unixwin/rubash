@@ -1237,6 +1237,19 @@ pub fn stdin_heredoc_declarations(text: &str) -> Vec<(String, bool)> {
     pending
 }
 
+/// rubash#351 oracle: the first line of `input` whose heredoc delimiter word
+/// leaves a quote open, with that quote character and the 1-based line.
+pub fn heredoc_delimiter_unclosed_quote(input: &str) -> Option<(char, usize)> {
+    let mut arith_depth = 0i64;
+    for (line_index, line) in input.split('\n').enumerate() {
+        let (_, unclosed) = scan_heredoc_operators_full(line, &mut arith_depth);
+        if let Some(quote) = unclosed {
+            return Some((quote, line_index + 1));
+        }
+    }
+    None
+}
+
 /// One physical line of the driver's heredoc-declaration scan, carrying the
 /// open arithmetic-command paren depth across lines so a multi-line `((`
 /// never leaks its shift operators as heredoc declarations.
@@ -1270,6 +1283,27 @@ fn scan_heredoc_operators(line: &str) -> Vec<(String, bool)> {
 }
 
 fn scan_heredoc_operators_with_state(line: &str, arith_depth: &mut i64) -> Vec<(String, bool)> {
+    scan_heredoc_operators_full(line, arith_depth).0
+}
+
+/// scan_heredoc_operators_with_state plus the unterminated-quote signal of
+/// the delimiter word (rubash#351): GNU read_token_word (parse.y:5419-5437)
+/// reads the here-document delimiter as an ordinary WORD, so a quote that
+/// never closes keeps the read open to EOF — no heredoc is declared and the
+/// parser dies with `unexpected EOF while looking for matching `q''.
+fn scan_heredoc_operators_full(
+    line: &str,
+    arith_depth: &mut i64,
+) -> (Vec<(String, bool)>, Option<char>) {
+    // GNU read_token_word (parse.y:5419-5437) reads the heredoc delimiter
+    // as an ordinary WORD: a quote that never closes keeps reading lines
+    // until EOF, where the word read FAILS with `unexpected EOF while
+    // looking for matching `q'' and NO heredoc is ever declared — the
+    // redirection never gathers a body (rubash#351: `cat <<'E` + line `E`
+    // was silently accepted as delimiter E with an EOF warning). An
+    // unterminated quote in the delimiter therefore suppresses the
+    // declaration and is reported for the EOF diagnostic.
+    let mut unclosed_delimiter_quote: Option<char> = None;
     let chars: Vec<char> = line.chars().collect();
     let mut declarations = Vec::new();
     let mut expect_delim: Option<bool> = None;
@@ -1430,6 +1464,14 @@ fn scan_heredoc_operators_with_state(line: &str, arith_depth: &mut i64) -> Vec<(
                                 word.push(chars[i]);
                                 i += 1;
                             }
+                            // Only the DELIMITER word (expect_delim still
+                            // pending) carries the heredoc contract; an
+                            // unclosed quote in any other word is the
+                            // generic quote oracle's business (heredoc
+                            // bodies are literal data).
+                            if i >= chars.len() && expect_delim.is_some() {
+                                unclosed_delimiter_quote = Some(q);
+                            }
                             i += 1;
                         }
                         _ => {
@@ -1457,14 +1499,14 @@ fn scan_heredoc_operators_with_state(line: &str, arith_depth: &mut i64) -> Vec<(
                             | "function"
                     );
                 if let Some(strip_tabs) = expect_delim.take() {
-                    if !word.is_empty() {
+                    if !word.is_empty() && unclosed_delimiter_quote.is_none() {
                         declarations.push((word, strip_tabs));
                     }
                 }
             }
         }
     }
-    declarations
+    (declarations, unclosed_delimiter_quote)
 }
 
 /// Extract the NAME from the operand of a `function` keyword header.
@@ -1769,6 +1811,43 @@ fn run_source_impl(
     // substitution balance is checked: parentheses in a heredoc body are
     // literal data, not shell syntax.
     let parse_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
+    // rubash#351: a `<<` whose delimiter word carries an unterminated quote
+    // fails the WORD read at EOF — GNU read_token_word (parse.y:5419-5437)
+    // reports `unexpected EOF while looking for matching `q'' and gathers
+    // no heredoc. The blanket `!input.contains("<<")` guard on the generic
+    // unclosed route below excludes every heredoc-bearing input, so the
+    // delimiter shape is detected and reported here first (GNU runs the
+    // complete lines before the failing one, like the other unclosed arms).
+    if pre_lexed.is_none() && !interactive {
+        if let Some((quote, open_line)) = heredoc_delimiter_unclosed_quote(input) {
+            let source = input.trim_end_matches('\n');
+            let prefix = if open_line > 1 {
+                source
+                    .lines()
+                    .take(open_line - 1)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                String::new()
+            };
+            if !prefix.trim().is_empty() {
+                let _ = run_source_with_line_offset(
+                    executor,
+                    &prefix,
+                    interactive,
+                    line_offset,
+                    redirect_cmd,
+                    diagnostic_text,
+                );
+            }
+            executor.mark_parse_error();
+            eprintln!(
+                "{}unexpected EOF while looking for matching `{quote}'",
+                executor.parser_diagnostic_prefix_for_line(open_line)
+            );
+            return 2;
+        }
+    }
     // perf19: a pre-lexed group broke COMPLETE at the gather (the
     // feeder-token certification) — the same predicate family
     // (has_unclosed_quotes / comsub / subscript / close-char) already

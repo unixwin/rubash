@@ -257,6 +257,22 @@ pub fn check_setlocale_warning() {
     let _ = locale_request_active();
 }
 
+/// Sync the locale-category variables into the PROCESS environment so the
+/// dynamic `locale_name()` readers (is_utf8, decimal_point, ...) observe
+/// assignments made inside the script. GNU variables.c installs sv_lang /
+/// sv_lc* watchers that call setlocale(3) on every LC_ALL/LC_CTYPE/LANG
+/// assignment (variables.c:4283-4350); the process env is rubash's
+/// equivalent single source of truth for those readers. Unset names are
+/// removed so the next-priority category applies.
+pub fn sync_process_locale(env_vars: &std::collections::HashMap<String, String>) {
+    for name in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        match env_vars.get(name) {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+}
+
 /// Initialize locale state. Kept as a no-op hook for parity with GNU bash's
 /// startup setlocale() pass; rubash re-derives the locale on demand.
 pub fn init_locale() {

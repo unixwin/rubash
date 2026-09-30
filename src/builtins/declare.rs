@@ -594,9 +594,37 @@ where
                 && !value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
                 && !valid_nameref_value(value)
             {
+                // GNU declare.def:576 prints the RAW assignment value. When
+                // the operand reached the declare path through the array
+                // assignment expansion (the target already carries -a), the
+                // value here is the typed storage serialization
+                // `("one"  "two" "three")'; decode the element words back
+                // to their text for the diagnostic (rubash#356; GNU prints
+                // `(one two three)').
+                let display =
+                    if value.starts_with('(') && value.ends_with(')') && value.contains('"') {
+                        let inner = &value[1..value.len() - 1];
+                        let words: Vec<String> =
+                            crate::builtins::declare::storage::split_storage_words(inner)
+                                .map(|word| {
+                                    crate::builtins::declare::storage::unquote_storage_value(
+                                        word.trim_start_matches(
+                                            crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
+                                        ),
+                                    )
+                                })
+                                .collect();
+                        if words.is_empty() {
+                            value.to_string()
+                        } else {
+                            format!("({})", words.join(" "))
+                        }
+                    } else {
+                        value.to_string()
+                    };
                 writeln!(
                     stderr,
-                    "{}{command_name}: `{value}': invalid variable name for name reference",
+                    "{}{command_name}: `{display}': invalid variable name for name reference",
                     diagnostic_prefix(variables)
                 )?;
                 attr_status = EXECUTION_FAILURE;

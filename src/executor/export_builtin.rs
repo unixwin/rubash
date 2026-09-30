@@ -59,6 +59,11 @@ impl Executor {
                     || word.starts_with("LANG=")
                 {
                     crate::locale::check_setlocale_warning();
+                    // GNU variables.c sv_lang/sv_lc* call setlocale on the
+                    // assignment; sync the process env so the dynamic
+                    // locale readers (locale::is_utf8 - the dollar-quote
+                    // backslash-u locale gate, rubash#353) see the change.
+                    crate::locale::sync_process_locale(&self.shell_state.env_vars);
                     break;
                 }
             }
