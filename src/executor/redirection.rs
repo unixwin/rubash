@@ -250,6 +250,29 @@ impl Executor {
                     }
                     continue;
                 }
+                // GNU redir.c:784-843 (do_redirection_internal,
+                // TRANSLATE_REDIRECT): the dup-word operand of [N]<&WORD /
+                // [N]>&WORD expands through redirection_expand
+                // (redir.c:298) — a process-substitution word expands to
+                // its substitution filename, which is a non-digit word, and
+                // the final `else` returns AMBIGUOUS_REDIRECT; redirection_
+                // error (redir.c:186-190) re-expands the word with
+                // W_NOCOMSUB|W_NOPROCSUB for the message, so the diagnostic
+                // carries the LITERAL `<(echo x)` text (rubash#340:
+                // `cat <& <(echo x)` -> `<(echo x): ambiguous redirect`,
+                // rc=1). The one exception is `>&WORD` with redirector 1
+                // (r_err_and_out, redir.c:832-838): the expanded filename
+                // opens for stdout+stderr and the command runs (GNU probe:
+                // `cat >& <(echo x)` is rc=0, silent).
+                if crate::parser::raw_word_has_unquoted_process_substitution(raw_word)
+                    && !(redirect.kind == crate::parser::RedirectKind::DuplicateOutput
+                        && redirector == 1
+                        && !raw_word.ends_with('-'))
+                {
+                    return self
+                        .reject_redirect_at(cmd, index, &format!("{raw_word}: ambiguous redirect"))
+                        .map(|_| true);
+                }
                 // A dup-kind target WITHOUT the `&` marker is rubash's own
                 // materialized form — command_with_process_substitution_
                 // files rewrites an external command's `<&N` operand to the

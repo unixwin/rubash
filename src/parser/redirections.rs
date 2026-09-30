@@ -109,6 +109,7 @@ pub(super) fn collect_trailing_redirections(
         ) {
             if let Some((mut process_substitution, next_i)) =
                 stderr_process_substitution_redirect_target(tokens, *index)
+                    .or_else(|| input_process_substitution_after_err_redirect(tokens, *index))
             {
                 process_substitution.redirect_fd = Some(2);
                 let target = process_substitution.target.clone();

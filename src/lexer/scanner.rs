@@ -666,6 +666,22 @@ impl<'a> Lexer<'a> {
             '0'..='9' if self.peek().is_some_and(|ch| ch.is_ascii_digit()) => {
                 Some(self.finish_number_token(start))
             }
+            // GNU parse.y:5490-5524 read_token_word's shellexp arm
+            // (syntax.h:84: `<`/`>` are shellexp characters): a `<`/`>`
+            // immediately followed by `(` NEVER terminates the word — the
+            // whole `<(...)`/`>(...)` process substitution is consumed into
+            // the token, so `cat 2>(echo x)` / `cat 3<(echo y)` are single
+            // WORDS (rubash#339) whose digits are literal text glued to the
+            // substitution result. The digit-prefixed redirection operators
+            // engage only when the `(` does not follow (the NUMBER decision
+            // at parse.y:5729 requires the word to have ENDED at the `<`/
+            // `>`, which `(` prevents).
+            '0'..='9'
+                if matches!(self.peek(), Some('<' | '>')) && self.peek_after(1) == Some('(') =>
+            {
+                self.skip_word_at(start);
+                Some(Token::new(TokenKind::Word, self.slice(start), start))
+            }
             '0'..='9' if c != '2' && self.peek() == Some('>') => {
                 self.advance();
                 if self.peek() == Some('>') {

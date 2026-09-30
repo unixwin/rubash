@@ -30,6 +30,20 @@ impl<'a> Lexer<'a> {
             }
         }
 
+        // GNU parse.y:5490-5524 read_token_word's shellexp() arm
+        // (syntax.h:84: `<`/`>` are shellexp chars): a `<`/`>` immediately
+        // followed by `(` NEVER ends the word — the whole `<(...)`/`>(...)`
+        // process substitution is consumed into the token (parse_comsub),
+        // so the digits are the head of an ordinary WORD (`cat 2>(echo x)`
+        // is the single word `2/dev/fd/63` after substitution, rubash#339).
+        // The NUMBER decision at got_token (parse.y:5729) fires only when
+        // the word actually ENDED at the `<`/`>`; with `(` next it never
+        // does. Scan the rest as word text and let the mid-word `<(`/`>(`
+        // arm of skip_word_inner own the substitution body.
+        if matches!(self.peek(), Some('<' | '>')) && self.peek_after(1) == Some('(') {
+            return self.finish_word_token(start, true);
+        }
+
         match self.peek() {
             Some('>') => self.finish_number_output_redirect(start),
             Some('<') => self.finish_number_input_redirect(start),

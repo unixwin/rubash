@@ -81,14 +81,26 @@ pub(super) fn missing_redirect_target_node(
             TokenKind::Semicolon if next.line_break => {
                 Some(offending("newline", tokens[index].position))
             }
+            TokenKind::RedirectIn | TokenKind::RedirectOut
+                // GNU read_token (parse.y:3794-3796): a `<`/`>` directly
+                // followed by `(` is NOT an operator token — it is the
+                // introducer of a process-substitution WORD, which is a
+                // legal redirection target (`cat 2>& <(echo x)` parses and
+                // fails at expansion time with `ambiguous redirect`,
+                // redir.c:839-843; rubash#340). The scanner emits the `<`/
+                // `>` and `(` as separate tokens; when they are adjacent
+                // the pair is a procsub target, never a missing-target
+                // syntax error.
+                if !matches!(tokens.get(index + 2), Some(token) if token.kind == TokenKind::Keyword && token.value == "(") =>
+            {
+                Some(offending(&next.value, next.position))
+            }
             TokenKind::Semicolon
             | TokenKind::Pipe
             | TokenKind::PipeErr
             | TokenKind::Background
             | TokenKind::And
             | TokenKind::Or
-            | TokenKind::RedirectIn
-            | TokenKind::RedirectOut
             | TokenKind::Append
             | TokenKind::RedirectErr
             | TokenKind::RedirectErrAppend
@@ -823,6 +835,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             note_command_line(&mut state.current_cmd, token);
             if let Some((mut process_substitution, next_i)) =
                 stderr_process_substitution_redirect_target(tokens, *i)
+                    .or_else(|| input_process_substitution_after_err_redirect(tokens, *i))
             {
                 process_substitution.redirect_fd = Some(2);
                 let target = process_substitution.target.clone();
@@ -853,6 +866,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             note_command_line(&mut state.current_cmd, token);
             if let Some((mut process_substitution, next_i)) =
                 stderr_process_substitution_redirect_target(tokens, *i)
+                    .or_else(|| input_process_substitution_after_err_redirect(tokens, *i))
             {
                 process_substitution.redirect_fd = Some(2);
                 let target = process_substitution.target.clone();
@@ -1612,6 +1626,26 @@ fn find_unquoted_ctrl_op(value: &str) -> Option<char> {
             b'`' if !in_single && !in_double => {
                 backtick_depth += 1;
             }
+            // GNU parse.y:7140 parse_compound_assignment reads each element
+            // through read_token; a `<('/`>(' process substitution is read
+            // as part of the element WORD (read_token's redirection branch
+            // at parse.y:3794-3796 hands `<`+`(` to the word scanner, and
+            // read_token_word's shellexp arm at parse.y:5490-5524 consumes
+            // the `(list)` body into the token), so `a=(<(echo e))` and
+            // `a=(x<(echo e)y)` are legal elements (rubash#339). A `<`/`>`
+            // NOT followed by `(` is still the redirection operator and the
+            // compound loop's yyerror names it (`a=(<x)` -> `unexpected
+            // token \`<'`, GNU-verified).
+            b'<' | b'>'
+                if !in_single
+                    && !in_double
+                    && bytes.get(i + 1) == Some(&b'(')
+                    && let Some(end) = skip_procsub_paren(bytes, i + 2) =>
+            {
+                i = end;
+                word_start = false;
+                continue;
+            }
             b'&' | b'|' | b';' | b'<' | b'>' if !in_single && !in_double => {
                 return Some(c as char);
             }
@@ -1651,6 +1685,50 @@ fn skip_dollar_paren(bytes: &[u8], mut i: usize) -> usize {
         i += 1;
     }
     i
+}
+
+/// Skip from just after the `(` of a `<(`/`>(` process substitution to the
+/// index just past the matching `)`. Quote/escape/nesting rules mirror
+/// GNU parse_matched_pair (parse.y:3877) as invoked by the read_token_word
+/// shellexp arm (parse.y:5490-5524). Returns `None` when the group never
+/// closes (the caller then treats the `<`/`>` as an operator, matching the
+/// yyerror a truncated word produces).
+fn skip_procsub_paren(bytes: &[u8], mut i: usize) -> Option<usize> {
+    let mut depth = 1i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    while i < bytes.len() && depth > 0 {
+        let c = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\\' if !in_single => escaped = true,
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'$' if !in_single
+                && !in_double
+                && i + 1 < bytes.len()
+                && bytes[i + 1] == b'('
+                && let Some(end) = skip_procsub_paren(bytes, i + 2) =>
+            {
+                i = end;
+                continue;
+            }
+            b'(' if !in_single && !in_double => depth += 1,
+            b')' if !in_single && !in_double => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    if depth == 0 {
+        Some(i)
+    } else {
+        None
+    }
 }
 
 /// Skip from just after `${` to the matching `}`, respecting nested

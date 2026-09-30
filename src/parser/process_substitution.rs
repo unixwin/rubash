@@ -115,7 +115,133 @@ pub(super) fn process_substitutions_in_word_with_raw(
         }
     }
 
+    // GNU subst.c:11349-11378 (expand_word_internal, cases '<'/'>'): an
+    // unquoted `<('/`>(' ANYWHERE in the word — not just word-initial — is
+    // extracted by extract_process_subst (subst.c:1311) and executed by
+    // process_substitute (subst.c:6362), its `/dev/fd/N` result spliced into
+    // the expanding word (`echo p<(echo x)q` -> `p/dev/fd/63q`,
+    // rubash#339). The token-shape scan above finds only word-initial
+    // substitutions; this raw-anchored scan owns the embedded spans (start
+    // > 0, so a word-initial `<(` already found above is not duplicated).
+    // The span text comes from the RAW word: the body keeps its own quoting
+    // the same way GNU pulls the span out of the word string before quote
+    // removal.
+    substitutions.extend(embedded_process_substitutions_in_raw(raw));
+
     substitutions
+}
+
+/// Quote-aware extraction of every UNQUOTED `<(`/`>(` span at raw offset > 0
+/// (word-initial spans belong to the token-shape scan in
+/// process_substitutions_in_word_with_raw). The paren matcher honors the
+/// same quote/escape/nesting rules as GNU parse_matched_pair (parse.y:3877)
+/// reached from the read_token_word shellexp arm (parse.y:5490-5524).
+fn embedded_process_substitutions_in_raw(raw: &str) -> Vec<ProcessSubstitution> {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut substitutions = Vec::new();
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            index += 1;
+            continue;
+        }
+        if !single
+            && !double
+            && matches!(ch, '<' | '>')
+            && chars.get(index + 1) == Some(&'(')
+            && index > 0
+        {
+            if let Some(end) = embedded_procsub_close(&chars, index + 2) {
+                let source: String = chars[index + 2..end].iter().collect();
+                let operator = if ch == '>' { ">" } else { "<" };
+                let target: String = chars[index..=end].iter().collect();
+                substitutions.push(ProcessSubstitution {
+                    target,
+                    open_delimiter_metadata: delimiter_metadata(&format!("{operator}(")),
+                    open_delimiter: format!("{operator}("),
+                    operator: operator.to_string(),
+                    operator_metadata: delimiter_metadata(operator),
+                    source: source.clone(),
+                    close_delimiter_metadata: delimiter_metadata(")"),
+                    close_delimiter: ")".to_string(),
+                    commands: parse(&crate::lexer::tokenize(&source)).commands,
+                    output: ch == '>',
+                    word_index: None,
+                    redirect_fd: None,
+                });
+                index = end + 1;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    substitutions
+}
+
+/// Index of the `)` closing a process-substitution group whose `(` is at
+/// `open` (just past the introducer). Mirrors the nesting/quote rules of
+/// skip_procsub_paren (parser/token_actions.rs) — GNU parse_matched_pair.
+fn embedded_procsub_close(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 1i32;
+    let mut index = open;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() && depth > 0 {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            index += 1;
+            continue;
+        }
+        if !single && !double {
+            if ch == '(' {
+                depth += 1;
+            } else if ch == ')' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Whether the raw word text contains a process-substitution opener that is
@@ -244,6 +370,34 @@ pub(super) fn stderr_process_substitution_redirect_target(
     }
 
     collect_output_process_substitution_target(tokens, redirect_index + 3)
+}
+
+/// `2>& <(...)` / `2>>& <(...)` — the stderr dup operator taking an INPUT
+/// process-substitution WORD. GNU read_token (parse.y:3794-3796) reads the
+/// `<(`+`(` as a procsub WORD operand, and r_duplicating_output_word
+/// (redir.c:839-843) rejects the non-digit expansion as AMBIGUOUS_REDIRECT
+/// reporting the literal word (`cat 2>& <(echo x)` ->
+/// `<(echo x): ambiguous redirect`, rc=1; rubash#340). The parse keeps the
+/// operator and the substitution as ONE redirect so the dup validator owns
+/// that contract instead of the `<(` leaking into the command words.
+pub(super) fn input_process_substitution_after_err_redirect(
+    tokens: &[Token],
+    redirect_index: usize,
+) -> Option<(ProcessSubstitution, usize)> {
+    if !matches!(
+        tokens.get(redirect_index)?.kind,
+        TokenKind::RedirectErr | TokenKind::RedirectErrAppend
+    ) || !tokens
+        .get(redirect_index + 1)
+        .is_some_and(|token| token.kind == TokenKind::RedirectIn && token.value == "<")
+        || !tokens
+            .get(redirect_index + 2)
+            .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == "(")
+    {
+        return None;
+    }
+
+    collect_process_substitution_target(tokens, redirect_index + 3)
 }
 
 pub(super) fn output_process_substitution_word_target(
