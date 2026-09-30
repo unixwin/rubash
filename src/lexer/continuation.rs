@@ -1,4 +1,4 @@
-use super::heredoc_scan::skip_heredoc_in_chars_with_closure;
+use super::heredoc_scan::{skip_heredoc_in_chars_decided, skip_heredoc_in_chars_with_closure};
 
 pub(super) fn ends_with_unquoted_backslash(input: &str) -> bool {
     // GNU parse.y shell_getc remove_quoted_newline: backslash-newline is ignored
@@ -2072,13 +2072,29 @@ pub(crate) fn comsub_residuals_advance(
             continue;
         }
         if state.backtick && ch == '<' && chars.get(index + 1) == Some(&'<') {
-            let (next, closes) = skip_heredoc_in_chars_with_closure(&chars, index);
-            // rubash#292: the terminator line is not in the buffer yet; a
-            // longer buffer closes this heredoc at a position this prefix
-            // cannot see (and the body lines in between must stay opaque),
-            // so park at the `<<` — no enclosing `$(` park exists at
-            // depth == 0.
-            if closes.is_none() && park.is_none() {
+            let (next, _closes, terminator_found) = skip_heredoc_in_chars_decided(&chars, index);
+            // rubash#292 + perf17: park ONLY while the terminator line has
+            // not arrived. Once it has, the heredoc's resume index is
+            // prefix-stable — the terminator search compares whole lines
+            // only (the join loop appends complete '\n'-terminated lines),
+            // so a longer buffer cannot move the first match — and the
+            // committed jump past the body is exactly what the fresh scan
+            // of every longer prefix does. GNU never re-reads a consumed
+            // heredoc body either (make_cmd.c:512 make_here_document reads
+            // each body line once through read_secondary_line, then the
+            // reader continues past the terminator; parse.y:3120
+            // gather_here_documents, parse.y:3557 read_token streams).
+            //
+            // Before perf17 this arm parked on `closes.is_none()` — which
+            // is also true for every heredoc whose HEADER line carries no
+            // `)` (i.e. every ordinary heredoc inside an open backtick)
+            // even after its terminator arrived, so the park never cleared
+            // and every later candidate line re-derived the whole
+            // accumulated tail: GNU bash's own configure -n parked once at
+            // the `<<_ACEOF` of `cat confdefs.h - <<_ACEOF >conftest.$ac_ext`
+            // and re-walked 534 M chars over 2406 candidate lines
+            // (perf11's #1 leftover, 95% of the gather).
+            if !terminator_found && park.is_none() {
                 park = Some(ComsubResidualPark {
                     pos: index,
                     snapshot: state.clone(),

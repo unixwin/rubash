@@ -9,6 +9,36 @@ pub(super) fn skip_heredoc_in_chars_with_closure(
     chars: &[char],
     start: usize,
 ) -> (usize, Option<(usize, usize)>) {
+    let (index, closure, _terminator_found) = skip_heredoc_in_chars_decided(chars, start);
+    (index, closure)
+}
+
+/// perf17 variant of [`skip_heredoc_in_chars_with_closure`]: additionally
+/// reports whether the heredoc's terminator line was found inside `chars`.
+///
+/// GNU anchor (make_cmd.c:512 `make_here_document`, driven by parse.y:3120
+/// `gather_here_documents`): the body is read line by line through
+/// `read_secondary_line` until a line equals the delimiter word exactly,
+/// and the reader then continues PAST that line — a consumed heredoc body
+/// is never re-read on later input lines (parse.y:3557 `read_token` streams
+/// and never re-scans consumed text). The `terminator_found` flag carries
+/// exactly that fact to checkpoint callers: once the terminator line is in
+/// the buffer, the skip's resume index is prefix-stable — the terminator
+/// search compares only WHOLE lines (the group driver appends complete
+/// '\n'-terminated physical lines, and the park machinery guarantees the
+/// `<<` itself never straddles a resume boundary), so a longer buffer can
+/// only append lines after the ones already compared and cannot move the
+/// first match. A `terminator_found == false` answer is the undecided
+/// case: the terminator line (or the make_cmd.c:602-611 `EOF`-prefix
+/// pushback line) has not arrived yet, and future input decides it.
+///
+/// The empty-delimiter early return (e.g. `<< ""`) reports `false` by
+/// construction: it never scans a body at all, so callers keep their
+/// pre-perf17 parking behavior there.
+pub(super) fn skip_heredoc_in_chars_decided(
+    chars: &[char],
+    start: usize,
+) -> (usize, Option<(usize, usize)>, bool) {
     let mut index = start + 2;
     let strip_tabs = if chars.get(index) == Some(&'-') {
         index += 1;
@@ -61,7 +91,7 @@ pub(super) fn skip_heredoc_in_chars_with_closure(
         delimiter = delimiter.trim_start_matches('\t').to_string();
     }
     if delimiter.is_empty() {
-        return (index, None);
+        return (index, None, false);
     }
     let mut header_close_paren = None;
     // A word-initial `#' after the delimiter word comments through the end
@@ -141,5 +171,5 @@ pub(super) fn skip_heredoc_in_chars_with_closure(
     } else {
         None
     };
-    (index, closure)
+    (index, closure, found_delimiter)
 }
