@@ -1,4 +1,6 @@
-use super::heredoc_scan::{skip_heredoc_in_chars_decided, skip_heredoc_in_chars_with_closure};
+use super::heredoc_scan::{
+    skip_heredoc_in_chars_decided, skip_heredoc_in_chars_with_closure, skip_heredoc_top_level,
+};
 
 pub(super) fn ends_with_unquoted_backslash(input: &str) -> bool {
     // GNU parse.y shell_getc remove_quoted_newline: backslash-newline is ignored
@@ -228,6 +230,11 @@ pub(crate) struct UnclosedDelim {
     /// funsub: the last significant char was a command terminator
     /// (';', '&', '|', newline, or a closed command construct).
     term_ready: bool,
+    /// perf19: the case-clause depth when this delimiter was pushed — a
+    /// `)` only closes this delimiter when the case depth has returned to
+    /// its push-time level (a `case` opened OUTSIDE never blocks the
+    /// closer; one opened INSIDE holds it through its `esac`).
+    case_depth_at_push: usize,
 }
 
 /// GNU parse.y reports `unexpected EOF while looking for matching `X'' where
@@ -294,12 +301,76 @@ pub(crate) fn unclosed_input_close_char_posix(
     // from swallowing the following lines into a dead group.
     let mut at_command = true;
     let mut cur_word = String::new();
+    // perf19 case-pattern tracking — the same word machine the parked
+    // close-char scan carries (`close_char_operator_context`,
+    // update_command_substitution_case_depth; GNU parse.y:1037 case
+    // grammar: a pattern's `)` is a case token, not the enclosing
+    // subshell/`$(` closer).
+    let mut case_word = String::new();
+    let mut case_depth = 0usize;
+    let mut case_word_boundary = true;
+    let mut case_current_word_boundary = true;
+    let mut case_in_stage = 0u8;
     let mut i = 0usize;
     while i < chars.len() {
         let ch = chars[i];
         let top = stack.last().copied();
         if ch == '\n' {
             line += 1;
+        }
+        if close_char_operator_context(top) {
+            update_command_substitution_case_depth_staged_chars(
+                &chars,
+                i,
+                ch,
+                &mut case_word,
+                &mut case_depth,
+                &mut case_word_boundary,
+                &mut case_current_word_boundary,
+                &mut case_in_stage,
+            );
+        } else if top.is_some_and(|d| d.close == '\'' || d.close == '"') {
+            case_word.clear();
+            case_word_boundary = false;
+        }
+        // perf19: heredoc body opacity (make_cmd.c:512 make_here_document
+        // reads the body raw; parse.y:3120 gather_here_documents, and
+        // parse.y:3557 read_token streams past the terminator). Same arm
+        // and context gate as the parked scan; the jumped newlines still
+        // advance the diagnostic line counter.
+        if ch == '<'
+            && chars.get(i + 1) == Some(&'<')
+            && chars.get(i + 2) != Some(&'<')
+            && close_char_operator_context(top)
+        {
+            if let Some((next, terminator_found)) = skip_heredoc_top_level(&chars, i) {
+                line += chars[i..next].iter().filter(|c| **c == '\n').count();
+                comment_start = true;
+                cur_word.clear();
+                case_word.clear();
+                case_word_boundary = true;
+                if let Some(d) = stack.last_mut() {
+                    if d.funsub {
+                        d.term_ready = true;
+                    }
+                } else {
+                    at_command = true;
+                }
+                i = next;
+                continue;
+            }
+        }
+        // `<<<` here-string (parse.y:3690-3706): one operator, consumed
+        // atomically so its second `<` is never a `<<` opener.
+        if ch == '<'
+            && chars.get(i + 1) == Some(&'<')
+            && chars.get(i + 2) == Some(&'<')
+            && close_char_operator_context(top)
+        {
+            comment_start = true;
+            cur_word.clear();
+            i += 3;
+            continue;
         }
         if let Some(d) = top {
             if d.escapes && ch == '\\' {
@@ -308,7 +379,12 @@ pub(crate) fn unclosed_input_close_char_posix(
                 i += 2;
                 continue;
             }
-            if ch == d.close && !(d.funsub && !d.term_ready) {
+            // perf19: a `)` while a case clause is open is a PATTERN
+            // terminator (parse.y:1037), not this delimiter's closer.
+            if ch == d.close
+                && !(d.funsub && !d.term_ready)
+                && !(d.close == ')' && case_depth > d.case_depth_at_push)
+            {
                 stack.pop();
                 // A closed subshell or brace group is a complete command:
                 // an enclosing function substitution's `}' may now close.
@@ -456,6 +532,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     funsub: false,
                     command: false,
                     term_ready: false,
+                    case_depth_at_push: 0,
                     array_list: false,
                 });
             }
@@ -468,6 +545,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     funsub: false,
                     command: false,
                     term_ready: false,
+                    case_depth_at_push: 0,
                     array_list: false,
                 });
             }
@@ -480,6 +558,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     funsub: false,
                     command: false,
                     term_ready: false,
+                    case_depth_at_push: 0,
                     array_list: false,
                 });
             }
@@ -509,6 +588,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                             funsub,
                             command: false,
                             term_ready: false,
+                            case_depth_at_push: 0,
                             array_list: false,
                         });
                         if funsub {
@@ -529,6 +609,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                             funsub: false,
                             command: false,
                             term_ready: false,
+                            case_depth_at_push: case_depth,
                             array_list: false,
                         });
                         // A fresh substitution body starts at a token
@@ -545,6 +626,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                                 funsub: false,
                                 command: false,
                                 term_ready: false,
+                                case_depth_at_push: case_depth,
                                 array_list: false,
                             });
                             i += 1;
@@ -572,6 +654,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                             funsub: false,
                             command: false,
                             term_ready: false,
+                            case_depth_at_push: 0,
                             array_list: false,
                         });
                         i += 1;
@@ -604,6 +687,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                         // `(` is array text, not a subshell.
                         command: is_subshell,
                         term_ready: false,
+                        case_depth_at_push: case_depth,
                         array_list: is_array_list,
                     });
                 }
@@ -627,6 +711,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     funsub: false,
                     command: !(i > 0 && chars[i - 1] == '('),
                     term_ready: false,
+                    case_depth_at_push: case_depth,
                     array_list: false,
                 });
                 comment_start = true;
@@ -642,6 +727,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     funsub: true,
                     command: true,
                     term_ready: false,
+                    case_depth_at_push: 0,
                     array_list: false,
                 });
             }
@@ -983,6 +1069,51 @@ pub(crate) fn quotes_residuals_advance(
                     snapshot: state.clone(),
                 });
             }
+        }
+
+        // perf19: TOP-LEVEL heredoc — the body is raw text. GNU
+        // make_cmd.c:512 `make_here_document` (driven by parse.y:3120
+        // gather_here_documents) reads the body through
+        // `read_secondary_line` with NO quoting state; the lexer
+        // (parse.y:5305 read_token_word) never processes a body character
+        // and the reader continues past the terminator line
+        // (parse.y:3557 read_token). A quote scan that toggles `'`/`"`
+        // inside the body mis-derives the rest of the group (perf19: an
+        // apostrophe in configure's `<<_ACEOF` C commentary held
+        // `single` open across 19578 lines). Park while the terminator
+        // has not arrived (perf17 prefix-stable rule); empty delimiter
+        // keeps the fall-through.
+        if !state.single
+            && !state.double
+            && !state.ansi_single
+            && ch == '<'
+            && chars.get(index + 1) == Some(&'<')
+            && chars.get(index + 2) != Some(&'<')
+        {
+            if let Some((next, terminator_found)) = skip_heredoc_top_level(&chars, index) {
+                if !terminator_found && park.is_none() {
+                    park = Some(QuotesResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    });
+                }
+                state.comment_start = true;
+                index = next;
+                continue;
+            }
+        }
+        // `<<<` here-string (parse.y:3690-3706): one three-character
+        // operator — consume it atomically so its second `<` is never
+        // re-read as a `<<` heredoc opener.
+        if !state.single
+            && !state.double
+            && !state.ansi_single
+            && ch == '<'
+            && chars.get(index + 1) == Some(&'<')
+            && chars.get(index + 2) == Some(&'<')
+        {
+            index += 3;
+            continue;
         }
 
         if ch == '$' && !state.single && !state.double && chars.get(index + 1) == Some(&'\'') {
@@ -2103,6 +2234,61 @@ pub(crate) fn comsub_residuals_advance(
             index = next;
             continue;
         }
+        // perf19: TOP-LEVEL heredoc (`depth == 0`, no open backtick, outside
+        // quotes and `${...}`): the body is raw text. GNU make_cmd.c:512
+        // `make_here_document` (driven by parse.y:3120 gather_here_documents)
+        // reads the body line by line through `read_secondary_line` without
+        // any quoting state — the lexer (parse.y:5305 read_token_word, fed by
+        // parse.y:3557 read_token) never sees a body character and continues
+        // PAST the terminator line. A group-completeness scan that instead
+        // applies quote/backtick rules across the body mis-derives: bash's
+        // own configure parks an `as_fn_*` heredoc whose body contains
+        // `can't` (an apostrophe in C commentary) and reports the whole
+        // remaining script as one open construct (perf19: 19578 lines, one
+        // group). Skip uses `skip_heredoc_top_level`: the PST_EOFTOKEN
+        // pushback branches (make_cmd.c:602-611, parse.y:4513 parse_comsub
+        // sets the flag only inside a command substitution) are disabled —
+        // at top level only the exact delimiter line terminates. Park while
+        // the terminator has not arrived (perf17's prefix-stable rule: whole
+        // lines only); an empty delimiter returns None and keeps the
+        // pre-existing fall-through.
+        if state.depth == 0
+            && !state.backtick
+            && !state.double
+            && state.parameter_depth == 0
+            && ch == '<'
+            && chars.get(index + 1) == Some(&'<')
+            && chars.get(index + 2) != Some(&'<')
+        {
+            if let Some((next, terminator_found)) = skip_heredoc_top_level(&chars, index) {
+                if !terminator_found && park.is_none() {
+                    park = Some(ComsubResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    });
+                }
+                // The jump lands just past the terminator line's '\n' — a
+                // fresh line start, exactly the '\n' arm's comment_start.
+                state.comment_start = true;
+                index = next;
+                continue;
+            }
+        }
+        // `<<<` here-string (parse.y:3690-3706 read_token lexes the
+        // three-character operator atomically): consume all three so the
+        // second `<` is never re-read as a `<<` heredoc opener — the
+        // same shape as the depth>0 arm above.
+        if state.depth == 0
+            && !state.backtick
+            && !state.double
+            && state.parameter_depth == 0
+            && ch == '<'
+            && chars.get(index + 1) == Some(&'<')
+            && chars.get(index + 2) == Some(&'<')
+        {
+            index += 3;
+            continue;
+        }
         // GNU read_token_word (parse.y:5404-5418): inside double quotes a
         // `)` is literal text — it never balances a `$(` parenthesis. All
         // constructs that stay live inside `"..."` (`\x`, `$(`, `` ` ``,
@@ -2912,6 +3098,46 @@ pub(crate) fn balanced_residuals_advance(
                 },
             }));
         }
+        // perf19: TOP-LEVEL heredoc — the body is raw text (GNU
+        // make_cmd.c:512 make_here_document reads it through
+        // read_secondary_line with no paren state; parse.y:3120
+        // gather_here_documents, parse.y:3557 read_token stream past the
+        // terminator). A balance scan that counts body parens
+        // mis-derives (perf19: configure's `<<_ACEOF` C commentary held
+        // the gate's `!balanced` half wrong for the rest of the file).
+        // Park while the terminator has not arrived (perf17 prefix-stable
+        // rule); empty delimiter keeps the fall-through.
+        if !state.single
+            && !state.double
+            && !state.ansi_single
+            && ch == '<'
+            && chars.get(index + 1) == Some(&'<')
+            && chars.get(index + 2) != Some(&'<')
+        {
+            if let Some((next, terminator_found)) = skip_heredoc_top_level(&chars, index) {
+                if !terminator_found && park.is_none() {
+                    park = Some(BalancedResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    });
+                }
+                state.comment_start = true;
+                index = next;
+                continue;
+            }
+        }
+        // `<<<` here-string (parse.y:3690-3706): one operator, consumed
+        // atomically so its second `<` is never a `<<` opener.
+        if !state.single
+            && !state.double
+            && !state.ansi_single
+            && ch == '<'
+            && chars.get(index + 1) == Some(&'<')
+            && chars.get(index + 2) == Some(&'<')
+        {
+            index += 3;
+            continue;
+        }
         if !state.single && !state.double && !state.ansi_single {
             state.comment_start = false;
         }
@@ -3077,6 +3303,36 @@ pub(crate) fn subscript_residuals_advance(
                 pos: index,
                 snapshot: state.clone(),
             });
+        }
+        // perf19: TOP-LEVEL heredoc — the body is raw text (GNU
+        // make_cmd.c:512 make_here_document, parse.y:3120
+        // gather_here_documents): no subscript can open inside it, and the
+        // body's `[`/`]`/parens must not feed this scan (parse.y:3557
+        // read_token never re-reads consumed text). The jumped span's
+        // newlines still advance the diagnostic line counter. Park while
+        // the terminator has not arrived (perf17 prefix-stable rule);
+        // empty delimiter keeps the fall-through.
+        if ch == '<' && chars.get(index + 1) == Some(&'<') && chars.get(index + 2) != Some(&'<') {
+            if let Some((next, terminator_found)) = skip_heredoc_top_level(&chars, index) {
+                if !terminator_found && park.is_none() {
+                    park = Some(SubscriptResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    });
+                }
+                state.line += chars[index..next].iter().filter(|c| **c == '\n').count();
+                state.command_position = true;
+                state.word.clear();
+                state.element_start = false;
+                index = next;
+                continue;
+            }
+        }
+        // `<<<` here-string (parse.y:3690-3706): one operator, consumed
+        // atomically so its second `<` is never a `<<` opener.
+        if ch == '<' && chars.get(index + 1) == Some(&'<') && chars.get(index + 2) == Some(&'<') {
+            index += 3;
+            continue;
         }
         match ch {
             '\\' => {
@@ -3308,6 +3564,18 @@ pub(crate) struct CloseCharResidualState {
     /// after `=` in an assignment word (the oracle's at_command tracker).
     pub(crate) at_command: bool,
     pub(crate) cur_word: String,
+    /// perf19 case-pattern tracking (parse.y:1037 case_command grammar): a
+    /// `)` inside an open case clause is a PATTERN terminator, never the
+    /// closer of an enclosing subshell/`$(...`/backquote — see
+    /// `close_char_operator_context` below.
+    pub(crate) word: String,
+    pub(crate) case_depth: usize,
+    pub(crate) word_boundary: bool,
+    pub(crate) current_word_boundary: bool,
+    /// The staged machine's `case SUBJECT in` progress (0 none, 1 after
+    /// `case`, 2 subject done, 3 after `in`) — see
+    /// update_command_substitution_case_depth_staged_chars.
+    pub(crate) case_in_stage: u8,
 }
 
 impl Default for CloseCharResidualState {
@@ -3319,6 +3587,11 @@ impl Default for CloseCharResidualState {
             comment_start: true,
             at_command: true,
             cur_word: String::new(),
+            word: String::new(),
+            case_depth: 0,
+            word_boundary: true,
+            current_word_boundary: true,
+            case_in_stage: 0,
         }
     }
 }
@@ -3368,6 +3641,29 @@ pub(crate) struct CloseCharResidualPark {
 /// idempotent assignments (line counting only runs at '\n', which never
 /// parks), so resume-at-park reproduces the full scan bit for bit.
 #[allow(clippy::too_many_lines)]
+/// perf19: is a `<<` heredoc operator / `case` keyword live shell syntax in
+/// this scanner context? GNU's reader only lexes operators and keywords
+/// where the grammar expects command text: the top level, inside
+/// `$(...)`, inside backquotes, inside `${ cmd; }` funsubs, and inside
+/// command-position subshells. It does NOT inside quotes (`'...'`,
+/// `"..."`, `$'...'` — `<<` and `case` are word data), inside `${param}`
+/// expansions, inside array-assignment lists (`x=(`), or inside
+/// arithmetic (`$((1<<2))` / `((x<<1))` — `<<` is the shift operator;
+/// those tops carry `report_open && !command`, exactly the
+/// parse_matched_pair arithmetic pushes).
+fn close_char_operator_context(top: Option<UnclosedDelim>) -> bool {
+    match top {
+        None => true,
+        Some(d) => match d.close {
+            '\'' | '"' => false,
+            '`' => true,
+            ')' => !d.report_open || d.command,
+            '}' => d.funsub,
+            _ => false,
+        },
+    }
+}
+
 pub(crate) fn close_char_residuals_advance(
     chars: &[char],
     from: usize,
@@ -3383,6 +3679,92 @@ pub(crate) fn close_char_residuals_advance(
         if ch == '\n' {
             state.line += 1;
         }
+        // perf19: case-pattern tracking. GNU's grammar (parse.y:1037
+        // case_command: CASE WORD newline_list IN case_clause ESAC)
+        // consumes a pattern's `)` as a case token — the subshell/
+        // `$(`/backquote closer only arrives at command position after
+        // the clause's `esac`. The comsub residual scanner already ports
+        // this word machine (`update_command_substitution_case_depth`,
+        // the special_case_tokens rules of parse.y:3369-3386); the
+        // close-char scan needs the same tracking so a case-pattern `)`
+        // does not pop an enclosing `)` delimiter. The feed runs at the
+        // loop top so a word completing AT the `)` (`esac)`) is folded
+        // before the pop check below reads `case_depth`. Comment bodies
+        // are consumed by the arms below after their `#` separator was
+        // fed (harmless); quote content is cleared by the helper via the
+        // single/double flags derived from the delimiter stack.
+        if close_char_operator_context(top) {
+            update_command_substitution_case_depth_staged_chars(
+                chars,
+                i,
+                ch,
+                &mut state.word,
+                &mut state.case_depth,
+                &mut state.word_boundary,
+                &mut state.current_word_boundary,
+                &mut state.case_in_stage,
+            );
+        } else if top.is_some_and(|d| d.close == '\'' || d.close == '"') {
+            // Inside a quote span the word machine clears (the skip.rs
+            // variant's `single || double` branch): `es'ac` must never
+            // assemble into `esac` (GNU marks quote-bearing words
+            // W_QUOTED, never keywords).
+            state.word.clear();
+            state.word_boundary = false;
+        }
+        // perf19: heredoc body opacity. GNU make_cmd.c:512
+        // `make_here_document` (driven by parse.y:3120
+        // gather_here_documents) reads the body as raw lines through
+        // `read_secondary_line` — the matched-pair scanner state
+        // (parse.y:3877 parse_matched_pair under parse.y:3557 read_token)
+        // never processes a body character, and the reader continues past
+        // the terminator line. The arm fires only in contexts where a
+        // redirection operator is live syntax (`close_char_operator_context`).
+        // Park while the terminator has not arrived (perf17 prefix-stable
+        // rule); empty delimiter keeps the fall-through. The jumped span's
+        // newlines advance the line counter the diagnostic `open_line`
+        // reports.
+        if ch == '<'
+            && chars.get(i + 1) == Some(&'<')
+            && chars.get(i + 2) != Some(&'<')
+            && close_char_operator_context(top)
+        {
+            if let Some((next, terminator_found)) = skip_heredoc_top_level(&chars, i) {
+                if !terminator_found && park.is_none() {
+                    park = Some(CloseCharResidualPark {
+                        pos: i,
+                        snapshot: state.clone(),
+                    });
+                }
+                state.line += chars[i..next].iter().filter(|c| **c == '\n').count();
+                state.comment_start = true;
+                state.cur_word.clear();
+                state.word.clear();
+                state.word_boundary = true;
+                if let Some(d) = state.stack.last_mut() {
+                    if d.funsub {
+                        d.term_ready = true;
+                    }
+                } else {
+                    state.at_command = true;
+                }
+                i = next;
+                continue;
+            }
+        }
+        // `<<<` here-string (parse.y:3690-3706): one operator, consumed
+        // atomically so its second `<` is never a `<<` opener (the
+        // operator boundary after it matches a single `<`'s).
+        if ch == '<'
+            && chars.get(i + 1) == Some(&'<')
+            && chars.get(i + 2) == Some(&'<')
+            && close_char_operator_context(top)
+        {
+            state.comment_start = true;
+            state.cur_word.clear();
+            i += 3;
+            continue;
+        }
         if let Some(d) = top {
             if d.escapes && ch == '\\' {
                 // An escaped character is word text everywhere.
@@ -3390,7 +3772,12 @@ pub(crate) fn close_char_residuals_advance(
                 i += 2;
                 continue;
             }
-            if ch == d.close && !(d.funsub && !d.term_ready) {
+            // perf19: a `)` while a case clause is open is a PATTERN
+            // terminator (parse.y:1037), not this delimiter's closer.
+            if ch == d.close
+                && !(d.funsub && !d.term_ready)
+                && !(d.close == ')' && state.case_depth > d.case_depth_at_push)
+            {
                 state.stack.pop();
                 // A closed subshell or brace group is a complete command:
                 // an enclosing function substitution's `}' may now close.
@@ -3547,6 +3934,7 @@ pub(crate) fn close_char_residuals_advance(
                     funsub: false,
                     command: false,
                     term_ready: false,
+                    case_depth_at_push: 0,
                     array_list: false,
                 });
             }
@@ -3559,6 +3947,7 @@ pub(crate) fn close_char_residuals_advance(
                     funsub: false,
                     command: false,
                     term_ready: false,
+                    case_depth_at_push: 0,
                     array_list: false,
                 });
             }
@@ -3571,6 +3960,7 @@ pub(crate) fn close_char_residuals_advance(
                     funsub: false,
                     command: false,
                     term_ready: false,
+                    case_depth_at_push: 0,
                     array_list: false,
                 });
             }
@@ -3618,6 +4008,7 @@ pub(crate) fn close_char_residuals_advance(
                             funsub,
                             command: false,
                             term_ready: false,
+                            case_depth_at_push: 0,
                             array_list: false,
                         });
                         if funsub {
@@ -3648,6 +4039,7 @@ pub(crate) fn close_char_residuals_advance(
                             funsub: false,
                             command: false,
                             term_ready: false,
+                            case_depth_at_push: state.case_depth,
                             array_list: false,
                         });
                         // A fresh substitution body starts at a token
@@ -3664,6 +4056,7 @@ pub(crate) fn close_char_residuals_advance(
                                 funsub: false,
                                 command: false,
                                 term_ready: false,
+                                case_depth_at_push: state.case_depth,
                                 array_list: false,
                             });
                             i += 1;
@@ -3691,6 +4084,7 @@ pub(crate) fn close_char_residuals_advance(
                             funsub: false,
                             command: false,
                             term_ready: false,
+                            case_depth_at_push: 0,
                             array_list: false,
                         });
                         i += 1;
@@ -3723,6 +4117,7 @@ pub(crate) fn close_char_residuals_advance(
                         // `(` is array text, not a subshell.
                         command: is_subshell,
                         term_ready: false,
+                        case_depth_at_push: state.case_depth,
                         array_list: is_array_list,
                     });
                 }
@@ -3746,6 +4141,7 @@ pub(crate) fn close_char_residuals_advance(
                     funsub: false,
                     command: !(i > 0 && chars[i - 1] == '('),
                     term_ready: false,
+                    case_depth_at_push: state.case_depth,
                     array_list: false,
                 });
                 state.comment_start = true;
@@ -3761,6 +4157,7 @@ pub(crate) fn close_char_residuals_advance(
                     funsub: true,
                     command: true,
                     term_ready: false,
+                    case_depth_at_push: 0,
                     array_list: false,
                 });
             }
@@ -3828,6 +4225,99 @@ fn update_command_substitution_case_depth(
 /// of `chars` without concluding. The decision itself is still committed
 /// exactly as the full-buffer scan commits it; only the caller's
 /// checkpoint cares about the flag.
+/// perf19: the STAGED case machine (skip.rs's
+/// `update_command_substitution_case_depth`, GNU special_case_tokens
+/// parse.y:3369-3386 + the parse.y:3433-3441 empty-case `esac`), over a
+/// chars slice like the unstaged wrapper above. The close-char scan uses
+/// THIS variant: its subshell/`$(`/backquote contexts see bare command
+/// text where `case SUBJECT in esac` appears with plain-whitespace word
+/// boundaries — the unstaged machine loses the reserved-word boundary
+/// after the subject word and never counts the empty case's `esac`
+/// (perf19: `( case x in esac )` held the subshell open to EOF).
+fn update_command_substitution_case_depth_staged_chars(
+    chars: &[char],
+    index: usize,
+    ch: char,
+    word: &mut String,
+    case_depth: &mut usize,
+    word_boundary: &mut bool,
+    current_word_boundary: &mut bool,
+    case_in_stage: &mut u8,
+) {
+    if ch == '_' || ch.is_ascii_alphanumeric() {
+        if word.is_empty() {
+            *current_word_boundary = *word_boundary;
+        }
+        word.push(ch);
+        return;
+    }
+
+    if word.is_empty() {
+        if command_substitution_separator_allows_reserved_word(ch) {
+            *word_boundary = true;
+        } else if !ch.is_whitespace() {
+            *word_boundary = false;
+        }
+        return;
+    }
+
+    let completing_after_case = *case_in_stage == 1;
+    if completing_after_case {
+        *case_in_stage = 2;
+    }
+
+    let reserved_word_allows_next = match word.as_str() {
+        "case" if *current_word_boundary => {
+            *case_depth += 1;
+            *case_in_stage = 1;
+            false
+        }
+        "in" if *case_in_stage == 2 => {
+            // GNU special_case_tokens rule 6: `in' after the case subject
+            // is the IN token even off a reserved-word boundary.
+            *case_in_stage = 3;
+            true
+        }
+        "esac" if *case_in_stage == 3 => {
+            // GNU parse.y:3433-3441: `esac' directly after IN is ESAC —
+            // the empty case `case WORD in esac' — unconditionally.
+            *case_depth = case_depth.saturating_sub(1);
+            *case_in_stage = 0;
+            true
+        }
+        "esac" if *current_word_boundary => {
+            let (starts_with_esac_chars, _decided) =
+                case_pattern_starts_with_esac_chars_ex(chars, index);
+            if !starts_with_esac_chars {
+                *case_depth = case_depth.saturating_sub(1);
+                *case_in_stage = 0;
+                true
+            } else {
+                // `esac` heads a pattern list (esac|pat) / sits in pattern
+                // position (esac): pattern text, not the keyword.
+                *case_in_stage = 0;
+                false
+            }
+        }
+        "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
+        | "done"
+            if *current_word_boundary =>
+        {
+            *case_in_stage = 0;
+            true
+        }
+        _ => {
+            if !completing_after_case {
+                *case_in_stage = 0;
+            }
+            false
+        }
+    };
+    word.clear();
+    *word_boundary =
+        reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
+}
+
 fn update_command_substitution_case_depth_ex(
     chars: &[char],
     index: usize,

@@ -1808,6 +1808,39 @@ pub(crate) fn command_substitutions_balanced(input: &str) -> bool {
             // Genuinely unbalanced command substitution.
             return false;
         }
+        // perf19: top-level heredoc — the body is raw text (GNU
+        // make_cmd.c:512 make_here_document reads it line by line with no
+        // paren state; parse.y:3120 gather_here_documents, parse.y:3557
+        // read_token stream past the terminator), so the body's parens
+        // never feed this balance scan. Same arm as the parked balanced
+        // scan.
+        if !single
+            && !double
+            && !ansi_single
+            && ch == '<'
+            && chars.get(index + 1) == Some(&'<')
+            && chars.get(index + 2) != Some(&'<')
+        {
+            if let Some((next, _terminator_found)) =
+                super::heredoc_scan::skip_heredoc_top_level(&chars, index)
+            {
+                index = next;
+                comment_start = true;
+                continue;
+            }
+        }
+        // `<<<` here-string (parse.y:3690-3706): one operator, consumed
+        // atomically so its second `<` is never a `<<` opener.
+        if !single
+            && !double
+            && !ansi_single
+            && ch == '<'
+            && chars.get(index + 1) == Some(&'<')
+            && chars.get(index + 2) == Some(&'<')
+        {
+            index += 3;
+            continue;
+        }
         if !single && !double && !ansi_single {
             comment_start = false;
         }
@@ -1901,6 +1934,32 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
                 double = false;
             }
             index += 1;
+            continue;
+        }
+        // perf19: top-level heredoc — the body is raw text (GNU
+        // make_cmd.c:512 make_here_document reads it line by line with no
+        // subscript state; parse.y:3120 gather_here_documents,
+        // parse.y:3557 read_token stream past the terminator), so the
+        // body's `[`/`]`/parens never feed this scan. Same arm as the
+        // parked subscript scan; the jumped newlines still advance the
+        // diagnostic line counter.
+        if ch == '<' && chars.get(index + 1) == Some(&'<') && chars.get(index + 2) != Some(&'<') {
+            if let Some((next, _terminator_found)) =
+                super::heredoc_scan::skip_heredoc_top_level(&chars, index)
+            {
+                let jumped = chars[index..next].iter().filter(|c| **c == '\n').count();
+                line += jumped;
+                command_position = true;
+                word.clear();
+                element_start = false;
+                index = next;
+                continue;
+            }
+        }
+        // `<<<` here-string (parse.y:3690-3706): one operator, consumed
+        // atomically so its second `<` is never a `<<` opener.
+        if ch == '<' && chars.get(index + 1) == Some(&'<') && chars.get(index + 2) == Some(&'<') {
+            index += 3;
             continue;
         }
         match ch {

@@ -131,12 +131,20 @@ pub fn run_script_with_history_in(
         // The returned feeder tokens are unused here: this driver's exec
         // text re-joins the group's line texts (and history expansion may
         // rewrite them), so run_history_group's parse keeps its own scan.
-        let Some((pending, start_line, group, _feeder_tokens)) =
+        let Some((pending, start_line, group, mut feeder_tokens)) =
             read_next_source_group(executor, &raw_lines, &mut index)
         else {
             break;
         };
-        let status = run_history_group(executor, &session, &group, start_line, redirect_cmd, false);
+        let status = run_history_group(
+            executor,
+            &session,
+            &group,
+            start_line,
+            redirect_cmd,
+            false,
+            feeder_tokens.take(),
+        );
         let parse_error = executor.take_parse_error();
         // A group that ended by unwinding (exit builtin, errexit, POSIX
         // special-builtin failure) stops the reader unconditionally — GNU's
@@ -759,6 +767,7 @@ fn run_history_group(
     start_line: usize,
     redirect_cmd: Option<&CommandNode>,
     interactive: bool,
+    feeder_tokens: Option<Vec<Token>>,
 ) -> i32 {
     let history_on = executor.get_env("__RUBASH_SETOPT_history").as_deref() == Some("1");
     let histexpand_on = executor.get_env("__RUBASH_SETOPT_histexpand").as_deref() == Some("1");
@@ -797,7 +806,13 @@ fn run_history_group(
         physical_offset += text.lines().count().max(1);
         if *is_body || !history_on || !histexpand_on {
             exec_parts.push(text.clone());
-            record_texts.push(Some(text.clone()));
+            // The recorded entry is only consumed when history is on;
+            // skipping the clone halves this loop's per-line allocations
+            // for history-off scripts (GNU bashhist.c pre_process_line is
+            // itself gated on history being enabled).
+            if history_on {
+                record_texts.push(Some(text.clone()));
+            }
             continue;
         }
         let result = session.borrow_mut().expand(text, ctx);
@@ -915,18 +930,52 @@ fn run_history_group(
         .shell_state
         .env_vars
         .insert("__RUBASH_ALIAS_STREAMED".to_string(), "1".to_string());
-    let status = run_source_with_line_offset(
-        executor,
-        &exec_text,
-        interactive,
-        start_line.saturating_sub(1),
-        redirect_cmd,
-        if exec_text == pre_alias_text {
-            None
-        } else {
-            Some(pre_alias_text.as_str())
-        },
-    );
+    // perf19 token reuse: when nothing rewrote the group's text (history
+    // expansion off or inert AND alias expansion an identity — the
+    // exec_text == pre_alias_text comparison below already answers the
+    // alias half) the gather feeder's committed tokens are byte-identical
+    // to a fresh re-lex of exec_text (read_next_source_group's perf10
+    // certification: complete break, no extglob toggle, non-alias arm).
+    // GNU parse.y:3557 read_token streams once and never re-tokenizes
+    // consumed text — the same reuse the `.` driver (perf10) applies. The
+    // trailing per-logical-line separator is popped with the exact rule
+    // tokenize_comsub_body_with_origin applies to the fresh stream.
+    let reuse_tokens = if exec_text == pre_alias_text && !modified_any {
+        feeder_tokens.map(|mut tokens| {
+            if tokens
+                .last()
+                .is_some_and(|token| token.kind == TokenKind::Semicolon)
+            {
+                tokens.pop();
+            }
+            tokens
+        })
+    } else {
+        None
+    };
+    let status = match reuse_tokens {
+        Some(tokens) => run_source_pre_lexed_with_line_offset(
+            executor,
+            &exec_text,
+            interactive,
+            start_line.saturating_sub(1),
+            redirect_cmd,
+            None,
+            tokens,
+        ),
+        None => run_source_with_line_offset(
+            executor,
+            &exec_text,
+            interactive,
+            start_line.saturating_sub(1),
+            redirect_cmd,
+            if exec_text == pre_alias_text {
+                None
+            } else {
+                Some(pre_alias_text.as_str())
+            },
+        ),
+    };
     executor
         .shell_state
         .env_vars
@@ -1653,6 +1702,37 @@ pub fn run_source(executor: &mut Executor, input: &str, interactive: bool) -> i3
     run_source_with_line_offset(executor, input, interactive, 0, None, None)
 }
 
+/// perf19 token-reuse entry: identical to [`run_source_with_line_offset`]
+/// except the caller supplies the group's ALREADY-COMMITTED token stream
+/// (the gather feeder's output, perf10 model) instead of re-lexing
+/// `input`. Eligibility is the caller's contract — the same conditions
+/// read_next_source_group documents for its returned feeder tokens
+/// (complete-group break, no effective extglob toggle, non-alias arm so
+/// `input` is byte-identical to the text the feeder scanned, and nothing
+/// rewrote the text in between): GNU parse.y:3557 read_token streams the
+/// input ONCE and never re-tokenizes consumed text; a certified token
+/// stream is that model's stand-in, exactly as the `.` source driver
+/// (builtins/source/execution.rs, perf10) already consumes it.
+pub(crate) fn run_source_pre_lexed_with_line_offset(
+    executor: &mut Executor,
+    input: &str,
+    interactive: bool,
+    line_offset: usize,
+    redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
+    pre_lexed: Vec<Token>,
+) -> i32 {
+    run_source_impl(
+        executor,
+        input,
+        interactive,
+        line_offset,
+        redirect_cmd,
+        diagnostic_text,
+        Some(pre_lexed),
+    )
+}
+
 pub fn run_source_with_line_offset(
     executor: &mut Executor,
     input: &str,
@@ -1660,6 +1740,26 @@ pub fn run_source_with_line_offset(
     line_offset: usize,
     redirect_cmd: Option<&CommandNode>,
     diagnostic_text: Option<&str>,
+) -> i32 {
+    run_source_impl(
+        executor,
+        input,
+        interactive,
+        line_offset,
+        redirect_cmd,
+        diagnostic_text,
+        None,
+    )
+}
+
+fn run_source_impl(
+    executor: &mut Executor,
+    input: &str,
+    interactive: bool,
+    line_offset: usize,
+    redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
+    pre_lexed: Option<Vec<Token>>,
 ) -> i32 {
     // TODO(shell.c/eval.c/parse.y): GNU Bash parses complete command streams,
     // including pending here-documents, rather than executing script files one
@@ -1669,7 +1769,16 @@ pub fn run_source_with_line_offset(
     // substitution balance is checked: parentheses in a heredoc body are
     // literal data, not shell syntax.
     let parse_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-    if !interactive
+    // perf19: a pre-lexed group broke COMPLETE at the gather (the
+    // feeder-token certification) — the same predicate family
+    // (has_unclosed_quotes / comsub / subscript / close-char) already
+    // answered closed over this exact text at the break line, and the
+    // final-newline difference between the pending mirror and `input`
+    // cannot open any construct. GNU never re-reads consumed text
+    // (parse.y:3557 read_token); the fresh whole-group rescan is only the
+    // unclosed-diagnostics route's gate, which a complete group skips.
+    if pre_lexed.is_none()
+        && !interactive
         && crate::lexer::has_unclosed_input_syntax_posix(input, parse_posix)
         && !input.contains("<<")
     {
@@ -1780,7 +1889,13 @@ pub fn run_source_with_line_offset(
         return 2;
     }
 
-    let mut tokens = tokenize_with_initial_posix(input, parse_posix);
+    // perf19: pre_lexed is the gather feeder's committed stream for THIS
+    // group (see run_source_pre_lexed_with_line_offset's doc) — tokenizing
+    // `input` again would re-read every byte the feeder already scanned.
+    let mut tokens = match pre_lexed {
+        Some(tokens) => tokens,
+        None => tokenize_with_initial_posix(input, parse_posix),
+    };
     // A command with more than HEREDOC_MAX (16) here-documents is fatal in
     // GNU (parse.y push_heredoc -> report_syntax_error + exit_shell with
     // EX_BADUSAGE). The lexer only returns tokens, so it parks the condition
@@ -2237,7 +2352,15 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 // defaults on for interactive shells), then records, then
                 // executes — the same pipeline as run_script_with_history.
                 let status = if let Some(session) = executor.get_session_history() {
-                    run_history_group(executor, &session, &group, pending_start_line, None, true)
+                    run_history_group(
+                        executor,
+                        &session,
+                        &group,
+                        pending_start_line,
+                        None,
+                        true,
+                        None,
+                    )
                 } else {
                     run_source_with_line_offset(
                         executor,
