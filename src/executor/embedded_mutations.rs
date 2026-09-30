@@ -2099,6 +2099,19 @@ impl Executor {
                 dynamic: false,
             },
         );
+        // The fresh fd 1 is the LIVE alias of this capture, exactly like the
+        // subshell rebind in command_list_substitution_output_typed
+        // (command_substitution.rs). An alias-generation record left on fd 1
+        // by an enclosing `1>&N` dup (fd_table dup_output propagates the
+        // source's record onto fd 1) reroutes the function body's stdout
+        // writes to that snapshot's capture generation instead of the
+        // substitution's own buffer — the #335 residue: inside nvm's
+        // `{ provided="$(nvm_rc_version 3>&1 1>&4)"; } 4>&1` every nested
+        // `$(func)` fast-path capture leaked one level up and read back
+        // empty. GNU subst.c:7306-7313 command_substitute dup2's the pipe
+        // onto fd 1: the child's fd 1 is a NEW open file description and
+        // inherits none of the parent fd 1's dup2 aliases.
+        self.fd_table.stdout_alias_generation.remove(&1);
         // Direct-stdout builtins inside the function consult the thread-local
         // capture, which belongs to an enclosing pipeline stage when this
         // substitution runs inside one; give the call its own capture.
