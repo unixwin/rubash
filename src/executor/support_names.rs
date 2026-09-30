@@ -378,23 +378,10 @@ pub(in crate::executor) fn invert_exit_status(status: i32) -> i32 {
 }
 
 pub(in crate::executor) fn short_set_flag_option(flag: char) -> Option<&'static str> {
-    match flag {
-        'a' => Some("allexport"),
-        'b' => Some("notify"),
-        'B' => Some("braceexpand"),
-        'E' => Some("errtrace"),
-        'h' => Some("hashall"),
-        'H' => Some("histexpand"),
-        'k' => Some("keyword"),
-        'm' => Some("monitor"),
-        'P' => Some("physical"),
-        'p' => Some("privileged"),
-        'r' => Some("restricted"),
-        't' => Some("onecmd"),
-        'T' => Some("functrace"),
-        'v' => Some("verbose"),
-        _ => None,
-    }
+    // Single truth table moved next to its GNU owner (flags.c shell_flags[]
+    // / set.def o_options) — rubash#358: the executor fast paths and
+    // builtins::set must never carry diverging copies.
+    crate::builtins::set::short_flag_option_name(flag)
 }
 
 /// Marker written into `operator_metadata.raw` on a compound command's

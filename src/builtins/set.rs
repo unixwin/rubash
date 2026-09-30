@@ -23,6 +23,82 @@ pub(super) const EXECUTION_FAILURE: i32 = 1;
 pub(crate) const EX_USAGE: i32 = 2;
 
 const SET_FLAGS: &str = "abefhkmnprtuvxBCEHPT";
+/// The apply loop's admission set is change_flag's table (flags.c:168-200
+/// shell_flags[]), which unlike the pre-scan DOES include 'i' — a character
+/// hidden inside an inline `o` operand (`set -opipefail`) reaches the apply
+/// loop, where 'i' succeeds (forced_interactive) and the first genuinely
+/// unknown char ('l') produces sh_invalidopt + EXECUTION_FAILURE
+/// (set.def:763-771). Rubash models no interactive-mode flip for that
+/// corner, so 'i' applies as a no-op there.
+const APPLY_FLAGS: &str = "abefhikmnprtuvxBCEHPT";
+
+/// GNU flags.c:168-200 `shell_flags[]` letters that have no dedicated
+/// branch below, mapped to their `-o` option names (set.def o_options /
+/// flags.c find_flag). Single truth table for BOTH the executor fast paths
+/// (`apply_simple_set_flags` / `apply_set_flag_updates`) and `set_with_io`,
+/// so the historical two-path split cannot drift again (rubash#358: the
+/// slow path used to validate these letters without ever applying them).
+pub(crate) fn short_flag_option_name(flag: char) -> Option<&'static str> {
+    match flag {
+        'a' => Some("allexport"),
+        'b' => Some("notify"),
+        'B' => Some("braceexpand"),
+        'E' => Some("errtrace"),
+        'h' => Some("hashall"),
+        'H' => Some("histexpand"),
+        'k' => Some("keyword"),
+        'm' => Some("monitor"),
+        'P' => Some("physical"),
+        'p' => Some("privileged"),
+        'r' => Some("restricted"),
+        't' => Some("onecmd"),
+        'T' => Some("functrace"),
+        'v' => Some("verbose"),
+        _ => None,
+    }
+}
+
+/// GNU set_builtin's per-character dispatch (builtins/set.def:716-772): a
+/// `-`/`+` word is applied one char at a time, every char that is not `o`
+/// (or the `r` refusal handled by callers) goes through change_flag
+/// (flags.c:226). 'e'/'x' additionally mirror the live markers
+/// (`__RUBASH_ERREXIT`/`__RUBASH_XTRACE`) the way flags.c:248-251/260-263
+/// keep exit_immediately_on_error/echo_command_at_execute in sync with the
+/// flag variable.
+pub(crate) fn apply_short_set_flag(
+    env_vars: &mut crate::shell::var_table::VarTable,
+    flag: char,
+    enabled: bool,
+) {
+    match flag {
+        'e' => {
+            if enabled {
+                env_vars.insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
+            } else {
+                env_vars.remove("__RUBASH_ERREXIT");
+            }
+            set_shell_option(env_vars, "errexit", enabled);
+        }
+        'x' => {
+            if enabled {
+                env_vars.insert("__RUBASH_XTRACE".to_string(), "1".to_string());
+            } else {
+                env_vars.remove("__RUBASH_XTRACE");
+            }
+            set_shell_option(env_vars, "xtrace", enabled);
+        }
+        'f' => set_shell_option(env_vars, "noglob", enabled),
+        'n' => set_shell_option(env_vars, "noexec", enabled),
+        'C' => set_shell_option(env_vars, "noclobber", enabled),
+        'u' => set_shell_option(env_vars, "nounset", enabled),
+        other => {
+            if let Some(option) = short_flag_option_name(other) {
+                set_shell_option(env_vars, option, enabled);
+            }
+        }
+    }
+}
+
 pub(super) const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 pub(super) const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 pub(super) const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
@@ -101,6 +177,97 @@ where
         return Ok(EXECUTION_SUCCESS);
     }
 
+    // GNU set.def:671-691 pre-scan: internal_getopt (bashgetopt.c) walks the
+    // words with optflags (flags.c:372-382 = shell_flags letters + "o;")
+    // and validates every flag word BEFORE set_builtin's apply loop runs,
+    // so `set -e -Z` reports the error with errexit still off. The scan
+    // stops at the first non-option word and at `--`/`-` (bashgetopt.c:76-90
+    // NOTOPT / "--" handling), swallows an inline `o` operand without
+    // validating its characters (`-opipefail`: the scan sees only 'o'), and
+    // consumes a following non-option word (`-o pipefail`) so a bad flag
+    // AFTER the operand is still a scan error with nothing applied.
+    {
+        let mut scan = args.iter().peekable();
+        while let Some(arg) = scan.next() {
+            let arg: &str = arg;
+            if arg == "--" || arg == "-" {
+                break;
+            }
+            let Some(prefix) = arg.chars().next().filter(|ch| *ch == '-' || *ch == '+') else {
+                break;
+            };
+            let flags = &arg[1..];
+            if flags.is_empty() {
+                break;
+            }
+            let mut chars = flags.chars();
+            while let Some(flag) = chars.next() {
+                if flag == 'o' {
+                    // bashgetopt.c:111-137: an inline operand consumes the
+                    // rest of the word unvalidated; otherwise a following
+                    // NOTOPT word is the operand.
+                    if chars.next().is_some() {
+                        break;
+                    }
+                    if let Some(next) = scan.peek() {
+                        let notopt =
+                            (!next.starts_with('-') && !next.starts_with('+')) || next.len() == 1;
+                        if notopt {
+                            scan.next();
+                        }
+                    }
+                    continue;
+                }
+                if flag == 'i' {
+                    // set.def:677-683: `set -i` is explicitly refused.
+                    writeln!(
+                        stderr,
+                        "{}set: {}i: invalid option",
+                        builtin_error_prefix(env_vars),
+                        prefix
+                    )?;
+                    writeln!(
+                        stderr,
+                        "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]"
+                    )?;
+                    return Ok(EX_USAGE);
+                }
+                if flag == '?' {
+                    // bashgetopt.c:99-101 prints the invalid-option line for
+                    // '?' itself; set.def:684-686 turns list_optopt=='?'
+                    // into EXECUTION_SUCCESS.
+                    writeln!(
+                        stderr,
+                        "{}set: {}?: invalid option",
+                        builtin_error_prefix(env_vars),
+                        prefix
+                    )?;
+                    writeln!(
+                        stderr,
+                        "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]"
+                    )?;
+                    return Ok(EXECUTION_SUCCESS);
+                }
+                if !SET_FLAGS.contains(flag) {
+                    // bashgetopt.c:99-101 sh_invalidopt + '?' return;
+                    // set.def:685-686 maps it to EX_USAGE.
+                    writeln!(
+                        stderr,
+                        "{}set: {}{}: invalid option",
+                        builtin_error_prefix(env_vars),
+                        prefix,
+                        flag
+                    )?;
+                    writeln!(
+                        stderr,
+                        "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]"
+                    )?;
+                    return Ok(EX_USAGE);
+                }
+            }
+        }
+    }
+
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         if *arg == "--" || *arg == "-" {
@@ -116,23 +283,9 @@ where
             return Ok(EXECUTION_SUCCESS);
         }
 
-        let mut chars = options.chars().peekable();
+        let mut chars = options.chars();
         while let Some(option) = chars.next() {
             if option == 'o' {
-                if chars.peek().is_some() {
-                    writeln!(
-                        stderr,
-                        "{}set: {}: invalid option",
-                        builtin_error_prefix(env_vars),
-                        arg
-                    )?;
-                    writeln!(
-                        stderr,
-                        "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]"
-                    )?;
-                    return Ok(EX_USAGE);
-                }
-
                 match args.get(index + 1) {
                     Some(name)
                         if !name.is_empty() && !name.starts_with('-') && !name.starts_with('+') =>
@@ -154,7 +307,10 @@ where
                     }
                     _ => print_shell_options(env_vars, prefix == '+', SET_O_PRINT_WIDTH, stdout)?,
                 }
-                break;
+                // set.def:726-766: the `o` branch continues the character
+                // loop, so trailing chars of the word (`-eox pipefail` → x,
+                // `-opipefail` → p i p e f a i l) are still applied.
+                continue;
             }
 
             if option == 'r' {
@@ -177,9 +333,13 @@ where
                     return Ok(EXECUTION_FAILURE);
                 }
                 set_shell_option(env_vars, "restricted", prefix == '-');
+                continue;
             }
 
-            if !SET_FLAGS.contains(option) {
+            if !APPLY_FLAGS.contains(option) {
+                // set.def:763-771: change_flag's FLAG_ERROR path. Only
+                // reachable for characters hidden from the pre-scan inside
+                // an inline `o` operand (`set -opipefail` dies at 'l').
                 writeln!(
                     stderr,
                     "{}set: {}{}: invalid option",
@@ -191,8 +351,13 @@ where
                     stderr,
                     "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]"
                 )?;
-                return Ok(EX_USAGE);
+                return Ok(EXECUTION_FAILURE);
             }
+
+            // set.def:767 change_flag: apply every remaining flag char of
+            // the word — the branch whose absence dropped `-e`/`-u` bundled
+            // before `-o` (rubash#358).
+            apply_short_set_flag(env_vars, option, prefix == '-');
         }
 
         index += 1;

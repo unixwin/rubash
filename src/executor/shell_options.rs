@@ -595,8 +595,14 @@ impl Executor {
             return false;
         }
 
+        // GNU set.def:671-691 validates every flag word (internal_getopt
+        // pre-scan) before applying any flag: `set -e -Z` reports the error
+        // with errexit untouched. Bail BEFORE applying anything when any
+        // word is not a pure supported-short-flag word, so the slow path
+        // (set_with_io, which reproduces the pre-scan) reports the failure
+        // with nothing applied (rubash#358).
         for arg in args {
-            let Some(prefix) = arg.chars().next().filter(|ch| matches!(ch, '-' | '+')) else {
+            let Some(_prefix) = arg.chars().next().filter(|ch| matches!(ch, '-' | '+')) else {
                 return false;
             };
             let flags = &arg[1..];
@@ -607,84 +613,17 @@ impl Executor {
             {
                 return false;
             }
+        }
 
+        for arg in args {
+            let prefix = arg.chars().next().expect("validated above");
             let enabled = prefix == '-';
-            for flag in flags.chars() {
-                match (flag, enabled) {
-                    ('e', true) => {
-                        self.shell_state
-                            .env_vars
-                            .insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "errexit",
-                            true,
-                        );
-                    }
-                    ('e', false) => {
-                        self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "errexit",
-                            false,
-                        );
-                    }
-                    ('x', true) => {
-                        self.shell_state
-                            .env_vars
-                            .insert("__RUBASH_XTRACE".to_string(), "1".to_string());
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "xtrace",
-                            true,
-                        );
-                    }
-                    ('x', false) => {
-                        self.shell_state.env_vars.remove("__RUBASH_XTRACE");
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "xtrace",
-                            false,
-                        );
-                    }
-                    ('u', _) => {
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "nounset",
-                            enabled,
-                        );
-                    }
-                    ('C', _) => {
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "noclobber",
-                            enabled,
-                        );
-                    }
-                    ('f', _) => {
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "noglob",
-                            enabled,
-                        );
-                    }
-                    ('n', _) => {
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "noexec",
-                            enabled,
-                        );
-                    }
-                    (flag, _) => {
-                        if let Some(option) = short_set_flag_option(flag) {
-                            crate::builtins::set::set_shell_option(
-                                &mut self.shell_state.env_vars,
-                                option,
-                                enabled,
-                            );
-                        }
-                    }
-                }
+            for flag in arg[1..].chars() {
+                crate::builtins::set::apply_short_set_flag(
+                    &mut self.shell_state.env_vars,
+                    flag,
+                    enabled,
+                );
             }
         }
 
@@ -841,74 +780,11 @@ impl Executor {
         for (prefix, flags) in flag_updates {
             let enabled = *prefix == '-';
             for flag in flags.chars() {
-                match (flag, enabled) {
-                    ('e', true) => {
-                        self.shell_state
-                            .env_vars
-                            .insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "errexit",
-                            true,
-                        );
-                    }
-                    ('e', false) => {
-                        self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "errexit",
-                            false,
-                        );
-                    }
-                    ('x', true) => {
-                        self.shell_state
-                            .env_vars
-                            .insert("__RUBASH_XTRACE".to_string(), "1".to_string());
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "xtrace",
-                            true,
-                        );
-                    }
-                    ('x', false) => {
-                        self.shell_state.env_vars.remove("__RUBASH_XTRACE");
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "xtrace",
-                            false,
-                        );
-                    }
-                    ('u', _) => {
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "nounset",
-                            enabled,
-                        );
-                    }
-                    ('C', _) => {
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "noclobber",
-                            enabled,
-                        );
-                    }
-                    ('f', _) => {
-                        crate::builtins::set::set_shell_option(
-                            &mut self.shell_state.env_vars,
-                            "noglob",
-                            enabled,
-                        );
-                    }
-                    (flag, _) => {
-                        if let Some(option) = short_set_flag_option(flag) {
-                            crate::builtins::set::set_shell_option(
-                                &mut self.shell_state.env_vars,
-                                option,
-                                enabled,
-                            );
-                        }
-                    }
-                }
+                crate::builtins::set::apply_short_set_flag(
+                    &mut self.shell_state.env_vars,
+                    flag,
+                    enabled,
+                );
             }
         }
     }
