@@ -580,6 +580,17 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('=') {
                     self.skip_word_at(start);
                     Some(Token::new(TokenKind::Word, self.slice(start), start))
+                } else if self.peek() == Some('(')
+                    && !self.extended_glob
+                    && self.reserved_word_position()
+                {
+                    // Gate closed at command position (rubash#361): GNU
+                    // read_token reads the word `!`, the gate-off split
+                    // ends it at `(` (parse.y:5466 `extended_glob`), and
+                    // CHECK_FOR_RESERVED_WORD (parse.y:3168-3181) makes it
+                    // the BANG keyword — `!(*.mp3|*.wmv)` is `!` negating
+                    // the subshell `(*.mp3|*.wmv)`, rc 0 under `bash -n`.
+                    Some(Token::new(TokenKind::Keyword, "!", start))
                 } else if self.peek() == Some('(') {
                     Some(self.finish_word_token(start, false))
                 } else if self
