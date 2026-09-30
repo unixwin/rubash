@@ -32,12 +32,15 @@ impl<'a> Lexer<'a> {
         self.skip_word_at(start);
         let extglob_split = std::mem::take(&mut self.extglob_split_pending);
         let raw = self.slice(start);
+        // perf21: is_assignment walks the word for `=` + name validation —
+        // compute it once for the consumers below instead of one walk each.
         // Only real assignment words (`a=$(cmd)`) preserve quotes verbatim so
         // the RHS quote state survives to assignment expansion. Ordinary words
         // that merely contain `=` and `$(` (e.g. `echo "B: $(printf 'v=[%s]'
         // "$(printf 'mid')")"`) must still go through quote removal, otherwise
         // the trailing `"` leaks into the expanded argument.
-        let value = if is_assignment(&raw) && assignment_rhs_opens_compound(&raw) {
+        let assignment = is_assignment(raw);
+        let value = if assignment && assignment_rhs_opens_compound(&raw) {
             // GNU parse.y:5652-5671 read_token_word: a compound array
             // assignment (`name=(...)` or `name[sub]=(...)`) preserves the
             // raw parenthesized RHS text verbatim. parse_compound_assignment
@@ -59,14 +62,14 @@ impl<'a> Lexer<'a> {
             // test matched those quoted spans and leaked the outer quotes
             // into the stored value (BASH_REMATCH probes then carried them).
             raw.to_string()
-        } else if is_assignment(&raw) && assignment_rhs_is_fully_single_quoted(&raw) {
+        } else if assignment && assignment_rhs_is_fully_single_quoted(&raw) {
             // GNU subst.c never scans a single-quoted span: a wholly
             // single-quoted RHS is literal data, so `x='$(date)'` stores the
             // text `$(date)` and `x='$(date)'` must not reach the expander's
             // `$(`/backtick fast paths. Strip the quoting here and mark the
             // dollars/backticks as literal (restored on the way out).
             protect_fully_single_quoted_assignment(&raw)
-        } else if is_assignment(&raw) && raw.contains("$(") {
+        } else if assignment && raw.contains("$(") {
             // GNU subst.c preserves quotes inside `$(...)` command
             // substitutions during assignment-word quote removal.
             // `remove_shell_quotes_assignment` copies `$(...)` bodies
@@ -88,7 +91,7 @@ impl<'a> Lexer<'a> {
             // rules there (`\"` is a literal quote, `(( "1" ))` loses the
             // quotes in the evaluator, not by word-level quote removal).
             raw.to_string()
-        } else if is_assignment(&raw) && raw.contains('`') {
+        } else if assignment && raw.contains('`') {
             // TODO(parse.y/subst.c): Assignment-word quote removal must not
             // consume quotes inside command substitutions. Preserve the
             // backquote body for the substitution stage.
@@ -103,7 +106,7 @@ impl<'a> Lexer<'a> {
         // backslash in it disqualifies the word (a''=b is the command
         // a=b, not an assignment). Validating the de-quoted value instead
         // wrongly accepted a''=b because the empty quotes vanish.
-        } else if is_assignment(&raw) {
+        } else if assignment {
             TokenKind::Assignment
         } else {
             TokenKind::Word
@@ -152,16 +155,21 @@ impl<'a> Lexer<'a> {
         } else {
             value
         };
-        let raw = if kind == TokenKind::Assignment && self.peek() == Some('(') {
+        // perf21: `Token::new_with_raw` copies both strings itself, so pass
+        // the borrowed slice through in the common case — the owned copy is
+        // needed only for the `=(` adjacency append.
+        let raw_glued;
+        let raw_ref: &str = if kind == TokenKind::Assignment && self.peek() == Some('(') {
             // `name=(...)` is a compound array assignment word in Bash: the
             // opening paren must be adjacent to the `=` with no space.
             // Mark the raw so the parser only treats an adjacent `(` as the
             // array-assignment form (`a= (1 2)` is a syntax error in Bash).
-            format!("{raw}(")
+            raw_glued = format!("{raw}(");
+            &raw_glued
         } else {
-            raw.to_string()
+            raw
         };
-        let mut token = Token::new_with_raw(kind, &value, &raw, start);
+        let mut token = Token::new_with_raw(kind, &value, raw_ref, start);
         token.extglob_split = extglob_split;
         token
     }

@@ -167,6 +167,21 @@ pub(super) fn remove_shell_quotes_assignment(raw: &str, posix: bool) -> String {
 }
 
 fn remove_shell_quotes_inner(raw: &str, posix: bool, assignment: bool) -> String {
+    // perf21 fast path: every arm that can emit anything but the input char
+    // itself is keyed on one of these seven bytes (`'`, `"`, `\`, `$`, `` ` ``,
+    // `[`, `]`), and `pending_name` — the only other state that can alter an
+    // emitted char (PARAM_NAME_END_MARKER) — is armed solely by a `$`. A word
+    // free of all seven de-quotes to itself verbatim, so a single byte scan +
+    // memcpy replaces the per-char state machine walk (GNU parse.y:3557
+    // read_token streams the input once; this walk is the token's second pass
+    // and configure-class scripts are dominated by plain unquoted words).
+    if !raw
+        .as_bytes()
+        .iter()
+        .any(|&b| matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'[' | b']'))
+    {
+        return raw.to_string();
+    }
     let mut out = String::new();
     let mut chars = raw.chars().peekable();
     // Array-subscript regions keep `\"` as a bare data quote: the subscript

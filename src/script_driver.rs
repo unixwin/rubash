@@ -248,32 +248,65 @@ pub(crate) fn read_next_source_group(
     // The alias-live arm below keeps the exact fresh whole-pending scan:
     // alias expansion may rewrite any part of the text.
     let mut text_scans = GroupTextScans::new(posix);
+    // perf21 battery fusion: heredoc-body lines live in the pending mirror
+    // but not in the feeder's logical-line mirror, so a group that saw any
+    // must keep advancing the battery's quotes/comsub machines itself.
+    let mut group_has_body = false;
     while *index < raw_lines.len() {
         let raw = raw_lines[*index];
         let text = raw.trim_end_matches('\n');
         *index += 1;
         let mut is_body = false;
-        let expanded_line = expand_group_aliases(executor, text);
-        if let Some((delimiter, strip_tabs)) = pending_heredocs.first().cloned() {
-            let candidate = if strip_tabs {
-                text.trim_start_matches('\t')
-            } else {
-                text
-            };
-            if candidate == delimiter {
-                pending_heredocs.remove(0);
-            } else {
-                is_body = true;
-            }
+        // perf21: with the alias table inert, expand_group_aliases is the
+        // identity — skip its per-line String copy and scan the raw text
+        // directly (aliases_live above computed the same predicate).
+        let expanded_owned;
+        let expanded_line: &str = if aliases_live {
+            expanded_owned = expand_group_aliases(executor, text);
+            &expanded_owned
         } else {
-            let declared =
-                stdin_heredoc_line_declarations(&expanded_line, &mut heredoc_arith_depth);
-            saw_heredoc = saw_heredoc
-                || (!declared.is_empty()
-                    && (expanded_line.contains("$(")
-                        || expanded_line.contains("<(")
-                        || expanded_line.contains(">(")));
-            pending_heredocs.extend(declared);
+            text
+        };
+        // perf21: borrow the front delimiter instead of cloning the
+        // (String, bool) per line; the remove happens after the borrow ends.
+        enum Front {
+            None,
+            Matched,
+            Body,
+        }
+        let front = match pending_heredocs.first() {
+            Some((delimiter, strip_tabs)) => {
+                let candidate = if *strip_tabs {
+                    text.trim_start_matches('\t')
+                } else {
+                    text
+                };
+                if candidate == delimiter.as_str() {
+                    Front::Matched
+                } else {
+                    Front::Body
+                }
+            }
+            None => Front::None,
+        };
+        match front {
+            Front::Matched => {
+                pending_heredocs.remove(0);
+            }
+            Front::Body => {
+                is_body = true;
+                group_has_body = true;
+            }
+            Front::None => {
+                let declared =
+                    stdin_heredoc_line_declarations(&expanded_line, &mut heredoc_arith_depth);
+                saw_heredoc = saw_heredoc
+                    || (!declared.is_empty()
+                        && (expanded_line.contains("$(")
+                            || expanded_line.contains("<(")
+                            || expanded_line.contains(">(")));
+                pending_heredocs.extend(declared);
+            }
         }
         if !is_body {
             paren_depth += line_paren_delta(&expanded_line);
@@ -304,7 +337,15 @@ pub(crate) fn read_next_source_group(
                 // corrected balance / array subscript / matched-pair close
                 // char / function-body delimiters). Per-prefix equivalence
                 // is enforced by the continuation.rs incremental tests.
-                let needs_more = scan.token_level_needs_more() || text_scans.needs_more(&pending);
+                // perf21 battery fusion: when the feeder's own join gates
+                // prove the just-pushed line closed every quote and
+                // substitution over the append-only twin of this pending
+                // text, the battery's duplicate quotes/comsub machines can
+                // take the answer instead of re-advancing (see
+                // GroupScanFeeder::gates_prove_quotes_comsub_closed).
+                let skip_quote_comsub = !group_has_body && scan.gates_prove_quotes_comsub_closed();
+                let needs_more = scan.token_level_needs_more()
+                    || text_scans.needs_more(&pending, skip_quote_comsub);
                 if !needs_more {
                     broke_complete = true;
                     break;
@@ -592,12 +633,34 @@ impl GroupTextScans {
     /// checkpoint. `pending` must be exactly the text whose chars were
     /// pushed so far (the signature-once check inside the function-body
     /// scanners reads it).
-    fn needs_more(&mut self, pending: &str) -> bool {
+    ///
+    /// `skip_quote_comsub` (perf21 battery fusion): the caller's feeder
+    /// proved the just-appended line closed every quote and command
+    /// substitution over the append-only twin of this pending text, with no
+    /// undecided unit parked. The battery then takes that answer for its
+    /// quotes and comsub/balanced arms instead of re-advancing the duplicate
+    /// machines: at a line terminator both machines' states from a closed,
+    /// unparked position are exactly `QuotesResidualState::default()` /
+    /// closed (the '\n' arms only reset `comment_start`, and a closed
+    /// quotes gate means the substitution machine saw no open `$(`/backtick
+    /// unit), so recording that state at the new mirror end reproduces the
+    /// machines' own advance bit for bit. The comsub/balanced checkpoints
+    /// are simply left where they were — a later dirty line re-advances
+    /// them from there, exactly what the full scan would re-derive.
+    fn needs_more(&mut self, pending: &str, skip_quote_comsub: bool) -> bool {
         // has_unclosed_input_syntax_posix:
-        if self.advance_quotes() {
+        if skip_quote_comsub {
+            // perf21 battery fusion: record the proven line-boundary state
+            // (see the method doc) instead of advancing the duplicate
+            // quotes machine.
+            self.quotes = Some(ScanCheckpoint {
+                resume: self.chars.len(),
+                snapshot: crate::lexer::QuotesResidualState::default(),
+            });
+        } else if self.advance_quotes() {
             return true;
         }
-        if self.advance_comsub() && !self.advance_balanced() {
+        if !skip_quote_comsub && self.advance_comsub() && !self.advance_balanced() {
             return true;
         }
         if self.advance_subscript() {
@@ -1195,7 +1258,15 @@ pub fn stdin_source_text_needs_more(source: &str, posix: bool) -> bool {
 /// parens" — a `#` at word start runs to EOL). Used by the history driver
 /// to keep a group open across a heredoc declared inside a process
 /// substitution.
-pub(crate) fn line_paren_delta(line: &str) -> i64 {
+pub fn line_paren_delta(line: &str) -> i64 {
+    // perf21: both counted bytes must be present for a non-zero delta; a
+    // byte-gate admission turns the quote-aware walk into a memcmp-speed
+    // scan for the majority of lines (GNU parse.y:3557 read_token streams
+    // the input once; the walk below is this port's substitute).
+    let bytes = line.as_bytes();
+    if !bytes.contains(&b'(') && !bytes.contains(&b')') {
+        return 0;
+    }
     let mut scan = CommentAwareScan::new();
     let mut depth = 0i64;
     for c in line.chars() {
@@ -1295,6 +1366,19 @@ fn scan_heredoc_operators_full(
     line: &str,
     arith_depth: &mut i64,
 ) -> (Vec<(String, bool)>, Option<char>) {
+    // perf21 byte admission: every declaration arm needs a `<` byte, and the
+    // only cross-line state (`arith_depth`) can be opened solely by a `(`
+    // byte (`((` command position or `$((` word expansion — both arms below
+    // read a `(` from the text). With neither byte present and depth already
+    // 0, the walk below cannot declare anything and cannot move the state,
+    // so skip the char materialization entirely (GNU read_token streams the
+    // input once; this walk is the gather's per-line substitute).
+    if *arith_depth == 0 {
+        let bytes = line.as_bytes();
+        if !bytes.contains(&b'<') && !bytes.contains(&b'(') {
+            return (Vec::new(), None);
+        }
+    }
     // GNU read_token_word (parse.y:5419-5437) reads the heredoc delimiter
     // as an ordinary WORD: a quote that never closes keeps reading lines
     // until EOF, where the word read FAILS with `unexpected EOF while
@@ -3327,7 +3411,7 @@ mod group_text_scans_tests {
             pending.push_str(&raw);
             scans.push_raw_line(&raw);
             assert_eq!(
-                scans.needs_more(&pending),
+                scans.needs_more(&pending, false),
                 stdin_source_text_needs_more(&pending, posix),
                 "battery at prefix {line_index} of {lines:?} posix={posix} ({pending:?})"
             );

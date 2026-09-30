@@ -476,6 +476,25 @@ pub(crate) struct GroupScanFeeder {
     /// `Token::extglob_gate`). A fallback to the fresh re-lex preserves
     /// today's behavior byte for byte on flipping groups.
     extglob_toggled: bool,
+    /// perf21 feeder/gather battery fusion: this feeder instance is one
+    /// gather group's whole life, so "the group text is append-only and
+    /// identical to the caller's pending mirror" is one sticky flag. Any
+    /// non-append mutation of `logical_line` (backslash-continuation pop,
+    /// IFS_GLUE insert, comsub-heredoc rotation) or any heredoc-body line
+    /// (consumed out of the mirror) drops it, and the gather's
+    /// `GroupTextScans` battery must then keep advancing its own
+    /// quotes/comsub machines over the pending mirror.
+    group_clean: bool,
+    /// perf21: the join gates' answers from the most recent evaluation —
+    /// `advance_comsub_scan`'s open answer (including the IFS_GLUE re-scan
+    /// arm) and whether that advance parked, and `advance_quotes_scan`'s
+    /// open answer. The rubash#155 inert-line fast path returns before the
+    /// gates run; its admission proves the line cannot flip either gate,
+    /// so the stale values stay true there.
+    gate_comsub_open: bool,
+    gate_comsub_parked: bool,
+    gate_quotes_open: bool,
+    gate_quotes_parked: bool,
 }
 
 impl GroupScanFeeder {
@@ -521,6 +540,11 @@ impl GroupScanFeeder {
             open_snapshot,
             overflowed: false,
             extglob_toggled: false,
+            group_clean: true,
+            gate_comsub_open: false,
+            gate_comsub_parked: false,
+            gate_quotes_open: false,
+            gate_quotes_parked: false,
         }
     }
 
@@ -549,6 +573,30 @@ impl GroupScanFeeder {
     /// fall back to a fresh whole-text re-lex when this is `true`.
     pub(crate) fn extglob_toggled(&self) -> bool {
         self.extglob_toggled
+    }
+
+    /// perf21 battery-fusion gate: the feeder's join gates (quotes +
+    /// command substitution, over the append-only `comsub_chars` mirror of
+    /// this group's text) prove BOTH of the gather battery's duplicate
+    /// quote/substitution questions answered "closed" for the line just
+    /// pushed, with no undecided unit parked. When the group text is also
+    /// still the pending mirror's append-only twin (`group_clean`), the
+    /// battery may skip advancing its own quotes/comsub/balanced machines
+    /// over the appended tail: the mirror differs from pending only by the
+    /// trailing line terminator, and the '\n' arms of both machines are
+    /// inert from a closed, unparked state (they only reset
+    /// `comment_start`), so the machines' answers and line-boundary states
+    /// over pending equal the feeder's — `QuotesResidualState::default()`
+    /// at every line end. GNU anchor: parse.y:3557 read_token streams the
+    /// input once; the two parallel batteries are this port's substitute,
+    /// and this gate removes their duplication on the provably-identical
+    /// prefix.
+    pub(crate) fn gates_prove_quotes_comsub_closed(&self) -> bool {
+        self.group_clean
+            && !self.gate_quotes_open
+            && !self.gate_quotes_parked
+            && !self.gate_comsub_open
+            && !self.gate_comsub_parked
     }
 
     /// Fold one token into the keyword-stack / last-significant summary,
@@ -618,6 +666,9 @@ impl GroupScanFeeder {
     /// heredoc (the original pulls body lines one at a time from the same
     /// input stream, in delimiter order).
     fn feed_awaiting_body(&mut self, raw_line: &str) {
+        // Body lines never enter the logical-line mirror, so the gather's
+        // pending text is no longer the mirror's twin (perf21 battery fusion).
+        self.group_clean = false;
         let body_line = if cfg!(windows) {
             raw_line.strip_suffix('\r').unwrap_or(raw_line).to_string()
         } else {
@@ -741,6 +792,10 @@ impl GroupScanFeeder {
         let mut state = snapshot;
         let park = comsub_residuals_advance(&self.comsub_chars, resume, &mut state);
         let open = state.is_open();
+        // perf21: expose the gate answer + park for the gather's battery
+        // fusion (see the field docs above).
+        self.gate_comsub_open = open;
+        self.gate_comsub_parked = park.is_some();
         self.comsub_checkpoint = match park {
             Some(park) => Some(ComsubScanCheckpoint {
                 resume: park.pos,
@@ -772,6 +827,8 @@ impl GroupScanFeeder {
         let mut state = snapshot;
         let park = quotes_residuals_advance(&self.comsub_chars, resume, &mut state);
         let open = state.is_open();
+        self.gate_quotes_open = open;
+        self.gate_quotes_parked = park.is_some();
         self.quotes_checkpoint = match park {
             Some(park) => Some(QuoteScanCheckpoint {
                 resume: park.pos,
@@ -902,7 +959,8 @@ impl GroupScanFeeder {
         // recomputed by the final full pass, so the accepted token stream
         // is byte-identical; only the per-line work drops from
         // O(accumulated buffer) to O(this line).
-        if self.brace_join_active && brace_join_fast_path_line(line) {
+        let fast_line = self.brace_join_active && brace_join_fast_path_line(line);
+        if fast_line {
             self.header_scan_from = self.logical_line.len();
             return;
         }
@@ -952,6 +1010,7 @@ impl GroupScanFeeder {
                         self.param_open_cache = None;
                         self.boundary = None;
                         self.rebuild_comsub_mirror();
+                        self.group_clean = false;
                         comsub_state_changed = true;
                     }
                 }
@@ -997,6 +1056,7 @@ impl GroupScanFeeder {
             self.boundary = None;
             self.continued_line = true;
             self.brace_join_active = false;
+            self.group_clean = false;
             return;
         }
         // parse.y:5379-5384: a backslash before EOF is NOT removed — GNU's
@@ -1054,7 +1114,8 @@ impl GroupScanFeeder {
         // (perf7 previously gated this on a `=(` byte admission —
         // parse.y:5785-5791 adjacency — which the checkpoint model now
         // subsumes: the opener bytes are carried in the residual state).
-        if self.advance_compound_scan() {
+        let compound_open = self.advance_compound_scan();
+        if compound_open {
             self.brace_join_active = false;
             return;
         }
@@ -1071,6 +1132,7 @@ impl GroupScanFeeder {
             self.brace_cache.clear();
             self.param_open_cache = None;
             self.boundary = None;
+            self.group_clean = false;
             self.rebuild_comsub_mirror();
         }
         // GNU reads tokens sequentially (parse.y read_token): the reader
@@ -1131,7 +1193,8 @@ impl GroupScanFeeder {
                         &mut self.brace_cache,
                     );
                     probe.position = column + 1;
-                    !probe.skip_brace().closed
+                    let closed = probe.skip_brace().closed;
+                    !closed
                 }
             }
         };
@@ -1147,6 +1210,7 @@ impl GroupScanFeeder {
         // next boundary checkpoint: a resumed pass extends the previous
         // list (fold only the delta), a full re-lex restores the open
         // line's start snapshot and refolds everything.
+        let fold_chars = line_tokens.len() as u64;
         self.fold_pass_tokens(&line_tokens, boundary_was_some && resume_allowed);
         if let Some(updated) = line_posix_mode_change(&line_tokens) {
             if self.parse_posix != updated {
@@ -1186,6 +1250,7 @@ impl GroupScanFeeder {
         // byte offset into the logical line (only the position field is
         // overwritten with the line number below), so consecutive columns
         // recover the exact inter-token spacing for raw arithmetic capture.
+        let gap_tokens = line_tokens.len() as u64;
         let mut previous_end = 0usize;
         for token in line_tokens.iter_mut() {
             let start = token.column.min(self.logical_line.len());
@@ -1202,8 +1267,12 @@ impl GroupScanFeeder {
                 .max(start.saturating_add(token.raw.len()))
                 .min(self.logical_line.len());
         }
-        let has_heredoc =
-            !heredoc_delimiters(&line_tokens, &self.logical_line, self.in_comsub).is_empty();
+        // perf21: compute the delimiters ONCE — the join branch below only
+        // needs their emptiness, and the commit path reuses the same Vec
+        // (heredoc_delimiters reads only token kinds/values/raw, none of
+        // which the gap-capture loop above mutates).
+        let delimiters = heredoc_delimiters(&line_tokens, &self.logical_line, self.in_comsub);
+        let has_heredoc = !delimiters.is_empty();
         // Join forward only on signals the tokens themselves prove: an
         // unclosed reserved-word `{` group (see tokens_open_unclosed_brace_group)
         // or an unterminated `${...}` parameter expansion. The old text-level
@@ -1247,6 +1316,7 @@ impl GroupScanFeeder {
                 if let Some(state) = pass_boundary {
                     self.boundary = Some((self.logical_line.len(), line_tokens, state));
                 }
+            } else if param_expansion_open {
             }
             self.brace_join_active = true;
             return;
@@ -1255,7 +1325,6 @@ impl GroupScanFeeder {
         for token in &mut line_tokens {
             token.position = self.logical_start_line;
         }
-        let delimiters = heredoc_delimiters(&line_tokens, &self.logical_line, self.in_comsub);
         // GNU parse.y push_heredoc (shell.h HEREDOC_MAX 16): the 17th heredoc
         // on one command is a fatal parse error. GNU runs report_syntax_error
         // then exit_shell(EX_BADUSAGE), so the shell dies with status 2 and
@@ -1890,7 +1959,8 @@ fn tokenize_plain(
         tokens.push(token);
     }
     *parse_state = lexer.take_parse_state();
-    (tokens, lexer.boundary_state())
+    let boundary = lexer.boundary_state();
+    (tokens, boundary)
 }
 
 /// rubash#281 complete-command-boundary resume: when a checkpoint from the
@@ -1938,8 +2008,14 @@ fn tokenize_with_boundary(
                 return (tokens, lexer.boundary_state());
             }
         }
+        // resume was allowed but no checkpoint existed: full re-lex under
+        // the ALLOWED stat (tail = whole input).
+        let started = std::time::Instant::now();
+        let result = tokenize_plain(input, posix, parse_state, brace_cache);
+        return result;
     }
-    tokenize_plain(input, posix, parse_state, brace_cache)
+    let result = tokenize_plain(input, posix, parse_state, brace_cache);
+    result
 }
 
 /// Detect top-level `set -o posix` / `set +o posix` commands in a tokenized

@@ -2878,3 +2878,124 @@ tokenize+parse 0.17). First run after any rebuild pays a Defender re-scan
    pid kills sometimes skip cleanup entirely - deliver never reaches the
    dead-pid branch in those runs; ambient per leftover 3). The lane's
    prune thread improves net cleanup either way.
+## feeder21 round (2026-09-28, wt21/feeder21 on 0914200e): join/re-lex decomposition + battery fusion
+
+The "feeder join/re-lex ~300ms" lane. The brief's hypothesis ("boundary
+rejection still walks whole-line re-lex") was measured FIRST and found
+already-gated; the real owners are per-line duplicated scanners and
+bookkeeping. All numbers RELEASE build, alternating A/B against a pristine
+0914200e base binary (private worktree target dir). Scratch instrumentation
+(env-gated counters + Instant timers, fully removed before handoff).
+
+### Decomposition (the brief's ask #1; instrumented, ~420ms wall)
+
+The re-lex amplification is GONE on configure: total re-lexed volume =
+577,845 chars full passes (18,429 resume-allowed-no-checkpoint, i.e. one
+per committed logical line - each line IS the product) + 92,581 refused
+(625 `}`-fold refusals at 1.7ms - the existing skip_brace probe already
+gates this to fold-completions only) + 3,850 resume tails = ~1.03x the
+file. The `}` refusal path the brief pointed at is 1.7ms, not 100ms.
+configure -n gather (~182ms real) decomposes as:
+
+| Piece | ms | Note |
+| --- | ---: | --- |
+| tokenize passes (tp_iterate) | ~45-50 | 19,054 passes; the lexer itself: word_finish 20-25 (quote removal walk + 3 String allocs/word), record_token 6.5, dispatch+ws ~17 |
+| feeder 4 scans (comsub/quotes/compound/param) | 24.7 | tail-only per line |
+| gather text battery (7 machines) | ~35 | quotes 4.2 + comsub 5.5 + subscript 4.5 + closechar 7.7 + fnbody 7.6 |
+| heredoc_decls per line | 14.1 | full quote-aware walk + Vec<char> materialization |
+| fold/gap-capture/heredoc_delims x2/funcheck | ~8 | per-pass token walks |
+| aliases copy + paren_delta + group/pending/chars mirror pushes | ~25 | 24,753 per-line String clones + char collects |
+
+Push-line branch exits: quotes-open 1,146 / continuation 272 / fastpath 23
+/ comsub-rescan 14 / refused 625 / resume 78. Boundary checkpoints made
+704, actually resumed 78 (configure's `}` lines refuse via the fold probe
+- correctly).
+
+### Landed changes (src/lexer/{mod,word,quotes}.rs + script_driver.rs; continuation.rs UNTOUCHED, git diff 0)
+
+1. **Battery fusion (the round's core)**: `GroupScanFeeder` exposes
+   `gates_prove_quotes_comsub_closed()` - the feeder's own quotes/comsub
+   join-gate answers (closed AND un-parked) over the append-only
+   `comsub_chars` mirror, with a sticky `group_clean` flag (dropped on
+   backslash-continuation pop, IFS_GLUE insert, comsub-heredoc rotation,
+   any heredoc-body line). When the group is clean, the gather's
+   `GroupTextScans::needs_more` TAKES that answer for its duplicate
+   quotes/comsub/balanced arms instead of re-advancing them: at a line
+   terminator both machines from a closed, un-parked position are exactly
+   `QuotesResidualState::default()` / closed (the '\n' arms only reset
+   `comment_start`), so recording the default at the new mirror end is
+   bit-identical to the machine's own advance; the comsub/balanced
+   checkpoints stay where they were and re-advance on any later dirty
+   line. Effect: ts_quotes 5,016 -> 1,107 advances, ts_comsub 4,139 -> 230.
+   GNU anchor: parse.y:3557 read_token streams once; the two parallel
+   scan batteries were this port's substitute for that model.
+2. **Byte admissions**: `scan_heredoc_operators_full` returns early when
+   the line has no `<` and no `(` byte and arith_depth==0 (every
+   declaration arm needs `<`; only `(`/`$((` can raise the cross-line
+   arith state) - heredoc_decls 14.1 -> 3.9ms. `line_paren_delta`
+   returns 0 with no `(`/`)` byte.
+3. **Per-line allocation trims**: expand_group_aliases skipped when the
+   alias table is inert (was a String clone per line);
+   pending_heredocs front checked by borrow (was a (String,bool) clone
+   per line); `heredoc_delimiters` computed once per pass instead of
+   twice (has_heredoc reuses the same Vec).
+4. **Word-path trims** (finish_word_token): `is_assignment` computed once
+   (was up to 3 walks); the non-`=(` raw passes through as `&str` (was a
+   dead `raw.to_string()` before Token::new_with_raw's own copy);
+   `remove_shell_quotes_inner` fast path - a word with none of
+   `' " \ $ ` [ ]` de-quotes to itself (every mutating arm is keyed on
+   those bytes; `pending_name` is armed only by `$`), so one byte scan +
+   memcpy replaces the per-char state machine (word_finish ~25 -> ~20ms
+   instrumented).
+
+### Numbers (median of 10 alternating runs, steady state, clean build)
+
+| Probe | base (0914200e) | lane | note |
+| --- | ---: | ---: | --- |
+| configure -n | 412 ms | 386 ms | -26 ms (-6%) |
+| nvm -n | 225 ms | 216 ms | -9 ms |
+
+configure -n rc=0 stdout/stderr byte-empty both sides; nvm -n outputs
+byte-identical base-vs-lane. **The <250ms goal is NOT reachable from the
+feeder family alone**: the remaining gather (~155ms) is ~50ms lexer
+per-byte cost (word_finish quote-removal walk - GNU defers quote removal
+to expansion, subst.c:4807 dequote_string runs at expand time, not lex
+time; moving it out of the lexer is a token-architecture round), ~25ms
+feeder scans + ~19ms battery subscript/closechar/fnbody (call-site
+admission is NOT provable - the machines carry word/case_depth context
+that arbitrary tails mutate), plus parse 144ms (parse20 bucket) and
+~90ms startup floor (startup21 bucket).
+
+### Zero-semantic-change evidence
+
+- 546 lib + 27 regression + `RUSTFLAGS="-D warnings" cargo check
+  --all-targets` + cargo fmt --check on the final clean tree.
+- 14-shape 3-way matrix (`target/issue-suites/results/perf21/
+  matrix-feeder21.sh` + m-{gnu,base,lane}-{n,exec}.{out,err,rc}):
+  lane-vs-base byte-identical on ALL shapes/modes (clean multi-line
+  quotes/comsubs, esac-paren lookaheads, backslash continuations,
+  heredoc bodies with unbalanced quotes, $(cat <<EOF) rotation,
+  assignment/bracket word shapes, fn signatures across lines, brace
+  folds); GNU-vs-lane diffs identical to GNU-vs-base (pre-existing
+  heredoc-in-dq-echo divergence + path prefixes).
+- true-baseline.sh slices x10 (heredoc case comsub comsub2 quote errors
+  cond func dstack redir): lane rb.out/rb.err byte-identical to base on
+  every suite; GNU diff counts unchanged (quote 94, comsub2 67, cond
+  105, comsub 27, heredoc 6, case 4, errors 4, func/dstack/redir 0).
+- src/lexer/continuation.rs untouched (git diff 0 lines).
+
+### Leftovers (measured, with owners)
+
+1. **Lexer per-byte cost ~50ms on configure** (finish_word_token's eager
+   quote removal + Token value/raw/leading_ws String allocs, ~71k
+   tokens): GNU read_token stores the word once and defers dequote to
+   expansion (subst.c:4807); the eager-dequote architecture is a
+   token-model round (WordMetadata/carrier family).
+2. **Battery subscript/closechar/fnbody ~19ms**: call-site byte
+   admission unprovable (machines carry non-answer state arbitrary tails
+   mutate); fusing them into the feeder needs machine-level rework in
+   captain-exclusive continuation.rs.
+3. **Feeder 4 scans ~25ms**: same admission blocker (comsub machine
+   accumulates `word`/`case_depth` on every non-ws char).
+4. **group Vec<(String,bool)> + exec_parts clones ~5ms**: borrow-thread
+   refactor of run_history_group's data plane.
