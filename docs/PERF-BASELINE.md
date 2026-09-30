@@ -2310,3 +2310,127 @@ per-command floor perf17 profiled; no single >5% site remains.
   greater-than-5% site remains; reaching 2x needs the already-ticketed
   deep borrow/attribute subsystems.
 
+## perf19 round (2026-09-30, wt19/perf19 on e3623c68): heredoc body opacity + case-pattern closers + history-driver token reuse
+
+The configure -n 29x follow-up (perf17 leftover #4). The brief's
+hypothesis ("the other scanners' parks on the same backtick stretch")
+was HALF right — the parks were real but the semantic owner was not
+the backtick family at all. All wall numbers RELEASE build,
+alternating A/B against a pristine e3623c68 base built this session
+in a sibling worktree (same load); GNU anchors re-measured INSIDE
+WSL this session (script files under `target/issue-suites/results/perf19/`).
+Scratch instrumentation (env-gated scanner/park/phase trace, RUBASH_PERF19)
+fully removed before commit.
+
+### Decomposition of the 1247 ms (env-gated trace)
+
+| Phase | Time | Detail |
+| --- | --- | --- |
+| comsub residual advance | 671 ms | 197 M chars / 3516 calls |
+| group parse (run_history_group) | 333 ms | includes re-lex per group |
+| feeder push_line | 95 ms | 24753 lines |
+| other 6 text scanners | ~13 ms | NOT the bottleneck |
+| keyword stack (token_more) | 0 ms | already incremental |
+
+And the structural fact behind it: the group at configure:5176
+absorbed the ENTIRE remaining file — 19578 lines, 525 K chars — as
+one never-completing group (1082 groups before it, then one giant).
+
+### Root cause 1: heredoc BODIES were live text to the group scanners
+
+The group driver freezes its parked scanners while the heredoc-body
+queue is non-empty, then the first candidate line AFTER the
+terminator re-walks the checkpoint across header+body+terminator.
+At top level (no open `$(`/backtick) the scanners had NO heredoc
+skip at all: the body's characters toggled live quote state. The
+apostrophe in the `<<_ACEOF` C commentary `can't` (configure:5207
+body) held `single` open; with state corrupted, the m4sh comment
+`add `-static'` (configure:5405) never entered comment state and its
+backtick parked `backtick` for the rest of the file. GNU never lexes
+a body: `make_cmd.c:512 make_here_document` (driven by parse.y:3120
+`gather_here_documents`) reads bodies through `read_secondary_line`
+with no quoting state, and `parse.y:3557 read_token` streams past
+the terminator (bodies are also what make GNU read the file as 4000
+independent groups).
+
+Fix (all six scanners in lockstep with their oracles):
+`heredoc_scan.rs` `skip_heredoc_top_level` (comsub_context=false core:
+the two PST_EOFTOKEN pushbacks disabled — `EOF)x` is body text at top
+level per make_cmd.c:571-574/602-611; refuses empty delimiters and
+headers carrying an open `$(`/`${/backtick introducer — upstream
+heredoc7.sub's `cat <<EOF && grep $(` shape) + a top-level `<<` arm
+in comsub/quotes/balanced/subscript/close_char (parked + oracle),
+parking only while the terminator line has not arrived (perf17's
+prefix-stable rule). `<<<` is one operator (parse.y:3690-3706) and is
+consumed atomically — the randomized incremental batteries caught the
+second-`<`-re-read regression before it shipped.
+
+### Root cause 2 (exposed by fix 1): case-pattern `)` popped subshell closers
+
+With bodies opaque, configure died at configure:23345 from `(` at
+configure:23329 — ALSO on the pristine base in isolation (pre-
+existing, previously masked by the mega-group). GNU parse.y:1037
+case_command consumes a pattern's `)` as a case token; the close-char
+scanner now runs the STAGED case machine (skip.rs's
+update_command_substitution_case_depth, parse.y:3369-3386 +
+parse.y:3433-3441 empty case) with a per-delimiter depth snapshot
+(`case_depth_at_push`): `)` closes only at its push-time depth. The
+staged variant is required — the unstaged one loses the reserved-word
+boundary after the case subject and never counts `case W in esac`'s
+ESAC (`( case x in esac )` held the subshell open). Keyword/operator
+tracking is gated by `close_char_operator_context`: live only at top
+level / `$(` / backquote / funsub / command-position subshell — not
+inside quotes, `${param}`, array lists, or arithmetic (`$((1<<2))`,
+parse.y:3727).
+
+### Fix 3: the history driver threw away perf10's certified tokens
+
+`run_history_group` re-lexed every group although `read_next_source_group`
+had just committed a certified-equivalent stream. When nothing rewrote
+the text (history expansion inert AND alias expansion identity) the
+stream is reused (`run_source_pre_lexed_with_line_offset`), the
+per-group unclosed pre-scan is skipped for pre-lexed (complete)
+groups, and the per-line history-record clone is gated on history
+being on. GNU anchor parse.y:3557 read_token streams once.
+
+### Numbers (median of alternating A/B)
+
+| Probe | base (e3623c68) | lane | GNU (in-WSL) | ratio |
+| --- | --- | --- | --- | --- |
+| 22-configure-full-n | 1188 ms | **420 ms (-65%)** | 38-39 ms | ~31x -> **~11x** |
+| 21-configure-head1374-n | 83 ms | 76 ms | (9 ms class) | flat |
+| 23-nvm-parse (-n) | 228 ms | 229 ms | 16-17 ms | flat |
+| 24-nvm-load | 465 ms | 462 ms | (185-188 class) | flat |
+
+configure -n rc=0, stdout/stderr byte-empty on both sides.
+
+### Zero-semantic-change evidence
+
+- 546 lib (the incremental-equivalence batteries drove out two
+  in-development regressions: `<<<` re-read, unstaged-case boundary)
+  + 27 regression + `RUSTFLAGS="-D warnings" cargo check --all-targets`
+  + fmt.
+- GNU-diff matrices (stdout+stderr+rc, WSL GNU 5.3.0):
+  `target/issue-suites/results/perf19/matrix{1,2,3}.sh` — 14
+  heredoc-body shapes, 14 case-closer shapes, the history-driver
+  grouping shapes: ALL byte-identical to GNU; matrix3 fails on the
+  pristine base (the case-blind break), matrix1/2 pass on both.
+- Suite slices via true-baseline.sh (heredoc/case/comsub/comsub2/
+  quote/redir): lane diff-vs-GNU line counts IDENTICAL to base on
+  every suite (all remaining diffs pre-existing).
+
+### Leftovers (measured, with owners)
+
+1. **configure -n residual ~420 ms**: parser 141 ms + feeder 104 ms
+   + scanners 26 ms + noexec walk 14 ms + driver ~40 ms. The parser
+   and feeder are the parsearch #281/#292 nested-body re-parse
+   family (next-round architecture; GNU does both in ~39 ms total).
+2. **Pre-existing (reproducer `printf '( case x in esac )\necho ok\n'`):
+   the EMPTY case inside a subshell fails identically on base and
+   lane (GNU rc=0) — tokenizer/parser family, distinct subsystem;
+   both this round's matrices and the suite slices confirm it is not
+   the group scanners.
+3. **fnbody scanners still scan heredoc bodies** (same class as the
+   six fixed here, but fnbody's is_open needs a function-signature
+   prefix, so no configure-family corpus is known to block on it) —
+   cover it when a reproducer exists.
