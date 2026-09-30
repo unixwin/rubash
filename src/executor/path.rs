@@ -350,40 +350,50 @@ fn cached_dir_listing(cache: &mut CommandLookupCache, directory: &Path) -> Arc<H
     listing
 }
 
-/// Listing-assisted equivalent of executable_candidate() for the PATH walk
-/// (rubash#159). The candidate set and its order are byte-identical to
-/// executable_candidate() -- PATHEXT extensions first for extensionless
-/// names, the bare path first otherwise -- but a candidate is only stat'ed
-/// when the directory listing says its name exists, so a full miss costs
-/// zero per-candidate stats instead of one per PATH entry x extension.
-/// The final is_file() confirmation keeps the stat walk's exact semantics
-/// for names claimed by directories or dangling symlinks.
+/// One probe candidate for the listing-assisted PATH walk: the lowercased
+/// file name the directory listing is asked about, plus the spelled file
+/// name to join onto a directory when the listing claims it. Built ONCE per
+/// lookup, not per directory: GNU findcmd.c:623 find_user_command_in_path
+/// passes the same NAME to find_in_path_element for every directory, and
+/// the candidate set is a pure function of NAME and PATHEXT order. The
+/// candidate order (bare first for extension-carrying names, extensions
+/// first otherwise, bare last) and the `with_extension` spellings are
+/// byte-identical to the per-directory `executable_candidate_listed` this
+/// replaces — only the per-directory `dir.join(name)` /
+/// `with_extension` / `to_string_lossy().to_lowercase()` churn moved out
+/// of the loop (envfix3: a warm unique-name miss over a 69-entry PATH
+/// spent ~310 us re-deriving the same ~8 strings 69 times).
 #[cfg(not(unix))]
-fn executable_candidate_listed(
-    base: &Path,
-    listing: &HashSet<String>,
-    extensions: &[String],
-) -> Option<PathBuf> {
-    let listed_file = |candidate: &Path| -> Option<PathBuf> {
-        let file_name = candidate.file_name()?.to_string_lossy().to_lowercase();
-        (listing.contains(&file_name) && candidate.is_file()).then(|| candidate.to_path_buf())
-    };
-    if base.extension().is_some() {
-        if let Some(found) = listed_file(base) {
-            return Some(found);
+struct ListedCandidate {
+    listing_key: String,
+    file: PathBuf,
+}
+
+#[cfg(not(unix))]
+fn listed_candidates(name: &str, extensions: &[String]) -> Vec<ListedCandidate> {
+    let base = Path::new(name);
+    let dotted = base.extension().is_some();
+    let mut probes = Vec::with_capacity(extensions.len() + 1);
+    let mut push = |candidate: &Path| {
+        // file_name() is None for `.`/`..`-shaped candidates; the stat walk
+        // could never match those against a listing either.
+        if let Some(file_name) = candidate.file_name() {
+            probes.push(ListedCandidate {
+                listing_key: file_name.to_string_lossy().to_lowercase(),
+                file: candidate.to_path_buf(),
+            });
         }
+    };
+    if dotted {
+        push(base);
     }
     for ext in extensions {
-        if let Some(found) = listed_file(&base.with_extension(ext)) {
-            return Some(found);
-        }
+        push(&base.with_extension(ext));
     }
-    if base.extension().is_none() {
-        if let Some(found) = listed_file(base) {
-            return Some(found);
-        }
+    if !dotted {
+        push(base);
     }
-    None
+    probes
 }
 
 /// Merged Windows PATH scan (rubash#159). Mirrors the walk shape of GNU
@@ -416,11 +426,24 @@ fn find_in_path_via_listings(
     }
     let dirs = Arc::clone(cache.path_dirs.as_ref().unwrap());
     let extensions = Arc::clone(cache.path_extensions.as_ref().unwrap());
+    // Candidate spellings are per-NAME, not per-directory (GNU passes the
+    // same NAME through the whole walk); derive them once so a miss costs
+    // one contains() per PATH entry per PATHEXT candidate and no
+    // allocation at all.
+    let candidates = listed_candidates(name, &extensions);
     for dir in dirs.iter() {
-        let base = dir.join(name);
         let listing = cached_dir_listing(&mut cache, dir);
-        if let Some(found) = executable_candidate_listed(&base, &listing, &extensions) {
-            return Some(found);
+        for candidate in &candidates {
+            // HashSet<String>::contains(&str): no lookup-key allocation.
+            if !listing.contains(candidate.listing_key.as_str()) {
+                continue;
+            }
+            // The listing only proves the NAME exists; confirm the stat
+            // walk's exact semantics for directories and dangling symlinks.
+            let path = dir.join(&candidate.file);
+            if path.is_file() {
+                return Some(path);
+            }
         }
     }
     None

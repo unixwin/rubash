@@ -746,6 +746,25 @@ impl Executor {
                     .filter(|value| !value.is_empty())
                     .map(|value| shell_safe_value(&value))
                     .unwrap_or_else(|| {
+                        // GNU evaluates the `:=` operator once per `{}`
+                        // occurrence (subst.c:9777 parameter_brace_expand ->
+                        // subst.c:10346 `case '='` with check_nullness ->
+                        // parameter_brace_expand_rhs): the assigned value IS
+                        // the expansion result. When a pre-scan pass already
+                        // applied this fragment (site-keyed memo), reuse its
+                        // resolved value instead of re-expanding the
+                        // alternate — a `$(...)` alternate would otherwise
+                        // re-execute (base: `v=${v:=$(echo HI >&2)}` ran the
+                        // comsub 4x, GNU 1x).
+                        if let Some(key) =
+                            crate::executor::expand_braced_indices::sub_site_key(name)
+                        {
+                            if let Some(resolved) =
+                                crate::executor::expand_braced_indices::assign_applied_lookup(&key)
+                            {
+                                return resolved;
+                            }
+                        }
                         let word = self.tilde_expand_operator_word(word, context);
                         // GNU parameter_brace_expand_word sets
                         // expand_no_split_dollar_star for op == '='
@@ -866,6 +885,9 @@ impl Executor {
         }
 
         if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+            if std::env::var_os("RUBASH_TRACE_APPAE").is_some() {
+                eprintln!("[EQPWM-tail-pattern] name={name:?}");
+            }
             return value;
         }
 
@@ -873,9 +895,15 @@ impl Executor {
             name,
             matches!(context, SubstitutionQuoteContext::Unquoted),
         ) {
+            if std::env::var_os("RUBASH_TRACE_APPAE").is_some() {
+                eprintln!("[EQPWM-tail-special] name={name:?}");
+            }
             return value;
         }
 
+        if std::env::var_os("RUBASH_TRACE_APPAE").is_some() {
+            eprintln!("[EQPWM-tail-word] name={name:?}");
+        }
         self.expand_word(word)
     }
 
@@ -1040,7 +1068,24 @@ impl Executor {
             {
                 return;
             }
+            // GNU evaluates the `:=` operator once per `${}` occurrence
+            // (subst.c:9777 parameter_brace_expand -> subst.c:10346
+            // `case '='` with check_nullness -> parameter_brace_expand_rhs).
+            // A NULL-resolving alternate fails the non-empty set-check in
+            // every layered pass, re-executing the alternate each time; the
+            // applied fragment is memoized under the cross-pass site key so
+            // later passes (walker pre-scan, real operator arm) reuse the
+            // resolved value instead of re-expanding.
+            let assign_site = crate::executor::expand_braced_indices::sub_site_key(inner);
+            if let Some(key) = &assign_site {
+                if crate::executor::expand_braced_indices::assign_applied_lookup(key).is_some() {
+                    return;
+                }
+            }
             let value = self.expand_assignment_alternate_mut(value, double_quoted);
+            if let Some(key) = assign_site {
+                crate::executor::expand_braced_indices::assign_applied_store(key, value.clone());
+            }
             // GNU parameter_brace_assign resolves the subscript AGAIN for
             // the assignment target (array_expand_index on the
             // assign_array_element path), distinct from the set-test's

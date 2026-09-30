@@ -856,6 +856,86 @@ impl Executor {
         Ok(variable_expanded)
     }
 
+    /// Whole-word quoted `$name` fast path — see the admission comment at
+    /// the call site. Mirrors the walker's `$name` arm
+    /// (embedded_mutations.rs `Some(first) if is_shell_name_start(first)`):
+    /// the same dynamic_parameter_value -> shell_variable_value ->
+    /// exact_case_env_var fetch chain, the same shell_safe_value, the same
+    /// walker-tail marker restores, and the same strip_ifs_protection_markers
+    /// the general tail applies to a non-split word. An unresolved name
+    /// pushes nothing in the walker arm, so the word is the empty string.
+    fn expand_quoted_single_name_parameter_word(
+        &mut self,
+        cmd: &CommandNode,
+        index: usize,
+        word: &str,
+        raw: Option<&str>,
+    ) -> Option<Vec<String>> {
+        let inner = word.strip_suffix(crate::executor::markers::PARAM_NAME_END_MARKER)?;
+        let name = inner.strip_prefix('$')?;
+        if name.is_empty() || !is_shell_name(name) {
+            return None;
+        }
+        // raw is exactly `"$<name>"` — first and last byte the dquote,
+        // the middle the same `$name` text (the equality forces the
+        // length).
+        let raw = raw?;
+        let raw_bytes = raw.as_bytes();
+        if raw_bytes.first() != Some(&b'"')
+            || raw_bytes.last() != Some(&b'"')
+            || raw_bytes.len() != inner.len() + 2
+            || &raw[1..raw.len() - 1] != inner
+        {
+            return None;
+        }
+        if !cmd.process_substitutions.is_empty()
+            || cmd
+                .word_metadata
+                .get(index)
+                .is_none_or(|metadata| !metadata.process_substitutions.is_empty())
+        {
+            return None;
+        }
+        let value = self
+            .dynamic_parameter_value(name)
+            .or_else(|| self.shell_variable_value(name))
+            .or_else(|| crate::executor::env_helpers::exact_case_env_var(name));
+        let Some(value) = value else {
+            return Some(vec![String::new()]);
+        };
+        let expanded = shell_safe_value(&value);
+        // Walker-tail restore chain (expand_embedded_parameters_mut_inner),
+        // in the same order; each link borrows when its marker is absent.
+        let restored =
+            crate::executor::parameter_ops::restore_protected_replacement_quotes_cow(&expanded);
+        let restored = crate::executor::markers::cow_replace(
+            &restored,
+            crate::executor::markers::DATA_DOLLAR_STR,
+            "$",
+        );
+        let restored = crate::executor::markers::cow_replace(
+            &restored,
+            crate::executor::markers::DATA_BACKTICK_STR,
+            "`",
+        );
+        let restored = crate::executor::markers::cow_replace(
+            &restored,
+            crate::executor::markers::DATA_BACKSLASH_STR,
+            "\\",
+        );
+        let restored = crate::executor::markers::cow_replace(
+            &restored,
+            crate::executor::markers::PARAM_NAME_END_MARKER_STR,
+            "",
+        );
+        let restored = crate::executor::markers::cow_replace(
+            &restored,
+            crate::executor::markers::QUOTED_NULL_MARKER_STR,
+            "",
+        );
+        Some(vec![strip_ifs_protection_markers(&restored.into_owned())])
+    }
+
     fn expand_simple_substitution_fragments(
         &mut self,
         cmd: &CommandNode,
@@ -996,6 +1076,29 @@ impl Executor {
             })
         {
             return vec![word.to_string()];
+        }
+        // Whole-word quoted `$name` (envfix3). GNU param_expand
+        // (subst.c:10464) switches on the character after `$`; for a name
+        // it collects the identifier and resolves the variable in one arm
+        // (the default `legal_variable_starter` path). A word that is
+        // EXACTLY one double-quoted parameter (raw `"$name"`, cooked
+        // `$name` + PARAM_NAME_END_MARKER) therefore expands to that one
+        // arm's value with no other pipeline behavior: quote context makes
+        // the result unsplit and unglobbed, and the walker-tail marker
+        // restores are the only post-fetch transforms. The admission is a
+        // whitelist (rubash#117 discipline): any other shape — embedded
+        // text, unquoted, escaped `\$`, braced `${...}`, positional
+        // `$1`, the scalar specials `$# $? $$ $- $!`, the word-list
+        // `$@`/`$*` — falls through to the full pipeline unchanged.
+        // Provable-identity guards skipped versus the general path: the
+        // `${` pre-scans find no `${`; the `$(`/backtick raw fast paths
+        // need a `$(`/backtick in raw; the eval arms need `eval` as word 0
+        // plus markers absent here; brace expansion needs an unquoted `{`;
+        // IFS marking is suppressed for quote-marked words; the nounset
+        // pre-scan runs per-command BEFORE word expansion; and the
+        // field-split/unquoted-null tail gates all key on UNquoted words.
+        if let Some(values) = self.expand_quoted_single_name_parameter_word(cmd, index, word, raw) {
+            return values;
         }
         // One cross-pass subscript-eval memo scope per command word —
         // covers this pre-scan and the real expansion below so one `${}`

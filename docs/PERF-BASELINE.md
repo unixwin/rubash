@@ -2563,3 +2563,170 @@ family, and the parse-side remainder is per-word scan machinery.
    the old [start..scan_boundary] — diverges only when a body errors
    BEFORE a `shopt -s extglob` that sits between the error and the
    closer (no known corpus; noted for completeness).
+## envfix3 round (2026-09-30, wt20/envfix3 on 0fe8d0fc): 2-10x bucket (10/13/15) + the MSYS-parent dual caliber
+
+Owner goal "all suites 2x". Three items from the qleak inventory's 2-10x
+bucket plus the environment-bound bucket's native-parent calibration. All
+numbers RELEASE, alternating A/B vs a pristine 0fe8d0fc base built this
+session in a sibling worktree (../rubash-wt-envfix3-base); official
+medians via scripts/run-perf-suite.sh (--runs 7); native-parent medians
+via the new scripts/run-perf-native-parent.py (--runs 10). GNU anchors
+re-measured inside WSL this session by the suite (10-pathmiss 21ms,
+13-readloop 23ms, 15-expansion 57ms, 04 13ms). Scratch instrumentation
+(phase timers, site-key traces) fully removed before commit.
+
+### #10 pathmiss (was 7.0x): the miss walk re-derived its candidates per DIRECTORY
+
+Decomposition (instrumented base): 100 unique-name misses cost 43.2ms in
+find_user_command alone = one 10.5ms first-fill (69 read_dirs for the
+host PATH) + ~310us per warm miss. The per-miss cost was pure churn in
+find_in_path_via_listings: for EVERY directory it rebuilt dir.join(name),
+then with_extension(ext) + file_name().to_string_lossy().to_lowercase()
+per PATHEXT candidate (~8 strings x 69 dirs re-derived from the same
+name). The listing cache (rubash#159) was already warm; only the
+candidate DERIVATION was inside the loop.
+
+Fix (path.rs): the candidate set is a pure function of NAME + PATHEXT
+(GNU findcmd.c:623 find_user_command_in_path passes the same NAME to
+find_in_path_element for every directory), so listed_candidates derives
+the lowercased listing keys and spelled file names ONCE per lookup; the
+walk is now one allocation-free HashSet::contains(&str) per directory x
+candidate, with the dir.join + is_file confirmation only on a listing
+hit. Candidate order and spellings byte-identical to the old
+executable_candidate_listed (matrix4).
+
+Numbers: harness median 132 -> **94ms** (-29%, GNU 21: 6.3x -> **4.5x**);
+native-parent median 64.3 -> **34.2ms** (GNU 21: 3.1x -> **1.6x**).
+Steady-state warm miss ~310us -> ~20us class.
+
+### #15 exphot leftovers: `:=` single-evaluation memo (a correctness fix) + the `"$name"` word fast path
+
+**`:=` memo (exphot leftover #2, landed as a GNU-parity bug fix).** GNU
+parameter_brace_expand (subst.c:9777) evaluates each `${}` occurrence
+exactly once: the `:=` arm (subst.c:10346 `case '='` with check_nullness
+-> parameter_brace_expand_rhs) expands the alternate and assigns in one
+call. Rubash's layered passes (assignment-RHS pre-scan
+assignment_expansion.rs:840, walker pre-scan embedded_mutations.rs:343,
+and the real operator arms) each re-derive the same fragment, and when
+the alternate resolves to NULL the `value non-empty` set-check fails in
+every pass, so the alternate RE-EXECUTES: `v=${v:=$(echo HI >&2)}`
+printed HI **4x** (GNU 1x; matrices under
+target/issue-suites/results/envfix3/). Fix: the pre-scan stores the
+applied fragment's resolved value under the same (word-ctx, frag-path,
+text) site key the SubXpassFrame memo uses (new ASSIGN_APPLIED map in
+expand_braced_indices.rs, cleared when a fresh outermost WordCtxGuard
+installs, so sibling words and loop iterations never share entries);
+later passes - the walker pre-scan and both real-arm `:=` resolutions
+(parameter_words.rs ops.split_colon_pair(name, b'=') arm and
+expand_braced_ops.rs) - reuse it. stderr is now byte-identical to GNU on
+every :=/=/comsub side-effect case; matrix1/matrix2 stdout byte-identical
+base-vs-lane. (The RHS double-pre-scan memo itself stays as exphot
+specified - the memo keys the application, which subsumes it for the
+divergence that mattered.)
+
+**`"$name"` whole-word fast path (exphot leftover #1).** Measured base
+release cost of one quoted-parameter word (`: "$i"` vs `: i` loops,
+5000x): ~9-10us/word (exphot's debug 24us/word shrinks but survives).
+GNU param_expand (subst.c:10464) switches on the character after `$`;
+for a name it resolves the variable in one arm. The port (command_
+prepare.rs expand_quoted_single_name_parameter_word): whitelist
+admission - cooked word EXACTLY `$<shell-name>` + PARAM_NAME_END_MARKER
+AND raw EXACTLY `"$<name>"` (embedded text, escapes, `${...}`,
+positional digits, the scalar specials and the word-list `$@`/`$*` all
+fall through) - then the walker's own `$name` arm (embedded_mutations.rs
+`Some(first) if is_shell_name_start`): the same
+dynamic_parameter_value -> shell_variable_value -> exact_case_env_var
+chain, shell_safe_value, the same walker-tail marker restores and the
+same strip_ifs_protection_markers. Skipped guard steps are provably
+identity for this shape (no `${`, no `$(`, no backtick, no braces, no IFS
+marking, nounset pre-scan runs per-command upstream, split/null tail
+gates key on UNquoted words). Word cost ~9us -> **~1us**; `"$i"` in a
+test command is now free vs a literal word.
+
+Probe 15 median (harness): base 572 -> lane 593 - flat within the host's
++-10% noise band (the test-word win is ~20ms of 570; the strip fragments
+and loop floor dominate). Probe 04: 162 -> 172, same band.
+
+### #13 readloop (was 9.0x): decomposed - the wall is the PRODUCER, not read
+
+Direct-spawn decomposition (base binary): the reader half
+(`while read -r l; do :; done < file`, 2000 lines) costs 42ms work
+(~21us/iter read+colon - the read builtin's own IO path is healthy, ~1.3x
+GNU's per-read), and it runs CONCURRENTLY with the producer. The
+producer (`while [ ... ]; do echo "..."; i=$((i+1)); done`) is the
+critical path: loop machinery (test+arith) ~96ms/2000 iters (~48us/iter,
+the 04/05 per-command floor family: perf11/12/17 profiled it to "no
+single >5% site; needs the ticketed borrow/attribute subsystems") +
+echo's buffered-output path ~16us/call. Read-side improvements cannot
+move the wall (reader has 4x headroom); lane median 204 vs base 203 -
+flat, as predicted. The honest owner of 13's remaining 8.9x is the
+04/05/06 floor family, not `read`.
+
+### Environment bucket (01/02/11): native-parent dual caliber
+
+New instrument: `scripts/run-perf-native-parent.py` - a native Python
+parent spawns rubash.exe via CreateProcess, timing only the child (the
+MSYS fork/exec constant never enters the window). GNU side stays the
+suite's inner-WSL numbers. Dual-caliber medians (base/lane identical for
+01/02/11; lane shown):
+
+| probe | MSYS parent (suite) | native parent | GNU inner | MSYS ratio | native ratio |
+|---|---:|---:|---:|---:|---:|
+| 01-startup-empty | 73 | 16.2 | 5 | 14.6x | **3.2x** |
+| 02-startup-fndef | 67 | 11.9 | 5 | 13.4x | **2.4x** |
+| 10-pathmiss (lane) | 94 | 34.2 | 21 | 4.5x | **1.6x** |
+| 11-pipeline-yes-head | 191 | 138.4 | 7 | 27.3x | **19.8x** |
+| 13-readloop (lane) | 204 | 150.9 | 23 | 8.9x | 6.6x |
+| 15-expansion (lane) | 593 | 531.0 | 57 | 10.4x | 9.3x |
+
+Verdict vs the plan's "<2x then re-host the suite" condition: 01/02 do
+NOT reach 2x natively (16.2/11.9 vs 5), so the suite's rubash side stays
+MSYS-parented; the dual caliber is recorded here instead. The ~54ms MSYS
+constant IS confirmed as the bulk of the ledger's 11-27x, but the
+corrected residuals are rubash-owned: 01/02's ~11-16ms in-process startup
+init vs GNU's 5ms, and 11's ~130ms internal yes|head pipeline machinery
+(vs GNU's ~7ms fork+wiring - matches the qleak decomposition's "rubash's
+residual ~120ms is its own pipeline spawn/wire/wait machinery"). Only the
+parent-spawn share of the old bucket is environment noise; the corrected
+classification: 01/02 = startup-init work (2.4-3.2x), 11 = pipeline
+machinery (>10x), neither is harness-bound at its core.
+
+### Semantics gate (zero-change evidence)
+
+- 546/546 lib, 27/27 regression, `RUSTFLAGS='-D warnings' cargo check
+  --tests` and `--release --tests` clean, cargo fmt.
+- src/lexer/continuation.rs untouched (git diff empty for it).
+- GNU-diff matrices `target/issue-suites/results/envfix3/matrix{1..4}.sh`
+  on pristine base, lane, and WSL GNU 5.3.0: matrix1/3/4 base-vs-lane
+  byte-identical stdout+stderr (matrix3's only GNU deltas: `$$` pid and
+  /d vs /mnt/d path forms - environment, pre-existing); matrix2
+  (side-effect visibility) stdout identical and lane stderr now
+  byte-identical to GNU while the base ran `:=` comsubs 2-5x (the fixed
+  divergence); matrix4 (PATH-scan: first-dir-wins, extension order,
+  dotted/case-insensitive names, miss class, hash views, fingerprint
+  invalidation, nonexistent PATH entries) byte-identical base-vs-lane.
+- true-baseline slices (exp new-exp more-exp posixexp quote read): lane
+  rb.out/rb.err/rc byte-identical to base on every slice; read=30 /
+  quote=94 GNU-diff lines, unchanged from the qleak ledger (one earlier
+  truncated read run was a host-load suite-timeout flake; three re-runs
+  byte-stable).
+- Pre-existing GNU divergences observed and NOT from this lane (both
+  reproduce on the base binary): `:=` inside `$(( ))` does not persist
+  the assignment (`echo "$((${n:=7}+1)) [$n]"` prints `8 []`, GNU
+  `8 [7]` - arith-snapshot family); `$0` path-form in diagnostics
+  (/d vs /mnt/d - environment).
+
+### Leftovers
+
+1. **10-pathmiss at 4.5x MSYS caliber**: first-fill 10.5ms (69 read_dirs
+   on the host PATH - GNU pays 3 stats per miss on its 3-entry PATH) +
+   the ~30ms harness parent constant. Natively 1.6x. Reaching 2x in the
+   suite's own caliber is parent-bound.
+2. **13/15 (and 04-07/16/20/24's exec half)**: owned by the per-command
+   floor (arith_dyn snapshot, for-arith pair, buffered-echo path ~16us,
+   strip-walker tail) - the ticketed deep subsystems; no single >5%
+   site remains from this lane's vantage.
+3. **11's ~130ms pipeline machinery** (native caliber): spawn/wire/wait
+   of the internal yes|head pipeline - a pipeline-subsystem round.
+4. **01/02 startup init ~11-16ms** vs GNU 5ms (native caliber): the
+   in-process init path (locale, env import, PATH normalization).

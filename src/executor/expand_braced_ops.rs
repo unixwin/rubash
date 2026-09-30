@@ -29,6 +29,20 @@ impl Executor {
                         .unwrap_or_default(),
                 );
             }
+            // GNU evaluates the `:=` operator once per `${}` occurrence
+            // (subst.c:9777 parameter_brace_expand -> subst.c:10346
+            // `case '='` with check_nullness -> parameter_brace_expand_rhs).
+            // When the pre-scan already applied this fragment and the
+            // alternate resolved to NULL (the set-check above fails),
+            // reuse the memoized result instead of re-expanding the
+            // alternate — a `$(...)` alternate would otherwise re-execute.
+            if let Some(key) = crate::executor::expand_braced_indices::sub_site_key(name) {
+                if let Some(resolved) =
+                    crate::executor::expand_braced_indices::assign_applied_lookup(&key)
+                {
+                    return Some(resolved);
+                }
+            }
             // GNU parameter_brace_expand_word sets expand_no_split_dollar_star
             // for op == '=' (subst.c:4487), which includes `:=`. This makes
             // unquoted $* with null IFS join with IFS[0] inside the value.

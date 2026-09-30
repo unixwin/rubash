@@ -165,9 +165,14 @@ pub(in crate::executor) struct WordCtxGuard {
 }
 
 impl WordCtxGuard {
-    /// Install `ctx` unconditionally.
+    /// Install `ctx` unconditionally. Installing at the outermost level
+    /// (no enclosing word context) starts a new word expansion, so the
+    /// `:=`-application memo of previous words is dead and cleared.
     pub(in crate::executor) fn new(ctx: u64) -> Self {
         let saved = CURRENT_WORD_CTX.with(|current| current.replace(ctx));
+        if saved == 0 {
+            assign_applied_clear();
+        }
         Self { saved }
     }
 
@@ -271,6 +276,45 @@ pub(in crate::executor) fn sub_res_store(key: (SubSite, String), resolved: Strin
             frame.insert(key, resolved);
         }
     });
+}
+
+thread_local! {
+    /// Cross-pass memo for `${name:=word}` operator APPLICATION (envfix3).
+    /// GNU parameter_brace_expand (subst.c:9777) evaluates each `${}`
+    /// occurrence exactly once: the `:=` arm (subst.c:10346 `case '='`
+    /// with check_nullness) expands the alternate and assigns in one
+    /// parameter_brace_expand_rhs call. Rubash's layered passes (the
+    /// assignment-RHS pre-scan, the walker pre-scan, and the real operator
+    /// arm) each re-derive the same fragment; when the alternate resolves
+    /// to NULL the `value non-empty` set-check fails in every pass and the
+    /// alternate — possibly a command substitution — re-executes
+    /// (`v=${v:=$(echo HI >&2)}` ran the comsub 4x, GNU 1x). The pre-scan
+    /// stores the applied fragment's resolved value under the same
+    /// (site, text) key the subscript memo uses; later passes look it up
+    /// instead of re-expanding. Distinct `${}` occurrences key differently
+    /// (frag ordinal), and the store is cleared when a fresh OUTERMOST
+    /// word context installs (every command word allocates one), so
+    /// sibling words and loop iterations never share entries. The map
+    /// cannot ride the SubXpassFrame stack: the pre-scan passes run under
+    /// DIFFERENT (or no) frames while sharing the one word context.
+    static ASSIGN_APPLIED: std::cell::RefCell<HashMap<(SubSite, String), String>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Consult the `:=`-application memo.
+pub(in crate::executor) fn assign_applied_lookup(key: &(SubSite, String)) -> Option<String> {
+    ASSIGN_APPLIED.with(|map| map.borrow().get(key).cloned())
+}
+
+/// Record one applied `:=` fragment (resolved alternate value).
+pub(in crate::executor) fn assign_applied_store(key: (SubSite, String), resolved: String) {
+    ASSIGN_APPLIED.with(|map| map.borrow_mut().insert(key, resolved));
+}
+
+/// Drop all `:=`-application entries: called when a fresh outermost word
+/// context installs, so entries never outlive their word.
+pub(in crate::executor) fn assign_applied_clear() {
+    ASSIGN_APPLIED.with(|map| map.borrow_mut().clear());
 }
 
 pub(in crate::executor) fn sub_idx_lookup(
