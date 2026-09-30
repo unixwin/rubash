@@ -138,3 +138,10 @@
 
 **2-3x 剩余路径（全量化有主）**：dispatch 函数指针表（execute_cmd.c:624 轮）、嵌套体内联解析（~150ms）、船长 comsub park 二次方（configure 合流）、arith_dyn 维护条目模型
 **待办**：#316 残留（引号头 glob 回归）、#317-320（fixpack 四单）、#331（自产路径 POSIX）、extglob toggle 残留态（execdeep 报，预存）、#322 continuation 补丁（船长审中）
+
+## 2026-09-30 战报（wt18-wt19 两波，2x 战役主攻）
+
+- **60 单关闭**（全累计）；wt18：perf17（configure park 83x→29x + dispatch 地板 8.8x）、misc17（#332+errors8 ok5-8）、sbxrc（沙箱历史真修 #134 + rc 覆盖矩阵 GNU 对齐）、up149（HOME 家族 fill-if-missing，归属反转=我们自己）
+- **wt19**：qleak（release 全套件首份盘点表 + 指针执行：花括号 41x→16.8x）、perf19（configure 1247→420ms ~11x：heredoc 体不透明+case 分级闭包+token 重用；根因=顶层扫描器把体当活文本，525K 字符死组）
+- 2x 五桶路线图落盘 PERF-BASELINE：达标 5 / 2-10x 3 / 环境绑定 3（MSYS 父 spawn）/ 解析绑定 5（嵌套体内联架构级）/ floor 6
+- 新单：#335 nvm cd-print、( case x in esac ) 预存
