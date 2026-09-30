@@ -183,9 +183,19 @@ pub(in crate::executor) fn replace_parameter_suffix(
 }
 
 pub(super) fn pattern_contains_glob(pattern: &str) -> bool {
+    // GNU pat_subst (subst.c:9238) routes EVERY pattern through
+    // match_pattern/match_upattern — there is no literal fast path. The
+    // literal shortcut here is admitted only for patterns that cannot
+    // carry operator meaning: the basic glob set plus the ksh extglob
+    // operator groups (`@(`, `!(`, `+(`, `*(`, `?(` — FNM_EXTMATCH when
+    // the extglob option is on, literal characters otherwise, which the
+    // compiled matcher also answers correctly with extglob off). Without
+    // the extglob shapes `${v/@(abc)/X}` took the literal path and never
+    // substituted (rubash#349).
     pattern
         .chars()
         .any(|ch| matches!(ch, '*' | '?' | '[' | '\\'))
+        || pattern_uses_extglob_syntax(pattern)
 }
 
 pub(in crate::executor) fn find_parameter_prefix_match(

@@ -2794,10 +2794,65 @@ pub(in crate::executor) fn raw_word_suppresses_pathname_expansion(
     raw: Option<&str>,
     metadata: Option<&WordMetadata>,
 ) -> bool {
+    // GNU quoting suppresses pathname expansion per CHARACTER, not per
+    // word: a word that mixes unquoted pattern syntax with quoted literal
+    // text still expands its unquoted parts. An UNQUOTED extglob opener
+    // (`@(`, `!(`, `+(`, `*(`, `?(` — read_token_word's PATTERN_CHAR arm,
+    // parse.y:5466-5489, consumes the group as pattern text) keeps the
+    // whole word a live pattern even when the group's characters are
+    // quoted: `@('a b')` matches the file `a b` with the quoted space
+    // literal (rubash#350; glob.c udequote_pathname strips the quoting
+    // inside the group). The recorded-patterns half stays as the
+    // suppression for words whose glob characters were all quoted away.
     raw_word_is_quoted(raw)
+        && !raw.is_some_and(|raw| raw_has_unquoted_extglob_operator(raw))
         && metadata
             .map(|metadata| metadata.pathname_patterns.is_empty())
             .unwrap_or(true)
+}
+
+/// Whether the raw word text contains an extglob operator group introducer
+/// (`@(`, `!(`, `+(`, `*(`, `?(`) outside any quoting span. Mirrors the
+/// lexer's PATTERN_CHAR check (parse.y:5466: the operator must be unquoted
+/// for read_token_word to consume `(` as pattern-group text).
+fn raw_has_unquoted_extglob_operator(raw: &str) -> bool {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            index += 1;
+            continue;
+        }
+        if !single
+            && !double
+            && matches!(ch, '@' | '!' | '+' | '*' | '?')
+            && chars.get(index + 1) == Some(&'(')
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 pub(in crate::executor) fn raw_word_is_fully_single_quoted(raw: Option<&str>) -> bool {
