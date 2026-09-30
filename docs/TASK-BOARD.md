@@ -145,3 +145,10 @@
 - **wt19**：qleak（release 全套件首份盘点表 + 指针执行：花括号 41x→16.8x）、perf19（configure 1247→420ms ~11x：heredoc 体不透明+case 分级闭包+token 重用；根因=顶层扫描器把体当活文本，525K 字符死组）
 - 2x 五桶路线图落盘 PERF-BASELINE：达标 5 / 2-10x 3 / 环境绑定 3（MSYS 父 spawn）/ 解析绑定 5（嵌套体内联架构级）/ floor 6
 - 新单：#335 nvm cd-print、( case x in esac ) 预存
+
+## 2026-09-30 全天战报（wt20-wt21 两波，77 单关闭）
+
+- **wt20**：gnusweep3（537 刁钻探针 96% 平价+孤儿 sub 24/26；开 #337-#356 二十单）、parse20（if 家族单遍内联+诚实再归因：configure 剩余=feeder 家族）、envfix3（pathmiss 4.5x/原生父 1.6x；:= 副作用 4→1=GNU；原生父 harness 双口径）、deepsweep（**17/20 一次关**，含 #354 载体泄漏 83 套件 A/B 零变动；#339-#351/#356 全 GNU 验证）
+- **wt21**（2x 收官轮）：startup21（pre-main 6-10ms=Windows 主机地板铁证；rubash 侧→1.3ms；01/02 原生父 9.5ms=cmd 地板）、feeder21（电池融合+准入+削减：configure 386ms；join/re-lex 前提证伪）、resid21（#336/#353/#355 关+#335 partial+#352 归类；#353 读时 locale 语义、#355 fd 间接层；回归门禁拦下 cat-file /dev/fd 连带破绽并修）
+- **2x 战役位置**：01/02 达 cmd 主机地板（2.4x 对 GNU-Linux）、5 套件 <2x、pathmiss 原生父 1.6x、configure 11x（token 架构级 quote-removal 是下一座山）、null 8.8x
+- CI 双绿全程；unix shim+catfile 两起 CI/门禁红均当场修复
