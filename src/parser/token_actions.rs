@@ -1034,6 +1034,33 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             }
 
             if token.value == "!"
+                && state
+                    .ast
+                    .commands
+                    .last()
+                    .is_some_and(|last| last.pipe.is_some())
+            {
+                // GNU parse.y:1408-1413: `pipeline_command: ... | BANG
+                // pipeline_command` — BANG may only prefix a whole
+                // pipeline_command, never follow `|` inside a
+                // pipe_sequence (`true | ! true` is `syntax error near
+                // unexpected token `!'`, rubash#360). The Pipe action
+                // pushed the previous stage with its pipe flag set, so a
+                // pending pipe on the last command marks this position.
+                let mut error = CommandNode::new();
+                error.line = Some(token.position);
+                error.insert_assignment(
+                    "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+                    format!(
+                        "!{}{}",
+                        crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+                        token.position
+                    ),
+                );
+                abort_parse_at_syntax_error(state, error, tokens[*i].position);
+                return TokenAction::Break;
+            }
+            if token.value == "!"
                 && (command_is_empty(&state.current_cmd)
                     || command_is_pending_inversion(&state.current_cmd))
             {
@@ -1648,6 +1675,18 @@ fn find_unquoted_ctrl_op(value: &str) -> Option<char> {
             }
             b'&' | b'|' | b';' | b'<' | b'>' if !in_single && !in_double => {
                 return Some(c as char);
+            }
+            // GNU parse.y:7104-7160 parse_compound_assignment's element
+            // loop accepts only WORD and ASSIGNMENT_WORD tokens: a `('
+            // read at element position (or mid-word — read_token returns
+            // it as its own token, ending the word) is the subshell
+            // token and hits the loop's yyerror: `var=( (1 2) )`,
+            // `var=(x(y z))` and `var=([2]=(3 4))` all report
+            // `syntax error near unexpected token `('` (rubash#360).
+            // Quoted `'('`/`"("` and escaped `\(` stay word content, and
+            // `$(`/backtick/procsub bodies were consumed above.
+            b'(' if !in_single && !in_double => {
+                return Some('(');
             }
             _ => {}
         }

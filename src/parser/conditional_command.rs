@@ -211,13 +211,16 @@ impl CondFail {
 /// left across characters that are not ` \n\t;|&` breaks, so adjacent
 /// arguments merge into one reported string (`(x' for `(x').
 fn walk_back_near_token(args: &[CondArg], mut index: usize) -> String {
+    // Raw text (quote/escape forms intact): GNU's error_token_from_text
+    // names the source form of the offending word (`syntax error near
+    // `\<'', not `<').
     let mut text = args
         .get(index)
-        .map(|(value, _, _, _)| value.clone())
+        .map(|(_, raw, _, _)| raw.clone())
         .unwrap_or_default();
     while index > 0 && args[index].2.is_empty() {
         index -= 1;
-        text = format!("{}{}", args[index].0, text);
+        text = format!("{}{}", args[index].1, text);
     }
     text
 }
@@ -439,12 +442,19 @@ fn cond_term(cursor: &mut CondCursor) -> Result<(), CondFail> {
             let (tok, line, index, anchor) = cursor.next();
             let binop = match &tok {
                 CondTok::Word => {
-                    let op = &cursor.args[index.unwrap()].0;
-                    is_conditional_binary_operator(op)
-                        || op == "="
-                        || op == "=="
-                        || op == "!="
-                        || op == "=~"
+                    // GNU parse.y:5156-5174: the binary-operator slot
+                    // matches the parser's word TEXT — quote removal has
+                    // not run (parse.y cond_term reads cond_token words),
+                    // so a quoted `'=='` / `'<'` or an escaped `\==` /
+                    // `\<` matches no operator and falls to the error
+                    // branch (`unexpected token `\<', conditional binary
+                    // operator expected`, rubash#360). The unescaped char
+                    // operators arrive as Char tokens below.
+                    let (op, raw) = (
+                        &cursor.args[index.unwrap()].0,
+                        &cursor.args[index.unwrap()].1,
+                    );
+                    raw == op && is_conditional_binary_operator(op)
                 }
                 CondTok::Char('<') | CondTok::Char('>') => true,
                 _ => false,
@@ -523,7 +533,10 @@ fn cond_or(cursor: &mut CondCursor) -> Result<(), CondFail> {
 /// their text; virtual/newline/EOF and the `]]` closer use GNU's alist names.
 fn cond_offending_text(cursor: &CondCursor, tok: &CondTok, index: Option<usize>) -> String {
     if let Some(i) = index {
-        return cursor.args[i].0.clone();
+        // GNU error_token_from_token prints the word's raw text — quote
+        // characters and escapes are still attached (`\<', `'=='`), so the
+        // operator-slot rejection names the exact source form.
+        return cursor.args[i].1.clone();
     }
     match tok {
         CondTok::Char(c) => c.to_string(),
@@ -544,7 +557,11 @@ fn conditional_error_source(
     let line = echo_line.or_else(|| tokens.get(start).map(|token| token.position))?;
     let mut source = String::new();
     let mut began = false;
-    for token in &tokens[..=end.min(tokens.len() - 1)] {
+    // GNU print_offending_line (parse.y:6814) echoes the WHOLE input line
+    // of the offending token — including text after `]]' when the
+    // conditional is followed on the same line (`[[ x \< y ]] || echo no'
+    // echoes the full line), so the walk must not stop at the closer.
+    for token in tokens {
         if token.position != line {
             if began {
                 break;
