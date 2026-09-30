@@ -825,3 +825,180 @@ extglob stripping ops, heredoc tab/quote/multi-delimiter forms.
    (form-independent probe m01 passes).
 3. `echo <(…)` prints the procsub path: /dev/fd/N (GNU) vs pid-numbered temp file
    (rubash) — tracked as #355, excluded from other categories.
+
+# ===== SECTION: ecosweep4 lane (wt22/nest22, 2026-09-28) — APPENDED, DO NOT REORDER =====
+
+Fourth wave: DEV-TOOLCHAIN SHELL LAYER (new dimension; waves 1-3 were
+plugin-ecosystem / GNU-syntax / dense-execution corpora). Worktree base
+`a522eb39`, carrier = release build from it. Oracle: WSL GNU Bash 5.3.0
+(`/usr/local/bin/bash`), script-file probes only, outputs via files. Sandbox:
+`target/issue-suites/results/ecosweep4/`; corpora (LF) under
+`target/ecosweep4-corpus/` (tarballs via gh api: bats-core@52439ebf,
+pre-commit@368bf476, direnv@b00e451f, shellcheck@4549614b, cli/cli@fc4b137c,
+choco@1a957a92).
+
+Dedup check BEFORE running: sections 1-4 + ecosweep + ecosweep2 + ecosweep3 +
+gnusweep3 read in full. Re-runs justified only where a prior blocker was
+CLOSED (bats: #172/#224) or the prior layer was load-level (direnv stdlib:
+target-tools C ran -n/load only; per-function drive is new). Not run: ble.sh,
+nvm body/suite, modernish, mvdan, GNU 83.
+
+## A1. pre-commit hook generator (pre_commit/resources/hook-tmpl + testing hooks)
+
+Rendered exactly like `pre_commit/commands/install_uninstall.py:_install_hook_script`
+(templated section split/replacement): 4 hook variants (default INSTALL_PYTHON='',
+explicit python, --config/--hook-type args, pre-push + --skip-on-missing-config) x
+drive cases (no pre-commit on PATH -> error branch; stub `pre-commit`/python on PATH
+-> exec chain with quoting-torture user args 'a b'/'c;d'/'x*y'/'q"z'/"t'u"), plus
+10 testing/resources/*/bin/hook.sh scripts and get-coursier.sh/get-dart.sh with
+stubbed curl/sha256sum/unzip/gunzip/cygpath. **15/16 byte-identical** (the
+exec chain, "$@" propagation, word-splitting of user args, HERE=$(cd/dirname/pwd)
+all parity after path-form normalization). The 1 red:
+
+- get-coursier.sh (`set -euo pipefail` header) rc=0 vs GNU rc=1 after a failing
+  chmod -> **rubash#358: `set -euo pipefail` / `set -eo pipefail` silently drops
+  the bundled -e and -u** (set_with_io applies only `-o`/`-r`; the fast path
+  bails on the whole arg containing 'o'). Root cause + GNU anchors
+  (set.def:716-772) in the issue. P0-class: the most common script header in
+  the ecosystem leaves errexit/nounset inert unless written as separate words.
+
+## A2. bats-core own test suite (re-run; ecosuite section 4 was fully blocked)
+
+With #172 and #224 CLOSED, `bin/bats` runs UNPATCHED under rubash (ecosuite's
+harvest patch no longer needed). 20 test files, timeout 150 s each, `test/.bats`
+pre-removed per run (see #359 below). GNU oracle: **20/20 files, 403/403 green**
+on the same tree. rubash:
+
+| verdict | files |
+| --- | --- |
+| byte-identical TAP+stderr+rc (10) | cat-formatter 5, common 9, filter 6, install 5, suite_setup_teardown 19, tagging 10, tap13 4, timeout 4, trace 2, warnings 8 |
+| all tests pass, stderr/out noise (4) | file_setup_teardown 17 (readonly-unset noise = #363 corollary), run 18 (emulated-tmpdir path-form noise), junit-formatter 13 (stderr leak into XML), formatter 12+1 (setup attribution + `script`-PTY test) |
+| real failures | load 24/26 (setup `load` fails, lines misattributed to bats-exec-test:4/6), suite 23/24 (symlinks, env) |
+| env-skips reported as not-ok | parallel (GNU parallel absent), root (msys symlinks) — bats' own platform skips |
+| TIMEOUT rc=124 | **bats.bats (146 tests), bats_pipe.bats (155 tests)** — `Executed 0 of expected N`, bats-preprocess executed with broken line/semantics (suspected #363-family) |
+
+-> **rubash#364** (hang + attribution), **rubash#359** (append-redirect to a
+`:`-containing filename under /d/ form fails EINVAL — the bats runlog
+`"<date> <HH:MM:SS> UTC.log"`; Git Bash + GNU both succeed; /tmp-form paths
+succeed inside rubash), readonly-attribute-leak evidence comment on **#363**.
+
+## A3. direnv stdlib.sh per-function drive (51 drivers + own test/stdlib.bash)
+
+- `stdlib.sh` (1552 L) `-n` parity: clean both sides.
+- direnv's own `test/stdlib.bash` with stubbed `direnv`: GNU DIES at the first
+  subshell (its own `set -euo pipefail` header — #358 in a second real corpus
+  file); rubash (errexit inert) runs ALL sections to "OK" with 3 assert
+  failures: direnv_apply_dump empty (#362 family), find_up/expand_path
+  path-form only (D:/ rendering).
+- Per-function matrix (every public stdlib function driven with its documented
+  usage; `direnv`/tool binaries stubbed symmetrically): **35/52 byte-identical**
+  including strict_env/unstrict_env, dotenv(+-exists), find_up, source_env,
+  watch_file/dir, fetchurl/source_url, direnv_load/apply_dump, PATH_add,
+  MANPATH_add, PATH_rm, load_prefix, semver_search, layouts go/node/opam/perl/
+  python, direnv_version, on_git_branch (real git fixture), env_vars_required,
+  require_allowed, user_rel_path, expand_path. Reds:
+  - layout_go/node/perl/php, use_vim -> **rubash#362**: `v=$(IFS=:; echo …)`
+    compound comsub under `f >/dev/null` returns EMPTY -> path_add exports
+    PATH/GOPATH='' (silent env wipe). 6-shape matrix in issue.
+  - use/use_julia/use_node/use_nodenv/use_rbenv/use_flake/use_guix/use_vim ->
+    **rubash#363**: external shebang scripts execute IN-PROCESS; the stub's
+    `cmd=$1` clobbered the caller's `local cmd` -> `use_log: command not found`.
+    Same pid, cwd/exit contained, variables leak (P0).
+  - source_env -> env (cygpath branch: Windows-only; GNU has no cygpath).
+  - PATH_rm/lo_path_rm, rvm -> message-form only: `export "-c=…"` classified as
+    option (GNU: "invalid variable name") and error file-attribution to the
+    driver instead of stdlib.sh (#201/#204 display family, not re-filed).
+  - source_up_if_exists -> real divergence (rubash takes the "referenced … does
+    not exist" else-branch though pushd succeeded; xtrace shows `[[ -f
+    ./.envrc ]]` false with the file present). Standalone replicas of every
+    step PASS; full-chain trigger NOT isolated this lane (artifacts:
+    direnv/sui2-4.*; suspected #363 interaction — the stub runs twice inside
+    the chain).
+
+## A4. zsh-nvm / Chocolatey bash layer (premise probes)
+
+- **zsh-nvm: premise invalid** (zsh-first plugin, 32 files, only
+  tests/common.sh is a bash artifact — a bats helper; same class as
+  volta/thoughtbot in section 3). Nothing to run.
+- **Chocolatey `chocolateyScript.ps1` bash wrapper: does not exist** (repo is
+  C#/PowerShell). BUT choco carries 3 real bash scripts (Cake bootstrapper
+  `build.sh` 129 L + debug/official variants): run under both shells —
+  byte-parity through "Downloading packages.config/NuGet" then diverges only
+  past the network boundary (real nuget.org fetch + mono absent) — env-bound,
+  no rubash issue. (`set -eo pipefail` header works — separate words.)
+
+## A5. ShellCheck's own unit-test corpus (parse face)
+
+2164 `prop_*` snippets extracted from src/ShellCheck/*.hs (extractor:
+`sc/extract.py`, Haskell string unescape incl. numeric escapes), `bash -n`
+rc-parity per snippet. **2157/2164 parity (99.7%).** 7 divergent -> 4 shapes:
+
+- **rubash#360** (over-lax x4): `[[ 3 \< 4 ]]` (GNU cond_term rejects escaped
+  operator), `true | ! true` (BANG not allowed after `|`), `var=( (1 2) (3 4) )`
+  and `var=( 1 [2]=(3 4) )` / `var=(1 [2]=(3 4))` (parse_compound_assignment
+  accepts only WORD/ASSIGNMENT_WORD).
+- **rubash#361** (over-strict x1): bare `!(*.mp3|*.wmv)` at command position
+  with extglob OFF — GNU lexes `!` + subshell (valid); rubash lexes `!(` as
+  extglob and dies.
+
+## A6. gh CLI bash layer
+
+- **`etc/bash_completion.sh` premise INVALID**: cli/cli has never had an etc/
+  dir (verified v0.5.0..v0.9.0 + HEAD via API); bash completion is cobra
+  runtime-generated (`gh completion -s bash`) — same class as the kubectl skip
+  (section 3). The GENERATED script (gh 2.97.0, 426 L cobra-v2) IS run as
+  corpus: `-n` clean; source + `complete -o default -F __start_gh gh`
+  registration + 2 driven COMP_WORDS dispatches (stubbed `gh __complete`) ->
+  **COMPREPLY and registration byte-identical**. Only divergence: compopt
+  warning file-attribution (driver vs completion file — #201/#204 form family).
+- `pkg/cmd/extension/ext_tmpls/script.sh` (rendered with a name) +
+  buildScript.sh: clean. `script/createrepo.sh` +
+  `api-host-gateway/{run,test}.sh`: symmetric error paths; deeper divergence
+  only where docker/gh exist in WSL but not on Windows (env).
+
+## Issue ledger from this lane
+
+| issue | corpus | class |
+| --- | --- | --- |
+| rubash#358 | pre-commit get-coursier.sh (+ direnv test/stdlib.bash) | P0 rubash-caused: bundled short flags in `set -euo pipefail` never applied |
+| rubash#359 | bats-core runlog file | rubash-caused: append-redirect EINVAL on `:`-containing filename (drive-form path layer) |
+| rubash#360 | shellcheck corpus | rubash-caused: parser over-lax x4 shapes |
+| rubash#361 | shellcheck corpus | rubash-caused: parser over-strict (extglob `!(` admission at command position) |
+| rubash#362 | direnv path_add / layout_* | P0 rubash-caused: compound comsub under outer stdout redirect captures empty |
+| rubash#363 | direnv use_* / bats per-test readonly | P0 rubash-caused: external scripts execute in-process; variables (and readonly attrs) leak |
+| rubash#364 | bats-core bats.bats/bats_pipe.bats + load/formatter setups | rubash-caused: 301-test hang "Executed 0"; ERR-trace line misattribution |
+
+## Environment-bound findings (no rubash issue)
+
+1. bats parallel.bats/root.bats/suite.bats symlink rows: bats' own `# skip`
+   platform skips (no GNU parallel, msys symlinks).
+2. direnv source_env cygpath branch (Windows-only code path); find_up /
+   expand_path assert failures are D:/ path-form rendering only.
+3. gh apigw run: docker/gh present in WSL, absent on Windows (asymmetric env).
+4. choco Cake bootstrappers past the nuget.org fetch boundary (network+mono).
+5. zsh-nvm (zsh-only) and gh `etc/bash_completion.sh` (never existed)
+   premise-invalid, recorded like volta/thoughtbot/kubectl.
+
+## Positive parity worth keeping
+
+- pre-commit hook generator end-to-end (15/16) incl. exec chains, "$@"
+  quoting torture, PATH discovery of extensionless scripts.
+- bats-core self-suite: from "0 start" (ecosuite, 2026-09-27) to 10/20 files
+  byte-identical + 4 more all-green-with-noise; the two closed blockers'
+  fixes are real-harvest-verified.
+- direnv stdlib -n clean; 35/52 functions byte-identical incl. all the
+  source_env/find_up/watch/layout-python/semver/on_git_branch machinery.
+- ShellCheck corpus parse parity 99.7%.
+- gh cobra-v2 completion machinery byte-identical under drive.
+
+## Artifacts
+
+- A1: `pc/` (gen.py, stub/, rub|gnu/, verdicts via cmp.py)
+- A2: `bats/` (run-{rub,gnu}.sh, per-file {rub,gnu}/<file>.{out,err,rc}), debug
+  tree `target/ecosweep4-corpus/bats-dbg`
+- A3: `direnv/` (gen.py, stub/, d-pre/, drivers, verdict.txt, probes
+  cs2/lg/sui*/pa2/rupro)
+- A5: `sc/` (extract.py, snips/ 2164, {rub,gnu}.rc.txt, diverge.txt, manifest.tsv)
+- A6: `gh/` (gen.py, work_extscript.sh, drivers)
+- A4: `choco/` (drivers + outputs)
+- B: `b-workspace-test.log` (full-workspace zero-point run)
