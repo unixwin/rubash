@@ -569,7 +569,7 @@ pub(in crate::executor) fn split_expanded_fragments(
         let mut bytes = Vec::new();
         let mut marker_positions = Vec::new();
         for fragment in fragments {
-            record_ctlesc_markers(fragment, bytes.len(), &mut marker_positions);
+            record_source_carrier_markers(fragment, bytes.len(), &mut marker_positions);
             bytes.extend(fragment.bytes.iter().copied());
         }
         return vec![materialize_field_text(&bytes, &marker_positions)];
@@ -588,7 +588,7 @@ pub(in crate::executor) fn split_expanded_fragments(
     let mut saw_unquoted = false;
     let mut pending_non_whitespace = false;
     for fragment in fragments {
-        record_ctlesc_markers(fragment, current.len(), &mut current_markers);
+        record_source_carrier_markers(fragment, current.len(), &mut current_markers);
         for byte in &fragment.bytes {
             let is_ifs = ifs.as_bytes().contains(byte);
             if fragment.splittable && !fragment.quoted && is_ifs {
@@ -640,13 +640,50 @@ fn record_ctlesc_markers(
     }
 }
 
+/// Record the absolute positions of every live carrier-family byte of a
+/// SOURCE-TEXT fragment appended at `base_len`.
+///
+/// rubash#354: GNU keeps a character that was quoted in the source word
+/// (parse.y:5694-5706 got_escaped_character) riding through expansion with
+/// its CTLESC protection (subst.c:11639-11673) and strips the protection
+/// only at argv materialization (subst.c:4807 dequote_string), where the
+/// character becomes literal data. Rubash's source-text carriers
+/// (DATA_DQUOTE for `\"`, DATA_SQUOTE, DATA_BACKSLASH, ...) are the same
+/// in-band port: they must reach the argv materializer
+/// (materialize_expanded_command_word -> decode_word_position_carriers) as
+/// LIVE carrier chars, not be owner-tagged as payload data. Owner-tagging
+/// them here turned the marker pair into raw output bytes at the final
+/// decode (`echo "\"$(echo x)\""` printed 0x18 0x78 0x18).
+///
+/// Capture fragments keep the payload owner-tagging (ctlesc_markers ==
+/// false): a 0x18 byte that came OUT of a command substitution is data and
+/// must reach the output boundary as that byte.
+fn record_source_carrier_markers(
+    fragment: &ExpandedFragment,
+    base_len: usize,
+    marker_positions: &mut Vec<usize>,
+) {
+    if !fragment.ctlesc_markers {
+        return;
+    }
+    for (offset, byte) in fragment.bytes.iter().enumerate() {
+        if is_carrier_byte(*byte as u32) {
+            marker_positions.push(base_len + offset);
+        }
+    }
+}
+
 /// Materialize one accumulated field: bytes that are payload data go through
 /// the bytes_to_shell_text owner-tagging, while bytes at `marker_positions`
-/// (ascending) stay live CTLESC marker chars — the globber consumes them as
+/// (ascending) stay live carrier marker chars — the globber consumes them as
 /// per-character quoting (glob.c udequote_pathname, 429-448) and argv
 /// materialization strips them (dequote_string, subst.c:4807). This is the
 /// rubash port of GNU keeping CTLESC-protected characters in the expansion
-/// result until after pathname expansion (subst.c:11639-11673).
+/// result until after pathname expansion (subst.c:11639-11673). A position
+/// may hold any carrier-family byte (CTLESC, DATA_DQUOTE, DATA_BACKSLASH,
+/// ... — rubash#354's source-text provenance set), and the original byte is
+/// what stays live; every carrier byte is ASCII, so the `as char` widening
+/// is exact.
 fn materialize_field_text(bytes: &[u8], marker_positions: &[usize]) -> String {
     if marker_positions.is_empty() {
         return bytes_to_shell_text(bytes);
@@ -657,7 +694,7 @@ fn materialize_field_text(bytes: &[u8], marker_positions: &[usize]) -> String {
         if position > run_start {
             output.push_str(&bytes_to_shell_text(&bytes[run_start..position]));
         }
-        output.push(crate::executor::markers::CTLESC);
+        output.push(bytes[position] as char);
         run_start = position + 1;
     }
     if run_start < bytes.len() {

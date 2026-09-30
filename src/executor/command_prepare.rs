@@ -981,6 +981,20 @@ impl Executor {
             return None;
         }
         let mut expanded_fragments = Vec::new();
+        // Quote state crosses literal fragments: the fragment slices cut the
+        // raw word at substitution-span boundaries, but GNU's quote state is
+        // a property of the WHOLE word (parse.y read_token_word runs one
+        // state machine across `$(...)` units, which it reads as units —
+        // parse.y:4451 parse_comsub). Dequoting each fragment with
+        // remove_shell_quotes from a fresh state made a fragment that starts
+        // inside a quote span re-read its first `'`/`"` as an OPENER: in
+        // `"a'b$(echo c)e'f"` the tail fragment `e'f"` misparsed as
+        // `e` + single-quoted `f"` (rubash#354 fragment-splice class). Track
+        // the state and prefix the fragment with its opening quote so the
+        // lexer dequoter resumes exactly where the word left off (a leading
+        // closer quote in the fragment then closes the synthetic opener,
+        // which is the GNU reading).
+        let mut quote_state = LiteralFragmentQuoteState::None;
         for fragment in raw_fragments {
             if fragment.substitution {
                 let context = fragment
@@ -991,7 +1005,15 @@ impl Executor {
                     self.expand_command_substitution_mut_typed_with_context(source, context);
                 expanded_fragments.push(output.into_fragment());
             } else {
-                let literal = crate::lexer::remove_shell_quotes(&fragment.text);
+                let mut text = fragment.text.clone();
+                match quote_state {
+                    LiteralFragmentQuoteState::Double => text.insert(0, '"'),
+                    LiteralFragmentQuoteState::Single => text.insert(0, '\''),
+                    LiteralFragmentQuoteState::None => {}
+                }
+                let literal = crate::lexer::remove_shell_quotes(&text);
+                quote_state =
+                    advance_literal_fragment_quote_state(quote_state, fragment.text.as_str());
                 if !literal.is_empty() {
                     // GNU expand_word_internal carries characters that were
                     // quoted in the source word through the splice with a
@@ -2549,6 +2571,46 @@ fn assignment_builtin_receives_assignment_word(
         cmd.words.first().map(String::as_str),
         Some("export" | "readonly" | "declare" | "typeset" | "local")
     )
+}
+
+/// Quote state carried across the literal fragments of
+/// `expand_simple_substitution_fragments` (rubash#354 fragment-splice
+/// class). `None` is unquoted word text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LiteralFragmentQuoteState {
+    None,
+    Single,
+    Double,
+}
+
+/// Advance the literal-fragment quote state over a fragment's RAW text.
+/// The fragment admission (expand_simple_substitution_fragments) already
+/// rejected every `$`, backtick and brace, so only `'`/`"`/`\` carry quote
+/// meaning here — the same per-character rules as GNU read_token_word
+/// (parse.y:5366-5398): `\` outside single quotes escapes the next
+/// character, `'` toggles single when not double-quoted, `"` toggles double
+/// when not single-quoted.
+fn advance_literal_fragment_quote_state(
+    state: LiteralFragmentQuoteState,
+    text: &str,
+) -> LiteralFragmentQuoteState {
+    let mut state = state;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        match (state, ch) {
+            (LiteralFragmentQuoteState::Single, '\'') => state = LiteralFragmentQuoteState::None,
+            (LiteralFragmentQuoteState::Single, _) => {}
+            (_, '\\') => {
+                let _ = chars.next();
+            }
+            (LiteralFragmentQuoteState::Double, '"') => state = LiteralFragmentQuoteState::None,
+            (LiteralFragmentQuoteState::Double, _) => {}
+            (LiteralFragmentQuoteState::None, '\'') => state = LiteralFragmentQuoteState::Single,
+            (LiteralFragmentQuoteState::None, '"') => state = LiteralFragmentQuoteState::Double,
+            (LiteralFragmentQuoteState::None, _) => {}
+        }
+    }
+    state
 }
 
 /// GNU parse.y marks a `name=(...)` / `name[sub]=(...)` operand to a
