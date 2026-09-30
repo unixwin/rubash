@@ -369,6 +369,14 @@ impl ConditionalArithParser<'_> {
         if value.is_empty() {
             return Some(0);
         }
+        // GNU expr.c:1557 strlong (contract at expr.c:1539: "0nnn ->
+        // base 8"): a variable value with a leading zero and only octal
+        // digits re-parses octal — `x=010; $((x))` is 8 (rubash#341).
+        // `0x` hex and `base#n` forms keep flowing to the nested
+        // expression parser below.
+        if let Some(number) = strlong_leading_zero_octal(value) {
+            return Some(bash_arith(number));
+        }
         if let Ok(number) = value.parse::<i128>() {
             return Some(bash_arith(number));
         }
@@ -467,7 +475,6 @@ impl ConditionalArithParser<'_> {
             "+=" => bash_arith(current + rhs),
             "-=" => bash_arith(current - rhs),
             "*=" => bash_arith(current * rhs),
-            "**=" => checked_arithmetic_pow(current, rhs)?,
             "<<=" => bash_arith((current as i64).wrapping_shl(u32::try_from(rhs).ok()?) as i128),
             ">>=" => bash_arith((current as i64).wrapping_shr(u32::try_from(rhs).ok()?) as i128),
             "&=" => bash_arith(current & rhs),
@@ -712,4 +719,23 @@ impl ConditionalArithParser<'_> {
         }
         mark_env_name(self.env_vars, ASSOC_VARS, name);
     }
+}
+
+/// GNU expr.c:1539/1557 strlong's `0nnn -> base 8` arm for variable
+/// VALUES: a leading zero followed only by octal digits (with an optional
+/// sign) is octal. Returns None for `0`, `0x...`, non-octal tails like
+/// `09`, and non-numeric text so those keep their existing paths.
+fn strlong_leading_zero_octal(value: &str) -> Option<i128> {
+    let (sign, digits) = match value.as_bytes().first() {
+        Some(b'-') => (-1i128, &value[1..]),
+        Some(b'+') => (1i128, &value[1..]),
+        _ => (1i128, value),
+    };
+    let rest = digits.strip_prefix('0')?;
+    if rest.is_empty() || !rest.bytes().all(|byte| (b'0'..=b'7').contains(&byte)) {
+        return None;
+    }
+    i128::from_str_radix(rest, 8)
+        .ok()
+        .map(|number| sign * number)
 }

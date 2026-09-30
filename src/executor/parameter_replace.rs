@@ -463,6 +463,19 @@ pub(in crate::executor) enum ParameterTransform {
 /// are excluded because GNU parses `#` first, so a later `@` is operand
 /// text, not a transform operator.
 pub(in crate::executor) fn invalid_at_transform_base(inner: &str) -> Option<&str> {
+    // GNU subst.c:9978-10007 parameter_brace_expand: `${!PREFIX@}` /
+    // `${!PREFIX*}` is the variable-name LIST form, decided before the
+    // parameter_brace_transform validation — a bang-led head whose only
+    // tail is the `@`/`*` list marker is never a transform introducer
+    // (rubash#338: `${!v@}` was misread as `${!v` + empty `@` transform
+    // and rejected as bad substitution through the set-variable gate).
+    if let Some(head) = inner.strip_suffix(['@', '*']) {
+        if let Some(name) = head.strip_prefix('!') {
+            if !name.is_empty() && is_shell_name(name) {
+                return None;
+            }
+        }
+    }
     let (head, tail) = inner.rsplit_once('@')?;
     if head.starts_with('#') {
         return None;

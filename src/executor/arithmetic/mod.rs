@@ -1432,7 +1432,7 @@ fn arithmetic_identifier_is_assignment_lhs(
 fn rest_assignment_operator_len(chars: &std::iter::Peekable<std::str::Chars>) -> usize {
     let rest: String = chars.clone().collect();
     for op in [
-        "<<=", ">>=", "**=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=",
+        "<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=",
     ] {
         if rest.starts_with(op) {
             return op.len();
@@ -2409,7 +2409,7 @@ fn skip_arith_ws(input: &[u8], pos: &mut usize) {
 
 fn assignment_operator_at(input: &[u8], pos: usize) -> Option<&'static str> {
     for op in [
-        "<<=", ">>=", "**=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=",
+        "<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=",
     ] {
         if op == "="
             && (input.get(pos + 1) == Some(&b'=')

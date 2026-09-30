@@ -308,6 +308,37 @@ impl Executor {
             return String::new();
         }
 
+        // GNU subst.c:9978-10007 parameter_brace_expand: `${!PREFIX@}` /
+        // `${!PREFIX*}` with a valid-name prefix lists every variable name
+        // beginning with PREFIX (all_variables_matching_prefix, strcmp
+        // order) — `@` joins with spaces (one field per name after field
+        // splitting, "$@" semantics), `*` joins with IFS[0] ("$*"
+        // semantics). Detected before valid_brace_expansion_word so the
+        // trailing `@`/`*` is the list marker, never an operator tail
+        // (rubash#338: `${!v@}` listed as bad substitution).
+        if let Some(rest) = name.strip_prefix('!') {
+            if let Some(prefix) = rest.strip_suffix(['@', '*']) {
+                if !prefix.is_empty() && is_shell_name(prefix) {
+                    let mut names: Vec<String> = self
+                        .shell_state
+                        .env_vars
+                        .keys()
+                        .filter(|candidate| {
+                            is_shell_name(candidate) && candidate.starts_with(prefix)
+                        })
+                        .cloned()
+                        .collect();
+                    names.sort_unstable();
+                    let separator = if rest.ends_with('*') {
+                        self.ifs_first_char_separator()
+                    } else {
+                        " ".to_string()
+                    };
+                    return names.join(&separator);
+                }
+            }
+        }
+
         if let Some(value) = self.expand_braced_special_or_indirect_parameter(name, true) {
             return value;
         }

@@ -119,15 +119,25 @@ impl Executor {
             return false;
         }
 
-        cmd.word_kinds
+        cmd.word_kinds.get(index).is_some_and(|kind| {
+            // A literal token can never expand to the empty string —
+            // the only plain-word route to a null field is a brace
+            // alternative with an empty member (`{a,}`), whose result
+            // re-expands through the recursive expand_command_word
+            // call with raw=None. GNU discards that unquoted null the
+            // same way it discards an unset variable's (rubash#337:
+            // `set -- {a,}` yields argc=1; braces.c brace_expand emits
+            // the empty word, expand_word_list_internal removes it).
+            matches!(
+                kind,
+                TokenKind::Variable | TokenKind::Word | TokenKind::BraceExpand
+            )
+        }) || cmd
+            .word_metadata
             .get(index)
-            .is_some_and(|kind| *kind == TokenKind::Variable)
-            || cmd
-                .word_metadata
-                .get(index)
-                .map(|metadata| metadata.raw.as_str())
-                .or_else(|| cmd.words.get(index).map(String::as_str))
-                .is_some_and(word_has_unquoted_command_substitution)
+            .map(|metadata| metadata.raw.as_str())
+            .or_else(|| cmd.words.get(index).map(String::as_str))
+            .is_some_and(word_has_unquoted_command_substitution)
     }
 
     pub(in crate::executor) fn splits_unquoted_expanded_word(
