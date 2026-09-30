@@ -109,4 +109,23 @@ impl Token {
             heredoc_end_line: None,
         }
     }
+
+    /// quoterm22 (perf21 followup): the finish_word_token call site already
+    /// owns the dequoted value String; moving it in replaces one of the three
+    /// per-word String allocations (`value.to_string()` copy) with a move.
+    /// Semantically identical to `new_with_raw`.
+    pub fn new_with_raw_owned(kind: TokenKind, value: String, raw: &str, position: usize) -> Self {
+        Self {
+            kind,
+            value,
+            raw: raw.to_string(),
+            position,
+            column: position,
+            line_break: false,
+            leading_ws: String::new(),
+            extglob_split: false,
+            extglob_gate: true,
+            heredoc_end_line: None,
+        }
+    }
 }

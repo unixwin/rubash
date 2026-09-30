@@ -2999,3 +2999,131 @@ that arbitrary tails mutate), plus parse 144ms (parse20 bucket) and
    accumulates `word`/`case_depth` on every non-ws char).
 4. **group Vec<(String,bool)> + exec_parts clones ~5ms**: borrow-thread
    refactor of run_history_group's data plane.
+
+## quoterm22 round (2026-09-28, wt22/quoterm22 on a522eb39): word_finish quote-removal deferral evaluation + walk substrate
+
+The "defer word_finish's eager quote removal" lane. The brief's two paths
+were evaluated FIRST with fresh instrumentation; the measurement rejected
+both as win-generators, and the round landed the low-risk substrate changes
+that capture the actually-available win. All numbers RELEASE build,
+interleaved A/B against a pristine a522eb39 base binary (env-gated counters
++ Instant timers, fully removed before handoff; instrumentation overhead
+measured at ~2ms/bucket and stated separately).
+
+### Fresh attribution (instrumented, configure -n, 40,163 words / 73,435 scan_token calls)
+
+| Piece | instrumented ms | note |
+| --- | ---: | --- |
+| scan_token total | 40.6 | whole tokenize scan loop |
+| word_finish value walk | 11.3 | fast path 28,911 words (72%, no `' " \ $ ` [ ]` byte) + slow walk 11,252 words / 282,396 chars |
+| marker/kind arms | 5.8 | incl. ~1.5ms instrumentation overhead |
+| Token::new_with_raw | 4.8 | 2 String copies per word (value copy + raw copy) |
+| value == raw rate | 30,632/40,163 = 76.3% | dequote is identity for 3/4 of words |
+
+word_finish total ~21.7ms instrumented (~17ms real) — NOT the ~50ms the
+brief assumed; tokenize's other ~19ms (dispatch+ws, record_token, operator
+Token::new) was feeder21's own leftover list, not word_finish.
+
+### Path evaluation (the brief's ask #1)
+
+- **(a) Token value 惰性化 (Cow/LazyCell): REJECTED.** 680 `.value` field
+  reads across src (430 in parser/), Token derives Clone (LazyCell forces
+  materialization on every clone), 1 write site, `pub value: String` is the
+  parser/executor API surface. In the carrier family this is exactly the
+  high-risk rewrite class; the win it could buy (skipping the value string
+  when value==raw) is bounded by ~76% of words x one small-String alloc.
+- **(b) defer to first consumer (word_value_from_raw pattern): REJECTED as
+  a win.** Measured fact: on configure -n the FIRST consumer of essentially
+  every word token's value is the parser itself (keyword compares + the
+  AST `words: Vec<String>` clone), one step after lex. GNU's deferral
+  target (expansion, subst.c:4807 dequote_string) is architecturally
+  unavailable: rubash's AST/expander contract REQUIRES the lex-time
+  carrier-laden value (DATA_DOLLAR/CTLESC family inserted during quote
+  removal are consumed by the expander). Deferring to the parser boundary
+  moves the walk, it does not remove it; net win = the double-copy only.
+  That is the token-architecture round (WordMetadata/carrier family), not
+  a zero-A/B-change lane.
+- **Chosen low-risk road:** keep the eager dequote where it is (it IS the
+  contract), but (1) stop paying a redundant copy, (2) make the walk
+  span-copying. Both are byte-identical by construction.
+
+### Landed changes (src/lexer/{quotes,word,token}.rs + scanner.rs; continuation.rs UNTOUCHED)
+
+1. **Token::new_with_raw_owned (token.rs, finish_word_token + the scanner
+   backtick site)**: the value String is MOVED into the token instead of
+   copied — kills one of the three per-word String allocations.
+   word_finish newtok bucket 4.8 -> 3.0ms instrumented.
+2. **Byte-cursor span-copy walk (quotes.rs)**: `remove_shell_quotes_inner`
+   (per-char `Peekable<Chars>` state machine) replaced by
+   `remove_shell_quotes_inner_cursor` — a byte cursor over `&str` with
+   bulk `push_str` spans between the ASCII trigger bytes, arm-for-arm
+   transcription (main walk, `$(`/`${`/backtick/ANSI-C/double-quote
+   subscanners as cursor twins; case-depth tracker logic unchanged, its
+   esac lookahead now passes the remaining slice instead of collecting a
+   fresh String). All trigger bytes are ASCII (UTF-8 continuation bytes
+   are never triggers), `pending_name` can only arm at `$` and continue
+   through [A-Za-z0-9_] — both facts recorded in the source header.
+   GNU anchor: parse.y:5305 read_token_word / parse.y:5694-5706
+   got_character carrier model unchanged; only the iteration substrate
+   changed. The iterator-based subscanners remain verbatim for the rare
+   remove_shell_quotes_outside_backticks path.
+   One transcription bug was caught by the differential gate before any
+   suite run: sub-cursors returning RELATIVE consumed counts were assigned
+   to the caller's absolute index (`idx = f(&rest[idx..])` instead of
+   `idx += ...`) — infinite re-push loop on `$(echo "\\")`; fixed to `+=`.
+3. Walk bucket 11.3 -> 8.8ms instrumented (fast-path words unchanged).
+
+### Numbers (interleaved A/B medians, clean builds, 16-20 runs)
+
+| Probe | base (a522eb39) | lane | delta |
+| --- | ---: | ---: | ---: |
+| configure -n | 391-405 (median ~396) | 382.5 (stable across runs) | ~ -13 ms |
+| nvm -n | 214-218 | 213.4-214.7 | ~ -2..-6 ms |
+
+rc=0 both sides; stdout/stderr byte-identical base-vs-lane on both corpora.
+**The <330ms goal is NOT reachable from the word_finish family**: fresh
+instrumentation puts word_finish at ~17ms real of the ~390ms wall; the
+remaining configure -n budget is parse ~144ms (parse20 bucket), startup
+~90ms (startup21 bucket), tokenize non-word_finish ~19ms + feeder/battery
+scans ~44ms (feeder21 leftovers, several needing captain-exclusive
+continuation.rs). The brief's 50ms attribution for word_finish is disproven
+by measurement; this lane took what the subsystem had.
+
+### Zero-semantic-change evidence
+
+- 546 lib tests + differential run (lane-local, removed before commit):
+  cursor walk vs the original character-machine walk over every token AND
+  whole line of all 737 files under third_party/bash/tests, nvm.sh, and
+  bash's own configure — 354,153 tokens x posix on/off x assignment on/off,
+  ZERO mismatches.
+- **Full 83-suite true-baseline A/B** (the hard gate):
+  `RUB_OVERRIDE=<base>` and `RUB_OVERRIDE=<lane>` full runs
+  (`target/issue-suites/results/q22-tb-base` vs `q22-tb-lane`): rb.out,
+  rb.err, and rb.rc byte-identical on ALL 83 suites; GNU-side ledgers
+  identical (`target/quoterm22/tb-{base,lane}-ledger.log`).
+- Post-cleanup spot re-verification (comments/test-module removal/fmt
+  rebuild): configure -n and nvm -n byte-identical vs base; 6 quote-family
+  suites (quote comsub comsub2 comsub-posix nquote new-exp) re-run
+  byte-identical vs the gated base artifacts.
+- `RUSTFLAGS="-D warnings" cargo check --all-targets` + `cargo fmt --check`
+  clean on the final tree; src/lexer/continuation.rs untouched
+  (`git diff a522eb39 -- src/lexer/continuation.rs` = 0).
+
+### Leftovers (measured, with owners)
+
+1. **Marker/kind arms ~5ms real**: quoted_literal_tilde + the Word-arm
+   `is_assignment(&value) && assignment_value_is_quoted(raw)` pair. A
+   conjunct reorder was tried and REVERTED (measured slower: '='-bearing
+   non-assignment arguments then pay a full RHS quote walk instead of the
+   2-char name-check exit). Needs a fused single-pass predicate, not a
+   reorder.
+2. **copy_braced_parameter_inner_cursor still allocates `wrapped` per
+   `${`** (1,320 occurrences on configure): scan_braced_parameter's
+   "&str starting at `$`" contract forces the copy; a view-taking scan
+   is a dolbrace.rs round.
+3. **Operator Token::new double-copies static text** (`"|"`, `"fi"` ... x2
+   Strings each, ~31k non-word tokens): needs an inline-small-string Token
+   representation — token-model round, paired with the value/raw unification.
+4. **The remaining <330ms distance is not a word_finish problem** — see the
+   budget note above; owners: parse20 (144ms), startup21 (~90ms),
+   feeder21 leftovers (~44ms + 19ms tokenize non-word_finish).

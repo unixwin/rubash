@@ -849,9 +849,9 @@ impl<'a> Lexer<'a> {
                 }
                 let raw = self.slice(start);
                 let value = normalize_backtick_command_substitution(raw);
-                Some(Token::new_with_raw(
+                Some(Token::new_with_raw_owned(
                     TokenKind::CommandSubst,
-                    &value,
+                    value,
                     raw,
                     start,
                 ))

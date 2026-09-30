@@ -331,7 +331,9 @@ impl<'a> Lexer<'a> {
         } else {
             raw
         };
-        let mut token = Token::new_with_raw(kind, &value, raw_ref, start);
+        // quoterm22: move the owned value in (one of the three per-word
+        // String allocations was this exact copy).
+        let mut token = Token::new_with_raw_owned(kind, value, raw_ref, start);
         token.extglob_split = extglob_split;
         token
     }

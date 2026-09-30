@@ -144,7 +144,7 @@ fn skip_braced_unit_quotes(chars: &[char], open: usize, closer: char) -> Option<
 /// quotes are literal), otherwise the de-quoted value keeps quote structure
 /// the expansion stage cannot interpret (posixexp2 case 28).
 pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
-    remove_shell_quotes_inner(raw, posix, false)
+    remove_shell_quotes_inner_cursor(raw, posix)
 }
 
 /// Assignment-word quote removal: identical to
@@ -163,231 +163,7 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
 /// assignment expander (expand_backtick_substitution_typed /
 /// expand_mixed_command_substitution_assignment) would execute.
 pub(super) fn remove_shell_quotes_assignment(raw: &str, posix: bool) -> String {
-    remove_shell_quotes_inner(raw, posix, true)
-}
-
-fn remove_shell_quotes_inner(raw: &str, posix: bool, assignment: bool) -> String {
-    // perf21 fast path: every arm that can emit anything but the input char
-    // itself is keyed on one of these seven bytes (`'`, `"`, `\`, `$`, `` ` ``,
-    // `[`, `]`), and `pending_name` — the only other state that can alter an
-    // emitted char (PARAM_NAME_END_MARKER) — is armed solely by a `$`. A word
-    // free of all seven de-quotes to itself verbatim, so a single byte scan +
-    // memcpy replaces the per-char state machine walk (GNU parse.y:3557
-    // read_token streams the input once; this walk is the token's second pass
-    // and configure-class scripts are dominated by plain unquoted words).
-    if !raw
-        .as_bytes()
-        .iter()
-        .any(|&b| matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'[' | b']'))
-    {
-        return raw.to_string();
-    }
-    let mut out = String::new();
-    let mut chars = raw.chars().peekable();
-    // Array-subscript regions keep `\"` as a bare data quote: the subscript
-    // parser owns quote semantics there and the word-value contract expects
-    // the de-escaped form. Outside subscripts `\"` must survive expansion as
-    // data, so it travels as the walker's data-double-quote marker.
-    let mut subscript_depth = 0usize;
-    // True while the emitted tail is an unbraced `$name` parameter; a quote
-    // boundary at that point must carry PARAM_NAME_END_MARKER (see above).
-    let mut pending_name = false;
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '[' => {
-                subscript_depth += 1;
-                pending_name = false;
-                out.push(ch);
-            }
-            ']' if subscript_depth > 0 => {
-                subscript_depth -= 1;
-                pending_name = false;
-                out.push(ch);
-            }
-            '$' if chars.peek() == Some(&'(') => {
-                pending_name = false;
-                copy_dollar_paren_substitution(&mut out, &mut chars);
-            }
-            '$' if chars.peek() == Some(&'\'') => {
-                pending_name = false;
-                chars.next();
-                out.push_str(&decode_ansi_c_span(&mut chars));
-            }
-            '$' if chars.peek() == Some(&'"') => {
-                pending_name = false;
-                chars.next();
-                remove_double_quoted_into(&mut out, &mut chars, false, posix);
-            }
-            '$' if chars.peek() == Some(&'{') => {
-                pending_name = false;
-                copy_braced_parameter_unquoted(&mut out, &mut chars);
-            }
-            '\'' => {
-                if pending_name {
-                    out.push(PARAM_NAME_END_MARKER);
-                }
-                pending_name = false;
-                // GNU subst.c:11882-11886 expand_word_internal case '\'':
-                // string_extract_single_quoted hands the whole span to
-                // add_quoted_string as quoted data — position-independent.
-                // A `"` inside single quotes therefore ALWAYS carries the
-                // data-double-quote marker (\x18), so every expansion
-                // walker treats it as data instead of a quote delimiter
-                // (nquote.tests line 27: `$"hello"', $"world"'` →
-                // `hello, $"world"`). The decision is word-wide, not
-                // positional: the bashdb getopts_long idiom
-                // `'set -- "${'"$1"'}" "$@"'` has its single-quoted
-                // segment FIRST, and a position-gated tag dropped its `"`
-                // (the eval then died on an unterminated quote).
-                //
-                // A fully single-quoted word is NOT exempt (rubash#203
-                // lane, aliasconv): its `"` is data in GNU too
-                // (subst.c:11882 case '\'' copies the span verbatim), and
-                // the previous raw-`"` exemption depended on every
-                // consumer being a verbatim fast path — expand_word
-                // (pipeline sed argv, redirection targets) re-walks quotes
-                // and stripped it: `sed 's/ab/"$@"/'` lost the replacement
-                // quotes. All downstream walkers already decode \x18 for
-                // mixed words (`echo 'a"b'c` prints `a"bc`), so the same
-                // decode covers the fully-quoted case. Assignments
-                // additionally protect `` ` `` as DATA_BACKTICK (see
-                // remove_shell_quotes_assignment).
-                let protect_dquote = true;
-                for quoted in chars.by_ref() {
-                    if quoted == '\'' {
-                        break;
-                    }
-                    if quoted == '$' {
-                        // Preserve the existing protected-dollar contract used by
-                        // downstream expansion, but do not protect literal globs.
-                        out.push(DATA_DOLLAR);
-                    } else if quoted == '`' {
-                        // GNU parse.y:5416-5432 read_token_word (shellquote
-                        // branch) + subst.c:11882-11886 expand_word_internal
-                        // (case '\''): single-quoted text is literal data at
-                        // expansion, so a backtick inside '...' never opens a
-                        // command substitution there. Rubash erases the quote
-                        // at tokenize time, so the literal backtick must
-                        // travel as the DATA_BACKTICK carrier — a raw ` left
-                        // in the token value is re-scanned by the embedded
-                        // expansion walker (embedded_parameters.rs backtick
-                        // arm) and executed as a nested substitution
-                        // (rubash#177: `` x="`echo hi | sed 's/\`x\`/y/'`" ``
-                        // ran the phantom command `x`). Output paths decode
-                        // the carrier (echo.rs, execution_misc.rs,
-                        // command_prepare.rs) the same way the assignment
-                        // pipeline already does.
-                        out.push(crate::executor::markers::DATA_BACKTICK);
-                    } else if protect_dquote && quoted == '"' {
-                        out.push(crate::executor::markers::DATA_DQUOTE);
-                    } else {
-                        out.push(quoted);
-                    }
-                }
-            }
-            '"' => {
-                if pending_name {
-                    out.push(PARAM_NAME_END_MARKER);
-                }
-                pending_name = false;
-                // GNU subst.c string_extract_double_quoted: a backtick inside
-                // double quotes enters backquote mode and the body is copied
-                // verbatim (subst.c:925-932) - the body's quotes are delimiters
-                // of the inner command, never literal data of this word
-                // (quote.tests:47 `echo "`echo 'foo bar'`"` must not leak the
-                // single quotes). Nested $()/\\${} spans inside the body stay
-                // owned by copy_backtick_body_preserving_syntax.
-                remove_double_quoted_into(&mut out, &mut chars, true, posix);
-            }
-            '`' => {
-                pending_name = false;
-                out.push(ch);
-                copy_backtick_body_preserving_syntax(&mut out, &mut chars);
-            }
-            '\\' => {
-                pending_name = false;
-                let Some(escaped) = chars.next() else {
-                    out.push(ch);
-                    continue;
-                };
-                if escaped == '$' {
-                    out.push(DATA_DOLLAR);
-                } else if escaped == '`' {
-                    out.push(crate::executor::markers::DATA_BACKTICK);
-                } else if escaped == '\'' {
-                    out.push(crate::executor::markers::DATA_SQUOTE);
-                } else if escaped == '"' {
-                    if subscript_depth > 0 {
-                        // Inside a subscript the escaped quote is still CTLESC
-                        // data: `a[\" \"]=15` reaches array_expand_index as the
-                        // literal text `" "` and fails "operand expected"
-                        // (GNU 5.3 verified). Emit the data-double-quote
-                        // marker — a bare `"` is re-read as a quote delimiter
-                        // by the expansion walker and silently stripped.
-                        out.push(crate::executor::markers::DATA_DQUOTE);
-                    } else {
-                        // `\"` outside quotes is a literal double quote that
-                        // must survive as data: downstream expansion scanners
-                        // toggle quote state on bare quotes, which would
-                        // swallow it (posixexp2 case 8, `echo \"`). \x18 is
-                        // the walker's data-double-quote marker, restored on
-                        // output.
-                        out.push(crate::executor::markers::DATA_DQUOTE);
-                    }
-                } else if escaped == '\\' {
-                    // Keep a literal backslash distinct from the protected
-                    // double-quote marker used by expansion internals.
-                    out.push(crate::executor::markers::DATA_BACKSLASH);
-                } else if matches!(
-                    escaped,
-                    '*' | '?'
-                        | '['
-                        | ']'
-                        | '@'
-                        | '+'
-                        | '!'
-                        | '('
-                        | ')'
-                        | '|'
-                        | '/'
-                        | '-'
-                        | '^'
-                        | '.'
-                        | '='
-                        | ':'
-                ) {
-                    // GNU parse.y:5694-5706 got_escaped_character marks EVERY
-                    // backslash-quoted char with CTLESC; the glob layer relies
-                    // on it to tell quoted pattern-significant chars from
-                    // syntax: `\/` is a legal bracket member while `/` voids
-                    // the expression (pathexp.c:88-100, sm_loop.c:527-534),
-                    // `[\^a]` is a set while `[^a]` is a negation, `[a\-z]`
-                    // is a member list while `[a-z]` is a range, and the
-                    // `[. .]`/`[= =]`/`[: :]` introducers must not fire on a
-                    // quoted `.`/`=`/`:`, and `\|`/`\(`/`\)` are data, not
-                    // extglob separators/group edges. Escaped chars with no
-                    // pattern role stay plain data.
-                    out.push(crate::executor::markers::CTLESC);
-                    out.push(escaped);
-                } else {
-                    out.push(escaped);
-                }
-            }
-            _ => {
-                if ch == '$' {
-                    pending_name = chars
-                        .peek()
-                        .is_some_and(|next| is_lexer_shell_name_start(*next));
-                } else if !(pending_name && is_lexer_shell_name_char(ch)) {
-                    pending_name = false;
-                }
-                out.push(ch);
-            }
-        }
-    }
-
-    out
+    remove_shell_quotes_inner_cursor(raw, posix)
 }
 
 fn is_lexer_shell_name_start(ch: char) -> bool {
@@ -396,6 +172,811 @@ fn is_lexer_shell_name_start(ch: char) -> bool {
 
 fn is_lexer_shell_name_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+// ---------------------------------------------------------------------------
+// quoterm22: byte-cursor span-copy substrate for the hot walk.
+//
+// GNU anchor: parse.y:5305 read_token_word assembles the token text once,
+// character by character (parse.y:3557 read_token's streaming model); GNU's
+// per-character lex walk inserts CTLESC carriers but never memcpy-runs — this
+// port's walk BOTH strips quotes and inserts the rubash carrier bytes
+// (DATA_DOLLAR/DATA_BACKTICK/DATA_SQUOTE/DATA_BACKSLASH/CTLESC), so the
+// per-character `Peekable<Chars>` state machine was the tokenize pass's
+// dominant cost (feeder21: word_finish 20-25ms of a 45-50ms tokenize on
+// configure, 40,163 words).
+//
+// The cursor family below is a SUBSTRATE-ONLY conversion of the original
+// per-character `Peekable<Chars>` state machines (the main walk it replaced
+// was removed after the differential run; the iterator-based subscanners it
+// still shares — remove_double_quoted_into and friends, used by the rare
+// outside-backticks path — remain verbatim above): every arm, guard, carrier
+// choice, and state transition was transcribed arm-for-arm; only the
+// iteration mechanics change — a byte
+// cursor over `&str` with bulk `push_str` spans between the ASCII trigger
+// bytes. Equivalence relies on three facts, each checked against the
+// original code:
+//   1. every trigger byte the state machines match on is ASCII, so a UTF-8
+//      continuation byte (>= 0x80) is never a trigger and can be span-copied
+//      verbatim;
+//   2. `pending_name` (the only cross-character state in the `_` arms) can
+//      only be ARMED at a `$` — itself a trigger byte — and only CONTINUED by
+//      [A-Za-z0-9_] (all non-trigger ASCII), so a trigger-free span either
+//      extends the pending name to its end or breaks it at its first
+//      non-name byte;
+//   3. subscanners that consume verbatim report their consumption by
+//      returning the remaining slice; the dequoting subscanners (ANSI-C
+//      span, double-quote machinery) are cursor transcriptions of their
+//      originals.
+// A lane-local differential run compared the cursor walk against the
+// original character-machine walk over every token of the vendored GNU test
+// corpus (737 files, 354,153 tokens x posix on/off), nvm.sh, and bash's own
+// configure — zero mismatches; the full 83-suite true-baseline A/B (base
+// binary vs lane binary, rb.out/rb.err/rb.rc all byte-identical) is the
+// durable proof recorded in docs/PERF-BASELINE.md (quoterm22 round).
+// ---------------------------------------------------------------------------
+
+/// Bytes that can make any arm of the cursor walk emit something other than
+/// the input verbatim (or change state): the seven de-quote bytes minus `]`,
+/// which is only stateful inside an array subscript.
+#[inline]
+fn q22_walk_trigger(b: u8) -> bool {
+    matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'[')
+}
+
+#[inline]
+fn q22_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+#[inline]
+fn q22_name_start_byte(b: u8) -> bool {
+    b == b'_' || b.is_ascii_alphabetic()
+}
+
+/// The raw->value dequote walk (GNU read_token_word quote removal,
+/// parse.y:5305+): `rest` walks the raw word byte-by-byte and runs of
+/// non-trigger bytes are pushed as one `&str` span.
+fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
+    if !raw
+        .as_bytes()
+        .iter()
+        .any(|&b| matches!(b, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'[' | b']'))
+    {
+        return raw.to_string();
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    // Array-subscript regions keep `\"` as a bare data quote (see the
+    // original walk's comment); `]` only matters while a subscript is open.
+    let mut subscript_depth = 0usize;
+    // True while the emitted tail is an unbraced `$name` parameter.
+    let mut pending_name = false;
+
+    while !rest.is_empty() {
+        let first = rest.as_bytes()[0];
+        match first {
+            b'[' => {
+                subscript_depth += 1;
+                pending_name = false;
+                out.push('[');
+                rest = &rest[1..];
+            }
+            b']' if subscript_depth > 0 => {
+                subscript_depth -= 1;
+                pending_name = false;
+                out.push(']');
+                rest = &rest[1..];
+            }
+            b'$' => {
+                pending_name = false;
+                match rest.as_bytes().get(1) {
+                    Some(&b'(') => {
+                        rest = copy_dollar_paren_substitution_cursor(&mut out, rest);
+                    }
+                    Some(&b'\'') => {
+                        rest = decode_ansi_c_span_cursor(&mut out, &rest[2..]);
+                    }
+                    Some(&b'"') => {
+                        rest = &rest[2..];
+                        rest = remove_double_quoted_into_cursor(&mut out, rest, false, posix);
+                    }
+                    Some(&b'{') => {
+                        rest = copy_braced_parameter_unquoted_cursor(&mut out, rest);
+                    }
+                    next => {
+                        // `$` with none of the four special followers: the
+                        // original falls to the `_` arm, which arms
+                        // pending_name iff the next char is a name start.
+                        pending_name = next.is_some_and(|&b| q22_name_start_byte(b));
+                        out.push('$');
+                        rest = &rest[1..];
+                    }
+                }
+            }
+            b'\'' => {
+                if pending_name {
+                    out.push(PARAM_NAME_END_MARKER);
+                }
+                pending_name = false;
+                rest = &rest[1..];
+                // Single-quoted span: every byte is literal data; the three
+                // expansion-trigger bytes travel as carriers (original
+                // `'` arm; GNU subst.c:11882-11886 never consults the
+                // comsub scanner inside `'...'`).
+                loop {
+                    let bytes = rest.as_bytes();
+                    let mut idx = 0usize;
+                    while idx < bytes.len() && !matches!(bytes[idx], b'\'' | b'$' | b'`' | b'"') {
+                        idx += 1;
+                    }
+                    out.push_str(&rest[..idx]);
+                    rest = &rest[idx..];
+                    match rest.as_bytes().first() {
+                        Some(&b'\'') => {
+                            rest = &rest[1..];
+                            break;
+                        }
+                        Some(&b'$') => {
+                            out.push(DATA_DOLLAR);
+                            rest = &rest[1..];
+                        }
+                        Some(&b'`') => {
+                            out.push(crate::executor::markers::DATA_BACKTICK);
+                            rest = &rest[1..];
+                        }
+                        Some(&b'"') => {
+                            out.push(crate::executor::markers::DATA_DQUOTE);
+                            rest = &rest[1..];
+                        }
+                        None => break, // unterminated span: consumed to end
+                        _ => unreachable!("span loop stops only at the four bytes"),
+                    }
+                }
+            }
+            b'"' => {
+                if pending_name {
+                    out.push(PARAM_NAME_END_MARKER);
+                }
+                pending_name = false;
+                rest = &rest[1..];
+                rest = remove_double_quoted_into_cursor(&mut out, rest, true, posix);
+            }
+            b'`' => {
+                pending_name = false;
+                out.push('`');
+                rest = copy_backtick_body_cursor(&mut out, &rest[1..]);
+            }
+            b'\\' => {
+                pending_name = false;
+                let Some(&escaped) = rest.as_bytes().get(1) else {
+                    // Trailing backslash: the original pushes it verbatim.
+                    out.push('\\');
+                    rest = &rest[1..];
+                    continue;
+                };
+                match escaped {
+                    b'$' => {
+                        out.push(DATA_DOLLAR);
+                        rest = &rest[2..];
+                    }
+                    b'`' => {
+                        out.push(crate::executor::markers::DATA_BACKTICK);
+                        rest = &rest[2..];
+                    }
+                    b'\'' => {
+                        out.push(crate::executor::markers::DATA_SQUOTE);
+                        rest = &rest[2..];
+                    }
+                    b'"' => {
+                        // Both subscript branches of the original emit the
+                        // same DATA_DQUOTE carrier for `\"`.
+                        out.push(crate::executor::markers::DATA_DQUOTE);
+                        rest = &rest[2..];
+                    }
+                    b'\\' => {
+                        out.push(crate::executor::markers::DATA_BACKSLASH);
+                        rest = &rest[2..];
+                    }
+                    b'*' | b'?' | b'[' | b']' | b'@' | b'+' | b'!' | b'(' | b')' | b'|' | b'/'
+                    | b'-' | b'^' | b'.' | b'=' | b':' => {
+                        // GNU parse.y:5694-5706 got_escaped_character marks
+                        // pattern-significant escaped chars with CTLESC.
+                        out.push(crate::executor::markers::CTLESC);
+                        out.push(escaped as char);
+                        rest = &rest[2..];
+                    }
+                    b if b < 0x80 => {
+                        out.push(b as char);
+                        rest = &rest[2..];
+                    }
+                    _ => {
+                        // Non-ASCII escaped char: push the whole char.
+                        let ch = rest[1..].chars().next().unwrap();
+                        out.push(ch);
+                        rest = &rest[1 + ch.len_utf8()..];
+                    }
+                }
+            }
+            _ => {
+                // Trigger-free span: bulk push. `]` at subscript depth 0 is
+                // data (the guarded arm above missed), so it participates in
+                // the span; every other span byte is a non-trigger.
+                let bytes = rest.as_bytes();
+                let mut idx = 0usize;
+                while idx < bytes.len() {
+                    let b = bytes[idx];
+                    if q22_walk_trigger(b) || (b == b']' && subscript_depth > 0) {
+                        break;
+                    }
+                    idx += 1;
+                }
+                if pending_name {
+                    // pending_name can only be continued by name bytes; the
+                    // first non-name byte of the span breaks it silently
+                    // (PARAM_NAME_END_MARKER is only emitted at quotes).
+                    let name_run = bytes[..idx]
+                        .iter()
+                        .position(|&b| !q22_name_byte(b))
+                        .unwrap_or(idx);
+                    if name_run < idx {
+                        pending_name = false;
+                    }
+                }
+                out.push_str(&rest[..idx]);
+                rest = &rest[idx..];
+            }
+        }
+    }
+
+    out
+}
+
+/// Cursor form of `copy_dollar_paren_substitution` (rest at the `$`).
+fn copy_dollar_paren_substitution_cursor<'a>(out: &mut String, rest: &'a str) -> &'a str {
+    out.push('$');
+    let rest = &rest[1..]; // past '$'
+    if !rest.starts_with('(') {
+        return rest; // unreachable from the dispatcher; keeps parity
+    }
+    out.push('(');
+    copy_dollar_paren_body_raw_cursor(out, &rest[1..])
+}
+
+/// Cursor form of `copy_dollar_paren_body_raw` (rest just past the `$(`).
+/// Every consumed byte is pushed verbatim; the case-depth tracker and the
+/// `rest` lookahead are transcribed unchanged (the lookahead now passes the
+/// remaining slice instead of collecting a fresh String).
+fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a str {
+    let mut depth = 1usize;
+    let mut case_depth = 0usize;
+    let mut word = String::new();
+    let mut word_boundary = true;
+    let mut current_word_boundary = true;
+    let mut case_in_stage = 0u8;
+    let mut idx = 0usize;
+    while idx < rest.len() {
+        let ch = rest[idx..].chars().next().unwrap();
+        out.push(ch);
+        idx += ch.len_utf8();
+        if ch == '\\' {
+            // A backslash-quoted character is word text, never a reserved
+            // word; push the same placeholder the original uses.
+            if let Some(escaped) = rest[idx..].chars().next() {
+                out.push(escaped);
+                idx += escaped.len_utf8();
+                word.push('\u{1}');
+            }
+            continue;
+        }
+        // `case WORD in' chain tracker lookahead (rubash#276/#284): computed
+        // only at the esac `)`/`|` decision, exactly like the original.
+        let tail: &str = if word == "esac" && matches!(ch, ')' | '|') {
+            &rest[idx..]
+        } else {
+            ""
+        };
+        super::skip::update_command_substitution_case_depth(
+            ch,
+            false,
+            false,
+            &mut word,
+            &mut case_depth,
+            &mut word_boundary,
+            &mut current_word_boundary,
+            tail,
+            &mut case_in_stage,
+        );
+        match ch {
+            '$' if rest.as_bytes().get(idx) == Some(&b'\'') => {
+                idx += 1;
+                out.push('\'');
+                idx += copy_ansi_c_single_quoted_raw_cursor(out, &rest[idx..]);
+                word.clear();
+                word_boundary = false;
+            }
+            '$' if rest.as_bytes().get(idx) == Some(&b'(') => {
+                idx += 1;
+                out.push('(');
+                depth += 1;
+            }
+            '\'' => {
+                idx += copy_single_quoted_raw_cursor(out, &rest[idx..]);
+                word.clear();
+                word_boundary = false;
+            }
+            '"' => {
+                idx += copy_double_quoted_raw_cursor(out, &rest[idx..]);
+                word.clear();
+                word_boundary = false;
+            }
+            '`' => {
+                let rem = copy_backtick_body_cursor(out, &rest[idx..]);
+                idx = rest.len() - rem.len();
+                word.clear();
+                word_boundary = false;
+            }
+            '(' if case_depth == 0 => depth += 1,
+            ')' if case_depth == 0 => {
+                // Plain subtraction like the original: an unbalanced `)`
+                // underflows/wraps identically (never observed on real
+                // scripts; the case_depth tracker owns pattern parens).
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[idx..];
+                }
+            }
+            _ => {}
+        }
+    }
+    &rest[idx..]
+}
+
+/// Cursor form of `copy_single_quoted_raw`: copy through the closing `'`.
+fn copy_single_quoted_raw_cursor(out: &mut String, rest: &str) -> usize {
+    let bytes = rest.as_bytes();
+    match bytes.iter().position(|&b| b == b'\'') {
+        Some(pos) => {
+            out.push_str(&rest[..=pos]);
+            pos + 1
+        }
+        None => {
+            out.push_str(rest);
+            rest.len()
+        }
+    }
+}
+
+/// Cursor form of `copy_ansi_c_single_quoted_raw`: `\\` pairs are copied
+/// through, an unescaped `'` closes.
+fn copy_ansi_c_single_quoted_raw_cursor(out: &mut String, rest: &str) -> usize {
+    let bytes = rest.as_bytes();
+    let mut idx = 0usize;
+    let mut escaped = false;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if escaped {
+            escaped = false;
+            idx += 1;
+            continue;
+        }
+        if b == b'\\' {
+            escaped = true;
+            idx += 1;
+            continue;
+        }
+        if b == b'\'' {
+            idx += 1;
+            break;
+        }
+        idx += 1;
+    }
+    out.push_str(&rest[..idx]);
+    idx
+}
+
+/// Cursor form of `copy_double_quoted_raw`: copy through the closing `"`,
+/// honoring `\\` pairs and nested `$(...)` bodies verbatim.
+fn copy_double_quoted_raw_cursor(out: &mut String, rest: &str) -> usize {
+    let mut idx = 0usize;
+    while idx < rest.len() {
+        let ch = rest[idx..].chars().next().unwrap();
+        out.push(ch);
+        idx += ch.len_utf8();
+        match ch {
+            '"' => return idx,
+            '\\' => {
+                if let Some(escaped) = rest[idx..].chars().next() {
+                    out.push(escaped);
+                    idx += escaped.len_utf8();
+                }
+            }
+            '$' if rest.as_bytes().get(idx) == Some(&b'(') => {
+                idx += 1;
+                out.push('(');
+                let consumed = copy_dollar_paren_body_raw_cursor(out, &rest[idx..]);
+                idx = rest.len() - consumed.len();
+            }
+            _ => {}
+        }
+    }
+    idx
+}
+
+/// Cursor form of `copy_backtick_body_preserving_syntax` (rest just past the
+/// opening backtick). Returns the remaining slice; the closing backtick is
+/// pushed. `\`+newline (and `\`+CRLF) inside the body is elided — the one
+/// place consumption is NOT verbatim, which is why this function returns the
+/// remainder instead of letting callers measure `out`.
+fn copy_backtick_body_cursor<'a>(out: &mut String, rest: &'a str) -> &'a str {
+    let bytes = rest.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'`' => {
+                out.push('`');
+                return &rest[idx + 1..];
+            }
+            b'\\' => match bytes.get(idx + 1) {
+                Some(&b'\n') => {
+                    idx += 2;
+                }
+                Some(&b'\r') if bytes.get(idx + 2) == Some(&b'\n') => {
+                    idx += 3;
+                }
+                _ => {
+                    // Backslash + following char (possibly multi-byte),
+                    // pushed verbatim like the original.
+                    let escaped = rest[idx + 1..].chars().next();
+                    match escaped {
+                        Some(ch) => {
+                            out.push('\\');
+                            out.push(ch);
+                            idx += 1 + ch.len_utf8();
+                        }
+                        None => {
+                            out.push('\\');
+                            idx += 1;
+                        }
+                    }
+                }
+            },
+            _ => {
+                let start = idx;
+                while idx < bytes.len() && bytes[idx] != b'`' && bytes[idx] != b'\\' {
+                    idx += 1;
+                }
+                out.push_str(&rest[start..idx]);
+            }
+        }
+    }
+    &rest[idx..]
+}
+
+/// Cursor form of `decode_ansi_c_span` (rest just past `$'`): collect the
+/// escape-honoring span, decode it, push the carrier-escaped decode, and
+/// return the remainder after the closing `'`.
+fn decode_ansi_c_span_cursor<'a>(out: &mut String, rest: &'a str) -> &'a str {
+    let bytes = rest.as_bytes();
+    let mut quoted = String::new();
+    let mut escaped = false;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if escaped {
+            escaped = false;
+            quoted.push('\\');
+            if b < 0x80 {
+                quoted.push(b as char);
+                idx += 1;
+            } else {
+                let ch = rest[idx..].chars().next().unwrap();
+                quoted.push(ch);
+                idx += ch.len_utf8();
+            }
+            continue;
+        }
+        if b == b'\\' {
+            escaped = true;
+            idx += 1;
+            continue;
+        }
+        if b == b'\'' {
+            idx += 1;
+            break;
+        }
+        if b < 0x80 {
+            quoted.push(b as char);
+            idx += 1;
+        } else {
+            let ch = rest[idx..].chars().next().unwrap();
+            quoted.push(ch);
+            idx += ch.len_utf8();
+        }
+    }
+    if escaped {
+        quoted.push('\\');
+    }
+    out.push_str(&escape_decoded_ansi_c_quotes(&decode_ansi_c_quoted(
+        &quoted,
+    )));
+    &rest[idx..]
+}
+
+/// Cursor form of `copy_braced_parameter_unquoted` (rest at the `$`).
+fn copy_braced_parameter_unquoted_cursor<'a>(out: &mut String, rest: &'a str) -> &'a str {
+    copy_braced_parameter_inner_cursor(out, rest, false, false)
+}
+
+/// Cursor form of `copy_braced_parameter_after_dollar` (rest at the `$`).
+fn copy_braced_parameter_after_dollar_cursor<'a>(
+    out: &mut String,
+    rest: &'a str,
+    posix: bool,
+) -> &'a str {
+    copy_braced_parameter_inner_cursor(out, rest, true, posix)
+}
+
+/// Cursor form of `copy_braced_parameter_inner` (rest at the `$`). The
+/// `${...}` unit is copied verbatim; only the consumption accounting changes
+/// (bytes consumed instead of chars counted).
+fn copy_braced_parameter_inner_cursor<'a>(
+    out: &mut String,
+    rest: &'a str,
+    outer_double_quote: bool,
+    posix: bool,
+) -> &'a str {
+    out.push('$');
+    let rest = &rest[1..]; // past '$'
+    if !rest.starts_with('{') {
+        return rest; // unreachable from the dispatchers; keeps parity
+    }
+    let remaining = &rest[1..]; // past '{'
+    if braced_body_contains_ansi_c(remaining) {
+        return copy_braced_parameter_with_ansi_c_cursor(out, rest);
+    }
+    let mut wrapped = String::with_capacity(rest.len() + 1);
+    wrapped.push('$');
+    wrapped.push_str(rest);
+    let context = BraceContext {
+        outer_double_quote,
+        posix,
+        replacement_context: false,
+        initial_state: DolbraceState::Param,
+    };
+    if let Some(scan) = scan_braced_parameter(&wrapped, context) {
+        // Original counts consumed CHARS of `wrapped[..scan.end]` minus the
+        // synthetic '$' and re-pushes them; the same bytes are `rest[..take]`.
+        let take = scan.end.saturating_sub(1).min(rest.len());
+        out.push_str(&rest[..take]);
+        return &rest[take..];
+    }
+    // Fallback: byte walk with nested `${` tracking, pushing verbatim.
+    out.push('{');
+    let bytes = rest.as_bytes();
+    let mut idx = 1usize; // past '{'
+    let mut depth = 1usize;
+    while idx < bytes.len() {
+        let ch = rest[idx..].chars().next().unwrap();
+        out.push(ch);
+        idx += ch.len_utf8();
+        if ch == '$' && bytes.get(idx) == Some(&b'{') {
+            out.push('{');
+            idx += 1;
+            depth += 1;
+            continue;
+        }
+        if ch == '}' {
+            // Plain subtraction like the original fallback loop.
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+    }
+    &rest[idx..]
+}
+
+/// Cursor form of `copy_braced_parameter_with_ansi_c` (rest at the `{`).
+fn copy_braced_parameter_with_ansi_c_cursor<'a>(out: &mut String, rest: &'a str) -> &'a str {
+    out.push('{');
+    let bytes = rest.as_bytes();
+    let mut idx = 1usize; // past '{'
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    while idx < bytes.len() {
+        let ch = rest[idx..].chars().next().unwrap();
+        out.push(ch);
+        idx += ch.len_utf8();
+        // $'...' ANSI-C quoting: consume to the closing ' (honoring \').
+        if ch == '$' && bytes.get(idx) == Some(&b'\'') && !single && !double {
+            out.push('\'');
+            idx += 1;
+            let mut escaped = false;
+            while idx < bytes.len() {
+                let sub = rest[idx..].chars().next().unwrap();
+                out.push(sub);
+                idx += sub.len_utf8();
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if sub == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if sub == '\'' {
+                    break;
+                }
+            }
+            continue;
+        }
+        // Backslash escaping (not in single quotes)
+        if ch == '\\' && !single {
+            if let Some(escaped) = rest[idx..].chars().next() {
+                out.push(escaped);
+                idx += escaped.len_utf8();
+            }
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            continue;
+        }
+        if ch == '$' && bytes.get(idx) == Some(&b'{') && !single && !double {
+            out.push('{');
+            idx += 1;
+            depth += 1;
+            continue;
+        }
+        if ch == '}' && !single && !double {
+            // Plain subtraction like the original.
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+    }
+    &rest[idx..]
+}
+
+/// Cursor form of `remove_double_quoted_into` (rest just inside the opening
+/// `"`; returns the remainder just past the closing `"` or, if unterminated,
+/// an empty slice). Trigger bytes inside double quotes: `"`, `$`, `\`, `'`,
+/// the glob set `* ? [ @ + !`, and `` ` `` when backtick bodies must be
+/// preserved.
+fn remove_double_quoted_into_cursor<'a>(
+    out: &mut String,
+    rest: &'a str,
+    preserve_backticks: bool,
+    posix: bool,
+) -> &'a str {
+    let mut rest = rest;
+    let mut pending_name = false;
+    while !rest.is_empty() {
+        let first = rest.as_bytes()[0];
+        if first == b'$' {
+            match rest.as_bytes().get(1) {
+                Some(&b'(') => {
+                    pending_name = false;
+                    rest = copy_dollar_paren_substitution_cursor(&mut *out, rest);
+                    continue;
+                }
+                Some(&b'{') => {
+                    pending_name = false;
+                    rest = copy_braced_parameter_after_dollar_cursor(&mut *out, rest, posix);
+                    continue;
+                }
+                Some(&b @ (b'?' | b'$' | b'!' | b'#' | b'-' | b'@' | b'*' | b'0'..=b'9')) => {
+                    pending_name = false;
+                    out.push('$');
+                    out.push(b as char);
+                    rest = &rest[2..];
+                    continue;
+                }
+                _ => {}
+            }
+            // `$` with a name-start follower arms pending_name and pushes the
+            // `$` raw; any other follower is a literal dollar that travels as
+            // DATA_DOLLAR (GNU parse.y skip_double_quoted: `$` not starting
+            // an expansion is literal).
+            if rest
+                .as_bytes()
+                .get(1)
+                .is_some_and(|&b| q22_name_start_byte(b))
+            {
+                pending_name = true;
+                out.push('$');
+                rest = &rest[1..];
+            } else {
+                pending_name = false;
+                out.push(DATA_DOLLAR);
+                rest = &rest[1..];
+            }
+            continue;
+        }
+        match first {
+            b'"' => {
+                if pending_name {
+                    out.push(PARAM_NAME_END_MARKER);
+                }
+                return &rest[1..];
+            }
+            b'`' if preserve_backticks => {
+                pending_name = false;
+                out.push('`');
+                rest = copy_backtick_body_cursor(&mut *out, &rest[1..]);
+            }
+            b'\\' => {
+                pending_name = false;
+                match rest.as_bytes().get(1) {
+                    Some(&b @ (b'\\' | b'"' | b'$' | b'`' | b'\n')) => {
+                        rest = &rest[2..];
+                        if b != b'\n' {
+                            match b {
+                                b'$' => out.push(DATA_DOLLAR),
+                                b'`' => out.push(crate::executor::markers::DATA_BACKTICK),
+                                b'\\' => out.push(crate::executor::markers::DATA_BACKSLASH),
+                                // De-escaped `"` travels as the data-double-
+                                // quote marker (see the original's comment).
+                                _ => out.push(crate::executor::markers::DATA_DQUOTE),
+                            }
+                        }
+                    }
+                    _ => {
+                        out.push('\\');
+                        rest = &rest[1..];
+                    }
+                }
+            }
+            b'\'' => {
+                pending_name = false;
+                out.push(crate::executor::markers::DATA_SQUOTE);
+                rest = &rest[1..];
+            }
+            b @ (b'*' | b'?' | b'[' | b'@' | b'+' | b'!') => {
+                pending_name = false;
+                out.push(crate::executor::markers::CTLESC);
+                out.push(b as char);
+                rest = &rest[1..];
+            }
+            _ => {
+                // Trigger-free span inside the quotes. `pending_name` can
+                // only be armed at the `$` handled above; a span continues it
+                // through name bytes and breaks it at the first other byte.
+                let bytes = rest.as_bytes();
+                let mut idx = 0usize;
+                while idx < bytes.len() {
+                    let b = bytes[idx];
+                    if matches!(
+                        b,
+                        b'"' | b'$' | b'\\' | b'\'' | b'*' | b'?' | b'[' | b'@' | b'+' | b'!'
+                    ) || (preserve_backticks && b == b'`')
+                    {
+                        break;
+                    }
+                    idx += 1;
+                }
+                if pending_name {
+                    let name_run = bytes[..idx]
+                        .iter()
+                        .position(|&b| !q22_name_byte(b))
+                        .unwrap_or(idx);
+                    if name_run < idx {
+                        pending_name = false;
+                    }
+                }
+                out.push_str(&rest[..idx]);
+                rest = &rest[idx..];
+            }
+        }
+    }
+    rest
 }
 
 pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
