@@ -120,8 +120,18 @@ impl Executor {
         self.update_underscore_parameter(cmd);
         // GNU execute_cmd.c:1004-1017: in POSIX mode, a non-interactive shell
         // exits when a special builtin returned an error status (> EX_SHERRBASE).
+        // execute_cmd.c:4657-4666: `builtin_is_special` is only set on the
+        // dispatch path where `(cmdflags & CMD_NO_FUNCTIONS) == 0' — the
+        // `command' builtin's re-dispatched argument (check_command_builtin
+        // sets CMD_NO_FUNCTIONS, execute_cmd.c:4723) never qualifies, so a
+        // special builtin executed as `command return ...' cannot mark the
+        // failure ("we don't want to exit the shell if a special builtin
+        // executed with `command builtin' fails"). The depth gate is the
+        // same state GNU tracks as executing_command_builtin
+        // (execute_cmd.c:4731-4735; errors8.sub ok 5/ok 6).
         let outcome = if result.is_ok()
             && self.special_builtin_failed.get()
+            && self.command_builtin_depth == 0
             && self.posix_mode_enabled()
             && self
                 .shell_state

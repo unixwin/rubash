@@ -263,6 +263,13 @@ impl Executor {
         self.command_builtin_depth += 1;
         let result = self.execute_command_without_aliases_with_path_inner(cmd, use_standard_path);
         self.command_builtin_depth -= 1;
+        // GNU execute_cmd.c:4657-4666: the special-builtin lookup — and with
+        // it builtin_is_special and special_builtin_failed — never runs for
+        // this re-dispatch (check_command_builtin set CMD_NO_FUNCTIONS at
+        // :4723), so whatever the inner builtin set must not leak to the
+        // OUTER command's posix fatal check (:1004-1017): `command return 16'
+        // under `set -o posix' reports and continues (errors8.sub ok 5).
+        self.special_builtin_failed.set(false);
         result
     }
 

@@ -24,10 +24,19 @@ impl Executor {
             }
             crate::builtins::shift::ShiftAction::Shift(amount) => {
                 if amount > self.shell_state.positional_params.len() {
+                    // GNU general.c:112 (posix_initialize): `set -o posix'
+                    // turns print_shift_error ON, so the out-of-range
+                    // diagnostic prints in posix mode even without the
+                    // shift_verbose shopt (builtins/shift.def:77-88
+                    // sh_erange; errors8.sub's ok-4 stderr line). The
+                    // failure itself stays EXECUTION_FAILURE (1, not >
+                    // EX_SHERRBASE): shift never sets special_builtin_failed,
+                    // so it is not posix-fatal even bare (execute_cmd.c:4886).
                     if crate::builtins::shopt::option_enabled(
                         &self.shell_state.env_vars,
                         "shift_verbose",
-                    ) {
+                    ) || self.posix_mode_enabled()
+                    {
                         writeln!(
                             stderr,
                             "{}shift: {amount}: shift count out of range",
