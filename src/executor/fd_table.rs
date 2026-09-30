@@ -850,6 +850,15 @@ impl FdReadEndpoint {
             offset: 0,
         })))
     }
+
+    /// Byte-payload form of `process_substitution` — a substitution body
+    /// may produce arbitrary bytes (rubash#355 fd-carried words).
+    pub(crate) fn process_substitution_bytes(input: Vec<u8>) -> Self {
+        Self::ProcessSubstitution(Rc::new(RefCell::new(TextInput {
+            data: input,
+            offset: 0,
+        })))
+    }
 }
 
 #[cfg(test)]

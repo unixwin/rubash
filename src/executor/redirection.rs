@@ -972,7 +972,7 @@ impl Executor {
     }
 
     fn open_command_output_target(
-        &self,
+        &mut self,
         state: &mut OutputFdState,
         fd: u32,
         target: &str,
@@ -982,6 +982,39 @@ impl Executor {
             state.fds.insert(fd, OutputTarget::Closed);
         } else if is_null_device(target) {
             state.fds.insert(fd, OutputTarget::Null);
+        } else if let Some(source_fd) =
+            crate::executor::execution_misc::dev_stdio_redirect_fd(target)
+        {
+            // rubash#355: a `/dev/fd/N` (or /dev/std*) output target is the
+            // OS fd-alias device in GNU — open() dups fd N's open file
+            // description. Windows has no /dev/fd filesystem; resolve
+            // through the virtual fd table exactly like the input side
+            // (execution_misc::dev_stdio_redirect_fd ->
+            // open_fd_read_endpoint). A ProcessSubstitution write endpoint
+            // names its temp carrier (writes land there for the
+            // substitution's finish path); a File endpoint shares the real
+            // handle. An fd with no write side is GNU's ENOENT
+            // ("No such file or directory", see
+            // write_bad_fd_redirect_diagnostic).
+            match self.fd_table.output_endpoint(source_fd) {
+                Some(FdWriteEndpoint::ProcessSubstitution { path, .. }) => {
+                    state.fds.insert(
+                        fd,
+                        OutputTarget::Path(shell_display_path(&path.to_string_lossy())),
+                    );
+                }
+                Some(FdWriteEndpoint::File(file_fd)) => {
+                    state
+                        .fds
+                        .insert(fd, OutputTarget::SharedFile(file_fd.clone()));
+                }
+                _ => {
+                    self.write_bad_fd_redirect_diagnostic(state, &redirect.target_metadata.raw)?;
+                    self.exit_code = 1;
+                    state.redirect_failed = true;
+                    return Ok(());
+                }
+            }
         } else {
             let target = self.redirect_output_path_target(target);
             if redirect.append {

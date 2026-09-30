@@ -566,7 +566,7 @@ impl Executor {
                 return Ok(());
             };
             let path = self.write_process_substitution_temp_bytes(&output)?;
-            *word = shell_display_path(&path.to_string_lossy());
+            *word = self.process_substitution_fd_word(&output);
             files.inputs.push(path);
         } else if let Some(source) = word
             .strip_prefix(">(")
@@ -574,7 +574,7 @@ impl Executor {
         {
             let source = source.to_string();
             let path = self.empty_process_substitution_temp()?;
-            *word = shell_display_path(&path.to_string_lossy());
+            *word = self.process_substitution_output_fd_word(&path);
             files
                 .outputs
                 .push(OutputProcessSubstitution { path, source });
@@ -589,13 +589,14 @@ impl Executor {
         files: &mut ProcessSubstitutionFiles,
     ) -> Result<(), ExecuteError> {
         for substitution in substitutions {
-            let path = if substitution.output {
+            if substitution.output {
                 let path = self.empty_process_substitution_temp()?;
                 files.outputs.push(OutputProcessSubstitution {
                     path: path.clone(),
                     source: substitution.source,
                 });
-                path
+                let display_path = self.process_substitution_output_fd_word(&path);
+                *word = word.replacen(&substitution.target, &display_path, 1);
             } else {
                 let Some(output) = self.process_substitution_output_bytes(&substitution.source)
                 else {
@@ -603,10 +604,9 @@ impl Executor {
                 };
                 let path = self.write_process_substitution_temp_bytes(&output)?;
                 files.inputs.push(path.clone());
-                path
+                let display_path = self.process_substitution_fd_word(&output);
+                *word = word.replacen(&substitution.target, &display_path, 1);
             };
-            let display_path = shell_display_path(&path.to_string_lossy());
-            *word = word.replacen(&substitution.target, &display_path, 1);
         }
         Ok(())
     }
@@ -641,22 +641,21 @@ impl Executor {
 
         let mut word = raw.to_string();
         for substitution in substitutions {
-            let path = if substitution.output {
+            if substitution.output {
                 let path = self.empty_process_substitution_temp()?;
-                self.assignment_output_process_substitutions.insert(
-                    shell_display_path(&path.to_string_lossy()),
-                    substitution.source,
-                );
-                path
+                let word_form = self.process_substitution_output_fd_word(&path);
+                self.assignment_output_process_substitutions
+                    .insert(word_form.clone(), substitution.source);
+                word = word.replacen(&substitution.target, &word_form, 1);
             } else {
                 let Some(output) = self.process_substitution_output_bytes(&substitution.source)
                 else {
                     continue;
                 };
-                self.write_process_substitution_temp_bytes(&output)?
-            };
-            let display_path = shell_display_path(&path.to_string_lossy());
-            word = word.replacen(&substitution.target, &display_path, 1);
+                self.write_process_substitution_temp_bytes(&output)?;
+                let word_form = self.process_substitution_fd_word(&output);
+                word = word.replacen(&substitution.target, &word_form, 1);
+            }
         }
         Ok(word)
     }
@@ -675,22 +674,21 @@ impl Executor {
                 .process_substitutions;
 
         for substitution in substitutions {
-            let path = if substitution.output {
+            if substitution.output {
                 let path = self.empty_process_substitution_temp()?;
-                self.assignment_output_process_substitutions.insert(
-                    shell_display_path(&path.to_string_lossy()),
-                    substitution.source,
-                );
-                path
+                let word_form = self.process_substitution_output_fd_word(&path);
+                self.assignment_output_process_substitutions
+                    .insert(word_form.clone(), substitution.source);
+                word = word.replacen(&substitution.target, &word_form, 1);
             } else {
                 let Some(output) = self.process_substitution_output_bytes(&substitution.source)
                 else {
                     continue;
                 };
-                self.write_process_substitution_temp_bytes(&output)?
-            };
-            let display_path = shell_display_path(&path.to_string_lossy());
-            word = word.replacen(&substitution.target, &display_path, 1);
+                self.write_process_substitution_temp_bytes(&output)?;
+                let word_form = self.process_substitution_fd_word(&output);
+                word = word.replacen(&substitution.target, &word_form, 1);
+            }
         }
         Ok(word)
     }
@@ -805,7 +803,20 @@ impl Executor {
         let Some(source) = self.assignment_output_process_substitutions.remove(target) else {
             return Ok(());
         };
-        let path = shell_path_to_windows(target, &self.shell_state.env_vars);
+        // rubash#355: the recorded key is the `/dev/fd/N` word form; the
+        // bytes live in the fd's ProcessSubstitution write carrier (its
+        // temp path), not at the word itself.
+        let path = if let Some(fd) = target
+            .strip_prefix("/dev/fd/")
+            .and_then(|fd| fd.parse::<u32>().ok())
+        {
+            match self.fd_table.output_endpoint(fd) {
+                Some(FdWriteEndpoint::ProcessSubstitution { path, .. }) => path,
+                _ => return Ok(()),
+            }
+        } else {
+            shell_path_to_windows(target, &self.shell_state.env_vars)
+        };
         let input = fs::read_to_string(&path).unwrap_or_default();
         self.execute_persistent_output_process_substitution(&source, input)?;
         let _ = fs::remove_file(path);
@@ -902,6 +913,83 @@ impl Executor {
             old_offset,
         );
         result
+    }
+
+    /// GNU subst.c:6362 process_substitute(): the substituted word is
+    /// `/dev/fd/N` — the parent's end of the substitution pipe, moved to a
+    /// high fd below 64 (move_to_high_fd, the same band the coproc fds
+    /// 63/60 come from). Windows has no /dev/fd filesystem, but the
+    /// shell's virtual fd table can carry the stream: every `/dev/fd/N`
+    /// consumer already resolves through it — redirects via
+    /// execution_misc::dev_stdio_redirect_fd -> open_fd_read_endpoint
+    /// (FdReadEndpoint::ProcessSubstitution), external argv via
+    /// dev_fd_operands::materialize_dev_fd_operands ->
+    /// dev_fd_table_operand, in-shell reads via the endpoint itself
+    /// (rubash#355: `case <(echo c) in /dev/fd/*` and `echo <(cmd)` are
+    /// script-visible and GNU prints the /dev/fd form).
+    ///
+    /// The temp file stays the backing store for Windows child processes
+    /// (registered in the stream table under its path and deleted by
+    /// ProcessSubstitutionFiles::drop); the fd-table endpoint owns its own
+    /// copy so the shared-offset drain semantics (procsub.tests
+    /// count_lines 1,0,0,0,0) survive word-form changes. The fd stays
+    /// registered for the shell's lifetime — GNU marks the real fd
+    /// close-on-exec but keeps it in the parent, so a variable carrying
+    /// `/dev/fd/N` remains resolvable later.
+    fn register_process_substitution_fd(&mut self, output: &[u8]) -> u32 {
+        let mut fd = 63u32;
+        while fd > 3 && !self.fd_table_fd_free(fd) {
+            fd -= 1;
+        }
+        if fd <= 3 {
+            return self.fd_table.allocate_dynamic();
+        }
+        self.fd_table.open_input(
+            fd,
+            FdReadEndpoint::process_substitution_bytes(output.to_vec()),
+            true,
+        );
+        fd
+    }
+
+    fn fd_table_fd_free(&self, fd: u32) -> bool {
+        match self.fd_table.entries.get(&fd) {
+            // No entry = free (GNU move_to_high_fd skips only fds the
+            // shell actually holds open).
+            None => true,
+            Some(entry) => entry.closed || (entry.read.is_none() && entry.write.is_none()),
+        }
+    }
+
+    /// The word form of a materialized input process substitution:
+    /// `/dev/fd/N` per GNU subst.c:6362, with the payload registered under
+    /// that fd (see register_process_substitution_fd).
+    fn process_substitution_fd_word(&mut self, output: &[u8]) -> String {
+        let fd = self.register_process_substitution_fd(output);
+        format!("/dev/fd/{fd}")
+    }
+
+    /// The word form of a materialized output process substitution
+    /// (`>(cmd)`): `/dev/fd/N` naming an fd whose write side feeds the
+    /// substitution's temp carrier (the finish path reads the temp by
+    /// path and runs the body with it as stdin).
+    fn process_substitution_output_fd_word(&mut self, temp: &PathBuf) -> String {
+        let mut fd = 63u32;
+        while fd > 3 && !self.fd_table_fd_free(fd) {
+            fd -= 1;
+        }
+        if fd <= 3 {
+            return shell_display_path(&temp.to_string_lossy());
+        }
+        self.fd_table.open_output(
+            fd,
+            FdWriteEndpoint::ProcessSubstitution {
+                path: temp.to_path_buf(),
+                command: String::new(),
+            },
+            true,
+        );
+        format!("/dev/fd/{fd}")
     }
 
     pub(in crate::executor) fn empty_process_substitution_temp(
