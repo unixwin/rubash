@@ -3,10 +3,10 @@ use super::*;
 impl Executor {
     pub(in crate::executor) fn execute_simple_loop(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
-        let Some(command) = ast.commands.get(index) else {
+        let Some(command) = commands.get(index) else {
             return Ok(None);
         };
         let Some(first_word) = command.words.first().map(String::as_str) else {
@@ -31,18 +31,19 @@ impl Executor {
             return Ok(None);
         }
 
-        let Some(do_index) = ast.commands[index + 1..]
+        let Some(do_index) = commands[index + 1..]
             .iter()
             .position(|command| command_is_control_word(command, "do"))
             .map(|offset| index + 1 + offset)
         else {
             return Ok(None);
         };
-        let Some(do_command) = ast.commands.get(do_index) else {
+        let Some(do_command) = commands.get(do_index) else {
             return Ok(None);
         };
         let initial_depth = self.embedded_do_loop_depth(do_command);
-        let Some(done_index) = self.find_matching_done_command(ast, do_index + 1, initial_depth)
+        let Some(done_index) =
+            self.find_matching_done_command(commands, do_index + 1, initial_depth)
         else {
             return Ok(None);
         };
@@ -53,7 +54,7 @@ impl Executor {
         normalize_leading_assignment_words(&mut condition);
 
         let mut condition_commands = vec![condition];
-        condition_commands.extend(ast.commands[index + 1..do_index].iter().cloned());
+        condition_commands.extend(commands[index + 1..do_index].iter().cloned());
 
         let mut body_commands = Vec::new();
         if do_command.words.len() > 1 {
@@ -61,8 +62,8 @@ impl Executor {
             body_command.words = body_command.words[1..].to_vec();
             body_commands.push(body_command);
         }
-        body_commands.extend(ast.commands[do_index + 1..done_index].iter().cloned());
-        let done_command = ast.commands.get(done_index).expect("done index is valid");
+        body_commands.extend(commands[do_index + 1..done_index].iter().cloned());
+        let done_command = commands.get(done_index).expect("done index is valid");
         let mut body = Ast {
             commands: body_commands,
         };
@@ -177,7 +178,7 @@ impl Executor {
 
     pub(in crate::executor) fn execute_alias_introduced_for(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
         // TODO(parse.y/alias.c/execute_cmd.c): Bash performs alias expansion
@@ -185,14 +186,13 @@ impl Executor {
         // following `for` as a reserved word. This stitches together the simple
         // `al for foo in v; do ...; done` shape from upstream alias7.sub.
         let mut command_index = index;
-        while ast
-            .commands
+        while commands
             .get(command_index)
             .is_some_and(|command| command.words.is_empty() && command_has_no_effect(command))
         {
             command_index += 1;
         }
-        let Some(command) = ast.commands.get(command_index) else {
+        let Some(command) = commands.get(command_index) else {
             return Ok(None);
         };
         let posix_mode = self
@@ -212,7 +212,7 @@ impl Executor {
             self.expand_aliases(&command.words)
         };
         let mut do_index = command_index + 1;
-        while ast.commands.get(do_index).is_some_and(|command| {
+        while commands.get(do_index).is_some_and(|command| {
             command.words.is_empty()
                 && command.brace_group.is_none()
                 && !command.has_assignment("__RUBASH_PARSE_ERROR__")
@@ -221,14 +221,13 @@ impl Executor {
         }
 
         if words.first().map(String::as_str) == Some("echo")
-            && ast
-                .commands
+            && commands
                 .get(do_index)
                 .is_some_and(|command| command.words.first().map(String::as_str) == Some("do"))
         {
             println!("{}", words[1..].join(" "));
             let done_index = self
-                .find_matching_done_command(ast, do_index, 0)
+                .find_matching_done_command(commands, do_index, 0)
                 .unwrap_or(command_index);
             println!("bash: -c: line 7: syntax error near unexpected token `do'");
             println!("bash: -c: line 7: `do echo foo=$foo bar=$bar'");
@@ -239,7 +238,7 @@ impl Executor {
             return Ok(None);
         }
         if let Some(next_index) =
-            self.execute_alias_introduced_arithmetic_for(ast, command_index, &words)?
+            self.execute_alias_introduced_arithmetic_for(commands, command_index, &words)?
         {
             return Ok(Some(next_index));
         }
@@ -247,7 +246,7 @@ impl Executor {
             return Ok(None);
         }
 
-        let Some(do_command) = ast.commands.get(do_index) else {
+        let Some(do_command) = commands.get(do_index) else {
             return Ok(None);
         };
         if let Some(brace_group) = do_command.brace_group.clone() {
@@ -288,7 +287,8 @@ impl Executor {
         }
 
         let initial_depth = self.embedded_do_loop_depth(do_command);
-        let Some(done_index) = self.find_matching_done_command(ast, do_index + 1, initial_depth)
+        let Some(done_index) =
+            self.find_matching_done_command(commands, do_index + 1, initial_depth)
         else {
             return Ok(None);
         };
@@ -299,7 +299,7 @@ impl Executor {
             body_command.words = body_command.words[1..].to_vec();
             body.push(body_command);
         }
-        body.extend(ast.commands[do_index + 1..done_index].iter().cloned());
+        body.extend(commands[do_index + 1..done_index].iter().cloned());
 
         let for_command = ForCommand {
             keyword: "for".to_string(),

@@ -1607,8 +1607,8 @@ impl Executor {
             body_start_line,
             true,
         );
-        let mut ast = crate::parser::parse(&tokens);
-        super::command_substitution::normalize_comsub_body_statement_lines(&mut ast, &tokens);
+        let mut commands = crate::parser::parse(&tokens);
+        super::command_substitution::normalize_comsub_body_statement_lines(&mut commands, &tokens);
 
         // GNU subst.c function_substitute: a funsub `${ ...; }` redirects the
         // body's stdout to the anonymous capture file (its expansion value);
@@ -1665,7 +1665,7 @@ impl Executor {
             self.shell_state.env_vars.remove("REPLY");
             self.shell_state.variables.remove("REPLY");
             self.shell_state.function_depth += 1;
-            let r = self.execute_ast(&ast);
+            let r = self.execute_ast(&commands);
             self.shell_state.function_depth -= 1;
             body_reply = self.shell_state.env_vars.get("REPLY").cloned();
             self.restore_function_locals();
@@ -1678,7 +1678,7 @@ impl Executor {
             // capture, which belongs to an enclosing pipeline stage when this
             // substitution runs inside one; give the body its own capture.
             let (thread_captured, r) = crate::executor::shell_options::capture_stdout(|| {
-                self.execute_current_shell_body(&ast)
+                self.execute_current_shell_body(&commands)
             });
             let mut cap = self.stdout_capture.take().unwrap_or_default();
             cap.extend_from_slice(&thread_captured);
@@ -1735,7 +1735,10 @@ impl Executor {
     /// function-like variable frame — `local` scopes to the body and `return`
     /// ends only the body, while plain assignments still mutate the current
     /// environment (comsub2.tests: `outside: 42` vs `outside:` empty).
-    fn execute_current_shell_body(&mut self, ast: &crate::parser::Ast) -> Result<(), ExecuteError> {
+    fn execute_current_shell_body(
+        &mut self,
+        commands: &crate::parser::Ast,
+    ) -> Result<(), ExecuteError> {
         self.shell_state.local_var_scopes.push(HashMap::new());
         self.shell_state.local_attr_scopes.push(HashMap::new());
         self.shell_state.local_typed_scopes.push(HashMap::new());
@@ -1743,7 +1746,7 @@ impl Executor {
         // GNU subst.c:7101 parses the funsub body with parse_and_execute
         // ("nofork comsub") → evalstring.c:348 indirection_level++, so the
         // in-place body's traces render one PS4 level deeper (rubash#254).
-        let result = self.with_xtrace_indirection(|executor| executor.execute_ast(ast));
+        let result = self.with_xtrace_indirection(|executor| executor.execute_ast(commands));
         self.shell_state.function_depth -= 1;
         self.restore_function_locals();
         result
@@ -1916,9 +1919,9 @@ impl Executor {
             body_start_line,
             true,
         );
-        let mut ast = crate::parser::parse(&tokens);
-        super::command_substitution::normalize_comsub_body_statement_lines(&mut ast, &tokens);
-        if !command_substitution_needs_ast_execution(&ast) {
+        let mut commands = crate::parser::parse(&tokens);
+        super::command_substitution::normalize_comsub_body_statement_lines(&mut commands, &tokens);
+        if !command_substitution_needs_ast_execution(&commands.commands) {
             return None;
         }
 
@@ -1992,9 +1995,9 @@ impl Executor {
             // one PS4 level deeper (rubash#254).
             self.with_xtrace_indirection(|executor| {
                 let result = if posix_mode || inherit_errexit {
-                    executor.execute_ast(&ast)
+                    executor.execute_ast(&commands)
                 } else {
-                    executor.with_errexit_suppressed(|executor| executor.execute_ast(&ast))
+                    executor.with_errexit_suppressed(|executor| executor.execute_ast(&commands))
                 };
                 let body_status = match &result {
                     Ok(()) => executor.exit_code,
@@ -2027,7 +2030,7 @@ impl Executor {
         // finishes, the reader stops (`$( esac ; ...)` in a case pattern:
         // the `*)` arm still prints `ok 2`, `echo we should not see this`
         // never runs). The body ran in place, so its parse_error latch is
-        // already ours — propagate it to the abort flag the ast loop checks.
+        // already ours — propagate it to the abort flag the commands loop checks.
         if self.parse_error_occurred {
             self.last_command_substitution_parse_error.set(true);
         }
@@ -2144,13 +2147,12 @@ impl Executor {
     }
 }
 
-fn command_substitution_needs_ast_execution(ast: &Ast) -> bool {
-    ast.commands.iter().any(command_has_ast_substitution_shape)
-        || ast
-            .commands
+fn command_substitution_needs_ast_execution(commands: &[CommandNode]) -> bool {
+    commands.iter().any(command_has_ast_substitution_shape)
+        || commands
             .iter()
             .any(command_contains_current_shell_substitution)
-        || (ast.commands.len() > 1 && ast.commands.iter().all(command_is_ast_list_substitution))
+        || (commands.len() > 1 && commands.iter().all(command_is_ast_list_substitution))
 }
 
 // GNU subst.c treats a syntactically command-like $((...)) body as a

@@ -564,7 +564,7 @@ impl Executor {
         let result = self.with_compound_output_redirects(call_cmd, |executor| {
             let body_run = |executor: &mut Executor| {
                 executor.with_ambient_line(body_open_line, |executor| {
-                    executor.execute_ast_inner(body_ast)
+                    executor.execute_ast_inner(&body_ast.commands)
                 })
             };
             match &definition_numbered_only {

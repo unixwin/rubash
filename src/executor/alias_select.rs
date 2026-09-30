@@ -4,18 +4,17 @@ use super::*;
 impl Executor {
     pub(in crate::executor) fn execute_alias_introduced_select(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
         let mut command_index = index;
-        while ast
-            .commands
+        while commands
             .get(command_index)
             .is_some_and(|command| command.words.is_empty())
         {
             command_index += 1;
         }
-        let Some(command) = ast.commands.get(command_index) else {
+        let Some(command) = commands.get(command_index) else {
             return Ok(None);
         };
 
@@ -32,7 +31,7 @@ impl Executor {
         }
 
         let mut do_index = command_index + 1;
-        while ast.commands.get(do_index).is_some_and(|command| {
+        while commands.get(do_index).is_some_and(|command| {
             command.words.is_empty()
                 && command.brace_group.is_none()
                 && command.get_assignment("__RUBASH_PARSE_ERROR__").is_none()
@@ -48,7 +47,7 @@ impl Executor {
         } else {
             return Ok(None);
         };
-        let Some(do_command) = ast.commands.get(do_index) else {
+        let Some(do_command) = commands.get(do_index) else {
             return Ok(None);
         };
         let in_keyword = (!default_positional).then(|| "in".to_string());
@@ -90,11 +89,12 @@ impl Executor {
         }
 
         let initial_depth = self.embedded_do_loop_depth(do_command);
-        let Some(done_index) = self.find_matching_done_command(ast, do_index + 1, initial_depth)
+        let Some(done_index) =
+            self.find_matching_done_command(commands, do_index + 1, initial_depth)
         else {
             return Ok(None);
         };
-        let done_command = ast.commands.get(done_index).expect("done index is valid");
+        let done_command = commands.get(done_index).expect("done index is valid");
 
         let mut body = Vec::new();
         if do_command.words.len() > 1 {
@@ -102,7 +102,7 @@ impl Executor {
             body_command.words = body_command.words[1..].to_vec();
             body.push(body_command);
         }
-        body.extend(ast.commands[do_index + 1..done_index].iter().cloned());
+        body.extend(commands[do_index + 1..done_index].iter().cloned());
 
         let select_command = SelectCommand {
             keyword: "select".to_string(),
@@ -127,9 +127,9 @@ impl Executor {
             end_keyword_metadata: Some(synthetic_keyword_metadata("done")),
             body,
         };
-        let redirect_command = ast.commands.get(done_index + 1).unwrap_or(done_command);
+        let redirect_command = commands.get(done_index + 1).unwrap_or(done_command);
         self.execute_select_command(redirect_command, &select_command)?;
-        Ok(Some((done_index + 2).min(ast.commands.len())))
+        Ok(Some((done_index + 2).min(commands.len())))
     }
 }
 

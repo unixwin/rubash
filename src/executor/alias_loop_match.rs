@@ -3,13 +3,13 @@ use super::*;
 impl Executor {
     pub(in crate::executor) fn find_matching_done_command(
         &self,
-        ast: &Ast,
+        commands: &[CommandNode],
         start: usize,
         initial_depth: usize,
     ) -> Option<usize> {
         let mut nested_loop_depth = initial_depth;
-        for index in start..ast.commands.len() {
-            let command = &ast.commands[index];
+        for index in start..commands.len() {
+            let command = &commands[index];
             if self.command_starts_alias_loop(command) {
                 nested_loop_depth += 1;
                 continue;

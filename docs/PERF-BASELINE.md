@@ -2146,3 +2146,167 @@ diff (bc4bc0e8, flagged for captain review).
    the token-level keyword stack — the C/E quote-leak family
    (continuation.rs, captain) is the semantic owner of why the stretch
    reads as one open construct at all.
+
+## qleak round (2026-09-30, wt19/qleak on e3623c68): full-suite 2x inventory + pointer execution of compound bodies
+
+Owner goal "all suites 2x". First full-suite inventory on a RELEASE binary
+(all previous rounds' suite tables were debug), then one structural fix.
+
+### Inventory (release, scripts/run-perf-suite.sh, median; GNU = WSL 5.3.0
+inner-timed, same session; host had parallel lanes — GNU medians consistent
+with prior rounds)
+
+| probe | rubash ms | GNU ms | ratio | bucket | main cost attribution (prior rounds' decompositions) |
+|---|---:|---:|---:|---|---|
+| 01-startup-empty | 73 | 5 | 14.6x | >10x | ~54ms MSYS-parent spawn constant (perf10: cmd.exe pays it identically); rubash in-process floor ~14ms |
+| 02-startup-fndef | 67 | 5 | 13.4x | >10x | same parent-spawn constant |
+| 04-loop-true-builtin | 167 | 13 | 12.8x | >10x | distributed per-command floor (perf17: bind_underscore 1.8us, expand 31ms/2k cmds, for-arith pair) |
+| 05-arith-x5000 | 138 | 12 | 11.5x | >10x | arith_dyn snapshot remains 87ms-class (perf11/exphot) + loop machinery |
+| 06-strconcat-x5000 | 301 | 23 | 13.1x | >10x | assignment apply + walker tail (exphot) |
+| 07-fncall-noop | 354 | 31 | 11.4x | >10x | frame machinery; local3-family leftovers (perf12) |
+| 08-cmdsub-true | 135 | 331 | 0.4x | <2x | spawn parity |
+| 09-external-uname | 92 | 205 | 0.4x | <2x | spawn parity |
+| 10-pathmiss-x100 | 141 | 20 | 7.0x | 2-10x | PATH lookup + `command -v` miss path |
+| 11-pipeline-yes-head | 191 | 7 | 27.3x | >10x | decomposed this round: ~73ms harness parent-spawn constant (floor = probe 01); head-file\|head costs the SAME ~160ms in Git Bash (msys binary cost, not rubash); python-parent yes\|head completes in ~35ms — rubash's residual ~120ms is its own pipeline spawn/wire/wait machinery vs GNU's fork. 2x is harness-bound regardless |
+| 12-pipe-echo-read | 1535 | 902 | 1.7x | <2x | — |
+| 13-readloop-gen | 206 | 23 | 9.0x | 2-10x | read builtin + simple-command dispatch (perffix family) |
+| 14-glob-srcrels | 2652 | 38180 | 0.1x | <2x | env-bound (drvfs globbing), regression tracking only |
+| 15-expansion-x5000 | 562 | 58 | 9.7x | 2-10x | empty_rhs walker tail + apply (exphot decomposition) |
+| 16-parse-flat8000 | 449 | 18 | 24.9x | >10x | 56us/cmd: chain 235ms of 435ms wall (this round's profile), assignment apply 32ms, jobs 14ms, linecmd 10ms — distributed floor |
+| 17-parse-flat8000-n | 127 | 12 | 10.6x | >10x | batch tokenizer + parse loop (perf15) |
+| 18-nested-brace-nst1 | 206 | 5 | 41.2x | >10x | THIS ROUND: O(depth^2) body clones in brace-group executor |
+| 19-nested-brace-nst2 | 276 | 6 | 46.0x | >10x | same + two-line parse cost |
+| 20-as-fn-mkdir-p | 123 | 7 | 17.6x | >10x | function def + call machinery |
+| 21-configure-head-n | 101 | 8 | 12.6x | >10x | gather + tokenize + nested body re-parses (perf15) |
+| 22-configure-full-n | 1206 | 40 | 30.1x | >10x | gather-dominated: scanner parks on the m4sh backtick stretch — continuation.rs (captain, C/E quote-leak family) |
+| 23-nvm-parse-n | 234 | 18 | 13.0x | >10x | parse-bound: tokenize + 1500 nested body re-parses (perf7/15) |
+| 24-nvm-load | 539 | 34 | 15.9x | >10x | gather+parse (as 23) + per-command exec; compound-body clones (THIS ROUND) |
+| 25-yes-head-read | 1270 | 675 | 1.9x | <2x | — |
+
+Buckets: <2x = 5 probes (08 09 12 14 25); 2-10x = 3 (10 13 15); >10x = 16.
+The 01/02/11 ratios are ~80% MSYS-parent spawn constant (GNU pays nothing
+comparable inside WSL) — like probe 14 they are environment-bound for the
+2x goal; the honest in-process gap for 01 is ~14ms vs 5ms.
+
+### Landed change: compound bodies execute by POINTER, not by clone
+
+Root cause (found this round, the largest non-captain item): EVERY compound
+executor deep-cloned its body into `Ast { commands: body.clone() }` before
+executing. GNU walks compound bodies by pointer — execute_cmd.c:624
+`execute_command_internal` dispatches on the COMMAND tag of the node
+make_cmd.c allocated ONCE at parse; execute_while_or_until (execute_cmd.c:3796,
+`execute_command (while_command->test)` at :3809), execute_for_command
+(:2990), execute_case_command (:3644), execute_if_command (:3862),
+execute_function (:5181) all re-walk the same COMMAND pointers and GNU never
+copies a COMMAND at execution time. In rubash the clone cost was:
+
+- **brace groups: O(depth^2).** `execute_brace_group_pipeline` cloned BOTH
+  the whole CommandNode (`command.clone()`, whose brace_group body holds the
+  remaining depth-k nodes) AND `brace_group.body.clone()` per level —
+  200-deep `{ { ...; } }` cloned ~2*sum(depth) CommandNodes of ~2.2 KB each
+  per run (measured shape: exec 623ms vs -n parse 103ms at D=400; the
+  exec-profile counters saw only 1.4ms — the time was pure clone churn).
+- **for loops: per ITERATION.** loop_select.rs cloned the body Vec every
+  iteration (GNU execute_for_command walks the same pointer per iteration).
+- while/if/case conditions and bodies, subshell bodies: one deep clone per
+  execution, all pure waste when no redirect splice is needed.
+
+Fix (root cause: the Vec-wrapper ownership, not a guard): `execute_ast_inner`
+now takes `&[CommandNode]` (execute_ast keeps `&Ast`; the ~29-function
+matcher chain that shares the command list — alias_introduced_*, simple_if,
+skip_and_or_rhs, pipeline walkers — was mechanically converted to slice
+params, compiler-guided). Every compound executor now calls the slice entry
+on the stored body. The two clones that feed real mutations are gated on the
+mutation's own necessary condition (rubash#117 whitelist discipline):
+
+1. `command.clone()` for `materialize_compound_output_process_substitutions`
+   runs only when a redirect target starts with `>(` (both of its arms —
+   shared_combined_output_process_substitution and
+   materialize_compound_output_redirect — require that prefix; without it
+   the call is the identity returning an empty vec).
+2. `body.clone()` for `apply_brace_group_redirects` /
+   `apply_command_output_redirects` runs only when a stdio-slot redirect
+   exists (their four `if let` splice admissions: redirect_out/append with
+   fd==1, redirect_err/redirect_err_append with fd==2; subshell uses the
+   conservative any-slot superset since numbered entries also splice).
+3. The `normalize_inline_compound_commands` rewrite for while/if bodies runs
+   only when some command's first word is `for` (its only rewrite arm,
+   inline_arithmetic_for_command, requires exactly that).
+
+A mid-refactor regression was caught by the probe battery: the mechanical
+`ast.commands` -> `commands` rewrite made execute_simple_pipeline's stage
+collector shadow the parameter, returning None for every pipeline ("echo hi |
+cat" failed) — the shadow audit (functions with a `commands` param AND a
+local `commands`) found this one site; fixed by renaming the collector.
+Keep that audit in mind for any future sed-style refactor of this chain.
+
+### Numbers (release, alternating A/B vs pristine e3623c68, best-of-3;
+harness medians from the full-suite re-run in parens)
+
+| probe | base | lane | delta | ratio |
+|---|---:|---:|---:|---:|
+| 18-nested-brace-nst1-d200 | 188-211 | 63-78 | **-66%** | 41.2x -> 16.8x (harness 206->84ms) |
+| 18 shape D=400 | 615-629 | 94-98 | **-85%** | now LINEAR in depth |
+| 19-nested-brace-nst2-d200 | 241 | 116 | **-52%** | 46.0x -> 23.7x (harness 276->142ms) |
+| 24-nvm-load | 517 | 446 | **-14%** | 15.9x -> 13.6x (harness 539->461ms) |
+| 12-pipe-echo-read | 1478 | 1491 | flat (parity) | 1.7x |
+| 04/05/06/07/15/16/17/20/21/23 | — | flat | noise band | — |
+
+Probe 19's remainder is parse-side: `-n` 120ms ≈ exec 119ms at D=200 (the
+exec-side clones are gone; the ~60ms-above-floor is the nested body
+re-parse fan-out — perf15 leftover #2, the whole-parser architecture item).
+Probe 16's chain phase (235ms of 435ms) decomposes into the same distributed
+per-command floor perf17 profiled; no single >5% site remains.
+
+### Semantics gate (zero-change evidence)
+
+- cargo test --lib 546/546; --test regression 27/27; `RUSTFLAGS='-D
+  warnings' cargo check --tests` and `--release --tests` clean; cargo fmt.
+- src/lexer/continuation.rs untouched (verified: git diff empty for it).
+- GNU-diff matrices m1-m3 (`target/issue-suites/results/qleak/`, script
+  files run on base binary, lane binary, and WSL GNU 5.3.0): brace groups
+  with stdout/append/stderr redirects and nesting, subshells (redirects,
+  var isolation, cwd restore, capture), if/elif/else, while/until
+  (break/continue in condition and body, `while case ... break`), word-list
+  and arithmetic for, the collapsed inline-`for ((...))` form inside while
+  bodies, case (incl. `;;&` fallthrough), pipelines (builtin-builtin,
+  builtin-compound, external-external, read loops), loop-body redirections
+  — base-vs-lane byte-identical stdout AND stderr AND rc on all three.
+  lane-vs-GNU: m2/m3 fully identical; m1 has ONE pre-existing divergence
+  (`{ echo x >&2; } 2>&1 1>/dev/null` loses the message; the pristine base
+  binary reproduces it byte-for-byte).
+- true-baseline suite slices (WSL oracle, both binaries): braces, case,
+  func, errors, read, quote — base-vs-lane stdout+stderr byte-identical,
+  GNU diff counts unchanged (6/4/0/4/30/94).
+- nvm `--no-use` load gate: declare -p NVM_*, declare -F nvm_* count,
+  compgen count, type nvm, nvm --version, alias count — byte-identical
+  base vs lane (only the embedded $$ differs, per-process).
+
+### 2x roadmap (per bucket, what each row still needs)
+
+- **Under 2x already (5)**: 08 09 12 14 25 — hold.
+- **2-10x (3)**:
+  - 10-pathmiss (7x): PATH-miss scan cost; candidate = lookup_paths.rs
+    probe result caching (GNU's command -v miss is a cached-hash miss).
+  - 13-readloop (9x): read-builtin + dispatch floor, same family as 04.
+  - 15-expansion (9.7x): exphot leftovers — the `"$i"`-word GNU
+    param_expand port and the RHS double-pre-scan memo; each measured
+    single-digit %; reaching 2x needs the borrow-based expansion refactor.
+- **Over 10x, environment-bound (3)**: 01 02 11 — the MSYS-parent spawn
+  constant (~54ms) floors the harness ratio near ~11x even at zero rubash
+  cost; GNU's WSL inner timing pays nothing comparable. Not fixable in
+  rubash; needs a native-parent harness or acceptance as environment noise.
+- **Over 10x, parse-bound (5)**: 17 21 23 (10-13x) and 19's remainder —
+  the nested body re-parse fan-out (GNU parses bodies inline in the same
+  reader pass; the fix is a single-pass recursive-descent body parse, a
+  whole-parser architecture change) plus the join-loop scans perf7
+  characterized. 22 (30x) additionally needs the captain-family scanner
+  false positives on the m4sh backtick stretch (continuation.rs C/E
+  quote-leak family).
+- **Over 10x, per-command floor (6)**: 04 05 06 07 16 20 24's exec half —
+  the distributed machinery perf11/12/17 profiled: the for-arith pair
+  (arith_dyn maintained-entry model), bind_underscore residual 1.8us,
+  marker-string attribute leftovers, expansion walker tail. No single
+  greater-than-5% site remains; reaching 2x needs the already-ticketed
+  deep borrow/attribute subsystems.
+

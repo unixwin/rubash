@@ -1,5 +1,5 @@
 use crate::executor::Executor;
-use crate::parser::{Ast, CommandNode};
+use crate::parser::CommandNode;
 
 pub(super) fn control_words(
     executor: &Executor,
@@ -13,22 +13,25 @@ pub(super) fn control_words(
 
 pub(super) fn find_word_command(
     executor: &Executor,
-    ast: &Ast,
+    commands: &[CommandNode],
     start: usize,
     word: &str,
 ) -> Option<usize> {
-    (start..ast.commands.len())
-        .find(|index| command_first_word_is(executor, &ast.commands[*index], word))
+    (start..commands.len()).find(|index| command_first_word_is(executor, &commands[*index], word))
 }
 
-pub(super) fn find_matching_fi(executor: &Executor, ast: &Ast, start: usize) -> Option<usize> {
+pub(super) fn find_matching_fi(
+    executor: &Executor,
+    commands: &[CommandNode],
+    start: usize,
+) -> Option<usize> {
     let mut depth = 0usize;
-    for index in start..ast.commands.len() {
-        if command_starts_if(executor, &ast.commands[index]) {
+    for index in start..commands.len() {
+        if command_starts_if(executor, &commands[index]) {
             depth += 1;
             continue;
         }
-        if command_first_word_is(executor, &ast.commands[index], "fi") {
+        if command_first_word_is(executor, &commands[index], "fi") {
             if depth == 0 {
                 return Some(index);
             }
@@ -40,20 +43,20 @@ pub(super) fn find_matching_fi(executor: &Executor, ast: &Ast, start: usize) -> 
 
 pub(super) fn find_if_branch_command(
     executor: &Executor,
-    ast: &Ast,
+    commands: &[CommandNode],
     start: usize,
     end: usize,
     word: &str,
 ) -> Option<usize> {
     let mut depth = 0usize;
     for index in start..end {
-        if command_starts_if(executor, &ast.commands[index]) {
+        if command_starts_if(executor, &commands[index]) {
             depth += 1;
             continue;
         }
-        if command_first_word_is(executor, &ast.commands[index], "fi") {
+        if command_first_word_is(executor, &commands[index], "fi") {
             depth = depth.saturating_sub(1);
-        } else if depth == 0 && command_first_word_is(executor, &ast.commands[index], word) {
+        } else if depth == 0 && command_first_word_is(executor, &commands[index], word) {
             return Some(index);
         }
     }

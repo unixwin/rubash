@@ -4,14 +4,14 @@ use super::*;
 impl Executor {
     pub(in crate::executor) fn execute_alias_introduced_compound_source(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
         if !self.alias_expansion_enabled() {
             return Ok(None);
         }
 
-        let Some(command) = ast.commands.get(index) else {
+        let Some(command) = commands.get(index) else {
             return Ok(None);
         };
         let Some(first_word) = command.words.first() else {
@@ -37,8 +37,8 @@ impl Executor {
 
         let mut next_index = index + 1;
         if !source_has_matching_compound_end(&source) {
-            for command_index in index + 1..ast.commands.len() {
-                let Some(next_command) = ast.commands.get(command_index) else {
+            for command_index in index + 1..commands.len() {
+                let Some(next_command) = commands.get(command_index) else {
                     break;
                 };
                 let command_source = if compound_alias {
@@ -78,10 +78,10 @@ impl Executor {
 
     pub(in crate::executor) fn execute_alias_introduced_inversion(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
-        let Some(command) = ast.commands.get(index) else {
+        let Some(command) = commands.get(index) else {
             return Ok(None);
         };
         let words = self.expand_aliases(&command.words);
@@ -113,10 +113,10 @@ impl Executor {
 
     pub(in crate::executor) fn execute_alias_introduced_subshell(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
-        let Some(command) = ast.commands.get(index) else {
+        let Some(command) = commands.get(index) else {
             return Ok(None);
         };
         let words = self.expand_aliases(&command.words);
@@ -124,7 +124,7 @@ impl Executor {
             return Ok(None);
         }
 
-        let (source, next_index) = alias_group_source(ast, index, command, &words, ")");
+        let (source, next_index) = alias_group_source(commands, index, command, &words, ")");
         let tokens = crate::lexer::tokenize_with_options(
             &source,
             crate::lexer::TokenizeOptions {
@@ -147,10 +147,10 @@ impl Executor {
 
     pub(in crate::executor) fn execute_alias_introduced_brace_group(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
-        let Some(command) = ast.commands.get(index) else {
+        let Some(command) = commands.get(index) else {
             return Ok(None);
         };
         let words = self.expand_aliases(&command.words);
@@ -158,7 +158,7 @@ impl Executor {
             return Ok(None);
         }
 
-        let (source, next_index) = alias_group_source(ast, index, command, &words, "}");
+        let (source, next_index) = alias_group_source(commands, index, command, &words, "}");
         let tokens = crate::lexer::tokenize_with_options(
             &source,
             crate::lexer::TokenizeOptions {
@@ -181,10 +181,10 @@ impl Executor {
 
     pub(in crate::executor) fn execute_alias_introduced_function(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
-        let Some(command) = ast.commands.get(index) else {
+        let Some(command) = commands.get(index) else {
             return Ok(None);
         };
         let words = self.expand_aliases(&command.words);
@@ -195,7 +195,7 @@ impl Executor {
         let mut source = alias_compound_source_words(&words);
         let mut next_index = index + 1;
         if words.len() == 2 {
-            if let Some(next_command) = ast.commands.get(next_index) {
+            if let Some(next_command) = commands.get(next_index) {
                 if command_is_function_body_candidate(next_command) {
                     source.push(' ');
                     source.push_str(&bash_command_source_text(next_command));
@@ -204,7 +204,7 @@ impl Executor {
             }
         } else if alias_function_source_starts_compound_body(&source) {
             while !source_has_matching_function_compound_body_end(&source) {
-                let Some(next_command) = ast.commands.get(next_index) else {
+                let Some(next_command) = commands.get(next_index) else {
                     break;
                 };
                 let command_source = alias_reparse_command_source(next_command);
@@ -239,10 +239,10 @@ impl Executor {
 
     pub(in crate::executor) fn execute_alias_introduced_time(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
-        let Some(command) = ast.commands.get(index) else {
+        let Some(command) = commands.get(index) else {
             return Ok(None);
         };
         let words = self.expand_aliases(&command.words);
@@ -250,13 +250,13 @@ impl Executor {
             return Ok(None);
         }
 
-        let (source, next_index) = alias_time_source(ast, index, command, &words);
+        let (source, next_index) = alias_time_source(commands, index, command, &words);
         if let Some(time_command) = alias_time_arithmetic_command(command, &words) {
             self.execute_time_ast_command(&time_command)?;
             return Ok(Some(index + 1));
         }
         if let Some((case_command, redirect_command, next_index)) =
-            alias_time_case_command(ast, index, command, &words)
+            alias_time_case_command(commands, index, command, &words)
         {
             let time_command = alias_time_command_from_words(
                 &words,
@@ -288,13 +288,13 @@ impl Executor {
 
     pub(in crate::executor) fn execute_alias_introduced_case(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
         // TODO(parse.y/alias.c/execute_cmd.c): Same parser-stream issue as the
         // alias-introduced `for` path, narrowed to single-line `case` forms in
         // alias7.sub.
-        let Some(command) = ast.commands.get(index) else {
+        let Some(command) = commands.get(index) else {
             return Ok(None);
         };
         let words = self.expand_aliases(&command.words);
@@ -303,14 +303,14 @@ impl Executor {
         }
 
         if let Some((case_command, redirect_command, next_index)) =
-            self.alias_case_command_from_ast(ast, index, command, &words)
+            self.alias_case_command_from_ast(commands, index, command, &words)
         {
             self.execute_case_command_with_redirects(redirect_command, &case_command)?;
             return Ok(Some(next_index));
         }
 
         let (source, redirect_command, next_index) =
-            self.alias_case_source(ast, index, command, &words);
+            self.alias_case_source(commands, index, command, &words);
         let tokens = crate::lexer::tokenize_with_options(
             &source,
             crate::lexer::TokenizeOptions {
@@ -338,10 +338,10 @@ impl Executor {
 
     pub(in crate::executor) fn execute_alias_introduced_coproc(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
-        let Some(command) = ast.commands.get(index) else {
+        let Some(command) = commands.get(index) else {
             return Ok(None);
         };
         let words = self.expand_aliases(&command.words);
@@ -356,7 +356,7 @@ impl Executor {
         append_source_redirects(&mut source, command);
         let mut next_index = index + 1;
         if alias_coproc_needs_following_body(&words) {
-            if let Some(next_command) = ast.commands.get(next_index) {
+            if let Some(next_command) = commands.get(next_index) {
                 if command_is_coproc_body_candidate(next_command) {
                     source.push(' ');
                     source.push_str(&bash_command_source_text(next_command));
@@ -387,7 +387,7 @@ impl Executor {
 
     fn alias_case_command_from_ast<'a>(
         &self,
-        ast: &'a Ast,
+        commands: &'a [CommandNode],
         index: usize,
         command: &'a CommandNode,
         words: &'a [String],
@@ -408,7 +408,7 @@ impl Executor {
         let mut current_command_index = index;
         let (redirect_command, next_index) = loop {
             let patterns = collect_alias_case_patterns(
-                ast,
+                commands,
                 current_command,
                 current_command_index,
                 current_words,
@@ -416,7 +416,7 @@ impl Executor {
             )?;
             let mut body = Vec::new();
             let boundary = collect_alias_case_body(
-                ast,
+                commands,
                 patterns.command,
                 patterns.command_index,
                 patterns.words,
@@ -485,7 +485,7 @@ impl Executor {
 
     fn alias_case_source<'a>(
         &self,
-        ast: &'a Ast,
+        commands: &'a [CommandNode],
         index: usize,
         command: &'a CommandNode,
         words: &[String],
@@ -494,8 +494,8 @@ impl Executor {
         let mut redirect_command = command;
         let mut next_index = index + 1;
 
-        for command_index in index + 1..ast.commands.len() {
-            let Some(next_command) = ast.commands.get(command_index) else {
+        for command_index in index + 1..commands.len() {
+            let Some(next_command) = commands.get(command_index) else {
                 break;
             };
             let mut command_source = bash_command_text(next_command);
@@ -522,14 +522,14 @@ impl Executor {
 
     pub(in crate::executor) fn execute_alias_heredoc(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
         if !self.alias_expansion_enabled() {
             return Ok(None);
         }
 
-        let Some(command) = ast.commands.get(index) else {
+        let Some(command) = commands.get(index) else {
             return Ok(None);
         };
         let Some(first_word) = command.words.first() else {
@@ -548,7 +548,7 @@ impl Executor {
 
         let mut next_index = index + 1;
         while let Some(delimiter) = pending_heredoc_delimiter(&source) {
-            let Some(next_command) = ast.commands.get(next_index) else {
+            let Some(next_command) = commands.get(next_index) else {
                 break;
             };
             let line = command_node_source_line(next_command);
@@ -572,8 +572,8 @@ impl Executor {
         // would execute as commands (heredoc10.sub "hello: command not
         // found").
         let tokens = crate::lexer::tokenize(&source);
-        let ast = crate::parser::parse(&tokens);
-        let result = self.execute_ast(&ast);
+        let commands = crate::parser::parse(&tokens);
+        let result = self.execute_ast(&commands);
         self.shell_state.expanding_aliases.pop();
         result?;
         Ok(Some(next_index))
@@ -593,7 +593,7 @@ fn alias_coproc_needs_following_body(words: &[String]) -> bool {
 }
 
 fn alias_group_source(
-    ast: &Ast,
+    commands: &[CommandNode],
     index: usize,
     command: &CommandNode,
     words: &[String],
@@ -607,8 +607,8 @@ fn alias_group_source(
     }
 
     let mut closed = false;
-    for command_index in index + 1..ast.commands.len() {
-        let Some(next_command) = ast.commands.get(command_index) else {
+    for command_index in index + 1..commands.len() {
+        let Some(next_command) = commands.get(command_index) else {
             break;
         };
         let command_source = alias_reparse_command_source(next_command);
@@ -632,7 +632,7 @@ fn alias_group_source(
 }
 
 fn alias_time_source(
-    ast: &Ast,
+    commands: &[CommandNode],
     index: usize,
     command: &CommandNode,
     words: &[String],
@@ -648,8 +648,8 @@ fn alias_time_source(
         return (source, next_index);
     }
 
-    for command_index in index + 1..ast.commands.len() {
-        let Some(next_command) = ast.commands.get(command_index) else {
+    for command_index in index + 1..commands.len() {
+        let Some(next_command) = commands.get(command_index) else {
             break;
         };
         let command_source = alias_reparse_command_source(next_command);
@@ -663,7 +663,7 @@ fn alias_time_source(
         }
     }
 
-    while let Some(next_command) = ast.commands.get(next_index) {
+    while let Some(next_command) = commands.get(next_index) {
         if !next_command.words.is_empty() || next_command.redirects.is_empty() {
             break;
         }
@@ -702,7 +702,7 @@ fn alias_time_compound_word_index(words: &[String]) -> Option<usize> {
 }
 
 fn alias_time_case_command<'a>(
-    ast: &'a Ast,
+    commands: &'a [CommandNode],
     index: usize,
     command: &'a CommandNode,
     words: &[String],
@@ -716,8 +716,8 @@ fn alias_time_case_command<'a>(
     let mut redirect_command = command;
     let mut next_index = index + 1;
     if !case_words.iter().any(|word| word == "esac") {
-        for command_index in index + 1..ast.commands.len() {
-            let Some(next_command) = ast.commands.get(command_index) else {
+        for command_index in index + 1..commands.len() {
+            let Some(next_command) = commands.get(command_index) else {
                 break;
             };
             case_words.extend(next_command.words.iter().cloned());

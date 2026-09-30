@@ -183,11 +183,13 @@ impl Executor {
                 &value,
             );
 
-            let body = Ast {
-                commands: for_command.body.clone(),
-            };
+            // GNU execute_for_command (execute_cmd.c:3201+) runs the body by
+            // POINTER — the COMMAND list make_cmd.c allocated once at parse
+            // is re-walked per iteration, never copied. The Vec wrapper this
+            // port used deep-cloned every body command on EVERY iteration;
+            // execute_ast_inner walks the stored slice.
             self.shell_state.loop_depth += 1;
-            let result = self.execute_ast(&body);
+            let result = self.execute_ast_inner(&for_command.body);
             self.shell_state.loop_depth -= 1;
             // GNU execute_cmd.c:3105 REAP(): dead background jobs are
             // silently reaped after every `for` body in a non-interactive

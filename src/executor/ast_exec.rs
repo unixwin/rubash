@@ -59,7 +59,7 @@ impl Executor {
 
     pub fn execute_ast(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
         if EXECUTION_LOCK_DEPTH.with(|depth| depth.get() > 0) {
-            return self.execute_ast_inner(ast);
+            return self.execute_ast_inner(&ast.commands);
         }
 
         // A fresh reader-level run: an evalerror abort still pending from a
@@ -73,7 +73,7 @@ impl Executor {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let original_dir = env::current_dir().ok();
         EXECUTION_LOCK_DEPTH.with(|depth| depth.set(1));
-        let result = self.execute_ast_inner(ast);
+        let result = self.execute_ast_inner(&ast.commands);
         EXECUTION_LOCK_DEPTH.with(|depth| depth.set(0));
         if let Some(original_dir) = original_dir {
             let _ = env::set_current_dir(original_dir);
@@ -82,16 +82,30 @@ impl Executor {
         result
     }
 
-    pub(in crate::executor) fn execute_ast_inner(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
+    /// Execute a borrowed command slice. GNU executes every compound body by
+    /// POINTER: execute_cmd.c:624 execute_command_internal dispatches on the
+    /// COMMAND tag of the node make_cmd.c allocated once at parse, and no
+    /// compound executor (execute_while_or_until execute_cmd.c:3801,
+    /// execute_for_command, execute_case_command, execute_function
+    /// execute_cmd.c:5200) copies its body — `while`/`for` iterations and
+    /// nested `{ { ...; } }` groups re-walk the same commands. The Vec
+    /// wrapper this port used forced a deep `Vec<CommandNode>` clone per
+    /// compound execution (per `for` ITERATION, and O(depth^2) for nested
+    /// brace groups); this entry takes the borrowed slice so those sites can
+    /// match GNU's zero-copy walk.
+    pub(in crate::executor) fn execute_ast_inner(
+        &mut self,
+        commands: &[CommandNode],
+    ) -> Result<(), ExecuteError> {
         self.evalerror_exec_depth
             .set(self.evalerror_exec_depth.get() + 1);
-        let result = self.execute_ast_inner_body(ast);
+        let result = self.execute_ast_inner_body(commands);
         self.evalerror_exec_depth
             .set(self.evalerror_exec_depth.get().saturating_sub(1));
         result
     }
 
-    fn execute_ast_inner_body(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
+    fn execute_ast_inner_body(&mut self, commands: &[CommandNode]) -> Result<(), ExecuteError> {
         let mut index = 0;
         // GNU execute_cmd.c:1576 execute_in_subshell: the forked child's
         // whole mutable state is a copy of the parent's. The flat `( )`
@@ -149,10 +163,10 @@ impl Executor {
                 self.exit_code = code;
                 // The region is dead: fast-forward to its closing command.
                 // If none exists the region is malformed — keep unwinding.
-                while index + 1 < ast.commands.len() && !ast.commands[index + 1].subshell_end {
+                while index + 1 < commands.len() && !commands[index + 1].subshell_end {
                     index += 1;
                 }
-                if index + 1 < ast.commands.len() {
+                if index + 1 < commands.len() {
                     index += 1;
                 } else if !$command.subshell_end {
                     return Err(ExecuteError::ExitCode(code));
@@ -185,8 +199,8 @@ impl Executor {
             }};
         }
 
-        while index < ast.commands.len() {
-            let command = &ast.commands[index];
+        while index < commands.len() {
+            let command = &commands[index];
             // GNU execute_cmd.c:652-656: `!` adds CMD_IGNORE_RETURN to the
             // command under exit_immediately_on_error, so its status never
             // satisfies errexit. The grouped drivers re-check
@@ -353,8 +367,8 @@ impl Executor {
                 // Feed subshell group stdin redirect to all body commands;
                 // FUNCTION_STDIN lives in env_vars, so the wholesale state
                 // restore at the boundary reverts it.
-                for fwd in index + 1..ast.commands.len() {
-                    let c = &ast.commands[fwd];
+                for fwd in index + 1..commands.len() {
+                    let c = &commands[fwd];
                     if c.subshell_end {
                         if let Some(input) = self.command_input_redirect(c) {
                             self.shell_state
@@ -482,7 +496,9 @@ impl Executor {
                 true
             };
 
-            if let Some(next_index) = self.execute_time_prefixed_command_sequence(ast, index)? {
+            if let Some(next_index) =
+                self.execute_time_prefixed_command_sequence(commands, index)?
+            {
                 index = next_index;
                 close_subshell_region_if_ended!(command);
                 continue;
@@ -490,7 +506,7 @@ impl Executor {
 
             if alias_chain_applicable {
                 if let Some(next_index) =
-                    self.execute_alias_introduced_compound_source(ast, index)?
+                    self.execute_alias_introduced_compound_source(commands, index)?
                 {
                     index = next_index;
                     close_subshell_region_if_ended!(command);
@@ -498,35 +514,38 @@ impl Executor {
                 }
             }
 
-            if let Some(next_index) = crate::builtins::source::execute_simple_if(self, ast, index)?
+            if let Some(next_index) =
+                crate::builtins::source::execute_simple_if(self, commands, index)?
             {
                 index = next_index;
                 close_subshell_region_if_ended!(command);
                 continue;
             }
 
-            if let Some(next_index) = self.execute_simple_loop(ast, index)? {
+            if let Some(next_index) = self.execute_simple_loop(commands, index)? {
                 index = next_index;
                 close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if let Some(next_index) =
-                crate::builtins::source::execute_pipe_into_source(self, ast, index)?
+                crate::builtins::source::execute_pipe_into_source(self, commands, index)?
             {
                 index = next_index;
                 close_subshell_region_if_ended!(command);
                 continue;
             }
 
-            if let Some(next_index) = self.execute_alias_escaped_pipe(ast, index)? {
+            if let Some(next_index) = self.execute_alias_escaped_pipe(commands, index)? {
                 index = next_index;
                 close_subshell_region_if_ended!(command);
                 continue;
             }
 
             if alias_chain_applicable {
-                if let Some(next_index) = self.execute_alias_introduced_inversion(ast, index)? {
+                if let Some(next_index) =
+                    self.execute_alias_introduced_inversion(commands, index)?
+                {
                     index = next_index;
                     close_subshell_region_if_ended!(command);
                     continue;
@@ -534,7 +553,7 @@ impl Executor {
             }
 
             if alias_chain_applicable {
-                if let Some(next_index) = self.execute_alias_introduced_time(ast, index)? {
+                if let Some(next_index) = self.execute_alias_introduced_time(commands, index)? {
                     index = next_index;
                     close_subshell_region_if_ended!(command);
                     continue;
@@ -542,7 +561,7 @@ impl Executor {
             }
 
             if alias_chain_applicable {
-                if let Some(next_index) = self.execute_alias_introduced_function(ast, index)? {
+                if let Some(next_index) = self.execute_alias_introduced_function(commands, index)? {
                     index = next_index;
                     close_subshell_region_if_ended!(command);
                     continue;
@@ -550,7 +569,9 @@ impl Executor {
             }
 
             if alias_chain_applicable {
-                if let Some(next_index) = self.execute_alias_introduced_brace_group(ast, index)? {
+                if let Some(next_index) =
+                    self.execute_alias_introduced_brace_group(commands, index)?
+                {
                     index = next_index;
                     close_subshell_region_if_ended!(command);
                     continue;
@@ -558,7 +579,7 @@ impl Executor {
             }
 
             if alias_chain_applicable {
-                if let Some(next_index) = self.execute_alias_introduced_subshell(ast, index)? {
+                if let Some(next_index) = self.execute_alias_introduced_subshell(commands, index)? {
                     index = next_index;
                     close_subshell_region_if_ended!(command);
                     continue;
@@ -566,7 +587,7 @@ impl Executor {
             }
 
             if alias_chain_applicable {
-                if let Some(next_index) = self.execute_alias_introduced_for(ast, index)? {
+                if let Some(next_index) = self.execute_alias_introduced_for(commands, index)? {
                     index = next_index;
                     close_subshell_region_if_ended!(command);
                     continue;
@@ -574,7 +595,7 @@ impl Executor {
             }
 
             if alias_chain_applicable {
-                if let Some(next_index) = self.execute_alias_introduced_select(ast, index)? {
+                if let Some(next_index) = self.execute_alias_introduced_select(commands, index)? {
                     index = next_index;
                     close_subshell_region_if_ended!(command);
                     continue;
@@ -582,7 +603,7 @@ impl Executor {
             }
 
             if alias_chain_applicable {
-                if let Some(next_index) = self.execute_alias_introduced_case(ast, index)? {
+                if let Some(next_index) = self.execute_alias_introduced_case(commands, index)? {
                     index = next_index;
                     close_subshell_region_if_ended!(command);
                     continue;
@@ -590,7 +611,7 @@ impl Executor {
             }
 
             if alias_chain_applicable {
-                if let Some(next_index) = self.execute_alias_introduced_coproc(ast, index)? {
+                if let Some(next_index) = self.execute_alias_introduced_coproc(commands, index)? {
                     index = next_index;
                     close_subshell_region_if_ended!(command);
                     continue;
@@ -598,14 +619,14 @@ impl Executor {
             }
 
             if alias_chain_applicable {
-                if let Some(next_index) = self.execute_alias_heredoc(ast, index)? {
+                if let Some(next_index) = self.execute_alias_heredoc(commands, index)? {
                     index = next_index;
                     close_subshell_region_if_ended!(command);
                     continue;
                 }
             }
 
-            if let Some(next_index) = self.execute_inverted_pipeline(ast, index)? {
+            if let Some(next_index) = self.execute_inverted_pipeline(commands, index)? {
                 index = next_index;
                 close_subshell_region_if_ended!(command);
                 continue;
@@ -647,7 +668,7 @@ impl Executor {
                     }
                     Err(error) => return Err(error),
                 }
-                if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
+                if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
                     index = next_index;
                 } else {
                     index += 1;
@@ -706,7 +727,7 @@ impl Executor {
                     }
                     Err(error) => return Err(error),
                 }
-                if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
+                if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
                     index = next_index;
                 } else {
                     index += 1;
@@ -800,7 +821,7 @@ impl Executor {
                     }
                     Err(error) => return Err(error),
                 }
-                if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
+                if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
                     index = next_index;
                 } else {
                     index += 1;
@@ -889,7 +910,7 @@ impl Executor {
                 // failing simple command (trap3.sub: "trap: 8" after
                 // false | false | false; trap2.sub "exit 42 | command false").
                 self.maybe_run_error_trap(command)?;
-                if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
+                if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
                     index = next_index;
                 } else {
                     index += 1;
@@ -948,7 +969,7 @@ impl Executor {
             let brace_result = self.execute_brace_group_pipeline(command);
             match brace_result {
                 Ok(true) => {
-                    if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
+                    if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
                         index = next_index;
                     } else {
                         index += 1;
@@ -997,7 +1018,7 @@ impl Executor {
                 Err(error) => return Err(error),
             }
 
-            let simple_result = self.execute_simple_pipeline(ast, index);
+            let simple_result = self.execute_simple_pipeline(commands, index);
             match simple_result {
                 Ok(Some(next_index)) => {
                     index = next_index;
@@ -1087,7 +1108,7 @@ impl Executor {
                     }
                     let failed_line = command.line;
                     if failed_line.is_some_and(|line| line != 0) {
-                        while let Some(next) = ast.commands.get(index + 1) {
+                        while let Some(next) = commands.get(index + 1) {
                             if next.line == failed_line && !next.subshell_end {
                                 index += 1;
                             } else {
@@ -1129,10 +1150,10 @@ impl Executor {
                 // the subshell boundary instead of propagating it.
                 Err(ExecuteError::ExpansionFailure(code)) if subshell_state.is_some() => {
                     self.exit_code = code;
-                    while index + 1 < ast.commands.len() && !ast.commands[index + 1].subshell_end {
+                    while index + 1 < commands.len() && !commands[index + 1].subshell_end {
                         index += 1;
                     }
-                    if index + 1 < ast.commands.len() {
+                    if index + 1 < commands.len() {
                         index += 1;
                     }
                     if let Some(saved_state) = subshell_state.take() {
@@ -1146,7 +1167,7 @@ impl Executor {
                     // to advance to; continuing would execute the same
                     // failing command forever (and repeatedly print the
                     // heredoc EOF diagnostic).
-                    let has_subshell_end = ast.commands[index + 1..]
+                    let has_subshell_end = commands[index + 1..]
                         .iter()
                         .any(|candidate| candidate.subshell_end);
                     if !command.subshell_end && !has_subshell_end {
@@ -1209,7 +1230,7 @@ impl Executor {
                 }
             }
 
-            if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
+            if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
                 index = next_index;
             } else {
                 index += 1;
@@ -1227,14 +1248,14 @@ impl Executor {
 
     pub(in crate::executor) fn execute_inverted_pipeline(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
         // TODO(parse.y/execute_cmd.c/execute_pipeline): Bash attaches `!` to a
         // pipeline command node and executes the whole pipeline before status
         // inversion. Rubash still flattens pipelines into simple commands, so
         // cover the small status-only cases used by upstream invert.tests.
-        let Some(command) = ast.commands.get(index) else {
+        let Some(command) = commands.get(index) else {
             return Ok(None);
         };
 
@@ -1244,13 +1265,12 @@ impl Executor {
 
         let mut pipeline = vec![command];
         let mut end = index;
-        while ast
-            .commands
+        while commands
             .get(end)
             .is_some_and(|command| command.pipe.is_some())
         {
             end += 1;
-            let Some(next) = ast.commands.get(end) else {
+            let Some(next) = commands.get(end) else {
                 return Ok(None);
             };
             pipeline.push(next);

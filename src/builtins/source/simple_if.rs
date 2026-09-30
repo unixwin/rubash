@@ -8,15 +8,15 @@ use crate::parser::{Ast, CommandNode};
 
 pub fn execute_simple_if(
     executor: &mut Executor,
-    ast: &Ast,
+    commands: &[CommandNode],
     index: usize,
 ) -> Result<Option<usize>, ExecuteError> {
-    execute_simple_if_inner(executor, ast, index, false, false)
+    execute_simple_if_inner(executor, commands, index, false, false)
 }
 
 fn execute_simple_if_inner(
     executor: &mut Executor,
-    ast: &Ast,
+    commands: &[CommandNode],
     index: usize,
     output_redirects_applied: bool,
     input_redirects_applied: bool,
@@ -25,7 +25,7 @@ fn execute_simple_if_inner(
     // source-test `if` forms until the parser has IF_COM and arithmetic
     // command nodes. Bash parses these as compound commands with test or
     // arithmetic evaluation and compound-list control flow.
-    let Some(command) = ast.commands.get(index) else {
+    let Some(command) = commands.get(index) else {
         return Ok(None);
     };
     let Some(command_words) = control_words(executor, command, &["if", "elif"]) else {
@@ -36,7 +36,7 @@ fn execute_simple_if_inner(
     let inline_then = command_words.iter().position(|word| word == "then");
     let Some(then_index) = inline_then
         .map(|_| index)
-        .or_else(|| find_word_command(executor, ast, index + 1, "then"))
+        .or_else(|| find_word_command(executor, commands, index + 1, "then"))
     else {
         return Ok(None);
     };
@@ -46,8 +46,7 @@ fn execute_simple_if_inner(
         then_index + 1
     };
     let branch_scan_start = if inline_then.is_none()
-        && ast
-            .commands
+        && commands
             .get(then_index)
             .is_some_and(|command| command_tail_starts_if(executor, command, 1))
     {
@@ -55,29 +54,37 @@ fn execute_simple_if_inner(
     } else {
         body_start
     };
-    let Some(fi_index) = find_matching_fi(executor, ast, branch_scan_start) else {
+    let Some(fi_index) = find_matching_fi(executor, commands, branch_scan_start) else {
         return Ok(None);
     };
 
-    let fi_command = ast.commands.get(fi_index).expect("fi index is valid");
+    let fi_command = commands.get(fi_index).expect("fi index is valid");
     if !output_redirects_applied && command_has_output_redirects(fi_command) {
         let mut redirected = Ast {
-            commands: ast.commands[index..=fi_index].to_vec(),
+            commands: commands[index..=fi_index].to_vec(),
         };
         executor.apply_command_output_redirects(fi_command, &mut redirected)?;
-        execute_simple_if_inner(executor, &redirected, 0, true, input_redirects_applied)?;
+        execute_simple_if_inner(
+            executor,
+            &redirected.commands,
+            0,
+            true,
+            input_redirects_applied,
+        )?;
         return Ok(Some(fi_index + 1));
     }
 
     if !input_redirects_applied && command_has_input_redirects(fi_command) {
         executor.with_command_input_redirects(fi_command, |executor| {
-            execute_simple_if_inner(executor, ast, index, output_redirects_applied, true)
+            execute_simple_if_inner(executor, commands, index, output_redirects_applied, true)
         })?;
         return Ok(Some(fi_index + 1));
     }
 
-    let elif_index = find_if_branch_command(executor, ast, branch_scan_start, fi_index, "elif");
-    let else_index = find_if_branch_command(executor, ast, branch_scan_start, fi_index, "else");
+    let elif_index =
+        find_if_branch_command(executor, commands, branch_scan_start, fi_index, "elif");
+    let else_index =
+        find_if_branch_command(executor, commands, branch_scan_start, fi_index, "else");
 
     let condition_words;
     let words = if keyword == "elif" {
@@ -96,7 +103,7 @@ fn execute_simple_if_inner(
         &condition_words
     };
     let and_or_condition = if inline_then.is_none() {
-        execute_and_or_if_condition(executor, ast, index, then_index)?
+        execute_and_or_if_condition(executor, commands, index, then_index)?
     } else {
         None
     };
@@ -115,13 +122,13 @@ fn execute_simple_if_inner(
         let body_end = elif_index.or(else_index).unwrap_or(fi_index);
         let mut body_commands = Vec::new();
         if let Some(then_pos) = inline_then {
-            if let Some(command) = command_tail_from(ast.commands.get(then_index), then_pos + 1) {
+            if let Some(command) = command_tail_from(commands.get(then_index), then_pos + 1) {
                 body_commands.push(command);
             }
-        } else if let Some(command) = command_tail(ast.commands.get(then_index)) {
+        } else if let Some(command) = command_tail(commands.get(then_index)) {
             body_commands.push(command);
         }
-        body_commands.extend(ast.commands[body_start..body_end].iter().cloned());
+        body_commands.extend(commands[body_start..body_end].iter().cloned());
         let body = Ast {
             commands: normalize_inline_compound_commands(body_commands),
         };
@@ -132,7 +139,7 @@ fn execute_simple_if_inner(
     if let Some(elif_index) = elif_index {
         return execute_simple_if_inner(
             executor,
-            ast,
+            commands,
             elif_index,
             output_redirects_applied,
             input_redirects_applied,
@@ -141,10 +148,10 @@ fn execute_simple_if_inner(
 
     if let Some(else_index) = else_index {
         let mut body_commands = Vec::new();
-        if let Some(command) = command_tail(ast.commands.get(else_index)) {
+        if let Some(command) = command_tail(commands.get(else_index)) {
             body_commands.push(command);
         }
-        body_commands.extend(ast.commands[else_index + 1..fi_index].iter().cloned());
+        body_commands.extend(commands[else_index + 1..fi_index].iter().cloned());
         let body = Ast {
             commands: normalize_inline_compound_commands(body_commands),
         };
@@ -182,11 +189,11 @@ fn command_has_input_redirects(command: &CommandNode) -> bool {
 
 fn execute_and_or_if_condition(
     executor: &mut Executor,
-    ast: &Ast,
+    commands: &[CommandNode],
     index: usize,
     then_index: usize,
 ) -> Result<Option<bool>, ExecuteError> {
-    let Some(command) = ast.commands.get(index) else {
+    let Some(command) = commands.get(index) else {
         return Ok(None);
     };
     if command.and_or().is_none() && then_index <= index + 1 {
@@ -202,14 +209,16 @@ fn execute_and_or_if_condition(
     {
         first.and_or = Some(true);
     }
-    let mut commands = vec![first];
-    commands.extend(
-        ast.commands[index + 1..then_index]
+    let mut condition_commands = vec![first];
+    condition_commands.extend(
+        commands[index + 1..then_index]
             .iter()
             .filter(|command| !command.words.is_empty())
             .cloned(),
     );
-    let condition_ast = Ast { commands };
+    let condition_ast = Ast {
+        commands: condition_commands,
+    };
     executor.with_errexit_suppressed(|executor| executor.execute_ast(&condition_ast))?;
     Ok(Some(executor.last_exit_code() == 0))
 }
@@ -287,9 +296,9 @@ fn execute_command_if_condition(
     }
     condition.pipe = None;
     condition.and_or = None;
-    let ast = Ast {
+    let commands = Ast {
         commands: vec![condition],
     };
-    executor.with_errexit_suppressed(|executor| executor.execute_ast(&ast))?;
+    executor.with_errexit_suppressed(|executor| executor.execute_ast(&commands))?;
     Ok(executor.last_exit_code() == 0)
 }

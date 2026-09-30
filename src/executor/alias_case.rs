@@ -22,14 +22,14 @@ pub(super) struct AliasCasePatterns<'a> {
 }
 
 pub(super) fn collect_alias_case_patterns<'a>(
-    ast: &'a Ast,
+    commands: &'a [CommandNode],
     command: &'a CommandNode,
     command_index: usize,
     words: &'a [String],
     pattern_index: usize,
 ) -> Option<AliasCasePatterns<'a>> {
     if let Some(patterns) =
-        collect_alias_case_extglob_patterns(ast, command, command_index, words, pattern_index)
+        collect_alias_case_extglob_patterns(commands, command, command_index, words, pattern_index)
     {
         return Some(patterns);
     }
@@ -42,7 +42,7 @@ pub(super) fn collect_alias_case_patterns<'a>(
 
     while current_command.pipe.is_some() && body_start >= current_words.len() {
         let next_index = current_command_index + 1;
-        let next_command = ast.commands.get(next_index)?;
+        let next_command = commands.get(next_index)?;
         patterns.push(next_command.words.first()?.clone());
         current_command = next_command;
         current_command_index = next_index;
@@ -60,7 +60,7 @@ pub(super) fn collect_alias_case_patterns<'a>(
 }
 
 fn collect_alias_case_extglob_patterns<'a>(
-    ast: &'a Ast,
+    commands: &'a [CommandNode],
     command: &'a CommandNode,
     command_index: usize,
     words: &'a [String],
@@ -80,7 +80,7 @@ fn collect_alias_case_extglob_patterns<'a>(
     let mut current_command_index = command_index;
     loop {
         let next_index = current_command_index + 1;
-        let next_command = ast.commands.get(next_index)?;
+        let next_command = commands.get(next_index)?;
         pattern.push('|');
 
         if next_command.pipe.is_some() {
@@ -108,7 +108,7 @@ fn alias_case_extglob_prefix(word: &str) -> bool {
 }
 
 pub(super) fn collect_alias_case_body<'a>(
-    ast: &'a Ast,
+    commands: &'a [CommandNode],
     command: &'a CommandNode,
     command_index: usize,
     words: &[String],
@@ -122,8 +122,8 @@ pub(super) fn collect_alias_case_body<'a>(
     }
     push_case_body_words(command, &words[start..], body);
 
-    for next_index in command_index + 1..ast.commands.len() {
-        let next_command = ast.commands.get(next_index)?;
+    for next_index in command_index + 1..commands.len() {
+        let next_command = commands.get(next_index)?;
         if let Some(boundary) = case_boundary_word_index(next_command) {
             push_case_body_words(next_command, &next_command.words[..boundary], body);
             return Some(alias_case_boundary(

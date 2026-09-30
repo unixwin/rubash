@@ -106,13 +106,13 @@ impl Executor {
 
             let mut command = command.clone();
             command.and_or = None;
-            let ast = Ast {
+            let commands = Ast {
                 commands: vec![command],
             };
             if index < and_or_list.connectors.len() {
-                self.with_errexit_suppressed(|executor| executor.execute_ast(&ast))?;
+                self.with_errexit_suppressed(|executor| executor.execute_ast(&commands))?;
             } else {
-                self.execute_ast(&ast)?;
+                self.execute_ast(&commands)?;
             }
         }
         Ok(())
@@ -137,8 +137,7 @@ impl Executor {
                 .collect();
             stage.words = self.expand_aliases_with_raw(&stage.words, &raws);
         }
-        let ast = Ast { commands: stages };
-        self.execute_simple_pipeline(&ast, 0)?.ok_or_else(|| {
+        self.execute_simple_pipeline(&stages, 0)?.ok_or_else(|| {
             ExecuteError::UnknownBuiltin("pipeline command could not execute".to_string())
         })?;
         Ok(())
@@ -159,18 +158,80 @@ impl Executor {
                     .stdin_redir
                     .set(command.redirects.iter().any(redirect_updates_stdin_redir));
             }
-            let mut redirect_command = command.clone();
-            let group_outputs =
-                self.materialize_compound_output_process_substitutions(&mut redirect_command)?;
-            let mut body = brace_group.body.clone();
-            self.apply_brace_group_redirects(&redirect_command, &mut body)?;
-            let ast = Ast { commands: body };
+            // GNU walks the group body by POINTER (execute_command_internal
+            // on the COMMAND allocated once at parse; make_cmd.c never
+            // copies). The two deep clones this port paid per brace group —
+            // command.clone() plus brace_group.body.clone() — are O(depth^2)
+            // for nested `{ { ...; } }` (level k copies the remaining
+            // depth-k CommandNodes, ~2.2 KB each) and are taken only to feed
+            // mutations that happen exclusively under the two gates below:
+            //
+            // 1. materialize_compound_output_process_substitutions rewrites a
+            //    redirect target only when it starts with `>(` (both of its
+            //    arms, shared_combined_output_process_substitution and
+            //    materialize_compound_output_redirect, require that prefix);
+            //    with no such target the call is the identity returning an
+            //    empty vec, so the command is borrowed unchanged.
+            // 2. apply_brace_group_redirects splices into the body only for
+            //    a stdio-slot redirect (redirect_out/append with fd==1,
+            //    redirect_err/redirect_err_append with fd==2 — exactly its
+            //    four `if let` admissions); with none, the body slice is
+            //    executed as-is.
+            // Both gates are necessary conditions of the mutation arms
+            // themselves (rubash#117 whitelist discipline): a false negative
+            // is impossible, and a redirect-free group (the common case)
+            // skips both clones.
+            let redirect_needs_ps_rewrite = [
+                command.redirect_out.as_ref(),
+                command.append.as_ref(),
+                command.redirect_err.as_ref(),
+                command.redirect_err_append.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|redirect| redirect.target.starts_with(">("));
+            let mut redirect_owned;
+            let group_outputs;
+            let redirect_command: &CommandNode = if redirect_needs_ps_rewrite {
+                redirect_owned = command.clone();
+                group_outputs =
+                    self.materialize_compound_output_process_substitutions(&mut redirect_owned)?;
+                &redirect_owned
+            } else {
+                group_outputs = Vec::new();
+                command
+            };
+            let brace_splice_needed = command
+                .redirect_out
+                .as_ref()
+                .is_some_and(|r| r.fd.unwrap_or(1) == 1)
+                || command
+                    .append
+                    .as_ref()
+                    .is_some_and(|r| r.fd.unwrap_or(1) == 1)
+                || command
+                    .redirect_err
+                    .as_ref()
+                    .is_some_and(|r| r.fd.unwrap_or(2) == 2)
+                || command
+                    .redirect_err_append
+                    .as_ref()
+                    .is_some_and(|r| r.fd.unwrap_or(2) == 2);
+            let mut body_owned;
+            let body: &[CommandNode] = if brace_splice_needed {
+                body_owned = brace_group.body.clone();
+                self.apply_brace_group_redirects(redirect_command, &mut body_owned)?;
+                &body_owned
+            } else {
+                &brace_group.body
+            };
             // `{ list; } N<<EOF` keeps the numbered heredoc fd open for the
             // whole group (redir.c do_redirection_internal applies compound
             // redirections once), like with_loop_fd_heredocs does for loops.
             let result = self.with_loop_fd_heredocs(command, |executor| {
-                executor
-                    .with_command_input_redirects(command, |executor| executor.execute_ast(&ast))
+                executor.with_command_input_redirects(command, |executor| {
+                    executor.execute_ast_inner(body)
+                })
             });
             // GNU Bash 5.2 (probes y1/y3, 2026-08-24): a word-expansion failure
             // inside a brace group ends only the group tail. The command
@@ -238,8 +299,8 @@ impl Executor {
             .unwrap_or(1);
         let tokens =
             crate::lexer::tokenize_comsub_body(inner, self.posix_mode_enabled(), start_line, false);
-        let ast = crate::parser::parse(&tokens);
-        self.execute_ast(&ast)?;
+        let commands = crate::parser::parse(&tokens);
+        self.execute_ast(&commands)?;
         Ok(true)
     }
 
@@ -342,35 +403,34 @@ impl Executor {
 
     pub(in crate::executor) fn execute_simple_pipeline(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
-        let Some(first) = ast.commands.get(index) else {
+        let Some(first) = commands.get(index) else {
             return Ok(None);
         };
         if first.pipe.is_none() {
             return Ok(None);
         }
 
-        let mut commands = vec![first];
+        let mut pipeline = vec![first];
         let mut end = index;
-        while ast
-            .commands
+        while commands
             .get(end)
             .is_some_and(|command| command.pipe.is_some())
         {
             end += 1;
-            let Some(command) = ast.commands.get(end) else {
+            let Some(command) = commands.get(end) else {
                 return Ok(None);
             };
-            commands.push(command);
+            pipeline.push(command);
         }
         // GNU parse.y:1470-1487: `cmd1 |& cmd2` desugars at PARSE time into
         // `cmd1 2>&1 | cmd2` — a r_duplicating_output redirect (redirector 2,
         // destination 1) APPENDED to cmd1's redirect list. execute_pipeline
         // binds the pipe to the element's fd 1 first (execute_cmd.c:2702
-        // passes fildes[1] as pipe_out), so the appended dup lands fd 2 on
-        // the SAME pipe open description fd 1 holds (redir.c:1169-1170
+        // passes fildes[1] as pipe_out), so the appended dup lands fd 2 on the
+        // SAME pipe open description fd 1 holds (redir.c:1169-1170
         // `2>&1 means dup2 (1, 2)`), and the element's merged bytes
         // interleave in true write order through that one pipe. rubash's
         // parser carries `|&` as pipe == Some(2); normalize every stage to
@@ -378,7 +438,7 @@ impl Executor {
         // redirect injector, the ordered stage routing, the external stdio
         // planner, the concurrent-path admissions — see one form and no
         // consumer needs a `|&` special case.
-        let normalized: Vec<CommandNode> = commands
+        let normalized: Vec<CommandNode> = pipeline
             .iter()
             .map(|command| normalize_pipeerr_stage(command))
             .collect();

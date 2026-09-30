@@ -289,10 +289,10 @@ impl Executor {
         &mut self,
         inverted_command: &InvertedCommand,
     ) -> Result<(), ExecuteError> {
-        let ast = Ast {
+        let commands = Ast {
             commands: vec![(*inverted_command.command).clone()],
         };
-        self.with_errexit_suppressed(|executor| executor.execute_ast(&ast))?;
+        self.with_errexit_suppressed(|executor| executor.execute_ast(&commands))?;
         self.exit_code = invert_exit_status(self.exit_code);
         Ok(())
     }
@@ -1052,10 +1052,10 @@ impl Executor {
 
     pub(in crate::executor) fn execute_time_prefixed_command_sequence(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
-        let Some(command) = ast.commands.get(index) else {
+        let Some(command) = commands.get(index) else {
             return Ok(None);
         };
         let Some(prefix) = time_prefix_parts(&command.words) else {
@@ -1069,7 +1069,7 @@ impl Executor {
         }
 
         let mut timed_ast = Ast {
-            commands: ast.commands[index..].to_vec(),
+            commands: commands[index..].to_vec(),
         };
         if let Some(first) = timed_ast.commands.first_mut() {
             first.words = command.words[prefix.command_index..].to_vec();
@@ -1083,8 +1083,8 @@ impl Executor {
 
         let started = time_command_started();
         let next_index = match timed_ast.commands[0].words.first().map(String::as_str) {
-            Some("if") => crate::builtins::source::execute_simple_if(self, &timed_ast, 0)?,
-            Some("while" | "until") => self.execute_simple_loop(&timed_ast, 0)?,
+            Some("if") => crate::builtins::source::execute_simple_if(self, &timed_ast.commands, 0)?,
+            Some("while" | "until") => self.execute_simple_loop(&timed_ast.commands, 0)?,
             _ => None,
         };
         let Some(next_index) = next_index else {
@@ -1265,7 +1265,7 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if self.if_command_needs_alias_scan(if_command) {
             let flat = flatten_if_command_for_alias_scan(cmd, if_command);
-            crate::builtins::source::execute_simple_if(self, &Ast { commands: flat }, 0)?;
+            crate::builtins::source::execute_simple_if(self, &flat, 0)?;
             return Ok(());
         }
 
@@ -1342,15 +1342,43 @@ impl Executor {
         self.shell_state.subshell_depth.set(saved_depth + 1);
         self.shell_state.loop_depth = 0;
 
-        let mut redirect_cmd = cmd.clone();
-        let group_outputs =
-            self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
-        let mut body = Ast {
-            commands: subshell_command.body.clone(),
+        // GNU executes the `( list )` body by POINTER (execute_in_subshell
+        // walks the Subshell->command the parser allocated once; make_cmd.c
+        // never copies). The clones below exist only to feed mutations:
+        // materialize_compound_output_process_substitutions rewrites a
+        // target only when it starts with `>(` (both arms require that
+        // prefix — see execute_brace_group_pipeline), and
+        // apply_command_output_redirects splices into the body only for a
+        // stdio-slot redirect; with neither, the stored slice runs as-is.
+        let redirect_needs_ps_rewrite = [
+            cmd.redirect_out.as_ref(),
+            cmd.append.as_ref(),
+            cmd.redirect_err.as_ref(),
+            cmd.redirect_err_append.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|redirect| redirect.target.starts_with(">("));
+        let mut redirect_owned;
+        let group_outputs;
+        let redirect_cmd: &CommandNode = if redirect_needs_ps_rewrite {
+            redirect_owned = cmd.clone();
+            group_outputs =
+                self.materialize_compound_output_process_substitutions(&mut redirect_owned)?;
+            &redirect_owned
+        } else {
+            group_outputs = Vec::new();
+            cmd
         };
         // Numbered redirects are duplicated in parser stdio fields. Keep only
         // true stdio fields in compound preparation; the original redirect
-        // list is applied to each body command below.
+        // list is applied to each body command below. Conservative admission:
+        // any stdio slot present means apply_command_output_redirects may
+        // splice, so the body is copied; a slot-free subshell borrows.
+        let body_splice_needed = cmd.redirect_out.is_some()
+            || cmd.append.is_some()
+            || cmd.redirect_err.is_some()
+            || cmd.redirect_err_append.is_some();
         let mut stdio_redirect_cmd = redirect_cmd.clone();
         let is_numbered = |redirect: &Redirect| {
             redirect
@@ -1390,7 +1418,15 @@ impl Executor {
         {
             stdio_redirect_cmd.redirect_err_append = None;
         }
-        self.apply_command_output_redirects(&stdio_redirect_cmd, &mut body)?;
+        let mut body_owned: Option<Vec<CommandNode>> = None;
+        if body_splice_needed {
+            let mut body_ast = Ast {
+                commands: subshell_command.body.clone(),
+            };
+            self.apply_command_output_redirects(&stdio_redirect_cmd, &mut body_ast)?;
+            body_owned = Some(body_ast.commands);
+        }
+        let body: &[CommandNode] = body_owned.as_deref().unwrap_or(&subshell_command.body);
         // GNU execute_cmd.c resolves subshell redirections in the parent
         // context before the body runs: expand and anchor relative file
         // targets now, or a `cd` in the body relocates them (niubash#118).
@@ -1415,7 +1451,7 @@ impl Executor {
         let result = self.with_loop_fd_heredocs(cmd, |executor| {
             executor.with_ambient_line(subshell_line, |executor| {
                 executor.with_command_input_redirects(cmd, |executor| {
-                    let body_result = executor.execute_ast(&body);
+                    let body_result = executor.execute_ast_inner(body);
                     // GNU execute_cmd.c execute_in_subshell: expr.c
                     // evalerror's jump_to_top_level(DISCARD) reaches only the
                     // forked subshell's own top level — the abort dies with
@@ -1489,14 +1525,24 @@ impl Executor {
     fn execute_loop_command(&mut self, loop_command: &LoopCommand) -> Result<(), ExecuteError> {
         let mut ran_body = false;
         let mut last_body_status = 0;
-        let condition = Ast {
-            commands: loop_command.condition.clone(),
-        };
-        let body = Ast {
-            commands: crate::builtins::source::normalize_inline_compound_commands(
-                loop_command.body.clone(),
-            ),
-        };
+        // GNU execute_while_or_until (execute_cmd.c:3801+) walks BOTH the
+        // condition and the body by POINTER — the COMMAND lists make_cmd.c
+        // allocated once at parse are re-walked per iteration, never copied.
+        // The clones this port paid once per loop (condition Vec clone plus
+        // the body's normalize rewrite) reduce to: no clone for the
+        // condition, and a body copy only when normalize_inline_compound_
+        // commands would actually rewrite something. Its ONLY rewrite arm
+        // (inline_arithmetic_for_command, builtins/source/flow.rs) requires a
+        // command whose first word is literally `for`; a body with no such
+        // word normalizes to itself, so the stored slice executes as-is.
+        let body_needs_normalize = loop_command
+            .body
+            .iter()
+            .any(|command| command.words.first().map(String::as_str) == Some("for"));
+        let body_owned = body_needs_normalize.then(|| {
+            crate::builtins::source::normalize_inline_compound_commands(loop_command.body.clone())
+        });
+        let body: &[CommandNode] = body_owned.as_deref().unwrap_or(&loop_command.body);
 
         loop {
             // GNU execute_cmd.c:3801 (execute_while_or_until) increments
@@ -1504,8 +1550,9 @@ impl Executor {
             // `continue` anywhere in the loop CONDITION are in-loop
             // (modernish bin/modernish:866 `while case $# in (0) break;;`).
             self.shell_state.loop_depth += 1;
-            let condition_result =
-                self.with_errexit_suppressed(|executor| executor.execute_ast(&condition));
+            let condition_result = self.with_errexit_suppressed(|executor| {
+                executor.execute_ast_inner(&loop_command.condition)
+            });
             self.shell_state.loop_depth -= 1;
             match condition_result {
                 Ok(()) => {}
@@ -1540,7 +1587,7 @@ impl Executor {
 
             ran_body = true;
             self.shell_state.loop_depth += 1;
-            let result = self.execute_ast(&body);
+            let result = self.execute_ast_inner(body);
             self.shell_state.loop_depth -= 1;
             self.run_pending_signal_traps()?;
             match result {
@@ -1656,11 +1703,11 @@ impl Executor {
             None => return Ok(()),
         };
         if matched {
-            return self.execute_ast(&Ast {
-                commands: crate::builtins::source::normalize_inline_compound_commands(
-                    if_command.then_body.clone(),
-                ),
-            });
+            // GNU execute_if_command (execute_cmd.c:5200 family) walks the
+            // branch body by POINTER; the normalize pass only rewrites
+            // lexer-collapsed `for ((...))` words (first word `for`), so a
+            // body without one executes the stored slice without the clone.
+            return self.execute_if_branch_body(&if_command.then_body);
         }
 
         for branch in &if_command.elif_branches {
@@ -1669,22 +1716,33 @@ impl Executor {
                 None => return Ok(()),
             };
             if matched {
-                return self.execute_ast(&Ast {
-                    commands: crate::builtins::source::normalize_inline_compound_commands(
-                        branch.body.clone(),
-                    ),
-                });
+                return self.execute_if_branch_body(&branch.body);
             }
         }
 
         if let Some(body) = &if_command.else_body {
-            return self.execute_ast(&Ast {
-                commands: crate::builtins::source::normalize_inline_compound_commands(body.clone()),
-            });
+            return self.execute_if_branch_body(body);
         }
 
         self.exit_code = 0;
         Ok(())
+    }
+
+    /// GNU runs if/elif/else bodies by POINTER (execute_cmd.c:5200+; no
+    /// compound executor copies its body). The stored slice executes
+    /// directly unless the inline-arithmetic-for normalize pass would
+    /// rewrite it (its only arm needs a `for` first word — see
+    /// normalize_inline_compound_commands, builtins/source/flow.rs).
+    fn execute_if_branch_body(&mut self, body: &[CommandNode]) -> Result<(), ExecuteError> {
+        if body
+            .iter()
+            .any(|command| command.words.first().map(String::as_str) == Some("for"))
+        {
+            let normalized =
+                crate::builtins::source::normalize_inline_compound_commands(body.to_vec());
+            return self.execute_ast_inner(&normalized);
+        }
+        self.execute_ast_inner(body)
     }
 
     /// Returns `None` when a word-expansion failure abandoned the whole
@@ -1693,11 +1751,11 @@ impl Executor {
         &mut self,
         condition: &[CommandNode],
     ) -> Result<Option<bool>, ExecuteError> {
-        let ast = Ast {
-            commands: condition.to_vec(),
-        };
+        // GNU evaluates the condition list by pointer (execute_cmd.c:5200
+        // execute_if_command -> execute_command on the stored COMMAND); the
+        // slice entry re-walks the stored nodes without the Vec clone.
         let saved_condition = self.inside_compound_condition.replace(true);
-        let result = self.with_errexit_suppressed(|executor| executor.execute_ast(&ast));
+        let result = self.with_errexit_suppressed(|executor| executor.execute_ast_inner(condition));
         self.inside_compound_condition.set(saved_condition);
         match result {
             Err(ExecuteError::ExpansionFailure(code)) => {
@@ -2219,10 +2277,9 @@ impl Executor {
                 if clause.body.is_empty() {
                     self.exit_code = 0;
                 } else {
-                    let body = Ast {
-                        commands: clause.body.clone(),
-                    };
-                    self.execute_ast(&body)?;
+                    // GNU execute_case_command (execute_cmd.c:5200 family)
+                    // walks the clause body by POINTER; no clone is taken.
+                    self.execute_ast_inner(&clause.body)?;
                 }
                 match clause.terminator {
                     CaseTerminator::Break => return Ok(()),

@@ -4,16 +4,16 @@ use super::*;
 impl Executor {
     pub(in crate::executor) fn execute_alias_introduced_arithmetic_for(
         &mut self,
-        ast: &Ast,
+        commands: &[CommandNode],
         command_index: usize,
         words: &[String],
     ) -> Result<Option<usize>, ExecuteError> {
         let Some((arithmetic, body_index)) =
-            self.alias_arithmetic_for_header(ast, command_index, words)
+            self.alias_arithmetic_for_header(commands, command_index, words)
         else {
             return Ok(None);
         };
-        let Some(body_command) = ast.commands.get(body_index) else {
+        let Some(body_command) = commands.get(body_index) else {
             return Ok(None);
         };
 
@@ -28,7 +28,8 @@ impl Executor {
         }
 
         let initial_depth = self.embedded_do_loop_depth(body_command);
-        let Some(done_index) = self.find_matching_done_command(ast, body_index + 1, initial_depth)
+        let Some(done_index) =
+            self.find_matching_done_command(commands, body_index + 1, initial_depth)
         else {
             return Ok(None);
         };
@@ -39,20 +40,20 @@ impl Executor {
             first_body_command.words = first_body_command.words[1..].to_vec();
             body.push(first_body_command);
         }
-        body.extend(ast.commands[body_index + 1..done_index].iter().cloned());
+        body.extend(commands[body_index + 1..done_index].iter().cloned());
 
         let for_command = alias_arithmetic_for_command(arithmetic, body);
-        let Some(done_command) = ast.commands.get(done_index) else {
+        let Some(done_command) = commands.get(done_index) else {
             return Ok(None);
         };
-        let redirect_command = ast.commands.get(done_index + 1).unwrap_or(done_command);
+        let redirect_command = commands.get(done_index + 1).unwrap_or(done_command);
         self.execute_for_command_with_redirects(&for_command, redirect_command)?;
-        Ok(Some((done_index + 2).min(ast.commands.len())))
+        Ok(Some((done_index + 2).min(commands.len())))
     }
 
     fn alias_arithmetic_for_header(
         &self,
-        ast: &Ast,
+        commands: &[CommandNode],
         command_index: usize,
         words: &[String],
     ) -> Option<(ArithmeticForCommand, usize)> {
@@ -61,12 +62,12 @@ impl Executor {
         }
 
         let mut parts = split_compact_alias_arithmetic_empty_test(alias_arithmetic_part(
-            ast.commands.get(command_index)?,
+            commands.get(command_index)?,
             &words[1..],
         ));
         let mut index = command_index + 1;
         while parts.len() < 3 {
-            let command = ast.commands.get(index)?;
+            let command = commands.get(index)?;
             if alias_arithmetic_empty_command(command) {
                 parts.push(String::new());
                 index += 1;
@@ -80,7 +81,7 @@ impl Executor {
         }
 
         if parts.len() == 2
-            && ast.commands.get(index).is_some_and(|command| {
+            && commands.get(index).is_some_and(|command| {
                 command.brace_group.is_some() || control_word(command) == Some("do")
             })
         {
@@ -91,8 +92,7 @@ impl Executor {
             return None;
         }
 
-        while ast
-            .commands
+        while commands
             .get(index)
             .is_some_and(alias_arithmetic_empty_command)
         {
