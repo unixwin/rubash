@@ -2434,3 +2434,132 @@ configure -n rc=0, stdout/stderr byte-empty on both sides.
    six fixed here, but fnbody's is_open needs a function-signature
    prefix, so no configure-family corpus is known to block on it) —
    cover it when a reproducer exists.
+
+## parse20 round (2026-09-28, wt20/parse20 on 0fe8d0fc): nested-body re-parse decomposition + if-family inline sections
+
+The "解析绑定桶" lane. The brief hypothesized configure -n's residual
+~120 ms (parser 141 + feeder 104) and nvm's parse side were dominated by
+nested-body re-parsing (parsearch: 1577 re-parses, ~150 ms; GNU inlines
+compound bodies in the same recursive-descent pass). All numbers RELEASE
+build, alternating A/B against a pristine 0fe8d0fc base binary built
+this session from master sources (private target dir, same load). Scratch
+instrumentation (env-gated phase/scan timers + atomic walk counters)
+fully removed before handoff.
+
+### Decomposition (instrumented lane binary; the brief's ask #1)
+
+nvm -n (wall ~229 ms): parse:top 64.2 ms (ONE top parse — the whole file
+is a single history group; 2130 nested parse entries, max depth 11);
+lex:all-entries 89.8 ms/491 calls/0.20 MB. Body re-parse shapes
+(inclusive): if 1218 calls/46.7 ms, case 256/22.6, fn-strict 125/56.4,
+loop 42/3.4, for 13/2.7, subshell 15/1.3; folded re-lex shapes are tiny
+(fnbody 30/3.1 ms, bracegroup 31/0.8). Boundary scans: if_section 658
+calls/32.9 ms inclusive, matching_brace 96/2.2, find_if_then 560/0.73,
+case_body_end 256/0.71. Folds (gated) 2.0 ms, extglob marking 0.6 ms.
+Walk counts: main-loop iterations 14,375 vs boundary-scan iterations
+47,982 (3.3x).
+
+configure -n (wall ~420 ms): parse:top 2481 calls/144.5 ms; nested
+entries 6793. Shapes: if 4387/255-260 ms, case 1336/77.5, for 165/35.1,
+loop 20/9.6, fn-strict 24/5.6; relex:bracegroup-folded 623/14.5.
+if_section scans 2636/241 ms inclusive. Walk counts: main loop 40,405 vs
+scans 141,631 (3.5x).
+
+**Model revision (the round's key finding).** The walk amplification is
+real (3.3-3.5x) but the scan walkers are CHEAP: after parsearch's
+Rc-threading/fold-exit/single-scan work, the double walk (scan for the
+closer + re-parse the slice) costs only ~10-25 ms on configure and ~5-10
+ms on nvm. The actual owners of the remaining wall:
+
+| Phase (configure -n) | ms | owner |
+| --- | ---: | --- |
+| driver gather (read_next_source_group family) | 178 | feeder join/re-lex loop — #281/#292 captain family (continuation.rs adjacent) |
+| feeder push_line (26331 lines) | 127 | ditto — scanners inside it only 24.7 (comsub 7.7 + compound 7.0 + quotes 5.7 + param 4.3) |
+| parse: whole | 144 | this lane's bucket, see below |
+| parse: handle_token | 84 | word intake (push_command_word 50, of which WordScans::run 31) + per-kind machinery 34 |
+| parse: try_parse_compound_start | ~52 exclusive | miss path only 8.9 (36878 misses); rest is compound-hit pre/post work |
+| noexec walk + driver + startup | ~95 | executor/driver |
+
+GNU does configure -n in ~38 ms total; its parser runs ZERO per-word
+metadata scans at parse time (words are stored once, scanned at
+expansion) and reads every token exactly once.
+
+### Landed change: if-family inline sections (the GNU single-pass model)
+
+`parse_loop.rs` + `if_command.rs` (+2 satellite caller lines in
+function_command.rs/coproc_command.rs; +388/−63 total). The main command
+loop is extracted into `run_command_loop(tokens, state, start)` (shared
+by whole parses and sections); `run_inline_section` swaps in a fresh
+command list plus the per-body balancer state the old fresh ParseState
+started with (pending_comsub 0, in_subshell false, stray-close leniency),
+runs the shared loop until the closer predicate fires, restores the
+caller's state, and applies the same fold/extglob tail the slice parse
+ran. `SectionStop::{IfCondition,IfBody}` reproduce find_if_then /
+parse_if_section's exact stop predicates (stack-is-empty +
+command_boundary_keyword_allowed + stop set); the loop's incremental
+compound-boundary stack is truncated at compound jumps (a successfully
+parsed compound's frames are net balanced, so the stack matches the
+scanner's at every stop candidate). Errored bodies fall back to the cold
+scan (scan_if_section_end / find_if_then kept) so the boundary the old
+slice parse used is preserved. GNU anchor: parse.y:1037-1054 if_command
+— the condition, `then`, the bodies and `fi` are shifted by the SAME
+yyparse run; parse.y:1264 compound_list. Satellites (function/case
+compound bodies, time-prefixed compounds) run the same engine over a
+scratch state via parse_if_command_standalone (contract-equal to the old
+parse_body_with_diagnostics fresh state).
+
+### Numbers (median of alternating A/B, steady state)
+
+| Probe | base (0fe8d0fc) | lane | note |
+| --- | ---: | ---: | --- |
+| configure -n | 415 ms | 409 ms | −1.5% |
+| 23-nvm-parse-n | 218 ms | 219 ms | flat |
+
+The walk amplification for if-sections is eliminated (the scan+slice
+double walk is gone), but the scans were cheap walkers, so the wall
+moves little. **The lane target (configure <250 ms, nvm <8x) is NOT
+reachable from the parse side alone**: the feeder join/re-lex family
+(~300 ms of configure's gather+push_line) is the #281/#292 captain
+family, and the parse-side remainder is per-word scan machinery.
+
+### Zero-semantic-change evidence
+
+- 546 lib + 27 regression + `RUSTFLAGS="-D warnings" cargo check
+  --all-targets` + cargo fmt --check, on the final clean tree.
+- 32-case 3-way matrix (GNU vs base vs lane, stdout+stderr+rc):
+  base-vs-lane byte-identical on ALL 32 (artifacts:
+  `target/issue-suites/results/parse20/cases/`); gnu-vs-lane 22/32
+  byte-identical, 10 diffs are pre-existing master diffs (identical on
+  base; error-wording/path prefix and `time` output class).
+- true-baseline.sh slices (errors/cond/func/case/comsub/quote/heredoc/
+  dstack): lane diff-vs-GNU line counts IDENTICAL to base on every
+  suite.
+- configure -n / nvm -n: rc=0, stdout+stderr byte-empty, base vs lane
+  outputs identical.
+- src/lexer/continuation.rs untouched (git diff 0 lines).
+
+### Leftovers (measured, with owners)
+
+1. **Feeder join/re-lex ~300 ms of configure -n** (gather 178 + push_line
+   non-scanner ~102): the #281/#292 resume/refuse family, parked
+   scanners' bookkeeping and the join loop's per-line re-tokenize —
+   captain family (continuation.rs exclusive). GNU reads once
+   (parse.y:3557 read_token).
+2. **Per-word parse-time scans 31 ms configure / 19 ms nvm**
+   (WordScans::run inside push_command_word): GNU runs NO parse-time
+   word scans; the parsearch-deferred triple-store/field-type churn
+   (word string stored 3x: token.value + cmd.words[i] +
+   metadata.value/.raw) is the deep fix — needs WordMetadata field-type
+   changes across 84 sites, next-round scale.
+3. **Compound-hit overhead ~43 ms configure** (try_parse_compound_start
+   exclusive beyond the miss path): pre/post body work per compound
+   (metadata assembly, finish_compound_command redirect walks).
+4. **Inline extension to case/for/loop/fn bodies**: measured scanner
+   cost is 3.2 ms (case_body_end) / <1 ms (for/loop) on configure —
+   sub-noise ROI; do it for architecture consistency only when the
+   satellite states thread naturally (parse_function_compound_body,
+   parse_time_prefixed_compound_command still use scratch states).
+5. **Errored-section extglob marking spans [start..error_i]** instead of
+   the old [start..scan_boundary] — diverges only when a body errors
+   BEFORE a `shopt -s extglob` that sits between the error and the
+   closer (no known corpus; noted for completeness).

@@ -33,6 +33,24 @@ pub(super) struct ParseState {
     pub(super) ast: Ast,
     pub(super) current_cmd: CommandNode,
     pub(super) in_subshell: bool,
+    /// ParseLoopOptions::stray_close_is_error, carried so the extracted
+    /// command loop (run_command_loop) reads it without the options bag.
+    pub(super) stray_close_is_error: bool,
+    /// Inline section parsing (GNU single-pass model): while Some, the
+    /// command loop stops at the enclosing compound's closer keyword
+    /// instead of treating it as an error/unexpected token. See
+    /// run_inline_section.
+    pub(super) section_stop: SectionStop,
+    /// The compound-boundary stack over the tokens the loop iterates on
+    /// while a section is open. A successfully parsed nested compound is
+    /// skipped wholesale (next_i jump), and its keyword frames are net
+    /// balanced, so the stack only stays non-empty for the pathological
+    /// not-consumed-compound shapes the slice scanner also shields.
+    pub(super) section_stack: Vec<&'static str>,
+    /// First token index of the open section (0 for whole parses): bounds
+    /// the backward error-helper walks so an error inside a section reads
+    /// the same tokens the old body slice contained.
+    pub(super) section_token_start: usize,
     /// Unclosed `$(` depth contributed by word tokens seen so far. The
     /// lexer does not fold every multi-line substitution (comsub-posix
     /// tests), so the matching `)` legitimately arrives later as a
@@ -69,6 +87,10 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         },
         current_cmd: CommandNode::new(),
         in_subshell: false,
+        stray_close_is_error: options.stray_close_is_error,
+        section_stop: SectionStop::None,
+        section_stack: Vec::new(),
+        section_token_start: 0,
         pending_comsub: 0,
         diagnostic_text: options
             .diagnostic_text
@@ -77,8 +99,45 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         source_line_offset: options.source_line_offset,
     };
 
-    let mut i = 0;
+    run_command_loop(tokens, &mut state, 0);
+
+    if !command_is_empty(&state.current_cmd) {
+        state.ast.commands.push(state.current_cmd);
+    }
+    state.ast.commands = fold_command_list(state.ast.commands);
+    mark_parse_time_extglob_errors(&mut state.ast, tokens);
+    state.ast
+}
+
+/// The command-list loop shared by whole parses and inline sections (GNU
+/// parse.y:1264 list grammar): walks `tokens` from `start`, pushing
+/// completed commands into `state.ast.commands`. Returns the index it
+/// stopped at — tokens.len() when the input ran out, or the closer token
+/// that ended an open section (state.section_stop). GNU anchor: GNU's
+/// parser consumes a compound body's tokens with the SAME yyparse run
+/// (parse.y:1037-1054 if_command: the body is a compound_list shifted
+/// from the live token stream) — this runner is that shared pass; the
+/// old model re-walked every body once to find its closer and again to
+/// parse it, which multiplied token work by the nesting depth.
+pub(super) fn run_command_loop(tokens: &[Token], state: &mut ParseState, start: usize) -> usize {
+    state.section_token_start = start;
+    let mut i = start;
     while i < tokens.len() {
+        let section_stack_before = state.section_stack.len();
+        // Inline-section closer check (GNU grammar position): the slice
+        // scanner this replaces (parse_if_section & siblings) stopped at
+        // exactly the tokens matching `stack.is_empty() &&
+        // boundary-allowed keyword in stop set`; the loop only iterates
+        // section-level tokens (nested compounds are skipped via next_i
+        // jumps and their keyword frames are net balanced — see the
+        // truncate after try_parse_compound_start), so this predicate
+        // fires on the same token the scanner chose.
+        if state.section_stop != SectionStop::None && section_stop_hit(tokens, i, state) {
+            return i;
+        }
+        if state.section_stop != SectionStop::None {
+            update_compound_boundary_stack(tokens, i, &mut state.section_stack);
+        }
         // A word token whose text ends inside an unclosed `$(` leaves its
         // `)` closer to arrive as a later top-level token.
         if matches!(
@@ -142,11 +201,11 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         // main loop is stray — at command start (`f() { ;; }') or
         // mid-command (`echo ;;'), where GNU's grammar also rejects it.
         if (matches!(tokens[i].raw.as_str(), ";;" | ";&" | ";;;&"))
-            || (options.stray_close_is_error
+            || (state.stray_close_is_error
                 && super::is_unquoted_operator(&tokens[i], ")")
                 && !state.in_subshell)
         {
-            push_unexpected_token_error(&mut state, tokens, i);
+            push_unexpected_token_error(state, tokens, i);
             break;
         }
 
@@ -164,13 +223,13 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         // word operand also cannot precede a separator (`echo > ;').
         if matches!(tokens[i].kind, TokenKind::Semicolon | TokenKind::Background)
             && !tokens[i].line_break
-            && separator_lacks_preceding_command(tokens, i)
+            && separator_lacks_preceding_command(tokens, i, state.section_token_start)
         {
-            push_unexpected_token_error(&mut state, tokens, i);
+            push_unexpected_token_error(state, tokens, i);
             break;
         }
 
-        if let Some(next_i) = try_parse_compound_start(tokens, i, &mut state) {
+        if let Some(next_i) = try_parse_compound_start(tokens, i, state) {
             // GNU parse.y: a complete compound command (including its
             // trailing redirections) must be followed by a command
             // connector — ';', '&', a newline, '|', '&&' or '||'. A token
@@ -255,7 +314,7 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
                     )
                 })
             {
-                push_unexpected_token_error(&mut state, tokens, next_i);
+                push_unexpected_token_error(state, tokens, next_i);
                 break;
             }
             // A folded compound whose body carries a parse-error node fails
@@ -292,21 +351,29 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
                 state.ast.commands.push(error);
                 break;
             }
+            // A successfully parsed compound's keyword frames are net
+            // balanced (`if..fi`, `case..esac`, `{..}`), exactly like the
+            // slice scanner's stack after walking the same region, so the
+            // frames this iteration's opener pushed are discarded instead
+            // of being left open (which would suppress every later stop).
+            state.section_stack.truncate(section_stack_before);
             i = next_i;
             continue;
         }
-
-        match handle_token(tokens, &mut i, &mut state) {
+        match handle_token(tokens, &mut i, state) {
             TokenAction::Advance => i += 1,
             TokenAction::Continue => continue,
             TokenAction::Break => break,
         }
     }
 
-    if !command_is_empty(&state.current_cmd) {
-        state.ast.commands.push(state.current_cmd);
-    }
+    i
+}
 
+/// The post-loop fold passes over one command list (whole parse or inline
+/// section body): gated exactly as when they lived inline in
+/// parse_with_options.
+pub(super) fn fold_command_list(commands: Vec<CommandNode>) -> Vec<CommandNode> {
     // Fast-exit admissions: each fold below is a whole-list pass whose map
     // is the identity for commands lacking its trigger field, so a list
     // with no trigger anywhere returns unchanged — skipping the
@@ -318,15 +385,11 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
     // trigger at all; the six unconditional passes cost 468ms of its
     // 848ms parse phase.)
 
-    let has_pipeline = state
-        .ast
-        .commands
-        .iter()
-        .any(|command| command.pipe.is_some());
+    let has_pipeline = commands.iter().any(|command| command.pipe.is_some());
     let c = if has_pipeline {
-        fold_pipeline_commands(state.ast.commands)
+        fold_pipeline_commands(commands)
     } else {
-        state.ast.commands
+        commands
     };
     // time_prefix_from_command fires only when a command's first word is
     // the literal `time'; fold_time_pipeline_commands looks through
@@ -364,20 +427,162 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         c
     };
     let has_background = c.iter().any(|command| command.background);
-    let c = if has_background {
+    if has_background {
         fold_background_commands(c)
     } else {
         c
-    };
-    state.ast.commands = c;
-    mark_parse_time_extglob_errors(&mut state.ast, tokens);
-    state.ast
+    }
 }
 
 /// The innermost `__RUBASH_PARSE_ERROR__`-marked command inside a folded
 /// compound's body (brace group, function body, case clause bodies), or the
 /// command itself when it is the error node. The main loop uses this to fail
 /// the whole logical line the way GNU's yyparse does.
+/// Which closer set an inline section stops at. Mirrors the stop sets of
+/// the slice scanners this replaces (find_if_then / parse_if_section).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SectionStop {
+    None,
+    /// An `if`/`elif` condition: stops at the `then` keyword.
+    IfCondition,
+    /// A `then`/`elif`/`else` body: stops at `fi`/`done`/`esac` (value
+    /// match) or `elif`/`else` (keyword match); `then` marks the
+    /// construct-invalid abort the scanner reported as None.
+    IfBody,
+}
+
+/// Whether `tokens[index]` is the closer the open section stops at. The
+/// predicate is the slice scanner's own stop test (stack empty +
+/// command_boundary_keyword_allowed + stop set), evaluated on the loop's
+/// iteration points — the same tokens the scanner walked.
+fn section_stop_hit(tokens: &[Token], index: usize, state: &ParseState) -> bool {
+    if !state.section_stack.is_empty() {
+        return false;
+    }
+    if !super::command_boundary_keyword_allowed(tokens, index) {
+        return false;
+    }
+    let token = &tokens[index];
+    match state.section_stop {
+        SectionStop::None => false,
+        SectionStop::IfCondition => is_keyword(tokens, index, "then"),
+        SectionStop::IfBody => {
+            matches!(token.value.as_str(), "fi" | "done" | "esac")
+                || is_keyword(tokens, index, "elif")
+                || is_keyword(tokens, index, "else")
+                || is_keyword(tokens, index, "then")
+        }
+    }
+}
+
+/// How an inline section ended.
+pub(super) enum SectionOutcome {
+    /// Stopped at the closer token; `index` IS the closer (not consumed).
+    Ended {
+        body: Vec<CommandNode>,
+        index: usize,
+    },
+    /// Input ran out before any closer (the scanner's None-by-EOF).
+    Eof { body: Vec<CommandNode> },
+    /// The loop broke on a parse error before the closer; the body's last
+    /// command carries the error node (the scanner still knew the real
+    /// boundary — callers recover it with the cold scanner when needed).
+    Errored { body: Vec<CommandNode> },
+    /// `then` arrived where a body was expected (parse_if_section's
+    /// return-None abort).
+    AbortedThen {
+        body: Vec<CommandNode>,
+        index: usize,
+    },
+}
+
+/// Parse one compound-body section inline in the caller's parse state
+/// (GNU parse.y: the body of `if COND; then BODY; fi` is a compound_list
+/// consumed by the SAME yyparse run — parse.y:1037-1054 — not a re-scan
+/// plus a re-parse of a sliced copy). Swaps in a fresh command list (and
+/// the per-body balancer state the old fresh ParseState started with:
+/// pending_comsub 0, in_subshell false, stray-close leniency), runs the
+/// shared command loop until the closer predicate fires, restores the
+/// caller's state, and applies the same fold/extglob tail the slice
+/// parse ran over its body slice.
+pub(super) fn run_inline_section(
+    tokens: &[Token],
+    state: &mut ParseState,
+    start: usize,
+    stop: SectionStop,
+) -> SectionOutcome {
+    let saved_commands = std::mem::take(&mut state.ast.commands);
+    let saved_current = std::mem::take(&mut state.current_cmd);
+    let saved_pending_comsub = state.pending_comsub;
+    let saved_in_subshell = state.in_subshell;
+    let saved_stray = state.stray_close_is_error;
+    let saved_stop = state.section_stop;
+    let saved_stack = std::mem::take(&mut state.section_stack);
+    let saved_start = state.section_token_start;
+
+    state.pending_comsub = 0;
+    state.in_subshell = false;
+    state.stray_close_is_error = false;
+    state.section_stop = stop;
+
+    let i = run_command_loop(tokens, state, start);
+
+    // Classify with the SECTION state still armed (the restored caller
+    // state below must not influence the closer predicate).
+    let at_eof = i >= tokens.len();
+    let aborted_then = !at_eof
+        && stop == SectionStop::IfBody
+        && state.section_stack.is_empty()
+        && super::command_boundary_keyword_allowed(tokens, i)
+        && is_keyword(tokens, i, "then");
+    let ended = !at_eof
+        && !aborted_then
+        && state.section_stack.is_empty()
+        && super::command_boundary_keyword_allowed(tokens, i)
+        && match stop {
+            SectionStop::None => false,
+            SectionStop::IfCondition => is_keyword(tokens, i, "then"),
+            SectionStop::IfBody => {
+                matches!(tokens[i].value.as_str(), "fi" | "done" | "esac")
+                    || is_keyword(tokens, i, "elif")
+                    || is_keyword(tokens, i, "else")
+            }
+        };
+
+    let mut body = std::mem::take(&mut state.ast.commands);
+    if !command_is_empty(&state.current_cmd) {
+        body.push(std::mem::take(&mut state.current_cmd));
+    }
+    // The stopped-at closer token (when present) is exactly the slice
+    // boundary the scanner produced, so this sub-slice equals the old
+    // body slice for both the fold gates and the extglob marker.
+    let body_tokens = &tokens[start..i.min(tokens.len())];
+    body = fold_command_list(body);
+    let mut body_ast = Ast { commands: body };
+    mark_parse_time_extglob_errors(&mut body_ast, body_tokens);
+    let body = body_ast.commands;
+
+    state.ast.commands = saved_commands;
+    state.current_cmd = saved_current;
+    state.pending_comsub = saved_pending_comsub;
+    state.in_subshell = saved_in_subshell;
+    state.stray_close_is_error = saved_stray;
+    state.section_stop = saved_stop;
+    state.section_stack = saved_stack;
+    state.section_token_start = saved_start;
+
+    if at_eof {
+        return SectionOutcome::Eof { body };
+    }
+    if aborted_then {
+        return SectionOutcome::AbortedThen { body, index: i };
+    }
+    if ended {
+        return SectionOutcome::Ended { body, index: i };
+    }
+    SectionOutcome::Errored { body }
+}
+
 fn compound_body_parse_error(cmd: &CommandNode) -> Option<&CommandNode> {
     if cmd.has_assignment("__RUBASH_PARSE_ERROR__")
         || cmd.has_assignment("__RUBASH_PARSE_ERROR_NEAR__")
@@ -899,12 +1104,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         && token.value == "if"
         && command_allows_compound_start(&state.current_cmd)
     {
-        if let Some((if_cmd, next_i)) = parse_if_command(
-            tokens,
-            i,
-            state.diagnostic_text.as_ref(),
-            state.source_line_offset,
-        ) {
+        if let Some((if_cmd, next_i)) = parse_if_command(tokens, i, state) {
             push_compound_command(state, if_cmd);
             return Some(next_i);
         }
@@ -1433,7 +1633,10 @@ pub(super) fn parse_body_with_diagnostics(
 /// redirection operator still expecting its word operand. Mirrors the
 /// GNU list grammar (parse.y:1264-1290), where a separator is only
 /// grammatical directly after a completed `list1`.
-fn separator_lacks_preceding_command(tokens: &[Token], index: usize) -> bool {
+fn separator_lacks_preceding_command(tokens: &[Token], index: usize, floor: usize) -> bool {
+    if index <= floor {
+        return true;
+    }
     match index.checked_sub(1) {
         None => true,
         Some(prev) => matches!(
@@ -1518,7 +1721,9 @@ pub(super) fn push_unexpected_token_error_named(
     let source = verbatim.unwrap_or_else(|| {
         let line_number = tokens[i].position;
         let mut line_start = i;
-        while line_start > 0 && tokens[line_start - 1].position == line_number {
+        while line_start > state.section_token_start
+            && tokens[line_start - 1].position == line_number
+        {
             line_start -= 1;
         }
         let mut joined = tokens[line_start].raw.clone();
@@ -2271,7 +2476,7 @@ pub(super) fn parse_time_prefixed_compound_command(
     let (mut command, next_i) = if is_keyword(tokens, i, "for") {
         parse_for_command(tokens, i, None, 0)?
     } else if is_keyword(tokens, i, "if") {
-        parse_if_command(tokens, i, None, 0)?
+        parse_if_command_standalone(tokens, i, None, 0)?
     } else if tokens
         .get(i)
         .is_some_and(|token| matches!(token.value.as_str(), "while" | "until"))
