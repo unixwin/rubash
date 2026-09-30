@@ -673,6 +673,19 @@ impl Executor {
         right: &str,
         metadata: &crate::parser::WordMetadata,
     ) -> i32 {
+        // GNU execute_cmd.c:4048-4057 (execute_cond_node): `rmatch &&
+        // shell_compatibility_level > 31` selects mode 2 (cond_expand_word
+        // QGLOB_REGEXP: quoted characters literalize regex metacharacters).
+        // Under compat31 (shopt sets shell_compatibility_level <= 31) the
+        // mode stays 0 — cond_expand_word's special==0 branch is plain
+        // dequote_list — and sh_regmatch still compiles the result as a
+        // REGEX, so a quoted RHS keeps pattern semantics
+        // (`[[ xa+b =~ "$re" ]]` with re='a+b' matches; rubash#346). The
+        // unquoted-RHS path (conditional_regex_match_status) already has
+        // exactly those mode-0 semantics.
+        if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "compat31") {
+            return self.conditional_regex_match_status(left, right);
+        }
         let left = self.expand_conditional_word(left);
         let right = self.quote_aware_regex_rhs(right, metadata);
         let right = restore_numeric_decimal_regex_escapes(&right);

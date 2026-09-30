@@ -3225,7 +3225,30 @@ impl Executor {
         // redirect.fd_var (parse.y:5821-5843 REDIR_WORD), so it never
         // appears here.
         if crate::builtins::exec::replaces_shell(&cmd.words[1..]) {
-            return Err(ExecuteError::ExitCode(status));
+            // GNU exec.def failed_exec: `if (subshell_environment ||
+            // (interactive == 0 && no_exit_on_failed_exec == 0))
+            // exit_shell (exit_value)` — a subshell always dies, a
+            // noninteractive shell dies unless the execfail shopt
+            // (no_exit_on_failed_exec, shopt.def) is set, and an
+            // interactive shell always continues. A SUCCESSFUL exec never
+            // returns (execve replaced the process), so the exemption only
+            // applies to failing statuses (rubash#347: `shopt -s execfail;
+            // exec /no/such/cmd` prints the diagnostic and the script keeps
+            // running, $? = 127).
+            let execfail =
+                crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "execfail");
+            let interactive = self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_INTERACTIVE")
+                .map(String::as_str)
+                == Some("1");
+            if status == 0
+                || self.shell_state.subshell_depth.get() > 0
+                || (!interactive && !execfail)
+            {
+                return Err(ExecuteError::ExitCode(status));
+            }
         }
         Ok(())
     }

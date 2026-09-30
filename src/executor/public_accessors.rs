@@ -941,6 +941,20 @@ impl Executor {
         {
             return;
         }
+        // GNU set -v (verbose): every input line is echoed to stderr as it
+        // is READ (flags.c:284 echo_input_at_read = verbose_flag; the
+        // reader prints shell_input_line, y.tab.c:5071). The echo happens
+        // after the command that turned the flag on has run (its own line
+        // was already read), and trap execution suspends it (trap.c:1285-
+        // 1290 saves and clears echo_input_at_read around the action).
+        // This preamble is the read/execute boundary for command lines, so
+        // the verbose echo lives here (rubash#348); the rendered command
+        // text is the physical line for simple and pipeline commands
+        // (compound bodies re-enter through their per-command stages).
+        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "verbose") {
+            let echo_text = bash_command_source_text(cmd);
+            let _ = writeln!(std::io::stderr(), "{echo_text}");
+        }
         // GNU the_printed_command is produced by print_command
         // (print_cmd.c), which covers every command form — a `[[ ]]`
         // node must record `[[ -n $unset ]]`, not a word-list dump
