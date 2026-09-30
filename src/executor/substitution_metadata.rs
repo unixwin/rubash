@@ -694,7 +694,10 @@ fn materialize_field_text(bytes: &[u8], marker_positions: &[usize]) -> String {
         if position > run_start {
             output.push_str(&bytes_to_shell_text(&bytes[run_start..position]));
         }
-        output.push(bytes[position] as char);
+        // Marker bytes are in-band PUA sentinels (ASCII-range carriers on
+        // the wire), never UTF-8 continuation bytes — From<u8> states that
+        // invariant instead of an unreviewed widening cast.
+        output.push(char::from(bytes[position]));
         run_start = position + 1;
     }
     if run_start < bytes.len() {
