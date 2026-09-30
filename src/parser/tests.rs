@@ -26,9 +26,15 @@ fn test_parse_simple() {
 fn test_extglob_enabled_after_parse_is_rejected() {
     let ast = parse(&tokenize("shopt -s extglob; echo @(x)"));
 
-    assert_eq!(ast.commands.len(), 2);
+    // GNU yyerror aborts the input at the first syntax error and drops the
+    // commands already parsed from the offending line (parse.y:6724 →
+    // report_syntax_error parse.y:6833), so only the error node remains —
+    // and a same-line `shopt -s extglob' never opens the parse gate for
+    // the tail command anyway (one list per reader unit, verified GNU
+    // 5.3.0: the whole line is the `(' syntax error).
+    assert_eq!(ast.commands.len(), 1);
     assert_eq!(
-        ast.commands[1]
+        ast.commands[0]
             .get_assignment("__RUBASH_PARSE_ERROR__")
             .map(String::as_str),
         Some("unexpected token `('")

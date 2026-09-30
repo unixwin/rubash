@@ -146,7 +146,7 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
                 && super::is_unquoted_operator(&tokens[i], ")")
                 && !state.in_subshell)
         {
-            push_unexpected_token_error(&mut state, tokens, i, &options);
+            push_unexpected_token_error(&mut state, tokens, i);
             break;
         }
 
@@ -166,7 +166,7 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
             && !tokens[i].line_break
             && separator_lacks_preceding_command(tokens, i)
         {
-            push_unexpected_token_error(&mut state, tokens, i, &options);
+            push_unexpected_token_error(&mut state, tokens, i);
             break;
         }
 
@@ -255,7 +255,7 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
                     )
                 })
             {
-                push_unexpected_token_error(&mut state, tokens, next_i, &options);
+                push_unexpected_token_error(&mut state, tokens, next_i);
                 break;
             }
             // A folded compound whose body carries a parse-error node fails
@@ -1458,19 +1458,32 @@ fn separator_lacks_preceding_command(tokens: &[Token], index: usize) -> bool {
 /// GNU parse.y reports `syntax error near unexpected token `X'' on the
 /// offending token and echoes only that input line (yyerror + the current
 /// input line), aborting the rest of the input.
-fn push_unexpected_token_error(
+fn push_unexpected_token_error(state: &mut ParseState, tokens: &[Token], i: usize) {
+    push_unexpected_token_error_named(state, tokens, i, None);
+}
+
+/// Core of `push_unexpected_token_error`, reading the diagnostic context
+/// from `ParseState` (`diagnostic_text`/`source_line_offset` are copied
+/// from `ParseLoopOptions` at state init and never mutated), with an
+/// explicit display name for the offending token — GNU names the virtual
+/// `newline' token where its grammar expected `)' right after a shifted
+/// function-head `(' (parse.y:1054 `WORD '(' ')'; `echo (' at end of input
+/// reports `newline', not `(').
+pub(super) fn push_unexpected_token_error_named(
     state: &mut ParseState,
     tokens: &[Token],
     i: usize,
-    options: &ParseLoopOptions,
+    name_override: Option<&str>,
 ) {
     // GNU reports the yacc token: the lexer keeps a whole `{ ...; }' brace
     // group in one token, but the grammar token is just `{'.
-    let token_text = if tokens[i].value.starts_with('{') {
-        "{"
-    } else {
-        tokens[i].value.as_str()
-    };
+    let token_text = name_override.unwrap_or_else(|| {
+        if tokens[i].value.starts_with('{') {
+            "{"
+        } else {
+            tokens[i].value.as_str()
+        }
+    });
     state.current_cmd.insert_assignment(
         "__RUBASH_PARSE_ERROR__".to_string(),
         format!("unexpected token `{token_text}'"),
@@ -1489,7 +1502,7 @@ fn push_unexpected_token_error(
     }
     // GNU echoes only the offending input line, from its first
     // token, not the rest of the file (parse.y:6813-6824
-    // print_offending_line prints the current `shell_input_line`).
+    // print_offending_line prints the current `shell_input_line').
     // With the original text available (script driver, eval reparse)
     // echo that line verbatim; token reconstruction cannot recover the
     // original spacing. Token positions are absolute script LINES and
@@ -1498,14 +1511,10 @@ fn push_unexpected_token_error(
     // within the text is `position - offset`, 1-based — never a byte
     // offset (rubash#204: the old byte-offset read reported line N's
     // number with line 1's text).
-    let verbatim = options
-        .diagnostic_text
-        .as_ref()
-        .or(options.source_text.as_ref())
-        .and_then(|text| {
-            let line_in_text = tokens[i].position.checked_sub(options.source_line_offset)?;
-            source_line_by_number(text, line_in_text)
-        });
+    let verbatim = state.diagnostic_text.as_ref().and_then(|text| {
+        let line_in_text = tokens[i].position.checked_sub(state.source_line_offset)?;
+        source_line_by_number(text, line_in_text)
+    });
     let source = verbatim.unwrap_or_else(|| {
         let line_number = tokens[i].position;
         let mut line_start = i;

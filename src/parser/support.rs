@@ -831,6 +831,39 @@ fn word_command_open_brace(tokens: &[Token], index: usize) -> bool {
     saw_prefix
 }
 
+/// GNU parse.y:1054 `function_def: WORD '(' ')' newline_list function_body'.
+/// The LALR parser shifts a `(' that arrives after EXACTLY ONE WORD at
+/// command position as a function-head candidate: a pending `!' inversion
+/// still allows the shift (GNU `! +(a|b)' errors at `a'), while anything
+/// that already committed the parse to `simple_command' — a second word, an
+/// assignment prefix (`x=1 y=2 +(a|b)' errors at `('), or a redirection
+/// prefix (`>f (a)' errors at `(') — does not. Word-DERIVED records
+/// (expansions, quotes, extglob patterns) ride on the single word and never
+/// disqualify it; `__RUBASH_*' marker pairs share the assignments list with
+/// real assignments and are likewise ignored. The structural fields are
+/// exactly what `command_is_empty` checks once the word itself is stripped.
+pub(super) fn lone_word_function_head_candidate(cmd: &CommandNode) -> bool {
+    if cmd.words.len() != 1 {
+        return false;
+    }
+    let mut bare = cmd.clone();
+    bare.inverted = false;
+    bare.words.clear();
+    bare.word_kinds.clear();
+    bare.assignments
+        .retain(|(name, _)| !name.starts_with("__RUBASH_"));
+    bare.process_substitutions.clear();
+    bare.command_substitutions.clear();
+    bare.arithmetic_expansions.clear();
+    bare.parameter_expansions.clear();
+    bare.brace_expansions.clear();
+    bare.extglob_patterns.clear();
+    bare.tilde_expansions.clear();
+    bare.pathname_patterns.clear();
+    bare.word_quotes.clear();
+    command_is_empty(&bare)
+}
+
 pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
     cmd.words.is_empty()
         && cmd.assignments.is_empty()

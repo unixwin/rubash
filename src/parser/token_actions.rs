@@ -1118,22 +1118,48 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             }
 
             if token.value == "(" && !command_is_empty(&state.current_cmd) {
-                state.current_cmd.insert_assignment(
-                    "__RUBASH_PARSE_ERROR__".to_string(),
-                    "unexpected token `('".to_string(),
-                );
-                if let Some(source) = parse_error_source_line(
+                // GNU parse.y:1054 `function_def: WORD '(' ')' newline_list
+                // function_body'. The LALR parser shifts a `(' after EXACTLY
+                // ONE WORD at command position as a function-head candidate —
+                // a pending `!' inversion still allows the shift (GNU
+                // `! +(a|b)' errors at `a'), while an assignment or
+                // redirection prefix already committed the parse to
+                // simple_command (GNU `x=1 y=2 +(a|b)' and `>f (a)' error at
+                // the `(' itself). Only `)' may follow the shifted `('; any
+                // other token is the yacc error. With two or more words the
+                // grammar has no `(' production at all — the error names the
+                // `(' itself. yyerror aborts the rest of the input
+                // (parse.y:6724 → report_syntax_error parse.y:6833), so the
+                // FIRST error is the reported one: `echo +(a|b)' with the
+                // extglob gate closed names `(', not the later stray `)'
+                // (rubash#332). A line break or end of input right after the
+                // shifted `(' is GNU's virtual `newline' token.
+                let shifted_function_head = lone_word_function_head_candidate(&state.current_cmd);
+                let offender = if shifted_function_head {
+                    match tokens.get(*i + 1) {
+                        Some(next)
+                            if !(next.kind == TokenKind::Keyword && next.value == ")")
+                                && next.kind != TokenKind::Eof =>
+                        {
+                            *i + 1
+                        }
+                        _ => *i,
+                    }
+                } else {
+                    *i
+                };
+                let name_override = match tokens.get(offender) {
+                    Some(next) if next.line_break || next.kind == TokenKind::Eof => Some("newline"),
+                    None => Some("newline"),
+                    _ => None,
+                };
+                super::parse_loop::push_unexpected_token_error_named(
+                    state,
                     tokens,
-                    *i,
-                    state.diagnostic_text.as_deref(),
-                    state.source_line_offset,
-                ) {
-                    state
-                        .current_cmd
-                        .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
-                }
-                *i += 1;
-                return TokenAction::Continue;
+                    offender,
+                    name_override,
+                );
+                return TokenAction::Break;
             }
 
             if token.value == ")" && state.in_subshell {
