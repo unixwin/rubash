@@ -383,11 +383,11 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                         // GNU parse.y:5694-5706 got_escaped_character marks
                         // pattern-significant escaped chars with CTLESC.
                         out.push(crate::executor::markers::CTLESC);
-                        out.push(escaped as char);
+                        out.push(char::from(escaped));
                         rest = &rest[2..];
                     }
                     b if b < 0x80 => {
-                        out.push(b as char);
+                        out.push(char::from(b));
                         rest = &rest[2..];
                     }
                     _ => {
@@ -667,7 +667,7 @@ fn decode_ansi_c_span_cursor<'a>(out: &mut String, rest: &'a str) -> &'a str {
             escaped = false;
             quoted.push('\\');
             if b < 0x80 {
-                quoted.push(b as char);
+                quoted.push(char::from(b));
                 idx += 1;
             } else {
                 let ch = rest[idx..].chars().next().unwrap();
@@ -686,7 +686,7 @@ fn decode_ansi_c_span_cursor<'a>(out: &mut String, rest: &'a str) -> &'a str {
             break;
         }
         if b < 0x80 {
-            quoted.push(b as char);
+            quoted.push(char::from(b));
             idx += 1;
         } else {
             let ch = rest[idx..].chars().next().unwrap();
@@ -875,7 +875,7 @@ fn remove_double_quoted_into_cursor<'a>(
                 Some(&b @ (b'?' | b'$' | b'!' | b'#' | b'-' | b'@' | b'*' | b'0'..=b'9')) => {
                     pending_name = false;
                     out.push('$');
-                    out.push(b as char);
+                    out.push(char::from(b));
                     rest = &rest[2..];
                     continue;
                 }
@@ -942,7 +942,7 @@ fn remove_double_quoted_into_cursor<'a>(
             b @ (b'*' | b'?' | b'[' | b'@' | b'+' | b'!') => {
                 pending_name = false;
                 out.push(crate::executor::markers::CTLESC);
-                out.push(b as char);
+                out.push(char::from(b));
                 rest = &rest[1..];
             }
             _ => {
