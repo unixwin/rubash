@@ -1,7 +1,6 @@
 use super::{ArithEvalDiag, ArithLValue, ConditionalArithParser};
 use crate::executor::arithmetic::{
-    bash_arith, checked_arithmetic_pow, eval_mutable_arith_value_with_random,
-    strip_arith_double_quotes,
+    bash_arith, eval_mutable_arith_value_with_random, strip_arith_double_quotes,
 };
 use crate::executor::{
     array_value_at, assoc_entries, assoc_value_at, current_epoch_seconds,
