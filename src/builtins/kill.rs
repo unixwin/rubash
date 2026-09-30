@@ -716,6 +716,14 @@ pub fn join_signal_mailbox_registration() {
 #[cfg(unix)]
 pub fn join_signal_mailbox_registration() {}
 
+#[cfg(unix)]
+pub fn register_signal_mailbox_async(_pid: u32) {
+    // Unix keeps kernel dispositions (see register_signal_mailbox): there
+    // is no marker file, so the async Windows path has no work — a no-op
+    // keeps the init.rs call site platform-uniform.
+    let _ = kernel_signals::install();
+}
+
 #[cfg(not(unix))]
 fn parse_signal_lines(content: &str) -> Vec<i32> {
     content
