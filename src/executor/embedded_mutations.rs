@@ -1956,6 +1956,30 @@ impl Executor {
 
         let saved_capture = self.stdout_capture.take();
         self.stdout_capture = Some(Vec::new());
+        // GNU subst.c:7306-7313 command_substitute: the substitution
+        // child's stdout is the capture pipe, never the caller's fd 1 —
+        // dup2(fildes[1], 1) replaces whatever binding the parent carried,
+        // so an enclosing function-call/group redirect (`f >/dev/null`,
+        // `for ...; do ...; done > summary`) must not route the body's
+        // writes to the outer target while the capture reads empty
+        // (rubash#362: direnv path_add's `path=$(IFS=:; echo "${a[*]}")`
+        // under `layout go >/dev/null` exported an EMPTY PATH). This body
+        // runs in place on the caller's executor, so the same fd-1 rebind
+        // the subshell path (command_list_substitution_output_typed) and
+        // the function shortcut (rubash#161) apply must be bracketed here
+        // too: saved_fd_table (cloned above) restores the caller's binding
+        // afterwards, and body-level redirects rebind fd 1 on this table
+        // for their own duration. fd 2 stays inherited — `$()` does not
+        // capture stderr (GNU subst.c:7149).
+        self.fd_table.entries.insert(
+            1,
+            crate::executor::fd_table::FdEntry {
+                read: None,
+                write: Some(FdWriteEndpoint::Stdout),
+                closed: false,
+                dynamic: false,
+            },
+        );
         // GNU trap.c reset_or_restore_signal_handlers (~1480): the forked
         // command-substitution child resets every inherited non-ignored
         // trap, so a parent trap cannot fire inside the substitution. The
