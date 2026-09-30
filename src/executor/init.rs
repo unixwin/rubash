@@ -23,12 +23,33 @@ pub static RESPAWNED_CHILD: std::sync::atomic::AtomicBool =
 
 impl Executor {
     pub fn new() -> Self {
-        let process_env_snapshot: HashMap<String, String> = std::env::vars().collect();
+        Self::new_inner(false)
+    }
+
+    /// startup21: the process's outermost executor, dropped immediately
+    /// before process exit (main.rs run_main). Identical to
+    /// [`Executor::new`] except the process-env snapshot is not built:
+    /// its only reader is the Drop-time environment restore, which the
+    /// process-exit executor skips (nothing can observe a dying process's
+    /// environment), so the extra full-map clone per spawn was pure cost.
+    pub fn new_process_exit() -> Self {
+        Self::new_inner(true)
+    }
+
+    fn new_inner(process_exit: bool) -> Self {
+        let process_env_snapshot: HashMap<String, String> = if process_exit {
+            HashMap::new()
+        } else {
+            std::env::vars().collect()
+        };
         // VarTable::from_values also imports any __RUBASH_*_VARS attribute
         // lists a parent rubash left in the environment — the structured
         // form of the cross-process attribute transport.
-        let mut env_vars =
-            crate::shell::var_table::VarTable::from_values(process_env_snapshot.clone());
+        let mut env_vars = if process_exit {
+            crate::shell::var_table::VarTable::from_values(std::env::vars().collect())
+        } else {
+            crate::shell::var_table::VarTable::from_values(process_env_snapshot.clone())
+        };
         // On Windows, std::env::vars() returns PATH as "Path" (capital P).
         // Every rubash command-lookup site reads env_vars.get("PATH") (all caps),
         // which is a case-sensitive HashMap lookup — it misses on Windows.
@@ -61,13 +82,17 @@ impl Executor {
         // `command -p` (command.def _CS_PATH) both need the logical bin
         // namespace to keep resolving. env_var writes sync into the process
         // environment, so a runtime probe of std::env PATH is polluted.
+        // startup21: the filesystem probe (3 is_file stats per PATH entry,
+        // ~0.28ms per spawn) is deferred — record the startup PATH as the
+        // probe source and pin it into __RUBASH_POSIX_TOOLS_DIR; the first
+        // consumer (path.rs windows_posix_tools_dir) resolves it lazily,
+        // memoized per PATH string, to the same directory the eager probe
+        // found.
         #[cfg(windows)]
         if !env_vars.contains_key("__RUBASH_POSIX_TOOLS_DIR") {
-            if let Some(dir) = crate::executor::path::windows_posix_tools_dir(&env_vars) {
-                env_vars.insert(
-                    "__RUBASH_POSIX_TOOLS_DIR".to_string(),
-                    dir.to_string_lossy().to_string(),
-                );
+            if let Some(startup_path) = env_vars.get("PATH").cloned() {
+                crate::executor::path::pin_startup_tools_dir_source(startup_path.clone());
+                env_vars.insert("__RUBASH_POSIX_TOOLS_DIR".to_string(), startup_path);
             }
         }
 
@@ -206,7 +231,13 @@ impl Executor {
                 // A blocked coprocess reader cannot consume a queued TERM.
                 false
             } else {
-                crate::builtins::kill::register_signal_mailbox(std::process::id()).is_ok()
+                // startup21: registration moved off the critical path —
+                // create_dir_all + marker write cost ~0.5ms per spawn and
+                // only cross-process kill consults the marker. Drop joins
+                // the registration thread before unregistering, so the
+                // marker never outlives a normally exiting shell.
+                crate::builtins::kill::register_signal_mailbox_async(std::process::id());
+                true
             };
 
         let mut executor = Self {
@@ -260,6 +291,7 @@ impl Executor {
             bash_logout_sourced: false,
             shell_pid,
             owns_signal_mailbox,
+            is_process_exit_executor: process_exit,
             background_children: HashMap::new(),
             coproc_stderr_forwarders: HashMap::new(),
             assignment_output_process_substitutions: HashMap::new(),

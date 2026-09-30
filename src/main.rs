@@ -50,7 +50,11 @@ fn run_main() -> i32 {
         print_identity_report();
         return 0;
     }
-    let mut executor = Executor::new();
+    let mut executor = Executor::new_process_exit();
+    // startup21: the process-exit executor's Drop skips the process-env
+    // restore and the signal-mailbox unregister — a dying process's
+    // environment is unobservable, and stale markers self-heal in
+    // deliver()'s dead-pid path plus the registration thread's prune.
     if let Ok(path) = env::current_exe() {
         // rubash#331: self-produced path values render in POSIX form
         // (/d/...) like $PWD — GNU's own BASH is a POSIX path, and the
@@ -1001,13 +1005,16 @@ fn run_script_file_with_init(
     // not echo "exit" the way a reader-phase exit does. Only the
     // exit.def:59-62 echo is suppressed (rubash#297).
     executor.set_env("__RUBASH_INTERACTIVE_FLAG_OFF", "1");
-    let status = if script_uses_history(&contents) || script_uses_aliases(&contents) {
+    let uses_hist = script_uses_history(&contents);
+    let uses_alias = script_uses_aliases(&contents);
+    let status = if uses_hist || uses_alias {
         run_script_with_history(executor, &contents, None)
     } else {
         run_source(executor, &contents, interactive)
     };
     executor.remove_env("__RUBASH_INTERACTIVE_FLAG_OFF");
-    finish_shell(executor, status, interactive)
+    let fin = finish_shell(executor, status, interactive);
+    fin
 }
 
 /// shell.c:1830-1842 init_interactive: `-i` forces the interactive

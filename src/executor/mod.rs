@@ -482,6 +482,16 @@ pub struct Executor {
     bash_logout_sourced: bool,
     shell_pid: u32,
     owns_signal_mailbox: bool,
+    /// startup21: true when this Executor is the process's outermost one
+    /// AND the process exits immediately after it drops (main.rs sets it
+    /// for the run_main executor). The Drop-time process-environment
+    /// restore (env diff plus one putenv per startup variable, ~0.45ms)
+    /// models "an in-process child leaves its parent's process env
+    /// untouched" (rubash#182, see the command_substitution.rs child
+    /// executor) — at real process exit nothing can observe the process
+    /// environment anymore, so the restore is skipped. Embedded/child
+    /// executors keep the restore.
+    is_process_exit_executor: bool,
     background_children: HashMap<u32, crate::fd::SpawnedChild>,
     coproc_stderr_forwarders: HashMap<u32, std::thread::JoinHandle<Result<(), std::io::Error>>>,
     assignment_output_process_substitutions: HashMap<String, String>,

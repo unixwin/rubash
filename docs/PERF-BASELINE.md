@@ -2730,3 +2730,151 @@ machinery (>10x), neither is harness-bound at its core.
    of the internal yes|head pipeline - a pipeline-subsystem round.
 4. **01/02 startup init ~11-16ms** vs GNU 5ms (native caliber): the
    in-process init path (locale, env import, PATH normalization).
+
+## startup21 round (2026-09-30, wt21/startup21 on 0914200e): full 01/02 attribution + the exit-path cuts
+
+The 2x-campaign's last bucket: 01/02 native-parent caliber (envfix3's
+`scripts/run-perf-native-parent.py`, median of 15 unless noted). GNU anchors
+re-measured inner-WSL same session: 01/02 best 4ms (script files).
+
+### Full attribution (the 12-16ms, finally complete)
+
+Scratch env-gated instrumentation (`RUBASH_STARTUP_PROFILE=1`, Instant phase
+ticks + GetProcessTimes/GetSystemTimePreciseAsFileTime anchor + wall from the
+native parent; module fully removed before commit). Probe 01, release,
+steady state:
+
+| segment | ms | owner |
+|---|---:|---|
+| process creation -> main entry (loader+CRT+static init) | 6.3-10 (swings with host load) | **HOST** |
+| in-main work (see below) | 2.2-2.4 | rubash |
+| Executor Drop (mailbox unregister + env restore) | 1.05-1.45 | rubash |
+| post-Drop CRT exit + parent-side wait | ~0.3-0.5 | host/mixed |
+
+**The pre-main segment is host-owned, not rubash's.** Evidence: a minimal
+Rust exit-0 exe (105KB) measures the same anchor (interleaved A/B on one
+load: minhello anchor med 9.0 vs rubash 6.8 — the ordering flips run to run,
+so it is noise); `cmd.exe /c exit` measures 9.4-9.6ms median from the same
+native parent; a 10MB image-padded exe (untouched .rdata) keeps the same
+floor (min 9.5) — image SIZE is not the cost either. Whole-process CPU is
+only 1.5-3ms: the pre-main wait is loader/AV wall time. perf10's unexplained
+"7-9ms" was this segment, mis-attributed to the debug image.
+
+In-main decomposition (before this round): mailbox register 0.48 / tools-dir
+PATH probe 0.28 / env collect 0.12 + VarTable clone 0.08 / SHELLOPTS+BASHOPTS
+replay 0.11 / thread spawn (512MB reserve) 0.15 / exec(`exit 0`) 0.32 /
+tokenize 0.10 + parse 0.07 / fresh-env fs probes (PWD/THIS_SH/OLDPWD) 0.10 /
+argv0 0.09 / struct+VariableStore 0.08 / prescans 0.07 / script read 0.05.
+Drop: remove_file x2 0.36-0.50 + entry scan 0.06 / env diff 0.09 / ~60
+putenv restore 0.34.
+
+### Landed changes (7 files; instrumentation removed)
+
+1. **Mailbox registration off the critical path** (`kill.rs
+   register_signal_mailbox_async`): create_dir_all + marker write cost
+   ~0.5ms per spawn; only OTHER processes' `kill` consults the marker (its
+   content is never read — existence only). Registration is initiated at
+   Executor::new (cf. GNU trap.c:102 initialize_signals ordering) on a
+   background thread; Drop-ordered joins keep embedded executors exact.
+   0.48 -> 0.05.
+2. **Lazy POSIX-tools-dir probe** (`path.rs windows_posix_tools_dir`,
+   `init.rs`): Executor::new no longer stats sh.exe/cat.exe/rm.exe across
+   PATH entries (0.28ms); it records the startup shell-form PATH and the
+   first consumer (`command -p`, logical /bin mapping) resolves it,
+   memoized per PATH string. The probe is a pure function of the startup
+   PATH string, so results are byte-equal to the eager probe, including
+   the PATH-overwrite pin case (probe: `PATH=/bin:/usr/bin` then
+   `command -p` still finds the toolset). 0.28 -> 0.00.
+3. **Process-exit executor skips the Drop restore + unregister**
+   (`mod.rs is_process_exit_executor`, `public_accessors.rs` Drop,
+   `main.rs new_process_exit`): the env-restore (env diff + ~60 putenv,
+   0.45ms) models an in-process child leaving its parent's process env
+   untouched (rubash#182); a process that is about to exit has an
+   unobservable environment. The exit-time mailbox unregister (two
+   remove_file, 0.4ms) is replaced by deliver()'s existing dead-pid
+   self-heal plus (4). Embedded/child executors keep both.
+4. **Unregister enumerates with the pattern scan** (`kill.rs`): the
+   read_dir-over-shared-dir loop became the FindFirstFileW pattern query
+   the poller already uses (same files removed; the dir held 213 stale
+   markers at measurement). Plus an opportunistic dead-pid prune (first
+   128 entries) on the registration thread — off the critical path, keeps
+   the shared dir bounded now that exit no longer removes own markers.
+5. **Single env pass at process exit** (`init.rs new_inner`): the
+   process_env_snapshot map (Drop-restore input, now skipped) is not
+   cloned at startup for the exit executor. 0.08 -> 0.
+
+### Numbers (release, alternating rounds, same session/load)
+
+| probe | base 0914200e | startup21 | GNU inner | ratio before -> after |
+|---|---:|---:|---:|---|
+| 01-startup-empty | 11.3 | **9.5** (min 8.8) | 4 | 2.8x -> **2.4x** |
+| 02-startup-fndef | 11.8 | **9.6** (min 9.1) | 4 | 3.0x -> **2.4x** |
+| 10-pathmiss | 34.2 | 31.1 | 21 | 1.6x -> 1.5x |
+| 11-pipeline | 138.4 | 135.1 | 7 | 19.8x -> 19.3x |
+| 13-readloop | 150.9 | 142.6 | 23 | 6.6x -> 6.2x |
+| 15-expansion | 531.0 | 532.9 | 57 | flat (noise) |
+
+01/02 now sit AT the host process-creation floor (cmd.exe 9.4-9.6, minimal
+exit-0 exe 9.1-9.5, same parent): rubash-owned in-process residual is
+~1.3ms (exec 0.32 / fresh-env 0.3 / env import 0.2 / thread 0.15 /
+tokenize+parse 0.17). First run after any rebuild pays a Defender re-scan
+(+2-5ms on the first probe) — warm up before measuring.
+
+### Observables changed (internal machinery, no GNU analog)
+
+- `${__RUBASH_POSIX_TOOLS_DIR}` before first tools-dir use now holds the
+  startup PATH string (the lazy source) instead of the resolved directory;
+  consumers resolve to the same directory as before.
+- The `{pid}.alive` marker appears ~0.5ms after process start (background
+  thread) and is no longer removed at process exit (self-heal + prune).
+- The process env is not restored at process exit (unobservable).
+
+### Semantics gate (zero-change evidence)
+
+- true-baseline slices (lane vs pristine-base 0914200e, both worktrees'
+  harnesses, rb.out/rb.err/rc compared): **trap 0 GNU-diff lines, jobs 0**
+  (GNU-identical on the lane), exp 0=0, new-exp 8=8, read 4=4, quote 0=0 —
+  byte-identical lane-vs-base modulo pid and worktree-path noise. (Lane
+  fixture initially lacked recho.exe/zecho.exe — copied from base before
+  the run; the 380-line "regression" was that artifact.)
+- GNU-diff probes (`target/issue-suites/results/startup21/probe*.sh`,
+  script files, WSL 5.3.0 vs base vs lane): probe2 (in-process child env
+  restore, rubash#182 family) GNU = base = lane byte-identical; probe3
+  (`command -p`, before/after `PATH=/bin:/usr/bin`) identical modulo the
+  platform path form. probe1/1b/1c (cross-process `kill -TERM` to a
+  trapped child) show a PRE-EXISTING gap: GNU runs the trap (wait=7,
+  TRAPPED) while BOTH base and lane hard-terminate (wait=143, NOTRAPPED)
+  — byte-identical base-vs-lane; see leftovers.
+- cargo test --lib 546/546, --test regression 27/27, RUSTFLAGS='-D
+  warnings' cargo check --tests and --release --tests clean, cargo fmt
+  --check clean, src/lexer/continuation.rs untouched, no stuck rubash
+  processes at turn end.
+
+### Leftovers (measured, with owners)
+
+1. **The <2x target is bounded by the host floor in this caliber**: any
+   Windows exe — including cmd.exe — measures 9.1-9.6ms from the native
+   parent; GNU's 4ms is WSL/Linux process creation. Rubash's remaining
+   in-process ~1.3ms is engine work with named owners (exec dispatch
+   0.32 — perf11 per-command floor; tokenize+parse 0.17 — parse20;
+   env import 0.2 — VarTable single-pass deep refactor; fresh-env fs
+   probes 0.3 — each syscall ~40us). Cutting all of it lands ~8.5ms ≈
+   2.1x — sub-2x needs the caliber re-hosted or the host floor itself.
+2. **Cross-process TERM trap delivery gap** (probe1 family, pre-existing,
+   base = lane): `kill -TERM` to a trapped rubash child hard-terminates
+   it (signal_process fallback) instead of running the trap — both for a
+   sleeping child (GNU: kernel wakes it) and a busy-loop child (the
+   throttled 64-command file poll never observes the .q. entry in the
+   probe window). The mailbox write itself works. Signal-subsystem round.
+3. **Mailbox dir is ambient-dependent**: when an MSYS parent passes
+   `TEMP=/tmp` unconverted, `std::env::temp_dir()` resolves
+   drive-relative and the mailbox lands in `<cwd-drive>:\tmp\rubash-signals`
+   (observed: D:\tmp dir created alongside the canonical
+   C:\Users\...\Temp one). Pre-existing; also makes the dead-pid
+   self-heal nondeterministic across parents (deliver and the marker can
+   live in different dirs). A startup canonicalization of the mailbox
+   dir would fix both; not this lane.
+4. **deliver()'s dead-pid unregister is flaky on base AND lane** (multi-
+   pid kills sometimes skip cleanup entirely - deliver never reaches the
+   dead-pid branch in those runs; ambient per leftover 3). The lane's
+   prune thread improves net cleanup either way.

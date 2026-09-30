@@ -603,16 +603,118 @@ pub fn unregister_signal_mailbox(_pid: u32) {}
 pub fn unregister_signal_mailbox(pid: u32) {
     let _ = std::fs::remove_file(signal_marker_path(pid));
     let _ = std::fs::remove_file(signal_queue_path(pid));
-    if let Ok(entries) = std::fs::read_dir(signal_mailbox_dir()) {
-        let prefix = format!("{pid}.q.");
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with(&prefix) {
-                let _ = std::fs::remove_file(entry.path());
-            }
+    // startup21: enumerate with the pattern-limited FindFirstFileW scan the
+    // poller already uses (pending_signal_entries) instead of read_dir over
+    // the whole shared directory. The directory accumulates one marker or
+    // queue file per process that ever ran (213 stale markers at lane
+    // measurement time) and the full scan cost ~0.5ms of every shell's exit
+    // path; the pattern query removes exactly the same set of files.
+    let prefix = format!("{pid}.q.");
+    if let Ok(entries) = pending_signal_entries(&signal_mailbox_dir(), &prefix) {
+        for entry in entries {
+            let _ = std::fs::remove_file(entry);
         }
     }
 }
+
+/// Startup21 (non-unix): register the mailbox OFF the Executor::new
+/// critical path. The synchronous registration (create_dir_all + marker
+/// write) costs ~0.5ms of Windows filesystem time per spawn, and the
+/// marker is only ever consulted by OTHER processes' kill builtin
+/// (deliver_rubash_signal) — this process's own execution never reads it.
+/// A sub-millisecond delay before the marker appears only widens the
+/// pre-mailbox window in which a cross-process kill falls back to the
+/// signal_process route, which is the behavior shells had before the
+/// mailbox existed. Ordering stays eager in the GNU sense: the
+/// registration is initiated at Executor::new (cf. trap.c:102
+/// initialize_signals at shell startup), and
+/// join_signal_mailbox_registration() lets Drop wait for the thread before
+/// unregistering, so a normally exiting shell never leaks its marker.
+#[cfg(not(unix))]
+static MAILBOX_REGISTRATION: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(not(unix))]
+pub fn register_signal_mailbox_async(pid: u32) {
+    let mut slot = MAILBOX_REGISTRATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // A previous top-level executor in this process (unit tests) may still
+    // hold the slot; joining first keeps registrations strictly ordered so
+    // a late write can never resurrect a marker an executor just removed.
+    if let Some(handle) = slot.take() {
+        let _ = handle.join();
+    }
+    match std::thread::Builder::new()
+        .name("rubash-sig-mailbox".to_string())
+        .spawn(move || {
+            let _ = register_signal_mailbox(pid);
+            prune_stale_markers(pid);
+        }) {
+        Ok(handle) => *slot = Some(handle),
+        // Thread spawn failure is not a shell error: fall back to the
+        // synchronous registration the executor previously paid.
+        Err(_) => {
+            let _ = register_signal_mailbox(pid);
+        }
+    }
+}
+
+/// startup21 (non-unix): opportunistic mailbox-directory hygiene, run on
+/// the background registration thread (never the shell's critical path —
+/// process-exit executors no longer remove their own marker, so something
+/// must keep the shared directory from growing without bound). Removes the
+/// mailbox of every DEAD pid found among the first 128 marker entries:
+/// exactly the cleanup deliver()'s dead-pid path performs on demand, done
+/// here proactively. A live pid's marker is left untouched; removals are
+/// idempotent, so racing an owner's own unregister is harmless.
+#[cfg(not(unix))]
+fn prune_stale_markers(own_pid: u32) {
+    const PRUNE_LIMIT: usize = 128;
+    let dir = signal_mailbox_dir();
+    let Ok(entries) = pending_signal_entries(&dir, "") else {
+        return;
+    };
+    let mut pruned = 0usize;
+    for path in entries {
+        if pruned >= PRUNE_LIMIT {
+            break;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+        let Some(pid) = name
+            .strip_suffix(".alive")
+            .and_then(|stem| stem.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == own_pid || process_exists(pid) {
+            continue;
+        }
+        unregister_signal_mailbox(pid);
+        pruned += 1;
+    }
+}
+
+/// Wait for an in-flight async mailbox registration to finish. Called by
+/// the top-level Executor's Drop BEFORE unregister_signal_mailbox, so the
+/// unregister cannot race a registration that has not written its marker
+/// yet (that ordering would leak the marker file).
+#[cfg(not(unix))]
+pub fn join_signal_mailbox_registration() {
+    if let Some(handle) = MAILBOX_REGISTRATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        let _ = handle.join();
+    }
+}
+
+#[cfg(unix)]
+pub fn join_signal_mailbox_registration() {}
 
 #[cfg(not(unix))]
 fn parse_signal_lines(content: &str) -> Vec<i32> {

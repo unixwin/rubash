@@ -1871,35 +1871,86 @@ pub(crate) fn shell_root_configured(env_vars: &HashMap<String, String>) -> bool 
 /// `command -p`'s guaranteed-utility PATH (command.def) and for mapping
 /// the logical `/bin`/`/usr/bin` namespace when no shell root is
 /// configured.
+///
+/// startup21 lazy probe: the filesystem probe (up to 3 is_file stats per
+/// PATH entry) cost ~0.28ms of every spawn although most shells never run
+/// `command -p` or touch `/bin`. Executor::new now records the startup
+/// PATH (pin_startup_tools_dir_source) and inserts the pin variable with
+/// that PATH string as its value instead of eagerly probing; the first
+/// consumer resolves it here, memoized per PATH string. The probe stays a
+/// pure function of the startup PATH string, so the result is byte-equal
+/// to the eager version's.
 #[cfg(windows)]
-pub(crate) fn windows_posix_tools_dir(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
+static STARTUP_TOOLS_DIR_SOURCE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+static TOOLS_DIR_PROBE_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, Option<PathBuf>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+fn tools_dir_cache() -> &'static std::sync::Mutex<HashMap<String, Option<PathBuf>>> {
+    TOOLS_DIR_PROBE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// startup21: record this process's startup shell-form PATH as the source
+/// for the lazy POSIX-tools-dir probe. Called once from Executor::new
+/// (the in-process child executors constructed later probe their own env
+/// PATH exactly as they did before, because their env_vars map does not
+/// carry the pin variable).
+#[cfg(windows)]
+pub(crate) fn pin_startup_tools_dir_source(startup_path: String) {
+    let _ = STARTUP_TOOLS_DIR_SOURCE.set(Some(startup_path));
+}
+
+#[cfg(windows)]
+fn memoized_tools_dir(path_value: &str) -> Option<PathBuf> {
+    let mut cache = tools_dir_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(hit) = cache.get(path_value) {
+        return hit.clone();
+    }
     // The startup PATH arrives in Windows `;` form while an assigned PATH
     // (and the imported shell-form PATH, rubash#175) is `:`-separated
     // `/c/...` entries. Split with the dual-semantics splitter and map each
     // entry to its Windows directory so both spellings find the toolset.
-    let tools_dir = |path_value: &str| {
-        split_shell_path(path_value)
-            .into_iter()
-            .map(|entry| shell_drive_entry_to_windows(&entry))
-            .find(|dir| {
-                ["sh.exe", "cat.exe", "rm.exe"]
-                    .iter()
-                    .all(|name| dir.join(name).is_file())
-            })
-    };
+    let found = split_shell_path(path_value)
+        .into_iter()
+        .map(|entry| shell_drive_entry_to_windows(&entry))
+        .find(|dir| {
+            ["sh.exe", "cat.exe", "rm.exe"]
+                .iter()
+                .all(|name| dir.join(name).is_file())
+        });
+    cache.insert(path_value.to_string(), found.clone());
+    found
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_posix_tools_dir(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     // The toolset location is a host property: a script that overwrites
     // PATH (`PATH=/bin:/usr/bin`, invocation.tests) must not lose it, so
-    // Executor::new pins the directory found on the startup PATH into
-    // __RUBASH_POSIX_TOOLS_DIR. Probing the live process PATH is useless —
-    // env_var writes sync into it before the lookup runs.
-    if let Some(pinned) = env_vars
-        .get("__RUBASH_POSIX_TOOLS_DIR")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_dir())
-    {
-        return Some(pinned);
+    // Executor::new pins the startup PATH into __RUBASH_POSIX_TOOLS_DIR
+    // (startup21: as the lazy source string; the value equals the recorded
+    // startup PATH, which no real directory value can collide with — and
+    // the equality check below runs before the is_dir fallback anyway).
+    // Probing the live process PATH is useless — env_var writes sync into
+    // it before the lookup runs.
+    if let Some(pinned) = env_vars.get("__RUBASH_POSIX_TOOLS_DIR") {
+        if let Some(Some(startup_path)) = STARTUP_TOOLS_DIR_SOURCE.get() {
+            if pinned == startup_path {
+                return memoized_tools_dir(startup_path);
+            }
+        }
+        let candidate = PathBuf::from(pinned);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
     }
-    env_vars.get("PATH").and_then(|path| tools_dir(path))
+    env_vars
+        .get("PATH")
+        .and_then(|path| memoized_tools_dir(path))
 }
 
 /// `/c/x` -> `C:\x` for one PATH entry; every other spelling (native

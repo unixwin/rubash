@@ -1309,10 +1309,32 @@ impl Default for Executor {
 
 impl Drop for Executor {
     fn drop(&mut self) {
-        if self.owns_signal_mailbox {
+        // startup21: the process-exit executor's process dies with this
+        // drop, so its marker removal is skipped entirely: deliver()'s
+        // dead-pid path (kill.rs deliver_rubash_signal -> process_exists
+        // -> unregister_signal_mailbox) self-heals stale markers on the
+        // next kill attempt at a recycled pid, and the registration
+        // thread opportunistically prunes dead-pid markers. The two
+        // remove_file calls (~0.4ms of failing/succeeding deletes under
+        // real-time scanning) only buy directory hygiene, which those
+        // paths already provide. Embedded/child executors keep the full
+        // unregister.
+        if self.owns_signal_mailbox && !self.is_process_exit_executor {
+            // Wait for the async registration thread first — unregistering
+            // before the marker write completes would leak the marker
+            // (write lands after the remove).
+            crate::builtins::kill::join_signal_mailbox_registration();
             crate::builtins::kill::unregister_signal_mailbox(std::process::id());
         }
 
+        // startup21: the process-env restore models an in-process child
+        // leaving its parent's env untouched (rubash#182). The process-exit
+        // executor's process dies with this drop — nothing can observe its
+        // environment afterward — so the diff + ~one putenv per startup
+        // variable (~0.45ms) is skipped there.
+        if self.is_process_exit_executor {
+            return;
+        }
         let current_names: Vec<String> = env::vars().map(|(name, _)| name).collect();
         for name in current_names {
             if !self.process_env_snapshot.contains_key(&name) {

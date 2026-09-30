@@ -1310,6 +1310,7 @@ impl Executor {
             bash_logout_sourced: true,
             shell_pid: self.shell_pid,
             owns_signal_mailbox: false,
+            is_process_exit_executor: false,
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
             arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),
             assignment_command_name: None,
