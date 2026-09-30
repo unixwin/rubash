@@ -1507,6 +1507,27 @@ impl Executor {
             if braced.len() > 1 || (braced.len() == 1 && braced[0] != word) {
                 let mut values = Vec::new();
                 for expanded in braced {
+                    // GNU braces.c brace_expand emits the empty-alternative
+                    // word, and expand_word_list_internal (subst.c:12026-
+                    // 12035) discards an unquoted null result the same way
+                    // it discards an unset variable's — `set -- {a,}` binds
+                    // one positional (rubash#337). Drop the empty member
+                    // HERE, at the brace-result assembly, so the comsum
+                    // word paths that share expand_command_word keep every
+                    // field they produce (the broad word-kind admission
+                    // cost the braces suite its command-substitution lines).
+                    // An escape-bearing sequence element (`{a..A}` yields
+                    // the `\` character) is never empty here, so it keeps
+                    // its field like GNU's quoted-null rule.
+                    // Sequence ({x..y}) elements are exempt: an
+                    // escape-bearing element — the `\` character in
+                    // {a..A} — expands empty but GNU KEEPS the field
+                    // (expand_word marks the word quoted; braces.tests
+                    // {a..A} keeps 33 args). Only plain ALTERNATIVE
+                    // members drop.
+                    if expanded.is_empty() && !word.contains("..") {
+                        continue;
+                    }
                     values.extend(self.expand_command_word(cmd, index, &expanded, None));
                 }
                 return values;
