@@ -86,7 +86,17 @@ impl Executor {
                     self.finish_external_error(cmd, &stderr, status)?;
                     return Ok(true);
                 }
-                self.execute_direct_shell_script(cmd, &expanded_command_name, &script_path, false)?;
+                // Exec model, like GNU: a `#!` script is exec'd by the
+                // kernel as a NEW interpreter process, and a shebangless
+                // text file hits execute_cmd.c:6237-6260's ENOEXEC tail,
+                // where the forked child sh_longjmps to subshell_top_level
+                // and restarts through shell.c:429-464 shell_reinitialize —
+                // a FRESH shell in both cases, seeded only from the
+                // exported environment (rubash#363: fork-model in-process
+                // execution leaked the script's variable assignments back
+                // into the caller's typed variable store, and let the
+                // script see the caller's unexported variables).
+                self.execute_direct_shell_script(cmd, &expanded_command_name, &script_path, true)?;
                 return Ok(true);
             }
         }
