@@ -20,7 +20,7 @@ use std::io::{self, Write};
 ///
 /// * `cfg(not(unix))`: the literal Linux x86 table is the wire format of
 ///   the Windows file-mailbox protocol (other rubash processes write these
-///   numbers into `%TEMP%\rubash-signals`) and of the suspend/resume state
+///   numbers into `%LOCALAPPDATA%\rubash-signals`) and of the suspend/resume state
 ///   backend — Linux numbering is the design contract. DO NOT renumber.
 /// * `cfg(unix)`: numbers follow the target platform via libc (Darwin:
 ///   7=EMT, 10=BUS, 12=SYS, 17=STOP, 18=TSTP, 19=CONT, 20=CHLD, 29=INFO,
@@ -570,7 +570,7 @@ pub fn send_signal(pid: u32, signal: i32) -> Result<(), &'static str> {
 /// Install this process's signal-receiving backend.
 ///
 /// Windows: a per-process `{pid}.alive` marker in the shared
-/// `%TEMP%\rubash-signals` directory; other rubash processes deliver
+/// `%LOCALAPPDATA%\rubash-signals` directory; other rubash processes deliver
 /// cross-process signals as atomic `.part`-rename entries beside it
 /// (deliver_rubash_signal).
 ///
@@ -1065,6 +1065,53 @@ fn deliver_rubash_signal(pid: u32, signal: i32) -> io::Result<bool> {
     Ok(true)
 }
 
+/// The shared signal-mailbox directory.
+///
+/// Windows (rubash#357): `%LOCALAPPDATA%\rubash-signals`, resolved ONCE per
+/// process and cached. TMP/TEMP are deliberately NOT consulted:
+///
+/// - An MSYS parent forwards raw POSIX values (`TEMP=/tmp`), which Win32 file
+///   APIs resolve against each process's CURRENT DRIVE — a process on `D:`
+///   gets `D:\tmp\rubash-signals`, one on `C:` gets `C:\tmp\...`, while a
+///   parent with the native `%TEMP%` reads `C:\Users\...\Temp\rubash-signals`.
+///   Two such processes split into different boxes, the killer misses the
+///   victim's `{pid}.alive` marker, and the kill falls back to
+///   TerminateProcess — the trap never runs (143/NOTRAPPED, rubash#357).
+/// - The process environment is also MUTABLE mid-run (a rubash child's env
+///   restore can re-apply the raw spawn value), so re-reading temp_dir() per
+///   call let the same process flip boxes between registration and polling
+///   (observed: marker written to the native box, later polls scanning
+///   `D:\tmp\rubash-signals` forever). The OnceLock pins one box for the
+///   process lifetime.
+///
+/// `%LOCALAPPDATA%` is user-scoped, always an absolute Windows path, and
+/// never MSYS-mangled, so every rubash process of the same user converges on
+/// one box regardless of TMP/TEMP form or cwd drive. Fallbacks mirror the
+/// user-profile chain (USERPROFILE, then the OS temp as a last resort) and
+/// keep the same first-use caching.
+///
+/// Unix: there is no file mailbox (kernel dispositions own delivery — see
+/// `register_signal_mailbox`); the plain temp join stays for the dead-marker
+/// helpers that never execute there.
+#[cfg(not(unix))]
+fn signal_mailbox_dir() -> std::path::PathBuf {
+    static MAILBOX_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    MAILBOX_DIR
+        .get_or_init(|| {
+            for key in ["LOCALAPPDATA", "USERPROFILE"] {
+                if let Ok(value) = std::env::var(key) {
+                    let path = std::path::PathBuf::from(&value);
+                    if path.is_absolute() {
+                        return path.join("rubash-signals");
+                    }
+                }
+            }
+            std::env::temp_dir().join("rubash-signals")
+        })
+        .clone()
+}
+
+#[cfg(unix)]
 fn signal_mailbox_dir() -> std::path::PathBuf {
     std::env::temp_dir().join("rubash-signals")
 }
