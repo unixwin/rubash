@@ -1,4 +1,7 @@
-use super::{command_boundary_keyword_allowed, is_case_end_keyword, parse, ProcessSubstitution};
+use super::{
+    command_boundary_keyword_allowed, follows_case_in_keyword, is_case_end_keyword, parse,
+    ProcessSubstitution,
+};
 use crate::executor::markers::DATA_DOLLAR;
 use crate::lexer::{Token, TokenKind};
 use std::collections::VecDeque;
@@ -444,7 +447,12 @@ fn collect_process_substitution_target_with_prefix(
         let boundary = index == source_start || command_boundary_keyword_allowed(tokens, index);
         if boundary && tokens[index].kind == TokenKind::Keyword && tokens[index].value == "case" {
             case_depth += 1;
-        } else if boundary && is_case_end_keyword(tokens, index) {
+        } else if (boundary || follows_case_in_keyword(tokens, index))
+            && is_case_end_keyword(tokens, index)
+        {
+            // `esac` right after the case's `in` closes the empty case
+            // (parse.y:3428-3441 special_case_tokens) so `<(case x in
+            // esac)` ends at its own `)` (rubash#336).
             case_depth = case_depth.saturating_sub(1);
         } else if case_depth == 0
             && tokens[index].kind == TokenKind::Keyword

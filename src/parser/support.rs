@@ -207,7 +207,37 @@ pub(super) fn is_unquoted_operator(token: &Token, value: &str) -> bool {
 }
 
 pub(super) fn is_case_end_keyword(tokens: &[Token], index: usize) -> bool {
-    is_keyword(tokens, index, "esac") && !case_pattern_starts_with_esac(tokens, index)
+    if !is_keyword(tokens, index, "esac") {
+        return false;
+    }
+    // parse.y:3433-3441 special_case_tokens: with a case open (the caller's
+    // case frame / esacs_needed_count), `esac` DIRECTLY after the case's
+    // `in` is the ESAC closer of the empty-case production (parse.y:1037) —
+    // GNU never reads it as pattern text from that position (the rule-4
+    // refusals at parse.y:3184-3186 apply only after `|' / `('), so the
+    // lookahead heuristic below must not second-guess it. This is what lets
+    // an enclosing group scan see through `( case x in esac ) ;; esac`
+    // (rubash#336): the inner `)` is a subshell closer, not a pattern
+    // delimiter, and the `;;` belongs to the OUTER case.
+    if follows_case_in_keyword(tokens, index) {
+        return true;
+    }
+    !case_pattern_starts_with_esac(tokens, index)
+}
+
+/// GNU parse.y:3428-3441 special_case_tokens(): `esac` DIRECTLY after the
+/// case's `in` is returned as the ESAC token (the `case WORD newline_list IN
+/// newline_list ESAC` empty-case production, parse.y:1037), even though `in`
+/// is NOT a reserved-word boundary — reserved_word_acceptable (parse.y:5898)
+/// has no IN, so this is the one special case that arms the recognition
+/// (guarded there by esacs_needed_count, i.e. an open case, which at the
+/// token-scanner call sites means the caller's case_depth is nonzero; at
+/// depth 0 the saturating decrement is a no-op, keeping `for i in esac` a
+/// word list). Group scanners whose case tracking is gated on
+/// `command_boundary_keyword_allowed` must consult this alongside the
+/// boundary check or they never close `( case x in esac )` (rubash#336).
+pub(super) fn follows_case_in_keyword(tokens: &[Token], index: usize) -> bool {
+    index > 0 && is_keyword(tokens, index - 1, "in")
 }
 
 fn case_pattern_starts_with_esac(tokens: &[Token], index: usize) -> bool {

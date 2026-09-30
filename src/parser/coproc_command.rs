@@ -106,7 +106,13 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 let boundary = i == body_start || command_boundary_keyword_allowed(tokens, i);
                 if boundary && is_keyword(tokens, i, "case") {
                     case_depth += 1;
-                } else if boundary && is_case_end_keyword(tokens, i) {
+                } else if (boundary || follows_case_in_keyword(tokens, i))
+                    && is_case_end_keyword(tokens, i)
+                {
+                    // `esac` right after the case's `in` closes the empty
+                    // case (parse.y:3428-3441 special_case_tokens) so
+                    // `coproc ( case x in esac )` ends at its own `)`
+                    // (rubash#336).
                     case_depth = case_depth.saturating_sub(1);
                 } else if case_depth == 0 && is_keyword(tokens, i, "(") {
                     depth += 1;
