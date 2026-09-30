@@ -191,19 +191,36 @@ impl Executor {
             self.last_command_substitution_status.set(None);
             return Err(ExecuteError::ExitCode(2));
         }
-        let original_raws: Vec<Option<&str>> = cmd
+        let original_words_had_command_substitution = cmd
             .word_metadata
             .iter()
-            .map(|metadata| Some(metadata.raw.as_str()))
-            .collect();
-        let original_words_had_command_substitution = original_raws
-            .iter()
-            .flatten()
-            .any(|raw| raw.contains("$(") || raw.contains('`'));
-        let pre_alias_words = expanded.words.clone();
+            .any(|metadata| metadata.raw.contains("$(") || metadata.raw.contains('`'));
+        // perf17: GNU consults the alias table itself (parse.y:3249
+        // alias_expand_token -> find_alias, a hash lookup) — with an empty
+        // table no word expands, so "did alias expansion change the words"
+        // is answered by that one emptiness test. The deep Vec<String>
+        // clone of every command's expanded words (and the raw-word Vec
+        // that feeds the expansion) existed only to answer the question
+        // after the fact; with an empty table
+        // apply_alias_expansion_after_word_expansion is an identity move
+        // (its own aliases.is_empty() fast path), so the comparison is
+        // constant-false and the clone is dead weight.
+        let aliases_empty = self.shell_state.aliases.is_empty();
+        let original_raws: Vec<Option<&str>> = if aliases_empty {
+            Vec::new()
+        } else {
+            cmd.word_metadata
+                .iter()
+                .map(|metadata| Some(metadata.raw.as_str()))
+                .collect()
+        };
+        let pre_alias_words = (!aliases_empty).then(|| expanded.words.clone());
         let alias_expanded =
             self.apply_alias_expansion_after_word_expansion(expanded, &original_raws);
-        let alias_expansion_changed_words = alias_expanded.words != pre_alias_words;
+        let alias_expansion_changed_words = match pre_alias_words {
+            Some(pre) => alias_expanded.words != pre,
+            None => false,
+        };
         if alias_expanded.words.is_empty() && !self.shell_state.arithmetic_expansion_error.get() {
             // GNU execute_simple_command (execute_cmd.c): a simple command
             // whose words all expand to nothing is still executed as a null

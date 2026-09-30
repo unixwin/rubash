@@ -1995,3 +1995,154 @@ commit 3 only moves arr.)
    (`SHELLOPTS=xxx 2>&1 || echo rc=$?`) while rubash runs it — the
    rubash#306 arith-error containment family (pre-existing,
    base-identical).
+
+## perf17 round (2026-09-28, wt18/perf17 on aaa1d298): comsub park quadratic + dispatch-floor allocations
+
+Two quantified deep-water items from the perf11/perf12 leftovers. All wall
+numbers RELEASE build, alternating A/B against a pristine base binary
+built this session from aaa1d298 in a sibling worktree (same load); GNU
+anchors re-measured inside WSL this session (script files under
+`target/perf17/`). Scratch instrumentation (env-gated comsub trace +
+exec_profile P17 sub-phase timers) fully removed before commit.
+
+### Task 1: the comsub park re-derivation (perf11 leftover #1, configure -n)
+
+Decomposition (env-gated trace, `configure -n` full 24753 lines): 44198
+`comsub_residuals_advance` calls walked 536 M chars; the 6018 park resumes
+(park re-derivations) account for 534 M of them (99.6%), and ALL of that
+is ONE park class — the backtick `<<` arm (tag=777 in the trace), not the
+`$(` skip-fail parks perf11 suspected (those re-derived only 134 K chars
+total). A single park created at the `<<_ACEOF` of `cat confdefs.h -
+<<_ACEOF >conftest.$ac_ext` (configure:5488, inside the m4sh
+false-positive backtick stretch) never cleared: 2406 re-derivations, each
+re-walking the accumulated tail up to 525 K chars.
+
+Root cause: that arm parked on `closes.is_none()` — but `closes` is the
+heredoc-HEADER `)` closure signal (skip_heredoc_in_chars_with_closure's
+second component), which is None for every heredoc whose header line
+carries no `)` — i.e. every ordinary heredoc inside an open backtick —
+even AFTER its terminator line arrived. The park was designed for the
+terminator-not-yet-arrived case and never distinguished the two.
+
+GNU anchor: make_cmd.c:512 `make_here_document` (driven by parse.y:3120
+`gather_here_documents`) reads the body line by line through
+`read_secondary_line` until a line equals the delimiter exactly, then the
+reader continues PAST it — a consumed heredoc body is never re-read
+(parse.y:3557 `read_token` streams). The aligned park condition is
+therefore "terminator line not yet in the buffer", and that decision is
+prefix-stable once found: the terminator search compares whole lines only
+(the join loop appends complete '\n'-terminated physical lines), so a
+longer buffer cannot move the first match.
+
+Fix (class-level): `heredoc_scan.rs` gained
+`skip_heredoc_in_chars_decided` (reports the `found_delimiter` local the
+function already computed; the old 2-tuple signature stays as a wrapper so
+the skip.rs / mod.rs / skip_parenthesized_unit_ex callers are untouched;
+empty-delimiter early return keeps found=false, preserving its park).
+`continuation.rs` (CAPTAIN-EXCLUSIVE — lane diff, commit bc4bc0e8,
+awaiting captain review, process as perf8/perf9) parks on
+`!terminator_found`. The `$(` skip-fail and esac-undecided parks and the
+depth>0 `<<` arm are unchanged.
+
+Numbers: configure -n 3413-3454 -> 1195-1214 ms (median 3416 -> 1202,
+-65%; GNU 40-42 ms). Zero-semantic-change evidence: 546 lib (incl.
+the comsub per-prefix incremental equivalence battery) + 27 regression +
+`-D warnings` check + fmt; GNU-diff matrices
+`target/issue-suites/results/perf17/matrix{1,2}.sh` (10 park shapes + 12
+well-formed join shapes) byte-identical stdout vs GNU, stderr
+byte-identical to the pristine base (the remaining heredoc-warning-text
+diffs vs GNU predate this round); nvm.sh `-n` output and a posix-mode
+per-iteration heredoc-in-backtick loop byte-identical base vs lane vs GNU.
+
+### Task 2: the dispatch floor (perf12 leftover #1: "matcmd 48%, null 9.1x")
+
+The lane brief asked whether execute_command_internal's dispatch is a
+layered match/string-compare chain vs GNU's one switch at execute_cmd.c:624
+on the COMMAND tag. Measured with scratch exec_profile sub-timers
+(nested-exclusive where the command has no nesting — the 20000-`:` null
+probe is exact): the string-match ladders are NOT the floor —
+`execute_prepared_command`'s jobspec/restricted/is-disabled pre-match
+2.1 ms, the primary builtin `match word` 0.9 ms, of a 483 ms total. The
+floor is per-command BOOKKEEPING ALLOCATIONS in the matcmd tail and the
+execute_command prelude:
+
+- `update_underscore_parameter` -> `bind_underscore`: 67.7 ms of the
+  71.9 ms matcmd tail (13.6% of the whole loop, 3.4 us/command). Every
+  simple command cloned the whole EXPORTED_VARS marker string, split it,
+  re-joined it, and re-inserted it (a byte-identical no-op once `_` is
+  absent), plus a full Variable clone + a fresh `"_"` key to overwrite
+  the variable's value. GNU's bind_lastarg (execute_cmd.c:4188) is ONE
+  variable-cell bind plus a flag-bit attribute clear (VUNSETATTR
+  att_exported, variables.h:124-133).
+- `pre_alias_words = expanded.words.clone()`: a deep Vec<String> clone of
+  every command's expanded words per command, taken to answer "did alias
+  expansion change the words" — constant-false when the alias table is
+  empty (GNU parse.y:3249 alias_expand_token consults the table; an empty
+  table is one test).
+
+Fix (both no-op-gated, the perf11 marker-list pattern):
+
+1. `bind_underscore` (command_words.rs): the EXPORTED_VARS rewrite runs
+   only when the borrowed list actually contains `_` or an empty fragment
+   (the filter's two drop conditions — exactly the rewrite-when-changed
+   gate, zero clones otherwise); the typed-store half swaps the value in
+   place via get_mut behind VariableStore::set's only refusal condition
+   (readonly), preserving the silent readonly-keeps-old-value behavior.
+   The last-word COMPOUND_ASSIGNMENT_MARKER strip became a contains-gated
+   Cow (GNU's lastarg is used as-is, execute_cmd.c:4746).
+2. `execute_command` (command_execute.rs): `aliases.is_empty()` gates the
+   raw-words Vec, the words clone, and the changed-words comparison —
+   apply_alias_expansion_after_word_expansion is an identity move there
+   (its own fast path), so the comparison result is unchanged.
+
+Residual decomposition after the fixes (null probe, 20000 commands,
+435 ms instrumented): bind_underscore 36.9 ms (1.8 us — the remaining
+`"_"`/value key-value allocations and two map probes; structural to the
+marker-string attribute model, perf12's structured-attributes leftover),
+expand_command_words 31 ms, linecmd 11 ms, for-arith pair ~123 ms (the
+largest single block, perf11's arith_dyn leftover), prelude remainder
+~9 ms. nvm-load's matcmd is 41-48% of exec time but is NESTED execution
+(the builtins/functions/comsubs inside matcmd), not the ladder: the fix
+moves nvm-load ~-1% (527-534 -> 520-529 ms), as expected.
+
+Numbers (alternating A/B, median): p6-null 380 -> 350 ms (-8%, GNU
+36-45; ratio 9.5x -> 8.8x), p6-local3 1768 -> 1558 ms (-12%, GNU
+118-119), nvm-load 533 -> 523 ms (flat; GNU 185-188), configure -n
+3416 -> 1202 ms (Task 1's -65%, GNU 40-42).
+
+Zero-semantic-change evidence (Task 2): 546 lib + 27 regression +
+`RUSTFLAGS="-D warnings" cargo check --all-targets` + fmt; matrix4
+(alias expansion + `$_` tracking + export list + unset, both shells):
+byte-identical base-vs-lane AND lane-vs-GNU; `_`-tracking probes
+(us-probe/us2/us3: readonly `_`, set -a exports, declare -x membership,
+`$_` after commands) byte-identical base vs lane; OMB live load (real
+HOME): PS1/declare -p/declare -F(284 functions)/alias md5 byte-identical
+base vs lane. src/lexer/continuation.rs contains ONLY the Task 1 park
+diff (bc4bc0e8, flagged for captain review).
+
+### Leftovers (measured, with owners)
+
+1. **CommandShape enum discriminant (execute_cmd.c:624 switch port)** —
+   measured NOT worth it as a pure dispatch change: the Option-probe
+   ladder + match-word self cost is ~3 ms of a 483 ms null loop. The fat
+   CommandNode's probe ladders are cheap; the floor is the per-command
+   allocations listed above plus the for-arith pair. A parse-time shape
+   tag only pays if the tag also removes prelude predicate re-probing —
+   defer until the allocation floor is exhausted.
+2. **bind_underscore residual 1.8 us/command**: two key/value String
+   allocations + env_vars HashMap probe + BTreeMap get/get_mut per
+   command. Removing it needs `_` as a first-class maintained slot (GNU
+   keeps one SHELL_VAR cell) — structured-attributes family, perf12.
+3. **errexit/xtrace maintained flags**: errexit_enabled() costs two env
+   gets per call and runs 2-3x per command; GNU tests an int
+   (`exit_immediately_requested`). The `__RUBASH_ERREXIT`/`XTRACE` flip
+   sites are 8+ across shell_options/embedded_mutations/
+   command_substitution/compound_exec (including wholesale subshell
+   save/restore lists) — a maintained Cell must cover all of them; do it
+   as its own reviewed change, not a lane rider.
+4. **configure -n now ~29x GNU (1202 vs 41 ms)**: remaining gather cost is
+   the other scanners' parks on the same 525 K-char m4sh backtick stretch
+   (quotes/balanced/fnbody advance over the tail per candidate line) and
+   the token-level keyword stack — the C/E quote-leak family
+   (continuation.rs, captain) is the semantic owner of why the stretch
+   reads as one open construct at all.

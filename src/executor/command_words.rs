@@ -12,22 +12,62 @@ impl Executor {
         self.shell_state
             .env_vars
             .insert("_".to_string(), value.to_string());
-        let exported = self.shell_state.env_vars.get(EXPORTED_VARS).cloned();
-        if let Some(exported) = exported {
-            let kept: Vec<&str> = exported
-                .split(DATA_DOLLAR)
-                .filter(|name| !name.is_empty() && *name != "_")
-                .collect();
-            self.shell_state
+        // perf17: GNU's attribute clear is a flag-bit test
+        // (variables.h:124-133 att_exported, VUNSETATTR at
+        // execute_cmd.c:4191) — an absent attribute is a no-op. The
+        // marker-string encoding expressed it as clone + split + join +
+        // reinsert of an UNCHANGED list (bind_lastarg runs after EVERY
+        // simple command: 67.7 of the 71.9 ms matcmd tail on the
+        // 20000-command null probe, i.e. 13.6% of the whole loop). A
+        // list containing neither `_` nor an empty fragment (the filter
+        // drops both) leaves the stored string byte-identical, so the
+        // membership pre-check — the same no-op gate perf11 used for the
+        // other marker lists (env_helpers unmark_env_name) — runs on a
+        // BORROW; the string is only materialized for a real rewrite.
+        let needs_rewrite = self
+            .shell_state
+            .env_vars
+            .get(EXPORTED_VARS)
+            .is_some_and(|exported| {
+                exported
+                    .split(DATA_DOLLAR)
+                    .any(|name| name.is_empty() || name == "_")
+            });
+        if needs_rewrite {
+            let joined = self
+                .shell_state
                 .env_vars
-                .insert(EXPORTED_VARS.to_string(), kept.join(DATA_DOLLAR_STR));
+                .get(EXPORTED_VARS)
+                .map(|exported| {
+                    exported
+                        .split(DATA_DOLLAR)
+                        .filter(|name| !name.is_empty() && *name != "_")
+                        .collect::<Vec<_>>()
+                        .join(DATA_DOLLAR_STR)
+                });
+            if let Some(joined) = joined {
+                self.shell_state
+                    .env_vars
+                    .insert(EXPORTED_VARS.to_string(), joined);
+            }
         }
-        if let Some(old) = self.shell_state.variables.get("_") {
-            let replacement = crate::shell::Variable {
-                value: crate::shell::ShellValue::Scalar(value.to_string()),
-                ..old.clone()
-            };
-            let _ = self.shell_state.variables.set("_", replacement);
+        // perf17: GNU's second half is bind_variable("_", value) — one
+        // variable-cell update (variables.c). The old shape cloned the
+        // whole Variable (including its value string) to overwrite the
+        // value, then re-inserted under a freshly allocated "_" key;
+        // VariableStore::set's only refusal is a readonly binding, so the
+        // same outcome (readonly keeps the old value, everything else
+        // swaps the value in place, no other field moves) is a guarded
+        // get_mut with zero clones.
+        let old_readonly = self
+            .shell_state
+            .variables
+            .get("_")
+            .is_some_and(|old| old.readonly);
+        if !old_readonly {
+            if let Some(old) = self.shell_state.variables.get_mut("_") {
+                old.value = crate::shell::ShellValue::Scalar(value.to_string());
+            }
         }
     }
 
@@ -44,7 +84,16 @@ impl Executor {
             // renders `$_` verbatim and the marker would leak into output
             // (bashdb `info variables` runs a bare `declare` inside a process
             // substitution).
-            let visible = value.replace(COMPOUND_ASSIGNMENT_MARKER, "");
+            // perf17: `str::replace` allocates even when the needle is
+            // absent; the marker appears only on compound-assignment
+            // operands, so the (alloc-free) `contains` gate keeps the
+            // common last-word text a borrow. GNU's lastarg is used
+            // as-is (execute_cmd.c:4746) — no rewrite happens there.
+            let visible: std::borrow::Cow<'_, str> = if value.contains(COMPOUND_ASSIGNMENT_MARKER) {
+                std::borrow::Cow::Owned(value.replace(COMPOUND_ASSIGNMENT_MARKER, ""))
+            } else {
+                std::borrow::Cow::Borrowed(value)
+            };
             self.bind_underscore(&visible);
         }
     }
