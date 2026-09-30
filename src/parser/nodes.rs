@@ -724,6 +724,13 @@ pub struct WordMetadata {
     pub tilde_expansions: Vec<TildeExpansion>,
     pub pathname_patterns: Vec<PathnamePattern>,
     pub word_quotes: Vec<WordQuote>,
+    /// The locale name under which this word's dollar-quoted backslash-u /
+    /// backslash-U escapes were decoded at lex time - Some only for words
+    /// whose raw carries such an escape (the one lex product whose value is
+    /// locale-dependent, lib/sh/strtrans.c ansicstr). The rubash#353
+    /// re-derivation compares it with the word's source line's read-time
+    /// locale.
+    pub lex_locale: Option<String>,
 }
 
 impl WordMetadata {
@@ -741,6 +748,7 @@ impl WordMetadata {
             tilde_expansions: Vec::new(),
             pathname_patterns: Vec::new(),
             word_quotes: Vec::new(),
+            lex_locale: None,
         }
     }
 
@@ -771,6 +779,11 @@ impl WordMetadata {
             tilde_expansions: super::tilde_expansions_in_word_with_raw(&value, &raw),
             pathname_patterns: super::pathname_patterns_in_word(&value, &raw),
             word_quotes: super::word_quotes_in_raw(&raw),
+            lex_locale: if crate::lexer::raw_has_ansi_u_escape(&raw) {
+                Some(crate::locale::locale_name())
+            } else {
+                None
+            },
             value,
             raw,
         }
@@ -826,6 +839,11 @@ impl WordMetadata {
             tilde_expansions,
             pathname_patterns,
             word_quotes,
+            lex_locale: if crate::lexer::raw_has_ansi_u_escape(&raw) {
+                Some(crate::locale::locale_name())
+            } else {
+                None
+            },
             value,
             raw,
         }

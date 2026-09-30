@@ -11,6 +11,168 @@ use super::scanner::Lexer;
 use super::token::{Token, TokenKind};
 use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 
+/// The raw->value dequote dispatch of finish_word_token (GNU read_token_word
+/// quote removal, parse.y:5305+), extracted verbatim so the executor's
+/// locale re-derivation (rubash#353) can reproduce EXACTLY the value the
+/// lexer would produce for a raw word — only the ANSI-C `\u`/`\U` locale
+/// gate may answer differently, pinned via locale::with_ansi_lex_locale.
+/// Returns the value plus the token kind the lexer would assign.
+pub(crate) fn word_value_from_raw(
+    raw: &str,
+    posix: bool,
+    allow_keyword: bool,
+) -> (String, TokenKind) {
+    let value = if is_assignment(raw) && assignment_rhs_opens_compound(raw) {
+        // GNU parse.y:5652-5671 read_token_word: a compound array
+        // assignment (`name=(...)` or `name[sub]=(...)`) preserves the
+        // raw parenthesized RHS text verbatim. parse_compound_assignment
+        // (parse.y:7104) clears PST_NOEXPAND (parse.y:7127), so the normal
+        // backslash branch (parse.y:5377-5397) keeps `\` in the token and
+        // sets pass_next_character to mark the next char literal. This
+        // means `\"`, `\'`, `\`` survive as literal `\"`, `\'`, `\`` in
+        // the token so assign_compound_array_list (arrayfunc.c) can
+        // tokenize the raw text with the original quoting intact.
+        // remove_shell_quotes_outside_backticks would convert `\"` to a
+        // data marker, corrupting the element tokenization.
+        //
+        // Compound detection is positional, not textual: parse.y:5648-5657
+        // peeks the character immediately after the assignment `=` and
+        // only an unquoted `(` begins parse_compound_assignment. An `=(`
+        // inside a quoted RHS (`a4='x=(1) y'`, `d1="a=(b)"`) is data —
+        // the raw text must still go through quote removal and store the
+        // scalar with the quotes stripped. The old `raw.contains("=(")`
+        // test matched those quoted spans and leaked the outer quotes
+        // into the stored value (BASH_REMATCH probes then carried them).
+        raw.to_string()
+    } else if is_assignment(raw) && assignment_rhs_is_fully_single_quoted(raw) {
+        // GNU subst.c never scans a single-quoted span: a wholly
+        // single-quoted RHS is literal data, so `x='$(date)'` stores the
+        // text `$(date)` and `x='$(date)'` must not reach the expander's
+        // `$(`/backtick fast paths. Strip the quoting here and mark the
+        // dollars/backticks as literal (restored on the way out).
+        protect_fully_single_quoted_assignment(raw)
+    } else if is_assignment(raw) && raw.contains("$(") {
+        // GNU subst.c preserves quotes inside `$(...)` command
+        // substitutions during assignment-word quote removal.
+        // `remove_shell_quotes_assignment` copies `$(...)` bodies
+        // verbatim via `copy_dollar_paren_substitution`, so quotes
+        // inside the substitution are preserved while backslash
+        // escapes outside it are converted to internal markers, and —
+        // unlike the plain word dequote — expansion triggers inside
+        // single-quoted spans travel as data carriers
+        // (`x='a'\''`b`'$(echo z)` must keep `` `b` `` literal,
+        // rubash#144; GNU parse.y:5366-5398 + subst.c:11882-11886).
+        // Without this, `eval c=\$\'\\$(printf %o $a)\'` kept literal
+        // backslashes that the expansion walker treated as escaping
+        // the `$`, suppressing the command substitution (iquote.tests
+        // line 69).
+        remove_shell_quotes_assignment(raw, posix)
+    } else if raw.starts_with("$((") {
+        // GNU keeps the text of a `$((...))` expansion verbatim at the
+        // word level; the arithmetic stage applies its own double-quote
+        // rules there (`\"` is a literal quote, `(( "1" ))` loses the
+        // quotes in the evaluator, not by word-level quote removal).
+        raw.to_string()
+    } else if is_assignment(raw) && raw.contains('`') {
+        // TODO(parse.y/subst.c): Assignment-word quote removal must not
+        // consume quotes inside command substitutions. Preserve the
+        // backquote body for the substitution stage.
+        remove_shell_quotes_outside_backticks(raw)
+    } else {
+        remove_shell_quotes_with_posix(raw, posix)
+    };
+    let kind = if allow_keyword && is_keyword(raw) {
+        TokenKind::Keyword
+    // GNU parse.y calls assignment() on the raw token (general.c:480):
+    // the name part may contain only [A-Za-z0-9_], so any quote or
+    // backslash in it disqualifies the word (a''=b is the command
+    // a=b, not an assignment). Validating the de-quoted value instead
+    // wrongly accepted a''=b because the empty quotes vanish.
+    } else if is_assignment(raw) {
+        TokenKind::Assignment
+    } else {
+        TokenKind::Word
+    };
+    let value = if quoted_literal_tilde(raw, &value) {
+        // TODO(parse.y/subst.c): Preserve quote state as WORD_DESC flags.
+        // This prevents quoted literal `~` from undergoing tilde
+        // expansion before builtins like `printf %q` see it.
+        format!(
+            "{}{value}",
+            crate::executor::markers::QUOTED_WORD_PREFIX_STR
+        )
+    } else if kind == TokenKind::Assignment && assignment_value_is_quoted(raw) {
+        // TODO(parse.y/subst.c): Replace this narrow quoted-RHS marker
+        // with WORD_DESC quote flags. It lets assignment tilde expansion
+        // distinguish `a=~/x` from `a="~/x"` without leaking syntax to
+        // builtins.
+        mark_quoted_assignment_value(raw, &value)
+    } else if kind == TokenKind::Word && is_assignment(&value) && assignment_value_is_quoted(raw) {
+        // A fully quoted assignment-looking argument, such as
+        // `"SHELL=~/bash"`, remains a normal word but its RHS quote state
+        // still suppresses the assignment-word tilde pass.
+        mark_quoted_assignment_value(raw, &value)
+    } else if raw.starts_with('"')
+        && (raw.ends_with('"') || raw.ends_with('\''))
+        && raw.contains("${")
+        && !super::quotes::raw_word_has_unquoted_glob_char(raw)
+    {
+        // TODO(parse.y/subst.c): Preserve full quote state on WORD_DESC
+        // instead of a sentinel. This narrow marker lets expansion
+        // distinguish "${v:-~}" from ${v:-~} for upstream tilde2.tests.
+        // The trailing-' form covers mixed fully-quoted words such as
+        // `"${IFS+"'"x ~ x'}'x"}"x}" #'` (dq segment + sq segment):
+        // GNU treats the whole word as quoted (no field splitting,
+        // quoted alternate expansion, posixexp2 case 28).
+        // rubash#316: first/last-character checks do not make a word
+        // fully quoted — `"$DIR"/*"${empty}"` has an unquoted `*`
+        // between the quoted segments and MUST keep pathname expansion
+        // (GNU subst.c tracks per-character quote flags). Words with an
+        // unquoted glob metacharacter therefore never take the
+        // fully-quoted sentinel (raw_word_has_unquoted_glob_char).
+        format!("{STORAGE_WORD_PREFIX_STR}{value}")
+    } else {
+        value
+    };
+    (value, kind)
+}
+
+/// Whether a raw word contains a `$'...'` span with a `\u`/`\U` escape —
+/// the only lex product whose value is locale-dependent (lib/sh/strtrans.c
+/// ansicstr -> u32cconv). Words without one never need the rubash#353
+/// re-derivation. Inside a `$'...'` span every `\` starts an escape; the
+/// escaped-backslash `\\` form consumes its follower, so only a `\`
+/// directly followed by `u`/`U` counts.
+pub(crate) fn raw_has_ansi_u_escape(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut index = 0usize;
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'$' && bytes[index + 1] == b'\'' {
+            // ANSI-C span: walk to the closing quote honoring `\\`.
+            let mut scan = index + 2;
+            while scan < bytes.len() {
+                match bytes[scan] {
+                    b'\\' => {
+                        if scan + 1 < bytes.len()
+                            && (bytes[scan + 1] == b'u' || bytes[scan + 1] == b'U')
+                        {
+                            return true;
+                        }
+                        scan += 2;
+                        continue;
+                    }
+                    b'\'' => break,
+                    _ => scan += 1,
+                }
+            }
+            index = scan + 1;
+            continue;
+        }
+        index += 1;
+    }
+    false
+}
+
 impl<'a> Lexer<'a> {
     pub(super) fn finish_word_token(&mut self, start: usize, allow_keyword: bool) -> Token {
         // rubash#131: GNU read_token_word (parse.y:5466) consumes the

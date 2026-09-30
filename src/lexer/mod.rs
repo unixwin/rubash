@@ -55,6 +55,7 @@ pub(crate) use quotes::{
     ANSI_C_QUOTE_MARKER, ANSI_C_QUOTE_MARKER_STR, PARAM_NAME_END_MARKER,
 };
 pub use token::{Token, TokenKind};
+pub(crate) use word::{raw_has_ansi_u_escape, word_value_from_raw};
 
 pub(crate) const QUOTED_HEREDOC_MARKER: &str = crate::executor::markers::QUOTED_HEREDOC_MARKER;
 

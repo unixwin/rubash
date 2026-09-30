@@ -1327,6 +1327,8 @@ impl Executor {
             evalerror_line: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),
+            line_lex_locales: std::cell::RefCell::new(HashMap::new()),
+            unit_lex_locale: std::cell::RefCell::new(None),
             ambient_line: Cell::new(None),
             conditional_invert_pending: Cell::new(false),
             inside_compound_condition: Cell::new(false),
@@ -1632,6 +1634,22 @@ impl Executor {
         // silent, empty, rc 0. Windows CreateFile on a directory would
         // surface "Permission denied" instead.
         let read_path = shell_path_to_windows(file_word, &self.shell_state.env_vars);
+        // A materialized input process substitution resolves to /dev/fd/N
+        // (subst.c process_substitute + move_to_high_fd): the bytes live in
+        // the fd table's ProcessSubstitution endpoint, not on disk. Reading
+        // the path with fs would fail with ENOENT where GNU reads the fd.
+        if let Some(fd_text) = file_word.strip_prefix("/dev/fd/") {
+            if let Ok(fd) = fd_text.parse::<u32>() {
+                if let Some((data, offset)) = self.fd_table.input_snapshot_bytes(fd) {
+                    if let Some(content) = data.get(offset..).map(<[u8]>::to_vec) {
+                        self.last_command_substitution_status.set(Some(0));
+                        return bytes_to_shell_text(&content)
+                            .trim_capture_terminator()
+                            .to_string();
+                    }
+                }
+            }
+        }
         if read_path.is_dir() {
             self.last_command_substitution_status.set(Some(0));
             return String::new();

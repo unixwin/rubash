@@ -650,6 +650,17 @@ pub struct Executor {
     /// Source line of the command currently executing at reader level —
     /// becomes the abort boundary when `evalerror_pending` is observed.
     reader_command_line: Cell<Option<usize>>,
+    /// rubash#353: locale in effect when each SOURCE LINE was first reached
+    /// at reader level — the locale GNU's parser would decode that line's
+    /// `$'...'` backslash-u escapes under (GNU reads a newline-terminated
+    /// list at a time, parse.y ansiexpand at read_token_word time). Keyed
+    /// by the line of the reader-level command that opens the line.
+    line_lex_locales: std::cell::RefCell<HashMap<usize, String>>,
+    /// rubash#353: the locale this execution unit (file/-c string) was
+    /// upfront-lexed under; a word whose metadata `lex_locale` equals it
+    /// came from that upfront lex (not from a later eval-time lex) and is
+    /// eligible for the read-time re-derivation.
+    unit_lex_locale: std::cell::RefCell<Option<String>>,
     /// GNU `line_number` ambient: at top level it advances to each
     /// command's parse-end line; inside a pre-parsed body it freezes at
     /// the enclosing command's established line (execute_cmd.c — only

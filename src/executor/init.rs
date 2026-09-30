@@ -324,6 +324,8 @@ impl Executor {
             evalerror_line: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),
+            line_lex_locales: std::cell::RefCell::new(HashMap::new()),
+            unit_lex_locale: std::cell::RefCell::new(None),
             ambient_line: Cell::new(None),
             inside_compound_condition: Cell::new(false),
             conditional_invert_pending: Cell::new(false),

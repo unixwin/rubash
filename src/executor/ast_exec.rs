@@ -67,6 +67,13 @@ impl Executor {
         self.evalerror_pending.set(false);
         self.evalerror_line.set(None);
         self.reader_command_line.set(None);
+        // rubash#353: this run's unit (file / -c string) was upfront-lexed
+        // under the CURRENT locale; words carrying that lex locale are
+        // eligible for the read-time re-derivation (words lexed later, e.g.
+        // inside eval, already decoded under their own read-time locale).
+        self.unit_lex_locale
+            .replace(Some(crate::locale::locale_name()));
+        self.line_lex_locales.borrow_mut().clear();
 
         let _guard = EXECUTION_LOCK
             .lock()
@@ -300,6 +307,18 @@ impl Executor {
             }
             if self.evalerror_exec_depth.get() == 1 {
                 self.reader_command_line.set(command.line);
+                // rubash#353: record the locale in effect when this SOURCE
+                // LINE is first reached at reader level — the locale GNU's
+                // parser would decode the line's `$'...'` backslash-u
+                // escapes under (GNU reads newline-terminated lists one at
+                // a time; the first command of a line fixes the read-time
+                // locale for every word the reader pulls in that list).
+                if let Some(line) = command.line {
+                    self.line_lex_locales
+                        .borrow_mut()
+                        .entry(line)
+                        .or_insert_with(crate::locale::locale_name);
+                }
                 // GNU eval.c:181 (reader_loop/parse_and_execute): stdin_redir
                 // is cleared before each top-level command, so a redirected
                 // control structure's flag never leaks into the next command.

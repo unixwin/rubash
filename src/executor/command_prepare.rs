@@ -355,6 +355,34 @@ impl Executor {
                 .then(|| cmd.assignment_raws.get(index))
                 .flatten()
                 .map(String::as_str);
+            // rubash#353: re-derive the RHS under the line's read-time
+            // locale when its `$'...'` backslash-u escapes were decoded
+            // under a different (upfront-lex) locale - the same rule the
+            // command-words hook applies; pure-assignment commands reach
+            // this loop without passing expand_command_words.
+            let value_owned;
+            let value = match raw.filter(|raw| crate::lexer::raw_has_ansi_u_escape(raw)) {
+                Some(raw) => {
+                    let unit_locale = self.unit_lex_locale.borrow().clone();
+                    match self.ansi_word_line_locale(unit_locale.as_deref(), cmd.line) {
+                        Some(line_locale) => {
+                            // Re-derive the FULL `name=raw` word so the
+                            // assignment dispatch (quoted-RHS markers and
+                            // all) reproduces the lexed value exactly.
+                            let full = format!("{name}={raw}");
+                            let rederived = self.rederive_word_under_locale(&full, &line_locale);
+                            let rhs = rederived
+                                .split_once('=')
+                                .map(|(_, rhs)| rhs.to_string())
+                                .unwrap_or_else(|| value.clone());
+                            value_owned = rhs;
+                            value_owned.as_str()
+                        }
+                        None => value.as_str(),
+                    }
+                }
+                None => value.as_str(),
+            };
             let assignment_result = self.expand_assignment_value_result_with_raw(name, value, raw);
             // GNU subst.c:10277-10288: a bad substitution raised while
             // expanding the assignment RHS is an expand_word_error. The
@@ -634,6 +662,34 @@ impl Executor {
         marks
     }
 
+    /// rubash#353: the read-time locale for a u-bearing word's source line,
+    /// when it differs from the locale the word's `$'...'` backslash-u
+    /// escapes were decoded under AND the word came from this unit's
+    /// upfront lex (a word lexed later — e.g. inside eval — already decoded
+    /// under its own read-time locale). `None` = keep the lexed value.
+    fn ansi_word_line_locale(
+        &self,
+        lex_locale: Option<&str>,
+        line: Option<usize>,
+    ) -> Option<String> {
+        let lex_locale = lex_locale?;
+        if self.unit_lex_locale.borrow().as_deref() != Some(lex_locale) {
+            return None;
+        }
+        let line = line?;
+        let line_locale = self.line_lex_locales.borrow().get(&line).cloned()?;
+        (line_locale != lex_locale).then_some(line_locale)
+    }
+
+    /// rubash#353: re-derive a raw word's value under `line_locale` through
+    /// the exact lexer dispatch — only the ANSI-C u-escape locale gate may
+    /// answer differently (pinned via locale::with_ansi_lex_locale).
+    fn rederive_word_under_locale(&self, raw: &str, line_locale: &str) -> String {
+        crate::locale::with_ansi_lex_locale(line_locale, || {
+            crate::lexer::word_value_from_raw(raw, self.posix_mode_enabled(), true).0
+        })
+    }
+
     pub(in crate::executor) fn expand_command_words(
         &mut self,
         cmd: &CommandNode,
@@ -694,6 +750,38 @@ impl Executor {
                         .replace(crate::executor::markers::CTLESC, "")
                         .contains(">(")
             });
+        // rubash#353: assignment RHS values get the same read-time locale
+        // re-derivation as command words (GNU decodes the RHS's `$'...'`
+        // backslash-u escapes when the reader pulls the list). The raws are
+        // index-aligned with the assignment values (nodes.rs
+        // push_assignment), and an upfront-lexed raw's lex locale is this
+        // unit's.
+        let assignments = if cmd.assignment_raws.len() == cmd.assignments.len() {
+            cmd.assignments
+                .iter()
+                .zip(cmd.assignment_raws.iter())
+                .map(|((name, value), raw)| {
+                    if crate::lexer::raw_has_ansi_u_escape(raw) {
+                        let unit_locale = self.unit_lex_locale.borrow().clone();
+                        if let Some(line_locale) =
+                            self.ansi_word_line_locale(unit_locale.as_deref(), cmd.line)
+                        {
+                            // Re-derive the FULL `name=raw` word so the
+                            // assignment dispatch (quoted-RHS markers and
+                            // all) reproduces the lexed pair exactly.
+                            let full = format!("{name}={raw}");
+                            let rederived = self.rederive_word_under_locale(&full, &line_locale);
+                            if let Some((_, rhs)) = rederived.split_once('=') {
+                                return (name.clone(), rhs.to_string());
+                            }
+                        }
+                    }
+                    (name.clone(), value.clone())
+                })
+                .collect::<Vec<_>>()
+        } else {
+            cmd.assignments.clone()
+        };
         let mut variable_expanded = CommandNode {
             words: Vec::new(),
             word_metadata: if preserve_word_metadata {
@@ -702,7 +790,7 @@ impl Executor {
                 Vec::new()
             },
             word_kinds: Vec::new(),
-            assignments: cmd.assignments.clone(),
+            assignments,
             // Keep the verbatim RHS aligned with the cloned assignments: the
             // assignment-procsub materialization (GNU subst.c:11349-11378
             // extract_process_subst) re-derives the substitution body from
@@ -778,6 +866,24 @@ impl Executor {
                         .iter()
                         .any(|assignment| assignment.word_index == Some(index));
                 let arrayref_marked = arrayref_marks.get(index).copied().unwrap_or(false);
+                // rubash#353: a word decoded at upfront-lex time under a
+                // locale that differs from its source line's read-time
+                // locale is re-derived under the read-time locale (GNU
+                // decodes $'...' backslash-u escapes when the reader pulls
+                // the list — in-script `export LC_ALL=C` on an earlier
+                // line therefore applies). No-op unless the word carries
+                // such an escape AND the locales differ.
+                let word_owned;
+                let word = match metadata.and_then(|metadata| {
+                    self.ansi_word_line_locale(metadata.lex_locale.as_deref(), cmd.line)
+                        .map(|line_locale| (line_locale, metadata.raw.clone()))
+                }) {
+                    Some((line_locale, raw)) => {
+                        word_owned = self.rederive_word_under_locale(&raw, &line_locale);
+                        word_owned.as_str()
+                    }
+                    None => word.as_str(),
+                };
                 self.expand_command_word(cmd, index, word, raw)
                     .into_iter()
                     .map(move |word| {

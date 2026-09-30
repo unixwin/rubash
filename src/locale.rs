@@ -11,6 +11,45 @@
 /// scripts after startup.
 use std::cell::RefCell;
 
+// Override for the locale the ANSI-C `\u`/`\U` decoder sees (rubash#353).
+//
+// GNU decodes `$'...'` when the READER pulls the enclosing command list
+// (parse.y:5560 ansiexpand inside read_token_word), so the locale that
+// gates the decoder (lib/sh/strtrans.c:161-181 -> unicode.c:239 u32cconv,
+// non-UTF-8 fallback u32tocesc `\u%04X`/`\U%08X`) is the one in effect at
+// that READ time — for a sequential script, the locale after all earlier
+// top-level lists executed. Rubash lexes the whole file upfront, so the
+// executor re-derives u-bearing words under their line's read-time locale
+// (recorded per source line at each top-level command start). During that
+// re-derivation this thread-local override carries the recorded locale
+// into the otherwise env-derived `locale_name()` the decoder consults;
+// outside a re-derivation there is no override and the decoder sees the
+// live environment exactly as before.
+thread_local! {
+    static ANSI_LEX_LOCALE_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Run `f` with the ANSI-C decoder locale pinned to `locale` (the
+/// read-time locale recorded for the word's source line).
+pub fn with_ansi_lex_locale<T>(locale: &str, f: impl FnOnce() -> T) -> T {
+    ANSI_LEX_LOCALE_OVERRIDE.with(|cell| {
+        *cell.borrow_mut() = Some(locale.to_string());
+    });
+    let result = f();
+    ANSI_LEX_LOCALE_OVERRIDE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+    result
+}
+
+/// The locale name the ANSI-C decoder must use: the re-derivation override
+/// when one is active, the live environment otherwise.
+pub fn ansi_lex_locale_name() -> String {
+    ANSI_LEX_LOCALE_OVERRIDE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(locale_name)
+}
+
 /// The active encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoding {

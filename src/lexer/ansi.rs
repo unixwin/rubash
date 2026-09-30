@@ -350,14 +350,16 @@ fn push_ansi_c_codepoint(output: &mut String, value: u32) {
     // u32cconv, whose non-UTF-8-locale fallback is u32tocesc
     // (unicode.c:141: `\u%04X` / `\U%08X`, ISO C99 escape with UPPERCASE
     // hex) — under `LC_ALL=C` GNU keeps `$'\u00e9'` as the six literal
-    // characters `\u00E9`. The locale name is read dynamically, so an
-    // `export LC_ALL=...` earlier in the script is honored.
+    // characters `\u00E9`. The locale name is read dynamically (see
+    // locale::ansi_lex_locale_name: a re-derivation under a line's
+    // read-time locale pins it), so an `export LC_ALL=...` earlier in the
+    // script is honored at the word's GNU read time.
     // Only an EXPLICITLY selected non-UTF-8 locale closes the gate: with
     // no locale variables rubash's platform default stays UTF-8 (its whole
     // text layer is UTF-8 on Windows; GNU would default to the C locale —
     // a documented platform divergence).
     let explicit_non_utf8_locale = {
-        let name = crate::locale::locale_name();
+        let name = crate::locale::ansi_lex_locale_name();
         !name.is_empty() && !crate::locale::is_utf8_locale_name(&name)
     };
     if value > 0x7f && explicit_non_utf8_locale {
