@@ -763,3 +763,65 @@ sandbox placement, env). No rubash-caused divergence.
   libpng.tgz, ffmpeg.tgz @ n7.1.1, hooks.tgz, nvm-install.sh,
   pyenv-installer.sh, docker-install.sh, docker-rootless-install.sh, webi/*,
   mirrors/).
+
+# ===== SECTION: gnusweep3 lane (wt20/gnusweep3, 2026-09-28) — APPENDED, DO NOT REORDER =====
+
+Third GNU-syntax deep-water wave: SELF-GENERATED tricky-construction matrices (not
+a re-run of the 83 .tests, not ecosystem corpora) + the bash-tree ORPHAN subs.
+Worktree base `0fe8d0fc`, carrier = release build from it. Oracle: WSL GNU Bash
+5.3.0 (`/usr/local/bin/bash`), script-file probes only, per-probe `timeout 20`,
+outputs via files, rc+stdout+stderr byte compare with `/mnt/d/`→`/d/` path-form
+normalization. Sandbox: `target/issue-suites/results/gnusweep3/` (generators under
+`harness/gen-cat*.sh`, runners `harness/{gnu-run,rb-run}.sh`, comparator
+`harness/cmp.py`, minimals `probes/min/`); pinned CI fixtures:
+`tests/fixtures/gnusweep3/` (25 minimals).
+
+Dedup check BEFORE running: sections 1-4 + ecosweep + ecosweep2 + ecosweep3 read in
+full. The 83-suite ledger covers the *.tests files; nothing here re-runs them.
+
+## A. Orphan subs (never referenced by any suite — transitive closure over *.tests)
+
+Direct-name grep is NOT enough: the suites fan out through helper scripts
+(`test.tests → run-all → run-minimal → execscript / run-dollars / run-input-test`,
+`trap.tests → trap2.sub → trap2a.sub`, `set-e.tests → set-e3.sub → set-e3a.sub`).
+True orphans = **26 files**: `extglob2.sub` + `nameref1..25.sub` (425/451 .subs
+are suite-covered). All 26 run on both shells (LF-normalized copies, GNU side with
+`THIS_SH=/usr/local/bin/bash` exported to mirror the suite environment).
+
+Verdict: **24/26 byte-identical** (after path-form normalization). Reds:
+- nameref11.sub → **rubash#352** (declare -r + coproc _PID listing)
+- nameref22.sub → **rubash#356** (declare -n error renders array-serialized value)
+
+## B. Generated construction matrices (537 probes total incl. orphans)
+
+| Category | Probes | Reds (engine) | Issues |
+| --- | --- | --- | --- |
+| cat1 quote hell ($'…'/$"…'/\'/nested comsub quotes/backslash matrix/continuation quotes) | 100 | 3 | #353 (\u under LC_ALL=C), #354 (^X 0x18 carrier leak in nested \`$(echo "\\\\")\`), +1 harness artifact re-verified green |
+| cat2 expansion order (IFS/word-split × pathname × tilde × brace, $@/$*, empty fields) | 100 | 3 | #337 ({a,} spurious empty word), #338 (${!prefix@} bad substitution), +3 platform-form artifacts (~/x in `case /*` — Windows home form, re-probe m01 shows case-word tilde IS expanded) |
+| cat3 process substitution (<() >>() >>(…) digit-word/array/pipes/redirect combos) | 48 | 4 | #339 (a=(<(…)) and `2>(…)` parse rejects), #340 (<& <(…) over-lax), #355 (path form = temp file not /dev/fd/N) |
+| cat4 arithmetic (assignment side effects, array subscripts, comma/ternary/**, 0x/0/2# bases) | 60 | 3 | #341 (leading-zero value not octal), #342 (**= over-lax) |
+| cat5 traps (EXIT nesting × comsub/subshell/pipe, RETURN/DEBUG/ERR propagation) | 58 | 3 | #343 (declare -ft RETURN trace), #344 (ERR trap + set -e), #345 (DEBUG trap in comsub) |
+| cat6 set/shopt flag matrix (flag on/off × sensitive construct, shopt -p driven selection) | 50 | 3 | #346 (compat31 quoted regex), #347 (execfail), #348 (set -v silent) |
+| cat7 extglob all operators × nesting/anchoring/alternation (case/[[ ]]/${var pat}/pathname) | 45 | 2 | #349 (extglob not compiled in ${var/pat/repl}), #350 (quoted extglob pattern in pathname) |
+| cat8 here-doc corners (<<- tabs, quoted delims, multi-heredoc, delim expansion, fn/comsub bodies) | 50 | 1 | #351 (unclosed quote in delimiter accepted) + known family #87/#72 (EOF-warning line number — fresh evidence comment posted) |
+
+Totals: **537 probes, 22 engine reds → 20 new issues (#337–#356) + 1 known-family
+annotation (#87) + 1 known-family cross-ref (#325 in #339, #214 in #356, #296/#179
+in #354, #239 in #338)**. Positive parity worth keeping: 96/100 quote-hell forms
+(including the full \' / \\ / comsub-quote matrix from the AGENTS worked
+counter-example), all IFS trailing/leading/multichar field cases, brace×tilde×glob
+ordering skeleton, 44/48 procsub behavioral forms, ternary/comma/base forms, EXIT
+trap nesting incl. subshell/comsub/pipe, pipefail/lastpipe/noclobber/inherit_errexit,
+extglob stripping ops, heredoc tab/quote/multi-delimiter forms.
+
+## C. Harness artifacts and platform-form classes (NOT engine bugs — recorded so future lanes do not re-file)
+
+1. Bare-glob probes (cat1 q037 `echo $(echo \*)`) run against the case directory
+   itself: the per-side artifact files (.rb.* vs .gnu.*) differ, so listings differ.
+   Re-run in a shared-content dir → identical. Glob probes must always use the
+   gfix/ fixture-dir pattern (cat2/cat6/cat7 do).
+2. `case ~/x in /*)` class: rubash expands ~ to the Windows home form (C:/…), GNU
+   to /root — the /* pattern probe is form-sensitive, not an engine divergence
+   (form-independent probe m01 passes).
+3. `echo <(…)` prints the procsub path: /dev/fd/N (GNU) vs pid-numbered temp file
+   (rubash) — tracked as #355, excluded from other categories.
