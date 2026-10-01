@@ -24,6 +24,7 @@ impl<'a> Lexer<'a> {
         // parse.y:3369-3386 + 3433-3441) — see
         // update_command_substitution_case_depth.
         let mut case_in_stage = 0u8;
+        let mut case_pattern_region = false;
         // GNU read_token (parse.y:3630-3643): `#` introduces a comment only
         // at a token boundary — after whitespace, a separator (`;&|()<>`),
         // or at the start. `word.is_empty()` alone is wrong: `$`, quotes and
@@ -71,6 +72,7 @@ impl<'a> Lexer<'a> {
                 &mut current_word_boundary,
                 rest,
                 &mut case_in_stage,
+                &mut case_pattern_region,
             );
             match c {
                 '`' => {
@@ -1228,6 +1230,7 @@ pub(super) fn update_command_substitution_case_depth(
     current_word_boundary: &mut bool,
     rest: &str,
     case_in_stage: &mut u8,
+    case_pattern_region: &mut bool,
 ) {
     if single || double {
         word.clear();
@@ -1244,6 +1247,19 @@ pub(super) fn update_command_substitution_case_depth(
     }
 
     if word.is_empty() {
+        if *case_depth > 0 {
+            if ch == ')' && *case_pattern_region {
+                // parse.y:3787-3788: `)` closes the pattern list.
+                *case_pattern_region = false;
+            } else if ch == ';' && (rest.starts_with(';') || rest.starts_with('&')) {
+                // parse.y:3710/3759: `;;`, `;&`, `;;&` start the next
+                // pattern list.
+                *case_pattern_region = true;
+            }
+            if *case_pattern_region && *case_in_stage == 3 && matches!(ch, '(' | '|') {
+                *case_in_stage = 4;
+            }
+        }
         if command_substitution_separator_allows_reserved_word(ch) {
             *word_boundary = true;
         } else if !ch.is_whitespace() {
@@ -1259,10 +1275,13 @@ pub(super) fn update_command_substitution_case_depth(
         *case_in_stage = 2;
     }
 
+    // parse.y:3177: inside PST_CASEPAT only ESAC may still be the keyword.
+    let in_pattern_region = *case_pattern_region;
     let reserved_word_allows_next = match word.as_str() {
-        "case" if *current_word_boundary => {
+        "case" if *current_word_boundary && !in_pattern_region => {
             *case_depth += 1;
             *case_in_stage = 1;
+            *case_pattern_region = false;
             false
         }
         "in" if *case_in_stage == 2 => {
@@ -1270,6 +1289,8 @@ pub(super) fn update_command_substitution_case_depth(
             // follows the case subject, so it is the IN token even off a
             // reserved-word boundary (`in` after `case SUBJECT `).
             *case_in_stage = 3;
+            // parse.y:3379/3396: the IN of a case arms the pattern region.
+            *case_pattern_region = true;
             true
         }
         "esac" if *case_in_stage == 3 => {
@@ -1281,16 +1302,18 @@ pub(super) fn update_command_substitution_case_depth(
             // error near unexpected token `)', verified vs WSL GNU 5.3.0).
             *case_depth = case_depth.saturating_sub(1);
             *case_in_stage = 0;
+            *case_pattern_region = false;
             true
         }
         "esac" if *current_word_boundary && !case_pattern_starts_with_esac_rest(ch, rest).0 => {
             *case_depth = case_depth.saturating_sub(1);
             *case_in_stage = 0;
+            *case_pattern_region = false;
             true
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
         | "done"
-            if *current_word_boundary =>
+            if *current_word_boundary && !in_pattern_region =>
         {
             *case_in_stage = 0;
             true
@@ -1503,6 +1526,7 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
     // parse.y:3369-3386 + 3433-3441) — see
     // update_command_substitution_case_depth.
     let mut case_in_stage = 0u8;
+    let mut case_pattern_region = false;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start. `word.is_empty()` alone is wrong: `$`, quotes and other
@@ -1604,6 +1628,7 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             // (niubash#139 `"${v}$(echo 中)"`).
             rest,
             &mut case_in_stage,
+            &mut case_pattern_region,
         );
         match ch {
             '\'' => single = true,

@@ -454,6 +454,7 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
     let mut word_boundary = true;
     let mut current_word_boundary = true;
     let mut case_in_stage = 0u8;
+    let mut case_pattern_region = false;
     let mut idx = 0usize;
     while idx < rest.len() {
         let ch = rest[idx..].chars().next().unwrap();
@@ -486,6 +487,7 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
             &mut current_word_boundary,
             tail,
             &mut case_in_stage,
+            &mut case_pattern_region,
         );
         match ch {
             '$' if rest.as_bytes().get(idx) == Some(&b'\'') => {
@@ -1395,6 +1397,7 @@ fn copy_dollar_paren_body_raw(
     // parse.y:3369-3386 + 3433-3441) — see skip.rs
     // update_command_substitution_case_depth (rubash#284).
     let mut case_in_stage = 0u8;
+    let mut case_pattern_region = false;
     while let Some(ch) = chars.next() {
         out.push(ch);
         if ch == '\\' {
@@ -1425,6 +1428,7 @@ fn copy_dollar_paren_body_raw(
             &mut current_word_boundary,
             &rest,
             &mut case_in_stage,
+            &mut case_pattern_region,
         );
         match ch {
             '$' if chars.peek() == Some(&'\'') => {

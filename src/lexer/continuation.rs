@@ -311,6 +311,10 @@ pub(crate) fn unclosed_input_close_char_posix(
     let mut case_word_boundary = true;
     let mut case_current_word_boundary = true;
     let mut case_in_stage = 0u8;
+    // parse.y:29 PST_CASEPAT (set at :3379/3396, cleared at :3787-3788):
+    // inside a pattern list reserved words are word data — the region bit
+    // keeps a pattern-position `case` from inflating case_depth (rubash#380).
+    let mut case_pattern_region = false;
     let mut i = 0usize;
     while i < chars.len() {
         let ch = chars[i];
@@ -328,6 +332,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                 &mut case_word_boundary,
                 &mut case_current_word_boundary,
                 &mut case_in_stage,
+                &mut case_pattern_region,
             );
         } else if top.is_some_and(|d| d.close == '\'' || d.close == '"') {
             case_word.clear();
@@ -1654,6 +1659,8 @@ fn skip_parenthesized_unit_ex(chars: &[char], open: usize) -> Option<(usize, boo
     let mut word_boundary = true;
     let mut current_word_boundary = true;
     let mut parameter_depth = 0usize;
+    // rubash#380: pattern-list region bit (parse.y:29 PST_CASEPAT).
+    let mut case_pattern_region = false;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start. `word.is_empty()` alone is wrong: `$`, quotes and other
@@ -1762,6 +1769,7 @@ fn skip_parenthesized_unit_ex(chars: &[char], open: usize) -> Option<(usize, boo
                 &mut word_boundary,
                 &mut current_word_boundary,
                 &mut undecided,
+                &mut case_pattern_region,
             );
             // GNU read_token_word (parse.y:5377-5397): outside quotes a
             // backslash quotes the next character — it can never act as
@@ -1872,6 +1880,8 @@ pub(crate) struct ComsubResidualState {
     pub(crate) word: String,
     pub(crate) word_boundary: bool,
     pub(crate) current_word_boundary: bool,
+    /// rubash#380: pattern-list region bit (parse.y:29 PST_CASEPAT).
+    pub(crate) case_pattern_region: bool,
 }
 
 impl Default for ComsubResidualState {
@@ -1893,6 +1903,7 @@ impl Default for ComsubResidualState {
             word: String::new(),
             word_boundary: true,
             current_word_boundary: true,
+            case_pattern_region: false,
         }
     }
 }
@@ -2173,6 +2184,7 @@ pub(crate) fn comsub_residuals_advance(
                 &mut state.case_depth,
                 &mut state.word_boundary,
                 &mut state.current_word_boundary,
+                &mut state.case_pattern_region,
             );
         }
         if state.depth > 0
@@ -2574,6 +2586,7 @@ fn update_command_substitution_case_depth_corrected_ex(
     lookahead: (&[char], usize),
     case_in_stage: &mut u8,
     undecided: &mut bool,
+    case_pattern_region: &mut bool,
 ) {
     if single || double {
         word.clear();
@@ -2590,6 +2603,24 @@ fn update_command_substitution_case_depth_corrected_ex(
     }
 
     if word.is_empty() {
+        if *case_depth > 0 {
+            if ch == ')' && *case_pattern_region {
+                // parse.y:3787-3788: `)` closes the pattern list.
+                *case_pattern_region = false;
+            } else if ch == ';'
+                && lookahead
+                    .0
+                    .get(lookahead.1 + 1)
+                    .is_some_and(|next| *next == ';' || *next == '&')
+            {
+                // parse.y:3710/3759: `;;`, `;&`, `;;&` start the next
+                // pattern list.
+                *case_pattern_region = true;
+            }
+            if *case_pattern_region && *case_in_stage == 3 && matches!(ch, '(' | '|') {
+                *case_in_stage = 4;
+            }
+        }
         if command_substitution_separator_allows_reserved_word(ch) {
             *word_boundary = true;
         } else if !ch.is_whitespace() {
@@ -2605,28 +2636,35 @@ fn update_command_substitution_case_depth_corrected_ex(
         *case_in_stage = 2;
     }
 
+    // parse.y:3177: inside PST_CASEPAT only ESAC may still be the keyword.
+    let in_pattern_region = *case_pattern_region;
     let reserved_word_allows_next = match word.as_str() {
-        "case" if *current_word_boundary => {
+        "case" if *current_word_boundary && !in_pattern_region => {
             *case_depth += 1;
             *case_in_stage = 1;
+            *case_pattern_region = false;
             false
         }
+
         "in" if *case_in_stage == 2 => {
             // GNU special_case_tokens rule 6 (parse.y:3369-3386): this `in'
             // follows the case subject, so it is the IN token even off a
             // reserved-word boundary (`in` after `case SUBJECT `).
             *case_in_stage = 3;
+            // parse.y:3379/3396: the IN of a case arms the pattern region.
+            *case_pattern_region = true;
             true
         }
         "esac" if *case_in_stage == 3 => {
             // GNU parse.y:3433-3441: `esac' directly after IN is ESAC —
             // the empty case `case WORD in esac'. Unconditional there, so
-            // no case_pattern lookahead guard on this arm: the `)` right
+            // no case-pattern lookahead guard on this arm: the `)` right
             // after `esac` is a stray top-level token, exactly how GNU
             // reports `case x in esac) echo hi;; esac` (syntax error near
             // unexpected token `)', verified vs WSL GNU 5.3.0).
             *case_depth = case_depth.saturating_sub(1);
             *case_in_stage = 0;
+            *case_pattern_region = false;
             true
         }
         "esac" if *current_word_boundary => {
@@ -2638,6 +2676,7 @@ fn update_command_substitution_case_depth_corrected_ex(
             if !starts {
                 *case_depth = case_depth.saturating_sub(1);
                 *case_in_stage = 0;
+                *case_pattern_region = false;
                 true
             } else {
                 false
@@ -2645,7 +2684,7 @@ fn update_command_substitution_case_depth_corrected_ex(
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
         | "done"
-            if *current_word_boundary =>
+            if *current_word_boundary && !in_pattern_region =>
         {
             *case_in_stage = 0;
             true
@@ -2657,6 +2696,18 @@ fn update_command_substitution_case_depth_corrected_ex(
             false
         }
     };
+    if *case_depth > 0 {
+        if ch == ')' && *case_pattern_region {
+            *case_pattern_region = false;
+        } else if ch == ';'
+            && lookahead
+                .0
+                .get(lookahead.1 + 1)
+                .is_some_and(|next| *next == ';' || *next == '&')
+        {
+            *case_pattern_region = true;
+        }
+    }
     word.clear();
     *word_boundary =
         reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
@@ -2679,6 +2730,8 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
     let mut word_boundary = true;
     let mut current_word_boundary = true;
     let mut parameter_depth = 0usize;
+    // rubash#380: pattern-list region bit (parse.y:29 PST_CASEPAT).
+    let mut case_pattern_region = false;
     // `case WORD in' chain tracker (GNU special_case_tokens,
     // parse.y:3369-3386 + 3433-3441) — see the corrected case-depth update.
     let mut case_in_stage = 0u8;
@@ -2758,11 +2811,12 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
         // the suffix unless the terminating char is `)` or `|` (mirror of
         // the skip.rs materialization rule; see
         // case_pattern_starts_with_esac_rest_chars).
-        let lookahead: (&[char], usize) = if word == "esac" && matches!(ch, ')' | '|') {
-            (chars, index)
-        } else {
-            (&[], usize::MAX)
-        };
+        let lookahead: (&[char], usize) =
+            if (word == "esac" && matches!(ch, ')' | '|')) || ch == ';' {
+                (chars, index)
+            } else {
+                (&[], usize::MAX)
+            };
         update_command_substitution_case_depth_corrected_ex(
             ch,
             false,
@@ -2774,6 +2828,7 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
             lookahead,
             &mut case_in_stage,
             &mut undecided,
+            &mut case_pattern_region,
         );
         match ch {
             '\'' => single = true,
@@ -3576,6 +3631,10 @@ pub(crate) struct CloseCharResidualState {
     /// `case`, 2 subject done, 3 after `in`) — see
     /// update_command_substitution_case_depth_staged_chars.
     pub(crate) case_in_stage: u8,
+    /// rubash#380: the pattern-list region bit (parse.y:29 PST_CASEPAT) —
+    /// reserved words inside a pattern list are word data. Checkpointed
+    /// alongside case_in_stage so a resumed scan matches the oracle.
+    pub(crate) case_pattern_region: bool,
 }
 
 impl Default for CloseCharResidualState {
@@ -3592,6 +3651,7 @@ impl Default for CloseCharResidualState {
             word_boundary: true,
             current_word_boundary: true,
             case_in_stage: 0,
+            case_pattern_region: false,
         }
     }
 }
@@ -3703,6 +3763,7 @@ pub(crate) fn close_char_residuals_advance(
                 &mut state.word_boundary,
                 &mut state.current_word_boundary,
                 &mut state.case_in_stage,
+                &mut state.case_pattern_region,
             );
         } else if top.is_some_and(|d| d.close == '\'' || d.close == '"') {
             // Inside a quote span the word machine clears (the skip.rs
@@ -4206,6 +4267,7 @@ fn update_command_substitution_case_depth(
     case_depth: &mut usize,
     word_boundary: &mut bool,
     current_word_boundary: &mut bool,
+    case_pattern_region: &mut bool,
 ) {
     let mut undecided = false;
     update_command_substitution_case_depth_ex(
@@ -4217,6 +4279,7 @@ fn update_command_substitution_case_depth(
         word_boundary,
         current_word_boundary,
         &mut undecided,
+        case_pattern_region,
     );
 }
 
@@ -4243,6 +4306,7 @@ fn update_command_substitution_case_depth_staged_chars(
     word_boundary: &mut bool,
     current_word_boundary: &mut bool,
     case_in_stage: &mut u8,
+    case_pattern_region: &mut bool,
 ) {
     if ch == '_' || ch.is_ascii_alphanumeric() {
         if word.is_empty() {
@@ -4253,6 +4317,28 @@ fn update_command_substitution_case_depth_staged_chars(
     }
 
     if word.is_empty() {
+        if *case_depth > 0 {
+            if ch == ')' && *case_pattern_region {
+                // parse.y:3787-3788: `)` closes the pattern list; the
+                // clause body begins and reserved words live again.
+                *case_pattern_region = false;
+            } else if ch == ';'
+                && chars
+                    .get(index + 1)
+                    .is_some_and(|next| *next == ';' || *next == '&')
+            {
+                // parse.y:3710/3759: `;;`, `;&`, `;;&` end the clause body —
+                // the next pattern list begins.
+                *case_pattern_region = true;
+            }
+            if *case_pattern_region && *case_in_stage == 3 && matches!(ch, '(' | '|') {
+                // A `(` pattern-list opener or `|` separator ends the
+                // directly-after-`in` window in which a bare `esac` closes
+                // an empty case (parse.y:3433-3441 needs last_read_token ==
+                // IN), so `(esac)` stays pattern text.
+                *case_in_stage = 4;
+            }
+        }
         if command_substitution_separator_allows_reserved_word(ch) {
             *word_boundary = true;
         } else if !ch.is_whitespace() {
@@ -4266,16 +4352,21 @@ fn update_command_substitution_case_depth_staged_chars(
         *case_in_stage = 2;
     }
 
+    // parse.y:3177: inside PST_CASEPAT only ESAC may still be the keyword.
+    let in_pattern_region = *case_pattern_region;
     let reserved_word_allows_next = match word.as_str() {
-        "case" if *current_word_boundary => {
+        "case" if *current_word_boundary && !in_pattern_region => {
             *case_depth += 1;
             *case_in_stage = 1;
+            *case_pattern_region = false;
             false
         }
         "in" if *case_in_stage == 2 => {
             // GNU special_case_tokens rule 6: `in' after the case subject
             // is the IN token even off a reserved-word boundary.
             *case_in_stage = 3;
+            // parse.y:3379/3396: the IN of a case arms the pattern region.
+            *case_pattern_region = true;
             true
         }
         "esac" if *case_in_stage == 3 => {
@@ -4283,6 +4374,7 @@ fn update_command_substitution_case_depth_staged_chars(
             // the empty case `case WORD in esac' — unconditionally.
             *case_depth = case_depth.saturating_sub(1);
             *case_in_stage = 0;
+            *case_pattern_region = false;
             true
         }
         "esac" if *current_word_boundary => {
@@ -4291,6 +4383,7 @@ fn update_command_substitution_case_depth_staged_chars(
             if !starts_with_esac_chars {
                 *case_depth = case_depth.saturating_sub(1);
                 *case_in_stage = 0;
+                *case_pattern_region = false;
                 true
             } else {
                 // `esac` heads a pattern list (esac|pat) / sits in pattern
@@ -4301,7 +4394,7 @@ fn update_command_substitution_case_depth_staged_chars(
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
         | "done"
-            if *current_word_boundary =>
+            if *current_word_boundary && !in_pattern_region =>
         {
             *case_in_stage = 0;
             true
@@ -4313,6 +4406,17 @@ fn update_command_substitution_case_depth_staged_chars(
             false
         }
     };
+    if *case_depth > 0 {
+        if ch == ')' && *case_pattern_region {
+            *case_pattern_region = false;
+        } else if ch == ';'
+            && chars
+                .get(index + 1)
+                .is_some_and(|next| *next == ';' || *next == '&')
+        {
+            *case_pattern_region = true;
+        }
+    }
     word.clear();
     *word_boundary =
         reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
@@ -4327,6 +4431,7 @@ fn update_command_substitution_case_depth_ex(
     word_boundary: &mut bool,
     current_word_boundary: &mut bool,
     undecided: &mut bool,
+    case_pattern_region: &mut bool,
 ) {
     if ch == '_' || ch.is_ascii_alphanumeric() {
         if word.is_empty() {
@@ -4337,6 +4442,20 @@ fn update_command_substitution_case_depth_ex(
     }
 
     if word.is_empty() {
+        if *case_depth > 0 {
+            if ch == ')' && *case_pattern_region {
+                // parse.y:3787-3788: `)` closes the pattern list.
+                *case_pattern_region = false;
+            } else if ch == ';'
+                && chars
+                    .get(index + 1)
+                    .is_some_and(|next| *next == ';' || *next == '&')
+            {
+                // parse.y:3710/3759: `;;`, `;&`, `;;&` start the next
+                // pattern list.
+                *case_pattern_region = true;
+            }
+        }
         if command_substitution_separator_allows_reserved_word(ch) {
             *word_boundary = true;
         } else if !ch.is_whitespace() {
@@ -4345,9 +4464,11 @@ fn update_command_substitution_case_depth_ex(
         return;
     }
 
+    let in_pattern_region = *case_pattern_region;
     let reserved_word_allows_next = match word.as_str() {
-        "case" if *current_word_boundary => {
+        "case" if *current_word_boundary && !in_pattern_region => {
             *case_depth += 1;
+            *case_pattern_region = false;
             false
         }
         "esac" if *current_word_boundary => {
@@ -4358,6 +4479,7 @@ fn update_command_substitution_case_depth_ex(
             }
             if !starts_with_esac_chars {
                 *case_depth = case_depth.saturating_sub(1);
+                *case_pattern_region = false;
                 true
             } else {
                 false
@@ -4365,12 +4487,23 @@ fn update_command_substitution_case_depth_ex(
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
         | "done"
-            if *current_word_boundary =>
+            if *current_word_boundary && !in_pattern_region =>
         {
             true
         }
         _ => false,
     };
+    if *case_depth > 0 {
+        if ch == ')' && *case_pattern_region {
+            *case_pattern_region = false;
+        } else if ch == ';'
+            && chars
+                .get(index + 1)
+                .is_some_and(|next| *next == ';' || *next == '&')
+        {
+            *case_pattern_region = true;
+        }
+    }
     word.clear();
     *word_boundary =
         reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
