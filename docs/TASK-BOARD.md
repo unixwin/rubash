@@ -226,3 +226,12 @@
 - **perf1x 回收（7002db37+74a06435，CI 绿 a92540a4）**：comsub 入口 errexit 对齐（修 4 活分歧：`$(f)` 内函数体 errexit 复活等）+ **删除活标记单一源化**（修 `set -e; set +o errexit; false` 被杀、xtrace 残留两族；读点 2 查→1 查）。诚实结论：~5% 估计低于噪声地板，Cell 缓存**不必再做**（已写 PERF-BASELINE 防浪费）；下一杠杆=`__RUBASH_CURRENT_LINE` Cell 移植
 - **#156**：归 WinuxCmd，上游单 WinuxCmd#1139 已建（bug+compat-gap）；niubash 侧钉死
 - 侧发现待开单：posix 翻转 inherit_errexit 粘滞（GNU `set +o posix` 不复位）
+
+## 2026-10-02 wt29/rubugs 回收（a8eb9e93/c52a7211/dc054fca/600cf42c + 船长 0641d4e7，CI 绿）
+
+- **#377 关**：marker 传输不变量三站点收口（未引号 fan-out 逐字段 glob；declare 引号产物保 CTLESC）
+- **#379 关**：ANSI-C 解码空白=词数据（ANSI_C_IFS_GUARD U+E401，markers.rs 注册表内新成员——String 词域非 Vec<u8> 载体域，已标注 owner 复核）；33 套件台账不动
+- **#381 关**：空 case 跳过 in 后换行+游离定界符报错（双向矩阵）
+- **#380 部分**：车道 executor/parser 侧 + 船长 continuation.rs/skip.rs/quotes.rs 全机器 PST_CASEPAT 穿线（含 close_char 残差态新字段、corrected lookahead 喂 ';'）；**裸关键词 comsub 形态转绿**；括号列表形态残留已仪器化定界（pattern-paren 的 at_push 记账在 esac-) 处弹错栈——单内有完整下一步建议）
+- **#154 教训存档**：车道 GNU 矩阵系 source 模式探针伪影；船长直测翻案（-c 子壳/函数真值 127=原实现对）
+- 期间调试仪器全部清除、诊断字符串逐字节核对还原
