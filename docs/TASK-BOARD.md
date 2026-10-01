@@ -177,3 +177,11 @@
 - **#370 关**：resolve_dup_source 补 fd_table 活绑定查询（镜像 fd1/2 ambient 播种）+ 管道兜底 drain 走 route_builtin_buffered_output 有序重定向状态。10 例 fd 矩阵字节一致；fd_redirects 两红转绿；cli_tests 19→17 预存失败（零新增）
 - **跟进三单**：#377（未引号 `${a[@]}`/declare 元素不 glob——#369 反向预存缺口）、#378（外来子进程拿不到 exec 编号 fd——Windows spawn 平台限制）、#379（comsub 间 `$'\n'` 折叠为空格——预存）
 - **winget**：437563 换代 444854（Unixwin.Niubash 1.2.1，zip+portable→inno，静默本地验证过）；旧单已留交接评注
+
+## 2026-10-01 晚间：1.2.2 发布 + winget 换版 + #368 回收 + 管道调查大反转
+
+- **niubash v1.2.2 已发**：rubash 98bc65ba 引擎（#364/#376/#369/#370 五族修复+ArithDynamicContext perf）。lock 手术式 bump（完整重解析会把 windows-sys 降级到 0.59/0.48 破坏特性门——已记入提交信息）；本机安装已升 1.2.2
+- **winget 444854 换版 1.2.1→1.2.2**（manifest 删旧加新+标题/描述+换版评注）；#141/#155 已 ping v1.2.2
+- **#368 关（3d311caa，CI 绿）**：Some(None) 写入臂走真 stdout 旁路（write_real_stdout_uncaptured）+ comsub 边界清 fd1 别名记录（subst.c:7320 新描述规则）；nvm juggle 双排布字节同 GNU
+- **管道数据丢失大反转（#155/#141 已发更正）**：v1.2.2 **未**修复——判别矩阵补全后病灶收敛在 **niubash-runtime `-c` 路径 × WinuxCmd 子进程组合**（rubash.exe 双 profile 直跑全对、MSYS/cmd 管道全对、niu stdin 模式全对、环境变量排除、双构建同坏）。wt26/pipefix 车道深挖中（niubash 侧工作树）
+- wt25/semix（#371+#372）在途
