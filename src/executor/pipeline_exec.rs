@@ -59,18 +59,38 @@ fn internal_pipeline_program_name(program: &std::path::Path) -> Option<&str> {
 #[cfg(windows)]
 fn wait_for_windows_pipeline_member(
     process: &mut std::process::Child,
+    downstream: Option<&mut std::process::Child>,
 ) -> Result<std::process::ExitStatus, ExecuteError> {
-    // Bash waits for the pipeline job to publish each member's status. Give
-    // a producer that observed a closed downstream pipe a short opportunity
-    // to exit naturally before applying the Windows hard-kill fallback.
+    // Bash waits for the pipeline job to publish each member's status
+    // (execute_cmd.c:2620 execute_pipeline forks every left element on
+    // pipe(2); jobs.c:3064 wait_for blocks with no wall-clock cap) and never
+    // terminates a member on a timer: a producer whose consumer is still
+    // reading is doing legitimate work, and SIGPIPE — not the shell — ends a
+    // producer that outlives its consumer. Windows has no SIGPIPE, so the
+    // bounded hard-kill remains necessary for a producer lingering after its
+    // downstream closed the pipe; it may apply ONLY then. The window starts
+    // when the downstream exit is first observed, not at call time — the old
+    // unconditional deadline killed healthy producers mid-stream and
+    // truncated `seq 5000000 | wc -l`-shaped pipelines at whatever had flowed
+    // by the cap (silent data loss, rc=0, per-run drift).
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
     const NATURAL_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
-    let deadline = std::time::Instant::now() + NATURAL_EXIT_WINDOW;
+    let mut downstream = downstream;
+    let mut kill_deadline: Option<std::time::Instant> = None;
     loop {
         if let Some(status) = process.try_wait().map_err(ExecuteError::IoError)? {
             return Ok(status);
         }
-        if std::time::Instant::now() >= deadline {
+        let downstream_gone = match downstream.as_deref_mut() {
+            // try_wait is non-destructive: the later formal wait/with_output
+            // of that child still reaps it.
+            Some(next) => next.try_wait().map_err(ExecuteError::IoError)?.is_some(),
+            None => true,
+        };
+        if downstream_gone && kill_deadline.is_none() {
+            kill_deadline = Some(std::time::Instant::now() + NATURAL_EXIT_WINDOW);
+        }
+        if kill_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
             let _ = process.kill();
             return process.wait().map_err(ExecuteError::IoError);
         }
@@ -1338,14 +1358,21 @@ impl Executor {
         }
 
         let mut results: Vec<(String, String, i32)> = vec![Default::default(); processes.len()];
-        let last = processes.pop().expect("pipeline has at least two stages");
-        let last_index = processes.len();
+        let last_index = processes.len() - 1;
         // Reap non-final stages in forward order: a `/dev/stdout`-family
         // operand on stage N flushes into a dup'd writer of pipe N, and that
         // dup must close before stage N+1 can see EOF — reaping downstream
-        // first would deadlock the wait.
-        for (index, mut member) in processes.into_iter().enumerate() {
-            let status = wait_for_windows_pipeline_member(&mut member)?;
+        // first would deadlock the wait. Each member is waited against its
+        // immediate downstream: GNU never caps a member whose consumer is
+        // still reading (execute_cmd.c:2620 + jobs.c:3064 wait_for), so the
+        // Windows broken-pipe hard-kill window may only arm once that
+        // downstream has exited. split_at_mut borrows the member and its
+        // downstream from the one Vec that still owns every child.
+        for index in 0..last_index {
+            let (head, tail) = processes.split_at_mut(index + 1);
+            let member = head.last_mut().expect("member index inside pipeline");
+            let downstream = tail.first_mut().expect("downstream member after index");
+            let status = wait_for_windows_pipeline_member(member, Some(downstream))?;
             results[index] = (
                 String::new(),
                 String::new(),
@@ -1353,6 +1380,8 @@ impl Executor {
             );
             self.finish_dev_fd_operands(std::mem::take(&mut stage_dev_ops[index]));
         }
+        let last = processes.pop().expect("pipeline has at least two stages");
+        debug_assert_eq!(processes.len(), last_index);
         let output = last.wait_with_output()?;
         let mut stdout_bytes = output.stdout;
         stdout_bytes
