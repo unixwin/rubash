@@ -152,3 +152,12 @@
 - **wt21**（2x 收官轮）：startup21（pre-main 6-10ms=Windows 主机地板铁证；rubash 侧→1.3ms；01/02 原生父 9.5ms=cmd 地板）、feeder21（电池融合+准入+削减：configure 386ms；join/re-lex 前提证伪）、resid21（#336/#353/#355 关+#335 partial+#352 归类；#353 读时 locale 语义、#355 fd 间接层；回归门禁拦下 cat-file /dev/fd 连带破绽并修）
 - **2x 战役位置**：01/02 达 cmd 主机地板（2.4x 对 GNU-Linux）、5 套件 <2x、pathmiss 原生父 1.6x、configure 11x（token 架构级 quote-removal 是下一座山）、null 8.8x
 - CI 双绿全程；unix shim+catfile 两起 CI/门禁红均当场修复
+
+## 2026-10-01 战报（wt22-wt23 回收中）
+
+- **wt22**：#361/#362/#363（direnv P0 家族：外部脚本 in-process 泄漏、复合体 comsub+重定向空返回）、quoterm22 游标基底（卫生门禁 char::From 两轮拦截后落地）
+- **1.2.1 release 链已合**：rubash #366/#367（版本 bump+lock 同步，匹配 niubash git 依赖声明）；niubash v1.2.1（Winget portable #151）。合并后 release 构建验证通过，磁盘清理 18→2 工作树
+- **wt23/bats364 已回收（2ad6c17c，CI 6/6 绿）**：#364 根因=展开后赋值值重扫 `<(` 物化 procsub（GNU subst.c:11358-11381：procsub 只在原始词文本游走时识别）——bats-preprocess CR-strip 循环执行了 bats.bats 内的 `<(normalize_variable_list)` 文本。修复=门条件收在展开前 RHS 字面 `<(`/`>(` 且非全引号。bats_pipe 155/155 TAP 字节同 GNU；bats.bats 70/146（余量为 perf→#375）
+- **ecosweep4-B 274 红分诊落盘** docs/ecosweep4-B-reds-triage-2026-10-01.md：真回归 2（**#369** 引号元素 glob 泄漏 8c52cb7f、**#370** exec 复制 fd 外部命令落错流 ba69f0d9，均已 bisect 定住）；语义缺口 #371 `${assoc[*]@A}`、#372 case 模式关键字；过时断言伞 #373（72 红）；executor_tests 跟进 #374
+- **#375 开**：bats DEBUG-trap 派发 ~0.4-1ms×2300 次/gather + 每触发 `$(cd;pwd)` 归一化（Windows 路径形态专属），2x 战役候补车道
+- wt23/hist274 在途（2x floor 桶三项+f28+#368 关联+电池三机器评估）
