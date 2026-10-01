@@ -185,3 +185,10 @@
 - **#368 关（3d311caa，CI 绿）**：Some(None) 写入臂走真 stdout 旁路（write_real_stdout_uncaptured）+ comsub 边界清 fd1 别名记录（subst.c:7320 新描述规则）；nvm juggle 双排布字节同 GNU
 - **管道数据丢失大反转（#155/#141 已发更正）**：v1.2.2 **未**修复——判别矩阵补全后病灶收敛在 **niubash-runtime `-c` 路径 × WinuxCmd 子进程组合**（rubash.exe 双 profile 直跑全对、MSYS/cmd 管道全对、niu stdin 模式全对、环境变量排除、双构建同坏）。wt26/pipefix 车道深挖中（niubash 侧工作树）
 - wt25/semix（#371+#372）在途
+
+## 2026-10-01 深夜：wt25/semix 回收（27ffceb9/50cd08ce，CI 绿）
+
+- **#371 关**：两根因——元素赋值清 DECLARED_UNSET_VARS（arrayfunc.c:815 真 cell）；分词按 chk_atstar（quoted `[*]` 一词、`[@]` 只按 IFS 切裸前缀，值体 CTLESC 存活）
+- **#372 关**：解析哨兵无责，真凶=lexer close-char 扫描器无 pattern-region 状态；修复=command-位 `(` 未闭合判定用真解析器复核证伪（#117 走法2，范围有据收窄）；issue308 残留 2 红转绿
+- **残留开单**：#380（comsub 执行层同族——lexer/skip.rs case-depth 机需 PST_CASEPAT 移植）、#381（空 case 严格性反向分歧——`in` 后换行未跳过）
+- 在途：wt26/pipefix（niu×WinuxCmd 管道丢数据 P0）
