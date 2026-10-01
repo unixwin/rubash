@@ -169,3 +169,11 @@
 - **for-arith memo 否决**（差分微探针：循环体真含循环变量，GNU 无 memo 付 0.6µs 我们 3.9µs——归因 per-command floor 家族）；errexit/xtrace 收敛只评估（发现 comsub 入口双编码陷阱角落，须先验 GNU execute_cmd.c:1669 再收敛）；电池三机器两阶段方案落 PERF-BASELINE（动 continuation.rs=船长专属，待拍板）
 - **f28 根因落 #368**：预开 fd 3/4 在 `$()` 内不可见（nvm-exec 协议坍塌），非 xtrace 继承（GNU 从不自动导出 SHELLOPTS，shell.c:1971-1987）
 - **#376 开（P0，船长抽查发现）**：词内两个 `$((...))` 中隔非字母材料（`:`/空格/`.`/`-`）误切分成一个合并表达式——`echo "$((1+1)):$((2+2))"` 直接报错。1.2.1 谱系预存（base==master 字节同败，非 2ad6c17c/b5b78aab 回归）；上游 arith.tests 无此形状=语料盲区；11 形态证据矩阵在单内。修复车道候选
+
+## 2026-10-01 wt24 回收（d1cdb7b3/8c5fc861/085c6a74，CI 6/6 绿）
+
+- **#376（P0）关**：三个整词 `$((` 快速路径的 strip_prefix+strip_suffix 准入把第一个 `$((` 配到最后一个 `))`。新 `whole_word_arithmetic_substitution_body` 真扫描器（括号深度 2 起算、引号/转义不透明、首个平衡 `))` 必须是词尾）替换三处准入（parameter_core/expand_word/command_prepare）；GNU 规范=parse.y:3877 parse_matched_pair 首个平衡 `))` 即断（:3988）、后续 `$((` 独立词事件（:5521）。11 形态+扩类边界双壳字节一致；14+3 回归测试
+- **#369 关**：引号整词元素传输形态从 ARRAY_FIELD_SPLIT_MARKER 改纯引号存储词（store! 形态），W_QUOTED 存活到 glob 门。**bisect 纠正：真引入=306436d7 非 8c52cb7f**（原判定被陈旧二进制污染；#288 无涉）。20 例类矩阵字节一致
+- **#370 关**：resolve_dup_source 补 fd_table 活绑定查询（镜像 fd1/2 ambient 播种）+ 管道兜底 drain 走 route_builtin_buffered_output 有序重定向状态。10 例 fd 矩阵字节一致；fd_redirects 两红转绿；cli_tests 19→17 预存失败（零新增）
+- **跟进三单**：#377（未引号 `${a[@]}`/declare 元素不 glob——#369 反向预存缺口）、#378（外来子进程拿不到 exec 编号 fd——Windows spawn 平台限制）、#379（comsub 间 `$'\n'` 折叠为空格——预存）
+- **winget**：437563 换代 444854（Unixwin.Niubash 1.2.1，zip+portable→inno，静默本地验证过）；旧单已留交接评注
