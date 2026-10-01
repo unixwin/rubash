@@ -207,3 +207,12 @@
 - **v1.2.4 已发布**：release 构建 `-C target-feature=+crt-static`（工作流烧入），objdump 验证仅剩系统 DLL；安装版实测 5M×3 全额+版本 banner。release runner 断连（other side closed）致资产缺失→rerun --failed 补齐；下载侧遇截断必须 size 核对
 - **winget 444854 第 4 次换版至 1.2.4**；管线在 PR 内换版后会卡死（新 head status 全空）——**close+reopen 重触发**有效（01-06 立即重跑）；当前 07-10 在跑
 - 记忆更新：winget-listing 全量重写（双层根因+管线卡死处置+下载截断）
+
+## 2026-10-01 军令状 + wt27-wt30 四车道齐发
+
+- **Owner 三条硬指令入常设记忆**（rubash-hang-test-and-perf-1x）：①挂起类修复必须配钉死回归测试（短 timeout 保护）；②issue 全清不挂账；③性能全线 ≤2x 硬线、目标 1x
+- **#141/#155 双关**（heptaspirit 1.2.4 验收：数据丢失全翻绿、读端字节=GNU、三段死锁 0.31s；231 双方三版本零复现按不可复现关）；#382 退出码残留补了他 的 PIPESTATUS 证据
+- **#158 新 P0**（他回归中发现+船长复现）：末段 cat/nl/rev 且 stdout 直连 → `seq 20000 | cat` 确定性挂起=2c781657 耐心等待暴露的旧句柄残留。**wt27/hangfix 热修在途**（护栏=2c781657 全部成果不许翻）
+- **wt28/bugs**（niubash）：#157 setup rc 坏文件（最优先）+ #153 裸 `/` 翻译 + #154 参数展开失败退出码 + #156 xargs 选项解析（含归属判定，WinuxCmd 只读）
+- **wt29/rubugs**（rubash）：#377 未引号 fan-out glob + #379 `$'..'` 折叠 + #380 comsub casepat + #381 空 case 严格性
+- **wt30/perf1x**：null 8.8x / configure 11x / errexit-xtrace 收敛（先验 GNU execute_cmd.c:1669）/ per-command 地板；架构级先设计后动；测量铁律含负载放大
