@@ -933,10 +933,39 @@ impl Executor {
                     let field = field
                         .replace(crate::executor::markers::IFS_GLUE, "")
                         .replace(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG, "");
-                    elements.push(format!(
-                        "{ARRAY_FIELD_SPLIT_MARKER}{}",
-                        quote_compound_field_value(&field)
-                    ));
+                    // A field still carrying CTLESC (\x11) protection is a
+                    // QUOTED element product — expand_command_word
+                    // CTLESC-protects every character of a quoted word's
+                    // result (GNU add_quoted_string, subst.c:11862), which
+                    // is exactly why the glob above left it literal. It must
+                    // KEEP the ARRAY_FIELD_SPLIT_MARKER (an expansion
+                    // product is never re-read as a [subscript]= assignment
+                    // — GNU's W_ASSIGNMENT is parse-time only, array19.sub:
+                    // `declare -a foo=("$b")` with b='[0]=bar' stores the
+                    // text at [0]) but its glob characters must stay
+                    // protected through the storage boundary: serialize the
+                    // CTLESC pairs INSIDE the double quotes (quote_array_
+                    // value would strip them) so the storage marker arm's
+                    // glob gate sees a fully protected word — GNU
+                    // glob_expand_word_list globs the CTLESC-laden word and
+                    // pathexp.c:120-122 skips every protected character —
+                    // and dequote_string (subst.c:4807) strips the pairs
+                    // only for the final stored value.
+                    if field.contains(crate::executor::markers::CTLESC) {
+                        elements.push(format!(
+                            "{ARRAY_FIELD_SPLIT_MARKER}\"{}\"",
+                            field
+                                .replace('\\', "\\\\")
+                                .replace('"', "\\\"")
+                                .replace('$', "\\$")
+                                .replace('\u{60}', "\\`")
+                        ));
+                    } else {
+                        elements.push(format!(
+                            "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                            quote_compound_field_value(&field)
+                        ));
+                    }
                 }
             }
         }

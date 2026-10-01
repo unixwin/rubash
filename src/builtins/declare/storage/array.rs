@@ -76,7 +76,17 @@ pub(in crate::builtins) fn append_array_value(
         // products carry quotes as DATA and skip the re-encoding.
         if from_field_split || !token_is_subscript_assignment(&unquoted_token) {
             let glob_word = if from_field_split {
-                token.to_string()
+                // A field-split product's quote characters are storage
+                // serialization DATA, so the glob gate must run on the
+                // DEQUOTED field (the executor-side marker arm in
+                // executor/arrays.rs does the same
+                // unquote_storage_value-then-glob): GNU glob_expand_word_
+                // list (subst.c:13264) globs the expanded word AFTER quote
+                // removal, so `declare -a d=($x)` with x='*' stores the
+                // matches (rubash#377). Handing the raw quoted token to
+                // pathname_expand_word made every `\x10`-tagged field a
+                // literal (pathname_expand_word's leading-quote bail).
+                unquoted_token.to_string()
             } else {
                 crate::executor::glob::compound_element_glob_pattern(token)
             };

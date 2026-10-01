@@ -1561,11 +1561,12 @@ impl Executor {
                     }
                     None => values.push(store!(&token, token_raw)),
                 }
-            } else if let Some(array_name) = token
+            } else if let Some((array_name, at_list_quoted)) = token
                 .strip_prefix(STORAGE_WORD_PREFIX)
                 .and_then(whole_word_braced_parameter_body)
                 .and_then(|body| body.strip_suffix("[@]"))
                 .filter(|name| !name.starts_with('!'))
+                .map(|name| (name, true))
                 .or_else(|| {
                     // The atomic lexer path (skip_word_at) preserves the
                     // element's wrapping quotes as raw text, so the hoist
@@ -1574,15 +1575,68 @@ impl Executor {
                     // marker; the [@] list must still fan out per element
                     // (array.tests: local v=("${foo[@]}") keeps 'b c' one
                     // element). A `!`-prefixed body is the keys form
-                    // (`${!h[@]}`), never a variable named `!h`.
-                    whole_word_braced_parameter_body(token.trim_matches('\u{E302}'))
+                    // (`${!h[@]}`), never a variable named `!h`. Quote
+                    // provenance rides the RAW token (unquote_storage_value
+                    // already decoded `token`): the \u{E302} wrap, or real
+                    // `"` delimiters the storage splitter kept in
+                    // token_raw, both mean W_QUOTED — one storage element
+                    // per member, no field split, no glob (rubash#369).
+                    let trimmed = token.trim_matches('\u{E302}');
+                    whole_word_braced_parameter_body(trimmed)
                         .and_then(|body| body.strip_suffix("[@]"))
                         .filter(|name| !name.starts_with('!'))
+                        .map(|name| {
+                            (
+                                name,
+                                token != trimmed
+                                    || (token_raw_core.starts_with('"')
+                                        && token_raw_core.ends_with('"')
+                                        && token_raw_core.len() >= 2),
+                            )
+                        })
                 })
             {
                 if let Some(storage) = self.parameter_array_storage(array_name) {
                     changed = true;
-                    values.extend(array_values(&storage).iter().map(|value| store!(value)));
+                    if at_list_quoted || bare {
+                        values.extend(array_values(&storage).iter().map(|value| store!(value)));
+                    } else {
+                        // UNQUOTED `${name[@]}` compound element
+                        // (rubash#377): GNU expand_compound_array_assignment
+                        // (arrayfunc.c:557) -> expand_words_no_vars
+                        // (subst.c:12590) -> expand_word_list_internal
+                        // (subst.c:13219) runs the unquoted at-list through
+                        // string_list_pos_params (subst.c:3030, the
+                        // `pchar == '@' && quoted == 0` arms -> string_list_
+                        // dollar_star/dollar_at with IFS[0] joins), then the
+                        // standard field splitter, and finally
+                        // glob_expand_word_list (subst.c:13264) pathname-
+                        // expands every surviving field — `a=('*' '*');
+                        // arr=(${a[@]})` stores the matches. Transport each
+                        // field with ARRAY_FIELD_SPLIT_MARKER (the unquoted
+                        // field-split product form; joined-string model of
+                        // field_split_positional_values_with_ifs — an empty
+                        // member between neighbors is an empty field under
+                        // a non-whitespace IFS and vanishes under the
+                        // default one) so the storage boundary globs it; a
+                        // `store!` quoted storage word would CTLESC-protect
+                        // the glob characters (the inverse of the #369
+                        // quoted-element fix).
+                        values.extend(
+                            field_split_positional_values_with_ifs(
+                                array_values(&storage),
+                                self.shell_state.env_vars.get("IFS").map(String::as_str),
+                            )
+                            .into_iter()
+                            .map(|field| {
+                                format!(
+                                    "{}{}",
+                                    crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
+                                    quote_compound_field_value(&field)
+                                )
+                            }),
+                        );
+                    }
                 } else {
                     values.push(store!(""));
                 }
