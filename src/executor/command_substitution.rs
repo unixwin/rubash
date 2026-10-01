@@ -1190,7 +1190,6 @@ impl Executor {
                 subshell.execute_ast(&ast)
             } else {
                 subshell.suppress_errexit = 0;
-                subshell.shell_state.env_vars.remove("__RUBASH_ERREXIT");
                 crate::builtins::set::set_shell_option(
                     &mut subshell.shell_state.env_vars,
                     "errexit",
@@ -1490,7 +1489,6 @@ impl Executor {
                 // clears the -e flag for the body (same adjustment as
                 // command_substitute's fork).
                 subshell.suppress_errexit = 0;
-                subshell.shell_state.env_vars.remove("__RUBASH_ERREXIT");
                 crate::builtins::set::set_shell_option(
                     &mut subshell.shell_state.env_vars,
                     "errexit",

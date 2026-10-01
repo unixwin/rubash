@@ -42,8 +42,6 @@ fn rubash_spawn_inherited_state(key: &str) -> bool {
         "__RUBASH_TRAP_ORIG_IGN",
         "__RUBASH_POSIX_MODE",
         "__RUBASH_ZSH_OPTIONS",
-        "__RUBASH_ERREXIT",
-        "__RUBASH_XTRACE",
         "__RUBASH_PHYSICAL_PWD",
         "__RUBASH_SHOPT_STATE",
         "__RUBASH_SHOPT_CHECKHASH",

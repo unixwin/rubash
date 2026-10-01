@@ -61,32 +61,21 @@ pub(crate) fn short_flag_option_name(flag: char) -> Option<&'static str> {
 /// GNU set_builtin's per-character dispatch (builtins/set.def:716-772): a
 /// `-`/`+` word is applied one char at a time, every char that is not `o`
 /// (or the `r` refusal handled by callers) goes through change_flag
-/// (flags.c:226). 'e'/'x' additionally mirror the live markers
-/// (`__RUBASH_ERREXIT`/`__RUBASH_XTRACE`) the way flags.c:248-251/260-263
-/// keep exit_immediately_on_error/echo_command_at_execute in sync with the
-/// flag variable.
+/// (flags.c:226), which writes the ONE flag variable flags.c:171 names for
+/// the letter. Rubash's single counterpart of that variable is the option
+/// table entry; exit_immediately_on_error's derived state is modeled by
+/// the suppression counter and the comsub entry adjustments instead (the
+/// old `__RUBASH_ERREXIT`/`__RUBASH_XTRACE` mirror markers are gone — a
+/// second encoding that only this short form wrote went stale after
+/// `set +o errexit` and resurrected the flag).
 pub(crate) fn apply_short_set_flag(
     env_vars: &mut crate::shell::var_table::VarTable,
     flag: char,
     enabled: bool,
 ) {
     match flag {
-        'e' => {
-            if enabled {
-                env_vars.insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
-            } else {
-                env_vars.remove("__RUBASH_ERREXIT");
-            }
-            set_shell_option(env_vars, "errexit", enabled);
-        }
-        'x' => {
-            if enabled {
-                env_vars.insert("__RUBASH_XTRACE".to_string(), "1".to_string());
-            } else {
-                env_vars.remove("__RUBASH_XTRACE");
-            }
-            set_shell_option(env_vars, "xtrace", enabled);
-        }
+        'e' => set_shell_option(env_vars, "errexit", enabled),
+        'x' => set_shell_option(env_vars, "xtrace", enabled),
         'f' => set_shell_option(env_vars, "noglob", enabled),
         'n' => set_shell_option(env_vars, "noexec", enabled),
         'C' => set_shell_option(env_vars, "noclobber", enabled),

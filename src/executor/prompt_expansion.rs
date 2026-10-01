@@ -631,12 +631,14 @@ impl Executor {
     }
 
     pub(in crate::executor) fn errexit_enabled(&self) -> bool {
-        self.shell_state
-            .env_vars
-            .get("__RUBASH_ERREXIT")
-            .map(String::as_str)
-            == Some("1")
-            || crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errexit")
+        // GNU flags.c:56 keeps ONE flag variable per option (`errexit_flag`,
+        // flags.c:171) that change_flag (flags.c:226) writes and every
+        // reader reads. The historical `__RUBASH_ERREXIT` live marker was a
+        // redundant second encoding written only by the short `-e` form —
+        // a long-form `set +o errexit` left it behind and resurrected the
+        // flag through the old `marker || attr` read. The option-table
+        // entry is the single source (same for xtrace below).
+        crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errexit")
     }
 
     pub(in crate::executor) fn errexit_is_active(&self) -> bool {
@@ -654,12 +656,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn xtrace_enabled(&self) -> bool {
-        self.shell_state
-            .env_vars
-            .get("__RUBASH_XTRACE")
-            .map(String::as_str)
-            == Some("1")
-            || crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "xtrace")
+        crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "xtrace")
     }
 
     /// Expanded PS4 prefix for `set -x` tracing (Bash prints the expanded

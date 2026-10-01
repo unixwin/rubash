@@ -667,7 +667,6 @@ impl Executor {
 
             if arg == "-" {
                 self.apply_set_flag_updates(&flag_updates);
-                self.shell_state.env_vars.remove("__RUBASH_XTRACE");
                 crate::builtins::set::set_shell_option(
                     &mut self.shell_state.env_vars,
                     "xtrace",

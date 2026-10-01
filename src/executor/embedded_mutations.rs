@@ -1627,11 +1627,9 @@ impl Executor {
                 &self.shell_state.env_vars,
                 "inherit_errexit",
             );
-        let saved_errexit_flag = self.shell_state.env_vars.get("__RUBASH_ERREXIT").cloned();
         let saved_errexit_opt =
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errexit");
         if !inherit_errexit {
-            self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
             crate::builtins::set::set_shell_option(
                 &mut self.shell_state.env_vars,
                 "errexit",
@@ -1690,16 +1688,6 @@ impl Executor {
         self.resume_alias_streamed(saved_alias_streamed);
 
         if !inherit_errexit {
-            match saved_errexit_flag {
-                Some(value) => {
-                    self.shell_state
-                        .env_vars
-                        .insert("__RUBASH_ERREXIT".to_string(), value);
-                }
-                None => {
-                    self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
-                }
-            }
             crate::builtins::set::set_shell_option(
                 &mut self.shell_state.env_vars,
                 "errexit",
@@ -2018,7 +2006,6 @@ impl Executor {
         let saved_suppress_errexit = self.suppress_errexit;
         if !posix_mode && !inherit_errexit {
             self.suppress_errexit = 0;
-            self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
             crate::builtins::set::set_shell_option(
                 &mut self.shell_state.env_vars,
                 "errexit",
@@ -2180,7 +2167,6 @@ impl Executor {
         let saved_suppress_errexit = self.suppress_errexit;
         if !posix_mode && !inherit_errexit {
             self.suppress_errexit = 0;
-            self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
             crate::builtins::set::set_shell_option(
                 &mut self.shell_state.env_vars,
                 "errexit",
