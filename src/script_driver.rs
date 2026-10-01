@@ -1859,6 +1859,118 @@ pub(crate) fn run_source_pre_lexed_with_line_offset(
     )
 }
 
+/// rubash#372: GNU decides command-position `(' completeness by parsing
+/// (parse.y read_token drives the subshell grammar), so a command-`('
+/// unclosed verdict from the text-level close-char scanner may be
+/// disproved by the real parser: tokenize and parse the whole input
+/// exactly as the normal execution path would and report whether the
+/// resulting AST is free of parse-error nodes. Other verdict shapes
+/// (quotes, `${`, `$(`, array lists, `[` subscripts) are read-time
+/// matched-pair verdicts the tokenizer does not model and are never
+/// overridden here.
+fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> bool {
+    let Some((close, _, _, _, command, _)) =
+        crate::lexer::unclosed_input_close_char_posix(input, parse_posix)
+    else {
+        return false;
+    };
+    if close != ')' || !command {
+        return false;
+    }
+    let tokens = tokenize_with_initial_posix(input, parse_posix);
+    if crate::lexer::heredoc_overflow_line().is_some() {
+        return false;
+    }
+    let ast = crate::parser::parse_with_options(
+        &tokens,
+        crate::parser::ParseLoopOptions {
+            stray_close_is_error: true,
+            source_text: Some(input.into()),
+            diagnostic_text: None,
+            source_line_offset: 0,
+        },
+    );
+    !ast.commands.iter().any(command_tree_has_parse_error)
+}
+
+/// True when this command node, or any command nested inside it (pipeline
+/// stages, and-or lists, compound bodies, clause bodies), carries one of
+/// the parser's error markers. Mirrors the marker set the executor's
+/// diagnostics read (command_execute.rs `__RUBASH_PARSE_ERROR*` arms).
+fn command_tree_has_parse_error(command: &CommandNode) -> bool {
+    if command
+        .assignments
+        .iter()
+        .any(|(name, _)| name.starts_with("__RUBASH_PARSE_ERROR"))
+    {
+        return true;
+    }
+    let mut nested = |body: &[CommandNode]| body.iter().any(command_tree_has_parse_error);
+    command
+        .pipeline_command
+        .as_ref()
+        .is_some_and(|pipeline| nested(&pipeline.stages))
+        || command
+            .and_or_list
+            .as_ref()
+            .is_some_and(|list| nested(&list.commands))
+        || command
+            .time_command
+            .as_ref()
+            .is_some_and(|time| command_tree_has_parse_error(&time.command))
+        || command
+            .background_command
+            .as_ref()
+            .is_some_and(|background| command_tree_has_parse_error(&background.command))
+        || command
+            .inverted_command
+            .as_ref()
+            .is_some_and(|inverted| command_tree_has_parse_error(&inverted.command))
+        || command
+            .for_command
+            .as_ref()
+            .is_some_and(|for_command| nested(&for_command.body))
+        || command.if_command.as_ref().is_some_and(|if_command| {
+            nested(&if_command.condition)
+                || nested(&if_command.then_body)
+                || if_command
+                    .elif_branches
+                    .iter()
+                    .any(|branch| nested(&branch.condition) || nested(&branch.body))
+                || if_command
+                    .else_body
+                    .as_ref()
+                    .is_some_and(|else_body| nested(else_body))
+        })
+        || command.loop_command.as_ref().is_some_and(|loop_command| {
+            nested(&loop_command.condition) || nested(&loop_command.body)
+        })
+        || command
+            .subshell_command
+            .as_ref()
+            .is_some_and(|subshell| nested(&subshell.body))
+        || command
+            .case_command
+            .as_ref()
+            .is_some_and(|case| case.clauses.iter().any(|clause| nested(&clause.body)))
+        || command
+            .select_command
+            .as_ref()
+            .is_some_and(|select| nested(&select.body))
+        || command
+            .function_command
+            .as_ref()
+            .is_some_and(|function| nested(&function.body))
+        || command
+            .brace_group
+            .as_ref()
+            .is_some_and(|brace_group| nested(&brace_group.body))
+        || command
+            .coproc_command
+            .as_ref()
+            .is_some_and(|coproc| coproc.body.as_ref().is_some_and(|body| nested(body)))
+}
+
 pub fn run_source_with_line_offset(
     executor: &mut Executor,
     input: &str,
@@ -1940,10 +2052,27 @@ fn run_source_impl(
     // cannot open any construct. GNU never re-reads consumed text
     // (parse.y:3557 read_token); the fresh whole-group rescan is only the
     // unclosed-diagnostics route's gate, which a complete group skips.
+    // rubash#372 (rubash#117 move 2 — converge to the real parser): the
+    // unclosed scanners are text-level fast paths for GNU's read-time EOF
+    // diagnostics; their case-word machine has no pattern-region state
+    // (GNU parse.y:3177-3186 CHECK_FOR_RESERVED_WORD is suppressed inside
+    // PST_CASEPAT, parser.h:29), so a compound keyword in PATTERN position
+    // (`case x in (a|case) ...`) counts as a real `case' and the scanner
+    // reports a phantom unclosed command `('. GNU decides `(' completeness
+    // by PARSING (parse.y read_token drives the subshell grammar); when
+    // the real parser produces a clean AST over the whole input, the
+    // command-`(' verdict is disproved and the normal execution path must
+    // run. Only this verdict shape is overridable: quotes, `${`, `$(`,
+    // array lists and `[' subscripts are read_token_word/parse_matched_
+    // pair verdicts (parse.y:5419-5437), where rubash's tokenizer folds
+    // instead of failing and the parser is NOT the authority. The
+    // verification only pays on inputs the scanner flagged (and never on
+    // heredoc inputs, which the gate already excludes).
     if pre_lexed.is_none()
         && !interactive
         && crate::lexer::has_unclosed_input_syntax_posix(input, parse_posix)
         && !input.contains("<<")
+        && !command_paren_verdict_disproved_by_parser(input, parse_posix)
     {
         // GNU parse.y:5635-5643 read_token_word + parse_matched_pair
         // (parse.y:3906-3912): an unclosed array subscript `[` reports
