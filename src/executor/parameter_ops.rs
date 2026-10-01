@@ -309,6 +309,77 @@ pub(in crate::executor) fn whole_word_braced_parameter_body(word: &str) -> Optio
     (close + 1 == rest.len()).then_some(&rest[..close])
 }
 
+/// When `word` is exactly one `$((...))` arithmetic expansion, return its
+/// body — the text between the opening `$((` and ITS closing `))`. GNU
+/// parse.y:5516 read_token_word hands every `$((` to parse.y:4451
+/// parse_comsub, which (parse.y:4462-4470) delegates to parse.y:3877
+/// parse_matched_pair(P_ARITH): the span closes at the FIRST `))` that
+/// returns the paren depth — seeded by the `$(` plus the second `(` — to
+/// zero, with quotes and backslash escapes opaque to the count
+/// (parse.y:3999-4000 LEX_PASSNEXT, parse.y:4041-4046 push_delimiter).
+/// After the span the word walk continues (parse.y:5521 `goto
+/// next_character`), so a later `$((`/`$param` in the same word is an
+/// independent expansion event. The naive `strip_prefix("$((") +
+/// strip_suffix("))")` admission — which pairs the FIRST `$((` with the
+/// LAST `))` of the word — glues the in-between material into one merged
+/// expression (rubash#376: `"$((1+1)):$((2+2))"` evaluated `1+1)):4`
+/// instead of printing `2:4`). This is the whole-word admission for the
+/// `$((...))` fast paths: `Some(body)` only when the first balanced
+/// closer is the word's final characters, `None` when it closes early
+/// (the caller falls through to the embedded walker, which already
+/// anchors each `$((` independently).
+pub(in crate::executor) fn whole_word_arithmetic_substitution_body(word: &str) -> Option<&str> {
+    let rest = word.strip_prefix("$((")?;
+    let bytes = rest.as_bytes();
+    // Same scan contract as the embedded walker's collector
+    // (embedded_mutations.rs collect_dollar_paren_arithmetic_expansion):
+    // depth starts at 2 — the `$(` plus the second `(`.
+    let mut depth: usize = 2;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if single {
+            single = ch != b'\'';
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == b'\\' {
+                escaped = true;
+            } else if ch == b'"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            b'\\' => escaped = true,
+            b'\'' => single = true,
+            b'"' => double = true,
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    // `bytes[index - 1]` is the first `)` of the `))` pair;
+                    // the closer must be the word's final two characters.
+                    return (index + 1 == bytes.len()).then_some(&rest[..index - 1]);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 /// Whether a parameter default/alternate word contains a backslash-escaped
 /// IFS whitespace character. In an unquoted word such an escape keeps the
 /// whitespace literal and suppresses field splitting (parse.y parameter
@@ -822,6 +893,66 @@ fn skip_matched_span(chars: &[(usize, char)], index: usize, close: char) -> usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whole_word_arithmetic_body_admits_single_substitution() {
+        // parse.y:3877 parse_matched_pair: closer is the first `))` that
+        // zeroes the depth seeded by `$(` + the second `(`.
+        assert_eq!(
+            whole_word_arithmetic_substitution_body("$((1+1))"),
+            Some("1+1")
+        );
+        assert_eq!(
+            whole_word_arithmetic_substitution_body("$(( (1+2) ))"),
+            Some(" (1+2) ")
+        );
+        assert_eq!(whole_word_arithmetic_substitution_body("1+1))"), None);
+        assert_eq!(whole_word_arithmetic_substitution_body("$((1+1"), None);
+    }
+
+    #[test]
+    fn whole_word_arithmetic_body_rejects_early_closing_rubash376() {
+        // rubash#376: the first `$((` closes at its own `))`; the trailing
+        // material (separator + later `$((`/literal) is ordinary word text,
+        // never part of the expression.
+        assert_eq!(
+            whole_word_arithmetic_substitution_body("$((1+1)):$((2+2))"),
+            None
+        );
+        assert_eq!(
+            whole_word_arithmetic_substitution_body("$((1+1)) $((2+2))"),
+            None
+        );
+        assert_eq!(whole_word_arithmetic_substitution_body("$((1+1))x"), None);
+        assert_eq!(
+            whole_word_arithmetic_substitution_body("$((v)):$PATH"),
+            None
+        );
+        // Balanced `))` INSIDE the body keeps the span open (depth counting).
+        assert_eq!(
+            whole_word_arithmetic_substitution_body("$(( (1+2) )):$((3+4))"),
+            None
+        );
+    }
+
+    #[test]
+    fn whole_word_arithmetic_body_quotes_and_escapes_are_opaque() {
+        // parse.y:3999-4000 LEX_PASSNEXT, parse.y:4041-4046 push_delimiter:
+        // quotes and backslash escapes keep their `)`s out of the count.
+        assert_eq!(
+            whole_word_arithmetic_substitution_body(r#"$((1")"+1))"#),
+            Some(r#"1")"+1"#)
+        );
+        assert_eq!(
+            whole_word_arithmetic_substitution_body(r"$((1\)+1))"),
+            Some(r"1\)+1")
+        );
+        // A quoted `))` does not close; the real closer at the end does.
+        assert_eq!(
+            whole_word_arithmetic_substitution_body(r#"$(( '))' + 1 ))"#),
+            Some(r#" '))' + 1 "#)
+        );
+    }
 
     #[test]
     fn matching_parameter_brace_skips_escaped_closing_brace() {

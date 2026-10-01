@@ -1335,9 +1335,16 @@ impl Executor {
         // GNU subst.c materializes a complete quoted arithmetic expansion before
         // word splitting. Keep it out of the legacy `$()` materializer, which
         // otherwise treats the inner `+` as a command word.
+        // rubash#376: the `"$((` ... `))"` shape alone does not prove the word
+        // is one `$((...))` unit — GNU closes each `$((` at its own first
+        // balanced `))` (parse.y:4470 parse_comsub -> parse.y:3877
+        // parse_matched_pair) and keeps walking the word (parse.y:5521), so
+        // `"$((1+1)):$((2+2))"` declines here and the embedded walker prints
+        // `2:4` instead of evaluating the merged `1+1)):4`.
         if let Some(expression) = raw.and_then(|raw| {
-            raw.strip_prefix("\"$((")
-                .and_then(|rest| rest.strip_suffix("))\""))
+            crate::executor::parameter_ops::whole_word_arithmetic_substitution_body(
+                raw.strip_prefix('"')?.strip_suffix('"')?,
+            )
         }) {
             if let Some(value) = self.eval_arithmetic_expansion_value(expression) {
                 return vec![value.to_string()];

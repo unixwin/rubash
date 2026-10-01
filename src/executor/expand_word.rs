@@ -497,9 +497,15 @@ impl Executor {
             return Some(value);
         }
 
-        if let Some(expression) = word
-            .strip_prefix("$((")
-            .and_then(|rest| rest.strip_suffix("))"))
+        // rubash#376: admit only a REAL whole-word `$((...))` — the first
+        // balanced `))` must be the word's last characters. A prefix+suffix
+        // strip pairs the first `$((` with the LAST `))` and merges
+        // `$((1+1)):$((2+2))` into one bogus expression; GNU closes each
+        // `$((` independently (parse.y:4470 parse_comsub ->
+        // parse.y:3877 parse_matched_pair) and keeps walking the word
+        // (parse.y:5521).
+        if let Some(expression) =
+            crate::executor::parameter_ops::whole_word_arithmetic_substitution_body(word)
         {
             let expression = self.expand_arithmetic_special_parameters(expression);
             // Pending deferred arithmetic writes are part of the effective
