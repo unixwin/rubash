@@ -1986,13 +1986,15 @@ impl Executor {
         // in-place body below runs on this executor, but the wholesale
         // state restore at the end rolls the parent's trap table back.
         crate::builtins::trap::reset_for_subshell(&mut self.shell_state.env_vars);
-        // Bash runs command substitution in a subshell where errexit is
-        // suppressed: `$(false; echo ok)` prints ok because the inner `false`
-        // does not abort the substitution (set-e.tests "command subst should
-        // not inherit -e"); only the substitution's final status (echo's 0)
-        // propagates to the outer assignment, which then checks -e.
-        // POSIX mode is the exception: `set -o posix; z=$(false;echo posix)`
-        // exits (set-e1.sub), so keep errexit active there.
+        // Bash runs command substitution in a subshell where the -e option
+        // is turned off at child entry: `$(false; echo ok)` prints ok
+        // because the inner `false` does not abort the substitution
+        // (set-e.tests "command subst should not inherit -e"); only the
+        // substitution's final status (echo's 0) propagates to the outer
+        // assignment, which then checks -e. POSIX mode (and the
+        // inherit_errexit shopt it enables) is the exception:
+        // `set -o posix; z=$(false;echo posix)` exits (set-e1.sub), so the
+        // adjustments below are skipped there and errexit stays active.
         let posix_mode = self
             .shell_state
             .env_vars
@@ -2001,6 +2003,28 @@ impl Executor {
             == Some("1");
         let inherit_errexit =
             crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "inherit_errexit");
+        // GNU subst.c:7356-7362 command_substitute child: without
+        // inherit_errexit (POSIX mode enables it) the child runs
+        // `builtin_ignoring_errexit = 0; change_flag ('e', FLAG_OFF);
+        // set_shellopts();` — it clears the -e OPTION itself, so `${-}` and
+        // `$SHELLOPTS` inside the body show no errexit and an explicit
+        // `set -e` inside the body re-enables it (set-e.tests
+        // `x=$(set -e; false; echo bad)` prints nothing). This body runs
+        // in place on the caller's executor, so the adjustments are
+        // bracketed: restore_flat_subshell rolls the env pair back from
+        // saved_state, and the caller's suppression counter (the
+        // `builtin_ignoring_errexit` counterpart) is restored after the
+        // capture, alongside the fd/exit-code restores.
+        let saved_suppress_errexit = self.suppress_errexit;
+        if !posix_mode && !inherit_errexit {
+            self.suppress_errexit = 0;
+            self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
+            crate::builtins::set::set_shell_option(
+                &mut self.shell_state.env_vars,
+                "errexit",
+                false,
+            );
+        }
         // Direct-stdout builtins inside the body consult the thread-local
         // capture, which belongs to an enclosing pipeline stage when this
         // substitution runs inside one; give the body its own capture.
@@ -2018,11 +2042,12 @@ impl Executor {
             // evalstring.c:348 indirection_level++: the body's traces render
             // one PS4 level deeper (rubash#254).
             self.with_xtrace_indirection(|executor| {
-                let result = if posix_mode || inherit_errexit {
-                    executor.execute_ast(&commands)
-                } else {
-                    executor.with_errexit_suppressed(|executor| executor.execute_ast(&commands))
-                };
+                // The GNU child adjustments (marker removed, option off,
+                // counter reset) were applied above; the body itself — and
+                // an explicit `set -e` inside it — decides errexit from the
+                // live env, exactly like the forked child (flags.c:261-263
+                // recompute exit_immediately_on_error from errexit_flag).
+                let result = executor.execute_ast(&commands);
                 let body_status = match &result {
                     Ok(()) => executor.exit_code,
                     Err(ExecuteError::Return(status))
@@ -2062,6 +2087,7 @@ impl Executor {
         self.restore_flat_subshell(saved_state, saved_dir);
         self.fd_table = saved_fd_table;
         self.exit_code = saved_exit_code;
+        self.suppress_errexit = saved_suppress_errexit;
         self.last_command_substitution_status.set(Some(status));
 
         Some(SubstitutionOutput::readback(output, status, context))
@@ -2136,6 +2162,31 @@ impl Executor {
         // onto fd 1: the child's fd 1 is a NEW open file description and
         // inherits none of the parent fd 1's dup2 aliases.
         self.fd_table.stdout_alias_generation.remove(&1);
+        // GNU subst.c:7356-7362 command_substitute child (this shortcut is
+        // the `$(f)` instance of that child): without inherit_errexit (POSIX
+        // mode enables it) the child resets builtin_ignoring_errexit and
+        // turns the -e OPTION itself off — change_flag('e', FLAG_OFF)
+        // clears errexit_flag (flags.c:171), exit_immediately_on_error
+        // follows (flags.c:261-263), and set_shellopts() re-renders. The
+        // function body therefore runs to completion under a parent
+        // `set -e` (`set -e; f() { false; echo inner; }; echo $(f)` captures
+        // `inner`), and an explicit `set -e` inside the body re-enables it.
+        // The in-place call is bracketed: restore_flat_subshell rolls the
+        // env pair back from saved_state and the caller's suppression
+        // counter is restored after the capture.
+        let posix_mode = self.posix_mode_enabled();
+        let inherit_errexit =
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "inherit_errexit");
+        let saved_suppress_errexit = self.suppress_errexit;
+        if !posix_mode && !inherit_errexit {
+            self.suppress_errexit = 0;
+            self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
+            crate::builtins::set::set_shell_option(
+                &mut self.shell_state.env_vars,
+                "errexit",
+                false,
+            );
+        }
         // Direct-stdout builtins inside the function consult the thread-local
         // capture, which belongs to an enclosing pipeline stage when this
         // substitution runs inside one; give the call its own capture.
@@ -2174,6 +2225,7 @@ impl Executor {
         };
         self.restore_flat_subshell(saved_state, saved_dir);
         self.exit_code = saved_exit_code;
+        self.suppress_errexit = saved_suppress_errexit;
         self.last_command_substitution_status.set(Some(status));
 
         Some(
