@@ -4,7 +4,7 @@
 
 [package]
 name = "rubash"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 rust-version = "1.70"
 authors = ["unixwin team <arookieofc@gmail.com>"]
