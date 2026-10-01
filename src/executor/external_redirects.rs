@@ -285,7 +285,47 @@ impl Executor {
             // a second description whose offset diverges from the child's
             // own fd. GNU shares one description — the EnvChannelFile marker
             // declines instead.
-            high.get(&source)?.try_clone()
+            if let Some(slot) = high.get(&source) {
+                return slot.try_clone();
+            }
+            // rubash#370: GNU dup2 (redir.c:1170) resolves the dup source
+            // against the shell's LIVE descriptor table at fork time —
+            // including fds >= 3 that a persistent `exec N>&M` bound (their
+            // fd-table endpoints ARE those bindings). Without this lookup a
+            // `cmd >&3` after `exec 3>&2` declined to the legacy route,
+            // whose piped fallback drained the bytes to fd 1's ambient
+            // alias (real stdout) instead of fd 3's stderr object. The
+            // endpoint-to-slot mapping mirrors the ambient fd 1/2 seeding
+            // above exactly (Stdout generation bookkeeping included);
+            // closed sources and coproc/procsub endpoints keep their
+            // dedicated plumbing, and File endpoints stay with the
+            // env-key channel.
+            let entry = _this.fd_table.entries.get(&source)?;
+            if entry.closed || entry.write.is_none() {
+                return None;
+            }
+            match entry.write.as_ref().expect("checked above") {
+                FdWriteEndpoint::Stderr => Some(ExternalStdioSlot::LiveStderr),
+                FdWriteEndpoint::Stdout => {
+                    match _this.fd_table.stdout_alias_generation.get(&source) {
+                        Some(Some(generation)) => {
+                            let still_active = crate::executor::shell_options::stdout_capture_active(
+                            )
+                                && *generation
+                                    == crate::executor::shell_options::stdout_capture_generation();
+                            if still_active {
+                                Some(ExternalStdioSlot::LiveStdout)
+                            } else {
+                                None
+                            }
+                        }
+                        Some(None) | None => Some(ExternalStdioSlot::RealStdoutSnapshot),
+                    }
+                }
+                FdWriteEndpoint::File(_) => None,
+                FdWriteEndpoint::CoprocStdin { .. }
+                | FdWriteEndpoint::ProcessSubstitution { .. } => None,
+            }
         };
 
         for redirect in &cmd.redirects {
@@ -835,16 +875,14 @@ impl Executor {
     }
 
     /// Routes the drained stream pair of a piped-fallback external child.
-    /// Every piped fallback shape resolves its fds to DISTINCT destinations
-    /// (the stdio plan owns all same-object merges — one file handle or one
-    /// shared capture pipe, niubash#144), so per-stream routing through the
-    /// fd endpoints is exact: write_fd_endpoint follows the fd table's
-    /// bound files, dup2 snapshot records (rubash#223 — including an outer
-    /// capture generation), coproc pipes, and the active captures. The
-    /// closed-output shapes report the sh_chkwrite `write error: Bad file
-    /// descriptor` through the ordered state instead (the child's writes
-    /// cannot reach a closed fd, so the routing outcome IS the observable
-    /// behavior, status 1).
+    /// Every piped shape routes through the command's ordered redirect
+    /// state (route_builtin_buffered_output / apply_ordered_output_
+    /// redirects) so the bytes land where the command's `>&N` dups point —
+    /// the fd table's live bindings — with the plain fd-1/fd-2 defaults
+    /// only when the walk declines. The closed-output shapes report the
+    /// sh_chkwrite `write error: Bad file descriptor` through the same
+    /// ordered state instead (the child's writes cannot reach a closed fd,
+    /// so the routing outcome IS the observable behavior, status 1).
     pub(in crate::executor) fn write_external_captured_streams(
         &mut self,
         cmd: &CommandNode,
@@ -853,6 +891,20 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if self.external_output_fds_closed(cmd) {
             let _ = self.route_builtin_buffered_output(cmd, stdout, stderr)?;
+            return Ok(());
+        }
+        // rubash#370: the piped-fallback bytes belong wherever the command's
+        // redirects point, NOT at fd 1/2's ambient aliases. GNU forks the
+        // child with descriptors already dup2'd (redir.c:1170), so a
+        // `cmd >&3` after `exec 3>&2` writes through fd 3's stderr object;
+        // draining to write_default_stdout instead landed them on the real
+        // stdout (the fd-1 alias). Route through the same ordered redirect
+        // walk the builtin flush uses (apply_ordered_output_redirects
+        // resolves `>&N` against the live fd table); when the walk declines
+        // (no output redirects) the previous default routing stands. This
+        // restores the drain contract ba69f0d9's deleted ordered-replay
+        // family carried (its write_ordered_command_output call site).
+        if self.route_builtin_buffered_output(cmd, stdout, stderr)? {
             return Ok(());
         }
         if !stdout.is_empty() {
