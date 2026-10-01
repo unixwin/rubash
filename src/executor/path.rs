@@ -1189,8 +1189,16 @@ fn windows_external_absolute_argument_needs_translation(
     normalized: &str,
     env_vars: &HashMap<String, String>,
 ) -> bool {
+    // A bare "/" is an operand character under POSIX, not a path only the
+    // shell can decide: `expr 10 / 3` uses it as the division operator and
+    // `tr / X` as a SET1 member (unixwin/niubash#153). GNU hands argv
+    // verbatim to execve (execute_cmd.c:6126 shell_execve) and never
+    // rewrites arguments, so the Windows adaptation may only translate
+    // unambiguously path-shaped operands. Path-consuming children (`ls /`)
+    // resolve "/" through their own POSIX layer, which lands on their
+    // installation root — the same tree the shell-root translation targeted.
     if normalized == "/" {
-        return configured_shell_root(env_vars).is_some();
+        return false;
     }
 
     // /dev/* pseudo-device operands pass through literally: POSIX-aware
@@ -3215,6 +3223,42 @@ mod tests {
         assert!(!windows_external_absolute_argument_needs_translation(
             "/mnt/cfoo",
             &env_vars
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_bare_root_slash_argument_never_translates() {
+        // unixwin/niubash#153: a single "/" is an operand character (expr's
+        // division operator, tr's SET1), not a path operand. GNU passes
+        // argv verbatim (execute_cmd.c:6126 shell_execve); translating "/"
+        // to the configured shell root corrupted `expr 10 / 3` (rc=2 with
+        // the root path as the "unexpected argument") and `tr / X` (SET1
+        // silently replaced by the root path string). Must hold both with
+        // and without a configured root.
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "WINUXSH_ROOT".to_string(),
+            std::env::temp_dir().to_string_lossy().to_string(),
+        );
+        assert!(!windows_external_absolute_argument_needs_translation(
+            "/", &env_vars
+        ));
+        let empty = HashMap::new();
+        assert!(!windows_external_absolute_argument_needs_translation(
+            "/", &empty
+        ));
+        // Root-mapped logical dirs keep their (existence-checked)
+        // translation so the gnu-compat fixture root still works.
+        let root = std::env::temp_dir().join("rubash-logical-root-paths");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let mut rooted = HashMap::new();
+        rooted.insert(
+            "WINUXSH_ROOT".to_string(),
+            root.to_string_lossy().into_owned(),
+        );
+        assert!(windows_external_absolute_argument_needs_translation(
+            "/bin", &rooted
         ));
     }
 
