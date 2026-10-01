@@ -2832,10 +2832,28 @@ impl Executor {
         }
         let value = self.whole_word_parameter_single_value(unquoted)?;
         if is_double_quoted {
-            return Some(vec![format!(
-                "{ARRAY_FIELD_SPLIT_MARKER}{}",
-                quote_compound_field_value(&value)
-            )]);
+            // A quoted whole-word element's product is a QUOTED storage
+            // word (GNU W_QUOTED): expand_word_internal delivers the
+            // parameter result through add_quoted_string (subst.c:11862)
+            // -> quote_string (subst.c:4773), so every character is
+            // CTLESC-protected when glob_expand_word_list (subst.c:12602)
+            // gates on unquoted_glob_pattern_p (pathexp.c:57, `case
+            // CTLESC` skips the protected char at pathexp.c:120-122) — a
+            // quoted `"$x"` with x='*' is data, never a pattern
+            // (rubash#369). Transport it as the plain `"..."` storage
+            // word the `store!` products use: the element glob gate
+            // (glob.rs compound_element_glob_pattern) treats the quote
+            // span as syntax and CTLESC-protects its characters, exactly
+            // GNU's re-parse of the element text (arrayfunc.c:575
+            // parse_string_to_word_list keeps W_QUOTED per word). The
+            // ARRAY_FIELD_SPLIT_MARKER form must NOT be used here: it is
+            // the transport for UNQUOTED field-split products, whose
+            // quotes are storage serialization DATA and whose fields the
+            // marker arm pathname-expands (A=($x) globs); the marker arm
+            // runs its glob AFTER unquote_storage_value strips the
+            // wrapper, so a marker-tagged quoted product loses its
+            // quoting state and globs (arr=("$x") stored the matches).
+            return Some(vec![quote_compound_field_value(&value)]);
         }
         // GNU subst.c:13219: an unquoted expansion that produces nothing
         // contributes NO field — `A=($unsetvar)` stores 0 elements
