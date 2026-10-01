@@ -161,3 +161,11 @@
 - **ecosweep4-B 274 红分诊落盘** docs/ecosweep4-B-reds-triage-2026-10-01.md：真回归 2（**#369** 引号元素 glob 泄漏 8c52cb7f、**#370** exec 复制 fd 外部命令落错流 ba69f0d9，均已 bisect 定住）；语义缺口 #371 `${assoc[*]@A}`、#372 case 模式关键字；过时断言伞 #373（72 红）；executor_tests 跟进 #374
 - **#375 开**：bats DEBUG-trap 派发 ~0.4-1ms×2300 次/gather + 每触发 `$(cd;pwd)` 归一化（Windows 路径形态专属），2x 战役候补车道
 - wt23/hist274 在途（2x floor 桶三项+f28+#368 关联+电池三机器评估）
+
+## 2026-10-01 hist274 回收（b5b78aab，CI 6/6 绿）
+
+- **ArithDynamicContext 惰性模型落地**：GNU variables.c:1844 INIT_DYNAMIC_VAR 读时物化的忠实移植，替掉每求值 9 项 HashMap 快照（2.15µs/次）；7 构造点机械切换；arithmetic_last_eval_input 改失败路径惰性写（GNU expr_string/lasttp 仅 evalerror 后有意义）；identity 路径 tflag 保值（全管道仍重查——comsub 可翻开关）。05 进程内 95.5→80.5ms（−15.7%，GNU 锚 12.5x→10.7-11.2x）；04 −3.4%。船长清掉一枚死探针定时器（t_tail，agent 门禁后遗留）
+- **m1/m2/m3 矩阵 + true-baseline 六切片 base==lane 字节一致**；车道另记 harness 陷阱：**0 字节 rb.out = 运行作废须重跑**（此前 301/777/912 计数是空输出对 GNU 的伪计数）
+- **for-arith memo 否决**（差分微探针：循环体真含循环变量，GNU 无 memo 付 0.6µs 我们 3.9µs——归因 per-command floor 家族）；errexit/xtrace 收敛只评估（发现 comsub 入口双编码陷阱角落，须先验 GNU execute_cmd.c:1669 再收敛）；电池三机器两阶段方案落 PERF-BASELINE（动 continuation.rs=船长专属，待拍板）
+- **f28 根因落 #368**：预开 fd 3/4 在 `$()` 内不可见（nvm-exec 协议坍塌），非 xtrace 继承（GNU 从不自动导出 SHELLOPTS，shell.c:1971-1987）
+- **#376 开（P0，船长抽查发现）**：词内两个 `$((...))` 中隔非字母材料（`:`/空格/`.`/`-`）误切分成一个合并表达式——`echo "$((1+1)):$((2+2))"` 直接报错。1.2.1 谱系预存（base==master 字节同败，非 2ad6c17c/b5b78aab 回归）；上游 arith.tests 无此形状=语料盲区；11 形态证据矩阵在单内。修复车道候选
