@@ -666,6 +666,21 @@ impl Executor {
         let value = value
             .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
             .unwrap_or(value);
+        // GNU subst.c:11358-11381 (expand_word_internal cases '<'/'>'):
+        // process substitution is recognized only while the word walker is
+        // scanning the ORIGINAL word text; results of parameter expansion
+        // are appended as data via add_string/sub_append_string
+        // (subst.c:11352-11356) and are never rescanned for `<('. So a
+        // `<('/`>(' that shows up in the EXPANDED value only because a
+        // variable's value carried it (bats-preprocess
+        // `line="${line//$'\r'/}"` over a file whose text contains `<(cmd)`
+        // — rubash#364) is data, not a substitution. Gate the
+        // post-expansion fallback materialization on the PRE-expansion RHS
+        // carrying a literal `<('/`>(' span: `var=$other` and
+        // `var="${other//X/Y}"` have none, so their results stay literal.
+        // A wholly double-quoted RHS (`var="<(x)"`) is data too (the
+        // subst.c case-'<' branch checks Q_DOUBLE_QUOTES), hence `!quoted`.
+        let rhs_has_procsub_text = !quoted && (value.contains("<(") || value.contains(">("));
         // A quoted value with no expansion syntax is already fully decoded
         // and must not go through the general expansion walker, which would
         // also run quote removal on quote syntax that the value legitimately
@@ -1100,7 +1115,7 @@ impl Executor {
                 .into_owned()
         };
         let mut expanded = decode_command_substitution_payload(&expanded);
-        if expanded.contains("<(") || expanded.contains(">(") {
+        if rhs_has_procsub_text {
             if let Ok(materialized) = self.materialize_assignment_process_substitutions(&expanded) {
                 expanded = materialized;
             }
