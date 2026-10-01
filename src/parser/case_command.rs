@@ -27,52 +27,48 @@ pub(super) fn parse_case_command(
     let in_keyword_metadata = build_keyword_metadata(&tokens[i]);
     i += 1;
 
-    // GNU parse.y: the token right after `in` is read in the pattern-list
-    // state where a bare `esac` terminates an EMPTY case list — `case x in
-    // esac` is a complete case command with zero clauses (verified against
-    // GNU 5.2.21: it runs the following commands and falls through). The
-    // `)` that often follows (`case x in esac)`) is then a separate syntax
-    // error reported at the paren. If `esac` is immediately followed by
-    // `)`, `|` or `(` it is *not* an empty case but a syntax error (the
-    // `)` would be a stray pattern delimiter). Returning None makes the
-    // whole `case` fail to parse, so `eval` reports the syntax error and
-    // does not execute the following `echo`.
-    if is_keyword(tokens, i, "esac") {
-        let follows_pattern_delim = tokens
-            .get(i + 1)
-            .is_some_and(|next| next.value == ")" || next.value == "|" || next.value == "(");
-        if follows_pattern_delim {
-            // `case x in esac)` and `case esac in esac)` are syntax errors:
-            // the bare `esac` after `in` would be an empty case, but the
-            // following `)`/`|` makes it a stray pattern delimiter. GNU
-            // reports `syntax error near unexpected token ')'` and the
-            // entire `case ... esac` fails (eval returns 2, no `echo` runs).
-            // Build a parse-error command that spans to the final `esac`
-            // so the `echo` is not executed as a separate command.
-            let mut final_esac = i;
-            for idx in (i..tokens.len()).rev() {
-                if is_keyword(tokens, idx, "esac") {
-                    final_esac = idx;
-                    break;
-                }
-            }
-            // GNU print_offending_line (parse.y:6813-6826) echoes the
-            // physical input line of the offending token, verbatim — not a
-            // reconstructed token span (rubash#285).
-            let source = super::parse_loop::offending_line_text(
+    // GNU parse.y:1037 grammar: `case WORD in newline_list ...' — the
+    // newline_list between `in` and the first pattern (or the empty case's
+    // `esac`) is legal, so the empty-case decision must look PAST it:
+    // `case x in\nesac) echo hi;;\nesac` is the same stray-`)` error as the
+    // one-line form, reported at the `)`'s physical line (rubash#381;
+    // verified vs WSL GNU 5.3.0: `syntax error near unexpected token `)'`
+    // citing the `esac) echo hi;;` line, not the final `esac` line).
+    let mut case_head = i;
+    while case_head < tokens.len()
+        && tokens[case_head].kind == TokenKind::Semicolon
+        && tokens[case_head].line_break
+    {
+        case_head += 1;
+    }
+
+    // GNU parse.y: the token right after `in` (past the newline_list) is
+    // read in the pattern-list state where a bare `esac` terminates an
+    // EMPTY case list — `case x in esac` is a complete case command with
+    // zero clauses (verified against GNU 5.2.21: it runs the following
+    // commands and falls through). The `)` that often follows (`case x in
+    // esac)`) is then a separate syntax error reported at the paren. If
+    // `esac` is immediately followed by `)`, `|` or `(` it is *not* an
+    // empty case but a syntax error (the `)` would be a stray pattern
+    // delimiter). Returning None makes the whole `case` fail to parse, so
+    // `eval` reports the syntax error and does not execute the following
+    // `echo`.
+    if is_keyword(tokens, case_head, "esac") {
+        // GNU parse.y:3433-3441 (special_case_tokens): the `esac' after
+        // `in` (+ the grammar's newline_list, parse.y:1037) is the ESAC of
+        // the EMPTY case — the case command ends HERE and whatever follows
+        // belongs to the OUTER grammar, which rejects it (rubash#381:
+        // accepting `case x in\nesac) echo hi;;\nesac` silently was the
+        // reverse-divergence).
+        if let Some(delimiter_index) = case_stray_delimiter_index(tokens, case_head) {
+            let (command, end) = case_stray_delimiter_error(
                 tokens,
-                final_esac,
-                source.map(|rc| &**rc),
+                start,
+                delimiter_index,
+                source,
                 source_line_offset,
             );
-            let mut command = CommandNode::new();
-            command.line = tokens.get(start).map(|token| token.position);
-            command.insert_assignment(
-                "__RUBASH_PARSE_ERROR__".to_string(),
-                "unexpected token `)'".to_string(),
-            );
-            command.insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
-            return Some(finish_compound_command(command, tokens, final_esac + 1));
+            return Some(finish_compound_command(command, tokens, end));
         }
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
@@ -84,16 +80,36 @@ pub(super) fn parse_case_command(
             in_keyword,
             in_keyword_metadata,
             clauses: Vec::new(),
-            end_keyword: tokens[i].value.clone(),
-            end_keyword_metadata: build_keyword_metadata(&tokens[i]),
+            end_keyword: tokens[case_head].value.clone(),
+            end_keyword_metadata: build_keyword_metadata(&tokens[case_head]),
         }));
-        return Some(finish_compound_command(command, tokens, i + 1));
+        return Some(finish_compound_command(command, tokens, case_head + 1));
     }
 
     let mut clauses = Vec::new();
     while i < tokens.len() {
         while i < tokens.len() && tokens[i].kind == TokenKind::Semicolon {
             i += 1;
+        }
+        // A clause terminator's `;;' re-enters the pattern-list state (GNU
+        // parse.y:3710 sets PST_CASEPAT), so the empty-case rule applies
+        // BETWEEN clauses too: `esac' closes the case unless the outer
+        // grammar's stray token follows — `case x in a) :;; esac) echo;;`
+        // errors exactly like the after-`in' form (rubash#381). The raw
+        // keyword is checked directly: is_case_end_keyword's lookahead
+        // would classify an `esac' followed by `)' as a pattern and the
+        // construct was silently accepted.
+        if is_keyword(tokens, i, "esac") {
+            if let Some(delimiter_index) = case_stray_delimiter_index(tokens, i) {
+                let (command, end) = case_stray_delimiter_error(
+                    tokens,
+                    start,
+                    delimiter_index,
+                    source,
+                    source_line_offset,
+                );
+                return Some(finish_compound_command(command, tokens, end));
+            }
         }
         if is_case_end_keyword(tokens, i) {
             break;
@@ -380,6 +396,66 @@ pub(super) fn parse_case_command(
         end_keyword_metadata: build_keyword_metadata(&tokens[i]),
     }));
     Some(finish_compound_command(command, tokens, i + 1))
+}
+
+/// The stray outer-grammar token that follows an empty-case `esac' at
+/// `esac_index` (rubash#381). `)`/`(` directly after the finished case are
+/// the offending token themselves; `|` is a legal pipeline in GNU's grammar,
+/// so the error surfaces at the pipeline tail's `)` (`case x in esac|y)`
+/// errors at the `)` after `y`). None when the case simply closes.
+fn case_stray_delimiter_index(tokens: &[Token], esac_index: usize) -> Option<usize> {
+    match tokens.get(esac_index + 1).map(|token| token.value.as_str()) {
+        Some(")") | Some("(") => Some(esac_index + 1),
+        Some("|") => tokens[esac_index + 2..]
+            .iter()
+            .position(|token| token.value == ")")
+            .map(|offset| esac_index + 2 + offset)
+            .or(Some(esac_index + 1)),
+        _ => None,
+    }
+}
+
+/// Build the parse-error command for a stray token after an empty case:
+/// `syntax error near unexpected token X' at the offending token's line
+/// with that physical line echoed (GNU yyerror + print_offending_line
+/// parse.y:6813-6826, rubash#285), spanning to the final `esac' so the
+/// clause body never executes as separate commands (GNU runs nothing).
+fn case_stray_delimiter_error(
+    tokens: &[Token],
+    start: usize,
+    delimiter_index: usize,
+    source: Option<&std::rc::Rc<str>>,
+    source_line_offset: usize,
+) -> (CommandNode, usize) {
+    let mut final_esac = delimiter_index;
+    for idx in (delimiter_index..tokens.len()).rev() {
+        if is_keyword(tokens, idx, "esac") {
+            final_esac = idx;
+            break;
+        }
+    }
+    let offending_source = super::parse_loop::offending_line_text(
+        tokens,
+        delimiter_index,
+        source.map(|rc| &**rc),
+        source_line_offset,
+    );
+    let mut command = CommandNode::new();
+    command.line = tokens
+        .get(delimiter_index)
+        .map(|token| token.position)
+        .or_else(|| tokens.get(start).map(|token| token.position));
+    command.insert_assignment(
+        "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+        format!(
+            "{}{}{}",
+            tokens[delimiter_index].value,
+            crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+            tokens[delimiter_index].position
+        ),
+    );
+    command.insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), offending_source);
+    (command, final_esac + 1)
 }
 
 fn raw_token_span(tokens: &[Token], start: usize, end: usize) -> String {
