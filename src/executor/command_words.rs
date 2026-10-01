@@ -380,19 +380,31 @@ impl Executor {
             return Ok(values);
         }
         if suppress_glob {
-            return Ok(vec![expanded]);
+            // A for-list value is a bound VALUE, not split transport: drop
+            // the ANSI_C_IFS_GUARD pairs (decoded `$'...'` blanks) the way
+            // argv materialization does (rubash#379; array27.sub `for k in
+            // $\'\t'` must bind the bare tab).
+            return Ok(vec![strip_for_word_guards(&expanded)]);
         }
         // Apply glob expansion for for-loop words
         match glob::pathname_expand_word(&expanded, &self.shell_state.env_vars) {
             glob::PathnameExpansion::Matches(matches) => Ok(matches),
-            glob::PathnameExpansion::NoMatch => Ok(vec![expanded]),
+            glob::PathnameExpansion::NoMatch => Ok(vec![strip_for_word_guards(&expanded)]),
             glob::PathnameExpansion::Fail(pattern) => Err(pattern),
         }
     }
 
     pub(in crate::executor) fn field_split_values(&self, value: &str) -> Vec<String> {
         field_split_values_with_ifs(
-            value,
+            // ANSI_C_IFS_GUARD (lexer/quotes.rs) marks decoded `$'...'`
+            // blanks as literal word data; convert it to IFS_GLUE -- the
+            // splitters' existing protection carrier -- so the field splitter
+            // keeps the blank inside the current field (rubash#379: GNU
+            // splits only expansion results, never source-word bytes).
+            &value.replace(
+                crate::executor::markers::ANSI_C_IFS_GUARD_STR,
+                crate::executor::markers::IFS_GLUE_STR,
+            ),
             self.shell_state.env_vars.get("IFS").map(String::as_str),
         )
     }
@@ -485,4 +497,12 @@ pub(in crate::executor) fn raw_word_has_unquoted_parameter_expansion(raw: &str) 
         index += 1;
     }
     false
+}
+
+/// Drop the ANSI_C_IFS_GUARD pairs (decoded `$'...'` blanks) at a VALUE
+/// boundary: the guard is field-split transport (rubash#379), and a bound
+/// for-list value is final data -- the same contract argv materialization
+/// (command_prepare::materialize_expanded_command_word) applies.
+pub(in crate::executor) fn strip_for_word_guards(value: &str) -> String {
+    value.replace(crate::executor::markers::ANSI_C_IFS_GUARD, "")
 }

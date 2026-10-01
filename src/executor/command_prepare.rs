@@ -31,7 +31,11 @@ fn materialize_expanded_command_word(word: &str) -> String {
             .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
             .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
             .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
-            .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\""),
+            .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
+            // Decoded `$'...'` blanks lose their split-protection guard
+            // here at the argv boundary (rubash#379); the blank itself is
+            // ordinary word data.
+            .replace(crate::executor::markers::ANSI_C_IFS_GUARD, ""),
     ))
 }
 
@@ -1878,7 +1882,15 @@ impl Executor {
             // field and still splits on the space (a\ + b), whereas
             // field_split_escaped_ifs read it as an escaped separator and
             // stripped the backslash (a + b). Escaping belongs to the lexer,
-            // not to parameter-expansion results.
+            // not to parameter-expansion results. ANSI_C_IFS_GUARD marks
+            // decoded `$'...'` blanks — convert to IFS_GLUE so the splitter
+            // treats them as literal field data (rubash#379).
+            let decoded = decoded
+                .replace(
+                    crate::executor::markers::ANSI_C_IFS_GUARD_STR,
+                    crate::executor::markers::IFS_GLUE_STR,
+                )
+                .to_string();
             field_split_values_with_ifs(
                 &decoded,
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -3225,7 +3237,20 @@ pub(in crate::executor) fn raw_word_is_quoted(raw: Option<&str>) -> bool {
     while index < chars.len() {
         match chars[index] {
             '\'' | '"' => return true,
-            '$' if chars.get(index + 1) == Some(&'\'') || chars.get(index + 1) == Some(&'"') => {
+            // A `$'...'` span is a QUOTED SEGMENT, not outer quoting of the
+            // whole word: GNU sets W_QUOTED per quoted segment, and the
+            // decoded bytes leave the lexer already data-protected (E010/
+            // E011 quote carriers, ANSI_C_IFS_GUARD blanks, CTLESC'd glob
+            // metachars — the add_quoted_string model of parse.y:5560-5575),
+            // so the REST of the word keeps its unquoted split/glob
+            // semantics (`$c$'\n'g` field-splits $c's result at IFS
+            // whitespace, rubash#379). Skip the span like ${...}/$(...) —
+            // only quotes OUTSIDE any span quote the word.
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                index = skip_raw_ansi_c_span(&chars, index + 2);
+                continue;
+            }
+            '$' if chars.get(index + 1) == Some(&'"') => {
                 return true;
             }
             '$' if chars.get(index + 1) == Some(&'{') => {
@@ -3442,8 +3467,12 @@ fn mark_literal_ifs_chars(word: &str, ifs: &str) -> String {
 /// Strip \x1c IFS-protection markers from a string. Used for non-field-split
 /// return paths where the markers served their purpose (or were never
 /// needed) and must not leak into command arguments or assignment values.
+/// The ANSI-C_IFS_GUARD pairs (decoded `$'...'` blanks, rubash#379) drop
+/// their guard the same way, keeping the blank itself.
 fn strip_ifs_protection_markers(value: &str) -> String {
-    value.replace(crate::executor::markers::IFS_GLUE, "")
+    value
+        .replace(crate::executor::markers::IFS_GLUE, "")
+        .replace(crate::executor::markers::ANSI_C_IFS_GUARD, "")
 }
 
 fn field_split_escaped_ifs(value: &str, ifs: Option<&str>) -> Vec<String> {
@@ -3474,8 +3503,12 @@ fn expanded_ends_with_ifs_separator(expanded: &str, executor: &Executor) -> bool
     let Some(last) = chars.last().copied() else {
         return false;
     };
-    // A \x1c-protected literal IFS char at the end is data, not a separator.
-    if chars.len() >= 2 && chars[chars.len() - 2] == crate::executor::markers::IFS_GLUE {
+    // A \x1c-protected literal IFS char (or an ANSI-C_IFS_GUARD-decoded
+    // blank) at the end is data, not a separator.
+    if chars.len() >= 2
+        && (chars[chars.len() - 2] == crate::executor::markers::IFS_GLUE
+            || chars[chars.len() - 2] == crate::executor::markers::ANSI_C_IFS_GUARD)
+    {
         return false;
     }
     executor
@@ -3572,6 +3605,25 @@ fn skip_raw_backtick(chars: &[char], mut index: usize) -> usize {
             continue;
         }
         if chars[index] == '`' {
+            return index + 1;
+        }
+        index += 1;
+    }
+    index
+}
+
+/// Skip a raw `$'...'` span (index just past the opening `$'`): GNU
+/// parse.y:5546-5558 hands the span to parse_matched_pair with P_ALLOWESC,
+/// so a backslash escapes the next character (`\'` does not close) and the
+/// closing `'` ends the span. Quotes inside the span are decoded DATA, not
+/// outer word quoting.
+fn skip_raw_ansi_c_span(chars: &[char], mut index: usize) -> usize {
+    while index < chars.len() {
+        if chars[index] == '\\' {
+            index += 2;
+            continue;
+        }
+        if chars[index] == '\'' {
             return index + 1;
         }
         index += 1;

@@ -245,6 +245,10 @@ impl Executor {
     fn expand_conditional_word(&mut self, word: &str) -> String {
         self.expand_word_mut(word)
             .replace(crate::executor::embedded_mutations::QUOTED_NULL_MARKER, "")
+            // A conditional word is a comparison VALUE: drop the
+            // ANSI_C_IFS_GUARD pairs (decoded `$'...'` blanks) so both
+            // operands compare as their real text (rubash#379).
+            .replace(crate::executor::markers::ANSI_C_IFS_GUARD, "")
     }
 
     fn conditional_status_with_metadata(

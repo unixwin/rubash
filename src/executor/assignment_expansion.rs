@@ -461,7 +461,18 @@ impl Executor {
         let saved_assignment_rhs = self.inside_assignment_rhs.replace(true);
         let expanded = self.expand_assignment_value_hoisting(name, value);
         self.inside_assignment_rhs.set(saved_assignment_rhs);
-        expanded
+        // The IFS_GLUE sentinel is field-splitting transport: an assignment
+        // VALUE never field-splits (the unquoted branch's tail already strips
+        // it with the same words, "no meaning once the value no longer
+        // field-splits"). Source-decoded ANSI-C blanks now arrive glue-
+        // protected too (quotes.rs escape_decoded_ansi_c_quotes — GNU
+        // CTLESC-quotes every decoded byte, so `v=$'a b'` stores three
+        // characters, rubash#379); strip the pairs at this boundary so no
+        // scalar store keeps the carrier.
+        let stripped = expanded
+            .replace(crate::executor::markers::IFS_GLUE, "")
+            .replace(crate::executor::markers::ANSI_C_IFS_GUARD, "");
+        stripped
     }
 
     fn expand_assignment_value_hoisting(&mut self, name: &str, value: &str) -> String {

@@ -226,6 +226,18 @@ pub(crate) const QUOTED_NULL_MARKER: char = '\u{E002}';
 pub(crate) const ANSI_C_QUOTE_MARKER: char = '\u{E010}';
 /// ANSI-C `$'...'` decoded `"` data carrier.
 pub(crate) const ANSI_C_DQUOTE_MARKER: char = '\u{E011}';
+/// ANSI-C `$'...'` decoded blank (space/tab/newline) guard: GNU CTLESC-
+/// quotes every decoded byte (parse.y:5560-5575 ansiexpand + sh_single_
+/// quote), so a decoded blank is literal word data that field splitting
+/// must never treat as a separator -- only EXPANSION RESULTS split
+/// (rubash#379: `A$((1+1))B$'\n'C$((2+2))D` is one argument). E401 lives
+/// outside every dynamic/escape family (raw-byte pair payloads
+/// E001..=E100, byte-chars E100..=E1FF, registry zone E000..=E3FF and the
+/// E400 literal-char-escape introducer), so comsub readback never
+/// E400-prefixes it and boundary strips always see it bare. Field-split
+/// call sites convert the guard to IFS_GLUE (the splitters' existing
+/// next-char-is-literal carrier); boundary strips drop it.
+pub(crate) const ANSI_C_IFS_GUARD: char = '\u{E401}';
 
 /// Base of conditional-pattern byte-chars: U+E100+byte
 /// (conditional/pattern.rs). The WHOLE E100..=E1FF range is generated
@@ -311,6 +323,7 @@ pub(crate) const ASSIGN_EXPANSION_DQUOTE_STR: &str = "\u{E30E}";
 pub(crate) const ASSIGN_EXPANSION_SQUOTE_STR: &str = "\u{E30F}";
 pub(crate) const ANSI_C_QUOTE_MARKER_STR: &str = "\u{E010}";
 pub(crate) const ANSI_C_DQUOTE_MARKER_STR: &str = "\u{E011}";
+pub(crate) const ANSI_C_IFS_GUARD_STR: &str = "\u{E401}";
 pub(crate) const QUOTED_NULL_MARKER_STR: &str = "\u{E002}";
 
 // C0 carrier &str spellings for `str::replace` targets / format strings.
@@ -890,7 +903,7 @@ mod tests {
     /// Every `_STR` companion must spell the same codepoint as its `char`.
     #[test]
     fn str_companions_match_char_consts() {
-        let pairs: [(char, &str); 36] = [
+        let pairs: [(char, &str); 37] = [
             (CTLESC, CTLESC_STR),
             (PARAM_NAME_END_MARKER, PARAM_NAME_END_MARKER_STR),
             (DATA_BACKSLASH, DATA_BACKSLASH_STR),
@@ -914,6 +927,7 @@ mod tests {
             (ARRAYREF_FLAG, ARRAYREF_FLAG_STR),
             (ANSI_C_QUOTE_MARKER, ANSI_C_QUOTE_MARKER_STR),
             (ANSI_C_DQUOTE_MARKER, ANSI_C_DQUOTE_MARKER_STR),
+            (ANSI_C_IFS_GUARD, ANSI_C_IFS_GUARD_STR),
             (QUOTED_NULL_MARKER, QUOTED_NULL_MARKER_STR),
             (ASSIGN_DATA_SQUOTE, ASSIGN_DATA_SQUOTE_STR),
             (ASSIGN_DATA_DQUOTE, ASSIGN_DATA_DQUOTE_STR),

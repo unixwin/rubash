@@ -275,13 +275,47 @@ pub(in crate::executor) fn redirect_target_is_ambiguous(raw: &str, expanded: &st
     let mut escaped = false;
     let mut has_unquoted_expansion = false;
 
-    for ch in raw.chars() {
+    let raw_chars: Vec<char> = raw.chars().collect();
+    let mut index = 0usize;
+    while index < raw_chars.len() {
+        let ch = raw_chars[index];
         if escaped {
             escaped = false;
+            index += 1;
             continue;
         }
         if ch == '\\' && !single_quoted {
             escaped = true;
+            index += 1;
+            continue;
+        }
+        // `$'...'` / `$"..."` are QUOTED constructs (parse.y:5546-5558
+        // hands `$'` to parse_matched_pair; locale `$"` likewise): their
+        // `$` is not a field-splitting expansion introducer, and every
+        // byte inside is quoted data -- skip the span instead of flagging
+        // the `$` (rubash#379: `> $'out tab1.txt'` opens one literal
+        // file, it is not an ambiguous redirect).
+        if ch == '$' && !single_quoted && matches!(raw_chars.get(index + 1), Some('\'') | Some('"'))
+        {
+            let quote = raw_chars[index + 1];
+            index += 2;
+            while index < raw_chars.len() {
+                if quote == '\'' && raw_chars[index] == '\\' {
+                    index += 2;
+                    continue;
+                }
+                if raw_chars[index] == quote {
+                    break;
+                }
+                if quote == '"'
+                    && raw_chars[index] == '\\'
+                    && matches!(raw_chars.get(index + 1), Some('"' | '\\' | '$' | '`'))
+                {
+                    index += 1;
+                }
+                index += 1;
+            }
+            index += 1;
             continue;
         }
         match ch {
@@ -290,12 +324,13 @@ pub(in crate::executor) fn redirect_target_is_ambiguous(raw: &str, expanded: &st
             _ => {}
         }
         if single_quoted || double_quoted {
+            index += 1;
             continue;
         }
         // GNU redir.c:298 redirection_expand resolves the operand with
-        // expand_words_no_vars, whose full pipeline — parameter/command/
+        // expand_words_no_vars, whose full pipeline -- parameter/command/
         // process substitution, brace expansion, field splitting, pathname
-        // expansion — is the only way one operand word becomes several
+        // expansion -- is the only way one operand word becomes several
         // fields. Every one of those expansions is introduced by an
         // UNQUOTED introducer character; quoted or escaped text can never
         // add a field (`> "a b"` opens one file whose name contains the
@@ -305,6 +340,7 @@ pub(in crate::executor) fn redirect_target_is_ambiguous(raw: &str, expanded: &st
         if matches!(ch, '$' | '`' | '{' | '*' | '?' | '[') {
             has_unquoted_expansion = true;
         }
+        index += 1;
     }
 
     has_unquoted_expansion

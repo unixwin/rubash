@@ -1301,11 +1301,53 @@ pub(super) fn decode_ansi_c_span(chars: &mut std::iter::Peekable<std::str::Chars
 /// has_unclosed_command_substitution) cannot mistake it for a live
 /// command-substitution opener (rubash#215: `x=$'a`b$(echo z)'`).
 pub(crate) fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
-    decoded
-        .replace('\'', &ANSI_C_QUOTE_MARKER.to_string())
-        .replace('"', &ANSI_C_DQUOTE_MARKER.to_string())
-        .replace('$', DATA_DOLLAR_STR)
-        .replace('`', crate::executor::markers::DATA_BACKTICK_STR)
+    let chars: Vec<char> = decoded.chars().collect();
+    let mut out = String::with_capacity(decoded.len());
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        match ch {
+            '\'' => out.push_str(ANSI_C_QUOTE_MARKER_STR),
+            '"' => out.push_str(ANSI_C_DQUOTE_MARKER_STR),
+            '$' => out.push_str(DATA_DOLLAR_STR),
+            '`' => out.push_str(crate::executor::markers::DATA_BACKTICK_STR),
+            // The same CTLESC-every-decoded-byte invariant (parse.y:5560-
+            // 5575) makes a decoded blank LITERAL WORD DATA, never a field-
+            // split separator (rubash#379): `A$((1+1))B$'\n'C$((2+2))D` is
+            // one argument in GNU because read_token_word hands the decoded
+            // bytes to the word as quoted characters and subst.c field
+            // splitting only ever runs on EXPANSION RESULTS, never on
+            // source-word bytes. The guard is a PUA codepoint outside
+            // every dynamic marker range (see markers.rs) rather than the
+            // C0 IFS_GLUE, so the comsub payload protection (which encodes
+            // every C0 byte of `$(`/backtick-bearing words) cannot capture
+            // it mid-transport; field-split call sites convert it to
+            // IFS_GLUE and boundary strips drop it.
+            ' ' | '\t' | '\n' => {
+                out.push_str(crate::executor::markers::ANSI_C_IFS_GUARD_STR);
+                out.push(ch);
+            }
+            // Decoded glob metacharacters are quoted data too: pathexp.c:57
+            // unquoted_glob_pattern_p never sees them (CTLESC-protected in
+            // GNU), so `echo $'a*b'` prints the literal text even when a
+            // match exists. CTLESC (x11) is the glob engine's own
+            // skip-pair carrier (glob.rs contains_glob_or_extglob), the
+            // assignment boundary's dequote_ctlesc_pairs removes the pair
+            // before storage, and materialize strips it at argv.
+            '*' | '?' | '[' => {
+                out.push_str(crate::executor::markers::CTLESC_STR);
+                out.push(ch);
+            }
+            // Extglob introducers as decoded data must not open a group.
+            '@' | '+' | '!' if chars.get(index + 1) == Some(&'(') => {
+                out.push_str(crate::executor::markers::CTLESC_STR);
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+        index += 1;
+    }
+    out
 }
 
 fn copy_double_quoted_raw(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {

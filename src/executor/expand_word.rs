@@ -164,6 +164,11 @@ impl Executor {
         } else {
             expanded
         };
+        // The operand becomes a FILENAME -- a value boundary: drop the
+        // ANSI_C_IFS_GUARD pairs (decoded `$'...'` blanks) here, or the
+        // guard byte reaches the ambiguity gate and the open() call
+        // (rubash#379: `> $'out tab1.txt'` must write that literal name).
+        let expanded = expanded.replace(crate::executor::markers::ANSI_C_IFS_GUARD, "");
         if suppress_glob {
             return expanded;
         }
