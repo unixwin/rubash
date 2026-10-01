@@ -764,6 +764,8 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
             // parse.y:3369-3386 + 3433-3441) — see embedded_mutations
             // update_command_substitution_case_depth (rubash#284).
             let mut inner_case_in_stage = 0u8;
+            // PST_CASEPAT port (rubash#380).
+            let mut inner_case_pattern_region = false;
             while cursor < chars.len() {
                 let (_, inner) = chars[cursor];
                 if inner == '\\' && !inner_single {
@@ -780,7 +782,7 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                     break;
                 }
                 if dollar_paren {
-                    crate::executor::embedded_mutations::update_command_substitution_case_depth(
+                    crate::executor::embedded_mutations::update_command_substitution_case_depth_region(
                         inner,
                         inner_single,
                         inner_double,
@@ -790,6 +792,7 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                         &mut inner_current_word_boundary,
                         &raw[chars[cursor].0 + inner.len_utf8()..],
                         &mut inner_case_in_stage,
+                        &mut inner_case_pattern_region,
                     );
                     // Heredoc bodies are literal data for substitution-span
                     // matching: parse.y gather_here_documents reads the whole

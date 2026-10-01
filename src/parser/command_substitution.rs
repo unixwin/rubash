@@ -78,6 +78,10 @@ fn dollar_command_substitution(
     let mut word = String::new();
     let mut word_boundary = true;
     let mut current_word_boundary = true;
+    // `case WORD in' chain + PST_CASEPAT pattern-region state
+    // (rubash#380): see update_command_substitution_case_depth.
+    let mut case_in_stage = 0u8;
+    let mut case_pattern_region = false;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start. `word_boundary`/`word.is_empty()` are wrong: `$`, quotes
@@ -190,6 +194,8 @@ fn dollar_command_substitution(
             &mut case_depth,
             &mut word_boundary,
             &mut current_word_boundary,
+            &mut case_in_stage,
+            &mut case_pattern_region,
         );
         match ch {
             '\'' if !double => single = !single,
@@ -458,6 +464,8 @@ fn update_command_substitution_case_depth(
     case_depth: &mut usize,
     word_boundary: &mut bool,
     current_word_boundary: &mut bool,
+    case_in_stage: &mut u8,
+    case_pattern_region: &mut bool,
 ) {
     if single || double {
         word.clear();
@@ -474,6 +482,26 @@ fn update_command_substitution_case_depth(
     }
 
     if word.is_empty() {
+        // PST_CASEPAT port (rubash#380, GNU parse.y:3177-3186 +
+        // parser.h:29): the pattern region disarms at the `)` closing a
+        // pattern list (parse.y:3787-3788), re-arms at the `;;`/`;&`/
+        // `;;&` clause terminators (parse.y:3710/3759 — a single body `;`
+        // does NOT re-arm it), and a `(`/`|` pattern opener ends the
+        // directly-after-`in` window of the empty-case `esac`
+        // (parse.y:3433-3441 needs last_read_token == IN; phantom rule 4
+        // at parse.y:3183 makes `(esac` a pattern).
+        if *case_depth > 0 {
+            if ch == ')' && *case_pattern_region {
+                *case_pattern_region = false;
+            } else if ch == ';'
+                && (chars.get(index + 1) == Some(&';') || chars.get(index + 1) == Some(&'&'))
+            {
+                *case_pattern_region = true;
+            }
+            if *case_pattern_region && *case_in_stage == 3 && matches!(ch, '(' | '|') {
+                *case_in_stage = 4;
+            }
+        }
         if command_substitution_separator_allows_reserved_word(ch) {
             *word_boundary = true;
         } else if !ch.is_whitespace() {
@@ -482,43 +510,107 @@ fn update_command_substitution_case_depth(
         return;
     }
 
+    let completing_after_case = *case_in_stage == 1;
+    if completing_after_case {
+        *case_in_stage = 2;
+    }
     let reserved_word_allows_next = update_command_substitution_reserved_word_depth(
         chars,
         index,
         word,
         *current_word_boundary,
         case_depth,
+        case_in_stage,
+        case_pattern_region,
+        completing_after_case,
     );
+    if *case_depth > 0 {
+        if ch == ')' && *case_pattern_region {
+            *case_pattern_region = false;
+        } else if ch == ';'
+            && (chars.get(index + 1) == Some(&';') || chars.get(index + 1) == Some(&'&'))
+        {
+            *case_pattern_region = true;
+        }
+    }
     word.clear();
     *word_boundary =
         reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_command_substitution_reserved_word_depth(
     chars: &[char],
     index: usize,
     word: &str,
     word_boundary: bool,
     case_depth: &mut usize,
+    case_in_stage: &mut u8,
+    case_pattern_region: &mut bool,
+    completing_after_case: bool,
 ) -> bool {
     if !word_boundary {
+        // Even a non-boundary word ends the empty-case window.
+        if !completing_after_case {
+            *case_in_stage = 0;
+        }
         return false;
     }
 
-    match word {
+    // parse.y:3177: inside the pattern region a reserved-word-looking word
+    // is a PATTERN (only ESAC may still close, and the existing
+    // case_pattern_starts_with_esac_chars heuristic already answers when
+    // `esac` is a pattern).
+    if *case_pattern_region && word != "esac" {
+        if !completing_after_case {
+            *case_in_stage = 0;
+        }
+        return false;
+    }
+
+    let result = match word {
         "case" => {
             *case_depth += 1;
+            *case_in_stage = 1;
+            *case_pattern_region = false;
             false
+        }
+        "in" if *case_in_stage == 2 => {
+            // GNU special_case_tokens rule 6 (parse.y:3369-3386): the `in'
+            // after a case subject is IN even off a reserved-word boundary;
+            // parse.y:3379/3396 arms the pattern region.
+            *case_in_stage = 3;
+            *case_pattern_region = true;
+            true
+        }
+        "esac" if *case_in_stage == 3 => {
+            // parse.y:3433-3441: `esac' directly after IN closes the empty
+            // case `case WORD in esac'.
+            *case_depth = case_depth.saturating_sub(1);
+            *case_in_stage = 0;
+            *case_pattern_region = false;
+            true
         }
         "esac" if !case_pattern_starts_with_esac_chars(chars, index) => {
             *case_depth = case_depth.saturating_sub(1);
+            *case_in_stage = 0;
+            *case_pattern_region = false;
             true
         }
         "esac" => false,
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
-        | "done" => true,
-        _ => false,
-    }
+        | "done" => {
+            *case_in_stage = 0;
+            true
+        }
+        _ => {
+            if !completing_after_case {
+                *case_in_stage = 0;
+            }
+            return false;
+        }
+    };
+    result
 }
 
 fn case_pattern_starts_with_esac_chars(chars: &[char], delimiter_index: usize) -> bool {

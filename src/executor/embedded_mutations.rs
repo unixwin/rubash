@@ -2403,6 +2403,9 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
     // parse.y:3369-3386 + 3433-3441) — see
     // update_command_substitution_case_depth (rubash#284).
     let mut case_in_stage = 0u8;
+    // PST_CASEPAT port (rubash#380): armed between a case's pattern lists
+    // and their `)` — see update_command_substitution_case_depth_region.
+    let mut case_pattern_region = false;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start of the body. `word.is_empty()` alone is wrong: `$`, quotes,
@@ -2623,7 +2626,7 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
             } else {
                 None
             };
-        update_command_substitution_case_depth(
+        update_command_substitution_case_depth_region(
             source_ch,
             single,
             double,
@@ -2633,6 +2636,7 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
             &mut current_word_boundary,
             &rest,
             &mut case_in_stage,
+            &mut case_pattern_region,
         );
         if let Some(delta) = alias_case_delta {
             if delta > 0 {
@@ -2951,6 +2955,48 @@ pub(in crate::executor) fn update_command_substitution_case_depth(
     rest: &str,
     case_in_stage: &mut u8,
 ) {
+    // Legacy 9-argument form: the pattern-region state cannot persist across
+    // per-character calls through a scratch local, so this wrapper keeps the
+    // pre-#380 semantics (no PST_CASEPAT port). The lexer/continuation.rs
+    // caller is captain-exclusive and stays on this form; every scanner that
+    // owns its loop state uses update_command_substitution_case_depth_region.
+    let mut scratch_region = false;
+    update_command_substitution_case_depth_region(
+        ch,
+        single,
+        double,
+        word,
+        case_depth,
+        word_boundary,
+        current_word_boundary,
+        rest,
+        case_in_stage,
+        &mut scratch_region,
+    );
+}
+
+/// GNU parse.y:3177-3186 CHECK_FOR_RESERVED_WORD + parser.h:29 PST_CASEPAT
+/// port (rubash#380): inside a case pattern list, a reserved-word-looking
+/// word is a PATTERN, not the keyword — `$(case y in (b|case) echo x;; esac)`
+/// must not count the pattern-position `case` and lose the closing `)`.
+/// Region armed at the case's `in` (parse.y:3379/3396 set PST_CASEPAT),
+/// re-armed at the `;;`/`;&`/`;;&` clause terminators (parse.y:3710/3759),
+/// disarmed at the `)` that closes a pattern list (parse.y:3787-3788) and
+/// at a recognized `esac` (parse.y:3186). A single `;` inside a clause body
+/// does NOT re-arm it — GNU accepts a nested `case` there (probe 2026-10-02:
+/// `$(case b in (b) :; case b in (b) echo IN;; esac;; esac)` prints IN).
+pub(in crate::executor) fn update_command_substitution_case_depth_region(
+    ch: char,
+    single: bool,
+    double: bool,
+    word: &mut String,
+    case_depth: &mut usize,
+    word_boundary: &mut bool,
+    current_word_boundary: &mut bool,
+    rest: &str,
+    case_in_stage: &mut u8,
+    case_pattern_region: &mut bool,
+) {
     if single || double {
         word.clear();
         *word_boundary = false;
@@ -2966,6 +3012,26 @@ pub(in crate::executor) fn update_command_substitution_case_depth(
     }
 
     if word.is_empty() {
+        if *case_depth > 0 {
+            if ch == ')' && *case_pattern_region {
+                // parse.y:3787-3788: `)` closes the pattern list, the
+                // clause body begins (reserved words live again).
+                *case_pattern_region = false;
+            } else if ch == ';' && (rest.starts_with(';') || rest.starts_with('&')) {
+                // parse.y:3710/3759: `;;`, `;&` and `;;&` end the clause
+                // body — the next pattern list begins.
+                *case_pattern_region = true;
+            }
+            if *case_pattern_region && *case_in_stage == 3 && matches!(ch, '(' | '|') {
+                // A `(` pattern-list opener (parse.y:3183's phantom Posix
+                // rule 4: `esac` directly after `(` is a pattern too) or a
+                // `|` pattern separator ends the directly-after-`in` window
+                // in which an `esac` closes an empty case (parse.y:3433-
+                // 3441 needs last_read_token == IN). Demote the stage so
+                // the empty-case arm cannot fire for `(esac)`.
+                *case_in_stage = 4;
+            }
+        }
         if command_substitution_separator_allows_reserved_word(ch) {
             *word_boundary = true;
         } else if !ch.is_whitespace() {
@@ -2983,10 +3049,13 @@ pub(in crate::executor) fn update_command_substitution_case_depth(
         *case_in_stage = 2;
     }
 
+    // parse.y:3177: inside PST_CASEPAT only ESAC may still be the keyword.
+    let in_pattern_region = *case_pattern_region;
     let reserved_word_allows_next = match word.as_str() {
-        "case" if *current_word_boundary => {
+        "case" if *current_word_boundary && !in_pattern_region => {
             *case_depth += 1;
             *case_in_stage = 1;
+            *case_pattern_region = false;
             false
         }
         "in" if *case_in_stage == 2 => {
@@ -2994,6 +3063,8 @@ pub(in crate::executor) fn update_command_substitution_case_depth(
             // follows the case subject, so it is the IN token even off a
             // reserved-word boundary.
             *case_in_stage = 3;
+            // parse.y:3379/3396: the IN of a case arms the pattern region.
+            *case_pattern_region = true;
             true
         }
         "esac" if *case_in_stage == 3 => {
@@ -3001,16 +3072,18 @@ pub(in crate::executor) fn update_command_substitution_case_depth(
             // empty case `case WORD in esac' — unconditionally.
             *case_depth = case_depth.saturating_sub(1);
             *case_in_stage = 0;
+            *case_pattern_region = false;
             true
         }
         "esac" if *current_word_boundary && !case_pattern_starts_with_esac_rest(ch, rest) => {
             *case_depth = case_depth.saturating_sub(1);
             *case_in_stage = 0;
+            *case_pattern_region = false;
             true
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
         | "done"
-            if *current_word_boundary =>
+            if *current_word_boundary && !in_pattern_region =>
         {
             *case_in_stage = 0;
             true
@@ -3022,6 +3095,13 @@ pub(in crate::executor) fn update_command_substitution_case_depth(
             false
         }
     };
+    if *case_depth > 0 {
+        if ch == ')' && *case_pattern_region {
+            *case_pattern_region = false;
+        } else if ch == ';' && (rest.starts_with(';') || rest.starts_with('&')) {
+            *case_pattern_region = true;
+        }
+    }
     word.clear();
     *word_boundary =
         reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
@@ -3106,4 +3186,78 @@ fn command_substitution_reserved_word_allows_next(word: &str) -> bool {
             | "done"
             | "esac"
     )
+}
+
+#[cfg(test)]
+mod case_pattern_region_tests {
+    use super::update_command_substitution_case_depth_region;
+
+    /// Drive the word machine over `source`, one char per call, and return
+    /// the final (case_depth, case_pattern_region).
+    fn scan(source: &str) -> (usize, bool) {
+        let mut word = String::new();
+        let mut case_depth = 0usize;
+        let mut word_boundary = true;
+        let mut current_word_boundary = true;
+        let mut case_in_stage = 0u8;
+        let mut region = false;
+        // The machine completes a word only AT a delimiter character, so a
+        // source that ends with the bare final word never closes it — append
+        // the newline separator a real comsub body's `)` supplies.
+        let mut source = source.to_string();
+        source.push('\n');
+        let chars: Vec<char> = source.chars().collect();
+        for (index, ch) in chars.iter().copied().enumerate() {
+            let rest: String = chars[index + 1..].iter().collect();
+            update_command_substitution_case_depth_region(
+                ch,
+                false,
+                false,
+                &mut word,
+                &mut case_depth,
+                &mut word_boundary,
+                &mut current_word_boundary,
+                &rest,
+                &mut case_in_stage,
+                &mut region,
+            );
+        }
+        (case_depth, region)
+    }
+
+    #[test]
+    fn pattern_position_case_is_not_the_keyword() {
+        // rubash#380: `$(case y in (b|case) echo x;; esac)` — the pattern
+        // `case` must not inflate case_depth (GNU parse.y:3177-3186
+        // PST_CASEPAT).
+        assert_eq!(scan("case y in (b|case) echo x;; esac"), (0, false));
+        assert_eq!(scan("case y in (case) echo x;; esac"), (0, false));
+        assert_eq!(scan("case y in case) echo x;; esac"), (0, false));
+        assert_eq!(scan("case y in b|case) echo x;; esac"), (0, false));
+    }
+
+    #[test]
+    fn plain_case_clauses_still_count() {
+        assert_eq!(scan("case y in (b) echo x;; esac"), (0, false));
+        assert_eq!(scan("case y in b) echo x;; esac"), (0, false));
+        // Nested case in a clause body stays balanced.
+        assert_eq!(
+            scan("case y in (b) case q in (c) :;; esac;; esac"),
+            (0, false)
+        );
+    }
+
+    #[test]
+    fn empty_case_and_clause_terminators() {
+        // `case WORD in esac` closes at the directly-after-in esac
+        // (parse.y:3433-3441)...
+        assert_eq!(scan("case y in esac"), (0, false));
+        // ...but `(esac` is a pattern (phantom rule 4, parse.y:3183) —
+        // the count stays open until the real esac.
+        assert_eq!(scan("case y in (esac) :;; esac"), (0, false));
+        // A clause terminator re-arms the region: a keyword in the NEXT
+        // pattern list is a pattern.
+        assert_eq!(scan("case y in (a) :;; (case) :;; esac"), (0, false));
+        assert_eq!(scan("case y in b) :;; case*|z) :;; esac"), (0, false));
+    }
 }
