@@ -50,6 +50,33 @@ fn internal_pipeline_program(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("<rubash-internal-{name}>"))
 }
 
+/// Drain one end of a child's pipe on a reader thread so the child can keep
+/// writing while the parent waits on other pipeline members (niubash#158).
+#[cfg(windows)]
+fn spawn_pipe_drain<R>(mut reader: R) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+#[cfg(windows)]
+fn join_pipe_drain(
+    drain: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+) -> Result<Vec<u8>, ExecuteError> {
+    match drain {
+        Some(handle) => handle
+            .join()
+            .map_err(|_| ExecuteError::IoError(std::io::Error::other("pipeline reader panicked")))?
+            .map_err(ExecuteError::IoError),
+        None => Ok(Vec::new()),
+    }
+}
+
 #[cfg(windows)]
 fn internal_pipeline_program_name(program: &std::path::Path) -> Option<&str> {
     let name = program.to_str()?.strip_prefix("<rubash-internal-")?;
@@ -1359,6 +1386,24 @@ impl Executor {
 
         let mut results: Vec<(String, String, i32)> = vec![Default::default(); processes.len()];
         let last_index = processes.len() - 1;
+        // niubash#158: start draining the last member's captured stdout and
+        // stderr BEFORE waiting on the upstream members. The last member
+        // reads an inter-member OS pipe and writes a parent-side capture
+        // pipe; a pass-through member (cat/nl/rev) that fills its stdout
+        // pipe stops reading its input, the upstream producer then fills the
+        // inter-member pipe and never exits, and the forward wait below
+        // would poll forever — `wait_with_output` only begins reading after
+        // every producer was reaped, so the staged ordering deadlocked once
+        // the 2c781657 patient wait removed the 100ms hard kill that used to
+        // mask it. GNU never withholds the final member's output:
+        // execute_cmd.c:2620 execute_pipeline leaves the rightmost element's
+        // fd 1 on the shell's own stdout (or, inside $(...), the capture
+        // pipe the child dups in subst.c:7143 command_substitute), and the
+        // parent drains that capture concurrently with the members —
+        // subst.c:7428 close(fildes[1]) then subst.c:7437 read_comsub(fildes[0])
+        // BEFORE subst.c:7441 wait_for(pid).
+        let last_stdout = processes[last_index].stdout.take().map(spawn_pipe_drain);
+        let last_stderr = processes[last_index].stderr.take().map(spawn_pipe_drain);
         // Reap non-final stages in forward order: a `/dev/stdout`-family
         // operand on stage N flushes into a dup'd writer of pipe N, and that
         // dup must close before stage N+1 can see EOF — reaping downstream
@@ -1380,16 +1425,18 @@ impl Executor {
             );
             self.finish_dev_fd_operands(std::mem::take(&mut stage_dev_ops[index]));
         }
-        let last = processes.pop().expect("pipeline has at least two stages");
+        let mut last = processes.pop().expect("pipeline has at least two stages");
         debug_assert_eq!(processes.len(), last_index);
-        let output = last.wait_with_output()?;
-        let mut stdout_bytes = output.stdout;
+        let status = last.wait().map_err(ExecuteError::IoError)?;
+        let mut stdout_bytes = join_pipe_drain(last_stdout)?;
         stdout_bytes
             .extend(self.finish_dev_fd_operands(std::mem::take(&mut stage_dev_ops[last_index])));
         results[last_index] = (
             crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
-            crate::executor::substitution_metadata::bytes_to_shell_text(&output.stderr),
-            crate::executor::wait_status::process_exit_status(&output.status),
+            crate::executor::substitution_metadata::bytes_to_shell_text(&join_pipe_drain(
+                last_stderr,
+            )?),
+            crate::executor::wait_status::process_exit_status(&status),
         );
         for reader in intermediate_stderr {
             let output = reader.join().map_err(|_| {

@@ -766,15 +766,27 @@ impl Executor {
         // duplicated inheritable handles (the fork-and-dup of GNU's
         // execute_pipeline element setup).
         drop(process);
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(
-                &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
-            )?;
+        // niubash#158: feed the stdin payload from a writer thread. Writing
+        // synchronously deadlocks when the payload exceeds the stdin pipe's
+        // capacity and the child is a pass-through that already filled its
+        // own (still undrained) stdout pipe: the shell blocks in write_all,
+        // the child stops reading, and the drain below never starts
+        // (`cat bigfile | cat`). GNU never mediates this write — the
+        // upstream element writes the inter-member pipe directly
+        // (execute_cmd.c:2645-2711) and dies on SIGPIPE when the reader
+        // goes away — so a broken-pipe result here (the child exited
+        // early, e.g. `head -1`) is the child's choice and is swallowed
+        // like SIGPIPE's silence, not propagated as a stage error.
+        let stdin_writer = child.stdin.take().map(|mut stdin| {
+            let payload = crate::executor::substitution_metadata::shell_text_to_raw_bytes(input);
             // The child was handed the whole payload; model it as consumed
             // (same approximation as comsub_stdin_writeback — a spawned
             // process's read() calls are not observable here).
             self.pipeline_stdin_consumed.set(Some(input.len()));
-        }
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(&payload);
+            })
+        });
         if let Some(mut reader) = merged_stage_reader {
             // One pipe carries the merged stream in true write order; drain
             // it to EOF while the child runs, then reap.
@@ -784,6 +796,9 @@ impl Executor {
                 .read_to_end(&mut merged)
                 .map_err(ExecuteError::IoError)?;
             let status = child.wait().map_err(ExecuteError::IoError)?;
+            // The child is gone; its stdin pipe is broken, so the payload
+            // writer thread (spawned above) has finished or is about to.
+            let _ = stdin_writer.map(|writer| writer.join());
             merged.extend(self.finish_dev_fd_operands(dev_ops));
             if let Some(target) = merged_shared_file {
                 // The merged pipe stood for BOTH fds on one shared file
@@ -817,6 +832,11 @@ impl Executor {
             )));
         }
         let output = child.wait_with_output()?;
+        // Same reaping boundary as the merged branch above: the exited child
+        // broke the stdin pipe, the payload writer thread ends on its
+        // broken-pipe write, and joining here keeps the thread's lifetime
+        // inside the stage call.
+        let _ = stdin_writer.map(|writer| writer.join());
 
         let mut stdout_bytes = output.stdout;
         stdout_bytes.extend(self.finish_dev_fd_operands(dev_ops));
