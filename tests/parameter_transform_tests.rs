@@ -127,7 +127,10 @@ fn test_parameter_transform_assignment_prints_indexed_arrays() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "<declare -a arr='alpha'>\n<declare -a arr='beta'>\n<declare>\n<-a>\n<arr=([0]=\"alpha\" [1]=\"beta\")>\n"
+        // GNU 5.3 (WSL script-file probe, rubash#371): a quoted ${arr[*]@A}
+        // is ONE word — chk_atstar (subst.c:7642) never marks a quoted [*]
+        // for the final list_string split (subst.c:12134).
+        "<declare -a arr='alpha'>\n<declare -a arr='beta'>\n<declare -a arr=([0]=\"alpha\" [1]=\"beta\")>\n"
     );
     let _ = fs::remove_file(output_path);
 }
@@ -145,9 +148,14 @@ fn test_parameter_transform_assignment_prints_assoc_arrays() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
+    // GNU 5.3 (WSL script-file probe, rubash#371): element-assigned assoc
+    // arrays keep the `declare -A assoc=(...)` body — assign_array_element
+    // (arrayfunc.c:815) allocates a real cell, so array_var_assignment
+    // (subst.c:8690) renders it — and a quoted [*] stays one word. Key
+    // order is GNU hash order (assoc_to_assign, assoc.c:414).
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "<declare -A assoc>\n<declare -A assoc='alpha'>\n<declare>\n<-A>\n<assoc=([one]=\"alpha\" [two]=\"beta\" )>\n"
+        "<declare -A assoc>\n<declare -A assoc='alpha'>\n<declare -A assoc=([two]=\"beta\" [one]=\"alpha\" )>\n"
     );
     let _ = fs::remove_file(output_path);
 }
@@ -245,9 +253,13 @@ fn test_parameter_transform_prints_key_value_pairs() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
+    // Assoc key/value order is GNU hash order (assoc_to_kvpair,
+    // assoc.c:346 iterates hash buckets): WSL GNU 5.3 prints
+    // `two "beta" one "alpha"` for this exact input (rubash#371 sibling
+    // red — the old expectation pinned insertion order).
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "scalar:'value':'value'\nindexed:0 \"alpha\" 1 \"beta\" / 0 alpha 1 beta\nassoc:one \"alpha\" two \"beta\" / one alpha two beta\n"
+        "scalar:'value':'value'\nindexed:0 \"alpha\" 1 \"beta\" / 0 alpha 1 beta\nassoc:two \"beta\" one \"alpha\" / two beta one alpha\n"
     );
     let _ = fs::remove_file(output_path);
 }

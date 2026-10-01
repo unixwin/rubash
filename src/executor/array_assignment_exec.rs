@@ -360,6 +360,14 @@ impl Executor {
             self.shell_state
                 .env_vars
                 .insert(name.to_string(), new_value);
+            // GNU assign_array_element (arrayfunc.c:815) ->
+            // bind_assoc_variable gives the variable a real assoc cell, so
+            // var_isset is true and array_var_assignment (subst.c:8690-8697)
+            // renders the `=(...)` body for `${assoc[*]@A}`. The rubash
+            // declared-never-assigned state is the DECLARED_UNSET_VARS
+            // marker; an element assignment must clear it or the @A
+            // transform keeps printing the bare name (rubash#371).
+            unmark_env_name(&mut self.shell_state.env_vars, DECLARED_UNSET_VARS, name);
             self.exit_code = 0;
             return true;
         }
@@ -514,6 +522,12 @@ impl Executor {
             .env_vars
             .insert(name.to_string(), format_indexed_array_storage(entries));
         mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, name);
+        // Same GNU owner as the assoc branch above: bind_array_variable
+        // (arrayfunc.c:815 assign_array_element) allocates a real array
+        // cell, so a declared-but-unset array becomes set the moment an
+        // element is assigned. Clear the rubash declared-unset marker so
+        // `${idx[*]@A}` renders the `=(...)` body (rubash#371).
+        unmark_env_name(&mut self.shell_state.env_vars, DECLARED_UNSET_VARS, name);
         self.exit_code = 0;
         true
     }

@@ -545,7 +545,29 @@ impl Executor {
         if transform == ParameterTransform::Assignment {
             let value = self.parameter_assignment_transform(var_name);
             if quoted_array_word {
-                return Some(split_array_assignment_transform_words(&value));
+                if starred {
+                    // GNU chk_atstar (subst.c:7642-7649): a QUOTED [*]
+                    // subscript never sets contains_dollar_at, so
+                    // expand_word_internal's final list_string split
+                    // (subst.c:12134) does not run — the whole transform
+                    // result is ONE word, `declare -A a=([k]="v" )`
+                    // included (rubash#371).
+                    return Some(vec![value]);
+                }
+                // QUOTED [@]: chk_atstar (subst.c:7630-7641) marks the word
+                // like "$@", and the final list_string (istring, ifs, 1)
+                // (subst.c:12134) splits the plain `declare -<flags> name`
+                // prefix on IFS characters while the value body —
+                // CTLESC-carried char-by-char by quote_string inside
+                // array_var_assignment (subst.c:8703) — survives as one
+                // field glued to the last prefix word.
+                let ifs_separator = assignment_transform_split_separator_from_ifs(
+                    self.shell_state.env_vars.get("IFS").map(String::as_str),
+                );
+                return Some(split_assignment_transform_words_on_ifs(
+                    &value,
+                    &ifs_separator,
+                ));
             }
             return Some(vec![value]);
         }
@@ -875,17 +897,44 @@ fn array_value_transform_splits_words(transform: ParameterTransform) -> bool {
     )
 }
 
-fn split_array_assignment_transform_words(value: &str) -> Vec<String> {
-    let mut parts = value.splitn(3, char::is_whitespace);
-    let first = parts.next().unwrap_or_default();
-    if first.is_empty() {
-        return Vec::new();
+/// The separator set for a quoted `[@]` assignment-transform result, per GNU
+/// expand_word_internal (subst.c:12099-12135): `ifs_chars = ifs_value`, so
+/// list_string splits on the current IFS characters; setifs (subst.c:12322)
+/// substitutes `" \t\n"` when IFS is unset, and a set-but-null IFS hits the
+/// `*ifs_chars ? ifs_chars : " "` fallback at subst.c:12134 — a literal
+/// space, not "no split".
+fn assignment_transform_split_separator_from_ifs(ifs: Option<&str>) -> String {
+    match ifs {
+        None => " \t\n".to_string(),
+        Some(value) if value.is_empty() => " ".to_string(),
+        Some(value) => value.to_string(),
     }
-    let Some(second) = parts.next() else {
-        return vec![first.to_string()];
+}
+
+/// Split a quoted `[@]` `@A` transform result the way GNU's final
+/// list_string does: only the plain `declare -<flags> name` prefix is
+/// breakable, because array_var_assignment (subst.c:8703) CTLESC-carries the
+/// whole `=(...)` body. Attribute letters and shell names cannot contain
+/// `=`, so the first `=` is the body boundary; the body stays attached to
+/// the last prefix field (list_string drops empty fields like the IFS
+/// splitter does).
+fn split_assignment_transform_words_on_ifs(value: &str, ifs_separator: &str) -> Vec<String> {
+    let (prefix, body) = match value.split_once('=') {
+        Some((prefix, body)) => (prefix, Some(body)),
+        None => (value, None),
     };
-    let Some(rest) = parts.next() else {
-        return vec![first.to_string(), second.to_string()];
-    };
-    vec![first.to_string(), second.to_string(), rest.to_string()]
+    let mut fields: Vec<String> = prefix
+        .split(|ch: char| ifs_separator.contains(ch))
+        .filter(|field| !field.is_empty())
+        .map(str::to_string)
+        .collect();
+    match (body, fields.last_mut()) {
+        (Some(body), Some(last)) => {
+            last.push('=');
+            last.push_str(body);
+        }
+        (Some(body), None) => fields.push(format!("={body}")),
+        (None, _) => {}
+    }
+    fields
 }
