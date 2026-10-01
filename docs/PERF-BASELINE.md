@@ -3303,3 +3303,89 @@ elimination), stage 2 net ~8-12ms more (feeder pays a small per-char update)
 — combined ~13-19ms of configure -n's ~386ms (-3.5-5%), same share on
 nvm -n. NOT implemented: both stages edit continuation.rs machines and the
 oracle equivalence proofs are the captain's gate.
+
+## perf1x round (2026-10-01, wt30/perf1x on 49057268): errexit/xtrace single-source convergence
+
+The hist274 bucket-3 handoff (31 read points x 1-2 env queries, ~5% of
+probe 05) with its prerequisite settled first. Two commits, both
+correctness-first; the perf delta is honestly below the noise floor.
+
+### Task 0 (the prerequisite): GNU's comsub errexit entry, verified
+
+GNU model (source + WSL 5.3.0 script-file probes `target/perf1x/e*.sh`):
+`command_substitute`'s fork child runs `builtin_ignoring_errexit = 0;
+change_flag ('e', FLAG_OFF); set_shellopts();` (subst.c:7356-7362) — the
+-e OPTION itself is cleared (flags.c:171 zeroes errexit_flag;
+exit_immediately_on_error follows at flags.c:261-263), so inside the body
+`$-` shows no 'e', `$SHELLOPTS` has no errexit, and an explicit `set -e`
+re-enables it. The nofork funsub does the same (subst.c:7020-7029). Two
+of rubash's four comsub entries modeled this; two did not — live
+divergences at 49057268:
+
+1. `run_ast_command_substitution_with_context` suppressed errexit with
+   the counter only: `$-`/`$SHELLOPTS` inside the body showed errexit
+   (probes e6/e7; GNU shows neither).
+2. `run_function_command_substitution` (the `$(f)` shortcut) had NO
+   adjustment: `set -e; f() { false; echo inner; }; echo $(f)` captured
+   empty (GNU captures `inner`; probes e3/e4e).
+
+**Commit 7002db37**: both entries now apply the GNU adjustment bracketed
+for in-place execution (counter save+reset, option off; env pair rolled
+back by restore_flat_subshell, counter restored after the capture). All
+four divergent shapes byte-identical to GNU; every previously-matching
+shape unchanged (25-case matrix `target/perf1x/m1.sh`).
+
+### Task 1: the markers deleted, option table is the single source
+
+The dual encoding itself was broken: the live markers
+(`__RUBASH_ERREXIT`/`__RUBASH_XTRACE`) were written ONLY by the short
+`-e`/`-x` form while the long form wrote just the option attr, and the
+read was `marker || attr` — any stale marker resurrected the flag:
+
+- `set -e; set +o errexit; false` -> rubash exited, GNU survives (d1/d3)
+- `set -x; set +o xtrace; echo end` -> rubash traced it, GNU does not (d4)
+- `set -x; ...; set +x; echo end1` -> base traced end1 (m2 matrix)
+
+GNU has ONE flag variable per option (flags.c:56-57/171, change_flag
+flags.c:226). **Commit 74a06435** deletes the markers everywhere (set.rs
+short form, the four comsub adjustments, funsub save/restore,
+shell_options `set -` operand, compound_exec spawn-inheritance list);
+`errexit_enabled()` (15 sites) / `xtrace_enabled()` (16 sites) read the
+option table alone — one env lookup per read instead of two, and the
+stale-marker class is structurally gone. The xtrace x comsub matrix
+(m2) is byte-identical to GNU including `++` indirection levels.
+
+### A/B (release, interleaved 8 rounds, load-amplified 20x per niubash#155)
+
+| probe (amplified) | base median | lane median | delta |
+|---|---:|---:|---:|
+| arith loop 100000 iters (in-process) | 977.7 ms | 971.7 ms | -0.6% (noise band ±5%) |
+| `:` loop 50000 iters (in-process) | 2003.0 ms | 2002.7 ms | flat |
+
+The hist274 estimate ("~5% of probe 05") is NOT confirmed at the wall
+level: even at 20x amplification the saved lookup is below the host
+noise floor. The commits stand on the GNU-alignment fixes (three fixed
+divergence families); the read convergence's remaining value is the
+eliminated desync surface, not wall time. A ShellState Cell cache on top
+(single attr lookup -> field read) is now unnecessary for correctness
+and sub-noise for perf — do not spend a round on it.
+
+### Gates
+
+549/549 lib + 27/27 regression (both commits); RUSTFLAGS='-D warnings'
+cargo check --all-targets clean; cargo fmt clean; true-baseline slices:
+set-e comsub comsub2 trap dstack 0 diff lines; errors/read/exp
+base-vs-lane byte-identical modulo each binary's own $0 path (remaining
+GNU diffs pre-existing); canaries yes|head 100000 and seq 5000000|wc -l
+pass; `$(seq 20000 | cat)` hangs identically on base (pre-existing
+#158, wt27 lane's); continuation.rs untouched.
+
+### Side findings (pre-existing, recorded with reproducers)
+
+1. **posix-mode stickiness gap**: GNU's `set -o posix` turns shopt
+   inherit_errexit ON and `set +o posix` leaves it ON (sticky —
+   `target/perf1x/m1y.sh`: GNU off/on/on, rubash off/off/off). Visible
+   in comsub errexit behavior after a posix round-trip (m1 cases
+   22/24/25). Owner: the posix flip site, separate subsystem.
+2. **Pre-existing nested-comsub/EXIT-trap shapes** (m1x) match GNU in
+   isolation; the m1 22/24/25 diffs are entirely finding 1.
