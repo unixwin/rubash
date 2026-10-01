@@ -216,3 +216,13 @@
 - **wt28/bugs**（niubash）：#157 setup rc 坏文件（最优先）+ #153 裸 `/` 翻译 + #154 参数展开失败退出码 + #156 xargs 选项解析（含归属判定，WinuxCmd 只读）
 - **wt29/rubugs**（rubash）：#377 未引号 fan-out glob + #379 `$'..'` 折叠 + #380 comsub casepat + #381 空 case 严格性
 - **wt30/perf1x**：null 8.8x / configure 11x / errexit-xtrace 收敛（先验 GNU execute_cmd.c:1669）/ per-command 地板；架构级先设计后动；测量铁律含负载放大
+
+## 2026-10-01 夜终：wt27/wt28/wt30 回收（wt29 在途）
+
+- **#158 关（e4d84c8b，CI 绿）**：末段捕获管道排空提前到正向等待前（GNU subst.c:7428/7437/7441 并发序）+ 顺序路径 stdin 写线程投喂；**钉死回归 5/5（预修 4/5 红）**；2c781657 护栏全保
+- **#157 关（niubash b4fc878）**：setup rc 模板 `\}` 逃逸闭括号→对齐 example 的 `${USERPROFILE//\//}`；单测+e2e（真实 setup 产物过 `niu -n`）
+- **#153 关（引擎 bd83a0fb + niu dbd3e3c）**：裸 `/` 是操作数字符永不翻译（execute_cmd.c:6126 argv 原样）；16 形态双壳字节一致
+- **#154 重大更正**：车道 GNU 矩阵是 source 模式探针伪影——直测真值 `-c` 模式子壳/函数/循环全是 **127**，原实现本就正确；推荐修复已试装→实测变差→回退。真分歧仅剩 comsub 角落（GNU=0 且吞诊断）——已重定域开在单内
+- **perf1x 回收（7002db37+74a06435，CI 绿 a92540a4）**：comsub 入口 errexit 对齐（修 4 活分歧：`$(f)` 内函数体 errexit 复活等）+ **删除活标记单一源化**（修 `set -e; set +o errexit; false` 被杀、xtrace 残留两族；读点 2 查→1 查）。诚实结论：~5% 估计低于噪声地板，Cell 缓存**不必再做**（已写 PERF-BASELINE 防浪费）；下一杠杆=`__RUBASH_CURRENT_LINE` Cell 移植
+- **#156**：归 WinuxCmd，上游单 WinuxCmd#1139 已建（bug+compat-gap）；niubash 侧钉死
+- 侧发现待开单：posix 翻转 inherit_errexit 粘滞（GNU `set +o posix` 不复位）
