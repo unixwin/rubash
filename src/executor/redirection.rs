@@ -1363,7 +1363,12 @@ impl OutputFdState {
             OutputTarget::ProcessStdoutAt(record) => {
                 // dup2 snapshot with the recorded binding (rubash#223):
                 // route to that capture generation's buffer, or the real
-                // process stdout when bound outside any capture.
+                // process stdout when bound outside any capture. The `None`
+                // record names the REAL stdout object the dup snapshotted
+                // (redir.c:1170) — writing it through write_stdout_bytes
+                // would re-resolve the active command-substitution capture
+                // and capture bytes GNU sends outside the substitution
+                // (rubash#368).
                 match record {
                     Some(generation) => {
                         let _ = crate::executor::shell_options::write_stdout_capture_at_generation(
@@ -1371,7 +1376,7 @@ impl OutputFdState {
                         );
                     }
                     None => {
-                        write_stdout_bytes(output)?;
+                        crate::executor::shell_options::write_real_stdout_uncaptured(output)?;
                     }
                 }
                 Ok(())

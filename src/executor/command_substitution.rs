@@ -1299,9 +1299,28 @@ impl Executor {
         // aliases at that read, so the driver's streamed-batch marker must
         // not reach the child's executor-level expansion.
         shell_state.env_vars.remove("__RUBASH_ALIAS_STREAMED");
+        let mut fd_table = self.fd_table.clone();
+        // GNU subst.c:7320 command_substitute: after the fork the child
+        // installs the capture pipe with `dup2 (fildes[1], 1)` — fd 1
+        // becomes a NEW open file description and inherits none of the
+        // parent fd 1's dup2 aliases. Every caller of this constructor runs
+        // its body against a fresh capture as the child's fd 1 (the
+        // substitution buffer here; pipeline elements likewise get the pipe
+        // bound to fd 1 first, execute_cmd.c:2702-2723), so the alias-
+        // generation record a parent `1>&N` left on fd 1 must not survive
+        // the boundary: a `Some(None)` record would route the body's plain
+        // stdout writes to the REAL process stdout (escaping the capture,
+        // rubash#368) and a `Some(gen)` record to the parent's capture
+        // generation instead of this child's buffer (the #335 residue the
+        // function-call fast path already clears — see
+        // embedded_mutations.rs). Descriptor bindings on every OTHER fd
+        // survive verbatim: GNU's fork keeps fd >= 3 at the parent's
+        // binding, which is exactly what `{ v=$(cmd 3>&1 1>&4); } 4>&1`
+        // needs (rubash#368).
+        fd_table.stdout_alias_generation.remove(&1);
         Executor {
             shell_state,
-            fd_table: self.fd_table.clone(),
+            fd_table,
             exit_code: self.exit_code,
             parse_error_occurred: false,
             // GNU exit.def bash_logout: subshells never source ~/.bash_logout

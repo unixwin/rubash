@@ -358,12 +358,15 @@ impl Executor {
             // a write to an fd bound to Stdout/Stderr follows the recorded
             // snapshot binding (capture generation / real stdout,
             // rubash#223), or the live capture when the fd is the alias.
+            // The `None` record is the REAL process stdout snapshotted at
+            // dup time (redir.c:1170) — it must bypass the active capture,
+            // not re-resolve through it (rubash#368).
             FdWriteEndpoint::Stdout => match self.fd_table.stdout_alias_generation.get(&fd) {
                 Some(Some(generation)) => {
                     let _ = write_stdout_capture_at_generation(output, *generation);
                 }
                 Some(None) => {
-                    write_stdout_bytes(output)?;
+                    write_real_stdout_uncaptured(output)?;
                 }
                 None => {
                     if stdout_capture_active() {
@@ -509,7 +512,18 @@ impl Executor {
             return;
         };
         let result = match endpoint {
-            FdWriteEndpoint::Stdout => write_global_stdout(output),
+            // fd 2 bound to fd 1's object by `2>&1` carries the same dup2
+            // snapshot contract as write_fd_endpoint (redir.c:1170): the
+            // recorded capture generation when the dup ran inside a
+            // capture, the REAL process stdout when it ran outside one
+            // (rubash#368 — `exec 2>&1; v=$(${x?boom})` reports boom on
+            // the real stdout, outside the substitution), and only a
+            // record-less marker the live capture-first resolution.
+            FdWriteEndpoint::Stdout => match self.fd_table.stdout_alias_generation.get(&2) {
+                Some(Some(generation)) => write_stdout_capture_at_generation(output, *generation),
+                Some(None) => write_real_stdout_uncaptured(output),
+                None => write_global_stdout(output),
+            },
             FdWriteEndpoint::Stderr => write_stderr_bytes(output),
             // A stderr fd bound to a coprocess input or process-substitution
             // path is not a diagnostics destination; report on the terminal
@@ -546,7 +560,12 @@ impl Executor {
             // An fd whose marker was dup'd from fd 1 earlier holds a
             // snapshot: that capture generation's buffer, or the real
             // process stdout when it was bound outside any capture — never
-            // a nested capture that later owns fd 1 (rubash#223).
+            // a nested capture that later owns fd 1 (rubash#223). The
+            // `None` record therefore writes the REAL process stdout
+            // directly: routing it through write_stdout_bytes would
+            // re-resolve against the active command-substitution capture
+            // and swallow bytes that GNU sends outside the substitution
+            // (rubash#368: `exec 3>&1; v=$(echo x >&3)` prints x outside).
             FdWriteEndpoint::Stdout => match self.fd_table.stdout_alias_generation.get(&fd) {
                 Some(Some(generation)) => {
                     let _ = crate::executor::shell_options::write_stdout_capture_at_generation(
@@ -555,7 +574,7 @@ impl Executor {
                     );
                 }
                 Some(None) => {
-                    write_stdout_bytes(output)?;
+                    write_real_stdout_uncaptured(output)?;
                 }
                 None => {
                     if stdout_capture_active() {
@@ -1247,7 +1266,20 @@ pub(crate) fn write_stdout_bytes(output: &[u8]) -> io::Result<()> {
     if stdout_capture_active() {
         return stdout_capture_write(output);
     }
+    write_real_stdout_uncaptured(output)
+}
 
+/// Write to the REAL process stdout object, ignoring any active thread-local
+/// capture. This is the destination a `Stdout` endpoint's dup record `None`
+/// names: GNU `N>&M` (redir.c:1169-1170 `dup2 (redir_fd, redirector)`)
+/// copies the open file description CURRENT at dup time, so a dup made while
+/// fd 1 was the process stdout keeps referring to that object. The
+/// command-substitution child later installs its capture pipe with
+/// `dup2 (fildes[1], 1)` (subst.c:7320) — a NEW open file description that
+/// replaces only fd 1 — so writes through the dup'd fd still reach the
+/// process stdout and escape the substitution (rubash#368:
+/// `{ v=$(cmd 3>&1 1>&4); } 4>&1` must print the fd-1 half outside).
+pub(crate) fn write_real_stdout_uncaptured(output: &[u8]) -> io::Result<()> {
     #[cfg(windows)]
     {
         return trace_stdio_write("stdout", output.len(), || {
