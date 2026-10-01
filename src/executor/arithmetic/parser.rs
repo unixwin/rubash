@@ -9,8 +9,6 @@ mod lvalue;
 #[path = "value.rs"]
 mod value;
 
-use std::collections::HashMap;
-
 use crate::executor::execution_misc::RandomGen;
 
 /// GNU expr.c `evalerror` record (expr.c:1524-1535): the diagnostic carries
@@ -98,13 +96,16 @@ pub(super) struct ConditionalArithParser<'a> {
     pub(super) env_vars: &'a mut crate::shell::var_table::VarTable,
     pub(super) resolving: Vec<String>,
     pub(super) random_state: Option<&'a RandomGen>,
-    /// Dynamic-parameter snapshot injected by the Executor (see
-    /// `Executor::arith_dynamic_values`). GNU expr.c:1150 expr_streval
+    /// Lazy dynamic-parameter context injected by the Executor (see
+    /// `Executor::arith_dynamic_context`). GNU expr.c:1150 expr_streval
     /// resolves operand names through find_variable, which materializes
     /// dynamic variables (BASHPID, BASH_SUBSHELL, ...) exactly like
     /// `$name` expansion; the evaluator only carries `env_vars`, so the
-    /// Executor supplies their current values here.
-    pub(super) dynamic_values: Option<&'a HashMap<&'static str, String>>,
+    /// Executor supplies a read-time-resolvable context here. GNU builds
+    /// no per-evaluation snapshot (variables.c:1844 INIT_DYNAMIC_VAR
+    /// getters resolve at find_variable time), and neither does this
+    /// port: a name resolves only when an operand actually spells it.
+    pub(super) dynamic_values: Option<&'a super::super::dynamic_arrays::ArithDynamicContext>,
     pub(super) error_category: Option<super::ArithmeticErrorCategory>,
     pub(super) no_expand: bool,
     /// The first recorded evalerror — GNU longjmps on the first failure, so

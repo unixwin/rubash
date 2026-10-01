@@ -178,7 +178,7 @@ impl Executor {
                 // expr.c:1183 expr_streval: dynamic variables resolve like
                 // `$name` expansion — `${a[$((RANDOM%3))]}` advances the
                 // same RNG state as `$((RANDOM%3))` (rubash#299).
-                let dynamic_values = self.arith_dynamic_values();
+                let dynamic_values = self.arith_dynamic_context();
                 let (result, writes) = eval_conditional_arith_value_with_writes(
                     &expr,
                     &overlaid,

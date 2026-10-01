@@ -3127,3 +3127,179 @@ by measurement; this lane took what the subsystem had.
 4. **The remaining <330ms distance is not a word_finish problem** — see the
    budget note above; owners: parse20 (144ms), startup21 (~90ms),
    feeder21 leftovers (~44ms + 19ms tokenize non-word_finish).
+
+## hist274 round (2026-10-01, wt23/hist274 on 2e6b0e98): arith_dyn lazy context + for-pair/errexit evaluations + f28 root-cause
+
+The 2x-floor-bucket round (04/05) plus two evaluation-only deliverables and
+the sig22 f28 follow-up. All numbers RELEASE, interleaved A/B vs a pristine
+2e6b0e98 base built this session in ../rubash-wt-hist274-base; GNU anchors
+re-measured by the suite in the same runs. Scratch instrumentation (per-name
+snapshot timers, eval-phase timers, env-gated differential variants) fully
+removed before the final gates; the final binary was re-gated from scratch.
+
+### Task 1.1 — arith_dyn: design review first, then the GNU-faithful port
+
+The brief asked for a "maintained entry" model (flip-point invalidation).
+Design review REJECTED it: GNU maintains no eager entries for these names —
+`initialize_dynamic_variables` (variables.c:1844) installs BASHPID,
+BASH_SUBSHELL, BASH_ARGV0, BASH_COMMAND, GROUPS, SHELLOPTS, BASHOPTS,
+PIPESTATUS, FUNCNAME as hash entries whose `dynamic_value` GETTERS run at
+find_variable time (INIT_DYNAMIC_VAR, variables.c:1202; get_bash_command at
+:1899 stores into the var only when read). An eager maintained entry for
+BASH_COMMAND would flip on EVERY command (a new per-command String clone +
+map insert taxing the write path rubash#156/#157 spent rounds removing), and
+the 8+ scattered flip points each need independent semantic review
+(execdeep's warning). The lazy port achieves GNU's cost model — zero for
+names an expression never references — with a smaller surface.
+
+Landed (src/executor/dynamic_arrays.rs ArithDynamicContext + arithmetic
+{mod,parser,value}.rs + 7 construction sites): the per-evaluation 9-entry
+HashMap snapshot (`Executor::arith_dynamic_values`, ~2.15µs/eval measured:
+9 x dynamic_parameter_value + 9 String clones + with_capacity(9) alloc +
+inserts) is replaced by a Copy-cheap context (bashpid/subshell_depth/
+function_depth/pipestatus_first integers + funcname_top/debug_trap_command
+Options that are None at top level) resolved per name at the point of use —
+`resolve(env, name)` mirrors dynamic_parameter_value's arms exactly
+(SHELLOPTS/BASHOPTS read the maintained env entry with the pure-env
+recompute fallback; BASH_ARGV0 via the extracted env-only
+script_name_value_from_env; GROUPS via the shared groups_words stub). parser
+field `dynamic_values: Option<&ArithDynamicContext>`; consumption at
+value.rs variable_value's existing precedence point.
+
+Two same-family trims: the duplicated `array_expand_once` lookup hoisted
+(assoc_noexpand reused on the identity-admitted path — provably unmutated;
+the full pipeline re-looks-up because GNU computes tflag at expr_streval
+time, post-expansion), and `arithmetic_last_eval_input` is now written only
+on failure paths (GNU expr.c's expr_string/lasttp matter only once evalerror
+records a diagnostic; all consumers — arithmetic_aliases:305,
+embedded_mutations:1051/1160, parameter_core:260 — read post-None; the
+nounset/bare-quote/empty-quoted early returns write it too).
+
+### Numbers (interleaved A/B medians, same load window)
+
+| probe | base | lane | delta | harness ratio (same-run GNU) |
+|---|---:|---:|---:|---|
+| 05-arith-x5000 (in-process) | 95.5 | 80.5 | **-15.7%** | 12.5x -> **10.7-11.2x** |
+| 05 snapshot build alone (differential variant) | +21.5ms | 0 | matches instrumented 2.14µs x 10001 | — |
+| 04-loop-true (in-process) | 117 | 113 | -3.4% | 11.9x -> 11.8x |
+| 06/07 | flat | flat | noise band | — |
+
+The 2x-floor goals (04 <10x, 05 <9x) are NOT reached: the snapshot's full
+predicted value landed, but 05's remaining ~68ms in-process is the
+distributed per-command floor — see leftovers.
+
+### Gates
+
+- matrices m1 (the nine dynamic names x every arith entry kind, subshell
+  depths, unset marks, options on/off, subscript contexts),
+  m2 (21 arithmetic FAILURE forms whose diagnostics read the deferred input
+  slot), m3 (array_expand_once, assign-to-dynamic, subscript side effects):
+  base-vs-lane byte-identical stdout+stderr+rc (`target/hist274/out/`).
+  Lane-vs-GNU deltas are pre-existing and base-identical: `((BASH_SUBSHELL =
+  5))` does not persist (GNU assign_subshell sets subshell_level, rubash
+  writes env only) — semantic ticket class, unchanged by this lane.
+- true-baseline slices (arith arith-for array assoc new-exp exp): base and
+  final lane byte-identical rb.out/rb.err/rb.rc; GNU diff counts identical
+  (0/0/8/46/4/0). **Harness pitfall recorded**: three earlier suite runs
+  silently produced EMPTY rubash output (0-byte rb.out on BOTH binaries) and
+  the ledger printed 301/90/777/385/912 "diff lines" — those were
+  empty-vs-GNU artifacts of a broken fixture state, not real baselines;
+  a 0-byte rb.out in this harness means the run is void, re-run before
+  reading the ledger.
+- 546/546 lib + 27/27 regression + `RUSTFLAGS='-D warnings' cargo check
+  --tests` and `--release --tests` clean + cargo fmt --check clean;
+  src/lexer/continuation.rs untouched (git diff 0).
+
+### Task 1.2 — for ((...)) pair: memo REJECTED by decomposition
+
+Differential micro-probes (20k iterations, timeout-guarded; one rubash.exe
+pair was left running by a bad probe and killed before finish):
+`(( i += 1 ))` command = 3.3µs end-to-end, `:` = 6.5µs, assignment =
+7.75µs; for-form test/update eval = 3.9µs/eval vs GNU 0.6µs (f1 shape GNU
+40ms vs lane 279ms = 7.0x). Real loop test/update expressions CONTAIN the
+loop variable — a constant-expression memo (GNU has none; execute_cmd.c:3201
+eval_arith_for_expr -> evalexp every iteration) would not apply to the
+shapes that matter. The pair cost decomposes as: eval pipeline ~1.5µs
+(parser 0.95 + tail 0.37) + restore_for_line ~0.4µs (an env get+insert with
+two String allocs per expression; GNU execute_cmd.c:3236 assigns an int) +
+xtrace/debug gates ~0.25µs. Owners: the eval-pipeline floor (already the
+per-command-floor family) and the __RUBASH_CURRENT_LINE-in-env model (a
+Cell<usize> port with env sync only at consumers — broad surface, its own
+round).
+
+### Task 1.3 — errexit/xtrace read convergence: evaluated, NOT landed
+
+Reads: errexit_enabled() x15 sites, xtrace_enabled() x16 sites; each read =
+1-2 env lookups (~0.1-0.15µs) consulting TWO encodings (__RUBASH_ERREXIT
+live marker, then shell_option_enabled's __RUBASH_SETOPT_* attr). Writers
+(~9 sites): set.rs apply_short_set_flag 'e'/'x' (writes BOTH encodings),
+the long form via set_shell_option, Executor::new SHELLOPTS replay,
+command_substitution.rs:1193/1474 (marker REMOVE only — the comsub child
+disables errexit by dropping the live marker while the option attr stays
+set, so inside a comsub child errexit_enabled() consults marker-then-attr
+and can return TRUE via the attr; whether that matches GNU's
+execute_cmd.c:1669 subshell reset is unverified), embedded_mutations
+save/restore block, shell_options.rs:651. Measured stake: 2-3 reads per
+command on the hot paths (~0.3-0.45µs) = 3-4.5ms on probe 05 (~5%).
+Convergence design (env stays authoritative; ShellState Cell<bool> read
+cache recomputed by a resync helper at every writer + carried by ShellState
+clone) is sound but the dual-encoding comsub corner above must be settled
+against GNU first — exactly the "8+ flip points, independent review"
+surface execdeep flagged. Left for the flag-convergence round with the
+OptionTable/VarTable owners.
+
+### Task 2 — f28 (sig22 follow-up): root-caused to an fd bug, NOT xtrace; issue #368 filed
+
+The nvm fast test "Running 'nvm-exec' should display required node version"
+fails on the pristine base at its first capture — but the capture corruption
+is fd-shape, not xtrace inheritance. Minimal repro (issue #368):
+`{ c="$(echo progress; echo value >&3)"; } 3>&1 1>&4; echo "[$c]"` — GNU
+prints `progress` outside and captures `[value]`; rubash captures BOTH
+(pre-opened fds 3/4 are invisible inside $( ); `>&3` and `1>&4` silently
+fall back to the capture pipe). nvm.sh's nvm_rc_version ends `nvm_echo
+"$VER" >&3` and nvm-exec consumes it with `{ V="$(nvm_rc_version 3>&1 1>&4)";
+} 4>&1`, so the version capture collapses and the whole error cascade
+(including the observed `0;31m`/`256` color-code lines inside the capture)
+follows. xtrace verification recorded in the issue: GNU never auto-exports
+SHELLOPTS (variables.c:510 readonly import; shell.c:1971-1987 children
+import from env only when non-privileged) and no xtrace inheritance could
+be reproduced on base or lane in any child shape (external, shebang ->
+rubash, `rubash -c`, ambient env) — the sig22 "inherited into capture"
+symptom is this fd bug.
+
+### Task 3 — battery three-machine redo: EVALUATION (captain decision input)
+
+feeder21's leftover: gather battery subscript 4.5ms + closechar 7.7ms +
+fnbody 7.6ms (~19.8ms on configure -n). State classification (verified in
+the oracles, not assumed):
+
+- **ANSWER state** (may not be dropped at a boundary): subscript's
+  `reported` + its quote/comment scan bits (single/double/ansi_single/
+  escaped/in_comment) and command_position/compassign_depth/element_start;
+  closechar's `stack` + case_depth/case_in_stage/word_boundary
+  (the `)`-inside-case disambiguation, parse.y:1037); fnbody's
+  phase/depth/search_from + CommentAwareScan.
+- **NON-ANSWER state** (full-String bookkeeping where only a classification
+  is ever read — the fusion blocker feeder21 named): subscript's `word` is
+  consumed ONLY by `word.is_empty()`, `is_pure_identifier(&word)` and
+  `is_command_position_boundary(&word)` (skip.rs `[` arm + newline arm) —
+  a 3-state summary (Empty/PureIdent/Other + reserved-word tracker) drives
+  identical answers. closechar's `cur_word` is read only as reserved-set
+  membership (`"if"|"then"|...|"case"`), `ends_with('=')`, `len()>1`,
+  is_empty (continuation.rs:493-511,670); its case-tracker `word` is read
+  only as `word == "esac"` — a prefix-progress byte suffices. These two
+  Strings make every per-line checkpoint snapshot a clone and pay a
+  per-alnum-char push on every tail advance.
+
+Redo sketch (two independent stages, both touch captain-exclusive
+continuation.rs): (1) summary-state port of subscript/closechar `word`
+fields (differential-gated vs the String oracle over the full corpus,
+quoterm22-style); (2) extend feeder21's fusion pattern —
+`needs_more(skip_quote_comsub)` gains feeder-maintained boundary summaries
+for the three machines' ANSWER state so clean lines take the answer instead
+of re-advancing (fnbody's rare signature check keeps its `pending` read at
+the delimiter transition only). Expected: stage 1 ~5-7ms (clone+push
+elimination), stage 2 net ~8-12ms more (feeder pays a small per-char update)
+— combined ~13-19ms of configure -n's ~386ms (-3.5-5%), same share on
+nvm -n. NOT implemented: both stages edit continuation.rs machines and the
+oracle equivalence proofs are the captain's gate.

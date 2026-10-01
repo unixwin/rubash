@@ -1,5 +1,88 @@
 use super::*;
 
+/// Lazy dynamic-parameter context for arithmetic evaluation — the port of
+/// GNU's read-time `dynamic_value` getters (variables.c:1844
+/// initialize_dynamic_variables / INIT_DYNAMIC_VAR at :1202, resolved
+/// through find_variable at expr.c:1150 expr_streval). See
+/// [`Executor::arith_dynamic_context`] for the cost model.
+#[derive(Debug, Clone)]
+pub(crate) struct ArithDynamicContext {
+    bashpid: u32,
+    subshell_depth: usize,
+    function_depth: usize,
+    funcname_top: Option<String>,
+    debug_trap_command: Option<String>,
+    pipestatus_first: i32,
+}
+
+impl ArithDynamicContext {
+    /// Resolve one of the nine Executor-injected dynamic names, mirroring
+    /// the arms of [`Executor::dynamic_parameter_value`] for exactly those
+    /// names (RANDOM/SRANDOM/LINENO/SECONDS/EPOCH* are resolved by the
+    /// evaluator itself and never reach here). `env_vars` is the
+    /// evaluator's own map — SHELLOPTS/BASHOPTS read the maintained entry
+    /// first (identical to what `dynamic_parameter_value` returned), with
+    /// the pure-env recompute as the absent-entry fallback for unit-test
+    /// maps that never ran the Executor::new binding.
+    pub(in crate::executor) fn resolve(
+        &self,
+        env_vars: &HashMap<String, String>,
+        name: &str,
+    ) -> Option<String> {
+        match name {
+            "BASHPID" => Some(self.bashpid.to_string()),
+            "BASH_SUBSHELL" => Some(self.subshell_depth.to_string()),
+            // variables.c:1526 get_bash_argv0 returns dollar_vars[0]; the
+            // script-name chain below is rubash's dollar_vars[0] model.
+            "BASH_ARGV0" => Some(script_name_value_from_env(env_vars)),
+            // GNU FUNCNAME carries att_invisible and reads unset at
+            // function depth 0 (variables.c:1812 make_funcname_visible);
+            // the dynamic snapshot omitted it there — funcname_top is None.
+            "FUNCNAME" => self.funcname_top.clone(),
+            // groups_words() is the current stub (vec!["0"]); keep both
+            // readers on one source so a real port changes them together.
+            "GROUPS" => Some(groups_words().get(0).cloned().unwrap_or_default()),
+            "BASH_COMMAND" => Some(
+                self.debug_trap_command
+                    .clone()
+                    .or_else(|| env_vars.get("__RUBASH_CURRENT_COMMAND").cloned())
+                    .unwrap_or_default(),
+            ),
+            "SHELLOPTS" => Some(
+                env_vars
+                    .get("SHELLOPTS")
+                    .cloned()
+                    .unwrap_or_else(|| crate::builtins::set::shellopts_value(env_vars)),
+            ),
+            "BASHOPTS" => Some(
+                env_vars
+                    .get("BASHOPTS")
+                    .cloned()
+                    .unwrap_or_else(|| crate::builtins::shopt::bashopts_value(env_vars)),
+            ),
+            "PIPESTATUS" => Some(self.pipestatus_first.to_string()),
+            _ => None,
+        }
+    }
+}
+
+/// Env-only form of [`Executor::script_name_value`] (GNU
+/// variables.c:1526-1545 get_bash_argv0/assign_bash_argv0): the
+/// dollar_vars[0] chain lives entirely in env entries, so the arithmetic
+/// context can resolve BASH_ARGV0 without an Executor handle.
+pub(in crate::executor) fn script_name_value_from_env(
+    env_vars: &HashMap<String, String>,
+) -> String {
+    env_vars
+        .get("BASH_ARGV0")
+        .or_else(|| env_vars.get("__RUBASH_ARGV0_AFTER_UNSET"))
+        .or_else(|| env_vars.get("__RUBASH_TOP_LEVEL_NAME"))
+        .or_else(|| env_vars.get("__RUBASH_SCRIPT_NAME"))
+        .or_else(|| env_vars.get("__RUBASH_SHELL_NAME"))
+        .cloned()
+        .unwrap_or_else(|| "rubash".to_string())
+}
+
 /// Resolves dynamic parameters whose values derive solely from `env_vars`
 /// (plus the wall clock). Shared between `$SECONDS`-style parameter
 /// expansion (via [`Executor::dynamic_parameter_value`]) and arithmetic
@@ -31,6 +114,13 @@ pub(in crate::executor) fn env_derived_dynamic_parameter_value(
         }
         _ => None,
     }
+}
+
+/// GROUPS word list — stub returning a single "0" (a real port would walk
+/// the process group set, GNU variables.c:1886 get_groupset). Shared by
+/// the Executor accessors and the arithmetic dynamic context.
+pub(in crate::executor) fn groups_words() -> Vec<String> {
+    vec!["0".to_string()]
 }
 
 impl Executor {
@@ -187,31 +277,37 @@ impl Executor {
     /// RANDOM/SRANDOM are excluded (reading them must advance the RNG
     /// state held inside the evaluator), as are the env-derived names
     /// (SECONDS/EPOCH*) and LINENO that value.rs resolves directly.
-    pub(in crate::executor) fn arith_dynamic_values(&self) -> HashMap<&'static str, String> {
-        // with_capacity(9): the map is built per arithmetic evaluation
-        // (eval_arithmetic_command_value_with_flags) and the default
-        // grow-from-zero path re-allocated the table 4+ times per build;
-        // &'static str keys avoid the 9 per-name String clones. GNU keeps
-        // no such map at all — expr.c:1150 expr_streval resolves every name
-        // through find_variable on maintained entries — so this snapshot is
-        // pure port scaffolding; its cost should stay minimal.
-        let mut values = HashMap::with_capacity(9);
-        for name in [
-            "BASHPID",
-            "BASH_SUBSHELL",
-            "BASH_ARGV0",
-            "FUNCNAME",
-            "GROUPS",
-            "BASH_COMMAND",
-            "SHELLOPTS",
-            "BASHOPTS",
-            "PIPESTATUS",
-        ] {
-            if let Some(value) = self.dynamic_parameter_value(name) {
-                values.insert(name, value);
-            }
+    /// GNU variables.c:1844 `initialize_dynamic_variables` installs the
+    /// dynamic parameter set as ordinary hash-table entries carrying a
+    /// `dynamic_value` getter (INIT_DYNAMIC_VAR, variables.c:1202) that
+    /// find_variable materializes AT READ TIME — expr.c:1150 expr_streval
+    /// resolves an operand name through find_variable, so GNU builds no
+    /// snapshot per arithmetic evaluation and pays nothing for dynamic
+    /// names an expression never references. This context is that model:
+    /// the Executor captures the Copy-valued dynamic state once per
+    /// evaluation (nothing mutates it mid-parse — no user code runs
+    /// during evaluation; command substitutions expand before the parser
+    /// starts), and the evaluator resolves the nine injected names
+    /// against it lazily, name by name, only when an operand actually
+    /// spells one. The two Option strings cost nothing at the top level
+    /// (FUNCNAME is unset outside functions, the DEBUG-trap command is
+    /// absent outside trap execution) and clone only in the contexts
+    /// where the eager 9-entry HashMap snapshot cloned them anyway.
+    pub(crate) fn arith_dynamic_context(&self) -> ArithDynamicContext {
+        ArithDynamicContext {
+            bashpid: self.bashpid_value(),
+            subshell_depth: self.shell_state.subshell_depth.get(),
+            function_depth: self.shell_state.function_depth,
+            funcname_top: (self.shell_state.function_depth > 0).then(|| {
+                self.shell_state
+                    .function_name_stack
+                    .first()
+                    .cloned()
+                    .unwrap_or_default()
+            }),
+            debug_trap_command: self.shell_state.debug_trap_command.borrow().clone(),
+            pipestatus_first: self.shell_state.pipestatus.first().copied().unwrap_or(0),
         }
-        values
     }
 
     /// GNU shell.c:1635-1650 (shell_execscript): the synthetic bottom
@@ -434,25 +530,11 @@ impl Executor {
     }
 
     pub(in crate::executor) fn script_name_value(&self) -> String {
-        self.shell_state
-            .env_vars
-            .get("BASH_ARGV0")
-            // GNU variables.c:1528-1545: assign_bash_argv0 rebinds
-            // dollar_vars[0], which survives `unset BASH_ARGV0` — the
-            // dedicated snapshot slot models that (cleared at every script
-            // entry, where shell.c:1613 rebinds the slot to script_name).
-            .or_else(|| self.shell_state.env_vars.get("__RUBASH_ARGV0_AFTER_UNSET"))
-            .or_else(|| self.shell_state.env_vars.get("__RUBASH_TOP_LEVEL_NAME"))
-            .or_else(|| self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"))
-            // Embedded hosts provide their public shell identity here. Keep
-            // this after script names so `niu foo.sh` still reports foo.sh.
-            .or_else(|| self.shell_state.env_vars.get("__RUBASH_SHELL_NAME"))
-            .cloned()
-            .unwrap_or_else(|| "rubash".to_string())
+        script_name_value_from_env(&self.shell_state.env_vars)
     }
 
     pub(in crate::executor) fn groups_words(&self) -> Vec<String> {
-        vec!["0".to_string()]
+        groups_words()
     }
 
     pub(in crate::executor) fn group_value_at(&self, index: usize) -> Option<String> {

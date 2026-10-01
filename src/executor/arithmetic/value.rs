@@ -321,12 +321,14 @@ impl ConditionalArithParser<'_> {
             // Executor-injected dynamic values (BASHPID, BASH_SUBSHELL,
             // ...) — GNU expr.c:1150 expr_streval reaches them through
             // find_variable; the evaluator has no Executor handle, so they
-            // arrive as a per-evaluation snapshot. String values
-            // (SHELLOPTS, BASH_COMMAND) re-enter as nested expressions,
-            // matching expr_streval's evalexp recursion.
-            if let Some(value) = self.dynamic_values.and_then(|values| values.get(name)) {
-                let value = value.clone();
-                return self.evaluate_variable_text(name, &value);
+            // arrive as a lazily-resolved context (the INIT_DYNAMIC_VAR
+            // getter port). String values (SHELLOPTS, BASH_COMMAND)
+            // re-enter as nested expressions, matching expr_streval's
+            // evalexp recursion.
+            if let Some(context) = self.dynamic_values {
+                if let Some(value) = context.resolve(self.env_vars, name) {
+                    return self.evaluate_variable_text(name, &value);
+                }
             }
         }
 

@@ -582,7 +582,7 @@ impl Executor {
                 // (arrayfunc.c:1353 -> expr.c:1183 expr_streval,
                 // rubash#299).
                 let overlaid = env_vars_with_pending_subscript_writes(&self.shell_state.env_vars);
-                let dynamic_values = self.arith_dynamic_values();
+                let dynamic_values = self.arith_dynamic_context();
                 let (result, writes) = eval_conditional_arith_value_with_writes(
                     expr.trim(),
                     &overlaid,

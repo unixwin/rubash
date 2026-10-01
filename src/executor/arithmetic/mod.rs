@@ -7,12 +7,12 @@ mod parser;
 
 use parser::ConditionalArithParser;
 pub(crate) use parser::{ArithEvalDiag, ArithEvalError};
-use std::collections::HashMap;
 
 use super::Executor;
 use crate::executor::execution_misc::RandomGen;
 use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 use crate::executor::{is_marked_var, SubstitutionQuoteContext, ASSOC_VARS, UNSET_DYNAMIC_VARS};
+use std::collections::HashMap;
 
 thread_local! {
     /// Variable writes performed by the arithmetic evaluator between the
@@ -345,10 +345,15 @@ impl Executor {
             };
             std::borrow::Cow::Owned(normalize_arithmetic_quotes(&expanded).into_owned())
         };
-        *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
+        // GNU expr.c's expr_string/lasttp only matter once evalerror
+        // records a diagnostic — success paths never consult them, so the
+        // diagnostic input slot is written lazily: the unbound-variable
+        // early return and the failed-evaluation tail below are the only
+        // paths whose callers read arithmetic_last_eval_input.
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars)
             {
+                *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
                 self.shell_state.arithmetic_nounset_error.set(true);
                 if !self.shell_state.arithmetic_expansion_error.replace(true) {
                     eprintln!("{}{}: unbound variable", self.diagnostic_prefix(), name);
@@ -369,9 +374,11 @@ impl Executor {
         // quote characters at all.
         if !preexpansion_is_identity {
             if has_bare_single_quote(&expression, &self.shell_state.env_vars) {
+                *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
                 return None;
             }
             if empty_quoted_operand_has_operator(&expression) {
+                *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
                 return None;
             }
         }
@@ -388,11 +395,20 @@ impl Executor {
         // under the option, so `let 'a[""]=26'` feeds `""` to evalexp
         // verbatim -> "operand expected" (verified GNU 5.3). The marker
         // mirrors EXP_EXPANDED for the parser's subscript evaluation.
-        let exp_expanded = !expand
-            && crate::builtins::shopt::option_enabled(
-                &self.shell_state.env_vars,
-                "array_expand_once",
-            );
+        // GNU computes tflag at expr_streval time (post-expansion): on the
+        // full pre-evaluation pipeline a command substitution may have
+        // flipped the option, so the lookup re-runs there; the
+        // identity-admitted path ran nothing between the two points, so
+        // the assoc_noexpand value is provably still current.
+        let exp_expanded = if preexpansion_is_identity {
+            assoc_noexpand
+        } else {
+            !expand
+                && crate::builtins::shopt::option_enabled(
+                    &self.shell_state.env_vars,
+                    "array_expand_once",
+                )
+        };
         if exp_expanded {
             self.shell_state
                 .env_vars
@@ -400,7 +416,7 @@ impl Executor {
         }
         // Save a snapshot of variable values before evaluation to detect changes.
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
-        let dynamic_values = self.arith_dynamic_values();
+        let dynamic_values = self.arith_dynamic_context();
         let (value, category) = eval_mutable_arith_value_with_random_flags(
             &expression,
             &mut self.shell_state.env_vars,
@@ -408,6 +424,13 @@ impl Executor {
             Some(&dynamic_values),
             true,
         );
+        // Failure path: every consumer of arithmetic_last_eval_input
+        // (arithmetic_aliases, embedded_mutations, parameter_core error
+        // arms) reads it only after a None result — see the
+        // expr_string/lasttp note above.
+        if value.is_none() {
+            *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
+        }
         self.shell_state
             .env_vars
             .remove("__RUBASH_ARITH_EXP_EXPANDED");
@@ -424,7 +447,6 @@ impl Executor {
         // Sync any variable changes from env_vars to shell_state.variables
         // so that subsequent variable expansions see the updated values.
         sync_arith_writes_to_shell_state(self);
-
         value
     }
 
@@ -540,7 +562,7 @@ impl Executor {
         let expression = normalize_arithmetic_quotes(&with_assoc_keys);
         *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
-        let dynamic_values = self.arith_dynamic_values();
+        let dynamic_values = self.arith_dynamic_context();
         let (value, category) = eval_mutable_arith_value_with_random_flags(
             &expression,
             &mut self.shell_state.env_vars,
@@ -654,7 +676,7 @@ impl Executor {
         // GNU expr.c: the expansion pass above already ran, so the parser
         // evaluates under evalexp's already-expanded rules — a surviving
         // `$name`/`$(...)` is "operand expected" data, not a re-expansion.
-        let dynamic_values = self.arith_dynamic_values();
+        let dynamic_values = self.arith_dynamic_context();
         let (value, category) = eval_mutable_arith_value_with_random_flags(
             &expression,
             &mut self.shell_state.env_vars,
@@ -1227,7 +1249,7 @@ pub(crate) fn eval_conditional_arith_value_with_writes(
     value: &str,
     env_vars: &crate::shell::var_table::VarTable,
     random_state: Option<&RandomGen>,
-    dynamic_values: Option<&HashMap<&'static str, String>>,
+    dynamic_values: Option<&super::dynamic_arrays::ArithDynamicContext>,
 ) -> (Option<i128>, Vec<(String, String)>) {
     let mut cloned = env_vars.clone();
     let (result, _category) =
@@ -2251,7 +2273,7 @@ pub(super) fn eval_mutable_arith_value_with_random(
     value: &str,
     env_vars: &mut crate::shell::var_table::VarTable,
     random_state: Option<&RandomGen>,
-    dynamic_values: Option<&HashMap<&'static str, String>>,
+    dynamic_values: Option<&super::dynamic_arrays::ArithDynamicContext>,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
     eval_mutable_arith_value_with_random_flags(value, env_vars, random_state, dynamic_values, false)
 }
@@ -2260,7 +2282,7 @@ pub(super) fn eval_mutable_arith_value_with_random_flags(
     value: &str,
     env_vars: &mut crate::shell::var_table::VarTable,
     random_state: Option<&RandomGen>,
-    dynamic_values: Option<&HashMap<&'static str, String>>,
+    dynamic_values: Option<&super::dynamic_arrays::ArithDynamicContext>,
     no_expand: bool,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
     // GNU Bash's subexpr() treats an empty arithmetic expression as zero.
@@ -2278,7 +2300,7 @@ fn eval_mutable_arith_result(
     value: &str,
     env_vars: &mut crate::shell::var_table::VarTable,
     random_state: Option<&RandomGen>,
-    dynamic_values: Option<&HashMap<&'static str, String>>,
+    dynamic_values: Option<&super::dynamic_arrays::ArithDynamicContext>,
     no_expand: bool,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
     // Fresh evaluation: a stale record/diagnostic from an earlier

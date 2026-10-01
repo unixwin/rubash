@@ -265,7 +265,7 @@ impl Executor {
         // expr_streval: operand names resolve through find_variable, which
         // sees dynamic variables — `${a[RANDOM%3]}` draws from the same RNG
         // state as `$((RANDOM%3))` (rubash#299).
-        let dynamic_values = self.arith_dynamic_values();
+        let dynamic_values = self.arith_dynamic_context();
         let (result, writes) = eval_conditional_arith_value_with_writes(
             &resolved,
             &overlaid,
