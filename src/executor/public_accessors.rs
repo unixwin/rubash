@@ -123,6 +123,30 @@ impl Executor {
         }
     }
 
+    /// Pretty-print driver entry (`bash --pretty-print`, eval.c:215-253
+    /// pretty_print_loop): a command node carrying a parse-error marker
+    /// makes read_command() longjmp — yyerror's stderr diagnostic is the
+    /// ONLY output for that command (nothing reaches stdout) and the loop
+    /// returns EXECUTION_FAILURE. The internal `__RUBASH_PARSE_*` marker
+    /// assignments must never pretty-print as command text.
+    pub fn report_pretty_print_parse_error(&self, cmd: &crate::parser::CommandNode) {
+        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_NEAR__") {
+            let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+            let token = fields.next().unwrap_or_default();
+            let line = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(|| cmd.line.unwrap_or(1));
+            let prefix = self.parser_diagnostic_prefix_for_line(line);
+            eprintln!("{prefix}syntax error near unexpected token `{token}'");
+            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                eprintln!("{prefix}`{source}'");
+            }
+            return;
+        }
+        self.report_command_parse_error(cmd);
+    }
+
     pub fn take_parse_error(&mut self) -> bool {
         std::mem::take(&mut self.parse_error_occurred)
     }

@@ -422,7 +422,9 @@ pub(super) fn update_compound_boundary_stack(
         let expected_matches = if expected == "esac" {
             is_case_end_keyword(tokens, index)
         } else if expected == LOOP_BODY_TERMINATOR {
-            is_keyword(tokens, index, "done") || is_boundary_keyword(tokens, index, "}")
+            is_keyword(tokens, index, "done")
+                || is_boundary_keyword(tokens, index, "}")
+                || folded_brace_group_closes_loop(tokens, index)
         } else if expected == LOOP_DO_TERMINATOR {
             is_keyword(tokens, index, "done")
         } else if expected == "}" {
@@ -485,6 +487,38 @@ pub(super) fn update_compound_boundary_stack(
         // closing brace to the enclosing function's group scan).
         stack.push("}");
     }
+}
+
+/// Whether `tokens[index]` is a folded complete `{ ...; }' group that
+/// terminates an open brace-form loop frame (LOOP_BODY_TERMINATOR). GNU
+/// parse.y:879-884/936 `... '{' compound_list '}'` — a loop whose
+/// brace-form body arrives as one folded keyword token is COMPLETE after
+/// it, exactly like the unfolded `}' closer, so the body scan of an
+/// ENCLOSING construct must not keep the loop frame open and steal the
+/// next `}' (invocation3.sub: `for i in 1 2 3; { select var in a; { :; }
+/// <<<a; }` — the select's folded `{ :; }' body left its frame open and
+/// the for's `}' closed the select instead, failing the whole script).
+/// A folded group followed by `do' is a loop CONDITION (`while { :; };
+/// do :; done', parse.y:886 `while_command: WHILE compound_list DO ...`),
+/// not the body — keep the frame so the do-form transform still applies.
+fn folded_brace_group_closes_loop(tokens: &[Token], index: usize) -> bool {
+    let Some(token) = tokens.get(index) else {
+        return false;
+    };
+    if token.kind != TokenKind::Keyword
+        || !token.value.starts_with('{')
+        || !token.value.ends_with('}')
+        || token.value.len() < 2
+    {
+        return false;
+    }
+    // `while { :; }; do' / `while { :; }\ndo' keep LOOP_BODY open: skip
+    // separators (`;', newlines) and let the FIRST significant token
+    // decide — `do' means the group was the loop's condition list.
+    !tokens[index + 1..]
+        .iter()
+        .find(|next| next.kind != TokenKind::Semicolon)
+        .is_some_and(|next| next.kind == TokenKind::Keyword && next.value == "do")
 }
 
 pub(super) fn command_boundary_keyword_allowed(tokens: &[Token], index: usize) -> bool {

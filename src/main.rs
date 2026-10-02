@@ -410,7 +410,11 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 if pretty_print {
                     // GNU shell.c:830-831: --pretty-print replaces execution
                     // with pretty_print_loop over the input file
-                    // (eval.c:215-253).
+                    // (eval.c:215-253). Parser diagnostics cite the script
+                    // path (error.c get_name_for_error uses $0), so the
+                    // prefix env must be armed before any parse error
+                    // reports.
+                    executor.set_env("__RUBASH_SCRIPT_NAME", script);
                     return run_pretty_print(executor, script);
                 }
                 return run_script_file_with_init(
@@ -755,8 +759,21 @@ fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
         if line.trim().is_empty()
             && !rubash::lexer::has_unclosed_input_syntax_posix(&pending, posix)
         {
-            last_was_newline =
-                flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
+            match flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline, executor)
+            {
+                Ok(next) => last_was_newline = next,
+                // GNU eval.c:215-253 pretty_print_loop: read_command's
+                // parse error longjmps to top_level — yyerror's stderr
+                // diagnostic already fired, commands parsed before the
+                // error have printed, nothing after it does, and the loop
+                // returns EXECUTION_FAILURE.
+                Err(()) => {
+                    print!("{output}");
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                    return 1;
+                }
+            }
             pending.clear();
             if !last_was_newline {
                 output.push('\n');
@@ -769,7 +786,15 @@ fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
         }
         pending.push_str(line);
     }
-    last_was_newline = flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
+    match flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline, executor) {
+        Ok(next) => last_was_newline = next,
+        Err(()) => {
+            print!("{output}");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            return 1;
+        }
+    }
     // GNU's reader delivers an empty parse at EOF after the last command
     // (eval.c:225-247), printing one final newline.
     if !last_was_newline && !output.is_empty() {
@@ -780,17 +805,31 @@ fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
 }
 
 /// Print one parsed command batch the way pretty_print_loop does. Returns
-/// the updated last_was_newline state.
+/// the updated last_was_newline state, or Err when a command parsed to a
+/// parse-error node (GNU aborts pretty-printing there after the parser's
+/// stderr diagnostic).
 fn flush_pretty_print_chunk(
     chunk: &str,
     posix: bool,
     output: &mut String,
     last_was_newline: bool,
-) -> bool {
+    executor: &mut rubash::Executor,
+) -> Result<bool, ()> {
     let tokens = tokenize_with_initial_posix(chunk, posix);
     let ast = parse(&tokens);
     let mut printed = false;
     for command in &ast.commands {
+        // The parse-error nodes carry their diagnostics as internal
+        // `__RUBASH_PARSE_*` marker assignments; pretty-printing those as
+        // command text leaks the markers into stdout. GNU's reader
+        // longjmps before any print (eval.c:225 `code = setjmp_nosigs
+        // (top_level)`); report the diagnostic and stop the loop.
+        if command.assignments.iter().any(|(name, _)| {
+            name.starts_with("__RUBASH_PARSE_ERROR") || name == "__RUBASH_COMPOUND_SYNTAX_ERROR"
+        }) {
+            executor.report_pretty_print_parse_error(command);
+            return Err(());
+        }
         if is_pretty_print_empty(command) {
             continue;
         }
@@ -799,9 +838,9 @@ fn flush_pretty_print_chunk(
         printed = true;
     }
     if printed {
-        return false;
+        return Ok(false);
     }
-    last_was_newline
+    Ok(last_was_newline)
 }
 
 /// Comment-only and whitespace-only parses must not print (GNU parses them
