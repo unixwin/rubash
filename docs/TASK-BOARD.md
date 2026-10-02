@@ -327,3 +327,11 @@
 - **全量回归轮**（f5a00f05+80479503，f6b74be2 CI 绿）：51 提交零引擎回归；真回归 #414（bisect 815802eb）；旧账 6 套件量化（cond 100/assoc 42/glob 44/invocation 8/nameref 5/quotearray 6）；#352/#159 验证关；#152→#415；#365 归 niu 层 -C 路由
 - **oh-my-niu 落地**（niubash ab20e37）：一等资产管理/curated catalog+GitHub 简写/信任分级（修 trust 翻位漏洞）/lockfile 钉 commit+restore-sync-clean/setup journal+undo；runtime 251+集成 7 全绿；真实 OMB 冒烟；三类残留：#251 交互硬门控/omb-compat 垫片 WP/引擎 glob 反斜杠（归 Option B 面）
 - 在途：pool1/pool2+hotfix（#414/#415）
+
+## 2026-10-02 终 X：hotfix 双关 + CI 超时热修（dca2e428 全绿）
+
+- **#414 关**（d5c30a0c）：posix 保留字别名双根因（驱动快路径准入 + 流式层只建模默认顺序）；GNU parse.y:5751-5771 前置/post 检查序；alias 套件 2→0，**run-alias 上游套件随之转绿**（CI 失败集 diff 证实）
+- **#415 关**（f74e37ac+dca2e428）：cat 全选项 GNU 平价（174/174）；**CI 教训**：`-` 操作数的缓冲排空模型死锁交互生产者（coproc.tests `coproc { cat -; }` exit 124 确定性复现×2）——热修=identity 选项+真进程 stdin 走逐块流式（GNU cat.c 字节拷贝），钉死测试（双轮写读交错）入列；本地 Windows 探针过而 CI Linux 挂=关闭时序差异掩盖死锁
+- niubash#152 随关；run-coproc 回到 exit 1（正常失败集），Timed out: 0
+- 诊断方法论沉淀：进度型 job 的红绿由 TIMEOUT_FAIL 决断非失败数；失败集 diff（绿 58/红 57 但红含新超时）是定位关键
+- 在途：pool1/pool2；工作树已清
