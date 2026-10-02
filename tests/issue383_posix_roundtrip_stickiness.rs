@@ -22,7 +22,6 @@
 #![cfg(windows)]
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 struct RunOutcome {
