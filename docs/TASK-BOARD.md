@@ -363,3 +363,9 @@
 - **强制源码研究先行**（owner："必须阅读源码不能凭感觉"）：lazy.nvim（spec/lock/bootstrap/view TUI）、LazyVim（extras 合集/distro 机制）、mason+registry（可执行配方=数据文件）三仓通读，引用 file:line，产出 lazy-family-source-study.md
 - **实现映射**：①基础索引配方化（Mason registry 模式；可执行走 wpm 驱动=零重实现）②合集/distro=可导入 spec 包（LazyVim extras 模式）③TUI MVP（lazy view 信息架构×已有 interactive_menu 基建）
 - 九车道并行：pool1/pool2/optionb/olddebt/niu365/parse4/floor/anyplug/lazystudy
+
+## 2026-10-03 V：Option B 落地（c37eb9f0 CI 绿）+ 插件系统三裁定
+
+- **Option B 引擎终态**（f633abef/04d3275a/c37eb9f0）：唯一 argv 漏斗（path.rs，8 spawn 点全审计无旁路）+posix_aware_child 三路判定（dispatcher/WINUXCMD_HOME/标记探针 memoize）+删两处 exists() 半翻译门+逃生门 __RUBASH_ARGV_DIALECT=legacy；83 套件 A/B **0 行 rubash-caused**（coproc/nameref 波动均证伪为环境噪声）；上游缺口 cp/mv/ls 逐字 POSIX → WinuxCmd#1145；1.2.6 发布门=WinuxCmd release 进 bundle 或默认 legacy
+- **插件系统三裁定**（常设记忆）：①独立实现红线（下载绝不绑 wpm/apt——跨平台关键，推翻"wpm 驱动"设计；直下=runtime 纯 Rust HTTP）；②文档/帮助/AI 速查与实现同 PR 交付；③索引全量化（五类分门别类）+lazy 家族研究加设计哲学/CLI-TUI/用户友好专节
+- 十车道并行中；lazystudy/anyplug 已收更正令
