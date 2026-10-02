@@ -85,6 +85,37 @@ fn shell_test_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// wt33 (#374): run `script` through the real CLI binary (script file, crate
+/// root cwd) and return (stdout, stderr, exit code). Several semantics
+/// depend on the driver's parse-execute cadence — alias-introduced compound
+/// keywords (`shopt -s expand_aliases; alias c=case; c x in …`), mid-line
+/// extglob toggles, comsub bodies with reserved-word patterns — which an
+/// in-process `tokenize() + execute_ast()` on a pre-parsed AST cannot
+/// model. The subprocess path is byte-identical to WSL GNU Bash 5.3.0 for
+/// these scripts (probes target/issue-suites/results/wt33-373/run/, series
+/// G/H); the in-process entry diverges from both.
+pub(crate) fn run_cli_script(script: &str) -> (String, String, Option<i32>) {
+    use std::io::Write;
+    use std::process::Command;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::path::Path::new("target").join(format!("wt33-cli-script-{seq}.sh"));
+    std::fs::create_dir_all("target").unwrap();
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(script.as_bytes()).unwrap();
+    drop(file);
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&path)
+        .output()
+        .expect("run rubash CLI");
+    let _ = std::fs::remove_file(&path);
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code(),
+    )
+}
+
 fn shell_output_path_to_host(path: &str) -> std::path::PathBuf {
     if cfg!(windows) && path.len() >= 3 && path.as_bytes()[0] == b'/' && path.as_bytes()[2] == b'/'
     {

@@ -17,16 +17,18 @@ fn test_empty_command_does_not_reset_exit_status() {
     let output_path = "target/rubash-empty-command-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("false; ; echo $? > {output_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-    executor.set_env("TMPDIR", &std::env::temp_dir().to_string_lossy());
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+    // wt33 (#374): `false; ; echo` is a SYNTAX ERROR in GNU 5.3.0 — probe
+    // wt33-373/run/H14_empty_command_status (byte-identical to rubash):
+    // `syntax error near unexpected token `;'`, rc 2, script aborted before
+    // the redirect. The old expectation (empty command preserved status 1)
+    // encoded a pre-GNU-verified over-acceptance.
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(2));
+    assert!(
+        cli_err.contains("syntax error near unexpected token `;'"),
+        "stderr: {cli_err}"
+    );
+    assert!(!std::path::Path::new(output_path).exists());
     let _ = fs::remove_file(output_path);
 }
 

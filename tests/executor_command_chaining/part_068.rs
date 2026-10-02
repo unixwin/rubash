@@ -178,7 +178,11 @@ fn test_let_builtin_evaluates_arithmetic_expressions() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "0 3\n1 0\n1 8\n1 8\n1\n0 8 11\n0 6\n"
+        // wt33 (#374): GNU 5.3.0 REJECTS `let n**=3` (`arithmetic syntax
+        // error: operand expected`) leaving n at 2, and the division by
+        // zero leaves n unchanged — probe H10_let_arith, byte-identical
+        // stdout and per-line stderr on both shells.
+        "0 3\n1 0\n1 2\n1 2\n1\n0 8 11\n0 6\n"
     );
     let _ = fs::remove_file(output_path);
 }
@@ -222,7 +226,10 @@ fn test_integer_compound_assignment_evaluates_as_scalar_arithmetic() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "8 11\ndeclare -i a=\"8\"\ndeclare -i b=\"11\"\n"
+        // wt33 (#374): GNU 5.3.0 prints integer attributes WITH the array
+        // flag after a compound assignment to an integer variable (probe
+        // H09_typeset_int_compound, byte-identical).
+        "8 11\ndeclare -ai a=([0]=\"8\")\ndeclare -ai b=([0]=\"11\")\n"
     );
     let _ = fs::remove_file(output_path);
 }

@@ -32,11 +32,14 @@ fn test_builtin_cd_invokes_cd_builtin() {
         None => std::env::remove_var("OLDPWD"),
     }
 
+    // wt33 (#374): `pwd` reports the shell (/d/…) domain since the #224
+    // path-domain work, not the Windows argv spelling.
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
+    let expected = dest_display.replacen("D:/", "/d/", 1).to_ascii_lowercase();
     assert_eq!(
         fs::read_to_string(&output_path).unwrap(),
-        format!("{dest_display}\n")
+        format!("{expected}\n")
     );
     let _ = fs::remove_dir_all(&root);
 }

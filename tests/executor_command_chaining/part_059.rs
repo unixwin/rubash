@@ -355,15 +355,16 @@ fn test_extglob_pathname_expansion_matches_files() {
     fs::write(format!("{dir_path}/keep.txt"), "keep").unwrap();
     fs::write(format!("{dir_path}/note.md"), "note").unwrap();
     fs::write(format!("{dir_path}/skip.tmp"), "skip").unwrap();
-    let input = format!("shopt -s extglob; printf '%s\\n' {dir_path}/!(*.tmp) > {output_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): the shopt must execute on its own line before the
+    // extglob word parses (GNU parse-execute cadence; the one-line form
+    // is rejected by GNU too — probes H16/H17).
+    let input = format!("shopt -s extglob\nprintf '%s\\n' {dir_path}/!(*.tmp) > {output_path}");
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
         "target/rubash-extglob-pathname/keep.txt\ntarget/rubash-extglob-pathname/note.md\n"
@@ -386,17 +387,15 @@ fn test_pathname_expansion_matches_intermediate_segments() {
     fs::write(format!("{two_dir}/file.txt"), "two").unwrap();
     fs::write(format!("{two_dir}/trace.log"), "trace").unwrap();
     let input = format!(
-        "printf '%s\\n' {base_path}/dir-*/*.txt > {output_path}; \
-         shopt -s extglob; printf '%s\\n' {base_path}/dir-@(two)/*.log >> {output_path}"
+        "printf '%s\\n' {base_path}/dir-*/*.txt > {output_path}\n\
+         shopt -s extglob\nprintf '%s\\n' {base_path}/dir-@(two)/*.log >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
         "target/rubash-glob-segments/dir-one/file.txt\n\

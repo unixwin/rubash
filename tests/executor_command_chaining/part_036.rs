@@ -458,7 +458,8 @@ fn test_fg_invalid_option_without_job_control_returns_failure() {
     assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
     assert_eq!(
         fs::read_to_string(error_path).unwrap(),
-        "rubash: fg: no job control\n"
+        // wt33 (#374): GNU -c diagnostic form (probe H06_fg_wording).
+        "bash: line 1: fg: no job control\n"
     );
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);

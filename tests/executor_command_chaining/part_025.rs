@@ -129,10 +129,13 @@ fn test_pushd_accepts_existing_relative_directory() {
     assert_eq!(executor.last_exit_code(), 0);
     let output = fs::read_to_string(output_path).unwrap();
     let lines: Vec<_> = output.lines().collect();
+    // wt33 (#374): pushd/dirs report the shell (/d/…) domain since #224.
     let cwd = std::env::current_dir()
         .unwrap()
         .to_string_lossy()
-        .replace('\\', "/");
+        .replace('\\', "/")
+        .replacen("D:/", "/d/", 1)
+        .to_ascii_lowercase();
     assert_eq!(
         lines.first().copied(),
         Some(format!("{cwd} {cwd}").as_str())

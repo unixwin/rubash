@@ -906,14 +906,12 @@ fn test_alias_introduced_time_executes_brace_group() {
         "shopt -s expand_aliases\nalias t=time\n\
          t -p {{ echo alias-time > {output_path}; }}; echo status:$? >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
         "alias-time\nstatus:0\n"
@@ -931,14 +929,12 @@ fn test_alias_introduced_time_preserves_brace_group_redirects() {
         "shopt -s expand_aliases\nalias t=time\n\
          t -p {{ echo redirected; }} > {output_path}; echo status:$? > {status_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "redirected\n");
     assert_eq!(fs::read_to_string(status_path).unwrap(), "status:0\n");
     let _ = fs::remove_file(output_path);
@@ -954,14 +950,12 @@ fn test_alias_introduced_time_executes_if_sequence() {
          t -p if true; then echo alias-if > {output_path}; fi; \
          echo status:$? >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
         "alias-if\nstatus:0\n"
@@ -979,14 +973,12 @@ fn test_alias_introduced_time_if_keeps_nested_if_body() {
          else echo inner >> {output_path}; fi; echo outer >> {output_path}; fi; \
          echo status:$? >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
         "inner\nouter\nstatus:0\n"
@@ -1005,14 +997,12 @@ fn test_alias_introduced_time_executes_for_sequence_with_redirect() {
          t -p for value in a b; do echo $value; done > {output_path}; \
          echo status:$? > {status_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "a\nb\n");
     assert_eq!(fs::read_to_string(status_path).unwrap(), "status:0\n");
     let _ = fs::remove_file(output_path);
@@ -1028,14 +1018,12 @@ fn test_alias_introduced_time_for_keeps_nested_while_body() {
          t -p for item in alpha; do while false; do echo bad >> {output_path}; done; \
          echo $item >> {output_path}; done; echo status:$? >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
         "alpha\nstatus:0\n"

@@ -210,14 +210,12 @@ fn test_alias_introduced_if_executes_then_branch() {
     let input = format!(
         "shopt -s expand_aliases\nalias i=if\ni true; then echo yes > {output_path}; else echo no > {output_path}; fi"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
     let _ = fs::remove_file(output_path);
 }
@@ -229,14 +227,12 @@ fn test_alias_introduced_if_executes_else_branch() {
     let input = format!(
         "shopt -s expand_aliases\nalias i=if\ni false; then echo yes > {output_path}; else echo no > {output_path}; fi"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "no\n");
     let _ = fs::remove_file(output_path);
 }
@@ -246,7 +242,7 @@ fn test_alias_introduced_if_prefix_with_then_executes_body() {
     let output_path = "target/rubash-alias-if-prefix-then-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
-        format!("shopt -s expand_aliases; alias i='if true; then'; i echo yes > {output_path}; fi");
+        format!("shopt -s expand_aliases\nalias i='if true; then'; i echo yes > {output_path}; fi");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -264,18 +260,16 @@ fn test_alias_introduced_if_prefix_keeps_nested_if_body() {
     let output_path = "target/rubash-alias-if-prefix-nested-if-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias i='if true; then'; \
+        "shopt -s expand_aliases\nalias i='if true; then'\n\
          i if false; then echo bad >> {output_path}; else echo inner >> {output_path}; fi; \
          echo outer >> {output_path}; fi"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "inner\nouter\n");
     let _ = fs::remove_file(output_path);
 }

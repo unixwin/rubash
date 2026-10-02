@@ -190,19 +190,17 @@ fn test_conditional_string_equality_uses_negated_extglob_patterns() {
     let output_path = "target/rubash-conditional-negated-extglob-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s extglob; \
+        "shopt -s extglob\n\
          [[ file.txt == !(*.tmp) ]]; echo txt:$? > {output_path}; \
          [[ file.tmp == !(*.tmp) ]]; echo tmp:$? >> {output_path}; \
          [[ file.tmp != !(*.tmp) ]]; echo not_tmp:$? >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
         "txt:0\ntmp:1\nnot_tmp:0\n"

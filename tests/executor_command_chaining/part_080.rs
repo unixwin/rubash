@@ -2307,7 +2307,7 @@ fn test_alias_introduced_inversion_flips_status() {
     let output_path = "target/rubash-alias-inversion-status.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias bang='!'; \
+        "shopt -s expand_aliases\nalias bang='!'; \
          bang false; echo false:$? > {output_path}; \
          bang true; echo true:$? >> {output_path}"
     );
@@ -2691,17 +2691,15 @@ fn test_alias_introduced_function_defines_brace_body() {
     let output_path = "target/rubash-alias-function-brace-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias fn=function; \
+        "shopt -s expand_aliases\nalias fn=function\n\
          fn af {{ echo alias-function > {output_path}; }}; af"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "alias-function\n");
     let _ = fs::remove_file(output_path);
 }
@@ -2711,7 +2709,7 @@ fn test_alias_introduced_function_accepts_following_brace_body() {
     let output_path = "target/rubash-alias-function-following-brace-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias fn=function; \
+        "shopt -s expand_aliases\nalias fn=function\n\
          fn af; {{ echo alias-following-function > {output_path}; }}; af"
     );
     let tokens = tokenize(&input);
@@ -2734,17 +2732,15 @@ fn test_alias_function_prefix_accepts_following_if_body() {
     let output_path = "target/rubash-alias-function-prefix-if-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias makef='function af'; \
+        "shopt -s expand_aliases\nalias makef='function af'\n\
          makef if true; then echo alias-prefix-if > {output_path}; fi; af"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
         "alias-prefix-if\n"
@@ -2757,17 +2753,15 @@ fn test_alias_function_prefix_accepts_following_for_body() {
     let output_path = "target/rubash-alias-function-prefix-for-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias makef='function af'; \
+        "shopt -s expand_aliases\nalias makef='function af'\n\
          makef for item in alpha beta; do echo $item >> {output_path}; done; af"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
     let _ = fs::remove_file(output_path);
 }
@@ -2777,17 +2771,15 @@ fn test_alias_introduced_brace_group_executes_body() {
     let output_path = "target/rubash-alias-brace-group-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias b='{{'; \
+        "shopt -s expand_aliases\nalias b='{{'\n\
          b echo alias-brace > {output_path}; }}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "alias-brace\n");
     let _ = fs::remove_file(output_path);
 }
@@ -2797,17 +2789,15 @@ fn test_alias_introduced_brace_group_collects_multiple_commands() {
     let output_path = "target/rubash-alias-brace-group-multi-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias b='{{'; \
+        "shopt -s expand_aliases\nalias b='{{'\n\
          b echo first > {output_path}; echo second >> {output_path}; }}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "first\nsecond\n");
     let _ = fs::remove_file(output_path);
 }
@@ -2817,7 +2807,7 @@ fn test_alias_introduced_subshell_executes_body() {
     let output_path = "target/rubash-alias-subshell-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias s='('; \
+        "shopt -s expand_aliases\nalias s='('; \
          s echo alias-subshell > {output_path}; )"
     );
     let tokens = tokenize(&input);
@@ -2837,7 +2827,7 @@ fn test_alias_introduced_subshell_collects_multiple_commands() {
     let output_path = "target/rubash-alias-subshell-multi-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias s='('; \
+        "shopt -s expand_aliases\nalias s='('; \
          s echo first > {output_path}; echo second >> {output_path}; )"
     );
     let tokens = tokenize(&input);
@@ -2859,18 +2849,16 @@ fn test_alias_introduced_coproc_executes_brace_body() {
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
     let input = format!(
-        "shopt -s expand_aliases; alias c=coproc; \
+        "shopt -s expand_aliases\nalias c=coproc\n\
          c MYC {{ echo alias-coproc > {output_path}; }}; \
          echo pid:${{MYC_PID:+set}} > {status_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
 
     let mut output = String::new();
@@ -2893,7 +2881,7 @@ fn test_alias_introduced_coproc_executes_simple_command() {
     let status_path = "target/rubash-alias-coproc-simple-status.txt";
     let _ = fs::remove_file(status_path);
     let input = format!(
-        "shopt -s expand_aliases; alias c=coproc; \
+        "shopt -s expand_aliases\nalias c=coproc\n\
          c -c 'true'; echo pid:${{COPROC_PID:+set}} > {status_path}"
     );
     let tokens = tokenize(&input);
@@ -2985,7 +2973,7 @@ fn test_alias_introduced_coproc_preserves_simple_redirects() {
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
     let input = format!(
-        "shopt -s expand_aliases; alias c=coproc; \
+        "shopt -s expand_aliases\nalias c=coproc\n\
          c -c 'echo alias-redirected' > {output_path}; \
          echo pid:${{COPROC_PID:+set}} > {status_path}"
     );

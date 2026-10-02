@@ -119,12 +119,17 @@ fn test_quoted_assoc_at_indices_expand_as_loop_words() {
 
     let result = executor.execute_ast(&ast);
 
+    // wt33 (#374): loop-word order follows the unstable assoc key order
+    // (H03 probe); sort the pairs.
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        "red=apple\nblue=berry\n"
-    );
+    let mut pairs: Vec<String> = fs::read_to_string(output_path)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    pairs.sort();
+    assert_eq!(pairs, ["blue=berry", "red=apple"]);
     let _ = fs::remove_file(output_path);
 }
 
@@ -298,9 +303,19 @@ fn test_assoc_array_indices_expand_keys() {
 
     let result = executor.execute_ast(&ast);
 
+    // wt33 (#374): GNU 5.3.0 prints `${!assoc[@]}` for this script as
+    // `two one` (assoc key order is hash-order and unstable — probe
+    // wt33-373/run/H03_assoc_order, byte-identical to rubash). Compare
+    // order-insensitively.
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "one two\n");
+    let mut keys: Vec<String> = fs::read_to_string(output_path)
+        .unwrap()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    keys.sort();
+    assert_eq!(keys, ["one", "two"]);
     let _ = fs::remove_file(output_path);
 }
 
@@ -327,9 +342,24 @@ fn test_bash_cmds_reflects_hash_table() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): BASH_CMDS key order is unstable in GNU (H03 probe);
+    // sort the key/value blocks before comparing.
+    let output = fs::read_to_string(output_path).unwrap();
+    let mut lines: Vec<&str> = output.lines().collect();
+    lines[0..2].sort_unstable();
+    lines[2..4].sort_unstable();
     assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        "key:<bar>\nkey:<foo>\nvalue:</usr/bin/bar>\nvalue:</usr/sbin/foo>\nfoo:</usr/sbin/foo>\n/usr/bin/bar\n1\ndeclare -A BASH_CMDS=([bar]=\"/usr/bin/bar\" )\n"
+        lines,
+        vec![
+            "key:<bar>",
+            "key:<foo>",
+            "value:</usr/bin/bar>",
+            "value:</usr/sbin/foo>",
+            "foo:</usr/sbin/foo>",
+            "/usr/bin/bar",
+            "1",
+            "declare -A BASH_CMDS=([bar]=\"/usr/bin/bar\" )",
+        ]
     );
     let _ = fs::remove_file(output_path);
 }
@@ -356,9 +386,23 @@ fn test_bash_aliases_reflects_alias_table() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): alias-table key order is unstable in GNU (H03 probe:
+    // both shells list `foo` first here); sort before comparing.
+    let output = fs::read_to_string(output_path).unwrap();
+    let mut lines: Vec<&str> = output.lines().collect();
+    lines[0..2].sort_unstable();
+    lines[2..4].sort_unstable();
     assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        "key:<bar>\nkey:<foo>\nvalue:</usr/bin/bar>\nvalue:</usr/sbin/foo>\nfoo:</usr/sbin/foo>\n1\ndeclare -A BASH_ALIASES=([bar]=\"/usr/bin/bar\" )\n"
+        lines,
+        vec![
+            "key:<bar>",
+            "key:<foo>",
+            "value:</usr/bin/bar>",
+            "value:</usr/sbin/foo>",
+            "foo:</usr/sbin/foo>",
+            "1",
+            "declare -A BASH_ALIASES=([bar]=\"/usr/bin/bar\" )",
+        ]
     );
     let _ = fs::remove_file(output_path);
 }

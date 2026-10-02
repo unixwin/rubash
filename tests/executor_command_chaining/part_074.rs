@@ -177,17 +177,15 @@ fn test_alias_introduced_case_command_redirects_clause_stdout() {
     let output_path = "target/rubash-alias-case-command-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias c=case; \
+        "shopt -s expand_aliases\nalias c=case\n\
          c x in x) echo matched ;; esac > {output_path}; echo done >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "matched\ndone\n");
     let _ = fs::remove_file(output_path);
 }
@@ -197,18 +195,17 @@ fn test_alias_introduced_case_here_string_feeds_clause_body() {
     let output_path = "target/rubash-alias-case-herestring-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias c=case; \
+        "shopt -s expand_aliases\nalias c=case\n\
          c x in x) cat ;; esac <<< alpha > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha");
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
+    // wt33 (#374): `cat <<< alpha` writes `alpha\n` (CLI/GNU behavior).
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
     let _ = fs::remove_file(output_path);
 }
 
@@ -217,17 +214,15 @@ fn test_alias_introduced_case_keeps_multiple_clause_commands() {
     let output_path = "target/rubash-alias-case-multiple-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias c=case; \
+        "shopt -s expand_aliases\nalias c=case\n\
          c x in x) read value; echo got:$value ;; esac <<< alpha > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "got:alpha\n");
     let _ = fs::remove_file(output_path);
 }
@@ -237,17 +232,15 @@ fn test_alias_introduced_case_keeps_multiple_clauses() {
     let output_path = "target/rubash-alias-case-multiple-clauses-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias c=case; \
+        "shopt -s expand_aliases\nalias c=case\n\
          c y in x) echo x ;; y) echo y ;; *) echo star ;; esac > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "y\n");
     let _ = fs::remove_file(output_path);
 }
@@ -257,17 +250,15 @@ fn test_alias_introduced_case_keeps_pattern_alternates() {
     let output_path = "target/rubash-alias-case-pattern-alternates-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias c=case; \
+        "shopt -s expand_aliases\nalias c=case\n\
          c y in x|y) echo yes ;; *) echo no ;; esac > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
     let _ = fs::remove_file(output_path);
 }
@@ -277,17 +268,15 @@ fn test_alias_introduced_case_keeps_extglob_pattern_alternates() {
     let output_path = "target/rubash-alias-case-extglob-alternates-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases extglob; alias c=case; \
+        "shopt -s expand_aliases extglob\nalias c=case\n\
          c foobar in @(foo|bar)) echo no ;; @(foo|foobar)) echo yes ;; *) echo star ;; esac > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
     let _ = fs::remove_file(output_path);
 }
@@ -297,17 +286,15 @@ fn test_alias_introduced_case_keeps_single_extglob_pattern() {
     let output_path = "target/rubash-alias-case-single-extglob-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases extglob; alias c=case; \
+        "shopt -s expand_aliases extglob\nalias c=case\n\
          c foo in @(foo)) echo yes ;; *) echo no ;; esac > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
     let _ = fs::remove_file(output_path);
 }
@@ -317,18 +304,16 @@ fn test_alias_introduced_case_keeps_nested_case_body() {
     let output_path = "target/rubash-alias-case-nested-case-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias c=case; \
+        "shopt -s expand_aliases\nalias c=case\n\
          c x in x) case y in y) echo inner >> {output_path} ;; esac; \
          echo outer >> {output_path} ;; esac"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "inner\nouter\n");
     let _ = fs::remove_file(output_path);
 }
@@ -338,18 +323,16 @@ fn test_alias_case_prefix_keeps_nested_case_body() {
     let output_path = "target/rubash-alias-case-prefix-nested-case-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias c='case x in'; \
+        "shopt -s expand_aliases\nalias c='case x in'\n\
          c x) case y in y) echo inner >> {output_path} ;; esac; \
          echo outer >> {output_path} ;; esac"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt33 (#374): run through the real CLI — this construct depends on the
+    // parse-execute cadence that an in-process execute_ast cannot model
+    // (subprocess behavior is byte-identical to WSL GNU 5.3.0; see
+    // run_cli_script's doc comment and the wt33-373 G/H probes).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "inner\nouter\n");
     let _ = fs::remove_file(output_path);
 }
