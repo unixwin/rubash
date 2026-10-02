@@ -320,3 +320,10 @@
 - **wt42/rebaseline**：全量回归轮（cargo test 全 target+true-baseline 全 ledger+83 套件当日台账+挂起检测=真回归即开单）+四疑挂起单核销——固化✓（每修复带钉死测试）但全量重跑此前缺位，本轮补上
 - **wt42/niu-plugin**（owner 拍板）：oh-my-niu 788 行设计落地——三铁律（外部在前/保底链/可回滚）+三缺口（#251 交互/管理器一等来源/trust 协议）+setup journal 升级
 - 五车道并行：pool1/pool2/perf3/rebaseline/niu-plugin
+
+## 2026-10-02 终 IX：perf3+rebaseline+oh-my-niu 三线收官
+
+- **perf3 四提交落地**（9029596a CI 绿）：下标字面快路径（BASH_SOURCE[0] -47%，GNU arrayfunc.c:1368 evalexp 镜像）+dyn[@] 活视图 -13.2%+trap 派发零分配+内核 Event catch_flag（p-null -8.4%→5.7x，trap.c:336 移植）；**Rc 三重存储经 100% 移除测量零收益而否决**；#375 归因反转（真地板 9.3µs；bats 单触发 182µs 优于 GNU 329µs，剩 array 存储地板 7µs vs 0.8µs 归 #242 族）；**configure -n 痊愈**（418ms rc=0，PERF-BASELINE 改回计时行）
+- **全量回归轮**（f5a00f05+80479503，f6b74be2 CI 绿）：51 提交零引擎回归；真回归 #414（bisect 815802eb）；旧账 6 套件量化（cond 100/assoc 42/glob 44/invocation 8/nameref 5/quotearray 6）；#352/#159 验证关；#152→#415；#365 归 niu 层 -C 路由
+- **oh-my-niu 落地**（niubash ab20e37）：一等资产管理/curated catalog+GitHub 简写/信任分级（修 trust 翻位漏洞）/lockfile 钉 commit+restore-sync-clean/setup journal+undo；runtime 251+集成 7 全绿；真实 OMB 冒烟；三类残留：#251 交互硬门控/omb-compat 垫片 WP/引擎 glob 反斜杠（归 Option B 面）
+- 在途：pool1/pool2+hotfix（#414/#415）
