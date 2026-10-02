@@ -256,3 +256,10 @@
 - **#124 分层定调**（评注+决策）：Git Bash→niu argv 边界=非我方（MSYS_NO_PATHCONV=1 用户侧，README 已有注）；混形 argv=引擎设计缺口（Option B 立项=MSYS 模型按孩子方言，A 否决）；WinuxCmd#1140/#1141/#1142 上游三单；**#160 开**（-c 未闭合引号静默 rc=1）
 - **wt34/perf2 回收**（310fc49f+dc7bef8e+e2e4f55f）：CURRENT_LINE 单一受控写入者（Cell 经架构论证不采纳）+ bind_underscore 等值跳过——p-null -4.7%（6.3x→6.0x）、p-f1 -5.7%；诚实未达 2x，深子系统三阶段计划落 PERF-BASELINE
 - wt33/testmaint 在途；06ae9463（perf 批）CI 在跑
+
+## 2026-10-02 终：wt33 回收 + v1.2.5 发布 + winget 换版
+
+- **wt33/testmaint 回收**（f16a997f/aa3deb18/29c3d6be/eb5d3dbe，CI 绿）：#373 关（88 红→0；84 过时期望 GNU 探针翻转+4 harness bug+**发现 parse 门进程级泄漏=真 flake 源**；真缺口开单 #384-#391）；#374 首轮 174→~119（34 测转真实 CLI 姿势+12 翻转；开单 #392-#396；K 探针 K001/K005 文本损坏待复核）——产品零改动
+- **v1.2.5 已发布**（引擎 c2f8e8a6）：#380 全族/#383/#382/#154/#117/#373+#374 首轮+perf 二波全打包；本机安装实测（380 双形态绿、posix 粘滞 on、静态 CRT 保持）
+- **winget 444854 换版 1.2.5**（第 5 次换版）；08 校验重跑中
+- 当前开单池：rubash #374 二轮/#375/#378/#384-#396（13 张新单）；niubash #124（等 WinuxCmd#1140/#1141+Option B 立项）/#156/#160；上游 WinuxCmd #1139/#1140/#1141/#1142
