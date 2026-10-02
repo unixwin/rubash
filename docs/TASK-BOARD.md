@@ -307,3 +307,9 @@
 - 三上游单随 PR 自动关；niubash#156/#124 已更新（等 WinuxCmd release 进 bundle）
 - WinuxCmd 仓库走 PR 规则（GH013）——直接推 main 被拒，已按规矩开 PR 合并；后续 WinuxCmd 贡献走同路
 - 在途四车道：pool1/pool2/caseerr/perf3
+
+## 2026-10-02 深夜 VII：caseerr 回收（#390/#391 关，CI 绿 d47cef6f）
+
+- #390：四组诊断全修（GNU 引用全链：parse_dparen 再解释/匹配对 EOF 措辞/复合赋值 rc1/CHECK_FOR_RESERVED_WORD 豁免）；**重分类发现**：`((x=[y))` 的 `[` 走 P_ARITH 数据臂=求值器 rc1；109/113 矩阵
+- #391：五层切分器引号感知下标+空格为数据+存储门保全（parse.y:5635-5651）；13/14
+- 残留 4 形态开单（batch 2）；在途：pool1/pool2/perf3
