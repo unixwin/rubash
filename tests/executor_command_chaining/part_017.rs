@@ -221,7 +221,6 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     let _ = fs::remove_file(&output_path);
 }
 
-#[ignore = "rubash#409: see issue (probe wt37-374 K016)"]
 #[test]
 fn test_declare_rx_without_assignment_marks_unset_variable() {
     let output_path = target_test_path("rubash-declare-rx-unset-output.txt");

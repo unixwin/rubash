@@ -432,6 +432,18 @@ impl Executor {
                 .get(&name)
                 .and_then(|value| self.scalar_parameter_value(&name, value));
         }
+        // GNU builtins/declare.def:800-812: a valueless `declare
+        // [-irux...] NAME` binds a NULL cell (variables.c:1912 var_isset is
+        // `var->value != 0`) and sets att_invisible, so `${V+set}` /
+        // `${V-word}` treat the name as unset until a real assignment binds
+        // a value. The DECLARED_UNSET_VARS mark records that state; the
+        // empty scalar materialized into the typed store by
+        // sync_typed_attributes must not override it (rubash#409).
+        if is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, &name)
+            && !self.shell_state.env_vars.contains_key(&name)
+        {
+            return None;
+        }
         if let Some(crate::shell::Variable {
             value: crate::shell::ShellValue::Scalar(value),
             ..
