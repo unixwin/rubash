@@ -203,18 +203,25 @@ fn c_command_dynamic_varredir_covers_read_write_dup_and_auto_close() {
 
 #[test]
 fn c_command_rejects_unbalanced_arithmetic_command_as_parse_error() {
-    // GNU bash 5.3 rejects `bash -c '"'"'((X=([))]'"'"'' with a parse error and
-    // status 2 ("syntax error near unexpected token `('"); rubash parses the
-    // same input through the GNU parse_dparen lexical rule and rejects it as
-    // a syntax error from the subshell path.
+    // GNU bash 5.3.0 (WSL probe, 2026-10-02): `bash -c '((X=([))]'' re-parses
+    // the (( span as a nested subshell when the next char after `))' is not
+    // `)' (parse.y:4938-4948), leaving `name=(' open at clean EOF — it
+    // reports "unexpected EOF while looking for matching `)'" at the
+    // compound's line with rc 1 (parse.y:7140-7174), not the rc 2 syntax
+    // error this test used to pin. 815802eb aligned rubash byte-for-byte;
+    // probe pair: target/issue-suites/results/wt42-verify/arith-*.
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
         .arg("((X=([))]")
         .output()
         .expect("run malformed arithmetic command");
 
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("syntax error"));
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected EOF while looking for matching `)'"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]

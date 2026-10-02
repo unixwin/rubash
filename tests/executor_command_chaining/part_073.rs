@@ -242,15 +242,18 @@ fn test_alias_introduced_if_prefix_with_then_executes_body() {
     let output_path = "target/rubash-alias-if-prefix-then-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
-        format!("shopt -s expand_aliases\nalias i='if true; then'; i echo yes > {output_path}; fi");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+        format!("shopt -s expand_aliases\nalias i='if true; then'\ni echo yes > {output_path}; fi");
+    // wt42 (2026-10-02 full-rebaseline): GNU 5.3.0 expands an alias only
+    // when its definition was EXECUTED before the use is READ — the `;`
+    // one-buffer form (`alias i='if true; then'; i …; fi`) is rejected by
+    // GNU as `syntax error near unexpected token fi' because the whole
+    // list is parsed before the alias command runs (parse.y:5761
+    // read_token_word -> 3249 alias_expand_token runs at READ time; 815802eb
+    // aligned rubash's rejection). Newline-separated definitions parse in a
+    // later input unit, so the use line sees the alias — verified
+    // byte-identical through run_cli_script vs WSL GNU 5.3.0.
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
     let _ = fs::remove_file(output_path);
 }

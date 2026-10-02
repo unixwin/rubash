@@ -436,17 +436,18 @@ fn test_alias_introduced_for_keeps_nested_alias_while_body() {
     let output_path = "target/rubash-alias-for-nested-while-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases\nalias f=for; alias w=while; \
+        "shopt -s expand_aliases\nalias f=for\nalias w=while\n\
          f item in a b; do n=0; w test $n -lt 1; do echo $item:$n >> {output_path}; (( ++n )); done; done"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt42 (2026-10-02 full-rebaseline): GNU 5.3.0 expands an alias only
+    // when its definition was EXECUTED before the use is READ — the `;`
+    // one-buffer form (`alias f=for; alias w=while; f …; do`) is rejected
+    // by GNU (whole list parsed before the alias commands run; parse.y:5761
+    // read_token_word -> 3249 alias_expand_token at READ time; 815802eb
+    // aligned rubash). Newline-separated definitions parse in later input
+    // units, so the use line sees both aliases — byte-identical to WSL GNU.
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "a:0\nb:0\n");
     let _ = fs::remove_file(output_path);
 }
@@ -476,17 +477,14 @@ fn test_alias_introduced_for_prefix_with_do_executes_body() {
     let output_path = "target/rubash-alias-for-prefix-do-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases\nalias f='for item in alpha beta; do'; \
+        "shopt -s expand_aliases\nalias f='for item in alpha beta; do'\n\
          f echo $item >> {output_path}; done"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // wt42 (2026-10-02 full-rebaseline): see the for/nested-while comment
+    // above — the `;` one-buffer form is rejected by GNU 5.3.0 (and now by
+    // rubash after 815802eb); newline separation matches both shells.
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
     let _ = fs::remove_file(output_path);
 }
