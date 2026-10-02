@@ -741,8 +741,20 @@ impl Executor {
     /// set_exit_status(EXECUTION_FAILURE): a fatal `${var?msg}` / nounset
     /// expansion error reports status 1 in script mode. In `-c` mode
     /// shell.c:1471 run_one_command maps FORCE_EOF to 127.
+    ///
+    /// Inside a $( )/backtick command substitution the fatal longjmp lands
+    /// on the child's own top_level setjmp (subst.c:7393-7404) and exits
+    /// EXECUTION_FAILURE — 1 — even when the session is `-c`, because the
+    /// comsub child runs parse_and_execute, never run_one_command
+    /// (rubash#154 comsub corner: `bash -c 'v=$(echo ${x:?})'` exits 1).
     pub(in crate::executor) fn expansion_fatal_status(&self) -> i32 {
-        if self.shell_state.env_vars.contains_key("__RUBASH_IS_C") {
+        if self
+            .shell_state
+            .env_vars
+            .contains_key("__RUBASH_COMSUB_BODY")
+        {
+            1
+        } else if self.shell_state.env_vars.contains_key("__RUBASH_IS_C") {
             127
         } else {
             1

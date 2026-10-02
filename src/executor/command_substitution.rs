@@ -1090,6 +1090,22 @@ impl Executor {
 
         let saved_dir = env::current_dir().ok();
         let mut subshell = self.command_substitution_executor();
+        // GNU subst.c:7393-7404 (command_substitute child): the body runs
+        // through parse_and_execute inside the forked child, whose top_level
+        // setjmp turns a fatal word-expansion longjmp (FORCE_EOF/DISCARD)
+        // into exit(EXECUTION_FAILURE) — 1. The 127 mapping lives only in
+        // shell.c:1471 run_one_command, the `-c` TOP-LEVEL driver, which the
+        // comsub child never runs. Mark the body so expansion_fatal_status
+        // reports 1 here even when the session is `-c` (rubash#154 comsub
+        // corner: `bash -c 'v=$(echo ${x:?})'` exits 1, not 127). The flag
+        // lives in the clone's env only — the enclosing `-c` command keeps
+        // the 127 mapping (direct fatals still exit 127), and the diagnostic
+        // prolog stays driven by __RUBASH_IS_C (`bash: line 1:` inside the
+        // child, GNU-measured).
+        subshell
+            .shell_state
+            .env_vars
+            .insert("__RUBASH_COMSUB_BODY".to_string(), "1".to_string());
         // GNU subst.c:7413 runs the body through parse_and_execute
         // ("command substitution"), whose reader bumps indirection_level
         // (builtins/evalstring.c:348) — every trace inside the substitution
