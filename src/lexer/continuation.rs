@@ -606,6 +606,13 @@ pub(crate) fn unclosed_input_close_char_posix(
                         });
                         if funsub {
                             comment_start = true;
+                            // P380FIX (captain diff): the funsub body is a
+                            // command context (parse.y:5506 — `${ cmds; }'),
+                            // so its first word sits at command position like
+                            // `$(`'s does; the `{` was consumed here without
+                            // feeding the word machine and the FUNSUB_CHAR
+                            // whitespace never restores the boundary.
+                            case_word_boundary = true;
                         }
                         i += 1;
                     }
@@ -629,6 +636,19 @@ pub(crate) fn unclosed_input_close_char_posix(
                         // A fresh substitution body starts at a token
                         // boundary: `$(#c` is a comment.
                         comment_start = true;
+                        // P380FIX (captain diff): the comsub body is a fresh
+                        // command stream (subst.c:7143 command_substitute ->
+                        // parse_and_execute; parse.y:4451 parse_comsub), so
+                        // its first word sits at command position and IS a
+                        // reserved word — `$(case y in ...)` must open the
+                        // case-depth machine. The `(` is consumed here
+                        // without feeding the word machine, and the `$` feed
+                        // cleared the boundary, so restore it explicitly
+                        // (skip_cmd_subst enters after `$(` with
+                        // word_boundary=true — same invariant). rubash#380.
+                        if chars.get(i + 2) != Some(&'(') {
+                            case_word_boundary = true;
+                        }
                         if chars.get(i + 2) == Some(&'(') {
                             // $(( ... )) arithmetic nests a second ')' and is
                             // parsed by parse_matched_pair: start_lineno.
@@ -2682,18 +2702,27 @@ fn update_command_substitution_case_depth_corrected_ex(
             true
         }
         "esac" if *current_word_boundary => {
-            let (starts, eof_based) =
-                case_pattern_starts_with_esac_rest_chars(lookahead.0, lookahead.1);
-            if eof_based {
-                *undecided = true;
+            // P380FIX (captain diff): parse.y:3177-3186 — `esac' is
+            // pattern text ONLY after a `|' or pattern-list `(' token
+            // (backward previous-token test, whitespace-skipped); every
+            // other boundary `esac' is the ESAC keyword. rubash#380.
+            // The lazily-absent buffer (usize::MAX sentinel) reads as
+            // "no pattern separator witnessed" → keyword, matching the
+            // old forward fallback's answer for that shape.
+            let word_start = lookahead.1.saturating_sub(word.chars().count());
+            let mut back = word_start;
+            while back > 0 && back <= lookahead.0.len() && lookahead.0[back - 1].is_whitespace() {
+                back -= 1;
             }
-            if !starts {
+            let prev_is_pattern_sep =
+                back > 0 && back <= lookahead.0.len() && matches!(lookahead.0[back - 1], '|' | '(');
+            if prev_is_pattern_sep {
+                false
+            } else {
                 *case_depth = case_depth.saturating_sub(1);
                 *case_in_stage = 0;
                 *case_pattern_region = false;
                 true
-            } else {
-                false
             }
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
@@ -2824,13 +2853,15 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
         // `esac` arm — and that scan returns (false, false) without reading
         // the suffix unless the terminating char is `)` or `|` (mirror of
         // the skip.rs materialization rule; see
-        // case_pattern_starts_with_esac_rest_chars).
-        let lookahead: (&[char], usize) =
-            if (word == "esac" && matches!(ch, ')' | '|')) || ch == ';' {
-                (chars, index)
-            } else {
-                (&[], usize::MAX)
-            };
+        // case_pattern_starts_with_esac_rest_chars). The rubash#380
+        // previous-token witness additionally needs the buffer at EVERY
+        // `esac` completion (a `(&[], usize::MAX)` sentinel stays possible
+        // for other shapes).
+        let lookahead: (&[char], usize) = if word == "esac" || ch == ';' {
+            (chars, index)
+        } else {
+            (&[], usize::MAX)
+        };
         update_command_substitution_case_depth_corrected_ex(
             ch,
             false,
@@ -4092,6 +4123,10 @@ pub(crate) fn close_char_residuals_advance(
                         });
                         if funsub {
                             state.comment_start = true;
+                            // P380FIX (captain diff): mirror the one-shot
+                            // scan — the funsub body's first word is at
+                            // command position (parse.y:5506). rubash#380.
+                            state.word_boundary = true;
                         }
                         i += 1;
                     }
@@ -4125,6 +4160,14 @@ pub(crate) fn close_char_residuals_advance(
                         // A fresh substitution body starts at a token
                         // boundary: `$(#c` is a comment.
                         state.comment_start = true;
+                        // P380FIX (captain diff): mirror the one-shot scan —
+                        // the comsub body's first word is at command position
+                        // (subst.c:7143 -> parse_and_execute), so the case
+                        // word machine must see a word boundary here.
+                        // rubash#380.
+                        if chars.get(i + 2) != Some(&'(') {
+                            state.word_boundary = true;
+                        }
                         if chars.get(i + 2) == Some(&'(') {
                             // $(( ... )) arithmetic nests a second ')' and is
                             // parsed by parse_matched_pair: start_lineno.
@@ -4402,18 +4445,31 @@ fn update_command_substitution_case_depth_staged_chars(
             true
         }
         "esac" if *current_word_boundary => {
-            let (starts_with_esac_chars, _decided) =
-                case_pattern_starts_with_esac_chars_ex(chars, index);
-            if !starts_with_esac_chars {
+            // P380FIX (captain diff): parse.y:3177-3186
+            // CHECK_FOR_RESERVED_WORD — `esac' stays WORD data ONLY when
+            // the previous token is `|' (Posix rule 4) or the pattern-list
+            // `(' (phantom rule 4), both meaningful inside PST_CASEPAT;
+            // every other boundary `esac' — after `;;', at a clause-body
+            // start, after `in' — is the ESAC keyword. The previous
+            // token is witnessed by scanning back over whitespace from
+            // the word start (the old `)`-then-evidence FORWARD lookahead
+            // misjudged `;; esac)` and `x) esac)` whenever a construct
+            // OUTSIDE the case supplied the evidence, rubash#380).
+            let word_start = index.saturating_sub(word.chars().count());
+            let mut back = word_start;
+            while back > 0 && chars[back - 1].is_whitespace() {
+                back -= 1;
+            }
+            if back > 0 && matches!(chars[back - 1], '|' | '(') {
+                // `esac` heads a pattern list (esac|pat) / sits in pattern
+                // position ((esac)): pattern text, not the keyword.
+                *case_in_stage = 0;
+                false
+            } else {
                 *case_depth = case_depth.saturating_sub(1);
                 *case_in_stage = 0;
                 *case_pattern_region = false;
                 true
-            } else {
-                // `esac` heads a pattern list (esac|pat) / sits in pattern
-                // position (esac): pattern text, not the keyword.
-                *case_in_stage = 0;
-                false
             }
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
@@ -4496,17 +4552,21 @@ fn update_command_substitution_case_depth_ex(
             false
         }
         "esac" if *current_word_boundary => {
-            let (starts_with_esac_chars, decided) =
-                case_pattern_starts_with_esac_chars_ex(chars, index);
-            if !decided {
-                *undecided = true;
+            // P380FIX (captain diff): parse.y:3177-3186 — `esac' is
+            // pattern text ONLY after a `|' or pattern-list `(' token
+            // (backward previous-token test, whitespace-skipped); every
+            // other boundary `esac' is the ESAC keyword. rubash#380.
+            let word_start = index.saturating_sub(word.chars().count());
+            let mut back = word_start;
+            while back > 0 && chars[back - 1].is_whitespace() {
+                back -= 1;
             }
-            if !starts_with_esac_chars {
+            if back > 0 && matches!(chars[back - 1], '|' | '(') {
+                false
+            } else {
                 *case_depth = case_depth.saturating_sub(1);
                 *case_pattern_region = false;
                 true
-            } else {
-                false
             }
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
