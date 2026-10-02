@@ -1272,14 +1272,26 @@ fn external_argument_path(arg: &str, env_vars: &HashMap<String, String>) -> Stri
             let drive = normalized.as_bytes()[1].to_ascii_lowercase();
             let translated = shell_path_to_windows(arg, env_vars);
             // `/c/...` is Rubash's explicit POSIX display-path spelling and
-            // must be translated even before the target is created. Other
-            // `/X/...` arguments are ambiguous (regexes, git pathspecs,
-            // sed/awk fragments); convert those only when they resolve to a
-            // real filesystem path.
+            // must be translated even before the target is created.
+            // Option B (niubash#124(b)): other `/X/...` operands translate
+            // UNCONDITIONALLY for native children — existence-gating here
+            // was the source of one argv arriving as `D:\a` + `/d/b`
+            // mixed dialect (target exists -> translated, target missing
+            // -> verbatim). GNU hands argv verbatim to execve
+            // (execute_cmd.c:6119-6127 shell_execve); the only reason a
+            // native child gets a translated operand at all is that it
+            // has no POSIX layer of its own, and such a child needs the
+            // Windows spelling for MISSING targets too (an output file
+            // being created). The POSIX-aware children that made the
+            // exists() gate look safe (regexes, git pathspecs, sed/awk
+            // fragments) now receive verbatim argv (posix_aware_child in
+            // external_command_for_named_program), so the ambiguity class
+            // no longer flows through here. The legacy escape hatch
+            // (__RUBASH_ARGV_DIALECT=legacy) restores the gated behavior.
             if drive != b'c' && normalized.len() <= 3 {
                 return arg.to_string();
             }
-            if drive != b'c' && !translated.exists() {
+            if drive != b'c' && argv_dialect_legacy(env_vars) && !translated.exists() {
                 return arg.to_string();
             }
             return translated.to_string_lossy().into_owned();
@@ -1353,7 +1365,13 @@ fn windows_external_absolute_argument_needs_translation(
             Some("bin" | "etc" | "lib" | "lib64" | "opt" | "sbin" | "usr" | "var")
         )
     {
-        return shell_path_to_windows(normalized, env_vars).exists();
+        // Option B (niubash#124(b)): translate shell-root-prefixed operands
+        // for native children unconditionally — the previous exists() gate
+        // split one argv into mixed dialects (an existing /etc/config became
+        // root\etc\config while a missing sibling stayed /etc/...). Only the
+        // legacy escape hatch keeps the existence probe.
+        return !argv_dialect_legacy(env_vars)
+            || shell_path_to_windows(normalized, env_vars).exists();
     }
 
     false
@@ -3085,7 +3103,18 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_external_arguments_preserve_nonexistent_drive_shaped_patterns() {
+    fn windows_external_arguments_translate_drive_shaped_uniformly() {
+        // Option B (niubash#124(b)): native children translate drive-shaped
+        // `/X/...` operands UNCONDITIONALLY — the pre-Option-B existence
+        // gate turned one argv into `D:\a` + `/d/b` mixed dialect and left
+        // a native child unable to address a not-yet-existing target (an
+        // output file being created). Ambiguous operands (git pathspecs,
+        // regexes) belong to POSIX-aware children, which now receive
+        // verbatim argv (posix_aware_child); a native git.exe under the
+        // MSYS model gets the converted spelling, exactly as Git Bash
+        // hands native children converted paths (MSYS_NO_PATHCONV is the
+        // documented user-side opt-out there; __RUBASH_ARGV_DIALECT=legacy
+        // is ours).
         let env_vars = HashMap::new();
         let (command, used_shell) = external_command_for_program(
             &PathBuf::from("git.exe"),
@@ -3098,7 +3127,79 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(!used_shell);
+        assert_eq!(args, vec!["H:\\not-a-real-pathspec".to_string()]);
+
+        // The legacy escape hatch restores the existence-gated behavior
+        // (nonexistent drive-shaped operand stays verbatim).
+        let mut legacy_env = HashMap::new();
+        legacy_env.insert("__RUBASH_ARGV_DIALECT".to_string(), "legacy".to_string());
+        let (command, _) = external_command_for_program(
+            &PathBuf::from("git.exe"),
+            &["/h/not-a-real-pathspec".to_string()],
+            &legacy_env,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
         assert_eq!(args, vec!["/h/not-a-real-pathspec".to_string()]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_argv_never_mixed_dialect() {
+        // Option B class invariant (niubash#124(b)): one invocation, one
+        // dialect. A native child receiving a drive-shaped POSIX operand
+        // pair (one existing, one missing) must see BOTH in Windows form —
+        // never `D:\existing` + `/d/missing` mixed. This is the exact
+        // reproducer class from the reopened report (mktemp -p / mv / cp
+        // operands), pinned at the funnel boundary.
+        let env_vars = HashMap::new();
+        let base = std::env::temp_dir().join("rubash-optb-mixed");
+        std::fs::create_dir_all(base.join("m")).unwrap();
+        let drive = base.to_string_lossy().to_string();
+        let drive = drive.trim_end_matches('\\').to_string();
+        let drive_letter = drive.chars().next().unwrap().to_ascii_lowercase();
+        let posix_existing = format!("/{}{}/m", drive_letter, &drive[2..]).replace('\\', "/");
+        let posix_missing =
+            format!("/{}{}/missing/x", drive_letter, &drive[2..]).replace('\\', "/");
+
+        let (command, _) = external_command_for_program(
+            &PathBuf::from("git.exe"),
+            &[posix_existing.clone(), posix_missing.clone()],
+            &env_vars,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(args.len(), 2, "both operands reach the child: {args:?}");
+        for arg in &args {
+            let bytes = arg.as_bytes();
+            assert!(
+                bytes.len() >= 3
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes[1] == b':'
+                    && (bytes[2] == b'\\' || bytes[2] == b'/'),
+                "native child argv must be uniform Windows form, got {arg:?}"
+            );
+        }
+
+        // POSIX-aware children keep the same pair verbatim (stage 1): the
+        // winuxcmd dispatcher route.
+        let (command, _) = external_command_for_program(
+            &PathBuf::from(r"C:\t\winuxcmd\usr\bin\winuxcmd.exe"),
+            &[posix_existing.clone(), posix_missing.clone()],
+            &env_vars,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            args.contains(&posix_existing) && args.contains(&posix_missing),
+            "POSIX-aware child must receive verbatim POSIX argv, got {args:?}"
+        );
     }
 
     #[cfg(windows)]
