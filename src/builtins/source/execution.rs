@@ -301,7 +301,14 @@ fn execute_source_with_args(
         executor.pop_bash_source();
         executor.pop_source_call_frame();
         match &old_current_line {
-            Some(line) => executor.set_env("__RUBASH_CURRENT_LINE", line),
+            // wt34/perf2: the single CURRENT_LINE author is the gated
+            // writer; the saved value round-trips through it (canonical
+            // renderings parse; a hand-corrupted non-numeric entry keeps
+            // its verbatim bytes via the fallback).
+            Some(line) => match line.parse::<usize>() {
+                Ok(saved) => executor.set_current_line_value(saved),
+                Err(_) => executor.set_env("__RUBASH_CURRENT_LINE", line),
+            },
             None => executor.remove_env("__RUBASH_CURRENT_LINE"),
         }
     }

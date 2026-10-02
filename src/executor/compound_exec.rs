@@ -1116,17 +1116,20 @@ impl Executor {
         // step once per iteration) with that line restored, so $LINENO inside
         // the fire is the for command's line (dbg-support.tests: the double
         // "debug lineno: 108 main" per iteration).
+        // wt34/perf2: the capture is the parsed line number (GNU's C int),
+        // not the env entry's String — the restore is then one equality-
+        // gated write through the single CURRENT_LINE author instead of a
+        // key+value allocation pair per expression evaluation, and the
+        // body's ambient line below reuses the parsed value instead of
+        // re-parsing the string once per iteration.
         let for_line = self
             .shell_state
             .env_vars
             .get("__RUBASH_CURRENT_LINE")
-            .cloned();
+            .and_then(|line| line.parse::<usize>().ok());
         let restore_for_line = |executor: &mut Executor| {
-            if let Some(line) = &for_line {
-                executor
-                    .shell_state
-                    .env_vars
-                    .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
+            if let Some(line) = for_line {
+                executor.set_current_line_value(line);
             }
         };
         if self.debug_trap_in_scope() && !arithmetic.init.trim().is_empty() {
@@ -1193,9 +1196,7 @@ impl Executor {
             let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_BODY);
             // execute_cmd.c:3236: line_number = arith_for_command->line is
             // the ambient for the body's non-line-setting commands.
-            let for_ambient = for_line
-                .as_deref()
-                .and_then(|line| line.parse::<usize>().ok());
+            let for_ambient = for_line;
             let result =
                 self.with_ambient_line(for_ambient, |executor| executor.execute_ast(&body_ast));
             drop(_t);

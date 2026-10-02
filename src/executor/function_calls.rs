@@ -487,9 +487,7 @@ impl Executor {
             .or(definition_line);
         if function_traced {
             if let Some(line) = body_open_line {
-                self.shell_state
-                    .env_vars
-                    .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
+                self.set_current_line_value(line);
             }
             // GNU's the_printed_command at the entry fire (execute_cmd.c:5387)
             // is still the call's simple-command text built from the PARSED
@@ -602,9 +600,7 @@ impl Executor {
         // "return lineno: 30 fn1" at fn1's exit).
         if result.is_ok() {
             if let Some(line) = definition_line {
-                self.shell_state
-                    .env_vars
-                    .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
+                self.set_current_line_value(line);
             }
         }
         self.run_function_return_trap()?;

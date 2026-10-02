@@ -54,9 +54,7 @@ impl Executor {
         // `select %s in ` + words), so PS4's $LINENO renders the select
         // keyword's line (rubash#275).
         if let Some(line) = cmd.line {
-            self.shell_state
-                .env_vars
-                .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
+            self.set_current_line_value(line);
         }
         if self.debug_trap_in_scope() {
             let _ = self.run_debug_trap(&format!(

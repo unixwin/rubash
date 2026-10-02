@@ -838,6 +838,26 @@ impl Executor {
         }
     }
 
+    /// Single writer for `__RUBASH_CURRENT_LINE` (wt34/perf2). GNU's
+    /// line_number is one process-local C int (execute_cmd.c SET_LINE_NUMBER
+    /// sites) written by plain assignment; the env-map encoding paid an
+    /// unconditional key+value String allocation at every loop-restore site
+    /// (for-arith test/update restore twice per iteration where GNU's
+    /// execute_cmd.c:3236 restore is an int store; word-list for restores
+    /// once per value). Every writer now funnels through this ONE
+    /// equality-gated entry point — the env entry (what builtin
+    /// diagnostics and child environments consume) keeps exactly one
+    /// author, and a byte-identical re-stamp skips the insert
+    /// (idempotence-preserving; the perf11 stamp gate extended to the
+    /// restore brackets).
+    pub(crate) fn set_current_line_value(&mut self, line: usize) {
+        stamp_env_usize(
+            &mut self.shell_state.env_vars,
+            "__RUBASH_CURRENT_LINE",
+            line,
+        );
+    }
+
     pub(in crate::executor) fn set_current_line(&mut self, cmd: &CommandNode) {
         // GNU execute_cmd.c: only some command kinds stamp `line_number`
         // from their own `->line` (cm_simple :936, cm_subshell :696,
@@ -887,11 +907,7 @@ impl Executor {
             // the rendered value differs from what is already stored —
             // byte-identical inserts are idempotent, so skipping them
             // changes nothing observable.
-            stamp_env_usize(
-                &mut self.shell_state.env_vars,
-                "__RUBASH_CURRENT_LINE",
-                line,
-            );
+            self.set_current_line_value(line);
             // GNU's line_number is a process-internal C int; the Windows
             // process-environment mirror only needs the OS write when the
             // stamped value differs from the last one WE wrote — a loop

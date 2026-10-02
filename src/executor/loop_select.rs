@@ -82,21 +82,20 @@ impl Executor {
         // command's own line (execute_for_command_with_redirects pins it
         // via with_ambient_line); fall back to the reader's current line
         // when no compound frame is open.
-        let for_line = self
-            .ambient_line
-            .get()
-            .map(|line| line.to_string())
-            .or_else(|| {
-                self.shell_state
-                    .env_vars
-                    .get("__RUBASH_CURRENT_LINE")
-                    .cloned()
-            });
+        // wt34/perf2: the captured line is the parsed number (GNU's C int);
+        // the per-value restore is one equality-gated write through the
+        // single CURRENT_LINE author instead of a key+value allocation pair
+        // per iteration (GNU execute_cmd.c:3062's line reset is an int
+        // store).
+        let for_line = self.ambient_line.get().or_else(|| {
+            self.shell_state
+                .env_vars
+                .get("__RUBASH_CURRENT_LINE")
+                .and_then(|line| line.parse::<usize>().ok())
+        });
         for value in values {
-            if let Some(line) = &for_line {
-                self.shell_state
-                    .env_vars
-                    .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
+            if let Some(line) = for_line {
+                self.set_current_line_value(line);
             }
             // GNU execute_cmd.c:3062-3063 (eval_arith... execute_for_command
             // iteration loop): `set -x` traces the for head once per

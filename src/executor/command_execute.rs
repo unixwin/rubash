@@ -28,9 +28,7 @@ impl Executor {
             let _t = PhaseTimer::new(&super::exec_profile::P_LINECMD);
             if self.debug_trap_running && self.shell_state.function_depth > 0 {
                 if let Some(line) = self.debug_trap_function_line {
-                    self.shell_state
-                        .env_vars
-                        .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
+                    self.set_current_line_value(line);
                 } else {
                     self.set_current_line(cmd);
                 }

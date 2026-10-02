@@ -886,7 +886,7 @@ fn run_history_group(
                 // being READ (current_command_line_count), so pin the
                 // location to this entry's physical line, not the last
                 // executed command's line.
-                executor.set_env("__RUBASH_CURRENT_LINE", &line_no.to_string());
+                executor.set_current_line_value(line_no);
                 let prefix = match (
                     executor.get_env("__RUBASH_SCRIPT_NAME"),
                     executor.get_env("__RUBASH_CURRENT_LINE"),
