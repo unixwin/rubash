@@ -292,3 +292,11 @@
 - #384 comsub 内 `$'…\'…'`、#385 case 管道级、#386 for/select extglob 关闸、#387 coproc 泄漏、#388 函数头 TAB# 注释（WIP 重做=按行切 span，前任"切到#丢全文"有反例）、#389 extglob-ON 复合赋值（四层不变量：parse 准入+read-time 盖章修 c09 级回溯 bug+三切分器+存储空格当数据）
 - #390/#391 按授权交分析（单内已落：q3/q4=esacs_needed_count+yacc 恢复链；#391=PST_COMPASSIGN 元素首 `[` 分支定位）——下一波车道
 - wt37 波次全部收官；wt38 两池在途（#397-#412）
+
+## 2026-10-02 深夜 V：owner 三军令入记忆 + wt39/wt40/wt41 扩容
+
+- **Owner 军令**（rubash-release-cadence-and-grind 记忆）：①发版放慢攒大波（下版 1.2.6 等 pool 清空+性能二轮+Option B 至少一项再切）；②所有 issue+性能清零前不停；③每改必对 GNU 源码（引用不落地不上）
+- **wt39/caseerr**：#390（esacs_needed_count+yacc 恢复链）+#391（PST_COMPASSIGN 元素首 `[` 分支）——两单分析已就绪直接实现
+- **wt40/perf3**：#375 二轮（DEBUG 派发地板 390µs+$(cd;pwd)，对照 traps.c trap 体解析复用）+null 地板三阶段计划第一阶段+configure -n 复测（#380 修后）
+- **wt41/wcmd**：**首次跨项目直接修 WinuxCmd**（owner 授权生态清零）——#1140 mv 混形回归（阻塞 Hermes，最高优）+#1141 mktemp 方言+#1139 xargs 选项；先读其 AGENTS/CMake，构建通是第一关，分支工作不 push 由船长审
+- 在途共五车道：pool1/pool2/caseerr/perf3/wcmd；Option B 等 pool 槽位释放即上
