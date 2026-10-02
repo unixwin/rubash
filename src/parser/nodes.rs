@@ -339,20 +339,15 @@ impl ConditionalPatternOperand {
         } else {
             Vec::new()
         };
-        let brace_expansions = if kind == ConditionalPatternKind::Glob {
-            super::brace_expansions_in_word_with_raw(&text, &raw_text)
-        } else {
-            Vec::new()
-        };
-        let parameter_expansions = super::parameter_expansions_in_word(&text);
-        let arithmetic_expansions = super::arithmetic_expansions_in_word(&text);
+        // wt44/parse4: the brace / parameter / arithmetic operand records
+        // have zero readers (see WordMetadata::new) and stay empty.
         Self {
             has_glob: case_pattern_has_glob(&operators),
             has_extglob: case_pattern_has_extglob(&operators),
             extglob_patterns,
-            brace_expansions,
-            parameter_expansions,
-            arithmetic_expansions,
+            brace_expansions: Vec::new(),
+            parameter_expansions: Vec::new(),
+            arithmetic_expansions: Vec::new(),
             text,
             kind,
             operators,
@@ -770,13 +765,19 @@ impl WordMetadata {
 
         Self {
             word_index,
-            brace_expansions: super::brace_expansions_in_word_with_raw(&value, &raw),
+            // wt44/parse4: parameter / arithmetic / brace / tilde expansion
+            // records stay empty — GNU runs no per-word expansion analyses at
+            // parse time (parse.y:5305 read_token_word builds the word once;
+            // subst.c analyzes at execution) and this port's executor
+            // re-derives all four from the word text at expansion time; the
+            // parse-time scans fed these vectors with zero readers.
+            brace_expansions: Vec::new(),
             command_substitutions,
             process_substitutions,
-            parameter_expansions: super::parameter_expansions_in_word(&value),
-            arithmetic_expansions: super::arithmetic_expansions_in_word(&value),
+            parameter_expansions: Vec::new(),
+            arithmetic_expansions: Vec::new(),
             extglob_patterns: super::extglob_patterns_in_word_with_raw(&value, &raw),
-            tilde_expansions: super::tilde_expansions_in_word_with_raw(&value, &raw),
+            tilde_expansions: Vec::new(),
             pathname_patterns: super::pathname_patterns_in_word(&value, &raw),
             word_quotes: super::word_quotes_in_raw(&raw),
             lex_locale: if crate::lexer::raw_has_ansi_u_escape(&raw) {
@@ -793,24 +794,18 @@ impl WordMetadata {
     /// read_token_word (parse.y:5305) assembles a word in ONE pass and
     /// make_cmd.c make_simple_command stores the WORD_DESC once — the
     /// parser must not re-run the per-word expansion scans that the
-    /// `record_*_for_word` calls of the same word intake already
-    /// performed (the duplicated scans also re-parsed every `$(...)`
-    /// body a second time). The tagging applied here is exactly
-    /// `WordMetadata::new`'s: command and process substitutions carry
-    /// `word_index`; every other kind stays untagged, byte-identical to
-    /// `new`'s output for the same word.
-    #[allow(clippy::too_many_arguments)]
+    /// word intake already performed (the duplicated scans also
+    /// re-parsed every `$(...)` body a second time). The tagging applied
+    /// here is exactly `WordMetadata::new`'s: command and process
+    /// substitutions carry `word_index`; every other kind stays untagged,
+    /// byte-identical to `new`'s output for the same word.
     pub fn from_scans(
         word_index: usize,
         value: String,
         raw: String,
-        brace_expansions: Vec<BraceExpansion>,
         command_substitutions: Vec<CommandSubstitutionNode>,
         process_substitutions: Vec<ProcessSubstitution>,
-        parameter_expansions: Vec<ParameterExpansion>,
-        arithmetic_expansions: Vec<ArithmeticExpansion>,
         extglob_patterns: Vec<ExtglobPattern>,
-        tilde_expansions: Vec<TildeExpansion>,
         pathname_patterns: Vec<PathnamePattern>,
         word_quotes: Vec<WordQuote>,
     ) -> Self {
@@ -830,13 +825,14 @@ impl WordMetadata {
             .collect();
         Self {
             word_index,
-            brace_expansions,
+            // See `new` for why these four kinds stay empty (wt44/parse4).
+            brace_expansions: Vec::new(),
             command_substitutions,
             process_substitutions,
-            parameter_expansions,
-            arithmetic_expansions,
+            parameter_expansions: Vec::new(),
+            arithmetic_expansions: Vec::new(),
             extglob_patterns,
-            tilde_expansions,
+            tilde_expansions: Vec::new(),
             pathname_patterns,
             word_quotes,
             lex_locale: if crate::lexer::raw_has_ansi_u_escape(&raw) {
@@ -920,9 +916,11 @@ impl CasePattern {
             operators,
             operator_metadata,
             extglob_patterns: super::extglob_patterns_in_word_with_raw(&text, &raw_text),
-            brace_expansions: super::brace_expansions_in_word_with_raw(&text, &raw_text),
-            parameter_expansions: super::parameter_expansions_in_word(&text),
-            arithmetic_expansions: super::arithmetic_expansions_in_word(&text),
+            // wt44/parse4: zero-reader records stay empty (see
+            // WordMetadata::new).
+            brace_expansions: Vec::new(),
+            parameter_expansions: Vec::new(),
+            arithmetic_expansions: Vec::new(),
             raw_text,
             text,
             clause_index,

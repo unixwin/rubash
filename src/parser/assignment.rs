@@ -58,15 +58,17 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             operator: Some("+=".to_string()),
             append: true,
             element_index,
-            subscript_brace_expansions: brace_expansions_in_word_with_raw(subscript, subscript),
-            subscript_parameter_expansions: parameter_expansions_in_word(subscript),
-            subscript_arithmetic_expansions: arithmetic_expansions_in_word(subscript),
-            brace_expansions: brace_expansions_in_word_with_raw(value, value),
-            parameter_expansions: parameter_expansions_in_word(value),
-            arithmetic_expansions: arithmetic_expansions_in_word(value),
+            // wt44/parse4: the parameter / arithmetic / brace / tilde
+            // element records have zero readers (see WordMetadata::new).
+            subscript_brace_expansions: Vec::new(),
+            subscript_parameter_expansions: Vec::new(),
+            subscript_arithmetic_expansions: Vec::new(),
+            brace_expansions: Vec::new(),
+            parameter_expansions: Vec::new(),
+            arithmetic_expansions: Vec::new(),
             extglob_patterns: extglob_patterns_in_word_with_raw(value, value),
             pathname_patterns: pathname_patterns_in_word(value, value),
-            tilde_expansions: tilde_expansions_in_word(value),
+            tilde_expansions: Vec::new(),
             word_quotes: word_quotes_in_raw(value),
         };
     }
@@ -78,15 +80,17 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             operator: Some("=".to_string()),
             append: false,
             element_index,
-            subscript_brace_expansions: brace_expansions_in_word_with_raw(subscript, subscript),
-            subscript_parameter_expansions: parameter_expansions_in_word(subscript),
-            subscript_arithmetic_expansions: arithmetic_expansions_in_word(subscript),
-            brace_expansions: brace_expansions_in_word_with_raw(value, value),
-            parameter_expansions: parameter_expansions_in_word(value),
-            arithmetic_expansions: arithmetic_expansions_in_word(value),
+            // wt44/parse4: the parameter / arithmetic / brace / tilde
+            // element records have zero readers (see WordMetadata::new).
+            subscript_brace_expansions: Vec::new(),
+            subscript_parameter_expansions: Vec::new(),
+            subscript_arithmetic_expansions: Vec::new(),
+            brace_expansions: Vec::new(),
+            parameter_expansions: Vec::new(),
+            arithmetic_expansions: Vec::new(),
             extglob_patterns: extglob_patterns_in_word_with_raw(value, value),
             pathname_patterns: pathname_patterns_in_word(value, value),
-            tilde_expansions: tilde_expansions_in_word(value),
+            tilde_expansions: Vec::new(),
             word_quotes: word_quotes_in_raw(value),
         };
     }
@@ -100,12 +104,14 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
         subscript_brace_expansions: Vec::new(),
         subscript_parameter_expansions: Vec::new(),
         subscript_arithmetic_expansions: Vec::new(),
-        brace_expansions: brace_expansions_in_word_with_raw(word, word),
-        parameter_expansions: parameter_expansions_in_word(word),
-        arithmetic_expansions: arithmetic_expansions_in_word(word),
+        // wt44/parse4: zero-reader element records stay empty (see
+        // WordMetadata::new).
+        brace_expansions: Vec::new(),
+        parameter_expansions: Vec::new(),
+        arithmetic_expansions: Vec::new(),
         extglob_patterns: extglob_patterns_in_word_with_raw(word, word),
         pathname_patterns: pathname_patterns_in_word(word, word),
-        tilde_expansions: tilde_expansions_in_word(word),
+        tilde_expansions: Vec::new(),
         word_quotes: word_quotes_in_raw(word),
     }
 }

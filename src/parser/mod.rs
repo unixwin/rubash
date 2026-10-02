@@ -3,13 +3,11 @@
 //! Transforms tokens into an AST.
 
 mod arithmetic_command;
-mod arithmetic_expansion;
 mod arithmetic_for;
 mod array_element_assignment;
 pub mod assignment;
 pub mod ast_print;
 mod brace_command;
-mod brace_expansion;
 mod case_command;
 mod command_substitution;
 mod conditional_command;
@@ -20,7 +18,6 @@ mod function_command;
 mod if_command;
 mod loop_command;
 mod nodes;
-mod parameter_expansion;
 mod parse_loop;
 pub(crate) mod pathname_pattern;
 mod process_substitution;
@@ -29,7 +26,6 @@ mod redirections;
 mod select_command;
 mod subshell_command;
 mod support;
-mod tilde_expansion;
 mod token_actions;
 mod word_quote;
 
@@ -50,12 +46,10 @@ pub use parse_loop::{parse, parse_with_options, ParseLoopOptions};
 pub(crate) use process_substitution::raw_word_has_unquoted_process_substitution;
 
 use arithmetic_command::*;
-use arithmetic_expansion::*;
 use arithmetic_for::*;
 use array_element_assignment::*;
 use assignment::*;
 use brace_command::*;
-use brace_expansion::*;
 use case_command::*;
 use command_substitution::*;
 use conditional_command::*;
@@ -65,7 +59,6 @@ use for_command::*;
 use function_command::*;
 use if_command::*;
 use loop_command::*;
-use parameter_expansion::*;
 use pathname_pattern::*;
 use process_substitution::*;
 use redirect_assign::*;
@@ -73,6 +66,5 @@ use redirections::*;
 use select_command::*;
 use subshell_command::*;
 use support::*;
-use tilde_expansion::*;
 use token_actions::*;
 use word_quote::*;

@@ -122,11 +122,8 @@ fn test_coproc_simple_command_records_word_metadata() {
     assert_eq!(coproc.words, ["echo", "$value", "\u{11}*.rs", "pre{a,b}"]);
     assert_eq!(coproc.word_metadata.len(), 4);
     assert_eq!(coproc.word_metadata[1].value, "$value");
-    assert_eq!(coproc.word_metadata[1].parameter_expansions.len(), 1);
-    assert_eq!(
-        coproc.word_metadata[1].parameter_expansions[0].name,
-        "value"
-    );
+    // wt44/parse4: parameter / brace records are no longer populated at
+    // parse time (zero readers; the executor re-derives from word text).
 
     assert_eq!(coproc.word_metadata[2].raw, "\"*.rs\"");
     assert!(coproc.word_metadata[2].pathname_patterns.is_empty());
@@ -135,10 +132,6 @@ fn test_coproc_simple_command_records_word_metadata() {
         coproc.word_metadata[2].word_quotes[0].kind,
         QuoteKind::Double
     );
-
-    assert_eq!(coproc.word_metadata[3].brace_expansions.len(), 1);
-    assert_eq!(coproc.word_metadata[3].brace_expansions[0].text, "{a,b}");
-    assert_eq!(coproc.word_metadata[3].brace_expansions[0].body, "a,b");
 }
 
 #[test]

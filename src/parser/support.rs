@@ -9,24 +9,21 @@ pub(super) fn note_command_line(cmd: &mut CommandNode, token: &Token) {
 
 pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     let word_index = cmd.words.len();
-    // Single-scan word intake: every per-word analysis runs ONCE here and
-    // its findings feed BOTH stores — the command-level vectors (extended
-    // with tagged clones, free for the empty Vecs that dominate real
-    // scripts) and the per-word `WordMetadata` (owning the scans'
-    // output). GNU parse.y:5305 read_token_word assembles a word in one
-    // pass and make_cmd.c make_simple_command stores the WORD_DESC once;
-    // the previous shape ran every scan twice (the `record_*_for_word`
-    // calls, then `WordMetadata::new`) and `$(...)` bodies were parsed
-    // twice. `WordMetadata::from_scans` applies exactly `new`'s tagging,
-    // so both stores stay byte-identical to the double-scan output.
+    // Word intake runs ONLY the scans whose findings a consumer still reads
+    // (command/process substitutions, extglob, pathname, quotes). GNU
+    // parse.y:5305 read_token_word assembles a word in one pass and
+    // make_cmd.c make_simple_command stores the WORD_DESC once; GNU runs NO
+    // per-word expansion analyses at parse time at all (subst.c analyzes at
+    // execution), and rubash's executor likewise re-derives parameter /
+    // arithmetic / brace / tilde expansion from the word text at expansion
+    // time — the parse-time scans for those four kinds fed store vectors
+    // with zero readers and are gone (wt44/parse4; the parameter scan alone
+    // was 10.3ms of nvm -n). `WordMetadata::from_scans` applies exactly
+    // `new`'s tagging, so both stores stay byte-identical.
     let scans = WordScans::run(&token.value, &token.raw);
     let WordScans {
         command_substitutions,
-        arithmetic_expansions,
-        parameter_expansions,
-        brace_expansions,
         extglob_patterns,
-        tilde_expansions,
         pathname_patterns,
         word_quotes,
         process_substitutions,
@@ -36,30 +33,10 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
             s.word_index = Some(word_index);
             s
         }));
-    cmd.arithmetic_expansions
-        .extend(arithmetic_expansions.iter().cloned().map(|mut e| {
-            e.word_index = Some(word_index);
-            e
-        }));
-    cmd.parameter_expansions
-        .extend(parameter_expansions.iter().cloned().map(|mut e| {
-            e.word_index = Some(word_index);
-            e
-        }));
-    cmd.brace_expansions
-        .extend(brace_expansions.iter().cloned().map(|mut e| {
-            e.word_index = Some(word_index);
-            e
-        }));
     cmd.extglob_patterns
         .extend(extglob_patterns.iter().cloned().map(|mut p| {
             p.word_index = Some(word_index);
             p
-        }));
-    cmd.tilde_expansions
-        .extend(tilde_expansions.iter().cloned().map(|mut e| {
-            e.word_index = Some(word_index);
-            e
         }));
     cmd.pathname_patterns
         .extend(pathname_patterns.iter().cloned().map(|mut p| {
@@ -89,13 +66,9 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
         word_index,
         token.value.clone(),
         token.raw.clone(),
-        scans.brace_expansions,
         scans.command_substitutions,
         scans.process_substitutions,
-        scans.parameter_expansions,
-        scans.arithmetic_expansions,
         scans.extglob_patterns,
-        scans.tilde_expansions,
         scans.pathname_patterns,
         scans.word_quotes,
     ));
@@ -104,16 +77,14 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
 }
 
 /// The per-word expansion analyses `push_command_word` needs, each run
-/// exactly once (see there for the GNU anchor). Field order follows the
-/// `record_*` call order of the previous double-scan shape so the
-/// command-level vectors keep their historical entry order.
+/// exactly once (see there for the GNU anchor). Only the kinds with live
+/// consumers are scanned (wt44/parse4): parameter / arithmetic / brace /
+/// tilde expansions fed store vectors with zero readers — the executor
+/// re-derives them from the word text at expansion time, exactly as GNU
+/// subst.c does.
 pub(super) struct WordScans {
     pub command_substitutions: Vec<CommandSubstitutionNode>,
-    pub arithmetic_expansions: Vec<ArithmeticExpansion>,
-    pub parameter_expansions: Vec<ParameterExpansion>,
-    pub brace_expansions: Vec<BraceExpansion>,
     pub extglob_patterns: Vec<ExtglobPattern>,
-    pub tilde_expansions: Vec<TildeExpansion>,
     pub pathname_patterns: Vec<PathnamePattern>,
     pub word_quotes: Vec<WordQuote>,
     pub process_substitutions: Vec<ProcessSubstitution>,
@@ -123,11 +94,7 @@ impl WordScans {
     pub fn run(value: &str, raw: &str) -> Self {
         Self {
             command_substitutions: command_substitutions_in_word(value),
-            arithmetic_expansions: arithmetic_expansions_in_word(value),
-            parameter_expansions: parameter_expansions_in_word(value),
-            brace_expansions: brace_expansions_in_word_with_raw(value, raw),
             extglob_patterns: extglob_patterns_in_word_with_raw(value, raw),
-            tilde_expansions: tilde_expansions_in_word_with_raw(value, raw),
             pathname_patterns: pathname_patterns_in_word(value, raw),
             word_quotes: word_quotes_in_raw(raw),
             process_substitutions: process_substitutions_in_word_with_raw(value, raw),

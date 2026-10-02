@@ -386,39 +386,17 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         *i = next_i;
                     }
                     let assignment_name = var_name.strip_suffix('+').unwrap_or(&var_name);
+                    // wt44/parse4: only the kinds with live consumers are
+                    // recorded for assignment RHS values (see
+                    // WordMetadata::new); parameter / arithmetic / brace /
+                    // tilde records had zero readers.
                     record_command_substitutions_for_assignment(
                         &mut state.current_cmd,
                         assignment_name,
                         &var_value,
                         None,
                     );
-                    record_arithmetic_expansions_for_assignment(
-                        &mut state.current_cmd,
-                        assignment_name,
-                        &var_value,
-                        None,
-                    );
-                    record_parameter_expansions_for_assignment(
-                        &mut state.current_cmd,
-                        assignment_name,
-                        &var_value,
-                        None,
-                    );
-                    record_brace_expansions_for_assignment(
-                        &mut state.current_cmd,
-                        assignment_name,
-                        &var_value,
-                        &raw_assignment_value,
-                        None,
-                    );
                     record_extglob_patterns_for_assignment(
-                        &mut state.current_cmd,
-                        assignment_name,
-                        &var_value,
-                        &raw_assignment_value,
-                        None,
-                    );
-                    record_tilde_expansions_for_assignment(
                         &mut state.current_cmd,
                         assignment_name,
                         &var_value,
@@ -578,19 +556,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     }
                     let word_index = state.current_cmd.words.len();
                     if let Some((assignment_name, value)) = word.split_once('=') {
+                        // wt44/parse4: see the sibling assignment arm — only
+                        // live-consumer kinds are recorded.
                         record_command_substitutions_for_assignment(
-                            &mut state.current_cmd,
-                            assignment_name.strip_suffix('+').unwrap_or(assignment_name),
-                            value,
-                            Some(word_index),
-                        );
-                        record_arithmetic_expansions_for_assignment(
-                            &mut state.current_cmd,
-                            assignment_name.strip_suffix('+').unwrap_or(assignment_name),
-                            value,
-                            Some(word_index),
-                        );
-                        record_parameter_expansions_for_assignment(
                             &mut state.current_cmd,
                             assignment_name.strip_suffix('+').unwrap_or(assignment_name),
                             value,
@@ -600,21 +568,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             .split_once('=')
                             .map(|(_, raw)| raw)
                             .unwrap_or(value);
-                        record_brace_expansions_for_assignment(
-                            &mut state.current_cmd,
-                            assignment_name.strip_suffix('+').unwrap_or(assignment_name),
-                            value,
-                            raw_assignment_value,
-                            Some(word_index),
-                        );
                         record_extglob_patterns_for_assignment(
-                            &mut state.current_cmd,
-                            assignment_name.strip_suffix('+').unwrap_or(assignment_name),
-                            value,
-                            raw_assignment_value,
-                            Some(word_index),
-                        );
-                        record_tilde_expansions_for_assignment(
                             &mut state.current_cmd,
                             assignment_name.strip_suffix('+').unwrap_or(assignment_name),
                             value,
