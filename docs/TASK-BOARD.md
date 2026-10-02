@@ -357,3 +357,9 @@
 - **wt46/anyplug**：资产枚举启发式审计（野生 repo 诚实呈现）+bpkg 适配（附录 A 存量规划）+管理器分发描述符化+实证集（单文件野生插件/bash-preexec/bpkg 包/bashmarks 负向保真/未知形状 repo）
 - 红线：引擎零插件特判（只读审计）；无垫片
 - 八车道并行：pool1/pool2/optionb/olddebt/niu365/parse4/floor/anyplug
+
+## 2026-10-03 IV：owner lazy 系研究令 → wt47/lazystudy
+
+- **强制源码研究先行**（owner："必须阅读源码不能凭感觉"）：lazy.nvim（spec/lock/bootstrap/view TUI）、LazyVim（extras 合集/distro 机制）、mason+registry（可执行配方=数据文件）三仓通读，引用 file:line，产出 lazy-family-source-study.md
+- **实现映射**：①基础索引配方化（Mason registry 模式；可执行走 wpm 驱动=零重实现）②合集/distro=可导入 spec 包（LazyVim extras 模式）③TUI MVP（lazy view 信息架构×已有 interactive_menu 基建）
+- 九车道并行：pool1/pool2/optionb/olddebt/niu365/parse4/floor/anyplug/lazystudy
