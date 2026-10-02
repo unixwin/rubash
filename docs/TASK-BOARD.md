@@ -350,3 +350,10 @@
 - **wt45/floor**：审计 prompt 链/rc 结构/缺省生效点→槽位认领模型+rc 顺序契约+真装 OMB/starship 的冲突实证钉死测试+设计文档 14.5
 - 与打地鼠禁令的接口：框架识别走 registry/rc 托管块（正确路径），不扩 env-PS1 模式检测
 - 七车道并行：pool1/pool2/optionb/olddebt/niu365/parse4/floor
+
+## 2026-10-03 III：owner"任意插件"通用化要求 → wt46/anyplug
+
+- **三层集成模型定稿**（答 owner）：基础层=任意可 source bash（引擎 GNU 平价即基座，零特判）；管理层=各管理器原生机制的薄描述符（catalog 是预填非白名单，新增管理器=数据条目零硬编码——描述符化重构防打地鼠）；依赖框架者只经框架（loader 保真）
+- **wt46/anyplug**：资产枚举启发式审计（野生 repo 诚实呈现）+bpkg 适配（附录 A 存量规划）+管理器分发描述符化+实证集（单文件野生插件/bash-preexec/bpkg 包/bashmarks 负向保真/未知形状 repo）
+- 红线：引擎零插件特判（只读审计）；无垫片
+- 八车道并行：pool1/pool2/optionb/olddebt/niu365/parse4/floor/anyplug
