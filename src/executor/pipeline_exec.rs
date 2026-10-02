@@ -83,6 +83,27 @@ fn internal_pipeline_program_name(program: &std::path::Path) -> Option<&str> {
     name.strip_suffix('>')
 }
 
+/// The exit status a hard-killed pipeline lingerer must report.
+///
+/// GNU ground truth (rubash#382): a producer that outlives its consumer
+/// dies of SIGPIPE — `wait_for` (jobs.c:3064) reaps WIFSIGNALED /
+/// WTERMSIG==SIGPIPE and jobs.c:2958 process_exit_status surfaces
+/// 128 + 13 = 141. The shell never rewrites the status; PIPESTATUS[0] of
+/// `yes | head -3` is 141 and `set -o pipefail` propagates it. Windows
+/// has no SIGPIPE and `Child::kill` is TerminateProcess(1), so the killed
+/// lingerer would report 1; this synthesizes the SIGPIPE-shaped exit code
+/// as the observable contract (same convention as builtins/kill.rs
+/// signal_process's TerminateProcess(128+signal)). Death notices are not
+/// affected: exit_status_signal stays None on Windows, matching GNU's
+/// silence for SIGPIPE deaths of foreground members in scripts.
+#[cfg(windows)]
+fn lingerer_sigpipe_status() -> std::process::ExitStatus {
+    use std::os::windows::process::ExitStatusExt;
+    // SIGPIPE is 13 on every platform bash models (builtins/kill.rs signal
+    // table); libc is unix-only here, so the literal carries the contract.
+    std::process::ExitStatus::from_raw(128 + 13)
+}
+
 #[cfg(windows)]
 fn wait_for_windows_pipeline_member(
     process: &mut std::process::Child,
@@ -119,7 +140,11 @@ fn wait_for_windows_pipeline_member(
         }
         if kill_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
             let _ = process.kill();
-            return process.wait().map_err(ExecuteError::IoError);
+            // Reap the terminated child, then report the SIGPIPE shape GNU
+            // observes for a producer whose consumer closed the pipe
+            // (rubash#382; see lingerer_sigpipe_status).
+            let _ = process.wait().map_err(ExecuteError::IoError)?;
+            return Ok(lingerer_sigpipe_status());
         }
         std::thread::sleep(POLL_INTERVAL);
     }
@@ -1741,8 +1766,13 @@ impl Executor {
             let status = match process.try_wait()? {
                 Some(status) => status,
                 None => {
+                    // The sequential tail consumed this member's output and
+                    // the downstream already exited, so a member still alive
+                    // here is the broken-pipe lingerer — report the SIGPIPE
+                    // shape GNU observes (rubash#382; lingerer_sigpipe_status).
                     let _ = process.kill();
-                    process.wait()?
+                    process.wait().map_err(ExecuteError::IoError)?;
+                    lingerer_sigpipe_status()
                 }
             };
             results.push((
