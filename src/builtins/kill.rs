@@ -766,6 +766,133 @@ fn take_self_signals() -> Vec<i32> {
     std::mem::take(&mut *queue)
 }
 
+// rubash#375/perf3: the per-command signal-poll's Windows-port catch_flag.
+// GNU run_pending_traps (trap.c:336) is `if (catch_flag == 0) return;` —
+// one int test, because the KERNEL handler (sig.c trap_handler) sets
+// catch_flag asynchronously the instant a signal arrives. Windows has no
+// kernel signal delivery into the shell process, so the file mailbox is
+// the transport and the empty check used to be a directory pattern query
+// every 64th command (~100us per query under real-time scanning,
+// 1.7us/command amortized — 15% of the 20000-iteration null-command
+// loop's wall). A named auto-reset kernel Event is the faithful
+// catch_flag port: cross-process senders SetEvent after their mailbox
+// rename; the per-command check is WaitForSingleObject(, 0) on a handle
+// opened once (~sub-us); the filesystem query runs only when the event
+// fired OR on the retained every-64th safety tick (senders that cannot
+// set the event — a different binary version, a restricted session —
+// keep today's delivery cadence). Auto-reset coalescing is exactly the
+// "at least one delivery is pending" contract: the drain reads ALL
+// pending entries whenever it runs, and a delivery landing between the
+// wait and the drain leaves the event set for the next command.
+#[cfg(windows)]
+mod signal_hint {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::HANDLE;
+
+    extern "system" {
+        fn CreateEventW(
+            attributes: *const core::ffi::c_void,
+            manual_reset: i32,
+            initial_state: i32,
+            name: *const u16,
+        ) -> HANDLE;
+        fn WaitForSingleObject(handle: HANDLE, milliseconds: u32) -> u32;
+        fn CloseHandle(handle: HANDLE) -> i32;
+    }
+
+    const EVENT_NAME_PREFIX: &str = "Local
+ubash-signal-hint-";
+
+    fn event_name(pid: u32) -> Vec<u16> {
+        let wide: Vec<u16> = format!("{EVENT_NAME_PREFIX}{pid}").encode_utf16().collect();
+        let mut name = wide;
+        name.push(0);
+        name
+    }
+
+    /// A kernel HANDLE is an opaque integer the kernel interprets; waiting
+    /// on it from any thread is safe (object-level synchronization), so the
+    /// OnceLock cell can carry it across threads.
+    struct HintHandle(HANDLE);
+    unsafe impl Send for HintHandle {}
+    unsafe impl Sync for HintHandle {}
+
+    fn open_or_create(pid: u32) -> Option<HintHandle> {
+        // CreateEventW on an existing name returns the existing event with
+        // ERROR_ALREADY_EXISTS — both directions are fine (the handle is
+        // ours to wait on; the kernel refcounts the object).
+        let handle = unsafe {
+            CreateEventW(
+                core::ptr::null(),
+                0, // auto-reset
+                0, // initially nonsignaled
+                event_name(pid).as_ptr(),
+            )
+        };
+        (!handle.is_null()).then(|| HintHandle(handle))
+    }
+
+    fn hint_handle() -> Option<HANDLE> {
+        static HANDLE_CELL: OnceLock<Option<HintHandle>> = OnceLock::new();
+        // The handle lives for the whole process: the OS closes it at exit
+        // (same lifecycle as the {pid}.alive marker) — one handle per
+        // process is the documented trade.
+        HANDLE_CELL
+            .get_or_init(|| open_or_create(std::process::id()))
+            .as_ref()
+            .map(|holder| holder.0)
+    }
+
+    /// True when a cross-process sender signaled a pending mailbox entry.
+    /// Any failure (restricted session, exhausted handles) reads as false —
+    /// the periodic fallback tick keeps polling the filesystem, so delivery
+    /// semantics never depend on the event.
+    pub fn signaled() -> bool {
+        let Some(handle) = hint_handle() else {
+            return false;
+        };
+        const WAIT_OBJECT_0: u32 = 0;
+        unsafe { WaitForSingleObject(handle, 0) == WAIT_OBJECT_0 }
+    }
+
+    /// Whether this process's hint event exists. When it does, every
+    /// same-version sender pulses it at delivery time, so the filesystem
+    /// fallback cadence stretches (eventless senders — an older binary, a
+    /// foreign tool writing the mailbox format — still get delivered, just
+    /// at the stretched cadence instead of the tight one).
+    pub fn available() -> bool {
+        hint_handle().is_some()
+    }
+
+    /// Best-effort signal from the SENDER side (deliver_rubash_signal):
+    /// open the target's event and pulse it. Failures are ignored — the
+    /// mailbox entry itself is the source of truth.
+    pub fn signal_target(pid: u32) {
+        extern "system" {
+            fn OpenEventW(desired_access: u32, inherit: i32, name: *const u16) -> HANDLE;
+            fn SetEvent(handle: HANDLE) -> i32;
+        }
+        const EVENT_MODIFY_STATE: u32 = 0x0002;
+        let handle = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, event_name(pid).as_ptr()) };
+        if handle.is_null() {
+            return;
+        }
+        unsafe {
+            SetEvent(handle);
+            CloseHandle(handle);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod signal_hint {
+    pub fn signaled() -> bool {
+        false
+    }
+    #[allow(unused_variables)]
+    pub fn signal_target(pid: u32) {}
+}
+
 pub fn take_pending_signals(pid: u32) -> io::Result<Vec<i32>> {
     // Unix: real kernel deliveries drain through the in-process queue; no
     // filesystem traffic, and no cross-process file mailbox exists.
@@ -788,7 +915,13 @@ pub fn take_pending_signals(pid: u32) -> io::Result<Vec<i32>> {
     {
         let mut signals = take_self_signals();
         let tick = FILE_POLL_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if signals.is_empty() && tick % 64 == 0 {
+        // catch_flag shape (see mod signal_hint): the kernel event fires the
+        // instant a same-version cross-process delivery lands, so the
+        // filesystem query runs on the event; the periodic fallback poll
+        // covers senders that cannot set the event (tight cadence when the
+        // event infrastructure is unavailable, stretched otherwise).
+        let fallback_period: u64 = if signal_hint::available() { 1024 } else { 64 };
+        if signals.is_empty() && (signal_hint::signaled() || tick % fallback_period == 0) {
             signals = take_file_signals(pid)?;
         }
         Ok(signals)
@@ -1062,6 +1195,7 @@ fn deliver_rubash_signal(pid: u32, signal: i32) -> io::Result<bool> {
         ),
     )?;
     std::fs::rename(&part, &full)?;
+    signal_hint::signal_target(pid);
     Ok(true)
 }
 
