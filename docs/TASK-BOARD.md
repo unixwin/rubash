@@ -286,3 +286,9 @@
 - **#375 首项**（4e0615e8）：六动态栈数组活视图读——bats --count -4.6%、BASH_SOURCE[*] -26%；数组读已排除为主因，剩余=DEBUG 派发地板 390µs+$(cd;pwd) 归一化（证据 target/perf375/）
 - 恢复中的 part_050 冲突（#374 姿势×#395 期望翻正）取车道侧解决；executor_tests 1531 过/56 ignore
 - 在途：gapfix1 续作、pool1、pool2；CI d5d992ce 后台盯
+
+## 2026-10-02 终 V：gapfix1 回收（#384-#389 六关，CI 绿 bbccb1c7）
+
+- #384 comsub 内 `$'…\'…'`、#385 case 管道级、#386 for/select extglob 关闸、#387 coproc 泄漏、#388 函数头 TAB# 注释（WIP 重做=按行切 span，前任"切到#丢全文"有反例）、#389 extglob-ON 复合赋值（四层不变量：parse 准入+read-time 盖章修 c09 级回溯 bug+三切分器+存储空格当数据）
+- #390/#391 按授权交分析（单内已落：q3/q4=esacs_needed_count+yacc 恢复链；#391=PST_COMPASSIGN 元素首 `[` 分支定位）——下一波车道
+- wt37 波次全部收官；wt38 两池在途（#397-#412）
