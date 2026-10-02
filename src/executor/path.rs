@@ -775,10 +775,26 @@ pub fn external_command_for_named_program(
         && !is_windows_powershell_script(program)
         && !is_windows_batch_file(program)
         && should_run_with_shell(program);
+    // Option B (niubash#124(b)): a POSIX-aware child (WinuxCmd dispatcher
+    // route or a program under a WinuxCmd installation root) resolves the
+    // shell's POSIX namespace itself, so it joins the verbatim-argv set:
+    // GNU hands execve the raw word bytes (execute_cmd.c:6119-6127
+    // shell_execve) and never rewrites arguments, and the child's own
+    // POSIX layer owns `/d/...` resolution — exactly the MSYS model, where
+    // the runtime inside the child converts paths at its Win32 boundary.
+    // Translating for such a child both loses dialect purity and splits
+    // one argv into mixed forms when some operands exist and others do not
+    // (the pre-Option-B existence-gated half-translation). The
+    // `__RUBASH_ARGV_DIALECT=legacy` escape hatch restores the old
+    // behavior for field rollback.
+    #[cfg(windows)]
+    let posix_aware = !argv_dialect_legacy(env_vars) && posix_aware_child(program, env_vars);
+    #[cfg(not(windows))]
+    let posix_aware = false;
     let native_args = args
         .iter()
         .map(|arg| {
-            if preserve_native_args || shell_wrapped {
+            if preserve_native_args || shell_wrapped || posix_aware {
                 arg.clone()
             } else {
                 external_argument_path(arg, env_vars)
@@ -920,6 +936,101 @@ fn is_winuxcmd_dispatcher(path: &Path) -> bool {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .is_some_and(|stem| stem.eq_ignore_ascii_case("winuxcmd"))
+}
+
+/// Option B argv-dialect escape hatch (niubash#124(b), MSYS per-child
+/// dialect model). Unset or any value other than `legacy` runs the Option B
+/// contract; `legacy` restores the pre-Option-B behavior (POSIX-aware
+/// children translated like natives + existence-gated half-translation) so
+/// a field regression can be reverted from the environment without a
+/// rebuild. Read from the shell env so `export` toggles it mid-session.
+fn argv_dialect_legacy(env_vars: &HashMap<String, String>) -> bool {
+    env_vars
+        .get("__RUBASH_ARGV_DIALECT")
+        .is_some_and(|value| value.eq_ignore_ascii_case("legacy"))
+}
+
+/// Case-insensitive component prefix test for Windows paths. `starts_with`
+/// on PathBuf is byte-sensitive, and WINUXCMD_HOME / dispatcher roots are
+/// host-provided strings whose case need not match the resolved program
+/// path (e.g. `c:\tools\...` vs `C:\Tools\...`).
+#[cfg(windows)]
+fn path_starts_with_ignore_case(path: &Path, prefix: &Path) -> bool {
+    let path_parts: Vec<String> = path
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
+        .collect();
+    let prefix_parts: Vec<String> = prefix
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
+        .collect();
+    if prefix_parts.is_empty() {
+        return false;
+    }
+    path_parts.len() >= prefix_parts.len() && path_parts[..prefix_parts.len()] == prefix_parts[..]
+}
+
+/// Memoized WinuxCmd-tree marker probe. For an already-resolved program
+/// path, derive the candidate installation root
+/// (`winuxcmd_installation_root_from_path`: `usr/bin` and flat layouts) and
+/// confirm it with the `winuxcmd.exe` marker. This classifies a program's
+/// dialect from its OWN tree, so a WinuxCmd installation reached through
+/// PATH without env configuration (multi-install hosts) is still detected.
+/// It does not select a dispatcher — that stays env-configured only (see
+/// `find_winuxcmd_dispatcher`).
+#[cfg(windows)]
+fn under_winuxcmd_tree(program: &Path) -> bool {
+    use std::sync::Mutex;
+    static CACHE: std::sync::OnceLock<Mutex<std::collections::HashMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    // Normalize separators and case into a flat cache key; the probe result
+    // depends only on the path (the marker files are installation layout,
+    // not configuration).
+    let key = program.to_string_lossy().replace('/', "\\").to_lowercase();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(cached) = guard.get(&key) {
+            return *cached;
+        }
+    }
+    let root = winuxcmd_installation_root_from_path(program);
+    let hit = root.join("usr").join("bin").join("winuxcmd.exe").is_file()
+        || root.join("winuxcmd.exe").is_file();
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key, hit);
+    }
+    hit
+}
+
+/// Option B (niubash#124(b), the MSYS per-child dialect model): whether a
+/// resolved program is POSIX-aware — its own runtime resolves verbatim
+/// POSIX argv (`/d/...`, `/tmp/...`, `/dev/...`). GNU never rewrites argv
+/// (execute_cmd.c:6119-6127 shell_execve: `execve (command, args, env)`),
+/// so such children must receive the shell word bytes verbatim and own
+/// path resolution themselves. Determinable by the engine in three ways:
+/// the winuxcmd dispatcher route, the env-configured WinuxCmd
+/// installation root (WINUXCMD_HOME / the dispatcher's tree), or the
+/// per-program winuxcmd.exe marker probe.
+#[cfg(windows)]
+fn posix_aware_child(program: &Path, env_vars: &HashMap<String, String>) -> bool {
+    if is_winuxcmd_dispatcher(program) {
+        return true;
+    }
+    if let Some(home) = env_vars
+        .get("WINUXCMD_HOME")
+        .filter(|value| !value.is_empty())
+    {
+        if path_starts_with_ignore_case(program, Path::new(home)) {
+            return true;
+        }
+    }
+    if let Some(dispatcher) = find_winuxcmd_dispatcher(env_vars) {
+        let root = winuxcmd_installation_root_from_path(&dispatcher);
+        if path_starts_with_ignore_case(program, &root) {
+            return true;
+        }
+    }
+    under_winuxcmd_tree(program)
 }
 
 #[cfg(windows)]
@@ -3330,6 +3441,127 @@ mod tests {
         // Empty-string operand (host-boundary quote collapse can reduce
         // `d="..."` to empty): stays empty, never gains `""` payload bytes.
         assert_eq!(external_argument_path("", &env), "");
+    }
+
+    // ---- Option B (niubash#124(b)): per-child argv dialect -------------------
+
+    #[test]
+    fn argv_dialect_legacy_escape_hatch() {
+        let mut env = HashMap::new();
+        assert!(!argv_dialect_legacy(&env), "unset must mean Option B");
+        env.insert("__RUBASH_ARGV_DIALECT".to_string(), "legacy".to_string());
+        assert!(argv_dialect_legacy(&env));
+        env.insert("__RUBASH_ARGV_DIALECT".to_string(), "LEGACY".to_string());
+        assert!(argv_dialect_legacy(&env), "match is case-insensitive");
+        env.insert("__RUBASH_ARGV_DIALECT".to_string(), "optionb".to_string());
+        assert!(!argv_dialect_legacy(&env));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn posix_aware_child_detection_routes() {
+        // Route 1: the winuxcmd dispatcher itself.
+        assert!(posix_aware_child(
+            Path::new(r"C:\tools\winuxcmd\usr\bin\winuxcmd.exe"),
+            &HashMap::new()
+        ));
+        assert!(posix_aware_child(
+            Path::new(r"C:\t\WINUXCMD.exe"),
+            &HashMap::new()
+        ));
+
+        // Route 2: under the env-configured WinuxCmd root (WINUXCMD_HOME is
+        // set by Executor::set_winuxcmd_path); case and separators must not
+        // matter (host-provided strings).
+        let mut env = HashMap::new();
+        env.insert(
+            "WINUXCMD_HOME".to_string(),
+            r"c:\Tools\WinuxCmd".to_string(),
+        );
+        assert!(posix_aware_child(
+            Path::new(r"C:\tools\winuxcmd\usr\bin\ls.exe"),
+            &env
+        ));
+        assert!(
+            !posix_aware_child(Path::new(r"C:\tools\winuxcmd-other\x.exe"), &env),
+            "component-boundary: a longer sibling directory must not match"
+        );
+        assert!(!posix_aware_child(
+            Path::new(r"D:\elsewhere\node.exe"),
+            &env
+        ));
+
+        // Route 3: the per-tree winuxcmd.exe marker probe — a WinuxCmd
+        // installation reached through PATH without any env configuration.
+        // The probe derives the root from the resolved program's own path
+        // (winuxcmd_installation_root_from_path), so the program file must
+        // exist exactly as a resolved spawn target would.
+        let root = std::env::temp_dir().join("rubash-optb-wcmd-tree");
+        let usr_bin = root.join("usr").join("bin");
+        std::fs::create_dir_all(&usr_bin).unwrap();
+        std::fs::write(usr_bin.join("winuxcmd.exe"), b"MZ").unwrap();
+        std::fs::write(usr_bin.join("printf.exe"), b"MZ").unwrap();
+        assert!(posix_aware_child(
+            &usr_bin.join("printf.exe"),
+            &HashMap::new()
+        ));
+        // Flat (legacy) installation layout: marker directly in the root.
+        let flat = std::env::temp_dir().join("rubash-optb-wcmd-flat");
+        std::fs::create_dir_all(&flat).unwrap();
+        std::fs::write(flat.join("winuxcmd.exe"), b"MZ").unwrap();
+        std::fs::write(flat.join("printf.exe"), b"MZ").unwrap();
+        assert!(posix_aware_child(&flat.join("printf.exe"), &HashMap::new()));
+        // A plain directory without the marker stays native.
+        let plain = std::env::temp_dir().join("rubash-optb-plain-tree");
+        let plain_bin = plain.join("usr").join("bin");
+        std::fs::create_dir_all(&plain_bin).unwrap();
+        std::fs::write(plain_bin.join("node.exe"), b"MZ").unwrap();
+        assert!(!posix_aware_child(
+            &plain_bin.join("node.exe"),
+            &HashMap::new()
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_prefix_match_ignores_case_and_components() {
+        assert!(path_starts_with_ignore_case(
+            Path::new(r"C:\Tools\WinuxCmd\usr\bin\ls.exe"),
+            Path::new(r"c:\tools\winuxcmd")
+        ));
+        assert!(path_starts_with_ignore_case(
+            Path::new(r"C:/Tools/WinuxCmd/ls.exe"),
+            Path::new(r"c:\tools\winuxcmd")
+        ));
+        assert!(!path_starts_with_ignore_case(
+            Path::new(r"C:\Tools\WinuxCmd2\ls.exe"),
+            Path::new(r"c:\tools\winuxcmd")
+        ));
+        assert!(!path_starts_with_ignore_case(
+            Path::new(r"C:\tools"),
+            Path::new(r"c:\tools\winuxcmd")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn under_winuxcmd_tree_marker_probe() {
+        // NOTE: the probe is memoized per process — use distinct trees so
+        // this test cannot read another test's cache entry (and vice
+        // versa). The program file must exist: the root derivation treats
+        // an existing file's parent as the bin directory.
+        let root = std::env::temp_dir().join("rubash-optb-marker-probe");
+        let usr_bin = root.join("usr").join("bin");
+        std::fs::create_dir_all(&usr_bin).unwrap();
+        std::fs::write(usr_bin.join("cat.exe"), b"MZ").unwrap();
+        // No marker yet: native.
+        assert!(!under_winuxcmd_tree(&usr_bin.join("cat.exe")));
+        let marked = std::env::temp_dir().join("rubash-optb-marker-probe-marked");
+        let marked_bin = marked.join("usr").join("bin");
+        std::fs::create_dir_all(&marked_bin).unwrap();
+        std::fs::write(marked_bin.join("winuxcmd.exe"), b"MZ").unwrap();
+        std::fs::write(marked_bin.join("cat.exe"), b"MZ").unwrap();
+        assert!(under_winuxcmd_tree(&marked_bin.join("cat.exe")));
     }
 
     #[cfg(windows)]
