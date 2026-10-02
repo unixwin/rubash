@@ -1625,6 +1625,43 @@ impl Executor {
                         })
                 })
             {
+                // rubash#375: the six dynamic stack arrays read members
+                // straight from the live view instead of rendering the
+                // `[i]=v` storage text and re-parsing it — GNU keeps
+                // BASH_LINENO/BASH_SOURCE/... as real ARRAY objects
+                // (variables.c INIT_DYNAMIC_VAR / push_call_frame), so a
+                // quoted `"${name[@]}"` copy (bats_debug_trap's two array
+                // copies per DEBUG firing) is an O(n) member walk, never
+                // a render+reparse round trip. Regular (and assoc-marked)
+                // names keep the storage render below.
+                if !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, array_name) {
+                    if let Some(members) = self.dynamic_stack_array_values(array_name) {
+                        changed = true;
+                        if at_list_quoted || bare {
+                            values.extend(members.iter().map(|value| store!(value)));
+                        } else {
+                            // UNQUOTED dynamic `${name[@]}`: same IFS
+                            // field-split + glob transport as the storage
+                            // arm below (expand_words_no_vars).
+                            let fields = field_split_positional_values_with_ifs(
+                                members,
+                                self.shell_state.env_vars.get("IFS").map(String::as_str),
+                            );
+                            if bare {
+                                values.extend(fields);
+                            } else {
+                                values.extend(fields.into_iter().map(|field| {
+                                    format!(
+                                        "{}{}",
+                                        crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
+                                        quote_compound_field_value(&field)
+                                    )
+                                }));
+                            }
+                        }
+                        continue;
+                    }
+                }
                 if let Some(storage) = self.parameter_array_storage(array_name) {
                     changed = true;
                     if at_list_quoted || bare {
