@@ -96,12 +96,23 @@ fn internal_pipeline_program_name(program: &std::path::Path) -> Option<&str> {
 /// signal_process's TerminateProcess(128+signal)). Death notices are not
 /// affected: exit_status_signal stays None on Windows, matching GNU's
 /// silence for SIGPIPE deaths of foreground members in scripts.
-#[cfg(windows)]
 fn lingerer_sigpipe_status() -> std::process::ExitStatus {
-    use std::os::windows::process::ExitStatusExt;
     // SIGPIPE is 13 on every platform bash models (builtins/kill.rs signal
-    // table); libc is unix-only here, so the literal carries the contract.
-    std::process::ExitStatus::from_raw(128 + 13)
+    // table). Windows: the raw value IS the exit code (GetExitCodeProcess)
+    // -> exit code 141. Unix: the wait-status layout is code<<8, and a real
+    // SIGPIPE death never reaches this arm (the child dies of the signal
+    // before try_wait returns None), so the synthesized value only covers
+    // our own kill() of a stuck lingerer -> exit code 141 either way.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(128 + 13)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(141 << 8)
+    }
 }
 
 #[cfg(windows)]
