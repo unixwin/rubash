@@ -300,3 +300,10 @@
 - **wt40/perf3**：#375 二轮（DEBUG 派发地板 390µs+$(cd;pwd)，对照 traps.c trap 体解析复用）+null 地板三阶段计划第一阶段+configure -n 复测（#380 修后）
 - **wt41/wcmd**：**首次跨项目直接修 WinuxCmd**（owner 授权生态清零）——#1140 mv 混形回归（阻塞 Hermes，最高优）+#1141 mktemp 方言+#1139 xargs 选项；先读其 AGENTS/CMake，构建通是第一关，分支工作不 push 由船长审
 - 在途共五车道：pool1/pool2/caseerr/perf3/wcmd；Option B 等 pool 槽位释放即上
+
+## 2026-10-02 深夜 VI：WinuxCmd 上游三单修复+合并（首次跨项目直修收官）
+
+- **wt41/wcmd**：WinuxCmd PR **#1144 已合并**（检查全绿）——#1140 mv 走共享 API 路径边界（cp 18 处/install 10 处先例、mv 是 0 处例外；顺带修 3 个潜伏 bug：copy 回退文件/目录倒置、dir-into-self 抄 GNU copy.c:2091、尾斜杠 DEST 覆盖）+ #1141 mktemp 回显 -p 方言（GNU mktemp.c:276-311；TMPDIR 方言留跟进）+ #1139 xargs 选项停析。2763/2763 全绿；niubash Hermes 端到端 rc=0 实证
+- 三上游单随 PR 自动关；niubash#156/#124 已更新（等 WinuxCmd release 进 bundle）
+- WinuxCmd 仓库走 PR 规则（GH013）——直接推 main 被拒，已按规矩开 PR 合并；后续 WinuxCmd 贡献走同路
+- 在途四车道：pool1/pool2/caseerr/perf3
