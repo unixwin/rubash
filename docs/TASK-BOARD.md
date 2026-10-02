@@ -313,3 +313,10 @@
 - #390：四组诊断全修（GNU 引用全链：parse_dparen 再解释/匹配对 EOF 措辞/复合赋值 rc1/CHECK_FOR_RESERVED_WORD 豁免）；**重分类发现**：`((x=[y))` 的 `[` 走 P_ARITH 数据臂=求值器 rc1；109/113 矩阵
 - #391：五层切分器引号感知下标+空格为数据+存储门保全（parse.y:5635-5651）；13/14
 - 残留 4 形态开单（batch 2）；在途：pool1/pool2/perf3
+
+## 2026-10-02 深夜 VIII：owner 三问 → 全量回归轮 + oh-my-niu 立项开工
+
+- **盘点**：rubash 21 开（16 pool 在途/#375 perf3/#413 新/#378+#359 挂起/#241+#242+#281 历史性能深水/#365+#352 疑陈旧）；niubash 5 开（#159/#152 待核销、#124/#156 等外部、#104 winget）
+- **wt42/rebaseline**：全量回归轮（cargo test 全 target+true-baseline 全 ledger+83 套件当日台账+挂起检测=真回归即开单）+四疑挂起单核销——固化✓（每修复带钉死测试）但全量重跑此前缺位，本轮补上
+- **wt42/niu-plugin**（owner 拍板）：oh-my-niu 788 行设计落地——三铁律（外部在前/保底链/可回滚）+三缺口（#251 交互/管理器一等来源/trust 协议）+setup journal 升级
+- 五车道并行：pool1/pool2/perf3/rebaseline/niu-plugin
