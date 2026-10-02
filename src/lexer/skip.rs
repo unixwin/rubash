@@ -25,6 +25,10 @@ impl<'a> Lexer<'a> {
         // update_command_substitution_case_depth.
         let mut case_in_stage = 0u8;
         let mut case_pattern_region = false;
+        // rubash#380: the last significant unquoted char fed to the case
+        // word machine — the previous-token witness for the `esac`
+        // pattern-text rule (parse.y:3181/3183).
+        let mut prev_sig: Option<char> = None;
         // GNU read_token (parse.y:3630-3643): `#` introduces a comment only
         // at a token boundary — after whitespace, a separator (`;&|()<>`),
         // or at the start. `word.is_empty()` alone is wrong: `$`, quotes and
@@ -73,7 +77,11 @@ impl<'a> Lexer<'a> {
                 rest,
                 &mut case_in_stage,
                 &mut case_pattern_region,
+                prev_sig,
             );
+            if esac_prev_token_char(c) {
+                prev_sig = Some(c);
+            }
             match c {
                 '`' => {
                     self.skip_backtick();
@@ -1231,6 +1239,7 @@ pub(super) fn update_command_substitution_case_depth(
     rest: &str,
     case_in_stage: &mut u8,
     case_pattern_region: &mut bool,
+    prev_sig: Option<char>,
 ) {
     if single || double {
         word.clear();
@@ -1274,8 +1283,6 @@ pub(super) fn update_command_substitution_case_depth(
     if completing_after_case {
         *case_in_stage = 2;
     }
-
-    // parse.y:3177: inside PST_CASEPAT only ESAC may still be the keyword.
     let in_pattern_region = *case_pattern_region;
     let reserved_word_allows_next = match word.as_str() {
         "case" if *current_word_boundary && !in_pattern_region => {
@@ -1305,11 +1312,25 @@ pub(super) fn update_command_substitution_case_depth(
             *case_pattern_region = false;
             true
         }
-        "esac" if *current_word_boundary && !case_pattern_starts_with_esac_rest(ch, rest).0 => {
-            *case_depth = case_depth.saturating_sub(1);
-            *case_in_stage = 0;
-            *case_pattern_region = false;
-            true
+        "esac" if *current_word_boundary => {
+            // rubash#380 / parse.y:3177-3186 CHECK_FOR_RESERVED_WORD:
+            // `esac' is pattern text ONLY when the previous token is `|'
+            // (Posix rule 4) or the pattern-list `(' (phantom rule 4) —
+            // witnessed by `prev_sig`, the last significant unquoted char
+            // fed to this machine. Every other boundary `esac' (after
+            // `;;', at a clause-body start) is the ESAC keyword. This
+            // replaces the `)`-then-evidence FORWARD lookahead, whose
+            // evidence could come from a construct outside the case
+            // (`;; esac)` in a nested comsub).
+            if matches!(prev_sig, Some('|') | Some('(')) {
+                *case_in_stage = 0;
+                false
+            } else {
+                *case_depth = case_depth.saturating_sub(1);
+                *case_in_stage = 0;
+                *case_pattern_region = false;
+                true
+            }
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
         | "done"
@@ -1332,6 +1353,15 @@ pub(super) fn update_command_substitution_case_depth(
 
 fn command_substitution_separator_allows_reserved_word(ch: char) -> bool {
     matches!(ch, ';' | '&' | '|' | '(' | ')' | '\n')
+}
+
+/// rubash#380: the char counts as the PREVIOUS-TOKEN witness for the
+/// `esac` pattern-text rule (parse.y:3181/3183, `last_read_token == '|'
+/// or '('`). Word characters belong to the CURRENT token — GNU's
+/// last_read_token is the previous completed token — so only operator /
+/// separator characters (non-word, non-whitespace) update the witness.
+pub(crate) fn esac_prev_token_char(ch: char) -> bool {
+    !ch.is_whitespace() && !ch.is_ascii_alphanumeric() && ch != '_'
 }
 
 fn case_pattern_starts_with_esac_rest(delimiter: char, rest: &str) -> (bool, bool) {
@@ -1527,11 +1557,15 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
     // update_command_substitution_case_depth.
     let mut case_in_stage = 0u8;
     let mut case_pattern_region = false;
+    // rubash#380: previous significant unquoted char fed to the case
+    // word machine (the `esac` previous-token witness,
+    // parse.y:3181/3183).
+    let mut prev_sig: Option<char> = None;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
-    // the start. `word.is_empty()` alone is wrong: `$`, quotes and other
-    // non-alphanumeric word characters never reach `word`, so `$(echo $#)`
-    // and `$(echo 'a'#b)` would misread `#` as a comment.
+    // the start. `word.is_empty()` alone is wrong: `$`, quotes and
+    // other non-alphanumeric word characters never reach `word`, so
+    // `$(echo $#)` and `$(echo 'a'#b)` would misread `#` as a comment.
     let mut token_boundary = true;
     while index < chars.len() {
         let ch = chars[index];
@@ -1629,7 +1663,16 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             rest,
             &mut case_in_stage,
             &mut case_pattern_region,
+            prev_sig,
         );
+        if esac_prev_token_char(ch) {
+            // The opening `(` at `index == open` belongs to the construct,
+            // not the body — GNU's last_read_token inside the body never
+            // sees it (skip_cmd_subst enters past `$(` and cannot).
+            if index > open {
+                prev_sig = Some(ch);
+            }
+        }
         match ch {
             '\'' => single = true,
             '"' => double = true,

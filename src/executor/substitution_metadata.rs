@@ -766,6 +766,10 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
             let mut inner_case_in_stage = 0u8;
             // PST_CASEPAT port (rubash#380).
             let mut inner_case_pattern_region = false;
+            // rubash#380: previous significant unquoted char fed to the
+            // case word machine (the `esac` previous-token witness,
+            // parse.y:3181/3183).
+            let mut inner_prev_sig: Option<char> = None;
             while cursor < chars.len() {
                 let (_, inner) = chars[cursor];
                 if inner == '\\' && !inner_single {
@@ -793,7 +797,11 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                         &raw[chars[cursor].0 + inner.len_utf8()..],
                         &mut inner_case_in_stage,
                         &mut inner_case_pattern_region,
+                        inner_prev_sig,
                     );
+                    if !inner_single && !inner_double && crate::lexer::esac_prev_token_char(inner) {
+                        inner_prev_sig = Some(inner);
+                    }
                     // Heredoc bodies are literal data for substitution-span
                     // matching: parse.y gather_here_documents reads the whole
                     // body before the parser looks at the next token, so a `)`

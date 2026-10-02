@@ -733,3 +733,122 @@ fn extglob_group_swallows_bracket_for_subscript_scan() {
             .is_some()
     );
 }
+
+/// rubash#380: the `$(` body is a fresh command stream (subst.c:7143
+/// command_substitute -> parse_and_execute; parse.y:4451 parse_comsub), so
+/// its FIRST word sits at command position and IS a reserved word — a
+/// leading `case' must open the case-depth machine. The pattern-list
+/// forms then push pattern-parens (4928cfa6) whose pops bypass the
+/// case-depth guard, and pattern-position `case'/`esac' stay WORD data
+/// (parse.y:3177-3186 CHECK_FOR_RESERVED_WORD inside PST_CASEPAT; `esac'
+/// is pattern text only after a `|' or pattern-list `(' token,
+/// parse.y:3181/3183). GNU-verified vs WSL bash 5.3.0: every shape below
+/// runs with rc=0 and an empty/`x` result.
+///
+/// SPLIT OF OWNERSHIP: the tokenizer-side span (skip_cmd_subst) and the
+/// executor machine are fixed in this branch; the admission oracle
+/// (`unclosed_input_close_char_posix`) lives in captain-exclusive
+/// src/lexer/continuation.rs — the `has_unclosed_input_syntax_posix`
+/// assertions stay RED until the captain applies the wt31/casepat
+/// continuation.rs diff (comsub-body word boundary + `esac`
+/// previous-token rule).
+#[test]
+fn comsub_leading_case_paren_keyword_patterns_close() {
+    let forms = [
+        "v=$(case y in (b|case) echo x;; esac)\n",
+        "v=$(case y in (case|b) echo x;; esac)\n",
+        "v=$(case y in (case) echo x;; esac)\n",
+        "v=$(case y in (b|c|case) echo x;; esac)\n",
+        "v=$(case y in (case|esac) echo x;; esac)\n",
+        "v=$(case y in (b|case) echo x;; (case|d) echo y;; esac)\n",
+    ];
+    for input in forms {
+        assert!(
+            !has_unclosed_quotes(input),
+            "quotes misjudged for {input:?}"
+        );
+        // Tokenizer side (skip.rs) — green on this branch.
+        let tokens = tokenize(input);
+        assert_eq!(tokens[0].kind, TokenKind::Assignment, "for {input:?}");
+        assert_eq!(
+            tokens[0].value,
+            input.trim_end(),
+            "comsub span for {input:?}"
+        );
+        // Admission side (continuation.rs) — needs the captain diff.
+        assert!(
+            !has_unclosed_input_syntax_posix(input, false),
+            "admission rejected {input:?} (needs the #380 continuation.rs diff)"
+        );
+        assert!(
+            unclosed_input_close_char_posix(input, false).is_none(),
+            "oracle residue for {input:?}"
+        );
+    }
+}
+
+/// rubash#380 controls: genuinely unclosed forms must still be rejected —
+/// the pattern-paren bookkeeping may not swallow a REAL missing `)`.
+#[test]
+fn comsub_leading_case_missing_close_stays_unclosed() {
+    // Missing the comsub's `)`: GNU reports `unexpected EOF while looking
+    // for matching `)'`.
+    let open = "v=$(case y in (b|case) echo x;; esac\n";
+    assert!(has_unclosed_input_syntax_posix(open, false));
+    // Missing `esac` AND `)`: the case never closes, so the `)` cannot
+    // arrive.
+    let no_esac = "v=$(case y in (b|case) echo x;;\n";
+    assert!(has_unclosed_input_syntax_posix(no_esac, false));
+}
+
+/// rubash#380 nested forms: a `$(`/`case` inside a clause body of an
+/// outer comsub case — GNU runs both with rc=0.
+#[test]
+fn comsub_leading_case_nested_constructs_close() {
+    let nested = [
+        "v=$(case y in (b|case) echo $(case b in (b) echo n;; esac);; esac)\n",
+        "v=$(case y in (b|case) case z in (c) echo zz;; esac;; esac)\n",
+    ];
+    for input in nested {
+        let tokens = tokenize(input);
+        assert_eq!(tokens[0].kind, TokenKind::Assignment, "for {input:?}");
+        assert_eq!(
+            tokens[0].value,
+            input.trim_end(),
+            "comsub span for {input:?}"
+        );
+        assert!(
+            !has_unclosed_input_syntax_posix(input, false),
+            "admission rejected nested form {input:?} (needs the #380 continuation.rs diff)"
+        );
+    }
+}
+
+/// rubash#380 `esac` previous-token rule (parse.y:3181/3183): `esac' is
+/// pattern text after `|' or the pattern-list `(' and the keyword
+/// everywhere else on a boundary. GNU-verified shapes.
+#[test]
+fn comsub_esac_pattern_positions_follow_previous_token_rule() {
+    // `a|esac)` and `(esac)` are PATTERN text: the case stays open past
+    // them and closes at the final keyword `esac`.
+    let patterns = [
+        "v=$(case b in a|esac) echo hit;; esac)\n",
+        "v=$(case b in (esac) echo hit;; esac)\n",
+    ];
+    for input in patterns {
+        assert!(
+            !has_unclosed_input_syntax_posix(input, false),
+            "pattern-esac rejected {input:?}"
+        );
+    }
+    // Backquote and funsub bodies carry the same grammar (GNU rc=0) and
+    // their closers are not `)', so the text scanners keep them closed.
+    assert!(!has_unclosed_input_syntax_posix(
+        "v=`case y in (b|case) echo x;; esac`\n",
+        false
+    ));
+    assert!(!has_unclosed_input_syntax_posix(
+        "v=${ case y in (b|case) echo x;; esac; }\n",
+        false
+    ));
+}

@@ -2406,6 +2406,10 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
     // PST_CASEPAT port (rubash#380): armed between a case's pattern lists
     // and their `)` — see update_command_substitution_case_depth_region.
     let mut case_pattern_region = false;
+    // rubash#380: the last significant unquoted char fed to the case word
+    // machine — the previous-token witness for the `esac` pattern-text rule
+    // (parse.y:3181/3183).
+    let mut prev_sig: Option<char> = None;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start of the body. `word.is_empty()` alone is wrong: `$`, quotes,
@@ -2637,7 +2641,11 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
             &rest,
             &mut case_in_stage,
             &mut case_pattern_region,
+            prev_sig,
         );
+        if !single && !double && crate::lexer::esac_prev_token_char(source_ch) {
+            prev_sig = Some(source_ch);
+        }
         if let Some(delta) = alias_case_delta {
             if delta > 0 {
                 case_depth += 1;
@@ -2972,6 +2980,9 @@ pub(in crate::executor) fn update_command_substitution_case_depth(
         rest,
         case_in_stage,
         &mut scratch_region,
+        // The scratch region never arms, so the `esac` previous-token
+        // witness is never consulted on this legacy path.
+        None,
     );
 }
 
@@ -2996,6 +3007,7 @@ pub(in crate::executor) fn update_command_substitution_case_depth_region(
     rest: &str,
     case_in_stage: &mut u8,
     case_pattern_region: &mut bool,
+    prev_sig: Option<char>,
 ) {
     if single || double {
         word.clear();
@@ -3075,11 +3087,24 @@ pub(in crate::executor) fn update_command_substitution_case_depth_region(
             *case_pattern_region = false;
             true
         }
-        "esac" if *current_word_boundary && !case_pattern_starts_with_esac_rest(ch, rest) => {
-            *case_depth = case_depth.saturating_sub(1);
-            *case_in_stage = 0;
-            *case_pattern_region = false;
-            true
+        "esac" if *current_word_boundary => {
+            // rubash#380 / parse.y:3177-3186 CHECK_FOR_RESERVED_WORD:
+            // `esac' is pattern text ONLY when the previous token is `|'
+            // (Posix rule 4) or the pattern-list `(' (phantom rule 4) —
+            // witnessed by `prev_sig`, the last significant unquoted char
+            // fed to this machine. Every other boundary `esac' (after
+            // `;;', at a clause-body start) is the ESAC keyword. This
+            // replaces the `)`-then-evidence FORWARD lookahead, whose
+            // evidence could come from a construct outside the case.
+            if matches!(prev_sig, Some('|') | Some('(')) {
+                *case_in_stage = 0;
+                false
+            } else {
+                *case_depth = case_depth.saturating_sub(1);
+                *case_in_stage = 0;
+                *case_pattern_region = false;
+                true
+            }
         }
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
         | "done"
@@ -3201,6 +3226,9 @@ mod case_pattern_region_tests {
         let mut current_word_boundary = true;
         let mut case_in_stage = 0u8;
         let mut region = false;
+        // rubash#380: the `esac` previous-token witness — the last
+        // significant char fed before the current one.
+        let mut prev_sig: Option<char> = None;
         // The machine completes a word only AT a delimiter character, so a
         // source that ends with the bare final word never closes it — append
         // the newline separator a real comsub body's `)` supplies.
@@ -3220,7 +3248,11 @@ mod case_pattern_region_tests {
                 &rest,
                 &mut case_in_stage,
                 &mut region,
+                prev_sig,
             );
+            if crate::lexer::esac_prev_token_char(ch) {
+                prev_sig = Some(ch);
+            }
         }
         (case_depth, region)
     }
@@ -3259,5 +3291,42 @@ mod case_pattern_region_tests {
         // pattern list is a pattern.
         assert_eq!(scan("case y in (a) :;; (case) :;; esac"), (0, false));
         assert_eq!(scan("case y in b) :;; case*|z) :;; esac"), (0, false));
+    }
+
+    /// rubash#380 `esac` previous-token rule (parse.y:3177-3186
+    /// CHECK_FOR_RESERVED_WORD): `esac' is WORD data only when the
+    /// previous token is `|' (Posix rule 4) or the pattern-list `('
+    /// (phantom rule 4); every other boundary `esac' — after `;;', at a
+    /// clause-body start — is the ESAC keyword. The old
+    /// `)`-then-evidence forward lookahead misjudged `;; esac)` whenever
+    /// a construct outside the case supplied the evidence (nested comsub
+    /// bodies). GNU-verified vs WSL bash 5.3.0.
+    #[test]
+    fn esac_after_pipe_or_pattern_paren_is_pattern_text() {
+        // `a|esac` / `(esac)` / `(case|esac)`: pattern text — the depth
+        // only returns at the final keyword `esac`.
+        assert_eq!(scan("case b in a|esac) x;; esac"), (0, false));
+        assert_eq!(scan("case b in (esac) x;; esac"), (0, false));
+        assert_eq!(scan("case y in (case|esac) x;; esac"), (0, false));
+        // Word characters of the completing word are NOT the previous
+        // token: `(case|esac)` must not read `esac` as following a word.
+        assert_eq!(scan("case y in (b|case) x;; esac"), (0, false));
+    }
+
+    #[test]
+    fn esac_after_clause_separator_is_the_keyword() {
+        // After `;;` (region re-armed) the `esac` closes the case.
+        assert_eq!(scan("case b in (b) n;; esac"), (0, false));
+        // Clause-body start (`x) esac`): PST_CASEPAT is off, the `esac`
+        // is the keyword (GNU errors later on the stray `;;` — the depth
+        // must return here).
+        assert_eq!(scan("case b in x) esac;; esac"), (0, false));
+        // The nested-comsub shape from the issue: the inner `;;` before
+        // the inner `esac` belongs to the INNER case, not evidence for a
+        // forward lookahead.
+        assert_eq!(
+            scan("case y in (b) echo $(case b in (b) n;; esac);; esac"),
+            (0, false)
+        );
     }
 }

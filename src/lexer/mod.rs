@@ -1624,6 +1624,11 @@ pub fn has_unclosed_input_syntax(input: &str) -> bool {
     has_unclosed_input_syntax_posix(input, false)
 }
 
+/// rubash#380: shared `esac` previous-token witness predicate (see
+/// skip.rs) — re-exported for the executor's copies of the case word
+/// machine.
+pub(crate) use skip::esac_prev_token_char;
+
 /// POSIX-aware variant: `set -o posix` changes how `'` inside `"${...}"`
 /// scans (Interp 221), so the unclosed-delimiter probe must know the mode.
 pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {

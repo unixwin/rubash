@@ -455,6 +455,9 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
     let mut current_word_boundary = true;
     let mut case_in_stage = 0u8;
     let mut case_pattern_region = false;
+    // rubash#380: previous significant char fed to the case word machine
+    // (the `esac` previous-token witness, parse.y:3181/3183).
+    let mut prev_sig: Option<char> = None;
     let mut idx = 0usize;
     while idx < rest.len() {
         let ch = rest[idx..].chars().next().unwrap();
@@ -488,7 +491,11 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
             tail,
             &mut case_in_stage,
             &mut case_pattern_region,
+            prev_sig,
         );
+        if crate::lexer::skip::esac_prev_token_char(ch) {
+            prev_sig = Some(ch);
+        }
         match ch {
             '$' if rest.as_bytes().get(idx) == Some(&b'\'') => {
                 idx += 1;
@@ -1398,6 +1405,9 @@ fn copy_dollar_paren_body_raw(
     // update_command_substitution_case_depth (rubash#284).
     let mut case_in_stage = 0u8;
     let mut case_pattern_region = false;
+    // rubash#380: previous significant char fed to the case word machine
+    // (the `esac` previous-token witness, parse.y:3181/3183).
+    let mut prev_sig: Option<char> = None;
     while let Some(ch) = chars.next() {
         out.push(ch);
         if ch == '\\' {
@@ -1429,7 +1439,11 @@ fn copy_dollar_paren_body_raw(
             &rest,
             &mut case_in_stage,
             &mut case_pattern_region,
+            prev_sig,
         );
+        if crate::lexer::skip::esac_prev_token_char(ch) {
+            prev_sig = Some(ch);
+        }
         match ch {
             '$' if chars.peek() == Some(&'\'') => {
                 chars.next();
