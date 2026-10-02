@@ -271,3 +271,10 @@
 - **wt37/exec2**：#374 二轮（K001/K005 探针复核→51 CLI 姿势转换→33 族分流，产品零改动）
 - **wt37/batsfix**：#375 bats 墙钟（trap 解析缓存/数组读成本/comsub 方向，A/B 数字制）+ niubash#160（-c 未闭合引号静默 rc=1）
 - 挂起：#378（spawn 层平台项）、Option B 路径方言立项（等本轮落地后开）
+
+## 2026-10-02 深夜 III：wt38 两池车道齐发（#397-#412 十六单全有主）
+
+- **wt38/pool1**：#397 read -a 转义/#398 read -t 0/**#399 载体域 0x1D 泄漏（全量护栏+2h 未根因即停）**/#400 jobs/#401 declare rc/#40402 readonly/#403 BASH_SUBSHELL/#404 算术递归
+- **wt38/pool2**：#405 comsub case 吞行（复用 #380 PST_CASEPAT 框架）/#406-#410 declare/select/typeset 族/#411 诊断行号/#412 函数管道重定向
+- 修复要求=解除对应 #[ignore] 并跑绿（executor_tests 1524 基线不降）
+- 限额中断三续作车道在途（gapfix1/gapfix2/batsfix）
