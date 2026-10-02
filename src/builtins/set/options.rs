@@ -309,12 +309,19 @@ pub(crate) fn set_shell_option(
     name: &str,
     enabled: bool,
 ) {
+    // GNU builtins/set.def:403-418 set_posix_mode short-circuits no-op
+    // flips before sv_strict_posix runs, so capture the prior state before
+    // the key write below makes `posix` look already-flipped.
+    let posix_prior = (name == "posix").then(|| shell_option_enabled(env_vars, "posix"));
     env_vars.insert(
         shell_option_key(name),
         if enabled { "1" } else { "0" }.to_string(),
     );
     let shelopts = shellopts_value(env_vars);
     env_vars.insert("SHELLOPTS".to_string(), shelopts);
+    if let Some(prior) = posix_prior {
+        apply_posix_mode_transition(env_vars, enabled, prior);
+    }
     // GNU builtins/set.def:388-399 set_ignoreeof: `set -o ignoreeof` binds
     // IGNOREEOF=10 (which sv_ignoreeof then reads back); `set +o` unbinds
     // the variable entirely.
@@ -352,6 +359,64 @@ pub(crate) fn set_shell_option(
 
 fn shell_option_key(name: &str) -> String {
     format!("__RUBASH_SETOPT_{}", name.replace('-', "_"))
+}
+
+/// GNU builtins/set.def:403-418 set_posix_mode -> variables.c:6257-6268
+/// sv_strict_posix -> general.c:103-128 posix_initialize: flipping `posix`
+/// is a transition-gated walk over the posix_vars table (general.c:85-92:
+/// interactive_comments, source_uses_path/sourcepath, expand_aliases,
+/// inherit_errexit, print_shift_error/shift_verbose).
+///
+/// * Enable: interactive_comments, sourcepath, expand_aliases,
+///   inherit_errexit and shift_verbose turn on, and set_posix_mode binds
+///   POSIXLY_CORRECT="y" (set.def:413, non-exported).
+/// * Disable (general.c:122-128, the no-saved-bitmap branch): only
+///   expand_aliases (to the interactive-shell default, off in scripts),
+///   print_shift_error and source_searches_cwd are restored;
+///   interactive_comments, source_uses_path and inherit_errexit are NOT
+///   touched — GNU 5.3 keeps them sticky across the round trip
+///   (rubash#383, WSL script-file probes). set_posix_mode unbinds
+///   POSIXLY_CORRECT (set.def:415-416).
+/// * set.def:406-409: a no-op flip returns before sv_strict_posix, so
+///   none of the derived options move on `set -o posix` when already on
+///   (or `set +o posix` when already off).
+///
+/// source_searches_cwd has no rubash shopt; its consumers (source.rs)
+/// gate on __RUBASH_POSIX_MODE, written here for every posix flip so all
+/// setter funnels (fast path, `shopt -o`, `local -` bitmap restore, CLI
+/// startup) stay in sync.
+fn apply_posix_mode_transition(
+    env_vars: &mut crate::shell::var_table::VarTable,
+    enabled: bool,
+    prior: bool,
+) {
+    env_vars.insert(
+        "__RUBASH_POSIX_MODE".to_string(),
+        if enabled { "1" } else { "0" }.to_string(),
+    );
+    if enabled == prior {
+        return;
+    }
+    if enabled {
+        env_vars.insert("POSIXLY_CORRECT".to_string(), "y".to_string());
+        for option in [
+            "interactive_comments",
+            "sourcepath",
+            "expand_aliases",
+            "inherit_errexit",
+            "shift_verbose",
+        ] {
+            crate::builtins::shopt::set_option(env_vars, option, true);
+        }
+    } else {
+        env_vars.remove("POSIXLY_CORRECT");
+        // general.c:127: expand_aliases = interactive_shell. rubash models
+        // the interactive default through __RUBASH_INTERACTIVE.
+        let interactive_default =
+            env_vars.get("__RUBASH_INTERACTIVE").map(String::as_str) == Some("1");
+        crate::builtins::shopt::set_option(env_vars, "expand_aliases", interactive_default);
+        crate::builtins::shopt::set_option(env_vars, "shift_verbose", false);
+    }
 }
 
 fn shellopts_includes_option(name: &str) -> bool {

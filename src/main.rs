@@ -154,7 +154,9 @@ fn apply_invocation_shell_mode(executor: &mut Executor, argv0: Option<&str>) {
     };
 
     if matches!(name.as_str(), "sh" | "ash") {
-        executor.set_env("__RUBASH_POSIX_MODE", "1");
+        // GNU shell.c:733-737: invoked as `sh' binds POSIXLY_CORRECT and
+        // runs sv_strict_posix (the posix_vars walk) — carried by
+        // set::set_shell_option.
         executor.set_shell_option("posix", true);
     }
     // GNU shell.c set_shell_name: an argv[0] whose first character is '-'
@@ -283,10 +285,9 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                         return 2;
                     }
                     let enabled = args[index] == "-o";
+                    // posix flips (with the set_posix_mode walk) live in
+                    // set::set_shell_option.
                     executor.set_shell_option(option, enabled);
-                    if option == "posix" {
-                        executor.set_env("__RUBASH_POSIX_MODE", if enabled { "1" } else { "0" });
-                    }
                     index += 2;
                 } else {
                     eprintln!("rubash: {}: option requires an argument", args[index]);
@@ -311,7 +312,8 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 index += 1;
             }
             "--posix" => {
-                executor.set_env("__RUBASH_POSIX_MODE", "1");
+                // GNU shell.c:566-572: --posix runs sv_strict_posix (the
+                // posix_vars walk) — carried by set::set_shell_option.
                 executor.set_shell_option("posix", true);
                 index += 1;
             }
@@ -659,7 +661,8 @@ fn parse_long_options(
                 executor.set_env("__RUBASH_LOGIN_SHELL", "1");
             }
             "posix" => {
-                executor.set_env("__RUBASH_POSIX_MODE", "1");
+                // GNU shell.c:566-572: --posix runs sv_strict_posix (the
+                // posix_vars walk) — carried by set::set_shell_option.
                 executor.set_shell_option("posix", true);
             }
             "restricted" => {

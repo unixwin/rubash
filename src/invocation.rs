@@ -230,9 +230,6 @@ impl ShellInvocation {
     }
 
     pub fn apply_to_executor(&self, executor: &mut Executor) -> Result<(), String> {
-        if self.posix {
-            executor.set_env("__RUBASH_POSIX_MODE", "1");
-        }
         // shell.c:497-503: --login/-l flips LOGIN_SHELL so the `logout`
         // builtin and exit path see a login shell.
         if self.login {
@@ -242,12 +239,9 @@ impl ShellInvocation {
             if !executor.is_shell_option(name) {
                 return Err(format!("{name}: invalid shell option name"));
             }
+            // posix flips (with the set_posix_mode walk and the
+            // __RUBASH_POSIX_MODE sync) live in set::set_shell_option.
             executor.set_shell_option(name, *enabled);
-            // Keep the environment bridge in sync for -o posix, the same way
-            // rubash's own binary entry does for -o posix -c ...
-            if name == "posix" {
-                executor.set_env("__RUBASH_POSIX_MODE", if *enabled { "1" } else { "0" });
-            }
         }
         for (name, enabled) in &self.shopt_flags {
             if !executor.set_shopt_option(name, *enabled) {

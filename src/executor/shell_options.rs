@@ -735,47 +735,9 @@ impl Executor {
                         self.shell_state.variables.remove("IGNOREEOF");
                     }
                 }
-                if option_name == "posix" {
-                    self.shell_state.env_vars.insert(
-                        "__RUBASH_POSIX_MODE".to_string(),
-                        if enabled { "1" } else { "0" }.to_string(),
-                    );
-                    // GNU general.c:98-128 posix_initialize: entering posix
-                    // mode turns on expand_aliases (among other shopts) and
-                    // saves the prior values; leaving restores the saved set
-                    // or the noninteractive default (off).
-                    if enabled {
-                        let prior = self.alias_expansion_enabled();
-                        self.shell_state.env_vars.insert(
-                            "__RUBASH_POSIX_SAVED_EXPAND_ALIASES".to_string(),
-                            if prior { "1" } else { "0" }.to_string(),
-                        );
-                        crate::builtins::shopt::set_option(
-                            &mut self.shell_state.env_vars,
-                            "expand_aliases",
-                            true,
-                        );
-                    } else {
-                        match self
-                            .shell_state
-                            .env_vars
-                            .remove("__RUBASH_POSIX_SAVED_EXPAND_ALIASES")
-                        {
-                            Some(saved) => crate::builtins::shopt::set_option(
-                                &mut self.shell_state.env_vars,
-                                "expand_aliases",
-                                saved == "1",
-                            ),
-                            // No saved state: noninteractive default is off
-                            // (interactive_shell is 0 here).
-                            None => crate::builtins::shopt::set_option(
-                                &mut self.shell_state.env_vars,
-                                "expand_aliases",
-                                false,
-                            ),
-                        }
-                    }
-                }
+                // The posix derived-option walk (set_posix_mode ->
+                // posix_initialize) lives in set::set_shell_option, the
+                // single funnel every posix setter uses.
                 index += 2;
                 continue;
             }

@@ -198,10 +198,14 @@ impl Executor {
     }
 
     /// GNU set.def:330-352 get_current_options: a bitmap over every `set -o`
-    /// option (letter flags and binary options alike). Serialized as
-    /// `name=0|1` pairs for the `-` local's value.
+    /// option (letter flags and binary options alike) plus — set.def:352 —
+    /// the posix_vars snapshot appended by get_posix_options (general.c:138),
+    /// which set_current_options restores after the option walk
+    /// (set.def:386 set_posix_options). Serialized as `name=0|1` pairs for
+    /// the `-` local's value; the posix_vars tail uses a `posixvar:` prefix
+    /// so it can never collide with a `set -o` option name.
     pub(in crate::executor) fn current_options_bitmap(&self) -> String {
-        crate::builtins::set::shell_option_names()
+        let mut entries: Vec<String> = crate::builtins::set::shell_option_names()
             .map(|name| {
                 format!(
                     "{name}={}",
@@ -209,20 +213,47 @@ impl Executor {
                         as u8
                 )
             })
-            .collect::<Vec<_>>()
-            .join(DATA_DOLLAR_STR)
+            .collect();
+        for name in Self::POSIX_BITMAP_SHOPTS {
+            entries.push(format!(
+                "posixvar:{name}={}",
+                crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, name) as u8
+            ));
+        }
+        entries.join(DATA_DOLLAR_STR)
     }
+
+    /// GNU general.c:82-92 posix_vars: the shopt-level variables the posix
+    /// walk (posix_initialize) flips, snapshotted into the `-` local bitmap
+    /// and restored verbatim by set.def:386 set_posix_options.
+    const POSIX_BITMAP_SHOPTS: [&'static str; 5] = [
+        "interactive_comments",
+        "sourcepath",
+        "expand_aliases",
+        "inherit_errexit",
+        "shift_verbose",
+    ];
 
     /// GNU set.def:358-386 set_current_options: apply the bitmap saved by a
     /// `-` local — only options whose state differs are flipped, and the
     /// binary-option side effects run with them (set.def:388-399
-    /// set_ignoreeof binds IGNOREEOF=10 / unbinds it).
+    /// set_ignoreeof binds IGNOREEOF=10 / unbinds it). The posixvar: tail is
+    /// applied last, directly (set.def:386 set_posix_options assigns the
+    /// posix_vars without rerunning the option side effects), which is what
+    /// undoes the posix walk's sticky flips inside the saved frame.
     fn apply_options_bitmap(&mut self, bitmap: &str) {
+        let mut posixvars: Vec<(&str, bool)> = Vec::new();
         for entry in bitmap.split(DATA_DOLLAR) {
             let Some((name, state)) = entry.split_once('=') else {
                 continue;
             };
             let enabled = state == "1";
+            if let Some(shopt_name) = name.strip_prefix("posixvar:") {
+                if Self::POSIX_BITMAP_SHOPTS.contains(&shopt_name) {
+                    posixvars.push((shopt_name, enabled));
+                }
+                continue;
+            }
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, name)
                 == enabled
             {
@@ -241,12 +272,12 @@ impl Executor {
                     self.shell_state.variables.remove("IGNOREEOF");
                 }
             }
-            if name == "posix" {
-                self.shell_state.env_vars.insert(
-                    "__RUBASH_POSIX_MODE".to_string(),
-                    if enabled { "1" } else { "0" }.to_string(),
-                );
-            }
+            // posix flips carry the set_posix_mode walk inside
+            // set::set_shell_option (see options.rs), including the
+            // __RUBASH_POSIX_MODE sync.
+        }
+        for (name, enabled) in posixvars {
+            crate::builtins::shopt::set_option(&mut self.shell_state.env_vars, name, enabled);
         }
     }
 
