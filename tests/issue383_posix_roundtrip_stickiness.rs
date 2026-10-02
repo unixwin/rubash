@@ -24,6 +24,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+#[allow(dead_code)] // stderr kept for matrix debugging; not every case asserts it
 struct RunOutcome {
     code: Option<i32>,
     stdout: String,
