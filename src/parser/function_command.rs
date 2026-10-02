@@ -738,7 +738,7 @@ fn parse_function_compound_body(tokens: &[Token], start: usize) -> Option<(Comma
         "if" => parse_if_command_standalone(tokens, start, None, 0),
         "while" | "until" => parse_loop_command(tokens, start, None, 0),
         "case" => parse_case_command(tokens, start, None, 0),
-        "select" => parse_select_command(tokens, start),
+        "select" => parse_select_command(tokens, start, None, 0),
         "coproc" => parse_coproc_command(tokens, start),
         "[[" => parse_conditional_command(tokens, start),
         _ => None,

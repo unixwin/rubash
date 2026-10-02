@@ -1470,7 +1470,12 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         && token.value == "select"
         && command_allows_compound_start(&state.current_cmd)
     {
-        if let Some((select_cmd, next_i)) = parse_select_command(tokens, i) {
+        if let Some((select_cmd, next_i)) = parse_select_command(
+            tokens,
+            i,
+            state.diagnostic_text.as_ref(),
+            state.source_line_offset,
+        ) {
             push_compound_command(state, select_cmd);
             return Some(next_i);
         }
@@ -2492,7 +2497,7 @@ pub(super) fn parse_time_prefixed_compound_command(
     } else if is_keyword(tokens, i, "case") {
         parse_case_command(tokens, i, None, 0)?
     } else if is_keyword(tokens, i, "select") {
-        parse_select_command(tokens, i)?
+        parse_select_command(tokens, i, None, 0)?
     } else if is_keyword(tokens, i, "coproc") {
         parse_coproc_command(tokens, i)?
     } else if let Some(parsed) = parse_function_command(tokens, i) {

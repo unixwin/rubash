@@ -1,7 +1,12 @@
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
-pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+pub(super) fn parse_select_command(
+    tokens: &[Token],
+    start: usize,
+    source: Option<&std::rc::Rc<str>>,
+    source_line_offset: usize,
+) -> Option<(CommandNode, usize)> {
     // Parse `select name [in words ...]; do body; done`
     let variable_token = tokens.get(start + 1)?;
     // GNU keeps the loop variable name as the raw word text — quote removal
@@ -60,6 +65,39 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
             }
             if select_brace_body_start(tokens, i) {
                 return None;
+            }
+            // GNU parse.y:1037-1054 wordlist admits only WORD tokens: a
+            // bare `(' in the list is `syntax error near unexpected token
+            // `(''. read_token_word absorbs the group into the word ONLY
+            // while the extglob shopt is on (parse.y:5466), so with the
+            // gate closed `select x in a @(b|c)' leaves the `(' as its own
+            // token and this position must reject it (rubash#386) exactly
+            // as simple-command position already does; a plain
+            // `select x in a (b)' is the same grammar slot.
+            if tokens[i].kind == TokenKind::Keyword
+                && tokens[i].value == "("
+                && tokens[i].raw == "("
+            {
+                let mut command = CommandNode::new();
+                command.line = tokens.get(start).map(|token| token.position);
+                command.insert_assignment(
+                    "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+                    format!(
+                        "({}{}",
+                        crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+                        tokens[i].position
+                    ),
+                );
+                command.insert_assignment(
+                    "__RUBASH_PARSE_SOURCE__".to_string(),
+                    super::parse_loop::offending_line_text(
+                        tokens,
+                        i,
+                        source.map(|rc| &**rc),
+                        source_line_offset,
+                    ),
+                );
+                return Some(finish_compound_command(command, tokens, tokens.len()));
             }
             if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
                 let raw = if next_i == i + 1 {
