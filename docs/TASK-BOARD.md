@@ -343,3 +343,10 @@
 - **wt44/niu365**：#365 niu 层 -C 路由递归 + omb-compat 垫片（对照真实 OMB lib 逐函数）
 - **wt44/parse4**：nvm 10.3x 的 parse 侧——WordScans 迁移（GNU parse 期零扫描）+store 克隆削减+body-reparse 缓存评估
 - 在途共六车道：pool1/pool2/optionb/olddebt/niu365/parse4
+
+## 2026-10-03 II：defaults-as-floor 裁定 + wt45/floor 车道
+
+- **Owner 裁定**：自有插件系统/配置/默认值（niu theme/prompt/补全）降级为地板——判定序=用户 rc 显式 > 已启用外部框架（OMB/bash-it/starship）> 产品裸默认；rc 顺序=niu 缺省块早且条件化、外部框架块在后，外部后到者胜绝不反向覆盖
+- **wt45/floor**：审计 prompt 链/rc 结构/缺省生效点→槽位认领模型+rc 顺序契约+真装 OMB/starship 的冲突实证钉死测试+设计文档 14.5
+- 与打地鼠禁令的接口：框架识别走 registry/rc 托管块（正确路径），不扩 env-PS1 模式检测
+- 七车道并行：pool1/pool2/optionb/olddebt/niu365/parse4/floor
