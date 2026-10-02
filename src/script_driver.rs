@@ -8,6 +8,7 @@
 //! `set -o histexpand` scripts lose `!!`/`!str`/word-designator expansion
 //! exactly like a spawned rubash.exe would not.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fs;
 use std::io;
@@ -537,6 +538,10 @@ fn fnbody_signature_before(chars: &[char], delimiter: usize, pending: &str) -> b
 /// Signature forms shared by stdin_source_has_unclosed_function_delimited_body
 /// (the oracle) and the incremental FnBody scanner (perf9).
 fn function_body_opener_signature(signature: &str) -> bool {
+    // Word-initial unquoted `#` comment spans never become tokens (the
+    // strip helper below), so a head like `function d # note` still reads
+    // as a signature awaiting its body delimiter (rubash#388).
+    let signature = strip_word_initial_comment_spans(signature);
     // Same fall-through as stdin_source_is_function_signature: a
     // `function f()` header peels to `function f`, which is not a single
     // WORD, so the keyword-form check below must still run
@@ -1611,8 +1616,109 @@ fn function_keyword_operand_name(operand: &str) -> &str {
     }
 }
 
+/// Strip every word-initial unquoted `#` comment SPAN — from the `#`
+/// through end of line, the newline kept as the line separator — from a
+/// function-head candidate text. GNU read_token's comment rule (the `#`
+/// branch of read_token's fetch loop, parse.y:3631-3644: a `#` read at
+/// token start, `!interactive || interactive_comments`, discards until
+/// EOL) and read_token_word's word-start test (parse.y:3937-3940:
+/// `retind == 0` or the previous word char is a newline or shellblank)
+/// keep `function NAME<TAB># note` a function head awaiting its body —
+/// the comment never becomes a token, so the group-completeness scanners
+/// must not let it defeat the signature predicate (rubash#388).
+///
+/// Word-initial means token-initial: after IFS blanks AND after each
+/// shell metacharacter `; & | ( ) < >` (every one of those is its own
+/// single-character token in read_token's dispatch, so the next `#` is
+/// fetched at token start — verified `f()# c` defines f, and
+/// `echo a;#b` comments, on GNU 5.3.0 script files). A `#` glued into a
+/// word (`d#x`) is name text; quote interiors are inert.
+///
+/// Spans are cut PER LINE, never to end of text: a head line's comment
+/// hides only its own line, so a complete definition whose head carries
+/// a comment still fails the head-only shape once its body lines
+/// follow (cutting to end of text would glue the whole script into one
+/// group — `function d # c\n{ :; }\nread x` must close at `}` so the
+/// trailing `read` consumes the next script line like GNU).
+fn strip_word_initial_comment_spans(text: &str) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut word_start = true;
+    let mut stripped: Option<String> = None;
+    let mut copy_from = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+            word_start = false;
+            index += 1;
+            continue;
+        }
+        if single {
+            if byte == b'\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            match byte {
+                b'"' => double = false,
+                b'\\' => escaped = true,
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\\' => {
+                escaped = true;
+                word_start = false;
+            }
+            b'\'' => {
+                single = true;
+                word_start = false;
+            }
+            b'"' => {
+                double = true;
+                word_start = false;
+            }
+            b' ' | b'\t' | b'\r' | b'\n' | b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>' => {
+                word_start = true
+            }
+            b'#' if word_start => {
+                let out = stripped.get_or_insert_with(|| String::with_capacity(text.len()));
+                out.push_str(&text[copy_from..index]);
+                // The comment runs through EOL (parse.y:3634
+                // discard_until('\n')); the newline itself stays as the
+                // line separator.
+                let mut end = index + 1;
+                while end < bytes.len() && bytes[end] != b'\n' {
+                    end += 1;
+                }
+                copy_from = end;
+                index = end;
+                continue;
+            }
+            _ => word_start = false,
+        }
+        index += 1;
+    }
+    match stripped {
+        Some(mut out) => {
+            out.push_str(&text[copy_from..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(text),
+    }
+}
+
 fn stdin_source_is_function_signature(source: &str) -> bool {
-    let trimmed = source.trim();
+    let stripped = strip_word_initial_comment_spans(source);
+    let trimmed = stripped.trim();
     // `name ()` / `name()` signature: peel the trailing parens with
     // optional whitespace (`'a b c' ( )' is still a signature — GNU's
     // grammar accepts any WORD; validity is judged at exec time). A
