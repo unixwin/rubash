@@ -38,7 +38,11 @@ fn test_nested_quotes_in_double() {
     let input = "echo \"it's a 'test'\"";
     let tokens = tokenize(input);
     assert_eq!(tokens.len(), 2);
-    assert_eq!(tokens[1].value, "it's a 'test'");
+    // wt33 (#373): single quotes inside a double-quoted word ride in
+    // token.value as the \x17 DATA_SINGLE_QUOTE carrier; execution strips
+    // them (probe wt33-373/run/F01_lexer_carrier_execution, byte-identical
+    // to GNU 5.3.0: `printf '[%s]\n' "it's a 'test'"` -> [it's a 'test']).
+    assert_eq!(tokens[1].value, "it\u{17}s a \u{17}test\u{17}");
 }
 
 #[test]
@@ -72,7 +76,11 @@ fn test_multiline_ansi_c_quote_with_escaped_single_quote_is_one_word() {
     let tokens = tokenize("echo $'foo\\'\nbar'");
     assert_eq!(tokens.len(), 2);
     assert_eq!(tokens[0].value, "echo");
-    assert_eq!(tokens[1].value, "foo'\nbar");
+    // wt33 (#373): $'...' quoting rides in token.value as the
+    // \u{E010}/\u{E401} PUA carriers; execution decodes (probe
+    // wt33-373/run/F02_ansi_c_multiline_word, byte-identical to GNU 5.3.0:
+    // the multiline ansi-c word prints `foo'` / `bar`).
+    assert_eq!(tokens[1].value, "foo\u{e010}\u{e401}\nbar");
     assert_eq!(tokens[1].raw, "$'foo\\'\nbar'");
 }
 
@@ -92,7 +100,10 @@ fn test_variable_with_adjacent_empty_quotes_uses_word_quote_removal() {
 
     assert_eq!(tokens.len(), 2);
     assert_eq!(tokens[1].kind, TokenKind::Word);
-    assert_eq!(tokens[1].value, "$v");
+    // wt33 (#373): the empty-quote pair leaves a \x13 marker in token.value
+    // (quote-removal bookkeeping); execution drops it (probe
+    // wt33-373/run/F01 line 2-3: `v=VV; printf '[%s]\n' $v''` -> [VV]).
+    assert_eq!(tokens[1].value, "$v\u{13}");
     assert_eq!(tokens[1].raw, "$v''");
 }
 
