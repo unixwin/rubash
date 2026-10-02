@@ -557,17 +557,35 @@ impl Executor {
 
     fn expand_compound_element_tilde(&self, token: &str, expand_after_colon: bool) -> String {
         const DQ_DATA: &'static str = crate::executor::markers::ASSIGN_DATA_DQUOTE_STR;
+        // rubash#391: the `[k]=` split must mirror read_token_word's
+        // element arm (parse.y:5635-5651) — the subscript ends at the
+        // quote-aware matched `]` (parse_matched_pair P_ARRAYSUB: a quoted
+        // or escaped `]` is data), and only an `=` directly after that
+        // closer makes the element `[sub]=value`. The old plain
+        // `find("]=")` split INSIDE a quoted span (`[ "a]=b" ]` became
+        // subscript ` "a` + value `b" ]` and the element was lost). The
+        // hoisted quote sentinels (E307/E302) count as quotes in the walk.
         let (prefix, element) = if token.starts_with('[') {
-            match token.find("]=") {
-                Some(offset) => {
-                    // The `[k]` subscript takes the same expand_subscript_string
-                    // pass as a direct element assignment (arrayfunc.c:815/865):
-                    // a leading unquoted `~` in the key tilde-expands while
-                    // `:`-tilde stays unarmed (assoc19.sub `[~/key]=v`).
-                    let key = self.expand_compound_tilde_segment(&token[1..offset]);
-                    (format!("[{key}]="), token[offset + 2..].to_string())
+            let chars: Vec<char> = token.chars().collect();
+            let dq: char = crate::executor::markers::ASSIGN_DATA_DQUOTE;
+            let sq: char = crate::executor::markers::ASSIGN_HOISTED_SQUOTE;
+            let shadow: Vec<char> = chars
+                .iter()
+                .map(|c| match c {
+                    c if *c == sq => '\'',
+                    c if *c == dq => '"',
+                    other => *other,
+                })
+                .collect();
+            match crate::lexer::arraysub_span_len(&shadow) {
+                Some(end) if shadow.get(end) == Some(&'=') => {
+                    let key: String = self.expand_compound_tilde_segment(
+                        &chars[1..end - 1].iter().collect::<String>(),
+                    );
+                    let value: String = chars[end + 1..].iter().collect();
+                    (format!("[{key}]="), value)
                 }
-                None => (String::new(), token.to_string()),
+                _ => (String::new(), token.to_string()),
             }
         } else {
             (String::new(), token.to_string())
@@ -3449,6 +3467,42 @@ pub(in crate::executor) fn split_compound_element_words(value: &str) -> Vec<Stri
                 chars.next();
             }
             continue;
+        }
+        // GNU parse.y:5635-5651 read_token_word under PST_COMPASSIGN: an
+        // element-LEADING `[` (token_index == 0, parse.y:5637) consumes the
+        // matched `[...]` span into the element word via parse_matched_pair
+        // (P_ARRAYSUB) — the span's interior, quoted `]`s and spaces
+        // included, is word DATA (strcpy at parse.y:5646), and the word
+        // CONTINUES past the `]` (`[a b]*` is one element ending at the
+        // next shellbreak). Without a following `=` the element is a plain
+        // bracket-glob word whose expansion runs later
+        // (expand_words_no_vars, arrayfunc.c:610: quote removal + pathname
+        // expansion, no field splitting — `[ empty ]` matches a one-char
+        // file, rubash#391).
+        if !single && !double && ch == '[' && token.is_empty() {
+            // The walk must see the hoisted quote sentinels (E307/E302,
+            // expand_assignment_value_hoisting) as the quotes they stand
+            // for — a `]` inside them is data. The pushed token keeps the
+            // sentinels verbatim; only this span walk reads the shadow.
+            let rest: Vec<char> = value[offset..].chars().collect();
+            let shadow: Vec<char> = rest
+                .iter()
+                .map(|c| match c {
+                    c if *c == SQ_DATA => '\'',
+                    c if *c == DQ_DATA => '"',
+                    other => *other,
+                })
+                .collect();
+            if let Some(end) = crate::lexer::arraysub_span_len(&shadow) {
+                token.push_str(&rest[..end].iter().collect::<String>());
+                // The leading `[` was already consumed by the iterator's
+                // `chars.next()`; the walker's span covers it, so advance
+                // only the remaining end - 1 characters.
+                for _ in 1..end {
+                    chars.next();
+                }
+                continue;
+            }
         }
         // GNU parse.y:5466 read_token_word (syntax.h:90-92 PATTERN_CHAR
         // `@ * + ? !`): under the extglob gate a pattern operator directly

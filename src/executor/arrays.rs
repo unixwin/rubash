@@ -669,6 +669,69 @@ fn token_is_subscript_assignment(token: &str) -> bool {
     false
 }
 
+/// (start, length) of the first compound-element assignment operator
+/// (`=' or `+=') that GNU would recognize, as BYTE offsets into `token`:
+/// read_token_word builds each element with the quote-aware `[...]'
+/// subscript span (parse.y:5635-5651, parse_matched_pair P_ARRAYSUB), so
+/// an `=' INSIDE that span or inside quotes is word data
+/// (`[ "a]=b" ]' is one plain element — the old plain split_once misread
+/// it as subscript ` "a' and the storage silently dropped it, rubash#391).
+/// Hoisted quote sentinels (E307/E302) count as quotes.
+fn compound_element_operator_offset(token: &str) -> Option<(usize, usize)> {
+    let dq: char = crate::executor::markers::ASSIGN_DATA_DQUOTE;
+    let sq: char = crate::executor::markers::ASSIGN_HOISTED_SQUOTE;
+    let chars: Vec<char> = token.chars().collect();
+    let shadow: Vec<char> = chars
+        .iter()
+        .map(|c| match c {
+            c if *c == sq => '\'',
+            c if *c == dq => '"',
+            other => *other,
+        })
+        .collect();
+    // Byte offset of each char index (the sentinels differ in width from
+    // the quotes they shadow).
+    let mut byte_offsets = Vec::with_capacity(chars.len() + 1);
+    let mut acc = 0usize;
+    for c in &chars {
+        byte_offsets.push(acc);
+        acc += c.len_utf8();
+    }
+    byte_offsets.push(acc);
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut index = 0usize;
+    // A leading subscript span: the operator can only sit after its closer.
+    if shadow.first() == Some(&'[') {
+        if let Some(end) = crate::lexer::arraysub_span_len(&shadow) {
+            index = end;
+        }
+    }
+    while index < shadow.len() {
+        let ch = shadow[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '+' if !single && !double && shadow.get(index + 1) == Some(&'=') => {
+                return Some((byte_offsets[index], "+=".len()));
+            }
+            '=' if !single && !double => {
+                return Some((byte_offsets[index], "=".len()));
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 /// Restores the lexer carrier bytes (\x14 backslash, \x17 single quote,
 /// \x18 double quote, \x1f `$`, \x1a backtick, ANSI-C quote markers) that
 /// survive into raw assignment tokens, after operator-level quote removal
@@ -772,37 +835,37 @@ pub(super) fn append_array_value(
             }
         }
 
-        if let Some((left, rhs)) = token.split_once("+=") {
-            if let Some(index) = array_assignment_index(left, &entries, env_vars) {
-                let current = entries.get(&index).cloned().unwrap_or_default();
-                let rhs = finalize_comsub_element(&dequote_compound_element_rhs(rhs));
-                let value = if integer {
-                    // GNU make_array_variable_value (arrayfunc.c:173-195) with
-                    // ASS_APPEND: both operands go through make_variable_value
-                    // → evalexp (variables.c:2920-2946), the full evaluator.
-                    (eval_conditional_arith_value(&current, env_vars).unwrap_or(0)
-                        + eval_conditional_arith_value(&rhs, env_vars).unwrap_or(0))
-                    .to_string()
-                } else {
-                    append_scalar_value(&current, &rhs)
-                };
-                entries.insert(index, value);
-                next_index = index + 1;
-                continue;
-            }
-            if array_assignment_has_subscript(left) {
-                continue;
-            }
-        }
-
-        if let Some((left, rhs)) = token.split_once('=') {
-            if let Some(index) = array_assignment_index(left, &entries, env_vars) {
+        if let Some((op_start, op_len)) = compound_element_operator_offset(&token) {
+            let left = &token[..op_start];
+            let rhs = &token[op_start + op_len..];
+            if op_len == 2 {
+                // `[sub]+=' append form.
+                if let Some(index) = array_assignment_index(left, &entries, env_vars) {
+                    let current = entries.get(&index).cloned().unwrap_or_default();
+                    let rhs = finalize_comsub_element(&dequote_compound_element_rhs(rhs));
+                    let value = if integer {
+                        // GNU make_array_variable_value (arrayfunc.c:173-195) with
+                        // ASS_APPEND: both operands go through make_variable_value
+                        // → evalexp (variables.c:2920-2946), the full evaluator.
+                        (eval_conditional_arith_value(&current, env_vars).unwrap_or(0)
+                            + eval_conditional_arith_value(&rhs, env_vars).unwrap_or(0))
+                        .to_string()
+                    } else {
+                        append_scalar_value(&current, &rhs)
+                    };
+                    entries.insert(index, value);
+                    next_index = index + 1;
+                    continue;
+                }
+                if array_assignment_has_subscript(left) {
+                    continue;
+                }
+            } else if let Some(index) = array_assignment_index(left, &entries, env_vars) {
                 let decoded = finalize_comsub_element(&dequote_compound_element_rhs(rhs));
                 entries.insert(index, decoded);
                 next_index = index + 1;
                 continue;
-            }
-            if array_assignment_has_subscript(left) {
+            } else if array_assignment_has_subscript(left) {
                 continue;
             }
         }
@@ -1085,7 +1148,35 @@ fn token_has_unquoted_whitespace(token: &str) -> bool {
     let mut extglob_depth = 0usize;
     let mut prev_ch: Option<char> = None;
     let mut prev_escaped = false;
-    for ch in token.chars() {
+    // rubash#391: an element-LEADING `[` consumes its matched `[...]` span
+    // the same way (parse.y:5635-5651, parse_matched_pair P_ARRAYSUB +
+    // strcpy) — the span's interior is word data, so its spaces are not
+    // field boundaries either (`[ empty ]` is ONE element that pathname
+    // expansion owns). The hoisted quote sentinels (E307/E302,
+    // expand_assignment_value_hoisting) count as quotes in the span walk.
+    let dq: char = crate::executor::markers::ASSIGN_DATA_DQUOTE;
+    let sq: char = crate::executor::markers::ASSIGN_HOISTED_SQUOTE;
+    let chars: Vec<char> = token.chars().collect();
+    let shadow: Vec<char> = chars
+        .iter()
+        .map(|c| match c {
+            c if *c == sq => '\'',
+            c if *c == dq => '"',
+            other => *other,
+        })
+        .collect();
+    let mut skip: Option<usize> = None;
+    if !shadow.is_empty() && shadow[0] == '[' {
+        if let Some(end) = crate::lexer::arraysub_span_len(&shadow) {
+            skip = Some(end);
+        }
+    }
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if let Some(end) = skip {
+            if index < end {
+                continue;
+            }
+        }
         if escaped {
             escaped = false;
             prev_ch = Some(ch);

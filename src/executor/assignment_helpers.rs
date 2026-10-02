@@ -776,6 +776,29 @@ impl Iterator for StorageWordIter<'_> {
                 }
                 continue;
             }
+            // GNU parse.y:5635-5651 read_token_word under PST_COMPASSIGN: an
+            // element-LEADING `[` (token_index == 0, parse.y:5637) consumes
+            // the matched `[...]` span into the word via parse_matched_pair
+            // (P_ARRAYSUB) — quoted `]`s and the span's spaces are word
+            // DATA (strcpy at parse.y:5646), the word continues past the
+            // closer, and without a trailing `=` the element is a plain
+            // bracket-glob word (expand_words_no_vars does quote removal +
+            // pathname expansion with no field splitting, arrayfunc.c:610
+            // — `[ empty ]` matches a one-char file, rubash#391).
+            if ch == '[' && !in_single && !in_double && word.is_empty() {
+                let rest_offset = self.offset + relative;
+                let rest: Vec<char> = self.input[rest_offset..].chars().collect();
+                if let Some(end) = crate::lexer::arraysub_span_len(&rest) {
+                    let consumed: String = rest[..end].iter().collect();
+                    word.push_str(&consumed);
+                    // The leading `[` was already consumed by the iterator;
+                    // the walker's span covers it, so advance end - 1.
+                    for _ in 1..end {
+                        chars.next();
+                    }
+                    continue;
+                }
+            }
             // GNU parse.y:5466 read_token_word (syntax.h:90-92 PATTERN_CHAR
             // `@ * + ? !`): under the extglob gate a pattern operator
             // directly before `(` consumes the balanced group into the

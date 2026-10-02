@@ -196,6 +196,30 @@ pub fn split_compound_assignment_words(inner: &str) -> Vec<String> {
             continue;
         }
 
+        // GNU parse.y:5635-5651 read_token_word under PST_COMPASSIGN: an
+        // element-LEADING `[` (token_index == 0, parse.y:5637) consumes the
+        // matched `[...]` span into the element word via parse_matched_pair
+        // (P_ARRAYSUB) — the span's interior, quoted `]`s and spaces
+        // included, is word DATA (strcpy at parse.y:5646) and the word
+        // continues past the closer (`[a b]*` is one element). Without a
+        // following `=` the element stays a plain bracket-glob word whose
+        // pathname expansion runs at execution (expand_words_no_vars,
+        // arrayfunc.c:610: quote removal + glob, no field splitting —
+        // `[ empty ]` matches a one-char file, rubash#391).
+        if ch == '[' && !single && !double && current.is_empty() {
+            let rest: Vec<char> = inner[offset..].chars().collect();
+            if let Some(end) = crate::lexer::arraysub_span_len(&rest) {
+                current.extend(rest[..end].iter());
+                // The leading `[` was already consumed by the loop's
+                // iterator; the walker's span covers it, so advance only
+                // the remaining end - 1 characters.
+                for _ in 1..end {
+                    chars.next();
+                }
+                continue;
+            }
+        }
+
         // GNU parse.y:5466 read_token_word (with syntax.h:90-92
         // PATTERN_CHAR `@ * + ? !`): under the live extglob gate a
         // pattern operator immediately followed by `(` consumes the
