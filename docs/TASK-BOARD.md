@@ -245,3 +245,14 @@
 - **wt33/testmaint**：#373+#374 过时断言三分法清理（禁为绿灯改产品）
 - **wt34/perf2**：CURRENT_LINE Cell 化 + null 8.8x 地板 + parse/feeder 桶（军令状 ≤2x 冲 1x）
 - 监控：winget 444854 全绿等版主；1.2.5 攒包中（等本波回收）
+
+## 2026-10-02 深夜 II：wt31/wt32/wt34/wt35/wt36 五车道回收（6a5ba305 CI 绿）
+
+- **#380 终结**（575fdaf8+d9e39a56）：双根因=continuation 孪生机 comsub 体首词无 word boundary（GNU 体=全新命令流）+ esac 前瞻启发式判反 `;; esac)`（GNU 是后看 last_read_token 规则）。37 形态矩阵+扩展电池字节同 GNU；车道 aggregation 打点钉死根因 1
+- **#383 关**（d684a7ae）：set_posix_mode walk 移植（enable 五项/disable 只复位两项、inherit_errexit 粘滞=GNU）
+- **#382 关**（97554588+6a5ba305）：双硬杀臂 SIGPIPE 形态 141（unix 141<<8 修复 CI cross-target）；WinuxCmd yes 退出码差异→WinuxCmd#1142
+- **niubash#154 关**（引擎 1229af6c）：车道重测推翻 rescope 两条"GNU 事实"（真值：末命令=1 且诊断**会**打印）；真分歧=comsub 体内致命展开 -c 下 127→修为 1（subst.c:7393-7404）
+- **niubash#117 关**（2f388cd）：外域 Git Bash PS1 在 rc 前 discard；活体复现干净
+- **#124 分层定调**（评注+决策）：Git Bash→niu argv 边界=非我方（MSYS_NO_PATHCONV=1 用户侧，README 已有注）；混形 argv=引擎设计缺口（Option B 立项=MSYS 模型按孩子方言，A 否决）；WinuxCmd#1140/#1141/#1142 上游三单；**#160 开**（-c 未闭合引号静默 rc=1）
+- **wt34/perf2 回收**（310fc49f+dc7bef8e+e2e4f55f）：CURRENT_LINE 单一受控写入者（Cell 经架构论证不采纳）+ bind_underscore 等值跳过——p-null -4.7%（6.3x→6.0x）、p-f1 -5.7%；诚实未达 2x，深子系统三阶段计划落 PERF-BASELINE
+- wt33/testmaint 在途；06ae9463（perf 批）CI 在跑
