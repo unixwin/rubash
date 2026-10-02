@@ -1695,12 +1695,19 @@ pub(super) fn push_unexpected_token_error_named(
     // parsed from the same line never run (`{ a; } { b; }' does not run
     // `a').  Drop the trailing commands parsed from the offending line.
     let error_line = tokens[i].position;
-    while state
-        .ast
-        .commands
-        .last()
-        .is_some_and(|command| command.line == Some(error_line))
-    {
+    while state.ast.commands.last().is_some_and(|command| {
+        command.line == Some(error_line)
+            // rubash#385: the failed command may SPAN lines — the pipeline
+            // whose first stage opened on an earlier line (`case x in\n
+            // esac|y) ...`: yyerror discards the whole in-progress command,
+            // so a stage still awaiting its continuation (pipe/and_or
+            // linkage flag set) belongs to the discarded command whatever
+            // its line. The flag is only ever set on a NON-final stage
+            // (the stage after `|'/`&&' has not arrived), so completed
+            // pipelines and and-or lists are never popped by this arm.
+            || command.pipe.is_some()
+            || command.and_or.is_some()
+    }) {
         state.ast.commands.pop();
     }
     // GNU echoes only the offending input line, from its first

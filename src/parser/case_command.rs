@@ -406,11 +406,16 @@ pub(super) fn parse_case_command(
 fn case_stray_delimiter_index(tokens: &[Token], esac_index: usize) -> Option<usize> {
     match tokens.get(esac_index + 1).map(|token| token.value.as_str()) {
         Some(")") | Some("(") => Some(esac_index + 1),
-        Some("|") => tokens[esac_index + 2..]
-            .iter()
-            .position(|token| token.value == ")")
-            .map(|offset| esac_index + 2 + offset)
-            .or(Some(esac_index + 1)),
+        // rubash#385: `|` after a finished case is a PIPELINE connector,
+        // never a case-level stray — GNU parse.y:855-856 makes
+        // case_command a shell_command, which composes the pipeline
+        // production (`command: shell_command ...` feeding
+        // `pipeline: ... '|' pipeline`), so `case x in esac | cat` runs
+        // the pipeline (verified vs WSL GNU 5.3.0: rc 0) and a malformed
+        // tail (`case x in esac|y) echo hi;;`) is rejected by the OUTER
+        // grammar's stray-`)` rule at that `)` — exactly GNU's diagnostic.
+        // Blaming the `|` itself here rejected every
+        // `case ... esac | cmd` pipeline (rubash#385).
         _ => None,
     }
 }

@@ -388,7 +388,6 @@ mod pipeline_tests {
     // Tracked by the wt33 case-pipeline issue. Do not flip this expectation
     // to the error form — that would cement the divergence.
     #[test]
-    #[ignore = "unixwin/rubash#385: case command as pipeline stage rejected (GNU accepts)"]
     fn test_case_command_pipeline_stage() {
         let input = "case $word in yes) echo yes ;; *) echo no ;; esac | grep yes";
         let tokens = tokenize(input);
