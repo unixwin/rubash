@@ -215,6 +215,7 @@ impl Executor {
                     &chars,
                     index + 2,
                     quote,
+                    quote == '\'',
                 ) {
                     let body: String = chars[index + 2..end].iter().collect();
                     if quote == '\'' {
@@ -226,26 +227,45 @@ impl Executor {
                     }
                     index = end + 1;
                     continue;
+                } else {
+                    // Unclosed unit: advance as data rather than spin.
+                    output.push(chars[index]);
+                    index += 1;
+                    continue;
                 }
             }
 
             if chars[index] == '\'' {
-                if let Some(end) =
-                    crate::executor::compound_exec::quoted_case_pattern_end(&chars, index + 1, '\'')
-                {
+                if let Some(end) = crate::executor::compound_exec::quoted_case_pattern_end(
+                    &chars,
+                    index + 1,
+                    '\'',
+                    false,
+                ) {
                     output.push_str(&chars[index + 1..end].iter().collect::<String>());
                     index = end + 1;
+                    continue;
+                } else {
+                    output.push(chars[index]);
+                    index += 1;
                     continue;
                 }
             }
 
             if chars[index] == '"' {
-                if let Some(end) =
-                    crate::executor::compound_exec::quoted_case_pattern_end(&chars, index + 1, '"')
-                {
+                if let Some(end) = crate::executor::compound_exec::quoted_case_pattern_end(
+                    &chars,
+                    index + 1,
+                    '"',
+                    false,
+                ) {
                     let body: String = chars[index + 1..end].iter().collect();
                     expand_segment(self, &body, &mut output);
                     index = end + 1;
+                    continue;
+                } else {
+                    output.push(chars[index]);
+                    index += 1;
                     continue;
                 }
             }
@@ -2659,6 +2679,36 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
             }
         }
         match source_ch {
+            // GNU parse.y:5541-5549 (read_token_word, shellexp branch): `$'`
+            // is ONE self-contained ANSI-C quoted unit — parse_matched_pair
+            // with P_ALLOWESC lets a backslash escape ANY following
+            // character, including the closing `'`. The comsub body extent
+            // is decided by that same reader (parse.y:4451 parse_comsub
+            // runs yyparse with shell_eof_token = `)`), so in
+            // `$(echo foo$'\''bar)` the unit ends at its third quote and
+            // the following `)` is the substitution closer (rubash#384).
+            // The lexer scanner (skip.rs skip_cmd_subst `$'` arm) already
+            // consumes the unit; without the same invariant here `\'`
+            // flips plain single-quote state and the closer looks quoted,
+            // producing a spurious `unexpected EOF while looking for
+            // matching `)'`.
+            '$' if !single && !double && chars.peek().copied() == Some('\'') => {
+                source.push(source_ch);
+                source.push(chars.next().expect("ANSI-C quote opener"));
+                let mut ansi_escaped = false;
+                while let Some(ansi_ch) = chars.next() {
+                    source.push(ansi_ch);
+                    if ansi_escaped {
+                        ansi_escaped = false;
+                        continue;
+                    }
+                    if ansi_ch == '\\' {
+                        ansi_escaped = true;
+                    } else if ansi_ch == '\'' {
+                        break;
+                    }
+                }
+            }
             '\'' if !double => {
                 single = !single;
                 token_boundary = false;

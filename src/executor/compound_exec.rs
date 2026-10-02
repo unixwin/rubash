@@ -2612,7 +2612,7 @@ fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String)
     while index < chars.len() {
         if chars[index] == '$' && matches!(chars.get(index + 1), Some('\'' | '"')) {
             let quote = chars[index + 1];
-            if let Some(end) = quoted_case_pattern_end(&chars, index + 2, quote) {
+            if let Some(end) = quoted_case_pattern_end(&chars, index + 2, quote, quote == '\'') {
                 let body = chars[index + 2..end].iter().collect::<String>();
                 if quote == '\'' {
                     output.push_str(&decode_ansi_c_escapes(&body));
@@ -2621,12 +2621,18 @@ fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String)
                 }
                 index = end + 1;
                 continue;
+            } else {
+                // No closer: an unclosed quote is a parse error before
+                // execution in GNU; never spin the walker on it.
+                output.push(chars[index]);
+                index += 1;
+                continue;
             }
         }
 
         if matches!(chars[index], '\'' | '"') {
             let quote = chars[index];
-            if let Some(end) = quoted_case_pattern_end(&chars, index + 1, quote) {
+            if let Some(end) = quoted_case_pattern_end(&chars, index + 1, quote, false) {
                 let body = chars[index + 1..end].iter().collect::<String>();
                 if quote == '\'' {
                     // GNU subst.c:11882-11886: every byte of a '...' span is
@@ -2647,6 +2653,10 @@ fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String)
                     output.push_str(&expand_word(&body));
                 }
                 index = end + 1;
+                continue;
+            } else {
+                output.push(chars[index]);
+                index += 1;
                 continue;
             }
         }
@@ -2722,7 +2732,7 @@ fn quote_aware_case_pattern(raw: &str, mut expand_word: impl FnMut(&str) -> Stri
     while index < chars.len() {
         if chars[index] == '$' && matches!(chars.get(index + 1), Some('\'' | '"')) {
             let quote = chars[index + 1];
-            if let Some(end) = quoted_case_pattern_end(&chars, index + 2, quote) {
+            if let Some(end) = quoted_case_pattern_end(&chars, index + 2, quote, quote == '\'') {
                 let body = chars[index + 2..end].iter().collect::<String>();
                 let literal = if quote == '\'' {
                     decode_ansi_c_escapes(&body)
@@ -2732,12 +2742,18 @@ fn quote_aware_case_pattern(raw: &str, mut expand_word: impl FnMut(&str) -> Stri
                 output.push_str(&escape_case_pattern_literal(&literal));
                 index = end + 1;
                 continue;
+            } else {
+                // Unclosed unit: parse error before execution in GNU;
+                // advance as data rather than spin.
+                output.push(chars[index]);
+                index += 1;
+                continue;
             }
         }
 
         if matches!(chars[index], '\'' | '"') {
             let quote = chars[index];
-            if let Some(end) = quoted_case_pattern_end(&chars, index + 1, quote) {
+            if let Some(end) = quoted_case_pattern_end(&chars, index + 1, quote, false) {
                 let body = chars[index + 1..end].iter().collect::<String>();
                 let literal = if quote == '\'' {
                     body
@@ -2758,6 +2774,10 @@ fn quote_aware_case_pattern(raw: &str, mut expand_word: impl FnMut(&str) -> Stri
                 };
                 output.push_str(&escape_case_pattern_literal(&literal));
                 index = end + 1;
+                continue;
+            } else {
+                output.push(chars[index]);
+                index += 1;
                 continue;
             }
         }
@@ -2854,6 +2874,7 @@ pub(in crate::executor) fn quoted_case_pattern_end(
     chars: &[char],
     start: usize,
     quote: char,
+    ansi_c: bool,
 ) -> Option<usize> {
     let mut index = start;
     let mut escaped = false;
@@ -2863,7 +2884,13 @@ pub(in crate::executor) fn quoted_case_pattern_end(
             index += 1;
             continue;
         }
-        if quote == '"' && chars[index] == '\\' {
+        // GNU parse.y:3992-3996 parse_matched_pair: inside a `$'...'`
+        // ANSI-C unit (P_ALLOWESC, set by read_token_word at
+        // parse.y:5559) a backslash sets LEX_PASSNEXT — the next
+        // character, including the closing `'`, is consumed as escaped
+        // data and never ends the span. A plain `'...'` span honors no
+        // escapes, so `ansi_c` is only true for the `$'` caller.
+        if (quote == '"' || ansi_c) && chars[index] == '\\' {
             escaped = true;
             index += 1;
             continue;
