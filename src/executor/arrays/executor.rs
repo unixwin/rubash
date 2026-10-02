@@ -366,6 +366,42 @@ impl Executor {
         )
     }
 
+    /// GNU subst.c param_expand (unbraced `$X`) nameref branch: when the
+    /// nameref cell is a valid array reference ending in `[@]', chk_atstar
+    /// (subst.c:7635-7639) sets quoted_dollar_at under double quotes, so
+    /// `"$ref"` takes the "$@" word boundaries — one word per element.
+    /// Admission mirrors array_at_word_values (whole word, optional
+    /// surrounding quotes / storage prefix); the braced `"${ref}"` and
+    /// `[*]' cells are deliberately excluded (they never set
+    /// quoted_dollar_at).
+    pub(in crate::executor) fn unbraced_nameref_at_word_values(
+        &self,
+        word: &str,
+    ) -> Option<Vec<String>> {
+        let core = word
+            .strip_prefix('"')
+            .and_then(|word| word.strip_suffix('"'))
+            .unwrap_or(word);
+        let core = core.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(core);
+        let name = core.strip_prefix('$')?;
+        // `${ref}` (braced) never runs chk_atstar; only the unbraced form.
+        if name.starts_with('{') || !is_shell_name(name) {
+            return None;
+        }
+        if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
+            return None;
+        }
+        let cell = self.shell_state.env_vars.get(name)?;
+        let base = cell.strip_suffix("[@]")?;
+        // GNU valid_array_reference: base must be a plain identifier (the
+        // subscript is exactly `[@]' here), so the reference re-expands as
+        // an array element list.
+        if !is_shell_name(base) {
+            return None;
+        }
+        Some(self.indirect_target_values(cell))
+    }
+
     pub(in crate::executor) fn array_at_word_values(&self, word: &str) -> Option<Vec<String>> {
         let quoted_array_word =
             (word.starts_with('"') && word.ends_with('"')) || word.starts_with(STORAGE_WORD_PREFIX);

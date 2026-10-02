@@ -1006,6 +1006,23 @@ impl Executor {
         {
             return None;
         }
+        // GNU subst.c param_expand's unbraced `$X' nameref branch: when the
+        // nameref cell is a valid array reference ending in `[@]', chk_atstar
+        // (subst.c:7635-7639) sets quoted_dollar_at under Q_DOUBLE_QUOTES, so
+        // `"$ref"` takes the "$@" word boundaries — one word per element
+        // (`declare -n ref='arr[@]'; recho "$ref"` is three arguments,
+        // nameref18.sub line 80). `[*]' cells never set it (the `*' arm
+        // requires quoted == 0) and a braced `"${ref}"` never calls
+        // chk_atstar, so both keep the single joined word below.
+        if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
+            if let Some(cell) = self.shell_state.env_vars.get(name) {
+                if let Some(base) = cell.strip_suffix("[@]") {
+                    if is_shell_name(base) {
+                        return Some(self.indirect_target_values(cell));
+                    }
+                }
+            }
+        }
         let value = self
             .dynamic_parameter_value(name)
             .or_else(|| self.shell_variable_value(name))
@@ -1407,6 +1424,24 @@ impl Executor {
                 SubstitutionQuoteContext::DoubleQuoted,
             )];
         }
+        // GNU subst.c param_expand (unbraced `$X`) nameref branch (the
+        // find_variable_last_nameref + valid_array_reference cell case):
+        // a nameref whose cell ends in `[@]' runs chk_atstar
+        // (subst.c:7635-7639), which sets quoted_dollar_at under double
+        // quotes — the expansion takes the "$@" word boundaries: one word
+        // per element even inside double quotes (`declare -n
+        // ref='arr[@]'; recho "$ref"` is three arguments, nameref18.sub
+        // line 80). The braced `"${ref}"` never calls chk_atstar and stays
+        // joined, `[*]' cells never set quoted_dollar_at (the `*' arm
+        // requires quoted == 0), and a declaration-builtin assignment
+        // operand joins instead (PF_ASSIGNRHS). Checked BEFORE the
+        // simple-substitution fragment fast path, which would otherwise
+        // splice the joined cell into one word.
+        if !assignment_builtin_receives_assignment_word(cmd, index, word) {
+            if let Some(values) = self.unbraced_nameref_at_word_values(word) {
+                return values;
+            }
+        }
         if let Some(raw) = raw {
             if let Some(values) = self.expand_simple_substitution_fragments(cmd, index, word, raw) {
                 return values;
@@ -1533,6 +1568,23 @@ impl Executor {
                 .is_some_and(|ifs| ifs.is_empty())
         {
             return self.shell_state.positional_params.clone();
+        }
+        if !declare_assignment_word {
+            // GNU param_expand's UNBRACED `$X` nameref branch (subst.c
+            // ~10976-10994): a nameref whose cell is a valid array
+            // reference ending in `[@]' runs chk_atstar (subst.c:7635-7639),
+            // which sets quoted_dollar_at under Q_DOUBLE_QUOTES — the
+            // expansion takes the "$@" word boundaries: one word per
+            // element even inside double quotes (`declare -n
+            // ref='arr[@]'; recho "$ref"` is three arguments, nameref18.sub
+            // line 80). The braced `"${ref}"` does NOT split (its path
+            // never calls chk_atstar), `[*]' cells never set
+            // quoted_dollar_at (the `*' arm requires quoted == 0), and a
+            // declaration-builtin assignment operand joins instead
+            // (PF_ASSIGNRHS, the declare_assignment_word gate above).
+            if let Some(values) = self.unbraced_nameref_at_word_values(word) {
+                return values;
+            }
         }
         if let Some(values) = if declare_assignment_word {
             None
