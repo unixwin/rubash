@@ -882,7 +882,25 @@ impl Executor {
                 let target = self.expand_word(word);
                 if target == "-" {
                     if stdin_remaining.is_none() {
-                        stdin_remaining = Some(self.cat_stdin_operand_bytes(cmd));
+                        // rubash#415 (CI coproc.tests hang): GNU cat streams
+                        // stdin as chunks arrive (cat.c byte-copy loop); a
+                        // buffered drain deadlocks interactive producers —
+                        // coproc.tests runs `coproc { cat - ; }`, writes,
+                        // reads the echo back, and closes the writer much
+                        // later. With identity options and the REAL process
+                        // stdin, flush what earlier operands collected and
+                        // stream; in-memory sources and formatting keep the
+                        // buffered drain (bounded, no cross-process wait).
+                        if options.identity() && self.cat_stdin_is_real_process_stdin(cmd) {
+                            if !output.is_empty() {
+                                self.write_cat_output(cmd, &filter(&output))?;
+                                output.clear();
+                            }
+                            self.stream_cat_stdin_operand(cmd)?;
+                            stdin_remaining = Some(Vec::new());
+                        } else {
+                            stdin_remaining = Some(self.cat_stdin_operand_bytes(cmd));
+                        }
                     }
                     if let Some(bytes) = stdin_remaining.take() {
                         output.extend(bytes);
@@ -1034,6 +1052,40 @@ impl Executor {
         Vec::new()
     }
 
+    /// True when the command's stdin is the real process stdin — the only
+    /// `cat -' source whose buffered drain can block on a live cross-process
+    /// writer (coproc pipes). Mirrors the last-resort arm of
+    /// cat_stdin_operand_bytes.
+    fn cat_stdin_is_real_process_stdin(&self, cmd: &CommandNode) -> bool {
+        if cmd.redirect_in.is_some() || cmd.heredoc.is_some() || cmd.here_string.is_some() {
+            return false;
+        }
+        if self.stdin_string_for_command(cmd).is_some() {
+            return false;
+        }
+        matches!(
+            self.fd_table.read_endpoint(0),
+            None | Some(FdReadEndpoint::InheritedProcessStdin)
+        )
+    }
+
+    /// The `-' operand's streaming copy: read a chunk, emit it, repeat —
+    /// GNU cat.c's byte-copy loop. Identity options only (formatting needs
+    /// whole-stream state).
+    fn stream_cat_stdin_operand(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        use std::io::Read;
+        let mut stdin = std::io::stdin().lock();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = stdin.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            let data = buffer[..count].to_vec();
+            self.write_cat_output(cmd, &data)?;
+        }
+        Ok(())
+    }
     fn stream_inherited_cat(
         &mut self,
         cmd: &CommandNode,

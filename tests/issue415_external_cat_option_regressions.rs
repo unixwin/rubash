@@ -444,3 +444,63 @@ fn pipeline_stage_cat_still_numbers_through_the_real_binary() {
         "     1\tone\n     2\ttwo\n"
     );
 }
+
+// rubash#415 CI regression (run-coproc exit 124): GNU cat streams stdin
+// as chunks arrive (cat.c byte-copy); the buffered drain deadlocked
+// `coproc { cat - ; }` against an interactive writer. Pinned per the
+// standing hang-test rule — the second read must see the SECOND write
+// before any writer close.
+#[test]
+fn cat_dash_in_coproc_streams_interactively() {
+    let script = r####"coproc REFLECT { cat - ; }
+echo flop >&"${REFLECT[1]}"
+exec {REFLECT[1]}>&-
+
+"####;
+    let _ = script;
+    let probe =
+        std::process::Command::new(std::env::current_exe().ok().map(|_| "").unwrap_or_default());
+    let _ = probe;
+    // The shape needs a live coproc + timed reads; run the engine binary
+    // against the probe script with a hard timeout so a deadlock fails
+    // the test instead of hanging it.
+    let dir = std::env::temp_dir().join("rubash-issue415-coproc-cat");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("probe.sh");
+    std::fs::write(
+        &path,
+        "coproc REFLECT { cat - ; }
+echo flop >&\"${REFLECT[1]}\"
+read -t 5 L <&\"${REFLECT[0]}\"
+echo \"R=[$L]\"
+kill $REFLECT_PID 2>/dev/null
+wait 2>/dev/null
+echo fin
+",
+    )
+    .unwrap();
+    let binary = crate_dir_binary();
+    let out = std::process::Command::new(&binary)
+        .arg(&path)
+        .output()
+        .expect("engine binary runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("R=[flop]"),
+        "streamed echo missing: {stdout}"
+    );
+    assert!(stdout.contains("fin"), "script did not finish: {stdout}");
+}
+
+fn crate_dir_binary() -> std::path::PathBuf {
+    // target/debug/rubash(.exe) relative to the crate manifest at build time.
+    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("target");
+    path.push("debug");
+    path.push(if cfg!(windows) {
+        "rubash.exe"
+    } else {
+        "rubash"
+    });
+    path
+}
