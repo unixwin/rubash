@@ -257,6 +257,26 @@ impl Executor {
         {
             return hit;
         }
+        // rubash#375: pure-decimal literal admission, the same class the
+        // mutable variant admits inside eval_indexed_subscript_expression
+        // (GNU arrayfunc.c:1368 array_expand_index -> evalexp: digits are
+        // their own value). This deferred `&self` variant exists to capture
+        // arithmetic WRITES from side-effecting subscripts (`a[i++]`,
+        // subst.c array_variable_part) by cloning the whole variable table
+        // and diffing it after the evaluation; a digits-only literal can
+        // produce no writes (no assignment operator, no operand names),
+        // consults no dynamic variable (no names), draws no RNG, and
+        // cannot fail to parse — skipping the clone+diff+eval pipeline is
+        // byte-identical to running it. Measured ~24us per read under a
+        // DEBUG trap (bats' bats_capture_stack_trace reads
+        // ${BASH_LINENO[i]}-style subscripts per stack frame per firing).
+        if let Some(index) = crate::executor::arithmetic::literal_decimal_subscript(&resolved) {
+            let result = IndexedSubscript::Index(index);
+            if let Some(key) = memo_key {
+                crate::executor::expand_braced_indices::sub_idx_store(key, result);
+            }
+            return result;
+        }
         let overlaid =
             crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
                 &self.shell_state.env_vars,

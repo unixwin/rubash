@@ -121,7 +121,7 @@ pub(in crate::executor) enum TrailingInputKind {
 /// lead (or a lone `0`): arithmetic-evaluates to itself, so the whole
 /// pre-evaluation pipeline is skippable (GNU arrayfunc.c:1368 evalexp on
 /// `a[N]`).
-fn literal_decimal_subscript(resolved: &str) -> Option<i128> {
+pub(in crate::executor) fn literal_decimal_subscript(resolved: &str) -> Option<i128> {
     let text = resolved.trim();
     if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
