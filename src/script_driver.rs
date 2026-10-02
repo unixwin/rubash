@@ -3130,31 +3130,6 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
             }
         }
     }
-    // KNOWN WORKAROUND (do not mistake this for a real fix).
-    //
-    // coproc.tests ends with `exec 4<&${COPROC[0]}-`, `exec >&${COPROC[1]}-`,
-    // `read foo <&4`, `echo $foo >&2`. With `foo` unset the final echo must
-    // emit just a newline on fd 2, and GNU's golden output ends
-    // `...descriptor\n\n`. Rubash runs the command and prints the fd-2
-    // diagnostic but loses that last newline, ending `...descriptor\n`.
-    //
-    // The cause has NOT been isolated. The sequence reproduces byte-identically
-    // in isolation, so it depends on state left by the three earlier coprocs in
-    // that suite (fd/job table state). Gating on the script name is therefore a
-    // stand-in for "the fd-2 newline was dropped", not a principled condition.
-    //
-    // TODO: find the real drop point in the fd-2 write path
-    // (executor/shell_options.rs write_output_fd_redirect / FdWriteEndpoint::
-    // Stderr) and delete this branch.
-    if !interactive
-        && status == 0
-        && executor
-            .get_env("__RUBASH_SCRIPT_NAME")
-            .as_deref()
-            .is_some_and(|script| script.contains("coproc"))
-    {
-        println!();
-    }
     match executor.run_exit_trap_with_status(status) {
         Ok(code) => code,
         Err(ExecuteError::ExitCode(code)) => code,
