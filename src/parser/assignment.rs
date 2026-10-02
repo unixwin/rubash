@@ -196,6 +196,39 @@ pub fn split_compound_assignment_words(inner: &str) -> Vec<String> {
             continue;
         }
 
+        // GNU parse.y:5466 read_token_word (with syntax.h:90-92
+        // PATTERN_CHAR `@ * + ? !`): under the live extglob gate a
+        // pattern operator immediately followed by `(` consumes the
+        // balanced group into the element word via parse_matched_pair,
+        // so `@(a | b)` is ONE element — the spaces inside the group
+        // never split it (GNU-verified: `arr=(@(a | b))` stores
+        // `[0]="@(a | b)"`, rubash#389). Quotes and escapes keep the
+        // operator inert (`\@(x)`, `'@(x)'`, `"@(x)"` stay literal
+        // text), and a `(` after anything else is still the subshell
+        // rejection the parse admission already made. The live gate is
+        // read here at element-split time, which for the execution-side
+        // callers is the same command cadence GNU's parse-time read had.
+        if !single
+            && !double
+            && matches!(ch, '@' | '*' | '+' | '?' | '!')
+            && matches!(chars.peek(), Some((_, '(')))
+            && crate::lexer::parse_extended_glob()
+        {
+            current.push(ch);
+            chars.next();
+            let rest: Vec<char> = inner[offset + 1..].chars().collect();
+            if let Some(end) = crate::lexer::extglob_pattern_group_len(&rest, 0) {
+                current.extend(rest[..end].iter());
+                // The opening `(` was already consumed by chars.next()
+                // above; the walker's span covers it, so advance only the
+                // remaining end - 1 characters.
+                for _ in 1..end {
+                    chars.next();
+                }
+            }
+            continue;
+        }
+
         if ch == '$' && !single {
             if matches!(chars.peek(), Some((_, '('))) {
                 current.push(ch);

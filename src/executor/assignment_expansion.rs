@@ -3450,6 +3450,33 @@ pub(in crate::executor) fn split_compound_element_words(value: &str) -> Vec<Stri
             }
             continue;
         }
+        // GNU parse.y:5466 read_token_word (syntax.h:90-92 PATTERN_CHAR
+        // `@ * + ? !`): under the extglob gate a pattern operator directly
+        // before `(` consumes the balanced group into the element word
+        // (parse_matched_pair), so `@(a | b)` is ONE element — spaces
+        // inside the group never split it (rubash#389). Quotes (including
+        // the hoisted sentinels above) and backslashes keep the operator
+        // inert, exactly like the parse-time admission.
+        if !single
+            && !double
+            && matches!(ch, '@' | '*' | '+' | '?' | '!')
+            && matches!(chars.peek(), Some((_, '(')))
+            && crate::lexer::parse_extended_glob()
+        {
+            token.push(ch);
+            chars.next();
+            let rest: Vec<char> = value[offset + 1..].chars().collect();
+            if let Some(end) = crate::lexer::extglob_pattern_group_len(&rest, 0) {
+                token.push_str(&rest[..end].iter().collect::<String>());
+                // The opening `(` was already consumed by chars.next()
+                // above; the walker's span covers it, so advance only the
+                // remaining end - 1 characters.
+                for _ in 1..end {
+                    chars.next();
+                }
+            }
+            continue;
+        }
         match ch {
             '\\' if !single => {
                 token.push(ch);

@@ -776,6 +776,36 @@ impl Iterator for StorageWordIter<'_> {
                 }
                 continue;
             }
+            // GNU parse.y:5466 read_token_word (syntax.h:90-92 PATTERN_CHAR
+            // `@ * + ? !`): under the extglob gate a pattern operator
+            // directly before `(` consumes the balanced group into the
+            // word via parse_matched_pair — whitespace inside `@(a | b)`
+            // never splits a compound-assignment element (rubash#389).
+            // Quotes (including the hoisted sentinels below) and
+            // backslashes keep the operator inert.
+            if !in_single
+                && !in_double
+                && matches!(ch, '@' | '*' | '+' | '?' | '!')
+                && matches!(chars.peek(), Some((_, '(')))
+                && crate::lexer::parse_extended_glob()
+            {
+                word.push(ch);
+                chars.next();
+                // `relative` points at the pattern operator, so the group's
+                // `(` sits at relative + 1 — the walker's span starts there
+                // and covers both parens (the `(` itself was just consumed
+                // by chars.next(), hence the end - 1 advance below).
+                let rest_offset = self.offset + relative + 1;
+                let rest: Vec<char> = self.input[rest_offset..].chars().collect();
+                if let Some(end) = crate::lexer::extglob_pattern_group_len(&rest, 0) {
+                    let consumed: String = rest[..end].iter().collect();
+                    word.push_str(&consumed);
+                    for _ in 1..end {
+                        chars.next();
+                    }
+                }
+                continue;
+            }
             // Mirror the declare storage splitter (declare/storage/words.rs):
             // whitespace inside EITHER quote family does not split a
             // compound-assignment word ('a b' stores one element, assoc12

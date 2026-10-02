@@ -1074,18 +1074,54 @@ fn token_has_unquoted_whitespace(token: &str) -> bool {
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
+    // extglob-group depth (rubash#389): read_token_word copies the matched
+    // pair span into the word via strcpy (parse.y:5468-5475), so the group's
+    // literal interior — spaces included — is word DATA, never a field
+    // boundary; GNU never field-splits it (expand_words_no_vars splits only
+    // expansion output). A `(` directly after an unquoted, unescaped pattern
+    // operator `@ * + ? !` (syntax.h:90-92) opens such a group under the
+    // gate.
+    let extglob = crate::lexer::parse_extended_glob();
+    let mut extglob_depth = 0usize;
+    let mut prev_ch: Option<char> = None;
+    let mut prev_escaped = false;
     for ch in token.chars() {
         if escaped {
             escaped = false;
+            prev_ch = Some(ch);
+            prev_escaped = true;
+            continue;
+        }
+        if extglob_depth > 0 {
+            match ch {
+                '\\' if !single => escaped = true,
+                '\'' if !double => single = !single,
+                '"' if !single => double = !double,
+                '(' if !single && !double => extglob_depth += 1,
+                ')' if !single && !double => extglob_depth -= 1,
+                _ => {}
+            }
+            prev_ch = Some(ch);
+            prev_escaped = false;
             continue;
         }
         match ch {
             '\\' if !single => escaped = true,
             '\'' if !double => single = !single,
             '"' if !single => double = !double,
+            '(' if extglob
+                && !single
+                && !double
+                && !prev_escaped
+                && matches!(prev_ch, Some('@' | '*' | '+' | '?' | '!')) =>
+            {
+                extglob_depth += 1
+            }
             c if c.is_whitespace() && !single && !double => return true,
             _ => {}
         }
+        prev_ch = Some(ch);
+        prev_escaped = false;
     }
     false
 }

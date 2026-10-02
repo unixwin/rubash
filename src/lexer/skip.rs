@@ -2647,3 +2647,41 @@ fn is_command_position_boundary(word: &str) -> bool {
             | "}"
     )
 }
+
+/// Length (in chars, ending just past the closer) of an extglob pattern
+/// group whose `(` sits at `open`, consumed the way GNU read_token_word's
+/// extglob arm does (parse.y:5466-5475): parse_matched_pair over the
+/// `(...)` span with its own quote/backslash state and nesting count.
+/// Returns `None` when the group never closes. The PATTERN_CHAR admission
+/// (`@ * + ? !`, syntax.h:90-92) and the extglob gate are judged by the
+/// callers — this is only the balanced-span walker.
+pub(crate) fn extglob_pattern_group_len(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single && !double => depth += 1,
+            ')' if !single && !double => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}

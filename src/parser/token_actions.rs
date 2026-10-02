@@ -359,7 +359,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         // wheat=([six]=6 [foo bar]="qux qix")).
                         if let Some((lhs, rhs)) = token.raw.split_once('=') {
                             if valid_compound_assignment_lhs(lhs) && rhs.starts_with('(') {
-                                if let Some(op) = find_unquoted_ctrl_op(rhs) {
+                                if let Some(op) = find_unquoted_ctrl_op(rhs, token.extglob_gate) {
                                     state.current_cmd.insert_assignment(
                                         "__RUBASH_COMPOUND_SYNTAX_ERROR__".to_string(),
                                         format!("unexpected token `{op}'"),
@@ -1591,7 +1591,7 @@ fn valid_compound_assignment_lhs(lhs: &str) -> bool {
 /// are consumed as part of a WORD token, so control operators inside
 /// them are NOT syntax errors at the compound-assignment level. This
 /// scanner must skip those constructs the same way.
-fn find_unquoted_ctrl_op(value: &str) -> Option<char> {
+fn find_unquoted_ctrl_op(value: &str, extglob: bool) -> Option<char> {
     let bytes = value.as_bytes();
     let mut i = 0;
     if i < bytes.len() && bytes[i] == b'(' {
@@ -1606,10 +1606,18 @@ fn find_unquoted_ctrl_op(value: &str) -> Option<char> {
     // compound assignment — so a comment line in `name=( ... )' never
     // reaches the parser and its `&'/`<'/... text cannot be a syntax error.
     let mut word_start = true;
+    // The previous byte of the CURRENT element word (0 at word start) and
+    // whether it was backslash-carried — the extglob group admission below
+    // must see an UNESCAPED pattern operator immediately before the `('
+    // (parse.y:5466 checks the live character, not the escaped-pair text).
+    let mut prev_word_byte: u8 = 0;
+    let mut prev_escaped = false;
     while i < bytes.len() {
         let c = bytes[i];
         if escaped {
             escaped = false;
+            prev_escaped = true;
+            prev_word_byte = c;
             word_start = false;
             i += 1;
             continue;
@@ -1621,12 +1629,16 @@ fn find_unquoted_ctrl_op(value: &str) -> Option<char> {
                 b'`' if !in_single && !in_double => backtick_depth -= 1,
                 _ => {}
             }
+            prev_word_byte = c;
             word_start = false;
             i += 1;
             continue;
         }
         match c {
-            b'\\' if !in_single => escaped = true,
+            b'\\' if !in_single => {
+                escaped = true;
+                prev_word_byte = b'\\';
+            }
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
             b'#' if !in_single && !in_double && word_start => {
@@ -1640,12 +1652,14 @@ fn find_unquoted_ctrl_op(value: &str) -> Option<char> {
             // part of the subshell, not the compound assignment.
             b'$' if !in_single && i + 1 < bytes.len() && bytes[i + 1] == b'(' => {
                 i = skip_dollar_paren(bytes, i + 2);
+                prev_word_byte = b')';
                 word_start = false;
                 continue;
             }
             // Skip ${...} parameter expansion — same reasoning.
             b'$' if !in_single && i + 1 < bytes.len() && bytes[i + 1] == b'{' => {
                 i = skip_dollar_brace(bytes, i + 2);
+                prev_word_byte = b'}';
                 word_start = false;
                 continue;
             }
@@ -1670,6 +1684,7 @@ fn find_unquoted_ctrl_op(value: &str) -> Option<char> {
                     && let Some(end) = skip_procsub_paren(bytes, i + 2) =>
             {
                 i = end;
+                prev_word_byte = b')';
                 word_start = false;
                 continue;
             }
@@ -1685,12 +1700,42 @@ fn find_unquoted_ctrl_op(value: &str) -> Option<char> {
             // `syntax error near unexpected token `('` (rubash#360).
             // Quoted `'('`/`"("` and escaped `\(` stay word content, and
             // `$(`/backtick/procsub bodies were consumed above.
+            //
+            // extglob admission (rubash#389): with the parse-time extglob
+            // gate open, read_token_word (parse.y:5466, `extended_glob &&
+            // PATTERN_CHAR (character)`) consumes the balanced group after
+            // an unescaped `@ * + ? !` (syntax.h:90-92 PATTERN_CHAR) as
+            // part of the element word via parse_matched_pair, so
+            // `arr=(@(foo|bar) [name]=+(test|bench))` parses (GNU-verified:
+            // the element stays one word, spaces inside `@(a | b)` included,
+            // while `\@(`, `'@'(` and a bare `r(` still hit this rejection).
             b'(' if !in_single && !in_double => {
+                let group_end = if extglob
+                    && !prev_escaped
+                    && matches!(prev_word_byte, b'@' | b'*' | b'+' | b'?' | b'!')
+                {
+                    skip_procsub_paren(bytes, i + 1)
+                } else {
+                    None
+                };
+                if let Some(end) = group_end {
+                    i = end;
+                    prev_word_byte = b')';
+                    prev_escaped = false;
+                    word_start = false;
+                    continue;
+                }
                 return Some('(');
             }
             _ => {}
         }
         word_start = matches!(c, b' ' | b'\t' | b'\n' | b'\r');
+        if !word_start {
+            prev_word_byte = c;
+        } else {
+            prev_word_byte = 0;
+        }
+        prev_escaped = false;
         i += 1;
     }
     None

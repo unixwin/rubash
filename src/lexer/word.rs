@@ -335,6 +335,11 @@ impl<'a> Lexer<'a> {
         // String allocations was this exact copy).
         let mut token = Token::new_with_raw_owned(kind, value, raw_ref, start);
         token.extglob_split = extglob_split;
+        // rubash#389/#131: stamp this pass's extglob gate so parse-side
+        // scanners answer with the state at READ time (parse.y:5466 gates
+        // on the live `extended_glob' as each word is lexed), not the
+        // post-tokenization global a later `shopt -u' may have flipped.
+        token.extglob_gate = self.extended_glob;
         token
     }
 
