@@ -1,9 +1,12 @@
 # Rubash ↔ GNU Bash 兼容性权威状态（单一事实来源）
 
-> 最后核对日期：2026-09-25（master `71c933eb`，env 归零口径 **82 零差 / 1 残余 / 83 套件**，
-> 台账条目见下文 2026-09-25 段；受影响切片 2026-09-26 复核后口径更新见
-> "假货清除后的口径更新"段。此前 2026-09-20 合并后全量 true-baseline 重跑的
-> 逐套件台账在 `target/issue-suites/results/postmerge-baseline-ledger.txt`）
+> 最后核对日期：2026-10-02（wt42/rebaseline 全量重基线车道，master `dc3e799b`，
+> **63 零差 / 20 有 DIFF / 285 原始行**，其中当日（10-02 的 51 提交）真回归仅
+> alias 0→2（rubash#414，815802eb 引入，bisect 定位）；cond 100 / assoc 42 /
+> glob 44 / invocation 8 / nameref 5 / quotearray 6 六套件经 2680e792 切片
+> 复测确认为 **09-26～10-01 窗口旧账**（与当日提交无关）。逐套件台账与归因
+> 见下文"2026-10-02 全量重基线"块与第二十九节。此前 2026-09-25 的
+> "82 零差 / 1 残余"口径见下文 2026-09-25 段。
 > 核对方法：用 `./target/debug/rubash.exe` 直接跑 GNU 官方测试文件
 > `third_party/bash/tests/<name>.tests`，对比 GNU bash 的真实输出。
 > 基线约定（2026-09-09 起生效）：语义比对一律用 WSL GNU Bash 5.3.0
@@ -62,6 +65,26 @@
 > 内建 recho 携带引擎内部 raw-byte 标记所掩盖；现为诚实的进程边界。
 > 沿用无桩 harness：`__RUBASH_NO_UPSTREAM_SCRIPTS` 经 `WSLENV /w` 跨边界，
 > `/bin/sh|/usr/bin/sh` 经 PATH 解析为 niubash 夹具，TMPDIR 逐套件隔离。）
+>
+> **2026-10-02 全量重基线（wt42/rebaseline 车道，master `dc3e799b`）：63 零差 / 20 有 DIFF / 285 原始行**
+> （当日 10-02 共 51 个修复提交落 master 后的首个全量回归轮。逐套件台账
+> `target/issue-suites/results/true-baseline-ledger.log`（本工作树）。归因结论：
+> **当日唯一真回归 = alias 0→2**——posix 模式展开保留字别名（`alias for=echo`
+> 后 `-o posix` 下 `for` 仍被替换为 `echo`，GNU 保留循环关键字），815802eb
+> （fix(#390)）引入，git-bisect 定位（2680e792 好 / 815802eb 首坏），已开
+> **rubash#414**。六套件放大项（cond 100 / assoc 42 / glob 44 / invocation 8 /
+> nameref 5 / quotearray 6）经 2680e792 切片复测**逐套件数字完全一致**——为
+> 09-26 假货清除～10-01 窗口累计的旧账（含 cond 230 行 `if [[ str ]] then
+> [[ str ]] fi` 保留字中止截断整套件、invocation3.sub 内部
+> `__RUBASH_PARSE_ERROR_NEAR__` 标记外漏），非当日提交造成；余下 13 套件
+> 与 09-24/25/26 台账的 env/平台口径吻合（extglob 16 env / nquote 10 env /
+> array+nquote4+new-exp 的 #141 argv 平台族 / test 8 NTFS 属性 / type 6 /
+> coproc 4-6 时序 / errors 2 / intl 1 / comsub-posix 1 / vredir 2 / read 2）。
+> cargo test 侧：24 红分诊完毕——10 个为 815802eb 引起的过时期望（9 个
+> alias 一缓冲用例 + 1 个算术 EOF rc 期望），已按 GNU 5.3.0 探针改齐（车道
+> 提交 80479503）；5 个预存红（3 bashdb + invalid_cli_shopt + parameter_transform
+> 的 `\$`→`#`，均已由 ecodweep4-B 台账跟踪）；9 个为 bashdb 夹具缺失环境项。
+> 详见第二十九节。）
 >
 > **上一台账（2026-09-22 深夜，master `44a56d1c`，无桩 + niu-sh 夹具）：58 零差 / 25 有 DIFF / 总 407 原始行**
 > （台账 `target/issue-suites/results/true-baseline-ledger.log`；逐行审计
@@ -1658,3 +1681,91 @@ directory"。已在测试内注释文档化，非 rubash 语义回归（WSL GNU 
 → 466/7，零新增失败；cargo test --lib 479 全绿；cargo check --tests
 x86_64-unknown-linux-gnu 与 aarch64-apple-darwin 零警告；signal 车道
 grouped_background_trap_receives_kill_from_parent 保持绿。
+
+## 第二十九节：2026-10-02 全量重基线（wt42/rebaseline 车道，master `dc3e799b`）
+
+**口径**：`scripts/true-baseline.sh` 无参数全跑（83 套件，WSL GNU Bash 5.3.0，
+无桩 harness + niu-sh 夹具），本工作树 `D:/repo/rubash-wt-rebase`（分支
+wt42/rebaseline，基 dc3e799b，构建先行确认：cargo build 28.5s 成功后才起测；
+clean env：unset BASH_ENV / unset -f rm rmdir unlink / unset WINUXSH_ROOT）。
+第一轮全跑作废——rubash 侧 recho/zecho.exe 未生成（WSL 里 rustc.exe 互操作
+静默失败，`ensure_test_helpers` 的 `2>/dev/null || true` 吞掉），nquote2-5
+rb.out 0 字节（`bash: recho: cannot execute binary file`，ELF 助手被裸执行）。
+按军规作废重跑：从 Windows 侧用 repo 自带 rustc 重编
+`scripts/test-helpers/{recho,zecho}.rs`（与主树源 md5 一致）后全量重跑两轮，
+轮间仅 coproc 4↔6 时序抖动，余逐套件一致。最终台账即上文 63/20/285。
+
+### 逐套件台账与归因（20 个有 DIFF 套件）
+
+**当日（10-02 的 51 提交）真回归 1 项：**
+
+| 套件 | 行数 | 归因 |
+| --- | --- | --- |
+| alias | 2 | **rubash#414**：posix 模式展开保留字别名。`alias for=echo` 定义后 `-o posix` 跑 `al for foo in v; do…done`，GNU 5.3.0 输出 `foo=v bar=`（for 保持关键字，rc 0），rubash 输出 `foo in v` + `syntax error near unexpected token do`（for 被替换为 echo）。定义阶段两壳一致（`alias -p` 均列出），分歧在展开。815802eb 引入（bisect：2680e792 好 / 815802eb 首坏），GNU 锚点 parse.y:5755/5757-5765/5767-5768。探针 `target/issue-suites/results/wt42-verify/posix-alias-*` |
+
+**09-26～10-01 窗口旧账 6 项（2680e792 切片复测数字逐一相同，与当日提交无关）：**
+
+| 套件 | 行数 | 内容 |
+| --- | --- | --- |
+| cond | 100 | 230 行 `if [[ str ]] then [[ str ]] fi`（上游注释"allow reserved words after a conditional command just because"）：rubash 报 `syntax error near unexpected token fi` 并中止整套件（rb 54 行 vs GNU 150 行，rc 2）；GNU 按合法 if 接受。中止谓词（token_actions.rs 保留字 command 位置即 Break）在合法复合关闭符上误触发。前置 `returns: 1/0`、`jbig2dec` 等小差另计 |
+| assoc | 42 | 133-139 行 abc/def/123 输出为空 + `declare -A dict=()` 形状差 |
+| glob | 44 | 主体为 `\u03B1` 转义与空 argv（`argv[1] = <>`）——#141 CreateProcessW UTF-16 argv 平台族；NTFS 非法文件名项延续 09-24 记录 |
+| invocation | 8 | invocation3.sub（pretty-print）解析错且内部 `__RUBASH_PARSE_ERROR_NEAR__=}5 __RUBASH_PARSE_SOURCE__=}` 标记直接漏进 stdout |
+| nameref | 5 | `declare -r RO_PID` 时序残留（#352 同族，见下）+ `argv[1] = <1 2 3>` 未分词 1 行 |
+| quotearray | 6 | 39-42 行 0↔1 四处翻转 |
+
+**env/平台/预存口径 13 项（与 09-24/25/26 台账吻合）：** extglob 16（env=16，
+NTFS 非法文件名）、nquote 10（env=10，od 列宽）、array 8 / nquote4 12 /
+new-exp 4（09-26 假货清除浮出的 #141 argv 平台族）、test 8（NTFS 属性位）、
+type 6（二进制名）、coproc 4-6（/etc/passwd ENOENT + 收割时序，轮间抖动）、
+errors 2（comsub 诊断措辞族，09-24 已记）、intl 1（locale，较 09-24 的 4 收窄）、
+comsub-posix 1、vredir 2 / read 2（与主树最后一次切片台账完全一致）。
+
+### cargo test 全量分诊（24 红 → 0 当日引擎回归）
+
+- **10 个过时期望（815802eb 引起，已修，车道提交 80479503）**：9 个
+  `command_chaining::test_alias_introduced_*`（`shopt -s expand_aliases; alias
+  w=while; w …; do` 单缓冲 `;` 形式——GNU 5.3.0 同样拒绝：整个列表先解析后
+  执行，读 `w` 时别名表尚无该条目（parse.y:5761 read_token_word → 3249
+  alias_expand_token 读时展开），报 `syntax error near unexpected token do`；
+  815802eb 对齐了 rubash；测试改为换行分隔形式 + run_cli_script（wt33 #374
+  既有模式），三形态（单缓冲; 拒绝 rc2 / 单缓冲简单别名 127 / 换行缓冲接受）
+  双壳逐字节一致）+ 1 个 `c_command_rejects_unbalanced_arithmetic_command…`
+  （`((X=([))]` GNU 实测 rc 1 + `unexpected EOF while looking for matching ')'
+  （parse.y:4938-4948 重诠释 + 7140-7174），旧期望 rc 2 已过时）。
+- **5 个预存红（已由 ecodweep4-B 2026-10-01 台账跟踪）**：bashdb_compat ×3
+  （`[[ =~ ^{` 正则族 + 嵌套 shim）、invalid_cli_shopt（`-O no_such_shopt`
+  rubash 静默 rc0 vs GNU rc2 `invalid shell option name`）、parameter_transform
+  `\$`→`#`（Administrator 下 uid 形状，环境味）。
+- **9 个环境项**：bashdb 夹具（target/bashdb-clean）在新工作树缺失导致
+  bashdb_compat×9 + getopts_long 假红；从主树拷入生成的夹具后归绿（余 3 红
+  见上条）。
+
+### 疑挂起单核销（任务 B）
+
+- **rubash#365（`\cmd` 别名抑制多行函数体无限递归）**：未修。当前 niubash
+  master（07a14eb，niu 1.2.5）`niu -C` 三形态矩阵与原报告一致（A 溢出 /
+  B、C 正常，--norc 同溢出）；裸 rubash 引擎（dc3e799b）脚本、`-i` stdin、
+  `-i -c` 三姿势全部通过——触发面在 niu 层 `-C` 路由
+  （`src/main.rs run_repl_command` → `execute_interactive_line`，整段多行
+  缓冲走"行"通道而非 `execute_interactive_script`）。已在单内留言，未深修。
+- **rubash#352（declare -r + coproc readonly）**：已修，带 20/20 稳定性证据
+  关单。复现器 stdout/stderr/rc 与 GNU 5.3.0 逐字节一致；nameref 套件内
+  同族时序残差 5 行在窗口旧账内另记。
+- **niubash#159（setup rc 第 16 行反斜杠）**：干净，关单。当前 master 生成
+  `HOME="${USERPROFILE//\//}"`（双反斜杠正确），`niu -n` 与 WSL `bash -n`
+  双壳 rc 0 零输出；#157 修复覆盖。
+- **niubash#152（裸 `cat -n FILE` 静默丢选项）**：归属 rubash 引擎
+  `external_file_builtins.rs` 的 `external_cat()`（bare cat 与 /bin/cat 均
+  路由至内建仿真，仅实现 -v 族；管道 stage 走真子进程故正常；裸 rubash
+  同样复现，WinuxCmd 无涉）——rubash 侧开 **rubash#415**，niubash#152 留言
+  回链。
+
+### 车道产物
+
+- 台账与工件：`target/issue-suites/results/true-baseline-ledger.log`、
+  `true-baseline/{suite}/`（本轮全套）、`wt42-verify/`（#352/#365/#159/#152/
+  alias/arith/posix-alias 全部探针双壳产物）。
+- 车道提交：80479503（测试对齐）；本节文档提交。
+- 单据：rubash#414（新，当日真回归）、rubash#415（新，#152 归属）、
+  rubash#352 关、niubash#159 关、#365/#152 留言。
