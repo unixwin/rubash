@@ -232,7 +232,6 @@ fn test_posix_function_declare_prefix_assignment_stays_local() {
     let _ = fs::remove_file(&output_path);
 }
 
-#[ignore = "rubash#410: see issue (probe wt37-374 K019)"]
 #[test]
 fn test_posix_function_typeset_plus_x_unsets_shell_value() {
     let output_path = target_test_path("rubash-posix-typeset-plus-x-output.txt");
