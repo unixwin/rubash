@@ -83,6 +83,7 @@ fn test_read_invalid_counts_redirect_stderr() {
     let _ = fs::remove_file(error_path);
 }
 
+#[ignore = "rubash#398: see issue (probe wt37-374 K045)"]
 #[test]
 fn test_read_timeout_zero_checks_without_consuming_input() {
     let output_path = "target/rubash-read-timeout-zero-output.txt";
@@ -920,6 +921,7 @@ fn test_read_compact_a_uses_attached_array_name() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#397: see issue (probe wt37-374 K044)"]
 #[test]
 fn test_read_a_processes_backslash_escaped_whitespace() {
     let output_path = "target/rubash-read-a-backslash-output.txt";

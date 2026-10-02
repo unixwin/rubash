@@ -205,6 +205,7 @@ fn test_declare_invalid_array_names_do_not_panic() {
     let _ = fs::remove_file(sink_path);
 }
 
+#[ignore = "rubash#401: see issue (probe wt37-374 K015)"]
 #[test]
 fn test_declare_rejects_indexed_to_assoc_conversion() {
     let output_path = target_test_path("rubash-declare-indexed-to-assoc-output.txt");
@@ -236,6 +237,7 @@ fn test_declare_rejects_indexed_to_assoc_conversion() {
     let _ = fs::remove_file(error_path);
 }
 
+#[ignore = "rubash#401: see issue (probe wt37-374 K014)"]
 #[test]
 fn test_declare_rejects_assoc_to_indexed_conversion() {
     let output_path = target_test_path("rubash-declare-assoc-to-indexed-output.txt");

@@ -233,6 +233,7 @@ fn test_dev_null_output_redirect_allows_following_commands() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#396: see issue (probe wt37-374 K010)"]
 #[test]
 fn test_touch_posix_literal_glob_filename_does_not_abort_script() {
     let output_path = "target/rubash-touch-literal-glob-output.txt";

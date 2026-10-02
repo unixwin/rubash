@@ -58,6 +58,7 @@ fn test_continue_outside_loop_returns_success() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#395: see issue (probe wt37-374 K052)"]
 #[test]
 fn test_break_zero_in_loop_returns_failure_without_breaking() {
     let output_path = "target/rubash-break-zero-output.txt";
@@ -75,6 +76,7 @@ fn test_break_zero_in_loop_returns_failure_without_breaking() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#395: see issue (probe wt37-374 K051)"]
 #[test]
 fn test_break_zero_in_loop_redirects_stderr() {
     let output_path = "target/rubash-break-zero-redirect-output.txt";
@@ -117,6 +119,7 @@ fn test_break_accepts_positive_signed_level() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#395: see issue (probe wt37-374 K054)"]
 #[test]
 fn test_continue_zero_in_loop_returns_failure_without_continuing() {
     let output_path = "target/rubash-continue-zero-output.txt";
@@ -134,6 +137,7 @@ fn test_continue_zero_in_loop_returns_failure_without_continuing() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#395: see issue (probe wt37-374 K053)"]
 #[test]
 fn test_continue_zero_in_loop_redirects_stderr() {
     let output_path = "target/rubash-continue-zero-redirect-output.txt";

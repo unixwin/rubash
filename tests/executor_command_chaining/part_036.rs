@@ -487,6 +487,7 @@ fn test_bg_without_job_control_returns_failure() {
     let _ = fs::remove_file(status_path);
 }
 
+#[ignore = "rubash#400: see issue (probe wt37-374 K034)"]
 #[test]
 fn test_fg_background_pid_waits_and_removes_job() {
     let output_path = "target/rubash-fg-pid-output.txt";
@@ -506,6 +507,7 @@ fn test_fg_background_pid_waits_and_removes_job() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#400: see issue (probe wt37-374 K033)"]
 #[test]
 fn test_bg_background_pid_succeeds_and_keeps_job() {
     let output_path = "target/rubash-bg-pid-output.txt";

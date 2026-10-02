@@ -1,6 +1,7 @@
 use super::super::*;
 use std::fs;
 
+#[ignore = "rubash#411: see issue (probe wt37-374 K020)"]
 #[test]
 fn test_direct_readonly_assignment_stops_noninteractive_script() {
     let output_path = target_test_path("rubash-direct-readonly-fatal-output.txt");

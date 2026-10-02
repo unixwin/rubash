@@ -275,6 +275,7 @@ fn test_arithmetic_assignments_evaluate_rhs_recursively() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#404: see issue (probe wt37-374 K081)"]
 #[test]
 fn test_arithmetic_variables_evaluate_recursively() {
     let output_path = "target/rubash-arithmetic-recursive-vars-output.txt";

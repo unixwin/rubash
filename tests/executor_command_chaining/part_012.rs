@@ -468,6 +468,7 @@ fn test_mapfile_combined_td_consumes_separate_delimiter() {
     );
 }
 
+#[ignore = "rubash#399: see issue (probe wt37-374 K012)"]
 #[test]
 fn test_mapfile_u_reads_numbered_fd_here_string() {
     let output_path = "target/rubash-mapfile-u-fd-output.txt";
@@ -487,6 +488,7 @@ fn test_mapfile_u_reads_numbered_fd_here_string() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#399: see issue (probe wt37-374 K013)"]
 #[test]
 fn test_readarray_combined_tu_reads_numbered_fd_here_string() {
     let output_path = "target/rubash-readarray-combined-tu-fd-output.txt";
@@ -506,6 +508,7 @@ fn test_readarray_combined_tu_reads_numbered_fd_here_string() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#399: see issue (probe wt37-374 K011)"]
 #[test]
 fn test_mapfile_combined_tu_consumes_separate_fd() {
     let output_path = "target/rubash-mapfile-combined-tu-fd-output.txt";

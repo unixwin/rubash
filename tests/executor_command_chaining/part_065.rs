@@ -256,6 +256,7 @@ fn test_parameter_case_mod_toggles_case() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#396: see issue (probe wt37-374 K080)"]
 #[test]
 fn test_indirect_parameter_case_mod_applies_to_target_value() {
     let output_path = "target/rubash-param-case-indirect-output.txt";

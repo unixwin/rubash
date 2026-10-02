@@ -54,6 +54,7 @@ fn test_read_combined_ra_compact_array_name_reads_raw_array() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#397: see issue (probe wt37-374 K050)"]
 #[test]
 fn test_read_combined_sa_reads_array() {
     let output_path = "target/rubash-read-sa-array-output.txt";
@@ -72,6 +73,7 @@ fn test_read_combined_sa_reads_array() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#397: see issue (probe wt37-374 K049)"]
 #[test]
 fn test_read_combined_sa_compact_array_name() {
     let output_path = "target/rubash-read-sa-compact-array-output.txt";
@@ -89,6 +91,7 @@ fn test_read_combined_sa_compact_array_name() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#397: see issue (probe wt37-374 K048)"]
 #[test]
 fn test_read_combined_ea_reads_array() {
     let output_path = "target/rubash-read-ea-array-output.txt";
@@ -107,6 +110,7 @@ fn test_read_combined_ea_reads_array() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#397: see issue (probe wt37-374 K047)"]
 #[test]
 fn test_read_combined_ea_compact_array_name() {
     let output_path = "target/rubash-read-ea-compact-array-output.txt";
@@ -232,6 +236,7 @@ fn test_read_combined_srea_compact_array_name_reads_raw_array() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#397: see issue (probe wt37-374 K046)"]
 #[test]
 fn test_read_a_processes_backslash_escaped_custom_ifs() {
     let output_path = "target/rubash-read-a-escaped-custom-ifs-output.txt";

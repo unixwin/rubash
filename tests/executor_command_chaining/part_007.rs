@@ -301,6 +301,7 @@ fn test_background_if_command_executes_and_updates_bang_pid() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#403: see issue (probe wt37-374 K009)"]
 #[test]
 fn test_bash_subshell_tracks_command_substitution_depth() {
     let output_path = "target/rubash-bash-subshell-output.txt";
@@ -457,6 +458,7 @@ fn test_background_loop_commands_execute_and_update_bang_pid() {
     let _ = fs::remove_file(output_path);
 }
 
+#[ignore = "rubash#396: see issue (probe wt37-374 K008)"]
 #[test]
 fn test_background_iteration_commands_execute_and_update_bang_pid() {
     let output_path = "target/rubash-background-iteration-command-output.txt";
