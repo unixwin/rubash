@@ -278,3 +278,11 @@
 - **wt38/pool2**：#405 comsub case 吞行（复用 #380 PST_CASEPAT 框架）/#406-#410 declare/select/typeset 族/#411 诊断行号/#412 函数管道重定向
 - 修复要求=解除对应 #[ignore] 并跑绿（executor_tests 1524 基线不降）
 - 限额中断三续作车道在途（gapfix1/gapfix2/batsfix）
+
+## 2026-10-02 夜 IV：batsfix+gapfix2 回收（niubash#160 关、rubash #392-#396 五关、#375 首项落地）
+
+- **niubash#160 关**（07a14eb+引擎钉死）：-c 未闭合引号报 GNU 同形诊断 rc=2，双树 8/8+8/8
+- **#392-#396 五关**（16195354/7877a7cd/ef3e84ff/4d2ca00d/d5d992ce）：cd PWD/@P 计数/复合 &>procsub/break-continue 0（翻正 #374 的四处错误期望=K031-K034 损坏提取物）/source <() 端点查表。#396 分类闭（5 不复现+1 平台噪声 WinuxCmd#1143+1 无法核证）
+- **#375 首项**（4e0615e8）：六动态栈数组活视图读——bats --count -4.6%、BASH_SOURCE[*] -26%；数组读已排除为主因，剩余=DEBUG 派发地板 390µs+$(cd;pwd) 归一化（证据 target/perf375/）
+- 恢复中的 part_050 冲突（#374 姿势×#395 期望翻正）取车道侧解决；executor_tests 1531 过/56 ignore
+- 在途：gapfix1 续作、pool1、pool2；CI d5d992ce 后台盯
