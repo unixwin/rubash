@@ -225,6 +225,21 @@ fn field_value(
     unescape_read_backslashes(&trim_trailing_unescaped_ifs(&raw, ifs))
 }
 
+/// Field values for `read -a` without `-r` (GNU read.def:972-979):
+/// `list_string` splits the CTLESC-protected line at IFS delimiters and
+/// `dequote_list` then strips the escape protection, so each element keeps
+/// the escaped characters joined and drops the backslash. Rubash's
+/// `split_read_field_ranges(line, ifs, true)` already performs the
+/// escape-aware split; this maps the ranges through the scalar
+/// `field_value` helper, which unescapes backslash pairs
+/// (`unescape_read_backslashes`) instead of slicing the raw line.
+pub(in crate::executor) fn read_array_field_values(line: &str, ifs: &str) -> Vec<String> {
+    split_read_field_ranges(line, ifs, true)
+        .into_iter()
+        .map(|range| field_value(line, range, ifs, true))
+        .collect()
+}
+
 pub(in crate::executor) fn read_scalar_fields(
     line: &str,
     names_len: usize,

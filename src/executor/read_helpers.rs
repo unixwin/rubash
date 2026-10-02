@@ -510,10 +510,14 @@ pub(in crate::executor) fn split_read_array_words_with_backslashes(
 ) -> Vec<String> {
     match ifs {
         Some("/") => split_escaped_words(line, '/'),
-        Some(ifs) if !ifs.is_empty() => split_read_field_ranges(line, ifs, true)
-            .into_iter()
-            .map(|(start, end)| line[start..end].to_string())
-            .collect(),
+        // GNU read.def:972-979: the -a path runs list_string over the
+        // CTLESC-protected line and dequote_list afterwards — escaped IFS
+        // characters stay inside the element and the backslash is dropped.
+        // The raw slice here kept the backslash (rubash#397); the scalar
+        // field_value helper performs the same escape-aware split + unescape.
+        Some(ifs) if !ifs.is_empty() => {
+            crate::executor::read_split::read_array_field_values(line, ifs)
+        }
         _ => split_escaped_words_on_whitespace(line),
     }
 }
