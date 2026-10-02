@@ -355,7 +355,11 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
-fn print_shell_variables<W>(
+/// GNU `set` with no arguments: print_var_list (variables.c) — assignment
+/// form with print_var_value quoting. `declare` with no operands and no
+/// minus-form attribute options dispatches here too (declare.def:373-380
+/// `set_builtin ((WORD_LIST *)NULL)`), so the two listings stay identical.
+pub(crate) fn print_shell_variables<W>(
     env_vars: &crate::shell::var_table::VarTable,
     stdout: &mut W,
 ) -> io::Result<()>

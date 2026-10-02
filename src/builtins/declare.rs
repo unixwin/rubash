@@ -403,7 +403,6 @@ where
     let mut names = Vec::new();
 
     let mut parse_options = true;
-    let mut saw_option = false;
     for arg in args {
         if parse_options && arg == "--" {
             parse_options = false;
@@ -415,7 +414,6 @@ where
             && arg != "+"
         {
             let set_attr = arg.starts_with('-');
-            saw_option = true;
             for option in arg[1..].chars() {
                 match option {
                     'p' => print = true,
@@ -995,7 +993,28 @@ where
         }
     }
 
-    let plain = names.is_empty() && !had_name_args && !print && !saw_option;
+    // GNU declare.def:373-380: with no operands, no -p, and no minus-form
+    // attribute options (flags_on == 0; `+x`-style options only populate
+    // flags_off), `declare` lists variables exactly like `set` with no
+    // arguments — set_builtin(NULL) -> print_var_list (variables.c):
+    // assignment form with print_var_value quoting (`NAME=value`,
+    // `IFS=$' \t\n'`), NOT the `declare -p` declaration form
+    // (`declare -- NAME="value"`). rubash#406.
+    let flags_on = export
+        || array
+        || assoc
+        || integer
+        || uppercase
+        || lowercase
+        || capcase
+        || nameref
+        || readonly
+        || trace;
+    let plain = names.is_empty() && !had_name_args && !print && !flags_on;
+    if plain {
+        crate::builtins::set::print_shell_variables(variables, stdout)?;
+        return Ok(attr_status);
+    }
     if names.is_empty() && !had_name_args {
         print = true;
     }

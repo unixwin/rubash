@@ -42,7 +42,6 @@ fn test_declare_p_without_names_lists_variables() {
     let _ = fs::remove_file(output_path);
 }
 
-#[ignore = "rubash#406: see issue (probe wt37-374 K017)"]
 #[test]
 fn test_declare_without_names_lists_variables() {
     let output_path = "target/rubash-declare-all-output.txt";
@@ -56,9 +55,13 @@ fn test_declare_without_names_lists_variables() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert!(fs::read_to_string(output_path)
-        .unwrap()
-        .contains("declare -- RUBASH_DECLARE_BARE=\"value\"\n"));
+    // GNU declare.def:373-380: bare `declare` lists variables like `set`
+    // (set_builtin(NULL) -> print_var_list): assignment form
+    // `NAME=value`, never the `declare -p` declaration form (rubash#406,
+    // probe wt37-374 K017, GNU 5.3.0).
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.contains("RUBASH_DECLARE_BARE=value\n"));
+    assert!(!output.contains("RUBASH_DECLARE_BARE=\"value\""));
     std::env::remove_var("RUBASH_DECLARE_BARE");
     let _ = fs::remove_file(output_path);
 }
