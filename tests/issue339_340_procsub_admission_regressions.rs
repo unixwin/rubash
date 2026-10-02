@@ -92,12 +92,16 @@ fn digit_prefixed_output_procsub_is_one_word() {
 /// #339: mid-word procsub splices into the word (`echo p<(echo x)q`).
 #[test]
 fn mid_word_procsub_splices_into_word() {
+    // wt33 (#373): the splice form is now the GNU-shaped /dev/fd/NN path —
+    // probe wt33-373/run/B20_midword_procsub (byte-identical to GNU 5.3.0):
+    //   v=$(echo p<(echo x)q); then printing $v yields `p/dev/fd/63q`
+    //   (form=devfd on both shells).
     let (stdout, stderr, code) = rubash("v=$(echo p<(echo x)q); printf '%s' \"$v\"");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));
     assert!(stdout.starts_with("p/"), "stdout: {stdout}");
     assert!(stdout.ends_with('q'), "stdout: {stdout}");
-    assert!(stdout.contains(".tmp"), "stdout: {stdout}");
+    assert!(stdout.contains("/dev/fd/"), "stdout: {stdout}");
 }
 
 /// #339 guard: a QUOTED `<(` is data — `echo "<(echo x)"` prints the literal

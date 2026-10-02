@@ -33,6 +33,25 @@ fn run_rubash(args: &[&str]) -> (String, String, Option<i32>) {
     )
 }
 
+/// wt33 (#373): run rubash with the process cwd set to `dir`. The empty-/
+/// unset-PATH tests search the CURRENT directory (GNU: an empty PATH entry
+/// means `.`), so they must execute inside the fixture directory —
+/// otherwise `type -p e` scans the crate root and finds nothing. GNU probe
+/// wt33-373/run/B14 (empty PATH -> `./e`) and B15 (unset PATH -> the
+/// physical cwd path of `e`), both byte-identical.
+fn run_rubash_in(dir: &Path, args: &[&str]) -> (String, String, Option<i32>) {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("run rubash");
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code(),
+    )
+}
+
 /// Build an isolated fixture under target/: bin1/mycmd and bin2/mycmd
 /// executables. Returns (dir, prologue assigning PATH to the two bins).
 fn setup_fixture(tag: &str) -> (std::path::PathBuf, String) {
@@ -210,12 +229,14 @@ fn setup_dot_fixture(tag: &str) -> std::path::PathBuf {
 
 #[test]
 fn type_p_empty_path_reports_dot_name() {
-    let dir = setup_dot_fixture("empty");
+    let dir = setup_dot_fixture("empty")
+        .canonicalize()
+        .expect("canonicalize fixture dir");
     let script = "PATH=\ntype -p e\n";
     let script_path = dir.join("s.sh");
     fs::write(&script_path, script).expect("write script");
 
-    let (stdout, stderr, code) = run_rubash(&[script_path.to_str().unwrap()]);
+    let (stdout, stderr, code) = run_rubash_in(&dir, &[script_path.to_str().unwrap()]);
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "./e\n");
     let _ = fs::remove_dir_all(&dir);
@@ -223,13 +244,15 @@ fn type_p_empty_path_reports_dot_name() {
 
 #[test]
 fn type_p_unset_path_reports_physical_cwd() {
-    let dir = setup_dot_fixture("unset");
+    let dir = setup_dot_fixture("unset")
+        .canonicalize()
+        .expect("canonicalize fixture dir");
     let script =
         "unset PATH\nz=$(type -p e)\ncase $z in */e) echo ok;; *) echo \"bad:[$z]\";; esac\n";
     let script_path = dir.join("s.sh");
     fs::write(&script_path, script).expect("write script");
 
-    let (stdout, stderr, code) = run_rubash(&[script_path.to_str().unwrap()]);
+    let (stdout, stderr, code) = run_rubash_in(&dir, &[script_path.to_str().unwrap()]);
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "ok\n");
     let _ = fs::remove_dir_all(&dir);
@@ -250,12 +273,14 @@ fn type_a_unset_path_finds_nothing() {
 
 #[test]
 fn type_a_empty_path_reports_dot_name() {
-    let dir = setup_dot_fixture("a-empty");
+    let dir = setup_dot_fixture("a-empty")
+        .canonicalize()
+        .expect("canonicalize fixture dir");
     let script = "PATH=\ntype -a e\n";
     let script_path = dir.join("s.sh");
     fs::write(&script_path, script).expect("write script");
 
-    let (stdout, stderr, code) = run_rubash(&[script_path.to_str().unwrap()]);
+    let (stdout, stderr, code) = run_rubash_in(&dir, &[script_path.to_str().unwrap()]);
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "e is ./e\n");
     let _ = fs::remove_dir_all(&dir);

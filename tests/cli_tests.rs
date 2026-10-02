@@ -2146,11 +2146,14 @@ fn timeformat_reports_invalid_format_character() {
         .output()
         .expect("run rubash");
 
+    // wt33 (#373): the GNU 5.3.0 form is `bash: line 1: TIMEFORMAT: ...`
+    // (probe wt33-373/run/B02_timeformat_bad_char and the -c form, both
+    // byte-identical to WSL GNU bash 5.3.0).
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "status:0\n");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "rubash: TIMEFORMAT: `Z': invalid format character\n"
+        "bash: line 1: TIMEFORMAT: `Z': invalid format character\n"
     );
 }
 
@@ -2162,11 +2165,12 @@ fn timeformat_rejects_precision_on_percent_cpu() {
         .output()
         .expect("run rubash");
 
+    // wt33 (#373): GNU form (probe wt33-373/run/B03_timeformat_precision).
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "status:0\n");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "rubash: TIMEFORMAT: `P': invalid format character\n"
+        "bash: line 1: TIMEFORMAT: `P': invalid format character\n"
     );
 }
 
@@ -3011,11 +3015,15 @@ fn script_file_accepts_shell_style_drive_path() {
         .output()
         .expect("run rubash");
 
+    // wt33 (#373): since the #224 $0/BASH_SOURCE path-domain work, $0 for
+    // a Windows drive-path script argument is reported in the shell (/d/…)
+    // domain, not the Windows (D:/…) domain of the argv spelling. GNU
+    // prints $0 exactly as passed; rubash's argv spelling is a Windows
+    // drive path, which its own $0 domain normalizes to /d/….
     assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        format!("{shell_path}\n")
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let expected = shell_path.to_ascii_lowercase().replacen("d:/", "/d/", 1);
+    assert_eq!(stdout, format!("{expected}\n"));
     let _ = fs::remove_file(script_path);
 }
 

@@ -48,9 +48,14 @@ fn cond_regex_unquoted_non_ascii_rhs_still_matches() {
 /// bytes, so `set -x` printed `arr=(ä¸­æ–‡)` for `arr=(中文)`.
 #[test]
 fn xtrace_compound_assignment_keeps_multibyte_element() {
+    // wt33 (#373): GNU 5.3.0 prints the QUOTED form for a tempenv compound
+    // assignment — probe wt33-373/run/B01_utf8_xtrace_tempenv
+    // (byte-identical to rubash): `set -x; arr=(中文) true`
+    //   stderr: + arr='(中文)'
+    //           + true
     let (stdout, stderr, code) = rubash("set -x; arr=(中文) true");
     assert!(
-        stderr.contains("arr=(中文)"),
+        stderr.contains("arr='(中文)'"),
         "stderr: {stderr}, stdout: {stdout}"
     );
     assert_eq!(code, Some(0));
