@@ -85,6 +85,23 @@ fn shell_test_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// wt37 (#374): rubash reports $0 and diagnostic paths in the shell (/d/...)
+/// domain since #224; GNU echoes the path as invoked. Tests asserting
+/// script-path-prefixed diagnostics derive the expected form with this.
+/// `D:/x/y` or `D:\x\y` -> `/d/x/y`.
+fn shell_domain_path(path: &str) -> String {
+    let b = path.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && (b[0] as char).is_ascii_alphabetic() {
+        let mut s = String::with_capacity(path.len() + 1);
+        s.push('/');
+        s.push((b[0] as char).to_ascii_lowercase());
+        s.push_str(&path[2..].replace('\\', "/"));
+        s
+    } else {
+        path.replace('\\', "/")
+    }
+}
+
 /// wt33 (#374): run `script` through the real CLI binary (script file, crate
 /// root cwd) and return (stdout, stderr, exit code). Several semantics
 /// depend on the driver's parse-execute cadence — alias-introduced compound
@@ -188,18 +205,14 @@ mod simple_execution {
 
     #[test]
     fn test_whitespace_braced_substitution_is_bad_substitution() {
-        // GNU Bash 5.2.21 (subst.c param_expand bad_substitution): a
-        // whitespace-led `${ command; }` word is a non-fatal word-expansion
-        // error - it abandons the current command with status 1 and the
-        // next line still runs.
-        let tokens = tokenize("echo ${ printf x; }");
-        let ast = parse(&tokens);
-        let mut executor = Executor::new();
-
-        let result = executor.execute_ast(&ast);
-
-        assert!(matches!(result, Err(ExecuteError::ExpansionFailure(1))));
-        assert_eq!(executor.last_exit_code(), 1);
+        // wt37 (#374): GNU Bash 5.3.0 executes a whitespace-led `${ cmd; }` as
+        // the current-shell substitution (probe wt37-374 K121: stdout
+        // "x\nafter:0\n", rc 0, empty stderr on both shells); the old
+        // 5.2.21-based ExpansionFailure expectation is stale.
+        let (_out, err, code) = run_cli_script("echo ${ printf x; }\necho after:$?\n");
+        assert_eq!(code, Some(0), "stderr: {err}");
+        assert_eq!(_out, "x\nafter:0\n");
+        assert_eq!(err, "");
     }
 
     #[test]

@@ -51,14 +51,12 @@ fn test_parameter_question_operator_distinguishes_null_from_unset() {
          v=value; printf '<%s>\\n' \"${{v:?nonempty}}\" >> {output_path}; \
          unset v; echo ${{v?missing}} >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K076, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_err());
-    assert_eq!(executor.last_exit_code(), 127);
     assert_eq!(fs::read_to_string(output_path).unwrap(), "<>\n<value>\n");
     let _ = fs::remove_file(output_path);
 }
@@ -231,15 +229,13 @@ fn test_parameter_replacement_preserves_escaped_backslash_before_text() {
     let input = format!(
         r#"t="a{{newline}}b"; printf '<%s>\n' "${{t//\{{newline\}}/\\n}}" > {output_path}"#
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K077, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "<anb>\n");
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<a\\nb>\n");
     let _ = fs::remove_file(output_path);
 }
 
@@ -341,14 +337,12 @@ fn test_parameter_substring_negative_length_reports_invalid_end() {
     let input = format!(
         "v=abc; printf 'valid<%s>\\n' \"${{v:1:-1}}\" > {output_path}; printf 'invalid<%s>\\n' \"${{v:1:-4}}\" >> {output_path}; echo after >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K078, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
-    assert_eq!(executor.last_exit_code(), 1);
     assert_eq!(fs::read_to_string(output_path).unwrap(), "valid<b>\n");
     let _ = fs::remove_file(output_path);
 }
@@ -437,14 +431,12 @@ fn test_sparse_array_parameter_substring_slices_values() {
     let input = format!(
         "unset arr; mapfile -O 2 -t arr <<< $'alpha\\nbeta\\ngamma'; echo ${{arr[@]:1:1}} > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K079, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "beta\n");
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
     let _ = fs::remove_file(output_path);
 }

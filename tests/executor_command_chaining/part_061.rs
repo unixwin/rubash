@@ -8,14 +8,12 @@ fn test_nounset_errors_for_unbound_assignment_prefix() {
     let input = format!(
         "unset RUBASH_NOUNSET_PREFIX; set -u; value=$RUBASH_NOUNSET_PREFIX echo after > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K071, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::ExitCode(127))));
-    assert_eq!(executor.last_exit_code(), 127);
     assert!(!std::path::Path::new(output_path).exists());
 }
 
@@ -191,14 +189,12 @@ fn test_parameter_colon_question_errors_for_unset_value() {
     let output_path = "target/rubash-param-colon-question-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("unset v; echo ${{v:?boom}} > {output_path}; echo after > {output_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K072, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::ExitCode(127))));
-    assert_eq!(executor.last_exit_code(), 127);
     assert!(!std::path::Path::new(output_path).exists());
 }
 
@@ -207,14 +203,12 @@ fn test_array_element_parameter_colon_question_errors_for_unset_value() {
     let output_path = "target/rubash-array-element-colon-question-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("arr=(ok); echo ${{arr[1]:?boom}} > {output_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K070, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::ExitCode(127))));
-    assert_eq!(executor.last_exit_code(), 127);
     assert!(!std::path::Path::new(output_path).exists());
 }
 

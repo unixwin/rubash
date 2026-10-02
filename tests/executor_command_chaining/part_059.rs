@@ -63,21 +63,25 @@ fn test_igncr_shell_option_is_listed_and_toggleable() {
     let _ = fs::remove_file(output_path);
     let input =
         format!("set -o igncr; set -o > {output_path}; set +o igncr; set -o >> {output_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K063, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
+    // GNU 5.3.0 has no `igncr` set -o option name (it is a Cygwin-bash
+    // option): both `set -o igncr` and `set +o igncr` fail with
+    // `set: igncr: invalid option name` and no igncr line appears in the
+    // set -o listing (probe wt37-374 K063).
+    assert_eq!(
+        cli_err.matches("set: igncr: invalid option name").count(),
+        2
+    );
     let output = fs::read_to_string(output_path).unwrap();
-    let lines: Vec<_> = output
-        .lines()
-        .filter(|line| line.starts_with("igncr"))
-        .collect();
-    assert_eq!(lines.len(), 2);
-    assert!(lines[0].ends_with("\ton"));
-    assert!(lines[1].ends_with("\toff"));
+    assert_eq!(
+        output.lines().filter(|line| line.contains("igncr")).count(),
+        0
+    );
     let _ = fs::remove_file(output_path);
 }
 
@@ -106,15 +110,17 @@ fn test_shellopts_assignment_reports_readonly() {
     let status_path = "target/rubash-shellopts-readonly-status.txt";
     let _ = fs::remove_file(status_path);
     let input = format!("SHELLOPTS=ignored; echo $? > {status_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K064, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    // GNU 5.3.0 aborts the command list at the readonly assignment, so the
+    // follow-up echo never runs (probe wt37-374 K064: status file absent,
+    // stderr `SHELLOPTS: readonly variable`).
+    assert!(!std::path::Path::new(status_path).exists());
+    assert!(cli_err.contains("SHELLOPTS: readonly variable"));
     let _ = fs::remove_file(status_path);
 }
 
@@ -155,15 +161,17 @@ fn test_bashopts_assignment_reports_readonly() {
     let status_path = "target/rubash-bashopts-readonly-status.txt";
     let _ = fs::remove_file(status_path);
     let input = format!("BASHOPTS=$BASHOPTS; echo $? > {status_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K058, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    // GNU 5.3.0 aborts the command list at the readonly assignment, so the
+    // follow-up echo never runs (probe wt37-374 K058: status file absent,
+    // stderr `BASHOPTS: readonly variable`).
+    assert!(!std::path::Path::new(status_path).exists());
+    assert!(cli_err.contains("BASHOPTS: readonly variable"));
     let _ = fs::remove_file(status_path);
 }
 
@@ -444,14 +452,12 @@ fn test_failglob_unmatched_command_word_aborts_command_list() {
     let input = format!(
         "shopt -s failglob; printf '%s\\n' target/rubash-no-such-*.zzz > {output_path}; echo after >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K060, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
-    assert_eq!(executor.last_exit_code(), 1);
     assert!(!std::path::Path::new(output_path).exists());
 }
 
@@ -462,14 +468,12 @@ fn test_failglob_takes_precedence_over_nullglob() {
     let input = format!(
         "shopt -s nullglob failglob; printf '%s\\n' target/rubash-no-such-*.zzz > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K059, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
-    assert_eq!(executor.last_exit_code(), 1);
     assert!(!std::path::Path::new(output_path).exists());
 }
 
@@ -480,14 +484,12 @@ fn test_failglob_unmatched_for_word_skips_loop_body() {
     let input = format!(
         "shopt -s failglob; for item in target/rubash-no-such-*.zzz; do echo $item > {output_path}; done; echo after >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K061, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
-    assert_eq!(executor.last_exit_code(), 1);
     assert!(!std::path::Path::new(output_path).exists());
 }
 
@@ -498,14 +500,12 @@ fn test_failglob_unmatched_select_word_skips_body() {
     let input = format!(
         "shopt -s failglob; select item in target/rubash-no-such-*.zzz; do echo $item > {output_path}; break; done <<< 1; echo after >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K062, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
-    assert_eq!(executor.last_exit_code(), 1);
     assert!(!std::path::Path::new(output_path).exists());
 }
 

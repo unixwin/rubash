@@ -231,18 +231,19 @@ fn test_declare_lower_f_prints_compound_function_bodies() {
          c() case $1 in a) echo alpha ;; *) echo other ;; esac; \
          declare -f f s c > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K056, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // GNU 5.3.0 `declare -f` reprints bodies in the multi-line form
+    // (probe wt37-374 K056, byte-identical at the CLI).
     let output = fs::read_to_string(output_path).unwrap();
-    assert!(output.contains("    for x in a; { echo $x; }"));
-    assert!(output.contains("    select y in b; { echo $y; break; }"));
-    assert!(output.contains("    case $1 in a) echo alpha ;; *) echo other ;; esac"));
+    assert_eq!(
+        output,
+        "f () \n{ \n    for x in a;\n    do\n        echo $x;\n    done\n}\ns () \n{ \n    select y in b;\n    do\n        echo $y;\n        break;\n    done\n}\nc () \n{ \n    case $1 in \n        a)\n            echo alpha\n        ;;\n        *)\n            echo other\n        ;;\n    esac\n}\n"
+    );
     let _ = fs::remove_file(output_path);
 }
 
@@ -253,17 +254,19 @@ fn test_declare_lower_f_prints_nested_function_definition_body() {
     let input = format!(
         "outer() {{ inner() {{ echo nested; }}; inner; }}; declare -f outer > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K057, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // GNU 5.3.0 `declare -f` reprint form (probe wt37-374 K057,
+    // byte-identical at the CLI).
     let output = fs::read_to_string(output_path).unwrap();
-    assert!(output.contains("    inner() { echo nested; }"));
-    assert!(output.contains("    inner\n"));
+    assert_eq!(
+        output,
+        "outer () \n{ \n    function inner () \n    { \n        echo nested\n    };\n    inner\n}\n"
+    );
     let _ = fs::remove_file(output_path);
 }
 

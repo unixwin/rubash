@@ -88,18 +88,19 @@ fn test_set_redirects_stderr() {
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);
     let input = format!("set -Z 2> {error_path}; echo $? > {status_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K026, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+    // GNU 5.3.0 diagnostic form (probe wt37-374 K026); the script-path
+    // prefix varies with the run_cli_script temp name, so assert the tail.
     let error = fs::read_to_string(error_path).unwrap();
-    assert!(error.contains("rubash: set: -Z: invalid option"));
-    assert!(error.contains("set: usage:"));
+    assert!(error.contains(
+        ": line 1: set: -Z: invalid option\nset: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]\n"
+    ));
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);
 }
@@ -110,18 +111,18 @@ fn test_set_appends_stderr() {
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
     let input = format!("set -Z 2>> {error_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K025, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(2), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 1);
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.starts_with("before\n"));
-    assert!(error.contains("rubash: set: -Z: invalid option"));
-    assert!(error.contains("set: usage:"));
+    // GNU 5.3.0 diagnostic form (probe wt37-374 K025); prefix-free tail.
+    assert!(error.contains(
+        ": line 1: set: -Z: invalid option\nset: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]\n"
+    ));
     let _ = fs::remove_file(error_path);
 }
 
@@ -132,17 +133,17 @@ fn test_unset_redirects_stderr() {
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);
     let input = format!("unset 1BAD 2> {error_path}; echo $? > {status_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K028, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
-    let error = fs::read_to_string(error_path).unwrap();
-    assert!(error.contains("rubash: unset: `1BAD`: not a valid identifier"));
+    // GNU 5.3.0 and the CLI both create the (empty) error file for
+    // `unset 1BAD 2> file` and leave rc 0 (probe wt37-374 K028); the old
+    // stderr text expectation was a rubash in-process form.
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+    assert_eq!(fs::read_to_string(error_path).unwrap(), "");
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);
 }
@@ -153,17 +154,15 @@ fn test_unset_appends_stderr() {
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
     let input = format!("unset 1BAD 2>> {error_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K027, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 1);
-    let error = fs::read_to_string(error_path).unwrap();
-    assert!(error.starts_with("before\n"));
-    assert!(error.contains("rubash: unset: `1BAD`: not a valid identifier"));
+    // GNU 5.3.0 and the CLI both leave the file unchanged (`before\n` only)
+    // for `unset 1BAD 2>> file` (probe wt37-374 K027).
+    assert_eq!(fs::read_to_string(error_path).unwrap(), "before\n");
     let _ = fs::remove_file(error_path);
 }
 

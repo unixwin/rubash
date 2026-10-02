@@ -356,18 +356,18 @@ fn test_hash_empty_table_reports_success() {
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);
     let input = format!("hash 2> {error_path}; echo $? > {status_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K021, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // GNU 5.3.0 `hash` on an empty table prints `hash: hash table empty` to
+    // stdout; the `2>` redirection still creates the (empty) error file on
+    // both shells (probe wt37-374 K021).
+    assert_eq!(_cli_out, "hash: hash table empty\n");
     assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
-    assert!(fs::read_to_string(error_path)
-        .unwrap()
-        .contains("hash: hash table empty"));
+    assert_eq!(fs::read_to_string(error_path).unwrap(), "");
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);
 }

@@ -162,16 +162,16 @@ fn test_case_extglob_pattern_expands_variable_before_matching() {
     let input = format!(
         "shopt -s extglob; word=bar; case \"$word\" in @(foo|$word)) echo matched > {output_path} ;; *) echo missed > {output_path} ;; esac"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    assert!(ast.commands[2].case_command.is_some());
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "matched\n");
+    // wt37 (#374): run through the real CLI - GNU 5.3.0 rejects the one-line
+    // `shopt -s extglob; ... case @(foo|bar)` form (a mid-line shopt does not
+    // affect that same line's parse); the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K055, target/issue-suites/results/wt37-374/run/).
+    // The old in-process `ast.commands[2].case_command` shape assert described
+    // a parse that neither shell reaches at the CLI (the line is rejected).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(2), "stderr: {cli_err}");
+    assert!(cli_err.contains("syntax error near unexpected token `('"));
+    assert!(!std::path::Path::new(output_path).exists());
     let _ = fs::remove_file(output_path);
 }
 
@@ -179,27 +179,20 @@ fn test_case_extglob_pattern_expands_variable_before_matching() {
 fn test_case_nocasematch_matches_literals_ranges_and_extglob() {
     let output_path = "target/rubash-case-nocasematch-output.txt";
     let _ = fs::remove_file(output_path);
+    // wt37 (#374): multi-line form (GNU 5.3.0 rejects the one-line
+    // `shopt -s ...; case ... @(foo|bar)` shape - the mid-line shopt does not
+    // affect that same line's parse); the old in-process version only passed
+    // on extglob state leaked from previously executed tests. Both shells run
+    // the multi-line form byte-identically (probe wt37-374 K055-adjacent
+    // nocasematch check): literal / range / extglob, rc 0.
     let input = format!(
-        "shopt -s nocasematch extglob; \
-         case Alpha in alpha) echo literal > {output_path} ;; *) echo no-literal > {output_path} ;; esac; \
-         case A in [a-z]) echo range >> {output_path} ;; *) echo no-range >> {output_path} ;; esac; \
+        "shopt -s nocasematch extglob\n\
+         case Alpha in alpha) echo literal > {output_path} ;; *) echo no-literal > {output_path} ;; esac\n\
+         case A in [a-z]) echo range >> {output_path} ;; *) echo no-range >> {output_path} ;; esac\n\
          case BAR in @(foo|bar)) echo extglob >> {output_path} ;; *) echo no-extglob >> {output_path} ;; esac"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    assert_eq!(
-        ast.commands
-            .iter()
-            .filter(|command| command.case_command.is_some())
-            .count(),
-        3
-    );
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
         "literal\nrange\nextglob\n"

@@ -128,18 +128,18 @@ fn test_enable_delete_reports_usage() {
     let error_path = "target/rubash-enable-delete-error.txt";
     let _ = fs::remove_file(error_path);
     let input = format!("enable -d notbuiltin 2> {error_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K029, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 2);
-    assert_eq!(
-        fs::read_to_string(error_path).unwrap(),
-        "rubash: enable: usage: enable [-a] [-dnps] [-f filename] [name ...]\n"
-    );
+    // GNU 5.3.0 form (probe wt37-374 K029): `enable -d name` on a non-builtin
+    // reports `name: not a shell builtin`; the script-path prefix varies with
+    // the run_cli_script temp name, so assert the diagnostic tail.
+    assert!(fs::read_to_string(error_path)
+        .unwrap()
+        .contains(": line 1: enable: notbuiltin: not a shell builtin\n"));
     let _ = fs::remove_file(error_path);
 }
 

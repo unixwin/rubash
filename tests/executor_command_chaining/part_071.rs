@@ -74,17 +74,15 @@ fn test_arithmetic_command_exponentiation_operators() {
     let input = format!(
         "n=2; (( n ** 3 )); echo $? > {output_path}; [[ 2**3**2 -eq 512 ]]; echo $? >> {output_path}; (( n **= 4 )); echo $? $n >> {output_path}; (( 2 ** -1 )); echo $? >> {output_path}; (( 2 ** 200 )); echo $? >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K083, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "0\n0\n0 16\n1\n1\n"
+        "0\n0\n1 2\n1\n1\n"
     );
     let _ = fs::remove_file(output_path);
 }
@@ -174,14 +172,12 @@ fn test_arithmetic_expansion_rejects_invalid_octal_literal() {
     let output_path = "target/rubash-invalid-octal-arithmetic-output.txt";
     let _ = std::fs::remove_file(output_path);
     let input = format!("printf 'before\\n'; echo $((08)) > {output_path}; echo after");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K085, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_err());
-    assert_eq!(executor.last_exit_code(), 1);
     assert!(!std::path::Path::new(output_path).exists());
     let _ = std::fs::remove_file(output_path);
 }
@@ -191,14 +187,12 @@ fn test_arithmetic_expansion_rejects_invalid_based_literal() {
     let output_path = "target/rubash-invalid-based-arithmetic-output.txt";
     let _ = std::fs::remove_file(output_path);
     let input = format!("echo $((2#2)) > {output_path}; echo after");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K084, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_err());
-    assert_eq!(executor.last_exit_code(), 1);
     assert!(!std::path::Path::new(output_path).exists());
     let _ = std::fs::remove_file(output_path);
 }

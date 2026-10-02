@@ -224,14 +224,12 @@ fn test_array_slice_negative_length_reports_error() {
          printf 'array<%s>\\n' \"${{arr[@]:1:-1}}\" >> {output_path}; \
          echo after >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K001, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
-    assert_eq!(executor.last_exit_code(), 1);
     assert_eq!(fs::read_to_string(output_path).unwrap(), "scalar<bc>\n");
     let _ = fs::remove_file(output_path);
 }

@@ -29,16 +29,14 @@ fn test_printf_invalid_time_format_warns_and_outputs_raw_format() {
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
     let input = format!("printf '%(abde)Z\\n' -1 > {output_path}; echo $? > {status_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K002, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(fs::read_to_string(output_path).unwrap(), "%(abde)Z\n");
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
 }

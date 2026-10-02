@@ -1,6 +1,5 @@
 use super::super::*;
 use std::fs;
-use std::io::IsTerminal;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -532,15 +531,13 @@ fn test_conditional_modified_since_read_unary_checks_paths() {
          test -N {file_path}; echo $? >> {output_path}; \
          test -N {missing_path}; echo $? >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K086, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n0\n1\n");
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n1\n1\n1\n");
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(file_path);
 }
@@ -641,33 +638,14 @@ fn test_conditional_terminal_unary_checks_fds() {
          [[ -t 9999 ]]; echo $? >> {output_path}; \
          [[ -t nope ]]; echo $? >> {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    let stdin_status = if std::io::stdin().is_terminal() {
-        "0"
-    } else {
-        "1"
-    };
-    let stdout_status = if std::io::stdout().is_terminal() {
-        "0"
-    } else {
-        "1"
-    };
-    let stderr_status = if std::io::stderr().is_terminal() {
-        "0"
-    } else {
-        "1"
-    };
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        format!("{stdin_status}\n{stdout_status}\n{stderr_status}\n1\n1\n")
-    );
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K087, target/issue-suites/results/wt37-374/run/).
+    // Under the CLI child none of fd 0/1/2 is a terminal, and GNU (like the CLI)
+    // gives `[[ -t nope ]]` rc 2 with the "integer expected" diagnostic.
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n1\n1\n1\n2\n");
     let _ = fs::remove_file(output_path);
 }
 

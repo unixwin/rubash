@@ -378,16 +378,14 @@ fn test_compgen_filter_pattern_all_filtered_keeps_generation_status() {
     let _ = fs::remove_file(status_path);
     let input =
         format!("compgen -W 'alpha beta' -X 'a*' a > {output_path}; echo $? > {status_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K035, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(fs::read_to_string(output_path).unwrap(), "");
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
 }
@@ -935,21 +933,25 @@ fn test_compgen_readonly_action_filters_readonly_variables() {
          compgen -A readonly RUBASH_COMPGEN_READONLY_ > {output_path}; echo first:$? > {status_path}; \
          compgen -A readonly RUBASH_COMPGEN_READONLY_Z >> {output_path}; echo second:$? >> {status_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K036, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        "RUBASH_COMPGEN_READONLY_ALPHA\nRUBASH_COMPGEN_READONLY_BETA\n"
-    );
+    // GNU 5.3.0 has no `readonly` compgen action: both shells reject it with
+    // `compgen: readonly: invalid action name` (rc 2); the redirections
+    // still create the (empty) output file (probe wt37-374 K036).
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "");
     assert_eq!(
         fs::read_to_string(status_path).unwrap(),
-        "first:0\nsecond:1\n"
+        "first:2\nsecond:2\n"
+    );
+    assert_eq!(
+        cli_err
+            .matches("compgen: readonly: invalid action name")
+            .count(),
+        2
     );
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
@@ -966,19 +968,18 @@ fn test_compgen_readonly_action_uses_prefix_suffix_and_filter() {
          compgen -P readonly: -S :end -A readonly -X '*BETA' RUBASH_COMPGEN_READONLY_ACTION_ > {output_path}; \
          echo $? > {status_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K037, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        "readonly:RUBASH_COMPGEN_READONLY_ACTION_ALPHA:end\n"
-    );
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+    // GNU 5.3.0 has no `readonly` compgen action: both shells reject it with
+    // `compgen: readonly: invalid action name` (rc 2); the redirection still
+    // creates the (empty) output file (probe wt37-374 K037).
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+    assert!(cli_err.contains("compgen: readonly: invalid action name"));
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
 }
@@ -1439,16 +1440,14 @@ fn test_compgen_stopped_action_succeeds_without_stopped_jobs() {
          compgen -A stopped > {output_path}; echo $? > {status_path}; \
          disown \"$pid\""
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K038, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(fs::read_to_string(output_path).unwrap(), "");
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
 }
@@ -1743,18 +1742,20 @@ fn test_type_prints_compound_function_bodies() {
          c() case $1 in a) echo alpha ;; *) echo other ;; esac; \
          type f s c > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K039, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // GNU 5.3.0 `type` reprints function bodies in the multi-line form
+    // (probe wt37-374 K039, byte-identical at the CLI).
     let output = fs::read_to_string(output_path).unwrap();
-    assert!(output.contains("    for x in a; { echo $x; }"));
-    assert!(output.contains("    select y in b; { echo $y; break; }"));
-    assert!(output.contains("    case $1 in a) echo alpha ;; *) echo other ;; esac"));
+    assert!(output.contains(
+        "f is a function\nf () \n{ \n    for x in a;\n    do\n        echo $x;\n    done\n}\n"
+    ));
+    assert!(output.contains("s is a function\ns () \n{ \n    select y in b;\n    do\n        echo $y;\n        break;\n    done\n}\n"));
+    assert!(output.contains("c is a function\nc () \n{ \n    case $1 in \n        a)\n            echo alpha\n        ;;\n        *)\n            echo other\n        ;;\n    esac\n}\n"));
     let _ = fs::remove_file(output_path);
 }
 
@@ -1764,17 +1765,19 @@ fn test_type_prints_nested_function_definition_body() {
     let _ = fs::remove_file(output_path);
     let input =
         format!("outer() {{ inner() {{ echo nested; }}; inner; }}; type outer > {output_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K040, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    // GNU 5.3.0 `type` reprints the nested definition verbatim in the
+    // multi-line form (probe wt37-374 K040, byte-identical at the CLI).
     let output = fs::read_to_string(output_path).unwrap();
-    assert!(output.contains("    inner() { echo nested; }"));
-    assert!(output.contains("    inner\n"));
+    assert_eq!(
+        output,
+        "outer is a function\nouter () \n{ \n    function inner () \n    { \n        echo nested\n    };\n    inner\n}\n"
+    );
     let _ = fs::remove_file(output_path);
 }
 

@@ -118,13 +118,11 @@ fn test_noclobber_prevents_output_overwrite() {
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "old\n").unwrap();
     let input = format!("set -C; echo new > {output_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::IoError(_))));
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K065, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "old\n");
     let _ = fs::remove_file(output_path);
 }
@@ -223,13 +221,11 @@ fn test_noclobber_prevents_stderr_overwrite() {
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "old\n").unwrap();
     let input = format!("set -C; unalias no_such_alias 2> {error_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::IoError(_))));
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K066, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(error_path).unwrap(), "old\n");
     let _ = fs::remove_file(error_path);
 }
@@ -261,14 +257,12 @@ fn test_nounset_errors_for_unbound_variable() {
     let input = format!(
         "unset RUBASH_NOUNSET_MISSING; set -u; echo $RUBASH_NOUNSET_MISSING > {output_path}; echo after > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K069, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::ExitCode(127))));
-    assert_eq!(executor.last_exit_code(), 127);
     assert!(!std::path::Path::new(output_path).exists());
 }
 
@@ -277,14 +271,12 @@ fn test_nounset_errors_for_unbound_positional_parameter() {
     let output_path = "target/rubash-nounset-positional-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -u; echo $1 > {output_path}; echo after > {output_path}");
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K068, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::ExitCode(127))));
-    assert_eq!(executor.last_exit_code(), 127);
     assert!(!std::path::Path::new(output_path).exists());
 }
 
@@ -313,13 +305,11 @@ fn test_nounset_errors_for_unbound_assignment_value() {
     let input = format!(
         "unset RUBASH_NOUNSET_ASSIGNMENT; set -u; value=$RUBASH_NOUNSET_ASSIGNMENT; echo after > {output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
+    // wt37 (#374): run through the real CLI - the in-process tokenize+execute_ast
+    // posture cannot model this construct; the CLI run is byte-identical to WSL GNU
+    // Bash 5.3.0 (probe wt37-374 K067, target/issue-suites/results/wt37-374/run/).
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
 
-    let result = executor.execute_ast(&ast);
-
-    assert!(matches!(result, Err(ExecuteError::ExitCode(127))));
-    assert_eq!(executor.last_exit_code(), 127);
     assert!(!std::path::Path::new(output_path).exists());
 }
