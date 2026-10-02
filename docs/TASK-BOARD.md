@@ -335,3 +335,11 @@
 - niubash#152 随关；run-coproc 回到 exit 1（正常失败集），Timed out: 0
 - 诊断方法论沉淀：进度型 job 的红绿由 TIMEOUT_FAIL 决断非失败数；失败集 diff（绿 58/红 57 但红含新超时）是定位关键
 - 在途：pool1/pool2；工作树已清
+
+## 2026-10-03 清晨：owner"并行推进" → wt44 四车道齐发（六车道并行）
+
+- **wt44/optionb**：Option B 路径方言终态实现（POSIX 感知孩子逐字 argv+native 统一翻译；验收=无混形矩阵+全量 83 套件重基线；>20 行波及即停等船长）
+- **wt44/olddebt**：旧账 6 套件清偿（cond 100 首攻——疑与 #414 同根保留字时序；glob 44 先判环境；invocation 的标记泄漏像真 bug）
+- **wt44/niu365**：#365 niu 层 -C 路由递归 + omb-compat 垫片（对照真实 OMB lib 逐函数）
+- **wt44/parse4**：nvm 10.3x 的 parse 侧——WordScans 迁移（GNU parse 期零扫描）+store 克隆削减+body-reparse 缓存评估
+- 在途共六车道：pool1/pool2/optionb/olddebt/niu365/parse4
