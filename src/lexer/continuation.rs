@@ -230,6 +230,10 @@ pub(crate) struct UnclosedDelim {
     /// funsub: the last significant char was a command terminator
     /// (';', '&', '|', newline, or a closed command construct).
     term_ready: bool,
+    /// rubash#380: a pattern-list `(` pushed while the case pattern region is armed —
+    /// pattern punctuation (parse.y:3383 case_item_patten), not a subshell; its `)`
+    /// is the pattern terminator, so the pop bypasses the case-depth guard.
+    pattern_paren: bool,
     /// perf19: the case-clause depth when this delimiter was pushed — a
     /// `)` only closes this delimiter when the case depth has returned to
     /// its push-time level (a `case` opened OUTSIDE never blocks the
@@ -388,7 +392,7 @@ pub(crate) fn unclosed_input_close_char_posix(
             // terminator (parse.y:1037), not this delimiter's closer.
             if ch == d.close
                 && !(d.funsub && !d.term_ready)
-                && !(d.close == ')' && case_depth > d.case_depth_at_push)
+                && (d.pattern_paren || !(d.close == ')' && case_depth > d.case_depth_at_push))
             {
                 stack.pop();
                 // A closed subshell or brace group is a complete command:
@@ -539,6 +543,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     term_ready: false,
                     case_depth_at_push: 0,
                     array_list: false,
+                    pattern_paren: false,
                 });
             }
             '"' => {
@@ -552,6 +557,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     term_ready: false,
                     case_depth_at_push: 0,
                     array_list: false,
+                    pattern_paren: false,
                 });
             }
             '`' => {
@@ -565,6 +571,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     term_ready: false,
                     case_depth_at_push: 0,
                     array_list: false,
+                    pattern_paren: false,
                 });
             }
             '$' => {
@@ -595,6 +602,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                             term_ready: false,
                             case_depth_at_push: 0,
                             array_list: false,
+                            pattern_paren: false,
                         });
                         if funsub {
                             comment_start = true;
@@ -616,6 +624,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                             term_ready: false,
                             case_depth_at_push: case_depth,
                             array_list: false,
+                            pattern_paren: false,
                         });
                         // A fresh substitution body starts at a token
                         // boundary: `$(#c` is a comment.
@@ -633,6 +642,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                                 term_ready: false,
                                 case_depth_at_push: case_depth,
                                 array_list: false,
+                                pattern_paren: false,
                             });
                             i += 1;
                         }
@@ -661,6 +671,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                             term_ready: false,
                             case_depth_at_push: 0,
                             array_list: false,
+                            pattern_paren: false,
                         });
                         i += 1;
                     }
@@ -694,6 +705,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                         term_ready: false,
                         case_depth_at_push: case_depth,
                         array_list: is_array_list,
+                        pattern_paren: false,
                     });
                 }
                 comment_start = true;
@@ -718,6 +730,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     term_ready: false,
                     case_depth_at_push: case_depth,
                     array_list: false,
+                    pattern_paren: case_depth > 0 && case_pattern_region,
                 });
                 comment_start = true;
             }
@@ -734,6 +747,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     term_ready: false,
                     case_depth_at_push: 0,
                     array_list: false,
+                    pattern_paren: false,
                 });
             }
             _ => {}
@@ -3837,7 +3851,7 @@ pub(crate) fn close_char_residuals_advance(
             // terminator (parse.y:1037), not this delimiter's closer.
             if ch == d.close
                 && !(d.funsub && !d.term_ready)
-                && !(d.close == ')' && state.case_depth > d.case_depth_at_push)
+                && (d.pattern_paren || !(d.close == ')' && state.case_depth > d.case_depth_at_push))
             {
                 state.stack.pop();
                 // A closed subshell or brace group is a complete command:
@@ -3997,6 +4011,7 @@ pub(crate) fn close_char_residuals_advance(
                     term_ready: false,
                     case_depth_at_push: 0,
                     array_list: false,
+                    pattern_paren: false,
                 });
             }
             '"' => {
@@ -4010,6 +4025,7 @@ pub(crate) fn close_char_residuals_advance(
                     term_ready: false,
                     case_depth_at_push: 0,
                     array_list: false,
+                    pattern_paren: false,
                 });
             }
             '`' => {
@@ -4023,6 +4039,7 @@ pub(crate) fn close_char_residuals_advance(
                     term_ready: false,
                     case_depth_at_push: 0,
                     array_list: false,
+                    pattern_paren: false,
                 });
             }
             '$' => {
@@ -4071,6 +4088,7 @@ pub(crate) fn close_char_residuals_advance(
                             term_ready: false,
                             case_depth_at_push: 0,
                             array_list: false,
+                            pattern_paren: false,
                         });
                         if funsub {
                             state.comment_start = true;
@@ -4102,6 +4120,7 @@ pub(crate) fn close_char_residuals_advance(
                             term_ready: false,
                             case_depth_at_push: state.case_depth,
                             array_list: false,
+                            pattern_paren: false,
                         });
                         // A fresh substitution body starts at a token
                         // boundary: `$(#c` is a comment.
@@ -4119,6 +4138,7 @@ pub(crate) fn close_char_residuals_advance(
                                 term_ready: false,
                                 case_depth_at_push: state.case_depth,
                                 array_list: false,
+                                pattern_paren: false,
                             });
                             i += 1;
                         }
@@ -4147,6 +4167,7 @@ pub(crate) fn close_char_residuals_advance(
                             term_ready: false,
                             case_depth_at_push: 0,
                             array_list: false,
+                            pattern_paren: false,
                         });
                         i += 1;
                     }
@@ -4180,6 +4201,7 @@ pub(crate) fn close_char_residuals_advance(
                         term_ready: false,
                         case_depth_at_push: state.case_depth,
                         array_list: is_array_list,
+                        pattern_paren: false,
                     });
                 }
                 state.comment_start = true;
@@ -4204,6 +4226,7 @@ pub(crate) fn close_char_residuals_advance(
                     term_ready: false,
                     case_depth_at_push: state.case_depth,
                     array_list: false,
+                    pattern_paren: state.case_depth > 0 && state.case_pattern_region,
                 });
                 state.comment_start = true;
             }
@@ -4220,6 +4243,7 @@ pub(crate) fn close_char_residuals_advance(
                     term_ready: false,
                     case_depth_at_push: 0,
                     array_list: false,
+                    pattern_paren: false,
                 });
             }
             _ => {}
