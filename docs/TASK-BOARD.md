@@ -235,3 +235,13 @@
 - **#380 部分**：车道 executor/parser 侧 + 船长 continuation.rs/skip.rs/quotes.rs 全机器 PST_CASEPAT 穿线（含 close_char 残差态新字段、corrected lookahead 喂 ';'）；**裸关键词 comsub 形态转绿**；括号列表形态残留已仪器化定界（pattern-paren 的 at_push 记账在 esac-) 处弹错栈——单内有完整下一步建议）
 - **#154 教训存档**：车道 GNU 矩阵系 source 模式探针伪影；船长直测翻案（-c 子壳/函数真值 127=原实现对）
 - 期间调试仪器全部清除、诊断字符串逐字节核对还原
+
+## 2026-10-02 夜：pattern_paren 落地 + #383 开单 + wt31-wt34 四车道齐发
+
+- **4928cfa6**：模式列表 `(` 独立 delimiter 种类（弹栈绕过 case_depth 守卫）；调查链更新到 #380（失败扫描中 pattern-paren 未被推栈、全量 oracle 调用返回 None=拒绝来自聚合器另一谓词——下一刀起点）
+- **#383 开**：posix 往返 inherit_errexit 粘滞（wt30 侧发现）
+- **wt31/casepat**：#380 残留攻坚（聚合器逐谓词打点定位真凶；continuation.rs 修复以 diff 交船长）
+- **wt32/optfix**：#383 + #382（退出码 141）+ niubash#154 comsub 角落
+- **wt33/testmaint**：#373+#374 过时断言三分法清理（禁为绿灯改产品）
+- **wt34/perf2**：CURRENT_LINE Cell 化 + null 8.8x 地板 + parse/feeder 桶（军令状 ≤2x 冲 1x）
+- 监控：winget 444854 全绿等版主；1.2.5 攒包中（等本波回收）
