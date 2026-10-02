@@ -9,9 +9,19 @@ impl Executor {
     /// in env_vars is invisible to `$_` expansion while `declare -p _` shows
     /// the new value (rubash#321).
     pub(in crate::executor) fn bind_underscore(&mut self, value: &str) {
-        self.shell_state
-            .env_vars
-            .insert("_".to_string(), value.to_string());
+        // wt34/perf2: GNU's bind_lastarg (execute_cmd.c:4191
+        // bind_variable("_", value)) rebinds the cell unconditionally, but
+        // the observable state is the VALUE — a loop body whose last word
+        // equals the previous bind (`:` for thousands of iterations) leaves
+        // both stores byte-identical. The equality gates skip the key+value
+        // allocation pair (env mirror) and the value clone (typed store)
+        // for that unchanged case; attributes and the EXPORTED_VARS
+        // rewrite keep their existing (no-op-gated) logic untouched.
+        if self.shell_state.env_vars.get("_").map(String::as_str) != Some(value) {
+            self.shell_state
+                .env_vars
+                .insert("_".to_string(), value.to_string());
+        }
         // perf17: GNU's attribute clear is a flag-bit test
         // (variables.h:124-133 att_exported, VUNSETATTR at
         // execute_cmd.c:4191) — an absent attribute is a no-op. The
@@ -66,7 +76,11 @@ impl Executor {
             .is_some_and(|old| old.readonly);
         if !old_readonly {
             if let Some(old) = self.shell_state.variables.get_mut("_") {
-                old.value = crate::shell::ShellValue::Scalar(value.to_string());
+                let unchanged =
+                    matches!(&old.value, crate::shell::ShellValue::Scalar(s) if s == value);
+                if !unchanged {
+                    old.value = crate::shell::ShellValue::Scalar(value.to_string());
+                }
             }
         }
     }
