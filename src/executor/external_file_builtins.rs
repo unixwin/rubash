@@ -780,14 +780,25 @@ impl Executor {
     }
 
     fn external_cat(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
-        let show_nonprinting = cat_has_show_nonprinting(cmd);
-        let filter = |data: &[u8]| -> Vec<u8> {
-            if show_nonprinting {
-                cat_v_filter(data)
-            } else {
-                data.to_vec()
+        // rubash#415: GNU cat parses its whole option surface (getopt_long
+        // with argv permutation) before opening anything — a usage error
+        // reports `cat: invalid option -- 'Z'' + the Try line and exits 1
+        // with NO output, even when operands exist (`cat f -Z', WSL 9.4
+        // probe perm.sh). --help/--version print the real binary's own
+        // text, so they fall through to the PATH subprocess.
+        let parsed = match parse_cat_argv(cmd) {
+            CatParsed::HelpOrVersion => return Ok(false),
+            CatParsed::Usage(message) => {
+                let mut stderr = Vec::new();
+                stderr.extend_from_slice(message.as_bytes());
+                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                self.exit_code = 1;
+                return Ok(true);
             }
+            CatParsed::Options { options, operands } => (options, operands),
         };
+        let (options, operands) = parsed;
+        let filter = |data: &[u8]| -> Vec<u8> { cat_format(data, &options) };
         if let Some(redirect) = &cmd.redirect_in {
             if redirect.fd.unwrap_or(0) == 0 {
                 let target = self.expand_redirect_target(redirect);
@@ -857,14 +868,27 @@ impl Executor {
         // `exec 0</dev/null` which stores empty bytes in fd 0: without this
         // ordering, `cat file` would see the empty stdin and return early
         // instead of reading the file operand.
-        if cat_has_file_operands(cmd) {
+        if !operands.is_empty() {
             let mut output = Vec::new();
             // GNU cat.c: operand failures (missing file, input==output)
             // print a diagnostic and set exit 1 but do NOT stop the loop —
             // later operands are still processed.
             let mut status = 0;
-            for word in cat_file_operands(cmd) {
+            // A `-' operand is stdin at that position; the first one
+            // drains the source, later ones see EOF (GNU cat.c reads
+            // stdin once — shared file offset).
+            let mut stdin_remaining: Option<Vec<u8>> = None;
+            for word in operands {
                 let target = self.expand_word(word);
+                if target == "-" {
+                    if stdin_remaining.is_none() {
+                        stdin_remaining = Some(self.cat_stdin_operand_bytes(cmd));
+                    }
+                    if let Some(bytes) = stdin_remaining.take() {
+                        output.extend(bytes);
+                    }
+                    continue;
+                }
                 // `/dev/std*`, `/dev/fd/N`, `/proc/self/fd/N`: GNU opens a
                 // dup of the descriptor — the in-process equivalent reads
                 // the fd endpoint's remaining bytes (subst.c shared
@@ -942,7 +966,9 @@ impl Executor {
             return Ok(true);
         }
 
-        if !cat_has_file_operands(cmd) {
+        // No operands: plain stdin shapes (the operand loop above already
+        // returned). This block keeps the original cascade order.
+        {
             if let Some(input) = self.read_function_stdin('\0', None, false) {
                 self.write_cat_output(
                     cmd,
@@ -977,55 +1003,56 @@ impl Executor {
                     .map(String::as_str)
                     == Some("1")
             {
-                return self.stream_inherited_cat(cmd);
-            }
-            if cmd.words.len() <= 1 {
-                return Ok(false);
+                return self.stream_inherited_cat(cmd, &options);
             }
             return Ok(false);
         }
-
-        let mut output = Vec::new();
-        for word in cat_file_operands(cmd) {
-            let target = self.expand_word(word);
-            // Q11 /proc P1 (docs/proc-vfs-plan.md hook B2): synthetic files
-            // are served before the filesystem, matching procfs semantics.
-            if let Some(bytes) = crate::proc_vfs::proc_file_content(&target) {
-                output.extend(bytes);
-                continue;
-            }
-            let win = shell_path_to_windows(&target, &self.shell_state.env_vars);
-            // `<(cmd)` carrier path: the word names a draining stream —
-            // serve the shared remainder (subst.c:7143).
-            let read = match self.procsub_stream_take(&win) {
-                Some(bytes) => Ok(bytes),
-                None => fs::read(&win),
-            };
-            match read {
-                Ok(bytes) => output.extend(bytes),
-                Err(_) => {
-                    let mut stderr = Vec::new();
-                    writeln!(
-                        &mut stderr,
-                        "{}cat: {}: No such file or directory",
-                        self.diagnostic_prefix(),
-                        target
-                    )?;
-                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-                    self.exit_code = 1;
-                    return Ok(true);
-                }
-            }
-        }
-        self.write_cat_output(cmd, &filter(&output))?;
-        self.exit_code = 0;
-        Ok(true)
     }
 
-    fn stream_inherited_cat(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
+    /// The `-' operand's bytes: the command's own stdin source (heredoc /
+    /// captured stdin / fd 0 endpoint), drained once. Best-effort for the
+    /// common shapes — a live inherited pipe is read to EOF.
+    fn cat_stdin_operand_bytes(&mut self, cmd: &CommandNode) -> Vec<u8> {
+        use std::io::Read;
+        if let Some(input) = self.stdin_string_for_command_mut(cmd) {
+            return crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input);
+        }
+        if !matches!(
+            self.fd_table.read_endpoint(0),
+            None | Some(FdReadEndpoint::InheritedProcessStdin)
+        ) {
+            if let Some(bytes) = self.fd_table.read_all_bytes(0) {
+                return bytes;
+            }
+        }
+        if cmd.redirect_in.is_none() && cmd.heredoc.is_none() && cmd.here_string.is_none() {
+            let mut stdin = std::io::stdin().lock();
+            let mut bytes = Vec::new();
+            let _ = stdin.read_to_end(&mut bytes);
+            return bytes;
+        }
+        Vec::new()
+    }
+
+    fn stream_inherited_cat(
+        &mut self,
+        cmd: &CommandNode,
+        options: &CatOptions,
+    ) -> Result<bool, ExecuteError> {
         use std::io::Read;
 
-        let show_nonprinting = cat_has_show_nonprinting(cmd);
+        if !options.identity() {
+            // The line filters (numbering, squeeze, $-ends) carry state
+            // across the whole stream, so a formatting invocation reads to
+            // EOF first (GNU streams; the in-process emulation buffers —
+            // bounded by the input, like every other emulated reader).
+            let mut stdin = std::io::stdin().lock();
+            let mut input = Vec::new();
+            stdin.read_to_end(&mut input)?;
+            self.write_cat_output(cmd, &cat_format(&input, options))?;
+            self.exit_code = 0;
+            return Ok(true);
+        }
         let mut stdin = std::io::stdin().lock();
         let mut buffer = [0_u8; 8192];
         loop {
@@ -1033,11 +1060,7 @@ impl Executor {
             if count == 0 {
                 break;
             }
-            let data = if show_nonprinting {
-                cat_v_filter(&buffer[..count])
-            } else {
-                buffer[..count].to_vec()
-            };
+            let data = buffer[..count].to_vec();
             self.write_cat_output(cmd, &data)?;
         }
         self.exit_code = 0;
@@ -1336,11 +1359,107 @@ pub(in crate::executor) fn cat_has_show_nonprinting(cmd: &CommandNode) -> bool {
     false
 }
 
-fn cat_file_operands(cmd: &CommandNode) -> Vec<&String> {
-    let mut operands = Vec::new();
-    let mut skip_next = false;
-    let redirect_targets = cat_redirect_targets(cmd);
+/// GNU coreutils cat option model (rubash#415). Byte-for-byte behavioral
+/// reference: WSL GNU coreutils 9.4 `/usr/bin/cat` probes
+/// (target/i415/gnu-matrix.out, corners/corners2/perm/order2 probes,
+/// 2026-10-02), which carry the observable cat.c contract:
+/// * `-b' beats `-n' in EVERY argv order (`-nb', `-bn', `-n -b', `-b -n'
+///   all number nonblank lines only — WSL probes, order2.sh).
+/// * numbering is `%6d\t' right-aligned, grows past six digits, and does
+///   NOT terminate a final line the input left unterminated.
+/// * `-E'/`-A'/`-e' print `$' only where the input HAS a newline; an
+///   unterminated final line gets neither `$' nor a newline.
+/// * `-s' collapses runs of adjacent EMPTY lines to one (across operand
+///   boundaries — the concatenated stream is one filter input).
+/// * `-u' is accepted and ignored.
+/// * GNU getopt permutes argv: `cat f -n' still numbers, `cat f -Z' still
+///   reports the invalid option; `--' ends option parsing; a bare `-'
+///   operand is stdin at that position.
+#[derive(Default)]
+struct CatOptions {
+    /// -b/--number-nonblank: number non-empty lines only (wins over -n).
+    number_nonblank: bool,
+    /// -n/--number: number all lines.
+    number_all: bool,
+    /// -s/--squeeze-blank.
+    squeeze_blank: bool,
+    /// -v/--show-nonprinting (implied by -e/-t/-A).
+    show_nonprinting: bool,
+    /// -E/--show-ends (implied by -e/-A).
+    show_ends: bool,
+    /// -T/--show-tabs (implied by -t/-A).
+    show_tabs: bool,
+}
 
+impl CatOptions {
+    /// No transformation at all: the plain-concatenation fast path keeps
+    /// its byte-identical passthrough (and the streaming stdin read).
+    fn identity(&self) -> bool {
+        !(self.number_nonblank
+            || self.number_all
+            || self.squeeze_blank
+            || self.show_nonprinting
+            || self.show_ends
+            || self.show_tabs)
+    }
+
+    fn number_mode(&self) -> Option<CatNumbering> {
+        if self.number_nonblank {
+            Some(CatNumbering::Nonblank)
+        } else if self.number_all {
+            Some(CatNumbering::All)
+        } else {
+            None
+        }
+    }
+}
+
+enum CatNumbering {
+    All,
+    Nonblank,
+}
+
+/// GNU cat long-option table. Order is behavior-carrying: an ambiguous
+/// abbreviation lists the possibilities in table order (`--numb' ->
+/// "possibilities: '--number-nonblank' '--number'", `--show-' -> show-
+/// nonprinting, show-ends, show-tabs, show-all — WSL 9.4 probes).
+const CAT_LONG_OPTIONS: [(&str, &str); 9] = [
+    ("number-nonblank", "b"),
+    ("number", "n"),
+    ("squeeze-blank", "s"),
+    ("show-nonprinting", "v"),
+    ("show-ends", "E"),
+    ("show-tabs", "T"),
+    ("show-all", "A"),
+    ("help", ""),
+    ("version", ""),
+];
+
+enum CatParsed<'a> {
+    Options {
+        options: CatOptions,
+        /// Operand words in argv order (`-' operands included verbatim).
+        operands: Vec<&'a String>,
+    },
+    /// `--help' / `--version': print the real binary's own text — not
+    /// emulated, the caller falls through to the PATH subprocess.
+    HelpOrVersion,
+    /// Usage error: the two GNU diagnostic lines, exit status 1.
+    Usage(String),
+}
+
+/// GNU getopt_long over cat's argv: short clusters (-benstuvAET), long
+/// options with unambiguous-prefix matching, `--' terminator, `-'
+/// operand, and argv permutation (options after operands still parse).
+/// Words glued to redirection operators and redirect-target words stay
+/// out of the operand list, like the previous classifier kept them.
+fn parse_cat_argv(cmd: &CommandNode) -> CatParsed<'_> {
+    let program = cmd.words.first().map(String::as_str).unwrap_or("cat");
+    let mut options = CatOptions::default();
+    let mut operands: Vec<&String> = Vec::new();
+    let mut options_done = false;
+    let redirect_targets = cat_redirect_targets(cmd);
+    let mut skip_next = false;
     for word in cmd.words.iter().skip(1) {
         if skip_next {
             skip_next = false;
@@ -1350,16 +1469,167 @@ fn cat_file_operands(cmd: &CommandNode) -> Vec<&String> {
             skip_next = true;
             continue;
         }
-        if word.starts_with('-') {
+        if redirect_targets.iter().any(|target| *target == word) {
             continue;
         }
-        if redirect_targets.iter().any(|target| *target == word) {
+        if !options_done && word.starts_with("--") && word.len() > 2 {
+            let name = &word[2..];
+            // Exact match wins even when the name is also a prefix of a
+            // longer option (GNU getopt_long).
+            let mut matches: Vec<&str> = CAT_LONG_OPTIONS
+                .iter()
+                .filter(|(long, _)| *long == name)
+                .map(|(long, _)| *long)
+                .collect();
+            if matches.is_empty() {
+                matches = CAT_LONG_OPTIONS
+                    .iter()
+                    .filter(|(long, _)| long.starts_with(name))
+                    .map(|(long, _)| *long)
+                    .collect();
+                if matches.len() > 1 {
+                    let possibilities = matches
+                        .iter()
+                        .map(|long| format!("'--{long}'"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    return CatParsed::Usage(format!(
+                        "{program}: option '--{name}' is ambiguous; possibilities: {possibilities}\nTry '{program} --help' for more information.\n"
+                    ));
+                }
+            }
+            let Some(long) = matches.first() else {
+                return CatParsed::Usage(format!(
+                    "{program}: unrecognized option '--{name}'\nTry '{program} --help' for more information.\n"
+                ));
+            };
+            match *long {
+                "number-nonblank" => options.number_nonblank = true,
+                "number" => options.number_all = true,
+                "squeeze-blank" => options.squeeze_blank = true,
+                "show-nonprinting" => options.show_nonprinting = true,
+                "show-ends" => options.show_ends = true,
+                "show-tabs" => options.show_tabs = true,
+                "show-all" => {
+                    options.show_nonprinting = true;
+                    options.show_ends = true;
+                    options.show_tabs = true;
+                }
+                "help" | "version" => return CatParsed::HelpOrVersion,
+                _ => unreachable!("table is exhaustive"),
+            }
+            continue;
+        }
+        if !options_done && word == "--" {
+            options_done = true;
+            continue;
+        }
+        if !options_done && word.starts_with('-') && word.len() > 1 {
+            for ch in word[1..].chars() {
+                match ch {
+                    'b' => options.number_nonblank = true,
+                    'n' => options.number_all = true,
+                    's' => options.squeeze_blank = true,
+                    'v' => options.show_nonprinting = true,
+                    'E' => options.show_ends = true,
+                    'T' => options.show_tabs = true,
+                    'e' => {
+                        options.show_nonprinting = true;
+                        options.show_ends = true;
+                    }
+                    't' => {
+                        options.show_nonprinting = true;
+                        options.show_tabs = true;
+                    }
+                    'A' => {
+                        options.show_nonprinting = true;
+                        options.show_ends = true;
+                        options.show_tabs = true;
+                    }
+                    'u' => {}
+                    other => {
+                        return CatParsed::Usage(format!(
+                            "{program}: invalid option -- '{other}'\nTry '{program} --help' for more information.\n"
+                        ));
+                    }
+                }
+            }
             continue;
         }
         operands.push(word);
     }
+    CatParsed::Options { options, operands }
+}
 
-    operands
+/// Apply the parsed cat formatting options to one complete byte stream
+/// (the concatenation of all operands / stdin — GNU's line filters see
+/// one stream, so a squeeze or numbering counter carries across operand
+/// boundaries). Byte semantics fixed by the WSL 9.4 probes above.
+fn cat_format(input: &[u8], options: &CatOptions) -> Vec<u8> {
+    if options.identity() {
+        return input.to_vec();
+    }
+    let numbering = options.number_mode();
+    let mut output = Vec::with_capacity(input.len() + input.len() / 8);
+    let mut number = 0u64;
+    let mut previous_blank = false;
+    let mut rest = input;
+    while !rest.is_empty() {
+        let (line, terminated, remainder) = match rest.iter().position(|&b| b == b'\n') {
+            Some(index) => (&rest[..index], true, &rest[index + 1..]),
+            None => (rest, false, &[][..]),
+        };
+        rest = remainder;
+        let blank = terminated && line.is_empty();
+        if options.squeeze_blank && blank && previous_blank {
+            continue;
+        }
+        previous_blank = blank;
+        match numbering {
+            Some(CatNumbering::All) => {
+                number += 1;
+                let _ = write!(output, "{number:>6}\t");
+            }
+            Some(CatNumbering::Nonblank) if !blank => {
+                number += 1;
+                let _ = write!(output, "{number:>6}\t");
+            }
+            _ => {}
+        }
+        if options.show_tabs {
+            let mut escaped = Vec::with_capacity(line.len());
+            for &byte in line {
+                if byte == b'\t' {
+                    escaped.extend_from_slice(b"^I");
+                } else {
+                    escaped.push(byte);
+                }
+            }
+            output.extend_from_slice(&cat_v_content(&escaped, options));
+        } else {
+            output.extend_from_slice(&cat_v_content(line, options));
+        }
+        if terminated {
+            if options.show_ends {
+                output.push(b'$');
+            }
+            output.push(b'\n');
+        }
+        // An unterminated final line gets neither `$' nor a newline
+        // (WSL 9.4 probes: `cat -E f' / `cat -n f' with no trailing LF).
+    }
+    output
+}
+
+/// The show-nonprinting escape over one line's content bytes (LF cannot
+/// occur; a TAB passes through literally — only -T/-A convert it, and
+/// that replacement already happened before this runs).
+fn cat_v_content(line: &[u8], options: &CatOptions) -> Vec<u8> {
+    if options.show_nonprinting {
+        cat_v_filter(line)
+    } else {
+        line.to_vec()
+    }
 }
 
 fn cat_redirect_targets(cmd: &CommandNode) -> Vec<&String> {
@@ -1374,10 +1644,6 @@ fn cat_redirect_targets(cmd: &CommandNode) -> Vec<&String> {
     .flatten()
     .map(|redirect| &redirect.target)
     .collect()
-}
-
-fn cat_has_file_operands(cmd: &CommandNode) -> bool {
-    !cat_file_operands(cmd).is_empty()
 }
 
 fn is_cat_redirect_operator_word(word: &str) -> bool {
