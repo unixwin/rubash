@@ -162,6 +162,18 @@ reproducer. A green 19/20 matrix has already shipped wrong "fixes" here
 (see the worked counter-example above); match GNU byte-for-byte on the class
 or mark the change unverified.
 
+
+### No shims for wrong paths (owner directive 2026-10-03)
+
+The #117 rule generalizes beyond lexer fast paths: building a shim, compat
+layer, or adapter that reimplements upstream behavior to paper over a WRONG
+product path is whack-a-mole. Worked example (2026-10-03, cancelled): an
+omb-compat shim reimplementing oh-my-bash lib functions so framework plugins
+could be sourced WITHOUT their loader — the bypass itself was the wrong
+path. Only two sanctioned moves: fix the path (the correct mechanism
+carries through) or forbid it (explicit rejection with an explanation).
+Any new compat layer must argue its existence premise is a CORRECT path,
+in the design doc, before implementation.
 ### Keep the measurement honest
 
 - **Build before you measure.** A ledger from a stale binary is worse than no
