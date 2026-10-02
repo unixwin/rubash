@@ -3389,3 +3389,133 @@ pass; `$(seq 20000 | cat)` hangs identically on base (pre-existing
    22/24/25). Owner: the posix flip site, separate subsystem.
 2. **Pre-existing nested-comsub/EXIT-trap shapes** (m1x) match GNU in
    isolation; the m1 22/24/25 diffs are entirely finding 1.
+
+## perf2b round (2026-10-02, wt34/perf2 on 4928cfa6): CURRENT_LINE single
+author, bind_underscore gates, and the parse/feeder bucket decomposition
+
+Three-bucket round (hist274 handoff). All wall numbers RELEASE build,
+native-Python-parent interleaved A/B medians against a pristine 4928cfa6
+binary built this session (`target/rubash-base-wt34.exe`, same load
+window); GNU anchors re-measured inner-WSL this session (p-null 37ms,
+p-f1 172ms, nvm -n ~17.9ms, wordfor 5.5ms). Scratch instrumentation (the
+`perf34_scratch` parse/feeder profiler) fully removed before commit; the
+final clean binary was re-gated from scratch.
+
+### Bucket 1 disposition: Cell-ization EVALUATED, single gated author
+landed instead (310fc49f)
+
+The Cell design (env authority -> `Cell<usize>` + consumer sync) was
+rejected on architecture evidence, not perf-noise grounds:
+
+- 62 in-process `__RUBASH_CURRENT_LINE` read sites; ~16 builtin
+  diagnostic-prefix helpers receive ONLY `&VarTable` (builtins take
+  `args + &mut VarTable`, never the Executor), so a Cell authority needs
+  either publish-at-dispatch churn across every per-builtin dispatch
+  site (printf_path_builtins.rs alone has ~15 cd entry points) or a
+  second readable encoding — exactly the desync surface wt30/perf1x
+  deleted for errexit/xtrace markers.
+- The measured win was in the WRITE path, not the read path:
+  `restore_for_line` (execute_arithmetic_for_command) and the word-list
+  for restore (loop_select) did UNCONDITIONAL
+  `insert(key.to_string(), line.clone())` — two String allocations + a
+  map insert per restore, twice per arith-for iteration where GNU's
+  execute_cmd.c:3236 restore is an int store. The per-command stamps
+  were already equality-gated (perf11).
+
+Landed: ONE gated entry point (`Executor::set_current_line_value`,
+stack-rendered, equality-gated insert) now authors the env entry — every
+writer funnels through it (set_current_line, the for-arith/word-list
+restores with parsed `Option<usize>` captures instead of Strings — the
+per-iteration ambient-line parse also disappears —, the reader-loop
+stamp, select/function/debug/function-exit pins, and source's restore
+bracket). Single source kept: the env entry has exactly one author, no
+second encoding.
+
+### Bucket 2: bind_underscore no-op gates (dc7bef8e) + eval-pipeline
+evaluation (nothing landed)
+
+- bind_underscore: GNU bind_lastarg (execute_cmd.c:4191) rebinds the
+  cell but only the VALUE is observable; the equality gates skip the
+  env-mirror insert and typed-store clone when unchanged (`:` in a loop
+  rebinds the same word thousands of times). perf17's 1.8us residual
+  becomes ~two map gets for that shape.
+- Eval pipeline (~1.5us/eval, hist274): the "extra vs GNU" items are
+  (a) three unconditional env-marker removes per evaluation
+  (`__RUBASH_ARITH_SUBSCRIPT_EXPR` / `_EXP_EXPANDED` / `_READONLY_ERROR`
+  — inserted by parser-internal error paths, removed per eval; a Cell
+  port needs threading a Cell handle through
+  eval_mutable_arith_value*'s parser, and the markers have NESTED-eval
+  clearing semantics that must be reproduced exactly), (b) the nounset
+  option HashMap read (GNU tests `unbound_variable_is_error`; the fix is
+  the option-table flag model perf1x evaluated as sub-noise), (c)
+  `record_arith_write` (rollback semantics — semantic, not waste). Each
+  is 40-160ns/eval; none crosses the honesty bar for this round. The
+  instrumented split (p-f1, RUBASH_EXEC_PROFILE): for_body 46% of wall,
+  eval pair 17% (test 1.3us + update 2.2us — the delta is the `i++`
+  write-back: bash_arith render + env insert + ARITH_WRITES log +
+  process-env sync gate), linecmd/chain/scans ~7%.
+
+### Bucket 3: fresh nvm -n decomposition + design section (no landing)
+
+Scratch phase profiler over nvm -n (172,906 bytes, 5732 lines, 15,048
+tokens, 8,549 CommandNode::new, wall ~184ms release): lextok 78-81ms
+(ONE whole-file tokenize call — the non-alias driver path; the gather
+family timers all read 0), parse 212-253ms of which body-reparse
+91-108ms (358 calls — parse20's if-inline left case/for/fn bodies),
+word-intake 27-35ms (WordScans 17-25ms: parameter scan 9.9 + comsub 4.2
++ quotes 3.0 instrumented; store clones 4ms), main-loop remainder ~90ms
+(try_parse_compound_start is 96% nested-INCLUSIVE — it does not localize
+anything). configure -n now ABORTS at line 23359 (`esac |` — GNU rc=0)
+identically on base and lane: a PRE-EXISTING master parse gap (the wt29
+#380 family residue), so nvm is the clean corpus.
+
+**Design section (the architecture item, for a future round): relocate
+per-word parse-time scans to expansion time.** GNU runs NO per-word
+expansion scans at parse (parse.y:5305 read_token_word builds the word
+once; make_cmd.c stores the WORD_DESC; subst.c analyzes at execution).
+Rubash's 9 `*_in_word` scans build the executor-facing metadata
+(comsubs/params/braces/quotes/extglob/tilde/pathname/procsub) at parse
+time — ~17-25ms of nvm -n's 184ms and the same share of every parse —
+plus the triple word store (token.value + cmd.words[i] +
+metadata.value/.raw — 3 clones/word). Staged plan: (1) make
+WordMetadata fields `Rc`-shared with the token stream so the store
+clones become refcount bumps (84 reader sites, mechanical but wide);
+(2) move scans 1-9 behind a lazy WordMetadata accessor consumed by the
+executor's expansion preamble (identical outputs — the scans are pure
+functions of (value, raw); the parse-time callers that need them today
+are the error-owning pre-scan family perf6 gated, which stays);
+(3) only then consider fusing the three `$`-triggered walkers
+(comsub/param/arith walk the same `$(`/`${` spans independently).
+Guardrail: the quoterm22-style differential over the full corpus before
+each stage. NOT attempted this round (stage 2 changes when errors fire
+relative to execution — needs the perf6 per-arm lazy-error analysis).
+
+### Numbers (final clean binary, interleaved A/B vs pristine 4928cfa6)
+
+| probe | base ms | lane ms | delta | GNU ms | ratio |
+|---|---:|---:|---:|---:|---:|
+| p-null (20000-iter `for ((;;)) :`) | 232.6 | 221.6 | -4.7% | 37 | 6.3x -> 6.0x |
+| p-f1 (100000-iter) | 1100.4 | 1038.1 | -5.7% | 172 | 6.4x -> 6.0x |
+| p-wordfor (900 word-list iterations) | 13.8 | 13.3 | -3.3% | 5.5 | 2.5x -> 2.4x |
+| nvm -n | 183.9 | 184.0 | flat | 17.9 | 10.3x (parse-bound) |
+| configure -n (aborts :23359 both) | 346.1 | 342.9 | -0.9% | — | pre-existing gap |
+
+Per-commit: 310fc49f alone measured p-null -2.9% / p-f1 -4.1%; dc7bef8e
+stacks to the combined -4.7% / -5.7%.
+
+### Gates
+
+- lib 553/553; regression 27/27; issue354 carrier 9/9; `RUSTFLAGS='-D
+  warnings' cargo check --all-targets` clean; cargo fmt --check clean;
+  continuation.rs untouched (never edited); tree byte-clean vs
+  dc7bef8e after scratch removal.
+- true-baseline slices (errors read arith arith-for func trap dstack
+  quote) on the final debug binary: base-vs-lane byte-identical (rb.out
+  identical everywhere; errors/rb.err differs ONLY in each binary's own
+  $0 path); GNU ledger counts identical (errors 2, read 2, rest 0).
+- canaries on the final release binary, base-identical: #380-shape
+  `$(case x in case) echo hi;; esac)` -> `[]` == GNU; `$(seq 20000|cat)`
+  completes under `timeout 10` (len=108893); `yes|head -100000` ->
+  100000; `seq 5000000|wc -l` x3 full (5000000). Underscore matrix
+  (loop/word binds, readonly `_`, set -a window, `$LINENO`) base-vs-lane
+  byte-identical. No stuck rubash/bash suite processes at turn end.
