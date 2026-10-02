@@ -71,6 +71,16 @@ impl Executor {
         if (redirect.target.starts_with(">(") || redirect.target.starts_with("<("))
             && redirect.target.ends_with(')')
         {
+            // rubash#394: while a compound command whose target IS a
+            // process substitution is in scope, the substitution's carrier
+            // path stands in for the text — the compound fd-table walk runs
+            // on the ORIGINAL node (only the executor's clone got its
+            // mirror slots rewritten) and must bind fd 1/2 to the carrier
+            // like GNU's dup2 onto the pipe (redir.c:832-838), never open()
+            // the literal `>(` text (Windows ERROR_INVALID_NAME).
+            if let Some(carrier) = self.procsub_carrier_memo.borrow().get(&redirect.target) {
+                return carrier.clone();
+            }
             return redirect.target.clone();
         }
         let key = format!(

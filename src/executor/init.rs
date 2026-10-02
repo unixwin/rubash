@@ -325,6 +325,7 @@ impl Executor {
             evalerror_line: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),
+            procsub_carrier_memo: std::cell::RefCell::new(HashMap::new()),
             reader_last_list_line: Cell::new(None),
             command_string_mode: Cell::new(false),
             line_lex_locales: std::cell::RefCell::new(HashMap::new()),

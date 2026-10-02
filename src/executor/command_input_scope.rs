@@ -478,6 +478,15 @@ impl Executor {
                     if is_closed_redirect_target(&target) {
                         continue;
                     }
+                    // `&> >(...)` / `&>> >(...)`: materialize_compound_output_
+                    // process_substitutions (rubash#394) has already rewritten
+                    // this list entry's `>(` text to the substitution's temp
+                    // carrier, so the walk below binds fd 1 and fd 2 to the
+                    // carrier exactly like GNU's r_err_and_out dup2 onto the
+                    // pipe (redir.c:832-838) — the compound's own live
+                    // writes (select prompt, loop diagnostics) follow it,
+                    // and the body's leaf writes arrive through the per-leaf
+                    // splice on the same carrier.
                     self.save_compound_output_fd(saved, 1);
                     self.save_compound_output_fd(saved, 2);
                     let append = redirect.kind == crate::parser::RedirectKind::CombinedAppend;

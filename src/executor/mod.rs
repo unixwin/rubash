@@ -651,6 +651,12 @@ pub struct Executor {
     /// Source line of the command currently executing at reader level —
     /// becomes the abort boundary when `evalerror_pending` is observed.
     reader_command_line: Cell<Option<usize>>,
+    /// rubash#394: `>(...)`-text -> carrier path for the compound command
+    /// currently in scope (materialize_compound_output_process_substitutions
+    /// -> expand_redirect_target; cleared at the compound's finish). The
+    /// compound fd-table walk runs on the ORIGINAL command node whose
+    /// ordered-list entries still carry the verbatim `>(` text.
+    procsub_carrier_memo: std::cell::RefCell<HashMap<String, String>>,
     /// shell.c:183 current_command_number support: source line of the last
     /// reader-level list that incremented the counter (eval.c:178). A
     /// semicolon-joined command sequence on one source line is ONE GNU

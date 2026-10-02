@@ -396,28 +396,40 @@ impl Executor {
             command.redirect_out.as_ref(),
             command.redirect_err_append.as_ref(),
         ) {
+            let original = command
+                .redirect_out
+                .as_ref()
+                .map(|redirect| redirect.target.clone())
+                .unwrap_or_default();
             let path = self.empty_process_substitution_temp()?;
             let display_path = shell_display_path(&path.to_string_lossy());
             if let Some(redirect) = &mut command.redirect_out {
                 redirect.target = display_path.clone();
             }
             if let Some(redirect) = &mut command.redirect_err_append {
-                redirect.target = display_path;
+                redirect.target = display_path.clone();
             }
+            self.note_procsub_carrier(&original, &display_path);
             outputs.push((path, source));
         }
         if let Some(source) = shared_combined_output_process_substitution(
             command.append.as_ref(),
             command.redirect_err_append.as_ref(),
         ) {
+            let original = command
+                .append
+                .as_ref()
+                .map(|redirect| redirect.target.clone())
+                .unwrap_or_default();
             let path = self.empty_process_substitution_temp()?;
             let display_path = shell_display_path(&path.to_string_lossy());
             if let Some(redirect) = &mut command.append {
                 redirect.target = display_path.clone();
             }
             if let Some(redirect) = &mut command.redirect_err_append {
-                redirect.target = display_path;
+                redirect.target = display_path.clone();
             }
+            self.note_procsub_carrier(&original, &display_path);
             outputs.push((path, source));
         }
 
@@ -442,6 +454,24 @@ impl Executor {
         Ok(outputs)
     }
 
+    /// rubash#394: record `>(...)`-text -> carrier-path for the duration of
+    /// one compound command. The compound fd-table walk
+    /// (open_compound_output_redirects) runs on the ORIGINAL command node
+    /// (only the executor's clone got its mirror slots rewritten), so
+    /// expand_redirect_target resolves the verbatim `>(` text through this
+    /// memo instead of handing the literal text to open() — which Windows
+    /// rejects with ERROR_INVALID_NAME ("Invalid argument"), killing the
+    /// whole compound body's output. Cleared by
+    /// finish_compound_output_process_substitutions.
+    fn note_procsub_carrier(&mut self, original: &str, carrier: &str) {
+        if original.is_empty() {
+            return;
+        }
+        self.procsub_carrier_memo
+            .borrow_mut()
+            .insert(original.to_string(), carrier.to_string());
+    }
+
     fn materialize_compound_output_redirect(
         &mut self,
         redirect: &mut Option<Redirect>,
@@ -458,7 +488,10 @@ impl Executor {
             return Ok(None);
         };
         let path = self.empty_process_substitution_temp()?;
-        redirect.target = shell_display_path(&path.to_string_lossy());
+        let display_path = shell_display_path(&path.to_string_lossy());
+        let original = redirect.target.clone();
+        redirect.target = display_path.clone();
+        self.note_procsub_carrier(&original, &display_path);
         Ok(Some((path, source)))
     }
 
@@ -468,6 +501,10 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         let mut error = None;
         for (path, source) in outputs {
+            let carrier = shell_display_path(&path.to_string_lossy());
+            self.procsub_carrier_memo
+                .borrow_mut()
+                .retain(|_, value| *value != carrier);
             if error.is_none() {
                 let input = fs::read_to_string(&path).unwrap_or_default();
                 if let Err(output_error) =
