@@ -239,9 +239,22 @@ where
     env_vars.remove("__RUBASH_PHYSICAL_PWD");
 
     match target.print {
-        // GNU cd.def prints the new directory exactly as bindpwd stored it
-        // in PWD — one canonical form (see the pwd_value gate above).
-        PrintPath::Always => writeln!(stdout, "{}", shell_pwd_display_path(&new_pwd_display))?,
+        // GNU builtins/cd.def prints the operand VALUE verbatim for the
+        // LCD_PRINTPATH/cdable_vars success cases: cd.def:397-400
+        // `printf ("%s\n", temp)` where temp is get_string_value(dirname)
+        // — the variable's raw string, `./` components included — and
+        // cd.def:377-378 prints dirname, the raw $OLDPWD value for `cd -`.
+        // Verified against WSL GNU 5.3.0: `v=$PWD/./real; cd v > f` puts
+        // "..././real" in f on both paths.
+        PrintPath::Always => {
+            let verbatim = target
+                .display
+                .as_deref()
+                .and_then(Path::to_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| shell_pwd_display_path(&new_pwd_display));
+            writeln!(stdout, "{verbatim}")?
+        }
         PrintPath::CdPath => writeln!(stdout, "{}", shell_pwd_display_path(&new_pwd_display))?,
         _ => {}
     }

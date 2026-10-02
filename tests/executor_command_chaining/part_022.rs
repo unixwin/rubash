@@ -268,11 +268,12 @@ fn test_shopt_appends_stderr() {
     let _ = fs::remove_file(error_path);
 }
 
-// wt33 (#374) IGNORED — real semantic gap, expectation matches GNU:
-// rubash's cdable_vars `cd` does not update $PWD and puts a raw D:/… form
-// into $OLDPWD (rubash#392, probe wt33-373/run/H04_cdable_vars_pwd).
+// rubash#392 fixed: cd's redirect binding now funnels through
+// sync_cd_variables for every shape, so a cdable_vars `cd dest > f`
+// updates PWD/OLDPWD in the live shell (GNU builtins/cd.def:136-175
+// bindpwd runs in the current process for builtins; probe
+// wt33-373/run/H04_cdable_vars_pwd).
 #[test]
-#[ignore = "unixwin/rubash#392: cdable_vars cd does not maintain PWD/OLDPWD"]
 fn test_cdable_vars_uses_variable_as_directory() {
     let original_dir = std::env::current_dir().unwrap();
     let original_pwd = std::env::var("PWD").ok();
@@ -283,7 +284,17 @@ fn test_cdable_vars_uses_variable_as_directory() {
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&dest_dir).unwrap();
 
-    let dest_display = shell_test_path(&dest_dir);
+    // Author the variable value in the POSIX /<drive>/ domain — the same
+    // single-domain shape as the WSL GNU probe — so the two lines match:
+    // line 1 is GNU cd.def:397-400's VERBATIM variable-value print, line 2
+    // is $PWD in rubash's canonical POSIX style (see the pwd_value gate in
+    // builtins/cd.rs; a D:/ value would legitimately print D:/ verbatim
+    // on line 1 while $PWD stays /d/).
+    let dest_win = shell_test_path(&dest_dir);
+    let mut drive_chars = dest_win.chars();
+    let drive = drive_chars.next().unwrap_or('d').to_ascii_lowercase();
+    let rest: String = drive_chars.collect();
+    let dest_display = format!("/{drive}{}", rest.trim_start_matches(':'));
     let output_display = output_path.to_string_lossy().replace('\\', "/");
     let input = format!(
         "shopt -s cdable_vars; dest='{dest_display}'; cd dest > {output_display}; echo $PWD >> {output_display}"
