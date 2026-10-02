@@ -180,6 +180,23 @@ where
         );
     }
 
+    // rubash#396: a `/dev/fd/N` word whose bytes live in the executor's fd
+    // table (the expansion-materialized `source <(cmd)` shape). GNU
+    // source.def hands the word to _evalfile and evalfile.c:104 open()s it
+    // — on Linux /dev/fd/N reopens the process_substitute pipe end parked
+    // at fd >= 64 (subst.c:6392 move_to_high_fd); on Windows the endpoint
+    // is in the fd table, so read it there. No live endpoint falls through
+    // to the filesystem path below.
+    if let Some(text) = executor.sourced_dev_fd_text(filename) {
+        return execution::execute_text_maybe_redirected(
+            executor,
+            &text,
+            invocation.args,
+            redirect_cmd,
+            Some(filename),
+        );
+    }
+
     let Some(source_path) = invocation.resolve_path(executor) else {
         if invocation.path.is_some() || posix_plain_name_lookup(executor, filename) {
             writeln!(

@@ -395,6 +395,26 @@ impl Executor {
             .map(|output| bytes_to_shell_text(&output))
     }
 
+    /// rubash#396: text behind a `/dev/fd/N` (or `/proc/self/fd/N`) word —
+    /// the `source <(cmd)` / `. <(cmd)` route once the expansion layer has
+    /// materialized the process substitution into an fd-table endpoint.
+    /// GNU source.def hands the expanded word to `_evalfile`, whose open()
+    /// (builtins/evalfile.c:104) reopens the pipe end process_substitute
+    /// parked at fd >= 64 (subst.c:6392 move_to_high_fd); on Windows the
+    /// bytes live in the fd table, so the read consults it — the same
+    /// endpoint lookup the comsub operand path uses. `None` (no live
+    /// Text/ProcessSubstitution read endpoint at N) falls through to the
+    /// filesystem open, which stays correct for real files.
+    pub(crate) fn sourced_dev_fd_text(&self, filename: &str) -> Option<String> {
+        let fd_text = filename
+            .strip_prefix("/dev/fd/")
+            .or_else(|| filename.strip_prefix("/proc/self/fd/"))?;
+        let fd = fd_text.parse::<u32>().ok()?;
+        let (data, offset) = self.fd_table.input_snapshot_bytes(fd)?;
+        let content = data.get(offset..)?.to_vec();
+        Some(bytes_to_shell_text(&content))
+    }
+
     pub(crate) fn process_substitution_output_bytes(&mut self, source: &str) -> Option<Vec<u8>> {
         let tokens = crate::lexer::tokenize(source);
         let ast = crate::parser::parse(&tokens);
