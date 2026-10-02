@@ -2965,6 +2965,10 @@ impl Executor {
                 let array_name = name
                     .strip_suffix("[*]")
                     .filter(|name| is_shell_name(name))?;
+                // rubash#375: dynamic stack arrays join from the live view.
+                if let Some(joined) = self.dynamic_array_joined(&name) {
+                    return Some(joined);
+                }
                 let storage = self.parameter_array_storage(array_name)?;
                 Some(self.join_array_parameter_values(&storage, &name))
             }
@@ -3020,6 +3024,10 @@ impl Executor {
             .strip_suffix("[@]")
             .or_else(|| name.strip_suffix("[*]"))
             .filter(|array_name| is_shell_name(array_name))?;
+        // rubash#375: dynamic stack arrays join from the live view.
+        if let Some(joined) = self.dynamic_array_joined(name) {
+            return Some(joined);
+        }
         self.parameter_array_storage(array_name)
             .map(|value| self.join_array_parameter_values(&value, name))
     }

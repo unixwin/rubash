@@ -69,6 +69,7 @@ mod declare_local;
 mod dev_fd_operands;
 mod dynamic_arrays;
 mod exec_profile;
+pub(in crate::executor) use dynamic_arrays::dense_view_element;
 pub(in crate::executor) use dynamic_arrays::env_derived_dynamic_parameter_value;
 pub(crate) mod embedded_mutations;
 mod embedded_parameters;

@@ -124,6 +124,12 @@ impl Executor {
                 };
                 return Some(self.group_value_at(index).unwrap_or_default());
             }
+            // rubash#375: dynamic stack arrays read the element straight
+            // from the live view (silent None posture, same as the storage
+            // path this replaces).
+            if let Some(values) = self.dynamic_stack_array_values(array_name) {
+                return Some(dense_view_element(&values, index).unwrap_or_default());
+            }
             return Some(
                 self.parameter_array_storage(array_name)
                     .and_then(|value| {
@@ -148,6 +154,18 @@ impl Executor {
                 split_once_outside_subscript(array_name, '-').map(|_| (array_name, ""))
             })
         {
+            // rubash#375: dynamic stack arrays join from the live view. The
+            // empty-view test mirrors the storage path's `!value.is_empty()`
+            // filter exactly (an empty view renders the empty storage
+            // string; a non-empty view never does, even when every element
+            // is empty).
+            if let Some(values) = self.dynamic_stack_array_values(array_name) {
+                if values.is_empty() {
+                    return Some(default.to_string());
+                }
+                let joined = self.dynamic_array_joined(name).unwrap_or_default();
+                return Some(joined);
+            }
             return Some(
                 self.parameter_array_storage(array_name)
                     .filter(|value| !value.is_empty())
@@ -160,6 +178,15 @@ impl Executor {
                 .strip_suffix("[@]")
                 .or_else(|| array_expr.strip_suffix("[*]"))
             {
+                // rubash#375: dynamic stack arrays join from the live view
+                // (same empty-view mirror as the plain `[@]-` arm above).
+                if let Some(values) = self.dynamic_stack_array_values(array_name) {
+                    if values.is_empty() {
+                        return Some(default.to_string());
+                    }
+                    let joined = self.dynamic_array_joined(array_expr).unwrap_or_default();
+                    return Some(joined);
+                }
                 return Some(
                     self.parameter_array_storage(array_name)
                         .filter(|value| !value.is_empty())
@@ -181,6 +208,10 @@ impl Executor {
             if array_name == "GROUPS" {
                 return Some(self.groups_words().join(" "));
             }
+            // rubash#375: dynamic stack arrays join from the live view.
+            if let Some(joined) = self.dynamic_array_joined(name) {
+                return Some(joined);
+            }
             return Some(
                 self.parameter_array_storage(array_name)
                     .map(|value| self.join_array_parameter_values(&value, name))
@@ -190,6 +221,11 @@ impl Executor {
         if let Some((array_name, index)) = parse_array_numeric_subscript(name) {
             if array_name == "GROUPS" {
                 return Some(self.group_value_at(index).unwrap_or_default());
+            }
+            // rubash#375: dynamic stack arrays read the element straight
+            // from the live view.
+            if let Some(values) = self.dynamic_stack_array_values(array_name) {
+                return Some(dense_view_element(&values, index as i128).unwrap_or_default());
             }
             return Some(
                 self.parameter_array_storage(array_name)

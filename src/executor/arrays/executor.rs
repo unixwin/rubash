@@ -4,8 +4,8 @@ use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::NamerefResolution;
 use crate::executor::{
     assoc_hash_ordered_entries, assoc_hash_ordered_values, assoc_keys, assoc_nbuckets,
-    eval_conditional_arith_value_with_writes, IndexedSubscript, SubscriptSource,
-    DECLARED_UNSET_VARS, NAMEREF_VARS,
+    dense_view_element, eval_conditional_arith_value_with_writes, IndexedSubscript,
+    SubscriptSource, DECLARED_UNSET_VARS, NAMEREF_VARS,
 };
 
 impl Executor {
@@ -122,8 +122,30 @@ impl Executor {
         let (array_name, key) = parse_array_subscript(expression)?;
 
         let storage_name = self.resolved_variable_name(array_name)?;
-        let storage = self.parameter_array_storage(array_name).unwrap_or_default();
-        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &storage_name) {
+        // rubash#375: the six dynamic stack arrays divert to the live view
+        // before any storage string is rendered — GNU keeps them as real
+        // ARRAY objects (variables.c INIT_DYNAMIC_VAR), so an element read
+        // is an O(1) array_reference, never a whole-array render+reparse
+        // (bats' `bats_capture_stack_trace` reads three of them per stack
+        // frame per DEBUG firing). Assoc-marked names keep the storage
+        // path (`declare -A` over a name owns the assoc arm). The shared
+        // key-expansion machinery below still runs for the dynamic names,
+        // so subscript semantics (arithmetic side effects, `$(())`
+        // memoization, quoting rules) are identical; only the element
+        // fetch and the storage render are skipped.
+        let assoc_marked = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &storage_name);
+        let dynamic_values = if assoc_marked {
+            None
+        } else {
+            self.dynamic_stack_array_values(array_name)
+        };
+        let storage = if dynamic_values.is_some() {
+            // Never consumed on this path; the divert below returns first.
+            String::new()
+        } else {
+            self.parameter_array_storage(array_name).unwrap_or_default()
+        };
+        if assoc_marked {
             // GNU parameters.c assoc_reference: a literal * subscript means
             // all elements, not the key "*"; a quoted * joins with IFS[0]
             // (string_list_pos_params). Expanded subscripts such as
@@ -240,6 +262,28 @@ impl Executor {
         // runs. This is the VALUE expansion path (not ${#arr[bad]} length
         // expansion which returns &expand_wdesc_error at subst.c:9955 and
         // abandons the command), so we must NOT set arithmetic_nonfatal_error.
+        //
+        // rubash#375: the six dynamic stack arrays read their element
+        // straight from the live view (GNU keeps them as real ARRAY
+        // objects, variables.c INIT_DYNAMIC_VAR — an element read is an
+        // O(1) array_reference, never a whole-array rebuild); keep the
+        // "bad array subscript" diagnostic for the unresolvable-negative
+        // leg so the posture matches the storage path below.
+        if let Some(values) = dynamic_values {
+            match dense_view_element(&values, index) {
+                Some(element) => return Some(element),
+                None => {
+                    if index < 0 {
+                        eprintln!(
+                            "{}{}: bad array subscript",
+                            self.diagnostic_prefix(),
+                            array_name
+                        );
+                    }
+                    return None;
+                }
+            }
+        }
         let Some(index) = resolve_indexed_array_subscript(&storage, index) else {
             eprintln!(
                 "{}{}: bad array subscript",
@@ -255,6 +299,12 @@ impl Executor {
     pub(in crate::executor) fn array_length(&self, name: &str) -> usize {
         if name == "GROUPS" {
             return self.groups_words().len();
+        }
+        // rubash#375: `${#BASH_LINENO[@]}` and friends count the live view
+        // (GNU: array_num_elements over the maintained ARRAY object) —
+        // no storage render + reparse for a length.
+        if let Some(values) = self.dynamic_stack_array_values(name) {
+            return values.len();
         }
         self.parameter_array_storage(name)
             .map(|value| array_values(&value).len())

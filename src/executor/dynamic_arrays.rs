@@ -345,6 +345,107 @@ impl Executor {
         stack
     }
 
+    /// Direct element-list view of the six dynamic stack arrays, mirroring
+    /// exactly what the matching `parameter_array_storage` arms render —
+    /// WITHOUT the storage-string round trip. GNU maintains BASH_LINENO,
+    /// BASH_SOURCE, FUNCNAME, BASH_ARGV and BASH_ARGC as real ARRAY objects
+    /// (variables.c INIT_DYNAMIC_VAR / push_call_frame), so an element read
+    /// `${BASH_LINENO[$i]}` is an O(1) `array_reference` (array.c) — GNU
+    /// never re-renders the whole array per subscript. rubash's scalar
+    /// table stores these arrays only as rendered storage strings, so every
+    /// indexed read, length read or set-ness test rebuilt and re-parsed the
+    /// full `[0]=v [1]=v ...` text — measured at ~50µs per read under a
+    /// DEBUG trap (bats' `bats_capture_stack_trace` reads three of these
+    /// arrays per stack frame per firing; rubash#375). This view feeds the
+    /// read-only fast paths; every writer still goes through the storage
+    /// form, so the two representations cannot diverge (the view is rebuilt
+    /// from the same live stacks on every call — content parity is by
+    /// construction, not by cache).
+    ///
+    /// Returns None for names that are NOT one of the six dynamic stack
+    /// arrays (or when nameref resolution fails, mirroring
+    /// `parameter_array_storage`'s `resolved_variable_name` gate).
+    pub(in crate::executor) fn dynamic_stack_array_values(
+        &self,
+        name: &str,
+    ) -> Option<Vec<String>> {
+        let name = self.resolved_variable_name(name)?;
+        let values = match name.as_str() {
+            "PIPESTATUS" => self.pipestatus_values(),
+            "FUNCNAME" => {
+                // Same att_invisibility as the storage arm
+                // (variables.c:1812 make_funcname_visible): outside any
+                // function the whole array reads as unset.
+                if self.shell_state.function_depth == 0 {
+                    Vec::new()
+                } else {
+                    let mut stack = self.shell_state.function_name_stack.clone();
+                    if self.has_script_main_frame()
+                        && !stack.is_empty()
+                        && stack.last().map(String::as_str) != Some("main")
+                    {
+                        stack.push("main".to_string());
+                    }
+                    stack
+                }
+            }
+            "BASH_ARGV" => self.shell_state.bash_argv_stack.clone(),
+            "BASH_ARGC" => self.shell_state.bash_argc_stack.clone(),
+            "BASH_LINENO" => self.bash_lineno_view(),
+            "BASH_SOURCE" => {
+                let mut stack = self.shell_state.bash_source_stack.clone();
+                // Without a main frame (`bash -c`, stdin scripts) the
+                // script-name bottom entry installed with $0 is not a
+                // BASH_SOURCE frame (see the storage arm's probe note).
+                if !self.has_script_main_frame() && !stack.is_empty() {
+                    stack.pop();
+                }
+                stack
+            }
+            _ => return None,
+        };
+        Some(values)
+    }
+
+    /// Indexed element read of a dynamic stack array,
+    /// `${BASH_LINENO[$i]}` shape. Dense-subscript semantics mirror
+    /// `resolve_indexed_array_subscript` + `array_value_at` over the
+    /// rendered storage (the six views are contiguous 0..n renders, so
+    /// max_index+1 == len): a non-negative index passes through, a
+    /// negative index counts back from the end, out-of-range and
+    /// unresolvable-subscript reads return None — callers keep their own
+    /// diagnostic posture (the element-value path reports "bad array
+    /// subscript", the braced-operator paths stay silent, exactly as their
+    /// storage-string counterparts do).
+    pub(in crate::executor) fn dynamic_stack_array_element(
+        &self,
+        name: &str,
+        index: i128,
+    ) -> Option<String> {
+        let values = self.dynamic_stack_array_values(name)?;
+        dense_view_element(&values, index)
+    }
+
+    /// `${name[@]}` / `${name[*]}` joined read of a dynamic stack array —
+    /// the fast twin of `parameter_array_storage` + `join_array_parameter_
+    /// values` for the six dynamic names: normalize each element (the
+    /// storage round trip's unquote/normalize pass is identity on the raw
+    /// view values) and join with the same `[@]`-space / `[*]`-IFS[0]
+    /// rule (`join_expanded_array_values`). `expression` carries the
+    /// `[@]`/`[*]` suffix, like every existing join call site. Returns
+    /// None when the base name is not one of the six dynamic arrays.
+    pub(in crate::executor) fn dynamic_array_joined(&self, expression: &str) -> Option<String> {
+        let array_name = expression
+            .strip_suffix("[@]")
+            .or_else(|| expression.strip_suffix("[*]"))?;
+        let values = self.dynamic_stack_array_values(array_name)?;
+        let values = values
+            .into_iter()
+            .map(normalize_array_expanded_value)
+            .collect::<Vec<_>>();
+        Some(self.join_expanded_array_values(values, expression))
+    }
+
     pub(in crate::executor) fn parameter_array_storage(&self, name: &str) -> Option<String> {
         let name = self.resolved_variable_name(name)?;
         let name = name.as_str();
@@ -717,4 +818,25 @@ impl Executor {
         }
         (evaluated, failure)
     }
+}
+
+/// Element fetch over a dense dynamic-stack view with the storage path's
+/// subscript semantics (`resolve_indexed_array_subscript` +
+/// `array_value_at` over a contiguous 0..n render): non-negative indices
+/// pass through, negative indices count back from the end
+/// (max_index+1+index == len+index), an unresolvable negative index and an
+/// out-of-range index both read as None. Callers own the diagnostic
+/// posture, mirroring their storage counterparts.
+pub(in crate::executor) fn dense_view_element(values: &[String], index: i128) -> Option<String> {
+    let resolved = if index >= 0 {
+        usize::try_from(index).ok()?
+    } else {
+        i128::try_from(values.len())
+            .ok()?
+            .checked_add(index)
+            .and_then(|resolved| usize::try_from(resolved).ok())?
+    };
+    values
+        .get(resolved)
+        .map(|value| normalize_array_expanded_value(value.clone()))
 }

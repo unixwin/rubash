@@ -333,6 +333,25 @@ impl Executor {
             .strip_suffix("[*]")
             .or_else(|| name.strip_suffix("[@]"))
         {
+            // rubash#375: the six dynamic stack arrays answer set-ness and
+            // the joined value from the live view — the storage render
+            // existed only to be parsed back for is_empty()/join (GNU
+            // tests array elements on the maintained ARRAY object,
+            // variables.c INIT_DYNAMIC_VAR). bats' per-firing
+            // `${BASH_LINENO[@]+"${BASH_LINENO[@]}"}` paid the round trip
+            // twice per DEBUG trap. Same contract as the storage path
+            // below: space join for BOTH `[@]` and `[*]`, elements
+            // normalized like array_values does.
+            if let Some(values) = self.dynamic_stack_array_values(array_name) {
+                let values = values
+                    .into_iter()
+                    .map(normalize_array_expanded_value)
+                    .collect::<Vec<_>>();
+                if values.is_empty() {
+                    return None;
+                }
+                return Some(values.join(" "));
+            }
             let values = self
                 .parameter_array_storage(array_name)
                 .map(|storage| array_values(&storage))
