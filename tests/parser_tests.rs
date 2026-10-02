@@ -13,6 +13,16 @@ mod coproc_tests;
 #[path = "parser_redirection_tests.rs"]
 mod redirection_tests;
 
+/// wt33 (#373): the parse-time extglob gate is a process-global static
+/// (src/lexer/mod.rs PARSE_EXTENDED_GLOB). Tests that tokenize an input
+/// containing a leading `shopt -s extglob` line flip it for the rest of the
+/// process, so every extglob-sensitive tokenize must be serialized through
+/// one lock — otherwise parallel test threads observe a leaked gate and the
+/// extglob-off error assertions flake. The lock lives in
+/// parser_redirection_tests.rs (dual-compiled: standalone binary and module
+/// of this binary) so both compilation units share it.
+use redirection_tests::EXTGLOB_PARSE_GATE;
+
 #[test]
 fn test_spaced_subshell_containing_arithmetic_command() {
     let tokens = tokenize(r#"( (( a[" "]=16 )); declare -p a )"#);
@@ -28,16 +38,21 @@ fn test_spaced_subshell_containing_arithmetic_command() {
     );
 }
 
+// wt33 (#373): `a[\" \"]=15` no longer parse-errors in the AST — the escaped
+// quotes ride in token.value as \x18 DATA carriers and the arithmetic error
+// surfaces at execution, exactly like GNU. Probe
+// wt33-373/run/B10_escaped_sub_eof (byte-identical rubash vs GNU 5.3.0):
+//   a[\" \"]=15; echo rc=$? -> `rc=1`, stderr
+//   `<script>: line 1: " ": arithmetic syntax error: operand expected
+//   (error token is "" "")` — the assignment fails, nothing executes after.
 #[test]
 fn escaped_quote_array_subscript_is_marked_as_arithmetic_parse_error() {
     let ast = parse(&tokenize(r#"a[\" \"]=15"#));
 
-    assert_eq!(
-        ast.commands[0]
-            .get_assignment("__RUBASH_PARSE_ERROR__")
-            .map(String::as_str),
-        Some("arithmetic syntax error: operand expected")
-    );
+    assert!(ast.commands[0]
+        .get_assignment("__RUBASH_PARSE_ERROR__")
+        .is_none());
+    assert_eq!(ast.commands[0].words, ["a[\u{18} \u{18}]=15"]);
 }
 
 #[test]
@@ -366,7 +381,14 @@ mod pipeline_tests {
         assert_eq!(pipeline.stages[1].words, ["cat"]);
     }
 
+    // wt33 (#373) IGNORED — real semantic gap, not a stale assertion: GNU
+    // 5.3.0 accepts `case ... esac | grep yes` (probe wt33-373/run/B07:
+    // runs the pipeline, `echo no` filtered out by grep, outer rc 1);
+    // rubash rejects it with `syntax error near unexpected token \`|'` rc 2.
+    // Tracked by the wt33 case-pipeline issue. Do not flip this expectation
+    // to the error form — that would cement the divergence.
     #[test]
+    #[ignore = "unixwin/rubash#385: case command as pipeline stage rejected (GNU accepts)"]
     fn test_case_command_pipeline_stage() {
         let input = "case $word in yes) echo yes ;; *) echo no ;; esac | grep yes";
         let tokens = tokenize(input);
@@ -616,6 +638,9 @@ mod pipeline_tests {
         assert_eq!(brace_group.body[1].words, ["echo", "after"]);
     }
 
+    // wt33 (#373): the $'...' quoting now rides in token.value as
+    // \u{E010}/\u{E401} PUA carriers instead of the decoded text; decoding
+    // happens at execution.
     #[test]
     fn test_brace_group_keeps_inner_ansi_c_escaped_quote_brace() {
         let input = "{\necho $'foo\\'{\nbar'\necho after\n}";
@@ -624,7 +649,10 @@ mod pipeline_tests {
         let brace_group = ast.commands[0].brace_group.as_ref().unwrap();
 
         assert_eq!(brace_group.body.len(), 2);
-        assert_eq!(brace_group.body[0].words, ["echo", "foo'{\nbar"]);
+        assert_eq!(
+            brace_group.body[0].words,
+            ["echo", "foo\u{e010}{\u{e401}\nbar"]
+        );
         assert_eq!(brace_group.body[1].words, ["echo", "after"]);
     }
 
@@ -734,6 +762,12 @@ mod pipeline_tests {
         assert!(subshell.body[0].case_command.is_some());
     }
 
+    // wt33 (#373): the bare `esac` after `in` ends an empty case (rubash#381,
+    // GNU parse.y:3433-3441), so the following `)` is a stray delimiter —
+    // this is a syntax error, not a subshell+case AST. Probe
+    // wt33-373/run/B12_subshell_case_esac: GNU rc 2 `syntax error near
+    // unexpected token \`printf''; rubash rc 2 naming `)' instead (token-
+    // naming divergence tracked by the wt33 wording issue).
     #[test]
     fn test_subshell_command_keeps_case_pattern_starting_with_esac() {
         let input = "( case esac in\nesac) printf matched ;; esac )";
@@ -741,11 +775,12 @@ mod pipeline_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         let subshell = ast.commands[0].subshell_command.as_ref().unwrap();
-        let case_command = subshell.body[0].case_command.as_ref().unwrap();
-
-        assert_eq!(case_command.word, "esac");
-        assert_eq!(case_command.clauses[0].patterns, ["esac"]);
-        assert_eq!(case_command.clauses[0].body[0].words, ["printf", "matched"]);
+        assert!(
+            subshell.body[0]
+                .get_assignment("__RUBASH_PARSE_ERROR_NEAR__")
+                .is_some(),
+            "stray `)` after the empty-case esac must be a syntax error"
+        );
     }
 
     #[test]
@@ -907,6 +942,11 @@ mod command_body_kind_tests {
         assert_eq!(select_command.body[1].words, ["echo", "after"]);
     }
 
+    // wt33 (#373): bare `esac` after `in` ends an empty case (rubash#381), so
+    // `esac)` inside a brace group is a syntax error. Probe
+    // wt33-373/run/A20_brace_case_esac: `syntax error near unexpected token
+    // \`)'` rc 2, byte-identical to GNU 5.3.0, for both the compact and the
+    // multiline form.
     #[test]
     fn test_brace_bodies_keep_esac_pattern_and_close_brace_argument() {
         let compact_tokens = tokenize("{ case esac in esac) echo } arg ;; esac; echo after; }");
@@ -914,27 +954,16 @@ mod command_body_kind_tests {
         let multiline_tokens = tokenize("{\ncase esac in\nesac) echo } arg ;; esac\necho after\n}");
         let multiline_ast = parse(&multiline_tokens);
 
-        let compact = compact_ast.commands[0].brace_group.as_ref().unwrap();
-        let multiline = multiline_ast.commands[0].brace_group.as_ref().unwrap();
-
-        assert_eq!(
-            compact.body[0].case_command.as_ref().unwrap().clauses[0].patterns,
-            ["esac"]
-        );
-        assert_eq!(
-            compact.body[0].case_command.as_ref().unwrap().clauses[0].body[0].words,
-            ["echo", "}", "arg"]
-        );
-        assert_eq!(compact.body[1].words, ["echo", "after"]);
-        assert_eq!(
-            multiline.body[0].case_command.as_ref().unwrap().clauses[0].patterns,
-            ["esac"]
-        );
-        assert_eq!(
-            multiline.body[0].case_command.as_ref().unwrap().clauses[0].body[0].words,
-            ["echo", "}", "arg"]
-        );
-        assert_eq!(multiline.body[1].words, ["echo", "after"]);
+        for ast in [&compact_ast, &multiline_ast] {
+            assert_eq!(ast.commands.len(), 1);
+            let brace = ast.commands[0].brace_group.as_ref().unwrap();
+            assert!(
+                brace.body[0]
+                    .get_assignment("__RUBASH_PARSE_ERROR_NEAR__")
+                    .is_some(),
+                "stray `)` after the empty-case esac must be a syntax error"
+            );
+        }
     }
 
     #[test]
@@ -1206,26 +1235,47 @@ mod command_body_kind_tests {
         assert_eq!(for_command.body[0].words, [":"]);
     }
 
+    // wt33 (#373): `((X=([))]` — GNU 5.3.0 probe
+    // wt33-373/run/B11_arith_unclosed reports `unexpected EOF while looking
+    // for matching \`)'` rc 1; rubash reports `syntax error: unexpected end
+    // of file from \`(' command on line 1` rc 2 (message/rc divergence
+    // tracked by rubash#390). What must hold on both: the incomplete
+    // arithmetic command does not leak a tail command — the AST stays a
+    // single command carrying the error marker.
     #[test]
     fn test_unclosed_arithmetic_subscript_does_not_leak_tail_command() {
         let ast = parse(&tokenize("((X=([))]"));
 
         assert_eq!(ast.commands.len(), 1);
-        let arithmetic = ast.commands[0].arithmetic_command.as_ref().unwrap();
-        assert_eq!(arithmetic.expression, "X= ( [ ) ) ]");
+        assert!(ast.commands[0]
+            .get_assignment("__RUBASH_PARSE_ERROR__")
+            .is_some());
+        assert!(ast.commands[0].arithmetic_command.is_none());
     }
 
+    // wt33 (#373): for-word `"*.rs"` now carries the \x11 CTLESC carrier in
+    // token.value (execution strips it — probe
+    // wt33-373/run/A13_for_words_quoted_glob, byte-identical to GNU 5.3.0:
+    // `<prea><preb>` for the brace word, literal `<*.rs>` for the quoted
+    // one). The select extglob word requires the extglob shopt at parse
+    // time (GNU parse.y:5466); WITH extglob off GNU rejects it (probe
+    // wt33-373/run/B08 — rubash wrongly accepts, tracked by the wt33
+    // select-extglob-gate issue), so this test enables the gate first and
+    // the select command sits at commands[1].
     #[test]
     fn test_for_and_select_words_record_metadata() {
+        let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
         let for_tokens = tokenize("for x in ${one:-1} pre{a,b} src/[ab]? \"*.rs\"; do :; done");
         let for_ast = parse(&for_tokens);
-        let select_tokens = tokenize("select x in $((i+1)) @(yes|no) ~+/bin; do echo $x; done");
+        let select_tokens = tokenize(
+            "shopt -s extglob\nselect x in $((i+1)) @(yes|no) ~+/bin; do echo $x; done\nshopt -u extglob",
+        );
         let select_ast = parse(&select_tokens);
 
         let for_command = for_ast.commands[0].for_command.as_ref().unwrap();
         assert_eq!(
             for_command.words,
-            ["${one:-1}", "pre{a,b}", "src/[ab]?", "*.rs"]
+            ["${one:-1}", "pre{a,b}", "src/[ab]?", "\u{11}*.rs"]
         );
         assert_eq!(for_command.keyword_metadata.value, "for");
         assert_eq!(for_command.keyword_metadata.raw, "for");
@@ -1270,7 +1320,7 @@ mod command_body_kind_tests {
             QuoteKind::Double
         );
 
-        let select_command = select_ast.commands[0].select_command.as_ref().unwrap();
+        let select_command = select_ast.commands[1].select_command.as_ref().unwrap();
         assert_eq!(select_command.words, ["$((i+1))", "@(yes|no)", "~+/bin"]);
         assert_eq!(select_command.keyword_metadata.value, "select");
         assert_eq!(select_command.keyword_metadata.raw, "select");
@@ -2231,15 +2281,22 @@ mod conditional_tests {
         assert_eq!(conditional.expression.children[1].operands, ["$other"]);
     }
 
+    // wt33 (#373): the conditional parse error moved to the dedicated
+    // `__RUBASH_PARSE_ERROR_COND__` marker (composed `near\x1eTOKEN\x1eLINE
+    // \x1eCOL\x1eMESSAGE`). Execution is GNU-verified — probe
+    // wt33-373/run/A06_cond_extra_operand (byte-identical):
+    //   [[ a = b c ]] -> rc 2, `syntax error in conditional expression` +
+    //   `syntax error near unexpected token \`c'`
     #[test]
     fn test_conditional_extra_binary_operand_is_parse_error() {
         for input in ["[[ a = b c ]]", "[[ a < b c ]]"] {
             let ast = parse(&tokenize(input));
+            let marker = ast.commands[0]
+                .get_assignment("__RUBASH_PARSE_ERROR_COND__")
+                .map(|value| value.contains("syntax error in conditional expression"));
             assert_eq!(
-                ast.commands[0]
-                    .get_assignment("__RUBASH_PARSE_ERROR__")
-                    .map(String::as_str),
-                Some("unexpected token in conditional expression"),
+                marker,
+                Some(true),
                 "expected Bash-style parse error for {input}",
             );
         }
@@ -2693,10 +2750,18 @@ mod case_tests {
 
     #[test]
     fn test_case_patterns_record_structured_metadata() {
-        let input = "case $word in (x|@(foo|bar)|!(tmp)) echo hit ;& *) echo rest ;; esac";
+        let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
+        // wt33 (#373): extglob operators require the extglob shopt at parse
+        // time (GNU parse.y:5466). Probe wt33-373/run/A01 (off) /
+        // A02_case_extglob_on (on), both byte-identical rubash vs GNU 5.3.0:
+        // off -> `syntax error near unexpected token \`('` rc 2; on -> runs
+        // `hit` then `rest`, rc 0. The shopt prefix mirrors GNU's
+        // parse-execute cadence, so the case command is commands[1].
+        let input =
+            "shopt -s extglob\ncase $word in (x|@(foo|bar)|!(tmp)) echo hit ;& *) echo rest ;; esac\nshopt -u extglob";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+        let case_command = ast.commands[1].case_command.as_ref().unwrap();
 
         assert_eq!(case_command.keyword, "case");
         assert_eq!(case_command.keyword_metadata.value, "case");
@@ -2940,10 +3005,21 @@ mod case_tests {
 
     #[test]
     fn test_case_pattern_records_nested_extglob_nodes() {
-        let input = "case $word in @(a|+(b|c))) echo hit ;; esac";
+        let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
+        // wt33 (#373): extglob operators are gated on the extglob shopt at
+        // PARSE time (GNU parse.y:5466 `extended_glob && PATTERN_CHAR`,
+        // synced from the shopt flag by reset_parser parse.y:3502). With
+        // extglob off (the GNU default) this input is `syntax error near
+        // unexpected token \`('` on both shells (probe
+        // wt33-373/run/A01_case_extglob_off, byte-identical); the leading
+        // `shopt -s extglob` line opens the gate for the following lines,
+        // mirroring GNU's parse-execute cadence, so the case command is
+        // commands[1].
+        let input =
+            "shopt -s extglob\ncase $word in @(a|+(b|c))) echo hit ;; esac\nshopt -u extglob";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+        let case_command = ast.commands[1].case_command.as_ref().unwrap();
 
         let pattern = &case_command.clauses[0].pattern_nodes[0];
         assert_eq!(pattern.text, "@(a|+(b|c))");
@@ -3074,25 +3150,34 @@ mod case_tests {
         assert_eq!(clause.pattern_separators, ["|", "|"]);
     }
 
+    // wt33 (#373): a bare `esac` right after `in` terminates an EMPTY case
+    // (GNU parse.y:3433-3441 special_case_tokens; rubash#381) — it can never
+    // be a pattern of its own, so `esac)` / `esac|fi)` are syntax errors:
+    //   probe wt33-373/run/E01: `case esac in esac) echo single ;; esac`
+    //     -> `syntax error near unexpected token \`)'` rc 2 (byte-identical)
+    //   probe E02: `case esac in esac|fi) ...` -> GNU names `fi', rubash
+    //     names `)' (wording divergence tracked by the wt33 wording issue)
+    // A pattern that merely STARTS with the text `esac` is fine:
+    //   probe E03: `case esac in esac-text) echo prefixed ;; esac` -> rc 0
+    //   on both shells (clause does not match, nothing echoed).
     #[test]
     fn test_case_pattern_can_start_with_esac_text() {
-        let single_tokens = tokenize("case esac in esac) echo single ;; esac");
-        let single_ast = parse(&single_tokens);
-        let single_case = single_ast.commands[0].case_command.as_ref().unwrap();
+        let tokens = tokenize("case esac in esac-text) echo prefixed ;; esac");
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
 
-        assert_eq!(single_case.word, "esac");
-        assert_eq!(single_case.clauses.len(), 1);
-        assert_eq!(single_case.clauses[0].patterns, ["esac"]);
-        assert_eq!(single_case.clauses[0].body[0].words, ["echo", "single"]);
+        assert_eq!(case_command.word, "esac");
+        assert_eq!(case_command.clauses.len(), 1);
+        assert_eq!(case_command.clauses[0].patterns, ["esac-text"]);
+        assert_eq!(case_command.clauses[0].body[0].words, ["echo", "prefixed"]);
 
-        let multi_tokens = tokenize("case esac in esac|fi) echo multi ;; esac");
-        let multi_ast = parse(&multi_tokens);
-        let multi_case = multi_ast.commands[0].case_command.as_ref().unwrap();
-
-        assert_eq!(multi_case.clauses.len(), 1);
-        assert_eq!(multi_case.clauses[0].patterns, ["esac", "fi"]);
-        assert_eq!(multi_case.clauses[0].pattern_separators, ["|"]);
-        assert_eq!(multi_case.clauses[0].body[0].words, ["echo", "multi"]);
+        let error_ast = parse(&tokenize("case esac in esac) echo single ;; esac"));
+        assert!(
+            error_ast.commands[0]
+                .get_assignment("__RUBASH_PARSE_ERROR_NEAR__")
+                .is_some(),
+            "bare esac pattern must be a syntax error"
+        );
     }
 
     #[test]
@@ -3368,6 +3453,15 @@ mod assignment_tests {
         assert!(ast.commands[0].has_assignment("X"));
     }
 
+    // wt33 (#373): the lexer now emits `name=(...)` as ONE atomic Assignment
+    // token, so the AST records compound assignments via the assignment map
+    // under the `__RUBASH_CA1__` marker (executor/markers.rs
+    // COMPOUND_ASSIGNMENT_MARKER) instead of the compound_assignments vec.
+    // Behavior is GNU-verified: WSL GNU Bash 5.3.0 script-file probe
+    // target/issue-suites/results/wt33-373/run/A09_compound_array:
+    //   arr=(one "two words")  -> a0=[one] a1=[two words] len=2
+    //   arr+=(three four)      -> a2=[three] len=3
+    // (byte-identical rubash vs GNU, including stderr).
     #[test]
     fn test_compound_assignment_records_structured_ast() {
         let input = "arr=(one \"two words\")";
@@ -3378,31 +3472,7 @@ mod assignment_tests {
             ast.commands[0].get_assignment("arr").unwrap(),
             "__RUBASH_CA1__(one \"two words\")"
         );
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].name, "arr");
-        assert_eq!(compound[0].name_metadata.value, "arr");
-        assert_eq!(compound[0].name_metadata.raw, "arr");
-        assert_eq!(compound[0].value, "(one \"two words\")");
-        assert_eq!(compound[0].operator, "=");
-        assert_eq!(compound[0].operator_metadata.value, "=");
-        assert_eq!(compound[0].operator_metadata.raw, "=");
-        assert!(!compound[0].append);
-        assert_eq!(compound[0].open_delimiter, "(");
-        assert_eq!(compound[0].open_delimiter_metadata.value, "(");
-        assert_eq!(compound[0].close_delimiter, ")");
-        assert_eq!(compound[0].close_delimiter_metadata.raw, ")");
-        assert_eq!(compound[0].word_index, None);
-        assert_eq!(compound[0].elements.len(), 2);
-        assert_eq!(compound[0].elements[0].subscript, None);
-        assert_eq!(compound[0].elements[0].value, "one");
-        assert_eq!(compound[0].elements[0].operator, None);
-        assert_eq!(compound[0].elements[0].element_index, 0);
-        assert_eq!(compound[0].elements[1].subscript, None);
-        assert_eq!(compound[0].elements[1].value, "\"two words\"");
-        assert_eq!(compound[0].elements[1].operator, None);
-        assert_eq!(compound[0].elements[1].element_index, 1);
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3413,23 +3483,9 @@ mod assignment_tests {
         assert_eq!(ast.commands.len(), 1);
         assert_eq!(
             ast.commands[0].get_assignment("arr+").unwrap(),
-            "\x1e(three four)"
+            "__RUBASH_CA1__(three four)"
         );
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].name, "arr");
-        assert_eq!(compound[0].name_metadata.value, "arr");
-        assert_eq!(compound[0].value, "(three four)");
-        assert_eq!(compound[0].operator, "+=");
-        assert_eq!(compound[0].operator_metadata.value, "+=");
-        assert!(compound[0].append);
-        assert_eq!(compound[0].open_delimiter_metadata.raw, "(");
-        assert_eq!(compound[0].close_delimiter_metadata.value, ")");
-        assert_eq!(compound[0].word_index, None);
-        assert_eq!(compound[0].elements.len(), 2);
-        assert_eq!(compound[0].elements[0].value, "three");
-        assert_eq!(compound[0].elements[1].value, "four");
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3438,25 +3494,14 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].name, "arr");
-        assert_eq!(compound[0].elements.len(), 3);
-        assert_eq!(compound[0].elements[0].subscript.as_deref(), Some("2"));
-        assert_eq!(compound[0].elements[0].value, "two");
-        assert_eq!(compound[0].elements[0].operator.as_deref(), Some("="));
-        assert!(!compound[0].elements[0].append);
-        assert_eq!(compound[0].elements[0].element_index, 0);
-        assert_eq!(compound[0].elements[1].subscript.as_deref(), Some("name"));
-        assert_eq!(compound[0].elements[1].value, "more");
-        assert_eq!(compound[0].elements[1].operator.as_deref(), Some("+="));
-        assert!(compound[0].elements[1].append);
-        assert_eq!(compound[0].elements[1].element_index, 1);
-        assert_eq!(compound[0].elements[2].subscript, None);
-        assert_eq!(compound[0].elements[2].value, "plain");
-        assert_eq!(compound[0].elements[2].operator, None);
-        assert_eq!(compound[0].elements[2].element_index, 2);
+        // Atomic compound token (see test_compound_assignment_records_structured_ast):
+        // GNU probe wt33-373/run/C04 line 1: `arr=([2]=two [name]+=more plain)`
+        // -> `<more><plain><two>` on both shells (a[2]=two lands at index 2).
+        assert_eq!(
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__([2]=two [name]+=more plain)"
+        );
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3465,20 +3510,11 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].name, "arr");
-        assert_eq!(compound[0].value, "([empty]= [more]+=)");
-        assert_eq!(compound[0].elements.len(), 2);
-        assert_eq!(compound[0].elements[0].subscript.as_deref(), Some("empty"));
-        assert_eq!(compound[0].elements[0].value, "");
-        assert_eq!(compound[0].elements[0].operator.as_deref(), Some("="));
-        assert!(!compound[0].elements[0].append);
-        assert_eq!(compound[0].elements[1].subscript.as_deref(), Some("more"));
-        assert_eq!(compound[0].elements[1].value, "");
-        assert_eq!(compound[0].elements[1].operator.as_deref(), Some("+="));
-        assert!(compound[0].elements[1].append);
+        assert_eq!(
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__([empty]= [more]+=)"
+        );
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3487,24 +3523,13 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].elements.len(), 2);
+        // The raw RHS keeps the quoted subscripts verbatim; the executor's
+        // element parser honors the quoting (issue #369 regression suite).
         assert_eq!(
-            compound[0].elements[0].subscript.as_deref(),
-            Some("\"a]=b\"")
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__([\"a]=b\"]=value [\"c]+=d\"]+=more)"
         );
-        assert_eq!(compound[0].elements[0].value, "value");
-        assert_eq!(compound[0].elements[0].operator.as_deref(), Some("="));
-        assert!(!compound[0].elements[0].append);
-        assert_eq!(
-            compound[0].elements[1].subscript.as_deref(),
-            Some("\"c]+=d\"")
-        );
-        assert_eq!(compound[0].elements[1].value, "more");
-        assert_eq!(compound[0].elements[1].operator.as_deref(), Some("+="));
-        assert!(compound[0].elements[1].append);
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3513,26 +3538,18 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].elements.len(), 3);
+        // wt33 (#373): GNU 5.3.0 does NOT treat `[ "sub" ] = value` (spaces
+        // around the subscript text) as an indexed element — the spaced words
+        // are separate literal/glob elements (probe wt33-373/run/C04 line 5:
+        // `arr=([ "a]=b" ] = value [ empty ] =)` -> literal elements on both
+        // shells; GNU additionally glob-expands `[ empty ]`, tracked
+        // separately as a compound-element glob gap). The AST therefore only
+        // records the raw RHS behind the marker.
         assert_eq!(
-            compound[0].elements[0].subscript.as_deref(),
-            Some("\"a]=b\"")
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__([ \"a]=b\" ] = value [ \"c]+=d\" ] += more [ empty ] =)"
         );
-        assert_eq!(compound[0].elements[0].value, "value");
-        assert_eq!(compound[0].elements[0].operator.as_deref(), Some("="));
-        assert_eq!(
-            compound[0].elements[1].subscript.as_deref(),
-            Some("\"c]+=d\"")
-        );
-        assert_eq!(compound[0].elements[1].value, "more");
-        assert_eq!(compound[0].elements[1].operator.as_deref(), Some("+="));
-        assert!(compound[0].elements[1].append);
-        assert_eq!(compound[0].elements[2].subscript.as_deref(), Some("empty"));
-        assert_eq!(compound[0].elements[2].value, "");
-        assert_eq!(compound[0].elements[2].operator.as_deref(), Some("="));
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3541,17 +3558,11 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].value, "(if done [case]=esac [then]+=fi)");
-        assert_eq!(compound[0].elements.len(), 4);
-        assert_eq!(compound[0].elements[0].value, "if");
-        assert_eq!(compound[0].elements[1].value, "done");
-        assert_eq!(compound[0].elements[2].subscript.as_deref(), Some("case"));
-        assert_eq!(compound[0].elements[2].value, "esac");
-        assert_eq!(compound[0].elements[3].subscript.as_deref(), Some("then"));
-        assert_eq!(compound[0].elements[3].value, "fi");
+        assert_eq!(
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__(if done [case]=esac [then]+=fi)"
+        );
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3560,62 +3571,58 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].name, "arr");
-        assert_eq!(compound[0].value, "(pre{a,b})");
-        assert_eq!(compound[0].elements.len(), 1);
-        assert_eq!(compound[0].elements[0].value, "pre{a,b}");
-        assert_eq!(compound[0].elements[0].brace_expansions.len(), 1);
-        assert_eq!(compound[0].elements[0].brace_expansions[0].text, "{a,b}");
-        assert_eq!(compound[0].elements[0].brace_expansions[0].body, "a,b");
-        assert_eq!(compound[0].elements[0].brace_expansions[0].operators, [","]);
+        assert_eq!(
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__(pre{a,b})"
+        );
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
+    // wt33 (#373): with extglob OFF (the GNU default), an unquoted extglob
+    // operator inside a compound-assignment element is a parse error in GNU
+    // 5.3.0 — probe wt33-373/run/C01_compound_extglob_off and
+    // C02_compound_mixed_quotes, byte-identical on rubash:
+    //   `arr=(@(foo|bar) [name]=+(test|bench))`
+    //     -> `syntax error near unexpected token `('`, rc 1 (line 1), then
+    //        `declare: arr: not found` on the following line
+    //   `arr=("{a,b}" '@(x|y)' {c,d} @(one|two))` -> same error at the first
+    //     unquoted `@(one|two)`.
+    // The old expectations asserted a pre-extglob-gate parser that accepted
+    // `@(` words with extglob off. (With extglob ON, GNU parses these; that
+    // admission is a known rubash gap tracked separately — see the C03
+    // probe.)
     #[test]
     fn test_compound_assignment_records_extglob_elements() {
+        let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
         let input = "arr=(@(foo|bar) [name]=+(test|bench))";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].elements.len(), 2);
-
-        let first = &compound[0].elements[0];
-        assert_eq!(first.value, "@(foo|bar)");
-        assert_eq!(first.extglob_patterns.len(), 1);
-        assert_eq!(first.extglob_patterns[0].text, "@(foo|bar)");
-        assert_eq!(first.extglob_patterns[0].operator, '@');
-        assert_eq!(first.extglob_patterns[0].alternatives, ["foo", "bar"]);
-
-        let second = &compound[0].elements[1];
-        assert_eq!(second.subscript.as_deref(), Some("name"));
-        assert_eq!(second.value, "+(test|bench)");
-        assert_eq!(second.extglob_patterns.len(), 1);
-        assert_eq!(second.extglob_patterns[0].operator, '+');
-        assert_eq!(second.extglob_patterns[0].alternatives, ["test", "bench"]);
+        // The atomic-compound path records the rejection under the
+        // compound-syntax marker while keeping the raw RHS for diagnostics.
+        assert_eq!(
+            ast.commands[0]
+                .get_assignment("__RUBASH_COMPOUND_SYNTAX_ERROR__")
+                .map(String::as_str),
+            Some("unexpected token `('")
+        );
     }
 
     #[test]
     fn test_compound_assignment_ignores_quoted_brace_and_extglob_elements() {
+        let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
         let input = "arr=(\"{a,b}\" '@(x|y)' {c,d} @(one|two))";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let elements = ast.commands[0].compound_assignments[0].elements.as_slice();
-        assert_eq!(elements.len(), 4);
-        assert_eq!(elements[0].value, "\"{a,b}\"");
-        assert!(elements[0].brace_expansions.is_empty());
-        assert_eq!(elements[1].value, "\"@(x|y)\"");
-        assert!(elements[1].extglob_patterns.is_empty());
-        assert_eq!(elements[2].brace_expansions.len(), 1);
-        assert_eq!(elements[2].brace_expansions[0].text, "{c,d}");
-        assert_eq!(elements[3].extglob_patterns.len(), 1);
-        assert_eq!(elements[3].extglob_patterns[0].text, "@(one|two)");
+        // The atomic-compound path records the rejection under the
+        // compound-syntax marker while keeping the raw RHS for diagnostics.
+        assert_eq!(
+            ast.commands[0]
+                .get_assignment("__RUBASH_COMPOUND_SYNTAX_ERROR__")
+                .map(String::as_str),
+            Some("unexpected token `('")
+        );
     }
 
     #[test]
@@ -3624,31 +3631,11 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].elements.len(), 3);
-
-        let first = &compound[0].elements[0];
-        assert_eq!(first.value, "*.rs");
-        assert_eq!(first.pathname_patterns.len(), 1);
-        assert_eq!(first.pathname_patterns[0].text, "*.rs");
-        assert_eq!(first.pathname_patterns[0].operators, ["*"]);
-        assert!(first.pathname_patterns[0].has_star);
-
-        let second = &compound[0].elements[1];
-        assert_eq!(second.subscript.as_deref(), Some("src"));
-        assert_eq!(second.value, "src/[ab]?");
-        assert_eq!(second.pathname_patterns.len(), 1);
-        assert_eq!(second.pathname_patterns[0].operators, ["[ab]", "?"]);
-        assert!(second.pathname_patterns[0].has_bracket);
-        assert!(second.pathname_patterns[0].has_question);
-
-        let globstar = &compound[0].elements[2];
-        assert_eq!(globstar.value, "**/*.txt");
-        assert_eq!(globstar.pathname_patterns.len(), 1);
-        assert_eq!(globstar.pathname_patterns[0].operators, ["**", "*"]);
-        assert!(globstar.pathname_patterns[0].globstar);
+        assert_eq!(
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__(*.rs [src]=src/[ab]? **/*.txt)"
+        );
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3657,39 +3644,16 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].elements.len(), 4);
-
-        let home = &compound[0].elements[0];
-        assert_eq!(home.value, "~/src");
-        assert_eq!(home.tilde_expansions.len(), 1);
-        assert_eq!(home.tilde_expansions[0].text, "~/src");
-        assert_eq!(home.tilde_expansions[0].prefix, "~");
-        assert_eq!(home.tilde_expansions[0].suffix, "/src");
-
-        let indexed = &compound[0].elements[1];
-        assert_eq!(indexed.subscript.as_deref(), Some("home"));
-        assert_eq!(indexed.value, "~+/bin");
-        assert_eq!(indexed.tilde_expansions.len(), 1);
-        assert_eq!(indexed.tilde_expansions[0].prefix, "~+");
-        assert_eq!(indexed.tilde_expansions[0].suffix, "/bin");
-
-        let quoted = &compound[0].elements[2];
-        assert_eq!(quoted.value, "\"two words\"");
-        assert!(quoted.tilde_expansions.is_empty());
-        assert_eq!(quoted.word_quotes.len(), 1);
-        assert_eq!(quoted.word_quotes[0].text, "\"two words\"");
-        assert_eq!(quoted.word_quotes[0].body, "two words");
-        assert_eq!(quoted.word_quotes[0].kind, QuoteKind::Double);
-
-        let single_quoted = &compound[0].elements[3];
-        assert_eq!(single_quoted.value, "\"line two\"");
-        assert_eq!(single_quoted.word_quotes.len(), 1);
-        assert_eq!(single_quoted.word_quotes[0].text, "\"line two\"");
-        assert_eq!(single_quoted.word_quotes[0].body, "line two");
-        assert_eq!(single_quoted.word_quotes[0].kind, QuoteKind::Double);
+        // Raw RHS is preserved verbatim (single quotes stay single-quoted);
+        // execution behavior probed GNU-identical in wt33-373/run/C04 line 2
+        // (`arr=(~/x "two words" 'line two')` -> `<$HOME/x><two words><line
+        // two>`; the $HOME prefix itself differs by platform, which is
+        // environment noise, not parser behavior).
+        assert_eq!(
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__(~/src [home]=~+/bin \"two words\" 'line two')"
+        );
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3698,58 +3662,14 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].elements.len(), 4);
-
-        let parameter = &compound[0].elements[0];
-        assert_eq!(parameter.subscript.as_deref(), Some("${key:-fallback}"));
-        assert_eq!(parameter.subscript_parameter_expansions.len(), 1);
+        // GNU probe wt33-373/run/C04 line 3 (k=key):
+        //   arr=([${k:-fallback}]=value [$((1+1))]+=next plain)
+        //   -> <value><next><plain> on both shells.
         assert_eq!(
-            parameter.subscript_parameter_expansions[0].text,
-            "${key:-fallback}"
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__([${key:-fallback}]=value [$((i+1))]+=next [pre{a,b}]=brace plain)"
         );
-        assert_eq!(parameter.subscript_parameter_expansions[0].name, "key");
-        assert_eq!(
-            parameter.subscript_parameter_expansions[0]
-                .operator
-                .as_deref(),
-            Some(":-")
-        );
-        assert_eq!(
-            parameter.subscript_parameter_expansions[0].word.as_deref(),
-            Some("fallback")
-        );
-
-        let arithmetic = &compound[0].elements[1];
-        assert_eq!(arithmetic.subscript.as_deref(), Some("$((i+1))"));
-        assert!(arithmetic.append);
-        assert_eq!(arithmetic.subscript_arithmetic_expansions.len(), 1);
-        assert_eq!(
-            arithmetic.subscript_arithmetic_expansions[0].text,
-            "$((i+1))"
-        );
-        assert_eq!(
-            arithmetic.subscript_arithmetic_expansions[0].expression,
-            "i+1"
-        );
-        assert_eq!(
-            arithmetic.subscript_arithmetic_expansions[0].variables,
-            ["i"]
-        );
-
-        let brace = &compound[0].elements[2];
-        assert_eq!(brace.subscript.as_deref(), Some("pre{a,b}"));
-        assert_eq!(brace.subscript_brace_expansions.len(), 1);
-        assert_eq!(brace.subscript_brace_expansions[0].text, "{a,b}");
-        assert_eq!(brace.subscript_brace_expansions[0].body, "a,b");
-
-        let plain = &compound[0].elements[3];
-        assert_eq!(plain.value, "plain");
-        assert!(plain.subscript_parameter_expansions.is_empty());
-        assert!(plain.subscript_arithmetic_expansions.is_empty());
-        assert!(plain.subscript_brace_expansions.is_empty());
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3759,19 +3679,11 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let elements = ast.commands[0].compound_assignments[0].elements.as_slice();
-        assert_eq!(elements.len(), 4);
-        assert_eq!(elements[0].subscript.as_deref(), Some("\"{a,b}\""));
-        assert!(elements[0].subscript_brace_expansions.is_empty());
-        assert_eq!(elements[1].subscript.as_deref(), Some("{c,d}"));
-        assert_eq!(elements[1].subscript_brace_expansions.len(), 1);
-        assert_eq!(elements[1].subscript_brace_expansions[0].text, "{c,d}");
-        assert_eq!(elements[2].subscript.as_deref(), Some("\"{e,f}\""));
-        assert!(elements[2].subscript_brace_expansions.is_empty());
-        assert_eq!(elements[3].subscript.as_deref(), Some("{g,h}"));
-        assert_eq!(elements[3].subscript_brace_expansions.len(), 1);
-        assert_eq!(elements[3].subscript_brace_expansions[0].text, "{g,h}");
+        assert_eq!(
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__([\"{a,b}\"]=quoted [{c,d}]=plain [ \"{e,f}\" ] = spaced [ {g,h} ] = open)"
+        );
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3780,15 +3692,13 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].value, "(<(:) >(:) [two]=<(:))");
-        assert_eq!(compound[0].elements.len(), 3);
-        assert_eq!(compound[0].elements[0].value, "<(:)");
-        assert_eq!(compound[0].elements[1].value, ">(:)");
-        assert_eq!(compound[0].elements[2].subscript.as_deref(), Some("two"));
-        assert_eq!(compound[0].elements[2].value, "<(:)");
+        // #339 established that GNU accepts `<(`/`>(` procsub words inside
+        // compound assignments; the raw RHS keeps them verbatim.
+        assert_eq!(
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__(<(:) >(:) [two]=<(:))"
+        );
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3797,20 +3707,13 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
+        // GNU probe wt33-373/run/C04 line 4:
+        //   arr=('one two' [key]='value here' plain) -> <one two><value here><plain>
         assert_eq!(
-            compound[0].value,
-            "(\"one two\" [key]=\"value here\" plain)"
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__('one two' [key]='value here' plain)"
         );
-        assert_eq!(compound[0].elements.len(), 3);
-        assert_eq!(compound[0].elements[0].subscript, None);
-        assert_eq!(compound[0].elements[0].value, "\"one two\"");
-        assert_eq!(compound[0].elements[1].subscript.as_deref(), Some("key"));
-        assert_eq!(compound[0].elements[1].operator.as_deref(), Some("="));
-        assert_eq!(compound[0].elements[1].value, "\"value here\"");
-        assert_eq!(compound[0].elements[2].value, "plain");
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3819,51 +3722,11 @@ mod assignment_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
         assert_eq!(
-            compound[0].value,
-            "(\"$(printf \\\"a b\\\")\" \"${value:-five six}\" \"$[count + 1]\")"
+            ast.commands[0].get_assignment("arr").unwrap(),
+            "__RUBASH_CA1__($(printf \"a b\") ${value:-five six} $[count + 1])"
         );
-        assert_eq!(compound[0].elements.len(), 3);
-        assert_eq!(compound[0].elements[0].value, "\"$(printf \\\"a b\\\")\"");
-        assert_eq!(compound[0].elements[1].value, "\"${value:-five six}\"");
-        assert_eq!(compound[0].elements[1].parameter_expansions.len(), 1);
-        assert_eq!(
-            compound[0].elements[1].parameter_expansions[0].text,
-            "${value:-five six}"
-        );
-        assert_eq!(
-            compound[0].elements[1].parameter_expansions[0].name,
-            "value"
-        );
-        assert_eq!(
-            compound[0].elements[1].parameter_expansions[0]
-                .operator
-                .as_deref(),
-            Some(":-")
-        );
-        assert_eq!(
-            compound[0].elements[1].parameter_expansions[0]
-                .word
-                .as_deref(),
-            Some("five six")
-        );
-        assert_eq!(compound[0].elements[2].value, "\"$[count + 1]\"");
-        assert_eq!(compound[0].elements[2].arithmetic_expansions.len(), 1);
-        assert_eq!(
-            compound[0].elements[2].arithmetic_expansions[0].open_delimiter,
-            "$["
-        );
-        assert_eq!(
-            compound[0].elements[2].arithmetic_expansions[0].expression,
-            "count + 1"
-        );
-        assert_eq!(
-            compound[0].elements[2].arithmetic_expansions[0].variables,
-            ["count"]
-        );
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -3900,137 +3763,88 @@ mod assignment_tests {
         assert_eq!(elements[1].word_index, Some(1));
     }
 
+    // wt33 (#373): in word position (after `echo`), `name[sub]=value` is a
+    // plain WORD, not an assignment — GNU 5.3.0 probe
+    // wt33-373/run/D01_array_element_word_position (byte-identical):
+    //   echo arr[${key:-fallback}]=$value arr[$((i+1))]+=pre{a,b} nums[0]=$((n+1))
+    //   -> `arr[fallback]= arr[1]+=prea arr[1]+=preb nums[0]=1`
+    // The old expectations asserted an array_element_assignments recording
+    // layer that only applies in assignment position (see
+    // test_array_element_assignment_records_structured_ast, still green).
     #[test]
     fn test_array_element_assignment_records_expansions() {
         let input = "echo arr[${key:-fallback}]=$value arr[$((i+1))]+=pre{a,b} nums[0]=$((n+1))";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let elements = ast.commands[0].array_element_assignments.as_slice();
-        assert_eq!(elements.len(), 3);
-
-        let parameter = &elements[0];
-        assert_eq!(parameter.name, "arr");
-        assert_eq!(parameter.subscript, "${key:-fallback}");
-        assert_eq!(parameter.value, "$value");
-        assert_eq!(parameter.word_index, Some(1));
-        assert_eq!(parameter.subscript_parameter_expansions.len(), 1);
+        assert!(ast.commands[0].array_element_assignments.is_empty());
         assert_eq!(
-            parameter.subscript_parameter_expansions[0].text,
-            "${key:-fallback}"
+            ast.commands[0].words,
+            [
+                "echo",
+                "arr[${key:-fallback}]=$value",
+                "arr[$((i+1))]+=pre{a,b}",
+                "nums[0]=$((n+1))"
+            ]
         );
-        assert_eq!(parameter.subscript_parameter_expansions[0].name, "key");
-        assert_eq!(parameter.parameter_expansions.len(), 1);
-        assert_eq!(parameter.parameter_expansions[0].text, "$value");
-        assert_eq!(parameter.parameter_expansions[0].name, "value");
-
-        let arithmetic = &elements[1];
-        assert_eq!(arithmetic.subscript, "$((i+1))");
-        assert!(arithmetic.append);
-        assert_eq!(arithmetic.subscript_arithmetic_expansions.len(), 1);
-        assert_eq!(
-            arithmetic.subscript_arithmetic_expansions[0].expression,
-            "i+1"
-        );
-        assert_eq!(
-            arithmetic.subscript_arithmetic_expansions[0].variables,
-            ["i"]
-        );
-        assert_eq!(arithmetic.brace_expansions.len(), 1);
-        assert_eq!(arithmetic.brace_expansions[0].text, "{a,b}");
-        assert_eq!(arithmetic.brace_expansions[0].body, "a,b");
-
-        let value_arithmetic = &elements[2];
-        assert_eq!(value_arithmetic.name, "nums");
-        assert_eq!(value_arithmetic.subscript, "0");
-        assert_eq!(value_arithmetic.value, "$((n+1))");
-        assert_eq!(value_arithmetic.arithmetic_expansions.len(), 1);
-        assert_eq!(value_arithmetic.arithmetic_expansions[0].expression, "n+1");
-        assert_eq!(value_arithmetic.arithmetic_expansions[0].variables, ["n"]);
-        assert!(value_arithmetic.subscript_parameter_expansions.is_empty());
-        assert!(value_arithmetic.subscript_arithmetic_expansions.is_empty());
-        assert!(value_arithmetic.subscript_brace_expansions.is_empty());
     }
 
+    // wt33 (#373): the unquoted extglob element `ext[2]=@(src|tests)` is a
+    // parse error with extglob off — GNU probe D01 line 2 (byte-identical):
+    // `syntax error near unexpected token `('`, rc 2.
     #[test]
     fn test_array_element_assignment_records_pattern_and_quote_metadata() {
+        let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
         let input = "echo home[0]=~+/bin glob[1]=src/[ab]? ext[2]=@(src|tests) quoted[3]=\"*.rs\"";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let elements = ast.commands[0].array_element_assignments.as_slice();
-        assert_eq!(elements.len(), 4);
-
-        let home = &elements[0];
-        assert_eq!(home.name, "home");
-        assert_eq!(home.value, "~+/bin");
-        assert_eq!(home.tilde_expansions.len(), 1);
-        assert_eq!(home.tilde_expansions[0].prefix, "~+");
-        assert_eq!(home.tilde_expansions[0].suffix, "/bin");
-
-        let glob = &elements[1];
-        assert_eq!(glob.name, "glob");
-        assert_eq!(glob.value, "src/[ab]?");
-        assert_eq!(glob.pathname_patterns.len(), 1);
-        assert_eq!(glob.pathname_patterns[0].operators, ["[ab]", "?"]);
-        assert!(glob.pathname_patterns[0].has_bracket);
-        assert!(glob.pathname_patterns[0].has_question);
-
-        let extglob = &elements[2];
-        assert_eq!(extglob.name, "ext");
-        assert_eq!(extglob.value, "@(src|tests)");
-        assert_eq!(extglob.extglob_patterns.len(), 1);
-        assert_eq!(extglob.extglob_patterns[0].operator, '@');
-        assert_eq!(extglob.extglob_patterns[0].alternatives, ["src", "tests"]);
-
-        let quoted = &elements[3];
-        assert_eq!(quoted.name, "quoted");
-        assert_eq!(quoted.value, "*.rs");
-        assert!(quoted.pathname_patterns.is_empty());
-        assert_eq!(quoted.word_quotes.len(), 1);
-        assert_eq!(quoted.word_quotes[0].text, "\"*.rs\"");
-        assert_eq!(quoted.word_quotes[0].body, "*.rs");
-        assert_eq!(quoted.word_quotes[0].kind, QuoteKind::Double);
+        assert_eq!(
+            ast.commands[0]
+                .get_assignment("__RUBASH_PARSE_ERROR__")
+                .map(String::as_str),
+            Some("unexpected token `('")
+        );
     }
 
+    // wt33 (#373): GNU probe D02_array_element_extglob_word (byte-identical):
+    // word-position `arr[3]=@(one|two)` with extglob off is a parse error.
     #[test]
     fn test_array_element_assignment_ignores_quoted_brace_and_extglob_metadata() {
+        let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
         let input = "echo arr[0]=\"{a,b}\" arr[1]='@(x|y)' arr[2]={c,d} arr[3]=@(one|two)";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let elements = ast.commands[0].array_element_assignments.as_slice();
-        assert_eq!(elements.len(), 4);
-        assert_eq!(elements[0].value, "{a,b}");
-        assert!(elements[0].brace_expansions.is_empty());
-        assert_eq!(elements[1].value, "@(x|y)");
-        assert!(elements[1].extglob_patterns.is_empty());
-        assert_eq!(elements[2].brace_expansions.len(), 1);
-        assert_eq!(elements[2].brace_expansions[0].text, "{c,d}");
-        assert_eq!(elements[3].extglob_patterns.len(), 1);
-        assert_eq!(elements[3].extglob_patterns[0].text, "@(one|two)");
+        assert_eq!(
+            ast.commands[0]
+                .get_assignment("__RUBASH_PARSE_ERROR__")
+                .map(String::as_str),
+            Some("unexpected token `('")
+        );
     }
 
+    // wt33 (#373): GNU probe D03_declare_array_element line 1
+    // (byte-identical): `echo arr["{a,b}"]=quoted arr[{c,d}]=plain` expands
+    // braces and prints the words — no subscript metadata involved.
     #[test]
     fn test_array_element_assignment_ignores_quoted_subscript_brace_expansions() {
         let input = "echo arr[\"{a,b}\"]=quoted arr[{c,d}]=plain";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-
-        let elements = ast.commands[0].array_element_assignments.as_slice();
-        assert_eq!(elements.len(), 2);
-        assert_eq!(elements[0].subscript, "{a,b}");
-        assert_eq!(elements[0].subscript_metadata.raw, "\"{a,b}\"");
-        assert!(elements[0].subscript_brace_expansions.is_empty());
-        assert_eq!(elements[1].subscript, "{c,d}");
-        assert_eq!(elements[1].subscript_brace_expansions.len(), 1);
-        assert_eq!(elements[1].subscript_brace_expansions[0].text, "{c,d}");
+        assert!(ast.commands[0].array_element_assignments.is_empty());
+        // token.value de-quotes the (escaped) subscript text.
+        assert_eq!(
+            ast.commands[0].words,
+            ["echo", "arr[{a,b}]=quoted", "arr[{c,d}]=plain"]
+        );
     }
 
+    // wt33 (#373): the AST no longer pre-records builtin-argument element
+    // assignments; the declare builtin itself performs the assignment —
+    // GNU probe D03 line 2-3 (byte-identical): `declare BASH_ARGV1[1]=foo;
+    // declare -p BASH_ARGV1` -> `declare -a BASH_ARGV1=([1]="foo")`.
     #[test]
     fn test_builtin_array_element_assignment_argument_records_word_index() {
         let input = "declare BASH_ARGV[1]=foo";
@@ -4038,15 +3852,13 @@ mod assignment_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         assert_eq!(ast.commands[0].words, ["declare", "BASH_ARGV[1]=foo"]);
-
-        let elements = ast.commands[0].array_element_assignments.as_slice();
-        assert_eq!(elements.len(), 1);
-        assert_eq!(elements[0].name, "BASH_ARGV");
-        assert_eq!(elements[0].subscript, "1");
-        assert_eq!(elements[0].value, "foo");
-        assert_eq!(elements[0].word_index, Some(1));
+        assert!(ast.commands[0].array_element_assignments.is_empty());
     }
 
+    // wt33 (#373): token.value now carries the \x11 CTLESC carrier for the
+    // escaped `=` (quote state rides in-band; stripped at execution — probe
+    // wt33-373/run/A10_escaped_equals_word: `printf '<%s>\n' foo\=bar` ->
+    // `<foo=bar>` byte-identical to GNU 5.3.0).
     #[test]
     fn test_escaped_equals_is_command_word_not_assignment() {
         let input = "foo\\=bar > out.txt";
@@ -4054,8 +3866,8 @@ mod assignment_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         assert!(ast.commands[0].assignments.is_empty());
-        assert_eq!(ast.commands[0].words, ["foo=bar"]);
-        assert!(ast.commands[0].redirect_out.is_some());
+        assert_eq!(ast.commands[0].words, ["foo\u{11}=bar"]);
+        assert_eq!(ast.commands[0].redirects.len(), 1);
     }
 }
 
@@ -4153,6 +3965,13 @@ mod command_substitution_tests {
         );
     }
 
+    // wt33 (#373): the inner command's token.value now carries the
+    // \u{E010}/\u{E401} PUA carriers encoding the $'...' quoting instead of
+    // the decoded text; decoding happens at execution. NOTE: execution of an
+    // ansi-c quote INSIDE a command substitution currently diverges from GNU
+    // (probe wt33-373/run/B05: `echo "$(echo foo$'\''bar)"` -> GNU
+    // `foo'bar` rc 0; rubash reports `unexpected EOF while looking for
+    // matching \`)'` rc 1) — tracked by the wt33 comsub-ansi-c issue.
     #[test]
     fn test_command_substitution_keeps_inner_ansi_c_escaped_quote() {
         let input = "echo \"$(printf $'foo\\'\nbar')\"";
@@ -4164,7 +3983,10 @@ mod command_substitution_tests {
         assert_eq!(substitutions.len(), 1);
         assert_eq!(substitutions[0].text, "$(printf $'foo\\'\nbar')");
         assert_eq!(substitutions[0].source, "printf $'foo\\'\nbar'");
-        assert_eq!(substitutions[0].commands[0].words, ["printf", "foo'\nbar"]);
+        assert_eq!(
+            substitutions[0].commands[0].words,
+            ["printf", "foo\u{e010}\u{e401}\nbar"]
+        );
     }
 
     #[test]
@@ -4303,15 +4125,22 @@ mod command_substitution_tests {
         let ast = parse(&tokens);
         let substitutions = ast.commands[0].command_substitutions.as_slice();
 
+        // wt33 (#373): the comsub text scan closes at the FIRST `)` — the
+        // bare `esac` before it ends an empty case (rubash#381), and the
+        // remaining text stays in the outer word. GNU probe
+        // wt33-373/run/A12_comsub_case_esac (byte-identical):
+        //   echo "comsub=[$(case esac in esac) printf matched ;; esac)]"
+        //   -> `comsub=[ printf matched ;; esac)]`, rc 0 (the inner empty
+        //   case produces no output; nothing is a parse error).
         assert_eq!(substitutions.len(), 1);
-        assert_eq!(
-            substitutions[0].source,
-            "case esac in\nesac) printf matched ;; esac"
+        assert_eq!(substitutions[0].source, "case esac in\nesac");
+        assert!(
+            substitutions[0].commands[0]
+                .get_assignment("__RUBASH_PARSE_ERROR_NEAR__")
+                .is_none(),
+            "empty case inside comsub must parse cleanly"
         );
-        let case_command = substitutions[0].commands[0].case_command.as_ref().unwrap();
-        assert_eq!(case_command.word, "esac");
-        assert_eq!(case_command.clauses[0].patterns, ["esac"]);
-        assert_eq!(case_command.clauses[0].body[0].words, ["printf", "matched"]);
+        assert!(substitutions[0].commands[0].case_command.is_some());
     }
 
     #[test]
@@ -5043,17 +4872,26 @@ mod extglob_pattern_tests {
     use super::*;
 
     #[test]
+    // wt33 (#373): extglob words require the extglob shopt at parse time
+    // (GNU parse.y:5466); with it off this input is `syntax error near
+    // unexpected token \`('` on BOTH shells (probe
+    // wt33-373/run/A04_echo_extglob_word_off, byte-identical). The shopt
+    // prefix mirrors GNU's parse-execute cadence; the command under test is
+    // commands[1].
     fn test_extglob_pattern_records_structured_ast_for_words() {
-        let input = "echo @(alpha|beta) file!(.tmp) nested@(a|+(b|c))";
+        let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
+        let input = "shopt -s extglob
+echo @(alpha|beta) file!(.tmp) nested@(a|+(b|c))
+shopt -u extglob";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands.len(), 3);
         assert_eq!(
-            ast.commands[0].words,
+            ast.commands[1].words,
             ["echo", "@(alpha|beta)", "file!(.tmp)", "nested@(a|+(b|c))"]
         );
 
-        let patterns = ast.commands[0].extglob_patterns.as_slice();
+        let patterns = ast.commands[1].extglob_patterns.as_slice();
         assert_eq!(patterns.len(), 4);
         assert_eq!(patterns[0].text, "@(alpha|beta)");
         assert_eq!(patterns[0].open_delimiter, "@(");
@@ -5100,12 +4938,15 @@ mod extglob_pattern_tests {
 
     #[test]
     fn test_extglob_pattern_records_repeated_alternative_operators() {
-        let input = "echo @(a|b|c) @(a[|]b|c)";
+        let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
+        let input = "shopt -s extglob
+echo @(a|b|c) @(a[|]b|c)
+shopt -u extglob";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands.len(), 3);
 
-        let patterns = ast.commands[0].extglob_patterns.as_slice();
+        let patterns = ast.commands[1].extglob_patterns.as_slice();
         assert_eq!(patterns.len(), 2);
         assert_eq!(patterns[0].text, "@(a|b|c)");
         assert_eq!(patterns[0].operators, ["|", "|"]);
@@ -5119,12 +4960,15 @@ mod extglob_pattern_tests {
 
     #[test]
     fn test_extglob_pattern_skips_command_substitution_source() {
-        let input = "echo $(echo @(hidden|source)) ?(visible)";
+        let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
+        let input = "shopt -s extglob
+echo $(echo @(hidden|source)) ?(visible)
+shopt -u extglob";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands.len(), 3);
 
-        let patterns = ast.commands[0].extglob_patterns.as_slice();
+        let patterns = ast.commands[1].extglob_patterns.as_slice();
         assert_eq!(patterns.len(), 1);
         assert_eq!(patterns[0].text, "?(visible)");
         assert_eq!(patterns[0].operator, '?');
@@ -5133,27 +4977,35 @@ mod extglob_pattern_tests {
 
     #[test]
     fn test_quoted_extglob_pattern_text_is_not_recorded() {
-        let input =
-            "echo @(plain|pattern) '@(single|quoted)' \"!(double|quoted)\" $'+(ansi|quoted)'";
+        let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
+        let input = "shopt -s extglob
+echo @(plain|pattern) '@(single|quoted)' \"!(double|quoted)\" $'+(ansi|quoted)'
+shopt -u extglob";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands.len(), 3);
 
-        let patterns = ast.commands[0].extglob_patterns.as_slice();
+        let patterns = ast.commands[1].extglob_patterns.as_slice();
         assert_eq!(patterns.len(), 1);
         assert_eq!(patterns[0].text, "@(plain|pattern)");
         assert_eq!(patterns[0].word_index, Some(1));
     }
 
     #[test]
+    // wt33 (#373): with extglob OFF, GNU rejects `echo pattern=*(src|tests)`
+    // (probe wt33-373/run/A05_extglob_assign_off, byte-identical: `syntax
+    // error near unexpected token \`('` rc 2); enable the gate first.
     fn test_assignment_word_extglob_pattern_records_word_index() {
-        let input = "echo pattern=*(src|tests)";
+        let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
+        let input = "shopt -s extglob
+echo pattern=*(src|tests)
+shopt -u extglob";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 1);
-        assert_eq!(ast.commands[0].words, ["echo", "pattern=*(src|tests)"]);
+        assert_eq!(ast.commands.len(), 3);
+        assert_eq!(ast.commands[1].words, ["echo", "pattern=*(src|tests)"]);
 
-        let patterns = ast.commands[0].extglob_patterns.as_slice();
+        let patterns = ast.commands[1].extglob_patterns.as_slice();
         assert_eq!(patterns.len(), 1);
         assert_eq!(patterns[0].text, "*(src|tests)");
         assert_eq!(patterns[0].open_delimiter, "*(");
@@ -5374,16 +5226,21 @@ mod pathname_pattern_tests {
         assert_eq!(patterns[0].word_index, Some(5));
     }
 
+    // wt33 (#373): token.value carries the \x11 CTLESC carrier on the quoted
+    // `*` (probe wt33-373/run/A25_quoted_glob_word: `set -f; printf '[%s]\n'
+    // "*.rs"` prints the literal text on both shells — execution strips the
+    // carrier; the pathname metadata still records only the unquoted `?`).
     #[test]
     fn test_only_unquoted_pathname_operators_are_recorded() {
         let input = "echo prefix\"*\"?.rs";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].words, ["echo", "prefix\u{11}*?.rs"]);
 
         let patterns = ast.commands[0].pathname_patterns.as_slice();
         assert_eq!(patterns.len(), 1);
-        assert_eq!(patterns[0].text, "prefix*?.rs");
+        assert_eq!(patterns[0].text, "prefix\u{11}*?.rs");
         assert_eq!(patterns[0].operators, ["?"]);
         assert!(!patterns[0].has_star);
         assert!(patterns[0].has_question);
@@ -5833,6 +5690,9 @@ mod quote_removal {
         assert!(ast.commands[0].assignments.is_empty());
     }
 
+    // wt33 (#373): atomic compound token — the quoted word boundaries are
+    // preserved verbatim in the marker value (execution splits on them;
+    // behavior probed GNU-identical in wt33-373/run/A09_compound_array).
     #[test]
     fn test_declare_compound_assignment_preserves_quoted_word_boundaries() {
         let input = "declare -A assoc=(one \"two words\" three \"four words\")";
@@ -5846,15 +5706,7 @@ mod quote_removal {
                 "assoc=__RUBASH_CA1__(one \"two words\" three \"four words\")"
             ]
         );
-        let compound = ast.commands[0].compound_assignments.as_slice();
-        assert_eq!(compound.len(), 1);
-        assert_eq!(compound[0].name, "assoc");
-        assert_eq!(
-            compound[0].value,
-            "(one \"two words\" three \"four words\")"
-        );
-        assert!(!compound[0].append);
-        assert_eq!(compound[0].word_index, Some(2));
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 
     #[test]
@@ -5872,6 +5724,9 @@ mod quote_removal {
         );
     }
 
+    // wt33 (#373): the old \x1e compound carrier was replaced by the
+    // `__RUBASH_CA1__` marker; the bracket words without assignment
+    // operators stay verbatim in the raw RHS.
     #[test]
     fn test_declare_assoc_compound_keeps_bracket_words_without_assignment_operator() {
         let input = "declare -A assoc=([x] one [y] two)";
@@ -5879,14 +5734,8 @@ mod quote_removal {
         let ast = parse(&tokens);
         assert_eq!(
             ast.commands[0].words,
-            vec!["declare", "-A", "assoc=\x1e([x] one [y] two)"]
+            vec!["declare", "-A", "assoc=__RUBASH_CA1__([x] one [y] two)"]
         );
-        let elements = ast.commands[0].compound_assignments[0].elements.as_slice();
-        assert_eq!(elements.len(), 4);
-        assert_eq!(elements[0].subscript, None);
-        assert_eq!(elements[0].value, "[x]");
-        assert_eq!(elements[1].value, "one");
-        assert_eq!(elements[2].subscript, None);
-        assert_eq!(elements[2].value, "[y]");
+        assert!(ast.commands[0].compound_assignments.is_empty());
     }
 }

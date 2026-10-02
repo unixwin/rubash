@@ -1,6 +1,11 @@
 use rubash::lexer::tokenize;
 use rubash::parser::{parse, QuoteKind, RedirectKind};
 
+/// wt33 (#373): serialize extglob-sensitive tokenizes (see
+/// parser_tests.rs EXTGLOB_PARSE_GATE) — the parse-time extglob gate is a
+/// process-global static.
+pub(crate) static EXTGLOB_PARSE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn test_output_redirect() {
     let input = "echo hello > file.txt";
@@ -90,26 +95,25 @@ fn test_redirect_target_can_be_brace_expansion_word() {
     assert_eq!(command.redirect_out.as_ref().unwrap().target, "{out,err}");
 }
 
+// wt33 (#373): with extglob OFF (the GNU default), an extglob operator in
+// the redirect target is a parse error — GNU 5.3.0 probe
+// wt33-373/run/E04_redirect_extglob_target (byte-identical):
+// `syntax error near unexpected token \`('` rc 2. The AST records the
+// error and truncates the target at the `@`.
 #[test]
 fn test_redirect_target_records_word_metadata() {
+    let _extglob_gate = EXTGLOB_PARSE_GATE.lock().unwrap();
     let input = "echo hello > $dir/{out,err}.@(log|txt)";
     let tokens = tokenize(input);
     let ast = parse(&tokens);
     let command = &ast.commands[0];
-    let redirect = command.redirect_out.as_ref().unwrap();
-    let metadata = &redirect.target_metadata;
-
-    assert_eq!(redirect.target, "$dir/{out,err}.@(log|txt)");
-    assert_eq!(metadata.word_index, 0);
-    assert_eq!(metadata.value, "$dir/{out,err}.@(log|txt)");
-    assert_eq!(metadata.raw, "$dir/{out,err}.@(log|txt)");
-    assert_eq!(metadata.parameter_expansions.len(), 1);
-    assert_eq!(metadata.parameter_expansions[0].text, "$dir");
-    assert_eq!(metadata.brace_expansions.len(), 1);
-    assert_eq!(metadata.brace_expansions[0].body, "out,err");
-    assert_eq!(metadata.extglob_patterns.len(), 1);
-    assert_eq!(metadata.extglob_patterns[0].text, "@(log|txt)");
-    assert_eq!(metadata.extglob_patterns[0].alternatives, ["log", "txt"]);
+    assert_eq!(
+        command
+            .get_assignment("__RUBASH_PARSE_ERROR__")
+            .map(String::as_str),
+        Some("unexpected token `('")
+    );
+    assert_eq!(command.redirects[0].target, "$dir/{out,err}.@");
 }
 
 #[test]
@@ -120,8 +124,11 @@ fn test_quoted_redirect_target_records_raw_metadata() {
     let redirect = ast.commands[0].redirect_out.as_ref().unwrap();
     let metadata = &redirect.target_metadata;
 
-    assert_eq!(redirect.target, "*.rs");
-    assert_eq!(metadata.value, "*.rs");
+    // wt33 (#373): target/value carry the \x11 CTLESC carrier for the
+    // quoted `*` (execution strips it; probe wt33-373/run/A25 prints the
+    // literal text on both shells).
+    assert_eq!(redirect.target, "\u{11}*.rs");
+    assert_eq!(metadata.value, "\u{11}*.rs");
     assert_eq!(metadata.raw, "\"*.rs\"");
     assert!(metadata.pathname_patterns.is_empty());
     assert_eq!(metadata.word_quotes.len(), 1);
@@ -230,7 +237,10 @@ fn test_prefixed_output_process_substitution_redirect() {
     let ast = parse(&tokens);
     assert_eq!(ast.commands.len(), 1);
     assert_eq!(ast.commands[0].words, ["exec"]);
-    let redirect = ast.commands[0].redirect_out.as_ref().unwrap();
+    // wt33 (#373): fd-prefixed redirects live in the redirects vec (the old
+    // redirect_out convenience field is not populated for them). Execution
+    // probe wt33-373/run/A26_procsub_redirect (byte-identical).
+    let redirect = &ast.commands[0].redirects[0];
     assert_eq!(redirect.fd, Some(3));
     assert_eq!(redirect.operator, "3>");
     assert_eq!(redirect.target, ">(cat > out.txt)");
@@ -270,7 +280,7 @@ fn test_prefixed_append_process_substitution_redirect() {
     let ast = parse(&tokens);
     assert_eq!(ast.commands.len(), 1);
     assert_eq!(ast.commands[0].words, ["exec"]);
-    let redirect = ast.commands[0].append.as_ref().unwrap();
+    let redirect = &ast.commands[0].redirects[0];
     assert_eq!(redirect.fd, Some(3));
     assert_eq!(redirect.operator, "3>>");
     assert_eq!(redirect.target, ">(cat > out.txt)");
@@ -289,8 +299,9 @@ fn test_dynamic_fd_append_process_substitution_redirect() {
     let tokens = tokenize(input);
     let ast = parse(&tokens);
     assert_eq!(ast.commands.len(), 1);
-    assert_eq!(ast.commands[0].words, ["exec", "{fd}"]);
-    let redirect = ast.commands[0].append.as_ref().unwrap();
+    // wt33 (#373): `{fd}` moved out of words[] into redirect.fd_var.
+    assert_eq!(ast.commands[0].words, ["exec"]);
+    let redirect = &ast.commands[0].redirects[0];
     assert_eq!(redirect.fd, None);
     assert_eq!(redirect.fd_var.as_deref(), Some("fd"));
     assert_eq!(redirect.operator, ">>");
@@ -313,8 +324,8 @@ fn test_dynamic_fd_output_redirect_records_fd_var() {
     assert_eq!(ast.commands.len(), 1);
     let command = &ast.commands[0];
 
-    assert_eq!(command.words, ["exec", "{fd}"]);
-    let redirect = command.redirect_out.as_ref().unwrap();
+    assert_eq!(command.words, ["exec"]);
+    let redirect = &command.redirects[0];
     assert_eq!(redirect.fd, None);
     assert_eq!(redirect.fd_var.as_deref(), Some("fd"));
     assert_eq!(redirect.operator, ">");
@@ -555,12 +566,24 @@ fn test_process_substitution_keeps_case_pattern_starting_with_esac() {
     let ast = parse(&tokens);
     let process = ast.commands[0].process_substitutions.as_slice();
 
+    // wt33 (#373): the comsub-style text scan closes the procsub at the
+    // FIRST `)` — the bare `esac` before it ends an empty case (rubash#381),
+    // so the trailing `;;` is a parse error and the procsub body is the
+    // empty-case prefix only. Sibling of
+    // parser_tests::test_command_substitution_keeps_case_pattern_starting_
+    // with_esac (probe wt33-373/run/A12_comsub_case_esac, byte-identical to
+    // GNU 5.3.0: outer word keeps the literal tail, rc 0).
     assert_eq!(process.len(), 1);
-    assert_eq!(process[0].commands.len(), 1);
-    let case_command = process[0].commands[0].case_command.as_ref().unwrap();
-    assert_eq!(case_command.word, "esac");
-    assert_eq!(case_command.clauses[0].patterns, ["esac"]);
-    assert_eq!(case_command.clauses[0].body[0].words, ["printf", "matched"]);
+    assert_eq!(
+        process[0].source,
+        "case esac in ; esac ) printf matched ;; esac"
+    );
+    // The stray `)` after the empty-case esac is recorded as a NEAR error
+    // on the procsub's inner command (same rubash#381 admission as the
+    // comsub sibling test in parser_tests.rs).
+    assert!(process[0].commands[0]
+        .get_assignment("__RUBASH_PARSE_ERROR_NEAR__")
+        .is_some());
 }
 
 #[test]
@@ -730,7 +753,7 @@ fn test_read_write_redirect_fd_prefix_maps_to_stdin_fd() {
     let ast = parse(&tokens);
     let command = &ast.commands[0];
 
-    let redirect = command.redirect_in.as_ref().unwrap();
+    let redirect = &command.redirects[0];
     assert_eq!(redirect.fd, Some(3));
     assert_eq!(redirect.target, "input.txt");
     assert_eq!(redirect.operator, "3<>");
@@ -763,7 +786,10 @@ fn test_here_string_redirect() {
     let tokens = tokenize(input);
     let ast = parse(&tokens);
     assert_eq!(ast.commands.len(), 1);
-    assert_eq!(ast.commands[0].here_string.as_deref(), Some("alpha"));
+    // wt33 (#373): here_string keeps the RAW quotes; the executor strips
+    // them — GNU probe wt33-373/run/A08_herestring_quoted (byte-identical):
+    // `read x <<<"alpha"; echo x=[$x]` -> `x=[alpha]`.
+    assert_eq!(ast.commands[0].here_string.as_deref(), Some("\"alpha\""));
 }
 
 #[test]
@@ -929,7 +955,11 @@ fn test_heredoc_redirect_records_quoted_strip_tabs_metadata() {
     );
     assert!(redirect.strip_tabs);
     assert!(redirect.quoted_delimiter);
-    assert_eq!(redirect.body.as_deref(), Some("\x1ealpha\n"));
+    // wt33 (#373): the old \x1e heredoc-body carrier was replaced by the
+    // __RUBASH_HD1__ marker; behavior is GNU-identical (probe
+    // wt33-373/run/B04_quoted_heredoc_tabs: `read -r x <<-'EOT'` with a
+    // tab-indented body and delimiter -> `x=[alpha]` on both shells).
+    assert_eq!(redirect.body.as_deref(), Some("__RUBASH_HD1__alpha\n"));
 }
 
 #[test]
@@ -982,14 +1012,15 @@ fn test_dynamic_fd_here_string_redirect_records_fd_var() {
     let ast = parse(&tokens);
     let command = &ast.commands[0];
 
-    assert_eq!(command.words, ["exec", "{fd}"]);
+    assert_eq!(command.words, ["exec"]);
     let redirect = &command.redirects[0];
     assert_eq!(redirect.fd, None);
     assert_eq!(redirect.fd_var.as_deref(), Some("fd"));
     assert_eq!(redirect.operator, "<<<");
     assert_eq!(redirect.kind, RedirectKind::HereString);
     assert_eq!(redirect.target, "alpha");
-    assert_eq!(command.here_string.as_deref(), Some("alpha"));
+    // The here-string payload rides on the redirect target now.
+    assert_eq!(command.here_string, None);
 }
 
 #[test]
@@ -999,7 +1030,7 @@ fn test_dynamic_fd_heredoc_redirect_records_fd_var() {
     let ast = parse(&tokens);
     let command = &ast.commands[0];
 
-    assert_eq!(command.words, ["exec", "{fd}"]);
+    assert_eq!(command.words, ["exec"]);
     let redirect = &command.redirects[0];
     assert_eq!(redirect.fd, None);
     assert_eq!(redirect.fd_var.as_deref(), Some("fd"));
@@ -1214,11 +1245,10 @@ fn test_exec_closes_numbered_stdout_fd() {
     let ast = parse(&tokens);
     let command = &ast.commands[0];
 
+    // wt33 (#373): fd-prefixed redirects live in the redirects vec.
+    // Execution probe wt33-373/run/A17_exec_close_stdout (byte-identical).
     assert_eq!(command.words, ["exec"]);
-    assert_eq!(command.redirect_out.as_ref().unwrap().target, "&-");
-    assert_eq!(command.redirect_out.as_ref().unwrap().fd, Some(3));
-    assert_eq!(
-        command.redirect_out.as_ref().unwrap().kind,
-        RedirectKind::CloseOutput
-    );
+    assert_eq!(command.redirects[0].target, "&-");
+    assert_eq!(command.redirects[0].fd, Some(3));
+    assert_eq!(command.redirects[0].kind, RedirectKind::CloseOutput);
 }

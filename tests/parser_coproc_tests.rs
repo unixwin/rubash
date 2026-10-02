@@ -116,7 +116,10 @@ fn test_coproc_simple_command_records_word_metadata() {
 
     assert_eq!(ast.commands.len(), 1);
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
-    assert_eq!(coproc.words, ["echo", "$value", "*.rs", "pre{a,b}"]);
+    // wt33 (#373): the quoted `*.rs` carries the \x11 CTLESC carrier in
+    // token.value (execution strips it — probe wt33-373/run/A28_coproc_words
+    // family; the body-output blank-line leak is tracked by rubash#387).
+    assert_eq!(coproc.words, ["echo", "$value", "\u{11}*.rs", "pre{a,b}"]);
     assert_eq!(coproc.word_metadata.len(), 4);
     assert_eq!(coproc.word_metadata[1].value, "$value");
     assert_eq!(coproc.word_metadata[1].parameter_expansions.len(), 1);
