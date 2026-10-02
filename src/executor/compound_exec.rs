@@ -1204,7 +1204,7 @@ impl Executor {
             match result {
                 Ok(()) => {}
                 Err(ExecuteError::Break(level)) if level <= 1 => {
-                    self.exit_code = 0;
+                    self.exit_code = self.take_break_failure_status().unwrap_or(0);
                     break;
                 }
                 Err(ExecuteError::Break(level)) => return Err(ExecuteError::Break(level - 1)),
@@ -1524,6 +1524,11 @@ impl Executor {
     fn execute_loop_command(&mut self, loop_command: &LoopCommand) -> Result<(), ExecuteError> {
         let mut ran_body = false;
         let mut last_body_status = 0;
+        // rubash#395: a break consumed by THIS loop ends it with the break
+        // builtin's own status (GNU break.def: EXECUTION_FAILURE for an
+        // out-of-range count); the tail normalization below must not
+        // clobber it with last_body_status.
+        let mut ended_by_break = false;
         // GNU execute_while_or_until (execute_cmd.c:3801+) walks BOTH the
         // condition and the body by POINTER — the COMMAND lists make_cmd.c
         // allocated once at parse are re-walked per iteration, never copied.
@@ -1561,7 +1566,8 @@ impl Executor {
                 // execute_cmd.c:3840 exits this loop. A level > 1 break
                 // propagates one level outward.
                 Err(ExecuteError::Break(level)) if level <= 1 => {
-                    self.exit_code = 0;
+                    self.exit_code = self.take_break_failure_status().unwrap_or(0);
+                    ended_by_break = true;
                     break;
                 }
                 Err(ExecuteError::Break(level)) => return Err(ExecuteError::Break(level - 1)),
@@ -1594,7 +1600,8 @@ impl Executor {
                     last_body_status = self.exit_code;
                 }
                 Err(ExecuteError::Break(level)) if level <= 1 => {
-                    self.exit_code = 0;
+                    self.exit_code = self.take_break_failure_status().unwrap_or(0);
+                    ended_by_break = true;
                     break;
                 }
                 Err(ExecuteError::Break(level)) => return Err(ExecuteError::Break(level - 1)),
@@ -1611,7 +1618,7 @@ impl Executor {
 
         if !ran_body {
             self.exit_code = 0;
-        } else if self.exit_code != 0 {
+        } else if self.exit_code != 0 && !ended_by_break {
             self.exit_code = last_body_status;
         }
         Ok(())

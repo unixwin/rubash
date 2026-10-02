@@ -197,7 +197,7 @@ impl Executor {
             match result {
                 Ok(()) => {}
                 Err(ExecuteError::Break(level)) if level <= 1 => {
-                    self.exit_code = 0;
+                    self.exit_code = self.take_break_failure_status().unwrap_or(0);
                     break;
                 }
                 Err(ExecuteError::Break(level)) => return Err(ExecuteError::Break(level - 1)),

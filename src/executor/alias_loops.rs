@@ -112,7 +112,7 @@ impl Executor {
             match condition_result {
                 Ok(()) => {}
                 Err(ExecuteError::Break(level)) if level <= 1 => {
-                    executor.exit_code = 0;
+                    executor.exit_code = executor.take_break_failure_status().unwrap_or(0);
                     break Ok(());
                 }
                 Err(ExecuteError::Break(level)) => break Err(ExecuteError::Break(level - 1)),
@@ -141,7 +141,7 @@ impl Executor {
                     last_body_status = executor.exit_code;
                 }
                 Err(ExecuteError::Break(level)) if level <= 1 => {
-                    executor.exit_code = 0;
+                    executor.exit_code = executor.take_break_failure_status().unwrap_or(0);
                     break Ok(());
                 }
                 Err(ExecuteError::Break(level)) => break Err(ExecuteError::Break(level - 1)),

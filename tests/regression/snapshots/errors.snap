@@ -13,14 +13,12 @@ after readonly assignment
 after for readonly assignment
 after posix for readonly variable
 after posix select readonly variable
-after loop
 1
 2
 after readonly assignment
 after for readonly assignment
 after posix for readonly variable
 after posix select readonly variable
-after loop
 0
 
 after 1: 1
@@ -76,13 +74,9 @@ DEBUG
 DEBUG
 invalid numeric argument
 after exit: 2
-after break: 1
-after continue: 1
 after shift: 1
 after return: 2
 after exit: 2
-after break: 1
-after continue: 1
 after shift: 1
 after return: 2
 after history: 2

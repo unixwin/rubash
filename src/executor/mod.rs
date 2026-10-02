@@ -648,6 +648,13 @@ pub struct Executor {
     /// abort is pending; only the reader-level loop skips to the next
     /// source line.
     evalerror_exec_depth: Cell<usize>,
+    /// rubash#395: the failure status a `break 0`/`continue 0`/
+    /// `break -1` carries out of the loop (GNU break.def:86-88: sh_erange,
+    /// `breaking = loop_level`, return EXECUTION_FAILURE — the loop still
+    /// unwinds, with status 1). The Break unwind resets exit_code at every
+    /// loop boundary, so the builtin's failure rides this Cell to the
+    /// innermost consumer arm.
+    break_failure_status: Cell<Option<i32>>,
     /// Source line of the command currently executing at reader level —
     /// becomes the abort boundary when `evalerror_pending` is observed.
     reader_command_line: Cell<Option<usize>>,

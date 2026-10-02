@@ -289,7 +289,7 @@ impl Executor {
         match result {
             Ok(()) => Ok(SelectBodyFlow::ContinueLoop),
             Err(ExecuteError::Break(level)) if level <= 1 => {
-                self.exit_code = 0;
+                self.exit_code = self.take_break_failure_status().unwrap_or(0);
                 Ok(SelectBodyFlow::BreakLoop)
             }
             Err(ExecuteError::Break(level)) => Err(ExecuteError::Break(level - 1)),

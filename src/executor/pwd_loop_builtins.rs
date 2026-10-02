@@ -97,14 +97,19 @@ impl Executor {
                     kind.name()
                 )?;
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-                self.exit_code = 1;
-                // GNU break.def:86-88 / continue.def:126-128: even when the
+                // GNU break.def:80-91 / continue.def:120-131: even when the
                 // count is out of range, `breaking`/`continuing` is set to
-                // loop_level. For `break 0` this breaks the current loop.
-                // For `continue 0`, `continuing = loop_level` with a count
-                // of 0 effectively breaks the loop (the rest of the body is
-                // skipped and the loop does not advance to the next
-                // iteration), so both cases return Break.
+                // loop_level — the loop STILL unwinds — and the builtin
+                // returns EXECUTION_FAILURE, so the loop's exit status is 1
+                // (rubash#395: the Break unwind resets exit_code at every
+                // loop boundary; the failure status rides the Cell to the
+                // innermost consumer arm). For `continue 0`,
+                // `continuing = loop_level` with a count of 0 effectively
+                // breaks the loop (the rest of the body is skipped and the
+                // loop does not advance to the next iteration), so both
+                // cases return Break.
+                self.break_failure_status.set(Some(1));
+                self.exit_code = 1;
                 let level = self.shell_state.loop_depth;
                 Err(ExecuteError::Break(level))
             }
@@ -116,10 +121,27 @@ impl Executor {
                     kind.name()
                 )?;
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-                self.exit_code = 1;
-                Ok(())
+                // GNU break.def:76 get_numeric_arg(list, interactive ? 2 : 1)
+                // (builtins/common.c:488-510): a non-numeric count reports
+                // sh_neednumarg and NEVER RETURNS — non-interactive fatal=1
+                // is set_exit_status(EX_BADUSAGE=2) + jump_to_top_level
+                // (EXITPROG): the whole shell exits 2 (verified WSL GNU
+                // 5.3.0: a script dies at the first `break 2x`, rc 2);
+                // interactive fatal=2 is DISCARD — the current command list
+                // is abandoned and the reader continues.
+                if self.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+                    return Err(ExecuteError::ExpansionFailure(2));
+                }
+                Err(ExecuteError::ExitCode(2))
             }
         }
+    }
+
+    /// rubash#395: the status a failed loop-control builtin (break 0 /
+    /// continue 0 / break -1) parked for the innermost Break consumer; a
+    /// normal `break n` unwinds with None (status 0).
+    pub(in crate::executor) fn take_break_failure_status(&self) -> Option<i32> {
+        self.break_failure_status.take()
     }
 
     pub(in crate::executor) fn execute_return(

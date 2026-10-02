@@ -58,9 +58,14 @@ fn test_continue_outside_loop_returns_success() {
     let _ = fs::remove_file(output_path);
 }
 
-#[ignore = "rubash#395: see issue (probe wt37-374 K052)"]
+// rubash#395 (GNU break.def:75-83, execute_cmd.c:635 + 3840): `break 0`
+// prints `break: 0: loop count out of range`, arms `breaking = loop_level`,
+// returns EXECUTION_FAILURE — the loop STILL unwinds with status 1 and the
+// rest of the body list is skipped (execute_command_internal early-returns
+// once `breaking` is set). Verified byte-for-byte against WSL GNU Bash
+// 5.3.0 script-file probes (target/issue395/matrix.sh M1/M3/M9).
 #[test]
-fn test_break_zero_in_loop_returns_failure_without_breaking() {
+fn test_break_zero_in_loop_breaks_with_failure_status() {
     let output_path = "target/rubash-break-zero-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("while true; do break 0; echo $? > {output_path}; break; done");
@@ -71,12 +76,11 @@ fn test_break_zero_in_loop_returns_failure_without_breaking() {
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+    assert_eq!(executor.last_exit_code(), 1);
+    assert!(!std::path::Path::new(output_path).exists());
     let _ = fs::remove_file(output_path);
 }
 
-#[ignore = "rubash#395: see issue (probe wt37-374 K051)"]
 #[test]
 fn test_break_zero_in_loop_redirects_stderr() {
     let output_path = "target/rubash-break-zero-redirect-output.txt";
@@ -92,8 +96,8 @@ fn test_break_zero_in_loop_redirects_stderr() {
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+    assert_eq!(executor.last_exit_code(), 1);
+    assert!(!std::path::Path::new(output_path).exists());
     assert!(fs::read_to_string(error_path)
         .unwrap()
         .contains("break: 0: loop count out of range"));
@@ -119,9 +123,13 @@ fn test_break_accepts_positive_signed_level() {
     let _ = fs::remove_file(output_path);
 }
 
-#[ignore = "rubash#395: see issue (probe wt37-374 K054)"]
+// rubash#395 (GNU continue.def:120-128 sets `breaking`, not `continuing`):
+// `continue 0` prints `continue: 0: loop count out of range`, arms
+// `breaking = loop_level`, returns EXECUTION_FAILURE — the loop ENDS with
+// status 1 and the rest of the body list is skipped. Verified against WSL
+// GNU Bash 5.3.0 (target/issue395/matrix.sh M2/M4/M11/M14).
 #[test]
-fn test_continue_zero_in_loop_returns_failure_without_continuing() {
+fn test_continue_zero_in_loop_ends_loop_with_failure_status() {
     let output_path = "target/rubash-continue-zero-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("while true; do continue 0; echo $? > {output_path}; break; done");
@@ -132,12 +140,11 @@ fn test_continue_zero_in_loop_returns_failure_without_continuing() {
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+    assert_eq!(executor.last_exit_code(), 1);
+    assert!(!std::path::Path::new(output_path).exists());
     let _ = fs::remove_file(output_path);
 }
 
-#[ignore = "rubash#395: see issue (probe wt37-374 K053)"]
 #[test]
 fn test_continue_zero_in_loop_redirects_stderr() {
     let output_path = "target/rubash-continue-zero-redirect-output.txt";
@@ -153,8 +160,8 @@ fn test_continue_zero_in_loop_redirects_stderr() {
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+    assert_eq!(executor.last_exit_code(), 1);
+    assert!(!std::path::Path::new(output_path).exists());
     assert!(fs::read_to_string(error_path)
         .unwrap()
         .contains("continue: 0: loop count out of range"));
