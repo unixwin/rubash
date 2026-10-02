@@ -681,22 +681,23 @@ impl Executor {
         if self.debug_trap_running || self.host_internal_depth.get() > 0 {
             return Ok(false);
         }
+        self.debug_trap_running = true;
+        // rubash#375: borrowing, allocation-free consult (GNU trap.c:1154
+        // reads trap_list[sig] once; the old path built a BTreeSet from the
+        // reset list and cloned the action string per firing).
         let Some(action) =
-            crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
+            crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
         else {
+            self.debug_trap_running = false;
             return Ok(false);
         };
-        if action.is_empty() {
-            return Ok(false);
-        }
-        self.debug_trap_running = true;
         *self.shell_state.debug_trap_command.borrow_mut() = Some(command_text.to_string());
         let call_line = self
             .shell_state
             .env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok());
-        let action = self.comsub_body_alias_splice(&action);
+        let action = self.comsub_body_alias_splice(action);
         let tokens = crate::lexer::tokenize(&action);
         let mut ast = crate::parser::parse(&tokens);
         if let Some(call_line) = call_line {
@@ -723,15 +724,13 @@ impl Executor {
         if self.return_trap_running || self.host_internal_depth.get() > 0 {
             return Ok(());
         }
+        self.return_trap_running = true;
         let Some(action) =
-            crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "RETURN")
+            crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "RETURN")
         else {
+            self.return_trap_running = false;
             return Ok(());
         };
-        if action.is_empty() {
-            return Ok(());
-        }
-        self.return_trap_running = true;
         let tokens = crate::lexer::tokenize(&action);
         let mut ast = crate::parser::parse(&tokens);
         // GNU trap.c:_run_trap_internal:1196 only sets SEVAL_RESETLINE for

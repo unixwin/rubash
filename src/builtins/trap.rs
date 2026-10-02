@@ -386,6 +386,42 @@ pub(crate) fn get_trap_action(env_vars: &HashMap<String, String>, signal: &str) 
     env_vars.get(&trap_key(signal)).cloned()
 }
 
+/// Borrowing, allocation-free `get_trap_action` for the per-firing trap
+/// dispatches (rubash#375). GNU `_run_trap_internal` (trap.c:1154-1155)
+/// reads `trap_list[sig]` — a pointer — and savestrings it once; it never
+/// builds a container to decide whether the trap is live. `reset_trap_
+/// signals` collects a BTreeSet per call and `trap_key` formats a String
+/// per call; under a DEBUG trap that ran once per firing (~2300 firings
+/// per bats gather, 70000+ in the probe loop). Semantics identical to
+/// `get_trap_action`: reset-list signals read as unset, empty actions
+/// read as unset.
+pub(crate) fn active_trap_action_ref<'a>(
+    env_vars: &'a HashMap<String, String>,
+    signal: &str,
+) -> Option<&'a str> {
+    if env_vars
+        .get(TRAP_RESET)
+        .is_some_and(|value| value.split(':').any(|reset| reset == signal))
+    {
+        return None;
+    }
+    let mut key_buffer = [0u8; 32];
+    let prefix = TRAP_PREFIX.as_bytes();
+    if prefix.len() + signal.len() > key_buffer.len() {
+        return env_vars
+            .get(&trap_key(signal))
+            .map(String::as_str)
+            .filter(|action| !action.is_empty());
+    }
+    key_buffer[..prefix.len()].copy_from_slice(prefix);
+    key_buffer[prefix.len()..prefix.len() + signal.len()].copy_from_slice(signal.as_bytes());
+    let key = std::str::from_utf8(&key_buffer[..prefix.len() + signal.len()]).ok()?;
+    env_vars
+        .get(key)
+        .map(String::as_str)
+        .filter(|action| !action.is_empty())
+}
+
 /// rubash#186: non-cloning `get_trap_action(...).is_some_and(|a| !a.is_empty())`
 /// for the per-command hot path. get_trap_action builds a BTreeSet from the
 /// reset list and clones the whole action string on every call; the ast_exec
