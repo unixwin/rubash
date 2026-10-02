@@ -566,24 +566,24 @@ fn test_process_substitution_keeps_case_pattern_starting_with_esac() {
     let ast = parse(&tokens);
     let process = ast.commands[0].process_substitutions.as_slice();
 
-    // wt33 (#373): the comsub-style text scan closes the procsub at the
-    // FIRST `)` — the bare `esac` before it ends an empty case (rubash#381),
-    // so the trailing `;;` is a parse error and the procsub body is the
-    // empty-case prefix only. Sibling of
-    // parser_tests::test_command_substitution_keeps_case_pattern_starting_
-    // with_esac (probe wt33-373/run/A12_comsub_case_esac, byte-identical to
-    // GNU 5.3.0: outer word keeps the literal tail, rc 0).
+    // wt33 (#373): the bare `esac` before the procsub's `)` ends an empty
+    // case (rubash#381), and the `)` then closes the PROC SUBSTITUTION —
+    // the trailing `printf matched ;; esac)` stays in the OUTER word
+    // (rubash#390: the outer grammar owns the diagnostic; GNU names the
+    // stray `;;`, probe wt39 cases13/a5 byte-identical to GNU 5.3.0:
+    // `syntax error near unexpected token `;;'' rc 2).
     assert_eq!(process.len(), 1);
-    assert_eq!(
-        process[0].source,
-        "case esac in ; esac ) printf matched ;; esac"
-    );
-    // The stray `)` after the empty-case esac is recorded as a NEAR error
-    // on the procsub's inner command (same rubash#381 admission as the
-    // comsub sibling test in parser_tests.rs).
+    assert_eq!(process[0].source, "case esac in ; esac");
+    // The procsub's inner command is the CLEAN empty case; the error lives
+    // on the outer command as the `;;' rejection.
+    assert!(process[0].commands[0].case_command.is_some());
     assert!(process[0].commands[0]
-        .get_assignment("__RUBASH_PARSE_ERROR_NEAR__")
-        .is_some());
+        .get_assignment("__RUBASH_PARSE_ERROR__")
+        .is_none());
+    assert_eq!(
+        ast.commands[0].get_assignment("__RUBASH_PARSE_ERROR__"),
+        Some(&"unexpected token `;;'".to_string())
+    );
 }
 
 #[test]

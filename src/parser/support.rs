@@ -213,16 +213,28 @@ pub(super) fn is_case_end_keyword(tokens: &[Token], index: usize) -> bool {
     // parse.y:3433-3441 special_case_tokens: with a case open (the caller's
     // case frame / esacs_needed_count), `esac` DIRECTLY after the case's
     // `in` is the ESAC closer of the empty-case production (parse.y:1037) —
-    // GNU never reads it as pattern text from that position (the rule-4
-    // refusals at parse.y:3184-3186 apply only after `|' / `('), so the
-    // lookahead heuristic below must not second-guess it. This is what lets
-    // an enclosing group scan see through `( case x in esac ) ;; esac`
+    // GNU never reads it as pattern text from that position, so the rule-4
+    // refusals below must not second-guess it. This is what lets an
+    // enclosing group scan see through `( case x in esac ) ;; esac`
     // (rubash#336): the inner `)` is a subshell closer, not a pattern
     // delimiter, and the `;;` belongs to the OUTER case.
     if follows_case_in_keyword(tokens, index) {
         return true;
     }
-    !case_pattern_starts_with_esac(tokens, index)
+    // parse.y:3181-3184 (CHECK_FOR_RESERVED_WORD under PST_CASEPAT): a bare
+    // `esac' in the pattern-list state is the terminator ESAC — only a
+    // directly preceding `|' (Posix grammar rule 4) or `(' (the phantom
+    // rule, an open pattern group) keeps it pattern TEXT. No
+    // `;;`-lookahead applies: `case x in a) :;; esac) echo hi;; esac'
+    // closes the case at the inter-clause `esac' and the `)' is the outer
+    // grammar's error (rubash#390 q3/q4 — verified vs WSL GNU 5.3.0).
+    !matches!(
+        index.checked_sub(1).and_then(|i| tokens.get(i)),
+        Some(token)
+            if (token.kind == TokenKind::Pipe && token.value == "|")
+                || (token.kind == TokenKind::PipeErr)
+                || (token.kind == TokenKind::Keyword && token.value == "(")
+    )
 }
 
 /// GNU parse.y:3428-3441 special_case_tokens(): `esac` DIRECTLY after the
@@ -237,7 +249,24 @@ pub(super) fn is_case_end_keyword(tokens: &[Token], index: usize) -> bool {
 /// `command_boundary_keyword_allowed` must consult this alongside the
 /// boundary check or they never close `( case x in esac )` (rubash#336).
 pub(super) fn follows_case_in_keyword(tokens: &[Token], index: usize) -> bool {
-    index > 0 && is_keyword(tokens, index - 1, "in")
+    // GNU parse.y:1037 `case_command: ... IN newline_list ESAC': the empty
+    // case's `esac' may be separated from its `in' by a newline_list (the
+    // physical newlines are Semicolon tokens with line_break here), so the
+    // `in' witness must look back past them — `( case x in\nesac )` closes
+    // the case at that `esac' and the `)' is the subshell closer
+    // (rubash#390 q3; without this, the pattern heuristic in
+    // case_pattern_starts_with_esac reclassified the terminator `esac' as
+    // a pattern when a later `;;' existed on the line).
+    let mut previous = index;
+    while previous > 0 {
+        previous -= 1;
+        let token = &tokens[previous];
+        if token.kind == TokenKind::Semicolon && token.line_break {
+            continue;
+        }
+        return is_keyword(tokens, previous, "in");
+    }
+    false
 }
 
 fn case_pattern_starts_with_esac(tokens: &[Token], index: usize) -> bool {
@@ -686,15 +715,26 @@ pub(super) fn propagate_subtree_parse_error(command: &mut CommandNode) {
     {
         return;
     }
+    // GNU yyerror's parser_error cites the parser's line_number at the
+    // FAILURE (parse.y:6839 via error.c:300-316), which is the offending
+    // token's line — an enclosing compound that adopts the subtree's error
+    // must report it there, not at the compound's own opening line
+    // (`while :; do case x in\nesac) ...` names the `esac)' line,
+    // rubash#390 q3).
+    let mut error_line = None;
     let markers: Vec<(String, String)> = match subtree_parse_error_node(command) {
-        Some(inner) => inner
-            .assignments
-            .iter()
-            .filter(|(name, _)| name.starts_with("__RUBASH_PARSE"))
-            .cloned()
-            .collect(),
+        Some(inner) => {
+            error_line = inner.line;
+            inner
+                .assignments
+                .iter()
+                .filter(|(name, _)| name.starts_with("__RUBASH_PARSE"))
+                .cloned()
+                .collect()
+        }
         None => return,
     };
+    command.line = error_line.or(command.line);
     for (name, value) in markers {
         command.insert_assignment(name, value);
     }

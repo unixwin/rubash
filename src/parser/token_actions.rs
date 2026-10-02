@@ -1086,27 +1086,18 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     "then" | "do" | "else" | "elif" | "fi" | "done" | "esac"
                 )
             {
-                note_command_line(&mut state.current_cmd, token);
-                state.current_cmd.insert_assignment(
-                    "__RUBASH_PARSE_ERROR__".to_string(),
-                    format!("unexpected token `{}`", token.value),
-                );
-                if let Some(source) = parse_error_source_line(
-                    tokens,
-                    *i,
-                    state.diagnostic_text.as_deref(),
-                    state.source_line_offset,
-                ) {
-                    state
-                        .current_cmd
-                        .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
-                }
-                state
-                    .ast
-                    .commands
-                    .push(std::mem::take(&mut state.current_cmd));
-                *i += 1;
-                return TokenAction::Continue;
+                // GNU parse.y:469-482 (`error '\n'` → YYABORT when not
+                // interactive): the grammar rejects the reserved word and
+                // the reader STOPS — no later token of the same input is
+                // parsed, and the remaining script lines never run
+                // (`echo a | fi` then `echo ok` runs nothing, rc 2 — WSL
+                // GNU 5.3.0 probes m5/m6). The canonical abort (pop the
+                // in-progress pipeline stages, echo the verbatim offending
+                // line) also fixes the report being overridden by the next
+                // token (`echo a | fi )` named `)' instead of `fi',
+                // rubash#390 e02 family).
+                super::parse_loop::push_unexpected_token_error(state, tokens, *i);
+                return TokenAction::Break;
             }
 
             if token.value == "(" && command_is_empty(&state.current_cmd) {

@@ -1931,6 +1931,32 @@ pub(crate) fn command_substitutions_balanced(input: &str) -> bool {
 /// not a command-position identifier; `x=a[b` has no identifier prefix
 /// (`a` after `=` fails token_is_ident) and stays an assignment value.
 pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
+    unclosed_array_subscript_walk(input, false)
+        .map(|(line, _closer, _construct_line, compassign)| (line, compassign))
+}
+
+/// The subscript-EOF diagnostic router (rubash#390 q2): GNU
+/// parse_matched_pair recurses on an unescaped `'`/`"` (and `$'`) inside a
+/// `P_ARRAYSUB` scan (parse.y:4040-4051, `$'` arm at 4046-4047), and the
+/// recursion's own EOF report names the QUOTE as the closer at the line the
+/// quote opened (start_lineno, parse.y:3901-3912) — `a["x]=15` reports
+/// `"'`, not `]' (WSL GNU 5.3.0 probes: `a[\n"x` → line 2 `"`,
+/// `a[$'x]` → line 1 `'`). Exit status follows the same context rule as
+/// the `]' shape (parse_compound_assignment EOF family → 1, command word
+/// → 2). Returns (report_line, closer, construct_line, inside_compassign):
+/// `construct_line` is where the `[` scan itself opened — the COMPLETE
+/// commands GNU already ran stop there, so the diagnostic driver's prefix
+/// cut must use it, not the (possibly later) report line. Same walk as
+/// `unclosed_array_subscript_line` with the quote-open bookkeeping
+/// surfaced.
+pub fn unclosed_array_subscript_eof(input: &str) -> Option<(usize, char, usize, bool)> {
+    unclosed_array_subscript_walk(input, true)
+}
+
+fn unclosed_array_subscript_walk(
+    input: &str,
+    quote_aware: bool,
+) -> Option<(usize, char, usize, bool)> {
     let chars: Vec<char> = input.chars().collect();
     let mut index = 0usize;
     let mut single = false;
@@ -2122,19 +2148,29 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
             // `[ ... ]` pairs nest, newlines are consumed by the scan.
             let mut depth = 1usize;
             let mut scan = index + 1;
+            let mut scan_line = line;
             let mut q_single = false;
             let mut q_double = false;
+            let mut q_ansi = false;
             let mut q_escaped = false;
+            let mut quote_line = line;
             while scan < chars.len() {
                 let c = chars[scan];
+                if c == '\n' {
+                    scan_line += 1;
+                }
                 if q_escaped {
                     q_escaped = false;
                     scan += 1;
                     continue;
                 }
-                if q_single {
+                if q_single || q_ansi {
+                    // parse.y:3990-3995: inside a `'`-pair a backslash is
+                    // literal data; only the closing `'` ends the recursion
+                    // (P_ALLOWESC handles `\'` inside `$'...')`.
                     if c == '\'' {
                         q_single = false;
+                        q_ansi = false;
                     }
                     scan += 1;
                     continue;
@@ -2150,8 +2186,19 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
                 }
                 match c {
                     '\\' => q_escaped = true,
-                    '\'' => q_single = true,
-                    '"' => q_double = true,
+                    '\'' => {
+                        q_single = true;
+                        quote_line = scan_line;
+                    }
+                    '"' => {
+                        q_double = true;
+                        quote_line = scan_line;
+                    }
+                    '$' if chars.get(scan + 1) == Some(&'\'') => {
+                        q_ansi = true;
+                        quote_line = scan_line;
+                        scan += 1;
+                    }
                     '[' => depth += 1,
                     ']' => {
                         depth -= 1;
@@ -2167,7 +2214,21 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
                 // EOF inside the subscript: report at the `[` line
                 // (parse.y:3906 start_lineno), with the compound-assignment
                 // context deciding the exit status (1 inside `name=(`).
-                return Some((line, compassign_depth > 0));
+                if quote_aware && (q_single || q_double || q_ansi) {
+                    // parse.y:4040-4051: the unterminated quote's own
+                    // parse_matched_pair recursion hit EOF first — its
+                    // closer (the quote char) and its start_lineno (the
+                    // quote's open line) own the report. The prefix cut
+                    // still uses the `[` line: no complete command exists
+                    // after the construct opened.
+                    return Some((
+                        quote_line,
+                        if q_double { '"' } else { '\'' },
+                        line,
+                        compassign_depth > 0,
+                    ));
+                }
+                return Some((line, ']', line, compassign_depth > 0));
             }
             index = scan + 1;
             word.clear();
@@ -2176,6 +2237,28 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
             continue;
         }
         if ch == '(' {
+            // GNU read_token hands a `((` at a command position (empty word)
+            // to parse_dparen (parse.y:3726-3733) -> parse_arith_cmd, whose
+            // P_ARITH matched-pair scan consumes the balanced body as ONE
+            // arithmetic token when the next character is `)` (parse.y:4976)
+            // — a `[` inside that body is plain arith data (no P_ARRAYSUB
+            // scan ever runs there), so the subscript walk must not look
+            // inside (`((a[b))` parses and the EVALUATOR reports
+            // `a[b' with status 1, rubash#390 q1 probes k1/k2). A `((`
+            // whose group is not followed by `)` is the nested-subshell
+            // reinterpretation: fall through to the ordinary `(' handling
+            // (its pushed body re-lexes to the same text shape).
+            if word.is_empty() && command_position && chars.get(index + 1) == Some(&'(') {
+                if let Some(close) = paren_group_close(&chars, index + 2) {
+                    if chars.get(close + 1) == Some(&')') {
+                        index = close + 2;
+                        word.clear();
+                        element_start = false;
+                        command_position = false;
+                        continue;
+                    }
+                }
+            }
             // `name=(` opens a compound-assignment list; any other `(` is a
             // subshell/grouping whose body starts a fresh command position.
             if word.ends_with('=') {
@@ -2674,6 +2757,413 @@ pub(crate) fn extglob_pattern_group_len(chars: &[char], open: usize) -> Option<u
             '"' if !single => double = !double,
             '(' if !single && !double => depth += 1,
             ')' if !single && !double => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Length (in chars, ending just past the closer) of the `[...]` array
+/// subscript span whose `[` sits at `chars[0]`, consumed the way GNU
+/// read_token_word's element arm does under PST_COMPASSIGN
+/// (parse.y:5635-5651): parse_matched_pair('[', ']', P_ARRAYSUB) with its
+/// own quote/backslash state and nested `[` pairs, the span copied into
+/// the word by strcpy (parse.y:5645-5647) — spaces inside are word DATA,
+/// never element boundaries. Returns `None` when the `]` never comes (the
+/// read-time EOF family owns that diagnostic; the splitters only walk
+/// already-admitted bodies). The element-leading admission (token_index ==
+/// 0 under PST_COMPASSIGN, parse.y:5637) is judged by the callers.
+pub(crate) fn arraysub_span_len(chars: &[char]) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut index = 1usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '[' if !single && !double => depth += 1,
+            ']' if !single && !double => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// rubash#390 q1: GNU read_token hands a `((` at a command position to
+/// parse_dparen (parse.y:3726-3733) -> parse_arith_cmd (parse.y:4970), whose
+/// parse_matched_pair(`(', `)', P_ARITH) scan counts parens across lines
+/// with quote recursions (parse.y:4040-4051) and backslash escapes
+/// (parse.y:3997-3998); EOF with the count still positive is the
+/// `unexpected EOF while looking for matching `)'' report at the line the
+/// group opened (parse.y:3908-3915, start_lineno) with exit 2 (the
+/// `error yacc_EOF' production forces EX_BADUSAGE only when the status is
+/// still 0 - parse.y:484-490).
+///
+/// Class A probe set (`((1+2', `((1+(2', `((x=(', `((x=()'): rc 2, `)' at
+/// the `((` line. This walker answers one question for the diagnostic
+/// router: given the 1-based `open_line` of an unclosed command `(`, does
+/// that line start a `((` whose P_ARITH group NEVER closes before end of
+/// input?
+pub(crate) fn dparen_arith_group_never_closes(input: &str, open_line: usize) -> bool {
+    let chars: Vec<char> = input.chars().collect();
+    let Some(start) = dparen_open_index(&chars, open_line) else {
+        return false;
+    };
+    paren_group_close(&chars, start + 2).is_none()
+}
+
+/// rubash#390 q1 class B: the P_ARITH group CLOSES but the next character
+/// is not `)` - GNU reinterprets the `((` as a nested subshell
+/// (parse.y:4938-4948) whose pushed body re-lexes as `( span-minus-closer
+/// )'. When that reparse leaves a compound assignment `name=(` still open
+/// at a CLEAN EOF, parse_compound_assignment's yacc_EOF arm reports
+/// `unexpected EOF while looking for matching `)'' at the line the
+/// compound opened (parse.y:7151-7152, orig_line_number - the `((` line
+/// for a same-line construct) and sets EXECUTION_FAILURE
+/// (parse.y:7167-7169) - exit 1, which the `error yacc_EOF' production
+/// keeps (parse.y:489-490 only forces 2 when the status is still 0).
+/// Probe set (`((X=([))]`, `((X=([))]x`): rc 1, `)' at line 1. Contrast
+/// shapes that stay with the existing wording: an unterminated `[` array
+/// subscript inside the compound reports `]' (parse.y:3908-3915 with
+/// close=`]', e.g. `((x=([y))`), and a fully-closed inner subshell leaves
+/// only the outer `(` open (parse.y:6892-6901, e.g. `((x=(y))`).
+pub(crate) fn dparen_subshell_reparse_compound_eof(input: &str, open_line: usize) -> bool {
+    let chars: Vec<char> = input.chars().collect();
+    let Some(start) = dparen_open_index(&chars, open_line) else {
+        return false;
+    };
+    // The P_ARITH span starts just past the second `(` of `((` and includes
+    // its balancing `)`.
+    let Some(close) = paren_group_close(&chars, start + 2) else {
+        return false;
+    };
+    // parse_arith_cmd:4976 - the character after the matched group decides;
+    // `)` means a real arithmetic command, everything else the subshell
+    // reinterpretation.
+    if chars.get(close + 1) == Some(&')') {
+        return false;
+    }
+    // The pushed body: parse.y:4999-5002 - '(' + span without its last
+    // character + ')' (the span's closer becomes the subshell's closer).
+    let span = &chars[start + 2..=close];
+    let mut body: Vec<char> = Vec::with_capacity(chars.len());
+    body.push('(');
+    body.extend_from_slice(&span[..span.len() - 1]);
+    body.push(')');
+    body.extend_from_slice(&chars[close + 1..]);
+
+    // Re-lex the body the way the parser does: the leading `(` opens the
+    // inner subshell; `name=(` opens a compound assignment
+    // (parse.y:5653-5658); a `[` at element start consumes the matched
+    // `[...]` as word data (parse.y:5635-5651) - across the pushed-string
+    // boundary into the real input tail; a `)` at element position closes
+    // the compound (parse.y:7140's loop exit).
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut paren_depth = 1usize; // the pushed body's own leading `(`
+    let mut compassign_depth = 0usize;
+    let mut word = String::new();
+    let mut element_start = true;
+    let mut index = 0usize;
+    while index < body.len() {
+        let ch = body[index];
+        if escaped {
+            escaped = false;
+            word.push(ch);
+            index += 1;
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                escaped = true;
+                word.clear();
+            }
+            '\'' => {
+                single = true;
+                word.clear();
+            }
+            '"' => {
+                double = true;
+                word.clear();
+            }
+            c if c.is_whitespace() => {
+                word.clear();
+                if compassign_depth > 0 {
+                    element_start = true;
+                }
+            }
+            '(' => {
+                // `name=(` opens a compound assignment only when the word so
+                // far is an identifier ending at `=` (parse.y:5653).
+                if word.ends_with('=')
+                    && !word[..word.len() - 1].is_empty()
+                    && word[..word.len() - 1]
+                        .chars()
+                        .all(|c| c == '_' || c.is_ascii_alphanumeric())
+                {
+                    compassign_depth += 1;
+                    element_start = true;
+                } else {
+                    paren_depth += 1;
+                }
+                word.clear();
+            }
+            ')' => {
+                if compassign_depth > 0 {
+                    compassign_depth -= 1;
+                } else if paren_depth > 0 {
+                    paren_depth -= 1;
+                }
+                word.clear();
+                element_start = false;
+            }
+            '[' if compassign_depth > 0 && element_start && word.is_empty() => {
+                // parse.y:5637: element-leading `[` under PST_COMPASSIGN -
+                // P_ARRAYSUB scan over `[...]` (quotes, escapes and nested
+                // `[` pairs, parse.y:3877+). An unterminated scan is the
+                // `]' report shape, not this class.
+                let mut sub_depth = 1usize;
+                let mut scan = index + 1;
+                let mut q_single = false;
+                let mut q_double = false;
+                let mut q_escaped = false;
+                while scan < body.len() {
+                    let c = body[scan];
+                    if q_escaped {
+                        q_escaped = false;
+                        scan += 1;
+                        continue;
+                    }
+                    if q_single {
+                        if c == '\'' {
+                            q_single = false;
+                        }
+                        scan += 1;
+                        continue;
+                    }
+                    if q_double {
+                        if c == '\\' {
+                            q_escaped = true;
+                        } else if c == '"' {
+                            q_double = false;
+                        }
+                        scan += 1;
+                        continue;
+                    }
+                    match c {
+                        '\\' => q_escaped = true,
+                        '\'' => q_single = true,
+                        '"' => q_double = true,
+                        '[' => sub_depth += 1,
+                        ']' => {
+                            sub_depth -= 1;
+                            if sub_depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    scan += 1;
+                }
+                if sub_depth > 0 {
+                    // Unterminated subscript inside the reparse: the `]'
+                    // family owns the report (probe `((x=([y))`).
+                    return false;
+                }
+                index = scan;
+                word.clear();
+                element_start = false;
+            }
+            c => {
+                word.push(c);
+                if c != '=' && !(c == '_' || c.is_ascii_alphanumeric()) {
+                    word.clear();
+                }
+                element_start = false;
+            }
+        }
+        index += 1;
+    }
+    // Clean EOF with the compound still open: parse.y:7140-7152.
+    compassign_depth > 0
+}
+
+/// Index of the first `((` on the 1-based `open_line` of `chars`, if any.
+fn dparen_open_index(chars: &[char], open_line: usize) -> Option<usize> {
+    let mut line = 1usize;
+    let mut index = 0usize;
+    while index < chars.len() && line < open_line {
+        if chars[index] == '\n' {
+            line += 1;
+        }
+        index += 1;
+    }
+    loop {
+        if index >= chars.len() || chars[index] == '\n' {
+            return None;
+        }
+        if chars[index] == '(' && chars.get(index + 1) == Some(&'(') {
+            return Some(index);
+        }
+        index += 1;
+    }
+}
+
+/// parse_matched_pair(`(', `)', P_ARITH) from `from`: quote recursions,
+/// backslash escapes, `$(`/`${`/`$[` groups (parse.y:4131-4145). Returns
+/// the index of the balancing `)`, or None when the group never closes.
+fn paren_group_close(chars: &[char], from: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut scan = from;
+    let mut single = false;
+    let mut double = false;
+    let mut backtick = false;
+    let mut escaped = false;
+    while scan < chars.len() {
+        let ch = chars[scan];
+        if escaped {
+            escaped = false;
+            scan += 1;
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            scan += 1;
+            continue;
+        }
+        if double {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                double = false;
+            }
+            scan += 1;
+            continue;
+        }
+        if backtick {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '`' {
+                backtick = false;
+            }
+            scan += 1;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '\'' => single = true,
+            '"' => double = true,
+            '`' => backtick = true,
+            '$' if matches!(chars.get(scan + 1), Some('(' | '{' | '[')) => {
+                let (open, close) = match chars[scan + 1] {
+                    '(' => ('(', ')'),
+                    '{' => ('{', '}'),
+                    _ => ('[', ']'),
+                };
+                match dollar_word_group_len(chars, scan + 1, open, close) {
+                    Some(end) => scan = end,
+                    None => return None,
+                }
+                continue;
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(scan);
+                }
+            }
+            _ => {}
+        }
+        scan += 1;
+    }
+    None
+}
+
+/// Balanced span of a `$(`/`${`/`$[` group whose opener sits at `open`
+/// (parse.y parse_dollar_word → parse_matched_pair with the pair's own
+/// open/close). Returns the index just past the closer, or None when it
+/// never closes. Quote/escape aware like the P_ARITH walker.
+fn dollar_word_group_len(
+    chars: &[char],
+    open: usize,
+    open_ch: char,
+    close_ch: char,
+) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '\'' => single = true,
+            '"' => double = true,
+            c if c == open_ch => depth += 1,
+            c if c == close_ch => {
                 depth -= 1;
                 if depth == 0 {
                     return Some(index + 1);

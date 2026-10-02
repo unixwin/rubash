@@ -43,6 +43,7 @@ pub(crate) use continuation::CloseCharResidualState;
 pub(crate) use continuation::SubscriptResidualState;
 use heredoc::{heredoc_delimiters, HereDocDelimiter};
 use scanner::{Lexer, LexerBoundaryState, LexerParseState};
+pub(crate) use skip::arraysub_span_len;
 pub(crate) use skip::command_substitutions_balanced;
 pub(crate) use skip::extglob_pattern_group_len;
 pub(crate) use skip::skip_parenthesized_unit_corrected;
@@ -1634,6 +1635,29 @@ pub(crate) use skip::esac_prev_token_char;
 /// scans (Interp 221), so the unclosed-delimiter probe must know the mode.
 pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
     skip::unclosed_array_subscript_line(input)
+}
+
+/// rubash#390 q2: subscript-EOF diagnostic router — closer char and report
+/// line follow parse_matched_pair's quote recursion (parse.y:4040-4051,
+/// 3901-3912): an unterminated `'`/`"`/`$'` inside the `[` scan reports the
+/// QUOTE at its open line instead of `]' at the `[` line. The third member
+/// is the `[` construct's own line (the prefix cut for complete-command
+/// execution stops there).
+pub fn unclosed_array_subscript_eof(input: &str) -> Option<(usize, char, usize, bool)> {
+    skip::unclosed_array_subscript_eof(input)
+}
+
+/// rubash#390 q1: `((` P_ARITH-group probe for the unclosed-command-`(`
+/// diagnostic router (see skip.rs).
+pub fn dparen_arith_group_never_closes(input: &str, open_line: usize) -> bool {
+    skip::dparen_arith_group_never_closes(input, open_line)
+}
+
+/// rubash#390 q1 class B: the `((` nested-subshell reinterpretation whose
+/// reparse dies with parse_compound_assignment's clean-EOF report (see
+/// skip.rs).
+pub fn dparen_subshell_reparse_compound_eof(input: &str, open_line: usize) -> bool {
+    skip::dparen_subshell_reparse_compound_eof(input, open_line)
 }
 
 pub fn has_unclosed_input_syntax_posix(input: &str, posix: bool) -> bool {

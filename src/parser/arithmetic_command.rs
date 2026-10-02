@@ -228,9 +228,15 @@ fn set_arithmetic_command_words(
 }
 
 /// Arithmetic commands are parsed before arithmetic evaluation. Reject an
-/// unmatched grouping delimiter here so malformed input gets Bash's parse
+/// unmatched `(`/`)` grouping here so malformed input gets Bash's parse
 /// status (2), instead of being treated as a valid command that merely
-/// evaluates to an arithmetic error (status 1).
+/// evaluates to an arithmetic error (status 1). Brackets are NOT part of
+/// this check: GNU's P_ARITH matched-pair scan counts parens only
+/// (parse.y:4970 via parse_matched_pair — a `[` inside `((...))` is plain
+/// data; no P_ARRAYSUB scan runs), so `((a[b))` parses and the EVALUATOR
+/// reports the operand/subscript error with status 1 (probes k1/k2,
+/// rubash#390 q1: `((x=[y))` → `((: x=[y: arithmetic syntax error:
+/// operand expected (error token is "[y")` rc 1).
 fn arithmetic_delimiters_balanced(expression: &str) -> bool {
     let mut stack = Vec::new();
     let mut escaped = false;
@@ -258,9 +264,7 @@ fn arithmetic_delimiters_balanced(expression: &str) -> bool {
 
         match ch {
             '(' => stack.push(ch),
-            '[' => stack.push(ch),
             ')' if stack.pop() != Some('(') => return false,
-            ']' if stack.pop() != Some('[') => return false,
             _ => {}
         }
     }

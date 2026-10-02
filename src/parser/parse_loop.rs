@@ -1666,7 +1666,7 @@ fn separator_lacks_preceding_command(tokens: &[Token], index: usize, floor: usiz
 /// GNU parse.y reports `syntax error near unexpected token `X'' on the
 /// offending token and echoes only that input line (yyerror + the current
 /// input line), aborting the rest of the input.
-fn push_unexpected_token_error(state: &mut ParseState, tokens: &[Token], i: usize) {
+pub(super) fn push_unexpected_token_error(state: &mut ParseState, tokens: &[Token], i: usize) {
     push_unexpected_token_error_named(state, tokens, i, None);
 }
 

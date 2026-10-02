@@ -82,8 +82,19 @@ impl Executor {
             .get_assignment("__RUBASH_PARSE_ERROR__")
             .map(String::as_str)
             .unwrap_or("unexpected token");
+        // GNU parser_error (parse.y:6839 via error.c:300-316) cites the
+        // parser's line_number AT the error — the offending token's line,
+        // which the error node records (push_unexpected_token_error and the
+        // subtree propagation both stamp it). A multi-line script's ambient
+        // CURRENT_LINE is the LAST line read, not the failure line
+        // (rubash#390: `while :; do case x in\nesac) ...` reports the
+        // `esac)' line, not the `done' line).
+        let prefix = match cmd.line {
+            Some(line) => self.parser_diagnostic_prefix_for_line(line),
+            None => self.parser_diagnostic_prefix(),
+        };
         if message.starts_with("syntax error:") || message.starts_with("arithmetic syntax error:") {
-            eprintln!("{}{}", self.parser_diagnostic_prefix(), message);
+            eprintln!("{prefix}{message}");
             // GNU error.c:324-327 (parser_error): with
             // exit_immediately_on_error set, the first diagnostic line is
             // followed by an immediate exit_shell(2) — the second line of
@@ -93,18 +104,11 @@ impl Executor {
                 return;
             }
             if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                eprintln!(
-                    "{}syntax error: `{}'",
-                    self.parser_diagnostic_prefix(),
-                    source
-                );
+                eprintln!("{prefix}syntax error: `{source}'");
             }
         } else {
             let message = super::command_execute::bash_style_unexpected_token_message(message);
-            eprintln!(
-                "{}syntax error near {message}",
-                self.parser_diagnostic_prefix(),
-            );
+            eprintln!("{prefix}syntax error near {message}");
             if self.errexit_active_at_diagnostic() {
                 return;
             }
@@ -114,7 +118,7 @@ impl Executor {
             // (`if :;then ...') stay as read (rubash#285: the old
             // trim/`;then' display rewrite corrupted the physical line).
             if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                eprintln!("{}`{}'", self.parser_diagnostic_prefix(), source);
+                eprintln!("{prefix}`{source}'");
             }
         }
     }

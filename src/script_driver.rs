@@ -2186,14 +2186,23 @@ fn run_source_impl(
         // `[` opened and exits 1 — and the scan swallows any later `)`,
         // so it must be reported ahead of the generic close-char path
         // (rubash#221: `foo=([)` was silently accepted).
-        if let Some((open_line, inside_compassign)) =
-            crate::lexer::unclosed_array_subscript_line(input)
+        // rubash#390 q2: an unterminated quote INSIDE the subscript is the
+        // quote recursion's own EOF (parse.y:4040-4051 + 3901-3912) — the
+        // closer char and report line are the QUOTE's (`a["x]=15` reports
+        // `"' at the `"` line, not `]' at the `[` line).
+        if let Some((open_line, closer, construct_line, inside_compassign)) =
+            crate::lexer::unclosed_array_subscript_eof(input)
         {
             let source = input.trim_end_matches('\n');
-            let prefix = if open_line > 1 {
+            // The prefix of COMPLETE commands stops at the `[` construct's
+            // line — for a quote that opened on a LATER line than its `[`
+            // (`a[\n"x`), cutting at the report line would re-run the
+            // already-open construct's first line standalone and emit a
+            // phantom second diagnostic.
+            let prefix = if construct_line > 1 {
                 source
                     .lines()
-                    .take(open_line - 1)
+                    .take(construct_line - 1)
                     .collect::<Vec<_>>()
                     .join("\n")
             } else {
@@ -2211,7 +2220,7 @@ fn run_source_impl(
             }
             executor.mark_parse_error();
             eprintln!(
-                "{}unexpected EOF while looking for matching `]'",
+                "{}unexpected EOF while looking for matching `{closer}'",
                 executor.parser_diagnostic_prefix_for_line(open_line)
             );
             // GNU exits 1 when the subscript opened inside a compound array
@@ -2261,6 +2270,45 @@ fn run_source_impl(
                 // `$(`/`$((`/array/quote matched pairs keep the "matching
                 // `X'" wording.
                 if close == ')' && command {
+                    // rubash#390 q1: a `((` at command position is NOT a
+                    // plain subshell — read_token hands it to parse_dparen
+                    // (parse.y:3726-3733) → parse_arith_cmd, whose
+                    // parse_matched_pair(`(',`)',P_ARITH) scan (parse.y:4970)
+                    // hitting EOF with the paren count still open reports
+                    // `unexpected EOF while looking for matching `)'' at the
+                    // line the group opened (parse.y:3908-3915, start_lineno)
+                    // with exit 2 (`error yacc_EOF' forces EX_BADUSAGE only
+                    // when the status is still 0 — parse.y:484-490). Probes:
+                    // `((1+2', `((1+(2', `((x=(' all rc 2 at the `((` line.
+                    // A group that CLOSES is the nested-subshell
+                    // reinterpretation (parse.y:4938-4948) and keeps this
+                    // branch's wording.
+                    if crate::lexer::dparen_arith_group_never_closes(input, open_line) {
+                        eprintln!(
+                            "{}unexpected EOF while looking for matching `)'",
+                            executor.parser_diagnostic_prefix_for_line(open_line)
+                        );
+                        executor.errexit_live_at_diagnostic();
+                        return 2;
+                    }
+                    // Class B: the group closed but the next char was not
+                    // `)` — the nested-subshell reparse leaves a compound
+                    // assignment open at clean EOF: parse.y:7151-7152's
+                    // `)' report at the compound's line with
+                    // set_exit_status(EXECUTION_FAILURE) (parse.y:7167-7169),
+                    // kept at 1 by the `error yacc_EOF' production
+                    // (parse.y:489-490 only forces 2 on a still-zero
+                    // status). error.c:324-327 forces 2 under live errexit.
+                    if crate::lexer::dparen_subshell_reparse_compound_eof(input, open_line) {
+                        eprintln!(
+                            "{}unexpected EOF while looking for matching `)'",
+                            executor.parser_diagnostic_prefix_for_line(open_line)
+                        );
+                        if executor.errexit_live_at_diagnostic() {
+                            return 2;
+                        }
+                        return 1;
+                    }
                     eprintln!(
                         "{}syntax error: unexpected end of file from `(' command on line {open_line}",
                         executor.parser_diagnostic_prefix_for_line(eof_line)

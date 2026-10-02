@@ -762,23 +762,22 @@ mod pipeline_tests {
     }
 
     // wt33 (#373): the bare `esac` after `in` ends an empty case (rubash#381,
-    // GNU parse.y:3433-3441), so the following `)` is a stray delimiter —
-    // this is a syntax error, not a subshell+case AST. Probe
-    // wt33-373/run/B12_subshell_case_esac: GNU rc 2 `syntax error near
-    // unexpected token \`printf''; rubash rc 2 naming `)' instead (token-
-    // naming divergence tracked by the wt33 wording issue).
+    // GNU parse.y:3433-3441), the following `)` closes the enclosing
+    // SUBSHELL, and the error surfaces at the next command-start token —
+    // GNU names `printf' (probe wt33-373/run/B12_subshell_case_esac,
+    // `syntax error near unexpected token \`printf'' rc 2; matched by
+    // rubash#390: the case closes and the outer grammar owns the naming —
+    // the whole input is one error command, not a subshell+case AST).
     #[test]
     fn test_subshell_command_keeps_case_pattern_starting_with_esac() {
         let input = "( case esac in\nesac) printf matched ;; esac )";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-        let subshell = ast.commands[0].subshell_command.as_ref().unwrap();
-        assert!(
-            subshell.body[0]
-                .get_assignment("__RUBASH_PARSE_ERROR_NEAR__")
-                .is_some(),
-            "stray `)` after the empty-case esac must be a syntax error"
+        assert_eq!(
+            ast.commands[0].get_assignment("__RUBASH_PARSE_ERROR__"),
+            Some(&"unexpected token `printf'".to_string()),
+            "the subshell absorbs the `)'; the missing separator names `printf'"
         );
     }
 
@@ -945,7 +944,9 @@ mod command_body_kind_tests {
     // `esac)` inside a brace group is a syntax error. Probe
     // wt33-373/run/A20_brace_case_esac: `syntax error near unexpected token
     // \`)'` rc 2, byte-identical to GNU 5.3.0, for both the compact and the
-    // multiline form.
+    // multiline form (rubash#390: the case closes at the `esac` and the
+    // outer grammar rejects the stray `)' — the error node now carries the
+    // canonical PARSE_ERROR marker instead of the old NEAR placement).
     #[test]
     fn test_brace_bodies_keep_esac_pattern_and_close_brace_argument() {
         let compact_tokens = tokenize("{ case esac in esac) echo } arg ;; esac; echo after; }");
@@ -956,10 +957,14 @@ mod command_body_kind_tests {
         for ast in [&compact_ast, &multiline_ast] {
             assert_eq!(ast.commands.len(), 1);
             let brace = ast.commands[0].brace_group.as_ref().unwrap();
+            // The compact form errors on body[0]; the multiline form keeps
+            // the clean empty case as body[0] and the error lands on the
+            // following command — either way the group fails as a whole.
             assert!(
-                brace.body[0]
-                    .get_assignment("__RUBASH_PARSE_ERROR_NEAR__")
-                    .is_some(),
+                brace
+                    .body
+                    .iter()
+                    .any(|command| command.get_assignment("__RUBASH_PARSE_ERROR__").is_some()),
                 "stray `)` after the empty-case esac must be a syntax error"
             );
         }
@@ -3151,11 +3156,12 @@ mod case_tests {
 
     // wt33 (#373): a bare `esac` right after `in` terminates an EMPTY case
     // (GNU parse.y:3433-3441 special_case_tokens; rubash#381) — it can never
-    // be a pattern of its own, so `esac)` / `esac|fi)` are syntax errors:
+    // be a pattern of its own. rubash#390: the case CLOSES at the `esac`
+    // and the outer grammar owns the rejection, so `esac)` / `esac|fi)` are
+    // syntax errors named by the token the yacc parser chokes on:
     //   probe wt33-373/run/E01: `case esac in esac) echo single ;; esac`
-    //     -> `syntax error near unexpected token \`)'` rc 2 (byte-identical)
-    //   probe E02: `case esac in esac|fi) ...` -> GNU names `fi', rubash
-    //     names `)' (wording divergence tracked by the wt33 wording issue)
+    //     -> `syntax error near unexpected token `)'` rc 2 (byte-identical)
+    //   probe E02: `case esac in esac|fi) ...` -> names `fi' (now matched)
     // A pattern that merely STARTS with the text `esac` is fine:
     //   probe E03: `case esac in esac-text) echo prefixed ;; esac` -> rc 0
     //   on both shells (clause does not match, nothing echoed).
@@ -3170,10 +3176,13 @@ mod case_tests {
         assert_eq!(case_command.clauses[0].patterns, ["esac-text"]);
         assert_eq!(case_command.clauses[0].body[0].words, ["echo", "prefixed"]);
 
+        // The stray `)` after the empty-case esac reaches the OUTER grammar
+        // (wt39 cases13/a1: `syntax error near unexpected token `)'' at the
+        // `)'s line, byte-identical to WSL GNU 5.3.0).
         let error_ast = parse(&tokenize("case esac in esac) echo single ;; esac"));
         assert!(
             error_ast.commands[0]
-                .get_assignment("__RUBASH_PARSE_ERROR_NEAR__")
+                .get_assignment("__RUBASH_PARSE_ERROR__")
                 .is_some(),
             "bare esac pattern must be a syntax error"
         );
