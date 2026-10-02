@@ -639,7 +639,15 @@ impl Executor {
                 .get(word)
                 .map(|alias| (alias.value.replace(DATA_DOLLAR, "$"), alias.expand_next))
         };
-        crate::lexer::expand_aliases_in_source(source, &lookup as &crate::lexer::AliasLookup<'_>)
+        // parse.y:4526-4533 parse_comsub: inside the comsub body the
+        // reader runs with expand_aliases = posixly_correct — when that is
+        // the live leg, read_token_word's posix reserved-word-first order
+        // (parse.y:5751-5769) applies to the body too (rubash#414).
+        crate::lexer::expand_aliases_in_source(
+            source,
+            &lookup as &crate::lexer::AliasLookup<'_>,
+            self.posix_mode_enabled(),
+        )
     }
 
     /// `comsub_body_alias_splice` for a body extracted from input the

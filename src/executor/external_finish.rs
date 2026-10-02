@@ -180,8 +180,15 @@ impl Executor {
         // than one whole-file parse. Gate on the exec-model child only: a
         // fork-model script child inherits the parent's history list, which
         // the driver's fresh session would discard.
+        // The startup-liveness arm of script_uses_aliases does not apply
+        // here: this is a fresh `bash script' child (rubash#414 note), and
+        // `set -o posix' in the parent UNBINDS POSIXLY_CORRECT
+        // (set.def:415-416), so the child does not inherit the parent's
+        // posix mode or its expand_aliases state (shell.c:1853: a
+        // non-interactive child starts with expand_aliases = its own
+        // posixly_correct = 0) — only the script's own text can enable it.
         let uses_history_driver = crate::script_driver::script_uses_history(&source)
-            || crate::script_driver::script_uses_aliases(&source);
+            || crate::script_driver::script_uses_aliases(&source, false);
         let mut ast = if uses_history_driver {
             crate::parser::Ast {
                 commands: Vec::new(),

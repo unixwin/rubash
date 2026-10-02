@@ -130,6 +130,73 @@ fn command_pos(last: Tok, last2: Tok) -> bool {
     !matches!(last, Tok::SemiSemi | Tok::SemiAnd | Tok::SemiSemiAnd) && reserved_ok(last)
 }
 
+/// CHECK_FOR_RESERVED_WORD (parse.y:3168-3199, from read_token_word):
+/// `word` is the grammar keyword when it is unquoted, the previous token
+/// allows a reserved word (reserved_word_acceptable, parse.y:5899), and
+/// the case-pattern state does not suppress it (every reserved word but a
+/// pattern-position `esac'; Posix grammar rule 4 after `|'/`(',
+/// y.tab.c:5536-5545). Applies the macro's parser-state side effects
+/// (expecting_in_command, esacs_needed_count, PST_CASEPAT clear,
+/// open_brace_count, PST_CONDEXPR) and returns the token; None leaves the
+/// word a plain word. Shared by the posix PRE-alias check and the default
+/// POST-alias check (parse.y:5751-5769, rubash#414).
+fn check_reserved_word(
+    word: &str,
+    quoted: bool,
+    last: Tok,
+    casepat: &mut bool,
+    case_needed: &mut usize,
+    expect_in: &mut usize,
+    expect_in_cmd: &mut Tok,
+    open_brace: &mut usize,
+    cond: &mut usize,
+) -> Option<Tok> {
+    let esac_suppressed = *casepat && matches!(last, Tok::Pipe | Tok::LParen);
+    if quoted || !reserved_ok(last) || (*casepat && word != "esac") || esac_suppressed {
+        return None;
+    }
+    let tok = match word {
+        "if" => Some(Tok::If),
+        "then" => Some(Tok::Then),
+        "elif" => Some(Tok::Elif),
+        "else" => Some(Tok::Else),
+        "fi" => Some(Tok::Fi),
+        "while" => Some(Tok::While),
+        "until" => Some(Tok::Until),
+        "do" => Some(Tok::Do),
+        "done" => Some(Tok::Done),
+        "for" => Some(Tok::For),
+        "select" => Some(Tok::Select),
+        "case" => Some(Tok::Case),
+        "esac" => Some(Tok::Esac),
+        "function" => Some(Tok::Function),
+        "coproc" => Some(Tok::Coproc),
+        "time" => Some(Tok::Time),
+        "!" => Some(Tok::Bang),
+        "{" => Some(Tok::LBrace),
+        "}" if *open_brace > 0 => Some(Tok::RBrace),
+        "[[" => Some(Tok::CondStart),
+        "]]" if *cond > 0 => Some(Tok::CondEnd),
+        _ => None,
+    }?;
+    match tok {
+        Tok::Case | Tok::For | Tok::Select => {
+            *expect_in_cmd = tok;
+            *expect_in += 1;
+        }
+        Tok::Esac => {
+            *case_needed = case_needed.saturating_sub(1);
+            *casepat = false;
+        }
+        Tok::LBrace => *open_brace += 1,
+        Tok::RBrace => *open_brace = open_brace.saturating_sub(1),
+        Tok::CondStart => *cond += 1,
+        Tok::CondEnd => *cond = cond.saturating_sub(1),
+        _ => {}
+    }
+    Some(tok)
+}
+
 /// One pushed expansion being consumed: GNU's pushed_string_list entry.
 /// `end` is the buffer index where the pushed text ends; when the scan
 /// position reaches it the alias leaves AL_BEINGEXPANDED and, when the
@@ -143,8 +210,18 @@ struct Boundary {
 /// Expand every alias that GNU's reader would expand while scanning
 /// `source`, given the alias table in `lookup`. Returns the rewritten
 /// source; everything outside the replaced words is byte-identical.
-pub(crate) fn expand_aliases_in_source(source: &str, lookup: &AliasLookup<'_>) -> String {
-    let source = expand_comsub_alias_bodies(source, lookup);
+///
+/// `posix` is `posixly_correct`: it selects the reserved-word/alias ORDER
+/// of read_token_word's tail (parse.y:5751-5769) — posix checks reserved
+/// words BEFORE alias expansion (a reserved word at an acceptable position
+/// is the keyword and never alias text), default mode expands the alias
+/// first and checks reserved words after (rubash#414).
+pub(crate) fn expand_aliases_in_source(
+    source: &str,
+    lookup: &AliasLookup<'_>,
+    posix: bool,
+) -> String {
+    let source = expand_comsub_alias_bodies(source, lookup, posix);
     let source = source.as_str();
     let mut buf: Vec<char> = source.chars().collect();
     let mut pos = 0usize;
@@ -386,6 +463,30 @@ pub(crate) fn expand_aliases_in_source(source: &str, lookup: &AliasLookup<'_>) -
                     continue;
                 }
 
+                // parse.y:5751-5755 (read_token_word): "Posix.2 does not
+                // allow reserved words to be aliased, so check for all of
+                // them ... before expanding the current token as an alias."
+                // In posix mode a reserved word at an acceptable position
+                // returns as the keyword and alias expansion never sees it
+                // (rubash#414: `alias for=echo` + `al for foo in v` under
+                // -o posix keeps the loop keyword, unlike default mode).
+                if posix {
+                    if let Some(tok) = check_reserved_word(
+                        &word,
+                        quoted,
+                        last,
+                        &mut casepat,
+                        &mut case_needed,
+                        &mut expect_in,
+                        &mut expect_in_cmd,
+                        &mut open_brace,
+                        &mut cond,
+                    ) {
+                        emit!(tok);
+                        continue;
+                    }
+                }
+
                 // alias_expand_token (parse.y:3249): unquoted word in a
                 // command position (PST_ALEXPNEXT or
                 // assignment_acceptable) with a live alias that is not
@@ -435,53 +536,23 @@ pub(crate) fn expand_aliases_in_source(source: &str, lookup: &AliasLookup<'_>) -
                     continue;
                 }
 
-                // CHECK_FOR_RESERVED_WORD (y.tab.c:3167): only when the
-                // previous token allows a reserved word. PST_CASEPAT
-                // suppresses every reserved word except a pattern-position
-                // esac (y.tab.c:5536-5545).
-                let esac_suppressed = casepat && matches!(last, Tok::Pipe | Tok::LParen);
-                if !quoted && reserved_ok(last) && !(casepat && word != "esac") && !esac_suppressed
-                {
-                    let tok = match word.as_str() {
-                        "if" => Some(Tok::If),
-                        "then" => Some(Tok::Then),
-                        "elif" => Some(Tok::Elif),
-                        "else" => Some(Tok::Else),
-                        "fi" => Some(Tok::Fi),
-                        "while" => Some(Tok::While),
-                        "until" => Some(Tok::Until),
-                        "do" => Some(Tok::Do),
-                        "done" => Some(Tok::Done),
-                        "for" => Some(Tok::For),
-                        "select" => Some(Tok::Select),
-                        "case" => Some(Tok::Case),
-                        "esac" => Some(Tok::Esac),
-                        "function" => Some(Tok::Function),
-                        "coproc" => Some(Tok::Coproc),
-                        "time" => Some(Tok::Time),
-                        "!" => Some(Tok::Bang),
-                        "{" => Some(Tok::LBrace),
-                        "}" if open_brace > 0 => Some(Tok::RBrace),
-                        "[[" => Some(Tok::CondStart),
-                        "]]" if cond > 0 => Some(Tok::CondEnd),
-                        _ => None,
-                    };
-                    if let Some(tok) = tok {
-                        match tok {
-                            Tok::Case | Tok::For | Tok::Select => {
-                                expect_in_cmd = tok;
-                                expect_in += 1;
-                            }
-                            Tok::Esac => {
-                                case_needed = case_needed.saturating_sub(1);
-                                casepat = false;
-                            }
-                            Tok::LBrace => open_brace += 1,
-                            Tok::RBrace => open_brace = open_brace.saturating_sub(1),
-                            Tok::CondStart => cond += 1,
-                            Tok::CondEnd => cond = cond.saturating_sub(1),
-                            _ => {}
-                        }
+                // parse.y:5767-5769 (read_token_word): "If not in Posix.2
+                // mode, check for reserved words after alias expansion" —
+                // the default-mode POST check (posix ran its check before
+                // the alias block above, so the keyword decision there is
+                // already final).
+                if !posix {
+                    if let Some(tok) = check_reserved_word(
+                        &word,
+                        quoted,
+                        last,
+                        &mut casepat,
+                        &mut case_needed,
+                        &mut expect_in,
+                        &mut expect_in_cmd,
+                        &mut open_brace,
+                        &mut cond,
+                    ) {
                         emit!(tok);
                         continue;
                     }
@@ -602,7 +673,7 @@ fn skip_backtick(buf: &[char], mut pos: usize) -> usize {
 /// can move the close paren (`case` protects a mid-body `)`, and an alias
 /// can contribute the closing `)` itself: `short='echo ok 8 )'`).
 /// `'` bodies and `\` escapes hide `$(`; `"` and `` ` `` interiors do not.
-fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>) -> String {
+fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>, posix: bool) -> String {
     if !source.contains("$(")
         && !source.contains("${ ")
         && !source.contains("${\t")
@@ -629,6 +700,7 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>) -> String 
                     &mut chars,
                     pos,
                     lookup,
+                    posix,
                     &mut changed,
                     |chars, open| crate::lexer::skip_parenthesized_unit_corrected(chars, open),
                 );
@@ -649,6 +721,7 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>) -> String 
                     &mut chars,
                     pos,
                     lookup,
+                    posix,
                     &mut changed,
                     skip_funsub_body,
                 );
@@ -677,6 +750,7 @@ fn splice_substitution_body(
     chars: &mut Vec<char>,
     pos: usize,
     lookup: &AliasLookup<'_>,
+    posix: bool,
     changed: &mut bool,
     extent: fn(&[char], usize) -> Option<usize>,
 ) -> usize {
@@ -686,7 +760,7 @@ fn splice_substitution_body(
         .saturating_sub(1)
         .min(chars.len());
     let body: String = chars[open + 1..body_end].iter().collect();
-    let expanded = expand_aliases_in_source(&body, lookup);
+    let expanded = expand_aliases_in_source(&body, lookup, posix);
     if expanded != body {
         chars.splice(open + 1..body_end, expanded.chars());
         *changed = true;
@@ -702,7 +776,7 @@ fn splice_substitution_body(
             break;
         }
         let tail: String = chars[tail_start..new_end].iter().collect();
-        let tail_expanded = expand_aliases_in_source(&tail, lookup);
+        let tail_expanded = expand_aliases_in_source(&tail, lookup, posix);
         if tail_expanded == tail {
             break;
         }

@@ -62,17 +62,31 @@ pub fn script_uses_history(contents: &str) -> bool {
 /// posix_initialize), so it must take the same driver — otherwise
 /// `$(...)` bodies are extracted before the alias table applies
 /// (comsub5.sub).
-pub fn script_uses_aliases(contents: &str) -> bool {
-    contents.contains("expand_aliases") || contents.contains("set -o posix")
+///
+/// `alias_live_at_start` covers the same state established BEFORE the
+/// reader starts — CLI `-o posix` / `--posix` (shell.c:1853
+/// init_noninteractive: `expand_aliases = posixly_correct`, so a
+/// non-interactive posix shell expands aliases from the first line) or
+/// `-O expand_aliases`. GNU's reader is always incremental
+/// (evalstring.c parse_and_execute); the whole-file `run_source` parse is
+/// a rubash fast path admissible only while parse-time alias state is
+/// inert for the entire file (rubash#414: `-o posix` + `alias for=echo`
+/// let the fast path miss GNU's parse-time reserved-word decision).
+pub fn script_uses_aliases(contents: &str, alias_live_at_start: bool) -> bool {
+    alias_live_at_start || contents.contains("expand_aliases") || contents.contains("set -o posix")
 }
 
 /// GNU parse.y alias_expand_token + push_string, run over the text of one
 /// command group. The lookup yields (value, AL_EXPANDNEXT); alias values
 /// store '$' as DATA_DOLLAR when the word carried it in data position.
+/// The `posix` flag selects read_token_word's reserved-word/alias order
+/// (parse.y:5751-5769): posix keeps reserved words as keywords, default
+/// mode lets an alias replace them (rubash#414).
 pub(crate) fn expand_group_aliases(executor: &Executor, source: &str) -> String {
     if !executor.alias_expansion_enabled() || executor.shell_state.aliases.is_empty() {
         return source.to_string();
     }
+    let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let lookup = move |word: &str| {
         executor.shell_state.aliases.get(word).map(|alias| {
             (
@@ -83,7 +97,7 @@ pub(crate) fn expand_group_aliases(executor: &Executor, source: &str) -> String 
             )
         })
     };
-    expand_aliases_in_source(source, &lookup as &AliasLookup<'_>)
+    expand_aliases_in_source(source, &lookup as &AliasLookup<'_>, posix)
 }
 
 /// shell.c run_pending_command style driver for scripts with history on:

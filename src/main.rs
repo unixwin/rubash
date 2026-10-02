@@ -878,11 +878,17 @@ fn run_command_string_with_init(
     // current_command_number never increments (`\#` prints 1 — GNU probe
     // target/gapfix2/cc.sh).
     executor.set_command_string_mode(true);
-    let status = if script_uses_history(command) || script_uses_aliases(command) {
-        run_script_with_history(executor, command, None)
-    } else {
-        run_source_with_line_offset(executor, command, interactive, line_offset, None, None)
-    };
+    // rubash#414: alias expansion live at reader start (CLI -o posix /
+    // --posix / -O expand_aliases — shell.c:1853 init_noninteractive sets
+    // expand_aliases = posixly_correct) takes the incremental grouped
+    // driver; GNU's reader is always command-by-command.
+    let alias_live_at_start = executor.alias_expansion_enabled();
+    let status =
+        if script_uses_history(command) || script_uses_aliases(command, alias_live_at_start) {
+            run_script_with_history(executor, command, None)
+        } else {
+            run_source_with_line_offset(executor, command, interactive, line_offset, None, None)
+        };
     executor.set_command_string_mode(false);
     finish_shell(executor, status, interactive)
 }
@@ -1014,7 +1020,10 @@ fn run_script_file_with_init(
     // exit.def:59-62 echo is suppressed (rubash#297).
     executor.set_env("__RUBASH_INTERACTIVE_FLAG_OFF", "1");
     let uses_hist = script_uses_history(&contents);
-    let uses_alias = script_uses_aliases(&contents);
+    // rubash#414: alias expansion live at reader start (CLI -o posix /
+    // --posix / -O expand_aliases — shell.c:1853) takes the incremental
+    // grouped driver, matching GNU's command-by-command reader.
+    let uses_alias = script_uses_aliases(&contents, executor.alias_expansion_enabled());
     let status = if uses_hist || uses_alias {
         run_script_with_history(executor, &contents, None)
     } else {

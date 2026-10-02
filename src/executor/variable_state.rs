@@ -2,7 +2,13 @@ use super::*;
 use crate::executor::markers::DATA_DOLLAR;
 
 impl Executor {
-    pub(crate) fn alias_expansion_enabled(&self) -> bool {
+    /// shopt `expand_aliases` state — `pub` for the bin-side grouped-driver
+    /// admission (rubash#414). GNU's non-interactive shell derives the
+    /// parser's live flag as expand_aliases = posixly_correct
+    /// (shell.c:1853 init_noninteractive); rubash folds that into the
+    /// shopt flip itself (apply_posix_mode_transition), so this one
+    /// predicate answers "aliases are live for the reader" in both modes.
+    pub fn alias_expansion_enabled(&self) -> bool {
         self.shell_state
             .env_vars
             .get("__RUBASH_SHOPT_STATE")
