@@ -3264,6 +3264,76 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_path_parameter_arguments_never_empty_or_quoted() {
+        // unixwin/niubash#124 (reopened): the reported symptom was `mktemp -p
+        // "$d"` failing with template `""/x.XXXXXX`, which is exactly what a
+        // child sees when the -p value arrives as two literal `"` characters
+        // (byte-verified against GNU coreutils mktemp 8.32: `mktemp -p '""'
+        // x.XXXXXX` prints that very message). GNU hands argv verbatim to
+        // execve (execute_cmd.c:6126 shell_execve); the Windows adaptation
+        // may translate a path-shaped operand to drive form, but it must
+        // never empty it or let quoting leak into the value. Pin the whole
+        // path-parameter family (mktemp -p/--tmpdir=, tar -C/-o, cp/mv
+        // operands) across existing/missing targets, Windows-form input,
+        // relative operands, and comsub-captured round-trips: every output
+        // keeps the full value with no `"` byte.
+        let env = {
+            let mut env_vars = HashMap::new();
+            env_vars.insert(
+                "WINUXSH_ROOT".to_string(),
+                std::env::temp_dir().to_string_lossy().to_string(),
+            );
+            env_vars
+        };
+        let base = std::env::temp_dir().join("rubash-p124-path-params");
+        std::fs::create_dir_all(base.join("m")).unwrap();
+        let drive = base.to_string_lossy().to_string();
+        let drive = drive.trim_end_matches('\\').to_string();
+        let drive_letter = drive.chars().next().unwrap().to_ascii_lowercase();
+        let posix = format!("/{}{}", drive_letter, &drive[2..]).replace('\\', "/");
+        let posix_existing = format!("{}/m", posix);
+        let posix_missing = format!("{}/missing", posix);
+        let win_existing = format!("{}/m", drive);
+        let win_missing = format!("{}/missing", drive);
+
+        let attached_tmpdir = format!("--tmpdir={posix_existing}");
+        let attached_p = format!("-p{posix_existing}");
+        let shapes = [
+            // (label, argument)
+            ("-p existing POSIX", posix_existing.as_str()),
+            ("-p existing Windows", win_existing.as_str()),
+            ("-p missing POSIX", posix_missing.as_str()),
+            ("-p missing Windows", win_missing.as_str()),
+            ("--tmpdir= attached", attached_tmpdir.as_str()),
+            ("-p attached", attached_p.as_str()),
+            ("relative operand", "m"),
+            ("comsub-captured Windows form", win_existing.as_str()),
+        ];
+        for (label, arg) in shapes {
+            let translated = external_argument_path(arg, &env);
+            assert!(!translated.is_empty(), "{label}: emptied {arg:?}");
+            assert!(
+                !translated.contains('"'),
+                "{label}: literal quote leaked into {translated:?}"
+            );
+            // The value must survive whole: it either stays verbatim or maps
+            // onto the same drive with the same tail components.
+            if translated != arg {
+                let normalized = translated.replace('\\', "/");
+                assert!(
+                    normalized.starts_with(&win_existing.replace('\\', "/"))
+                        || normalized.starts_with(&win_missing.replace('\\', "/")),
+                    "{label}: value changed meaning: {arg:?} -> {translated:?}"
+                );
+            }
+        }
+        // Empty-string operand (host-boundary quote collapse can reduce
+        // `d="..."` to empty): stays empty, never gains `""` payload bytes.
+        assert_eq!(external_argument_path("", &env), "");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_mnt_drive_paths_do_not_false_positive() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
