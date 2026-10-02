@@ -422,12 +422,13 @@ fn test_parameter_prompt_transform_expands_octal_escapes() {
     let _ = fs::remove_file(output_path);
 }
 
-// wt33 (#374) IGNORED — real gap: GNU expands `\#` to the number of
-// commands executed so far (probe H09: `history=1 command=7`); rubash
-// prints `command=0`. The old expectation (`history=0`) was also wrong for
-// GNU. Tracked by rubash#393.
+// rubash#393 fixed: `\#` in ${var@P} reads current_command_number
+// (shell.c:183 init 1; eval.c:178 increments per reader-loop command list
+// before execution). This single-line list `p=...; echo ...` is the FIRST
+// list, so the counter is 2 while it runs (WSL GNU 5.3.0 probe
+// target/gapfix2/h9a.sh: same one-liner prints 2). `\!` is the prompt
+// history number: 1 with no history entries (new-exp.tests new-exp10).
 #[test]
-#[ignore = "unixwin/rubash#393: @P \\# command-number expands to 0"]
 fn test_parameter_prompt_transform_expands_history_and_command_count_escapes() {
     let output_path = "target/rubash-param-prompt-transform-count-output.txt";
     let _ = fs::remove_file(output_path);
@@ -442,7 +443,7 @@ fn test_parameter_prompt_transform_expands_history_and_command_count_escapes() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "history=0 command=0\n"
+        "history=1 command=2\n"
     );
     let _ = fs::remove_file(output_path);
 }

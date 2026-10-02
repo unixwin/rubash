@@ -1361,6 +1361,11 @@ impl Executor {
             evalerror_line: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),
+            // current_command_number rides shell_state (fork-copied); the
+            // reader-list line marker and the -c suppression are reader
+            // transients of the parent, not fork state.
+            reader_last_list_line: Cell::new(None),
+            command_string_mode: Cell::new(false),
             line_lex_locales: std::cell::RefCell::new(HashMap::new()),
             unit_lex_locale: std::cell::RefCell::new(None),
             ambient_line: Cell::new(None),

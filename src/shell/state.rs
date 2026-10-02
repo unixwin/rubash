@@ -68,6 +68,13 @@ pub struct ShellState {
     pub(crate) expanding_aliases: Vec<String>,
     /// execute_cmd.c loop_level — break/continue scope boundary.
     pub(crate) loop_depth: usize,
+    /// shell.c:183 `current_command_number` (init 1): the reader_loop
+    /// increments it per command list read, before execution (eval.c:178).
+    /// `\#` in prompt expansion reads it (parse.y:6568-6574; in a script
+    /// `${var@P}` sees decoding_prompt == ps0_prompt == NULL, so the
+    /// ps0/ps1/ps2 compensation does NOT apply and the raw counter shows).
+    /// Copied across the fork boundary like every C global.
+    pub(crate) command_number: usize,
     /// variables.c funcnest / function call depth.
     pub(crate) function_depth: usize,
     /// variables.c dollar_vars_changed bookkeeping for `set` scope.
@@ -288,6 +295,7 @@ impl Clone for ShellState {
             local_typed_scopes: self.local_typed_scopes.clone(),
             expanding_aliases: self.expanding_aliases.clone(),
             loop_depth: self.loop_depth,
+            command_number: self.command_number,
             function_depth: self.function_depth,
             dollar_vars_changed_by_set: self.dollar_vars_changed_by_set,
             random_state: self.random_state.clone_state(),

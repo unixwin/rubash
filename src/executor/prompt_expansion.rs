@@ -506,7 +506,22 @@ impl Executor {
     }
 
     pub(in crate::executor) fn prompt_command_number(&self) -> usize {
-        0
+        // shell.c:183 current_command_number; eval.c:178 increments it in
+        // the reader_loop before each command list executes. In a script's
+        // `${var@P}` the parse.y:6573 ps0/ps1/ps2 compensation does not
+        // apply (decoding_prompt and ps0_prompt are both NULL), so the raw
+        // counter is what GNU prints — verified: an echo on script line k
+        // shows k+1 (WSL GNU 5.3.0 probes target/gapfix2/h9{a,b,c}.sh).
+        self.shell_state.command_number
+    }
+
+    /// Marks the executor as running a `bash -c` command string: shell.c
+    /// run_one_command never enters reader_loop, so
+    /// current_command_number stays at its init 1 (WSL GNU 5.3.0 probe
+    /// target/gapfix2/cc.sh). The execute_ast walk checks this before
+    /// stepping the counter.
+    pub fn set_command_string_mode(&mut self, enabled: bool) {
+        self.command_string_mode.set(enabled);
     }
 
     pub(in crate::executor) fn prompt_time(&self, format: &str) -> String {

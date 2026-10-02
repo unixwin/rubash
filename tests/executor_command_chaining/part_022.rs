@@ -187,10 +187,13 @@ fn test_shopt_print_mode_preserves_query_status() {
     let _ = fs::remove_file(output_path);
 }
 
-// wt33 (#374) IGNORED — GNU pads `set -o` names one column narrower than
-// rubash (probe H07_set_o_spacing); the expectation matches GNU. rubash#393.
+// rubash#393 resolved: `shopt -o` listings print with shopt.def:73 OPTFMT
+// "%-20s\t%s\n" (NOT set.def:291's 15-wide MINUS_O_FORMAT) — verified
+// byte-identical against WSL GNU 5.3.0 (target/gapfix2/sho.sh: both print
+// "pipefail" + 12 spaces + TAB + "off"). The pre-existing engine output
+// was already conformant; the wt33 expectation (15-wide) was wrong for
+// GNU. `set -o` keeps the 15-wide form (set.def:291, probe so2.sh).
 #[test]
-#[ignore = "unixwin/rubash#393: set -o readable column width off by one"]
 fn test_shopt_o_uses_readable_format_without_print_flag() {
     let output_path = "target/rubash-shopt-o-readable-output.txt";
     let _ = fs::remove_file(output_path);
@@ -202,7 +205,7 @@ fn test_shopt_o_uses_readable_format_without_print_flag() {
     assert!(executor.execute_ast(&ast).is_ok());
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "pipefail       \toff\nset +o pipefail\n"
+        "pipefail            \toff\nset +o pipefail\n"
     );
     let _ = fs::remove_file(output_path);
 }

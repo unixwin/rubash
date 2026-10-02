@@ -651,6 +651,17 @@ pub struct Executor {
     /// Source line of the command currently executing at reader level —
     /// becomes the abort boundary when `evalerror_pending` is observed.
     reader_command_line: Cell<Option<usize>>,
+    /// shell.c:183 current_command_number support: source line of the last
+    /// reader-level list that incremented the counter (eval.c:178). A
+    /// semicolon-joined command sequence on one source line is ONE GNU
+    /// list (read_command gathers the whole line), so the counter steps
+    /// only when the top-level node's line changes.
+    reader_last_list_line: Cell<Option<usize>>,
+    /// True while a `bash -c` command string runs: shell.c
+    /// run_one_command bypasses reader_loop, so current_command_number
+    /// never increments (WSL GNU 5.3.0: `bash -c 'x="\#"; echo ${x@P}'`
+    /// prints 1).
+    command_string_mode: Cell<bool>,
     /// rubash#353: locale in effect when each SOURCE LINE was first reached
     /// at reader level — the locale GNU's parser would decode that line's
     /// `$'...'` backslash-u escapes under (GNU reads a newline-terminated

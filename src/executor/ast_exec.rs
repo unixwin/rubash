@@ -208,6 +208,35 @@ impl Executor {
 
         while index < commands.len() {
             let command = &commands[index];
+            // eval.c:178 + shell.c:183: current_command_number increments
+            // once per reader-loop command list, BEFORE it executes; `\#`
+            // in ${var@P} reads the counter (parse.y:6568-6574). This
+            // depth-1 walk IS the reader's list sequence for every driver
+            // (script-file lines/groups, interactive accepted lines, stdin
+            // groups); nested walks (source/eval/comsub bodies — entered
+            // while the execution lock was already held) run INSIDE an
+            // executing list and stay frozen at the inherited value (WSL
+            // GNU 5.3.0: sourced lines all print the source line's number).
+            // `bash -c` never enters reader_loop (shell.c run_one_command),
+            // hence the command_string_mode suppression. One source line is
+            // ONE GNU list (read_command gathers `a; b` together), so the
+            // counter steps only when the node's line changes.
+            if self.evalerror_exec_depth.get() == 1
+                && subshell_state.is_none()
+                && !self.command_string_mode.get()
+            {
+                let node_line = command.line;
+                let is_new_list = match (node_line, self.reader_last_list_line.get()) {
+                    (Some(line), Some(previous)) => line != previous,
+                    _ => true,
+                };
+                if is_new_list {
+                    self.shell_state.command_number += 1;
+                }
+                if let Some(line) = node_line {
+                    self.reader_last_list_line.set(Some(line));
+                }
+            }
             // GNU execute_cmd.c:652-656: `!` adds CMD_IGNORE_RETURN to the
             // command under exit_immediately_on_error, so its status never
             // satisfies errexit. The grouped drivers re-check

@@ -874,11 +874,16 @@ fn run_command_string_with_init(
     // parse.y:3249), and `bash -c 'set -H\necho !!'` must expand history on
     // the lines read after `set -H` runs (bashhist.c pre_process_line is
     // applied per input line as the parser pulls it).
+    // Either way this is shell.c run_one_command, NOT reader_loop:
+    // current_command_number never increments (`\#` prints 1 — GNU probe
+    // target/gapfix2/cc.sh).
+    executor.set_command_string_mode(true);
     let status = if script_uses_history(command) || script_uses_aliases(command) {
         run_script_with_history(executor, command, None)
     } else {
         run_source_with_line_offset(executor, command, interactive, line_offset, None, None)
     };
+    executor.set_command_string_mode(false);
     finish_shell(executor, status, interactive)
 }
 
@@ -1263,6 +1268,9 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
             }
         }
 
+        // eval.c:178: one current_command_number increment per command
+        // list read happens in the execute_ast walk; no driver increment
+        // here (`\#` in ${var@P} reads it).
         let status = run_source_with_line_offset(
             executor,
             &pending,
@@ -1285,6 +1293,8 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
     }
 
     if !pending.trim().is_empty() {
+        // Final list gathered at EOF (e.g. no trailing newline) — still
+        // one reader_loop iteration (eval.c:178); the walk increments it.
         let status = run_source_with_line_offset(
             executor,
             &pending,
