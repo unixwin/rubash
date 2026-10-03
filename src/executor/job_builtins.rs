@@ -1194,7 +1194,7 @@ impl Executor {
             crate::builtins::disown::DisownAction::Jobs(jobs) => {
                 let mut status = 0;
                 for job in jobs {
-                    if let Some(pid) = self.resolve_background_job(&job) {
+                    if let Some(pid) = self.resolve_disown_job(&job) {
                         self.background_children.remove(&pid);
                         self.close_coproc_endpoints(pid);
                         self.fd_table.close(pid);
@@ -1263,6 +1263,27 @@ impl Executor {
                 .completed_statuses
                 .contains_key(&pid))
         .then_some(pid)
+    }
+
+    /// GNU jobs.def:283-289 disown_builtin: a numeric operand resolves by
+    /// PID through get_job_by_pid -> jobs.c:1916 -> jobs.c:1878 find_job,
+    /// which scans the LIVE jobs table only — bgpids (saved exit statuses)
+    /// are NOT consulted. A dead job that a `jobs` listing already removed
+    /// (POSIX cleanup, jobs.def:138-139 notify_and_cleanup) or a `wait`
+    /// consumed (jobs.c:3438 wait_for_job J_NOTIFIED + delete) is therefore
+    /// "no such job" for disown (rc 1). Contrast wait_for_single_pid
+    /// (jobs.c:2741), which DOES fall back to bgp_search — the wait path
+    /// keeps resolve_background_job's completed_statuses arm.
+    fn resolve_disown_job(&self, job: &str) -> Option<u32> {
+        if job.starts_with('%') {
+            return self.resolve_background_job(job);
+        }
+        let pid = job.parse::<u32>().ok()?;
+        self.shell_state
+            .job_table
+            .pid_to_job
+            .contains_key(&pid)
+            .then_some(pid)
     }
 
     fn background_job_number(&self, pid: u32) -> usize {
