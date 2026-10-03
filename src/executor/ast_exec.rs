@@ -78,13 +78,22 @@ impl Executor {
         let _guard = EXECUTION_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let original_dir = env::current_dir().ok();
         EXECUTION_LOCK_DEPTH.with(|depth| depth.set(1));
         let result = self.execute_ast_inner(&ast.commands);
         EXECUTION_LOCK_DEPTH.with(|depth| depth.set(0));
-        if let Some(original_dir) = original_dir {
-            let _ = env::set_current_dir(original_dir);
-        }
+        // rubash#423: GNU has no per-run cwd undo. `cd` runs chdir(2) in the
+        // shell process itself (builtins/cd.def cd_builtin -> chdir), and the
+        // process cwd IS the session state every later command inherits —
+        // the reader never restores it. The restore this port paid per
+        // execute_ast call (ced287c4 "isolate executor cwd during runs")
+        // modeled an embedding-host boundary, but every real driver —
+        // rubash.exe's own script/interactive readers AND the winuxsh $0
+        // shim — drives whole shell sessions through this entry, so the
+        // undo fired per interactive LINE and every child spawned by the
+        // NEXT line (external ls, sed, ...) saw the stale startup cwd while
+        // the shell's own PWD already moved (`cd dir && ls` on one line was
+        // correct, two lines were not). Removing it makes the process cwd
+        // live, like GNU.
         super::exec_profile::print_summary();
         result
     }
