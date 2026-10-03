@@ -431,6 +431,20 @@ impl Executor {
                             ),
                         }
                         if self.shell_state.function_depth == 0 {
+                            // rubash#401, GNU subst.c:13033: the nested
+                            // bind failure at top level is
+                            // exp_jump_to_top_level(DISCARD) — it fires during
+                            // word expansion, before the command's own
+                            // redirections exist (`declare -A a=() 2> ERR`
+                            // never creates ERR; the message reaches the
+                            // shell's stderr), discards the rest of the
+                            // command list sharing the failing source line,
+                            // and leaves $? = 1 for the next line (GNU probe
+                            // wt38 p401 run401/k014c: same-line echo skipped,
+                            // next-line $? is 1). The plain Err(()) only
+                            // failed the command, so rubash kept executing
+                            // the same line's successors.
+                            self.raise_evalerror_abort();
                             return Err(());
                         }
                     } else if nested_readonly {
@@ -439,6 +453,11 @@ impl Executor {
                             self.diagnostic_prefix()
                         );
                         if self.shell_state.function_depth == 0 {
+                            // Same subst.c:13033 DISCARD for the nested
+                            // readonly bind (GNU probe run401/nro.sh:
+                            // `declare ro=() 2> E1; echo same-line` skips the
+                            // echo, next line sees $? 1, E1 never created).
+                            self.raise_evalerror_abort();
                             return Err(());
                         }
                     }

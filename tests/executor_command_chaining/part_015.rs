@@ -205,7 +205,16 @@ fn test_declare_invalid_array_names_do_not_panic() {
     let _ = fs::remove_file(sink_path);
 }
 
-#[ignore = "rubash#401: see issue (probe wt37-374 K015)"]
+// rubash#401 (probe wt37-374 K015 / wt38 run401 p401m M2): the
+// assignment-form conversion `declare -A arr=()` fails in the NESTED bind
+// during word expansion (GNU subst.c:12949 expand_declaration_argument ->
+// subst.c:13033 exp_jump_to_top_level DISCARD): the diagnostic goes to the
+// shell's stderr — the command's own `2>` redirect is never set up — and
+// the rest of the failing source line is discarded with $? 1. The script
+// continues on the NEXT line, so `echo status:$?` records 1 and the
+// variable keeps its indexed shape (`declare -a arr=()`). GNU 5.3.0 probed
+// byte-identical (wt38 run401 matrix m2, plus the one-line abort shape m3
+// where the same-line echo is skipped and next-line $? is 1).
 #[test]
 fn test_declare_rejects_indexed_to_assoc_conversion() {
     let output_path = target_test_path("rubash-declare-indexed-to-assoc-output.txt");
@@ -215,8 +224,8 @@ fn test_declare_rejects_indexed_to_assoc_conversion() {
     let _ = fs::remove_file(&output_path);
     let _ = fs::remove_file(&error_path);
     let input = format!(
-        "declare -a arr=(); declare -A arr=() 2> {shell_error_path}; \
-         echo status:$? > {shell_output_path}; declare -p arr >> {shell_output_path}"
+        "declare -a arr=()\ndeclare -A arr=() 2> {shell_error_path}\n\
+         echo status:$? > {shell_output_path}\ndeclare -p arr >> {shell_output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -230,14 +239,18 @@ fn test_declare_rejects_indexed_to_assoc_conversion() {
         fs::read_to_string(&output_path).unwrap(),
         "status:1\ndeclare -a arr=()\n"
     );
-    assert!(fs::read_to_string(&error_path)
-        .unwrap()
-        .contains("declare: arr: cannot convert indexed to associative array"));
+    // The failure precedes the command's redirection setup: the error file
+    // is never created (GNU m2.err absent; the message is on shell stderr).
+    assert!(!std::path::Path::new(&error_path).exists());
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(error_path);
 }
 
-#[ignore = "rubash#401: see issue (probe wt37-374 K014)"]
+// rubash#401 (probe wt37-374 K014 / wt38 run401 p401m M1): mirror of the
+// indexed->assoc case — `declare -a assoc=()` on an existing associative
+// variable fails in the nested bind before redirections exist, discards
+// the rest of the failing line with $? 1, and the next line records
+// status:1 with the variable keeping its assoc shape (GNU m1).
 #[test]
 fn test_declare_rejects_assoc_to_indexed_conversion() {
     let output_path = target_test_path("rubash-declare-assoc-to-indexed-output.txt");
@@ -247,8 +260,8 @@ fn test_declare_rejects_assoc_to_indexed_conversion() {
     let _ = fs::remove_file(&output_path);
     let _ = fs::remove_file(&error_path);
     let input = format!(
-        "declare -A assoc; declare -a assoc=() 2> {shell_error_path}; \
-         echo status:$? > {shell_output_path}; declare -p assoc >> {shell_output_path}"
+        "declare -A assoc\ndeclare -a assoc=() 2> {shell_error_path}\n\
+         echo status:$? > {shell_output_path}\ndeclare -p assoc >> {shell_output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -262,9 +275,9 @@ fn test_declare_rejects_assoc_to_indexed_conversion() {
         fs::read_to_string(&output_path).unwrap(),
         "status:1\ndeclare -A assoc\n"
     );
-    assert!(fs::read_to_string(&error_path)
-        .unwrap()
-        .contains("declare: assoc: cannot convert associative to indexed array"));
+    // Pre-redirection failure: the error file is never created (GNU m1.err
+    // absent; the message is on the shell's stderr).
+    assert!(!std::path::Path::new(&error_path).exists());
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(error_path);
 }
