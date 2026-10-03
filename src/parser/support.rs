@@ -10,7 +10,10 @@ pub(super) fn note_command_line(cmd: &mut CommandNode, token: &Token) {
 pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     let word_index = cmd.words.len();
     // Word intake runs ONLY the scans whose findings a consumer still reads
-    // (command/process substitutions, extglob, pathname, quotes). GNU
+    // (process substitutions, extglob, pathname). Command substitutions
+    // re-derive at their consumption points (pretty-print rendering, the
+    // executor's own comsub execution parse) and word quotes at the
+    // conditional `=~` quoting check. GNU
     // parse.y:5305 read_token_word assembles a word in one pass and
     // make_cmd.c make_simple_command stores the WORD_DESC once; GNU runs NO
     // per-word expansion analyses at parse time at all (subst.c analyzes at
@@ -22,17 +25,10 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     // `new`'s tagging, so both stores stay byte-identical.
     let scans = WordScans::run(&token.value, &token.raw);
     let WordScans {
-        command_substitutions,
         extglob_patterns,
         pathname_patterns,
-        word_quotes,
         process_substitutions,
     } = &scans;
-    cmd.command_substitutions
-        .extend(command_substitutions.iter().cloned().map(|mut s| {
-            s.word_index = Some(word_index);
-            s
-        }));
     cmd.extglob_patterns
         .extend(extglob_patterns.iter().cloned().map(|mut p| {
             p.word_index = Some(word_index);
@@ -42,11 +38,6 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
         .extend(pathname_patterns.iter().cloned().map(|mut p| {
             p.word_index = Some(word_index);
             p
-        }));
-    cmd.word_quotes
-        .extend(word_quotes.iter().cloned().map(|mut q| {
-            q.word_index = Some(word_index);
-            q
         }));
     let prior_words_are_array_assignments = cmd.words.is_empty()
         || (!cmd.array_element_assignments.is_empty()
@@ -66,11 +57,9 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
         word_index,
         token.value.clone(),
         token.raw.clone(),
-        scans.command_substitutions,
         scans.process_substitutions,
         scans.extglob_patterns,
         scans.pathname_patterns,
-        scans.word_quotes,
     ));
     cmd.words.push(token.value.clone());
     cmd.word_kinds.push(token.kind.clone());
@@ -79,24 +68,21 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
 /// The per-word expansion analyses `push_command_word` needs, each run
 /// exactly once (see there for the GNU anchor). Only the kinds with live
 /// consumers are scanned (wt44/parse4): parameter / arithmetic / brace /
-/// tilde expansions fed store vectors with zero readers — the executor
-/// re-derives them from the word text at expansion time, exactly as GNU
-/// subst.c does.
+/// tilde expansions, command substitutions and word quotes fed store
+/// vectors with zero (or re-derivable) readers — the executor re-derives
+/// them from the word text at expansion time, exactly as GNU subst.c
+/// does.
 pub(super) struct WordScans {
-    pub command_substitutions: Vec<CommandSubstitutionNode>,
     pub extglob_patterns: Vec<ExtglobPattern>,
     pub pathname_patterns: Vec<PathnamePattern>,
-    pub word_quotes: Vec<WordQuote>,
     pub process_substitutions: Vec<ProcessSubstitution>,
 }
 
 impl WordScans {
     pub fn run(value: &str, raw: &str) -> Self {
         Self {
-            command_substitutions: command_substitutions_in_word(value),
             extglob_patterns: extglob_patterns_in_word_with_raw(value, raw),
             pathname_patterns: pathname_patterns_in_word(value, raw),
-            word_quotes: word_quotes_in_raw(raw),
             process_substitutions: process_substitutions_in_word_with_raw(value, raw),
         }
     }

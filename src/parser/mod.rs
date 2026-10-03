@@ -29,12 +29,20 @@ mod support;
 mod token_actions;
 mod word_quote;
 
-/// Executor-facing wrapper for the parse-time command-substitution scan:
-/// the print_comsub text serializer (rubash#274) re-derives the `$()` spans
-/// of a word the same way `record_command_substitutions_for_word` does at
-/// parse time, so both see identical span boundaries.
+/// Executor-facing wrapper for the command-substitution scan: the
+/// pretty-print renderer and the print_comsub text serializer (rubash#274)
+/// re-derive a word's `$()` spans on demand (wt44/parse4: the parse-time
+/// word-intake scan is gone; GNU parse.y:5305 read_token_word stores the
+/// word once and subst.c analyzes at use).
 pub fn command_substitutions_in_word_public(word: &str) -> Vec<CommandSubstitutionNode> {
     command_substitution::command_substitutions_in_word(word)
+}
+
+/// Executor-facing wrapper for the word-quote scan: the conditional `=~`
+/// operand-quoting check (GNU parse.y cond.c / subst.c quoted-regex
+/// semantics) re-derives a raw word's quote spans on demand (wt44/parse4).
+pub fn word_quotes_in_raw_public(raw: &str) -> Vec<WordQuote> {
+    word_quote::word_quotes_in_raw(raw)
 }
 
 #[cfg(test)]
@@ -51,7 +59,6 @@ use array_element_assignment::*;
 use assignment::*;
 use brace_command::*;
 use case_command::*;
-use command_substitution::*;
 use conditional_command::*;
 use coproc_command::*;
 use extglob_pattern::*;

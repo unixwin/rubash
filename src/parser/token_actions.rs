@@ -388,14 +388,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     let assignment_name = var_name.strip_suffix('+').unwrap_or(&var_name);
                     // wt44/parse4: only the kinds with live consumers are
                     // recorded for assignment RHS values (see
-                    // WordMetadata::new); parameter / arithmetic / brace /
-                    // tilde records had zero readers.
-                    record_command_substitutions_for_assignment(
-                        &mut state.current_cmd,
-                        assignment_name,
-                        &var_value,
-                        None,
-                    );
+                    // WordMetadata::new); command-substitution and
+                    // word-quote records had zero readers (the executor
+                    // parses comsub bodies itself at execution).
                     record_extglob_patterns_for_assignment(
                         &mut state.current_cmd,
                         assignment_name,
@@ -403,14 +398,6 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         &raw_assignment_value,
                         None,
                     );
-                    if let Some((_, raw_value)) = token.raw.split_once('=') {
-                        record_word_quotes_for_assignment(
-                            &mut state.current_cmd,
-                            assignment_name,
-                            raw_value,
-                            None,
-                        );
-                    }
                     state.current_cmd.insert_assignment_with_raw(
                         var_name,
                         var_value,
@@ -558,12 +545,6 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     if let Some((assignment_name, value)) = word.split_once('=') {
                         // wt44/parse4: see the sibling assignment arm — only
                         // live-consumer kinds are recorded.
-                        record_command_substitutions_for_assignment(
-                            &mut state.current_cmd,
-                            assignment_name.strip_suffix('+').unwrap_or(assignment_name),
-                            value,
-                            Some(word_index),
-                        );
                         let raw_assignment_value = raw_word
                             .split_once('=')
                             .map(|(_, raw)| raw)
@@ -575,16 +556,6 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             raw_assignment_value,
                             Some(word_index),
                         );
-                        if let Some((raw_assignment_name, raw_value)) = raw_word.split_once('=') {
-                            record_word_quotes_for_assignment(
-                                &mut state.current_cmd,
-                                raw_assignment_name
-                                    .strip_suffix('+')
-                                    .unwrap_or(raw_assignment_name),
-                                raw_value,
-                                Some(word_index),
-                            );
-                        }
                     }
                     state
                         .current_cmd

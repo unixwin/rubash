@@ -501,8 +501,15 @@ impl Printer {
             .map(|metadata| metadata.raw.clone())
             .unwrap_or_else(|| word.to_string());
         let mut rendered = raw;
-        if let Some(metadata) = metadata {
-            for node in &metadata.command_substitutions {
+        // wt44/parse4: GNU normalizes `$( ... )` spans at parse time
+        // (parse.y:4451 parse_comsub + print_comsub); the parse-time word
+        // scan that captured the substitution trees is gone, so the
+        // renderer re-derives them from the word text on demand — the same
+        // scan the intake used to run (identical span boundaries,
+        // command_substitutions_in_word_public is also print_comsub's
+        // oracle).
+        if metadata.is_some() {
+            for node in &crate::parser::command_substitutions_in_word_public(word) {
                 if node.backtick || node.current_shell {
                     continue;
                 }

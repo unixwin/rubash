@@ -62,7 +62,17 @@ fn arithmetic_command_is_bare(cmd: &CommandNode) -> bool {
         && cmd.here_string.is_none()
         && cmd.here_string_carrier.is_none()
         && cmd.process_substitutions.is_empty()
-        && cmd.command_substitutions.is_empty()
+        // wt44/parse4: the parse-time comsub records are gone (the executor
+        // parses comsub bodies itself at execution); every command
+        // substitution requires a `$` or backtick byte in some word or
+        // assignment value, so their absence proves the empty answer
+        // (rubash#117 whitelist admission — a false negative only costs
+        // speed).
+        && cmd
+            .words
+            .iter()
+            .chain(cmd.assignments.iter().map(|(_, value)| value))
+            .all(|text| !text.contains('$') && !text.contains('`'))
         && !cmd.background
         && cmd.pipe.is_none()
         && cmd.pipeline_command.is_none()

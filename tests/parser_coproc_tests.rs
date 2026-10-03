@@ -127,9 +127,9 @@ fn test_coproc_simple_command_records_word_metadata() {
 
     assert_eq!(coproc.word_metadata[2].raw, "\"*.rs\"");
     assert!(coproc.word_metadata[2].pathname_patterns.is_empty());
-    assert_eq!(coproc.word_metadata[2].word_quotes.len(), 1);
+    // wt44/parse4: word-quote records re-derive at the consumer.
     assert_eq!(
-        coproc.word_metadata[2].word_quotes[0].kind,
+        rubash::parser::word_quotes_in_raw_public(&coproc.word_metadata[2].raw)[0].kind,
         QuoteKind::Double
     );
 }

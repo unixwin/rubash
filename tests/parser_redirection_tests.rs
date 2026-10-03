@@ -131,9 +131,11 @@ fn test_quoted_redirect_target_records_raw_metadata() {
     assert_eq!(metadata.value, "\u{11}*.rs");
     assert_eq!(metadata.raw, "\"*.rs\"");
     assert!(metadata.pathname_patterns.is_empty());
-    assert_eq!(metadata.word_quotes.len(), 1);
-    assert_eq!(metadata.word_quotes[0].text, "\"*.rs\"");
-    assert_eq!(metadata.word_quotes[0].kind, QuoteKind::Double);
+    // wt44/parse4: word-quote records re-derive at the consumer.
+    let quotes = rubash::parser::word_quotes_in_raw_public(&metadata.raw);
+    assert_eq!(quotes.len(), 1);
+    assert_eq!(quotes[0].text, "\"*.rs\"");
+    assert_eq!(quotes[0].kind, QuoteKind::Double);
 }
 
 #[test]
@@ -491,8 +493,10 @@ fn test_process_substitution_records_nested_body_ast() {
     assert_eq!(process[0].commands.len(), 2);
     assert_eq!(process[0].commands[0].words, ["echo", "$(date)"]);
     assert_eq!(process[0].commands[1].words, ["printf", "done"]);
+    // wt44/parse4: the inner body's comsub store is gone; the public scan
+    // is the same oracle pretty-print uses.
     assert_eq!(
-        process[0].commands[0].command_substitutions[0].source,
+        rubash::parser::command_substitutions_in_word_public("$(date)")[0].source,
         "date"
     );
 }
@@ -948,9 +952,9 @@ fn test_heredoc_redirect_records_quoted_strip_tabs_metadata() {
     assert_eq!(redirect.delimiter_metadata.word_index, 0);
     assert_eq!(redirect.delimiter_metadata.value, "EOF");
     assert_eq!(redirect.delimiter_metadata.raw, "'EOF'");
-    assert_eq!(redirect.delimiter_metadata.word_quotes.len(), 1);
+    // wt44/parse4: word-quote records re-derive at the consumer.
     assert_eq!(
-        redirect.delimiter_metadata.word_quotes[0].kind,
+        rubash::parser::word_quotes_in_raw_public(&redirect.delimiter_metadata.raw)[0].kind,
         QuoteKind::Single
     );
     assert!(redirect.strip_tabs);

@@ -339,6 +339,16 @@ impl Executor {
         self.quoted_conditional_pattern_status(args, metadata)
     }
 
+    /// Whether a conditional RHS operand word carries quote spans (GNU
+    /// parse.y W_QUOTED on the `=~`/`==` RHS decides regex-vs-literal and
+    /// pattern-vs-literal semantics). wt44/parse4: the parse-time word-quote
+    /// scan is gone (GNU runs no per-word analyses at parse; subst.c/cond
+    /// consult quoting at use), so the check re-derives the spans from the
+    /// raw spelling on demand — the same pure function of the same input.
+    fn conditional_rhs_word_is_quoted(raw: &str) -> bool {
+        !crate::parser::word_quotes_in_raw_public(raw).is_empty()
+    }
+
     fn quoted_conditional_pattern_status(
         &mut self,
         args: &[String],
@@ -348,7 +358,9 @@ impl Executor {
             [left, op, right, end]
                 if end == "]]"
                     && matches!(op.as_str(), "=" | "==" | "!=")
-                    && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty()) =>
+                    && metadata
+                        .get(2)
+                        .is_some_and(|m| Self::conditional_rhs_word_is_quoted(&m.raw)) =>
             {
                 let left = self.expand_conditional_word(left);
                 let right = self.expand_conditional_word(right);
@@ -363,7 +375,9 @@ impl Executor {
             }
             [left, op, right]
                 if matches!(op.as_str(), "=" | "==" | "!=")
-                    && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty()) =>
+                    && metadata
+                        .get(2)
+                        .is_some_and(|m| Self::conditional_rhs_word_is_quoted(&m.raw)) =>
             {
                 let left = self.expand_conditional_word(left);
                 let right = self.expand_conditional_word(right);
@@ -379,12 +393,17 @@ impl Executor {
             [left, op, right, end]
                 if end == "]]"
                     && op == "=~"
-                    && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty()) =>
+                    && metadata
+                        .get(2)
+                        .is_some_and(|m| Self::conditional_rhs_word_is_quoted(&m.raw)) =>
             {
                 Some(self.conditional_quoted_regex_match_status(left, right, &metadata[2]))
             }
             [left, op, right]
-                if op == "=~" && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty()) =>
+                if op == "=~"
+                    && metadata
+                        .get(2)
+                        .is_some_and(|m| Self::conditional_rhs_word_is_quoted(&m.raw)) =>
             {
                 Some(self.conditional_quoted_regex_match_status(left, right, &metadata[2]))
             }

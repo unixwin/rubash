@@ -1,18 +1,4 @@
-use super::{CommandNode, QuoteKind, WordQuote};
-
-pub(super) fn record_word_quotes_for_assignment(
-    command: &mut CommandNode,
-    assignment_name: &str,
-    raw_value: &str,
-    word_index: Option<usize>,
-) {
-    let quotes = word_quotes_in_raw(raw_value).into_iter().map(|mut quote| {
-        quote.assignment_name = Some(assignment_name.to_string());
-        quote.word_index = word_index;
-        quote
-    });
-    command.word_quotes.extend(quotes);
-}
+use super::{QuoteKind, WordQuote};
 
 pub(super) fn word_quotes_in_raw(raw: &str) -> Vec<WordQuote> {
     // Provably-empty admission (rubash#117 whitelist discipline): every

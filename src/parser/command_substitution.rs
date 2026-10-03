@@ -1,20 +1,4 @@
-use super::{parse, CommandNode, CommandSubstitutionNode};
-
-pub(super) fn record_command_substitutions_for_assignment(
-    command: &mut CommandNode,
-    assignment_name: &str,
-    value: &str,
-    word_index: Option<usize>,
-) {
-    let substitutions = command_substitutions_in_word(value)
-        .into_iter()
-        .map(|mut substitution| {
-            substitution.assignment_name = Some(assignment_name.to_string());
-            substitution.word_index = word_index;
-            substitution
-        });
-    command.command_substitutions.extend(substitutions);
-}
+use super::{parse, CommandSubstitutionNode};
 
 pub(super) fn command_substitutions_in_word(word: &str) -> Vec<CommandSubstitutionNode> {
     // Provably-empty admission (rubash#117 whitelist discipline): every

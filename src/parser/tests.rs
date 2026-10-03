@@ -129,7 +129,10 @@ fn test_parse_piped_heredoc_body_belongs_to_left_command() {
 fn test_command_substitution_ignores_parentheses_in_heredoc_body() {
     let tokens = tokenize("echo $(\ncat <<eof\nhere doc with )\neof\n)");
     let ast = parse(&tokens);
-    let substitution = &ast.commands[0].command_substitutions[0];
+    // wt44/parse4: the parse-time comsub store is gone; the public scan
+    // is the same oracle pretty-print uses.
+    let substitution =
+        &crate::parser::command_substitutions_in_word_public(&ast.commands[0].words[1])[0];
 
     assert_eq!(substitution.source, "\ncat <<eof\nhere doc with )\neof\n");
     assert_eq!(

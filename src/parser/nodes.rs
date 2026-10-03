@@ -748,13 +748,6 @@ impl WordMetadata {
     }
 
     pub fn new(word_index: usize, value: String, raw: String) -> Self {
-        let command_substitutions = super::command_substitutions_in_word(&value)
-            .into_iter()
-            .map(|mut substitution| {
-                substitution.word_index = Some(word_index);
-                substitution
-            })
-            .collect();
         let process_substitutions = super::process_substitutions_in_word_with_raw(&value, &raw)
             .into_iter()
             .map(|mut substitution| {
@@ -766,20 +759,23 @@ impl WordMetadata {
         Self {
             word_index,
             // wt44/parse4: parameter / arithmetic / brace / tilde expansion
-            // records stay empty — GNU runs no per-word expansion analyses at
-            // parse time (parse.y:5305 read_token_word builds the word once;
-            // subst.c analyzes at execution) and this port's executor
-            // re-derives all four from the word text at expansion time; the
-            // parse-time scans fed these vectors with zero readers.
+            // records, command-substitution records and word-quote records
+            // stay empty — GNU runs no per-word expansion analyses at parse
+            // time (parse.y:5305 read_token_word builds the word once;
+            // subst.c analyzes at execution); this port's executor
+            // re-derives all of them from the word text at their
+            // consumption points (comsub execution parses the body itself,
+            // pretty-print rendering re-scans the word, the conditional
+            // `=~` check re-scans the raw).
             brace_expansions: Vec::new(),
-            command_substitutions,
+            command_substitutions: Vec::new(),
             process_substitutions,
             parameter_expansions: Vec::new(),
             arithmetic_expansions: Vec::new(),
             extglob_patterns: super::extglob_patterns_in_word_with_raw(&value, &raw),
             tilde_expansions: Vec::new(),
             pathname_patterns: super::pathname_patterns_in_word(&value, &raw),
-            word_quotes: super::word_quotes_in_raw(&raw),
+            word_quotes: Vec::new(),
             lex_locale: if crate::lexer::raw_has_ansi_u_escape(&raw) {
                 Some(crate::locale::locale_name())
             } else {
@@ -803,19 +799,10 @@ impl WordMetadata {
         word_index: usize,
         value: String,
         raw: String,
-        command_substitutions: Vec<CommandSubstitutionNode>,
         process_substitutions: Vec<ProcessSubstitution>,
         extglob_patterns: Vec<ExtglobPattern>,
         pathname_patterns: Vec<PathnamePattern>,
-        word_quotes: Vec<WordQuote>,
     ) -> Self {
-        let command_substitutions = command_substitutions
-            .into_iter()
-            .map(|mut substitution| {
-                substitution.word_index = Some(word_index);
-                substitution
-            })
-            .collect();
         let process_substitutions = process_substitutions
             .into_iter()
             .map(|mut substitution| {
@@ -825,16 +812,16 @@ impl WordMetadata {
             .collect();
         Self {
             word_index,
-            // See `new` for why these four kinds stay empty (wt44/parse4).
+            // See `new` for why the non-live kinds stay empty (wt44/parse4).
             brace_expansions: Vec::new(),
-            command_substitutions,
+            command_substitutions: Vec::new(),
             process_substitutions,
             parameter_expansions: Vec::new(),
             arithmetic_expansions: Vec::new(),
             extglob_patterns,
             tilde_expansions: Vec::new(),
             pathname_patterns,
-            word_quotes,
+            word_quotes: Vec::new(),
             lex_locale: if crate::lexer::raw_has_ansi_u_escape(&raw) {
                 Some(crate::locale::locale_name())
             } else {

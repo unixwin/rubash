@@ -1309,11 +1309,7 @@ mod command_body_kind_tests {
             ["[ab]", "?"]
         );
         assert!(for_command.word_metadata[3].pathname_patterns.is_empty());
-        assert_eq!(for_command.word_metadata[3].word_quotes[0].text, "\"*.rs\"");
-        assert_eq!(
-            for_command.word_metadata[3].word_quotes[0].kind,
-            QuoteKind::Double
-        );
+        // wt44/parse4: word-quote records re-derive at the consumer.
 
         let select_command = select_ast.commands[1].select_command.as_ref().unwrap();
         assert_eq!(select_command.words, ["$((i+1))", "@(yes|no)", "~+/bin"]);
@@ -1354,20 +1350,26 @@ mod command_body_kind_tests {
 
         assert_eq!(for_command.words, ["$(printf a)", "`printf b`"]);
         assert_eq!(for_command.word_metadata.len(), 2);
-        assert_eq!(for_command.word_metadata[0].command_substitutions.len(), 1);
-        let dollar = &for_command.word_metadata[0].command_substitutions[0];
+        assert_eq!(
+            rubash::parser::command_substitutions_in_word_public(&for_command.words[0]).len(),
+            1
+        );
+        let dollar =
+            &rubash::parser::command_substitutions_in_word_public(&for_command.words[0])[0];
         assert_eq!(dollar.text, "$(printf a)");
         assert_eq!(dollar.source, "printf a");
         assert!(!dollar.backtick);
-        assert_eq!(dollar.word_index, Some(0));
         assert_eq!(dollar.commands[0].words, ["printf", "a"]);
 
-        assert_eq!(for_command.word_metadata[1].command_substitutions.len(), 1);
-        let backtick = &for_command.word_metadata[1].command_substitutions[0];
+        assert_eq!(
+            rubash::parser::command_substitutions_in_word_public(&for_command.words[1]).len(),
+            1
+        );
+        let backtick =
+            &rubash::parser::command_substitutions_in_word_public(&for_command.words[1])[0];
         assert_eq!(backtick.text, "`printf b`");
         assert_eq!(backtick.source, "printf b");
         assert!(backtick.backtick);
-        assert_eq!(backtick.word_index, Some(1));
         assert_eq!(backtick.commands[0].words, ["printf", "b"]);
     }
 
@@ -2590,10 +2592,10 @@ mod conditional_tests {
         assert_eq!(conditional.arg_metadata[2].value, "*.rs");
         assert_eq!(conditional.arg_metadata[2].raw, "\"*.rs\"");
         assert!(conditional.arg_metadata[2].pathname_patterns.is_empty());
-        assert_eq!(conditional.arg_metadata[2].word_quotes.len(), 1);
+        // wt44/parse4: word-quote records re-derive at the =~ consumer.
         assert_eq!(
-            conditional.arg_metadata[2].word_quotes[0].kind,
-            QuoteKind::Double
+            rubash::parser::word_quotes_in_raw_public(&conditional.arg_metadata[2].raw).len(),
+            1
         );
 
         assert_eq!(conditional.arg_metadata[7].value, "]]");
@@ -2806,13 +2808,13 @@ mod case_tests {
         assert_eq!(case_command.word_metadata.value, "*.rs");
         assert_eq!(case_command.word_metadata.raw, "\"*.rs\"");
         assert!(case_command.word_metadata.pathname_patterns.is_empty());
-        assert_eq!(case_command.word_metadata.word_quotes.len(), 1);
-        assert_eq!(case_command.word_metadata.word_quotes[0].text, "\"*.rs\"");
-        assert_eq!(case_command.word_metadata.word_quotes[0].body, "*.rs");
-        assert_eq!(
-            case_command.word_metadata.word_quotes[0].kind,
-            QuoteKind::Double
-        );
+        // wt44/parse4: word-quote records re-derive at the consumer; the
+        // public scan is the same oracle.
+        let quotes = rubash::parser::word_quotes_in_raw_public(&case_command.word_metadata.raw);
+        assert_eq!(quotes.len(), 1);
+        assert_eq!(quotes[0].text, "\"*.rs\"");
+        assert_eq!(quotes[0].body, "*.rs");
+        assert_eq!(quotes[0].kind, QuoteKind::Double);
     }
 
     #[test]
@@ -3654,6 +3656,37 @@ mod assignment_tests {
 mod command_substitution_tests {
     use super::*;
 
+    /// wt44/parse4: the parse-time command-substitution store is gone (the
+    /// executor parses comsub bodies at execution; pretty-print and
+    /// print_comsub re-derive via the same scan). Derive the records the
+    /// tests assert against using the public scan, so the span-extraction
+    /// coverage (the #380-family case/heredoc/nested shapes) keeps testing
+    /// the live code path.
+    fn comsubs_for_words(
+        cmd: &rubash::parser::CommandNode,
+    ) -> Vec<rubash::parser::CommandSubstitutionNode> {
+        cmd.words
+            .iter()
+            .flat_map(|word| rubash::parser::command_substitutions_in_word_public(word))
+            .collect()
+    }
+
+    fn comsubs_for_assignment_values(
+        cmd: &rubash::parser::CommandNode,
+    ) -> Vec<rubash::parser::CommandSubstitutionNode> {
+        cmd.assignments
+            .iter()
+            .flat_map(|(name, value)| {
+                rubash::parser::command_substitutions_in_word_public(value)
+                    .into_iter()
+                    .map(|mut substitution| {
+                        substitution.assignment_name = Some(name.clone());
+                        substitution
+                    })
+            })
+            .collect()
+    }
+
     #[test]
     fn test_command_substitution_records_structured_ast_for_words() {
         let input = "echo $(printf hi) pre$(date)post `whoami`";
@@ -3665,7 +3698,7 @@ mod command_substitution_tests {
             ["echo", "$(printf hi)", "pre$(date)post", "`whoami`"]
         );
 
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(&ast.commands[0]);
         assert_eq!(substitutions.len(), 3);
         assert_eq!(substitutions[0].text, "$(printf hi)");
         assert_eq!(substitutions[0].open_delimiter, "$(");
@@ -3681,7 +3714,6 @@ mod command_substitution_tests {
         assert_eq!(substitutions[0].commands.len(), 1);
         assert_eq!(substitutions[0].commands[0].words, ["printf", "hi"]);
         assert!(!substitutions[0].backtick);
-        assert_eq!(substitutions[0].word_index, Some(1));
         assert_eq!(substitutions[0].assignment_name, None);
         assert_eq!(substitutions[1].text, "$(date)");
         assert_eq!(substitutions[1].open_delimiter, "$(");
@@ -3689,7 +3721,6 @@ mod command_substitution_tests {
         assert_eq!(substitutions[1].close_delimiter, ")");
         assert_eq!(substitutions[1].source, "date");
         assert_eq!(substitutions[1].commands[0].words, ["date"]);
-        assert_eq!(substitutions[1].word_index, Some(2));
         assert_eq!(substitutions[2].text, "`whoami`");
         assert_eq!(substitutions[2].open_delimiter, "`");
         assert_eq!(substitutions[2].open_delimiter_metadata.value, "`");
@@ -3701,7 +3732,6 @@ mod command_substitution_tests {
         assert_eq!(substitutions[2].source, "whoami");
         assert_eq!(substitutions[2].commands[0].words, ["whoami"]);
         assert!(substitutions[2].backtick);
-        assert_eq!(substitutions[2].word_index, Some(3));
     }
 
     #[test]
@@ -3715,7 +3745,7 @@ mod command_substitution_tests {
             "$(printf hi)"
         );
 
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_assignment_values(&ast.commands[0]);
         assert_eq!(substitutions.len(), 1);
         assert_eq!(substitutions[0].text, "$(printf hi)");
         assert_eq!(substitutions[0].open_delimiter, "$(");
@@ -3732,15 +3762,17 @@ mod command_substitution_tests {
         let input = "echo $(echo $(date); printf done)";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(&ast.commands[0]);
 
         assert_eq!(substitutions.len(), 1);
         assert_eq!(substitutions[0].source, "echo $(date); printf done");
         assert_eq!(substitutions[0].commands.len(), 2);
         assert_eq!(substitutions[0].commands[0].words, ["echo", "$(date)"]);
         assert_eq!(substitutions[0].commands[1].words, ["printf", "done"]);
+        // wt44/parse4: the inner body's comsub store is gone; the public
+        // scan is the same oracle pretty-print uses.
         assert_eq!(
-            substitutions[0].commands[0].command_substitutions[0].source,
+            rubash::parser::command_substitutions_in_word_public("$(date)")[0].source,
             "date"
         );
     }
@@ -3757,7 +3789,7 @@ mod command_substitution_tests {
         let input = "echo \"$(printf $'foo\\'\nbar')\"";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(&ast.commands[0]);
 
         assert_eq!(ast.commands[0].words, ["echo", "$(printf $'foo\\'\nbar')"]);
         assert_eq!(substitutions.len(), 1);
@@ -3774,7 +3806,7 @@ mod command_substitution_tests {
         let input = "echo before$()after";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(&ast.commands[0]);
 
         assert_eq!(substitutions.len(), 1);
         assert_eq!(substitutions[0].text, "$()");
@@ -3783,7 +3815,6 @@ mod command_substitution_tests {
         assert_eq!(substitutions[0].close_delimiter, ")");
         assert_eq!(substitutions[0].source, "");
         assert!(substitutions[0].commands.is_empty());
-        assert_eq!(substitutions[0].word_index, Some(1));
         assert_eq!(substitutions[0].assignment_name, None);
     }
 
@@ -3792,7 +3823,7 @@ mod command_substitution_tests {
         let input = "echo $(case beta in alpha) printf alpha ;; beta) printf beta ;; esac)";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(&ast.commands[0]);
 
         assert_eq!(substitutions.len(), 1);
         assert_eq!(
@@ -3808,7 +3839,7 @@ mod command_substitution_tests {
         let input = "echo $(case x in x) if ((1)); then printf ok; fi esac)";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(&ast.commands[0]);
 
         assert_eq!(substitutions.len(), 1);
         assert_eq!(
@@ -3826,7 +3857,7 @@ mod command_substitution_tests {
         let input = "echo $(case x in x) case y in y) printf a;; esac esac)";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(&ast.commands[0]);
 
         assert_eq!(substitutions.len(), 1);
         assert_eq!(
@@ -3844,7 +3875,7 @@ mod command_substitution_tests {
         let input = "echo $(case k in else|done|time|esac) for f in 1 2 3; do printf x; done esac)";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(&ast.commands[0]);
 
         assert_eq!(substitutions.len(), 1);
         assert_eq!(
@@ -3864,7 +3895,7 @@ mod command_substitution_tests {
         let input = "echo $(case a in a) printf ok ;; # comment\nesac)";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(&ast.commands[0]);
 
         assert_eq!(substitutions.len(), 1);
         assert_eq!(
@@ -3884,7 +3915,7 @@ mod command_substitution_tests {
         let input = "echo $(cat <<A; cat <<B\none\nA\ntwo\nB\n)";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(&ast.commands[0]);
 
         assert_eq!(substitutions.len(), 1);
         assert_eq!(substitutions[0].commands.len(), 2);
@@ -3903,7 +3934,7 @@ mod command_substitution_tests {
         let input = "echo $(case esac in\nesac) printf matched ;; esac)";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(&ast.commands[0]);
 
         // wt33 (#373): the comsub text scan closes at the FIRST `)` — the
         // bare `esac` before it ends an empty case (rubash#381), and the
@@ -3928,7 +3959,7 @@ mod command_substitution_tests {
         let input = "echo $(echo case; echo ok)";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(&ast.commands[0]);
 
         assert_eq!(substitutions.len(), 1);
         assert_eq!(substitutions[0].source, "echo case; echo ok");
@@ -3943,7 +3974,7 @@ mod command_substitution_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         let command = &ast.commands[0];
-        let substitutions = command.command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(command);
 
         assert_eq!(command.words, ["echo", "${ echo hi; }"]);
         assert_eq!(substitutions.len(), 1);
@@ -3967,7 +3998,7 @@ mod command_substitution_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         let command = &ast.commands[0];
-        let substitutions = command.command_substitutions.as_slice();
+        let substitutions = comsubs_for_words(command);
 
         assert_eq!(substitutions.len(), 1);
         assert_eq!(substitutions[0].text, "${| REPLY=hi; }");
@@ -3997,7 +4028,10 @@ mod command_substitution_tests {
         assert_eq!(ast.commands.len(), 1);
         assert_eq!(ast.commands[0].words, ["echo", "value=`printf hi`"]);
 
-        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        // wt44/parse4: the old record tagged the assignment name; the
+        // public scan finds the same span in the word's RHS.
+        let (assignment_name, rhs) = ast.commands[0].words[1].split_once('=').unwrap();
+        let substitutions = rubash::parser::command_substitutions_in_word_public(rhs);
         assert_eq!(substitutions.len(), 1);
         assert_eq!(substitutions[0].text, "`printf hi`");
         assert_eq!(substitutions[0].open_delimiter, "`");
@@ -4005,8 +4039,7 @@ mod command_substitution_tests {
         assert_eq!(substitutions[0].close_delimiter, "`");
         assert_eq!(substitutions[0].source, "printf hi");
         assert!(substitutions[0].backtick);
-        assert_eq!(substitutions[0].assignment_name.as_deref(), Some("value"));
-        assert_eq!(substitutions[0].word_index, Some(1));
+        assert_eq!(assignment_name, "value");
     }
 }
 
@@ -4273,6 +4306,23 @@ mod pathname_pattern_tests {
 mod word_quote_tests {
     use super::*;
 
+    /// wt44/parse4: the parse-time word-quote store is gone; derive via
+    /// the public scan (the =~ consumer's oracle) over the raw spellings.
+    fn quotes_for_raws(cmd: &rubash::parser::CommandNode) -> Vec<rubash::parser::WordQuote> {
+        // The old store recorded assignment RHS quotes before word quotes
+        // (the assignment branch ran first); keep that order.
+        cmd.assignment_raws
+            .iter()
+            .map(String::as_str)
+            .chain(
+                cmd.word_metadata
+                    .iter()
+                    .map(|metadata| metadata.raw.as_str()),
+            )
+            .flat_map(|raw| rubash::parser::word_quotes_in_raw_public(raw))
+            .collect()
+    }
+
     #[test]
     fn test_word_quotes_record_structured_ast_for_words() {
         let input = "printf 'one two' \"three $HOME\" $'line\\n' $\"locale\"";
@@ -4280,7 +4330,7 @@ mod word_quote_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
 
-        let quotes = ast.commands[0].word_quotes.as_slice();
+        let quotes = quotes_for_raws(&ast.commands[0]);
         assert_eq!(quotes.len(), 4);
         assert_eq!(quotes[0].text, "'one two'");
         assert_eq!(quotes[0].open_delimiter, "'");
@@ -4291,13 +4341,11 @@ mod word_quote_tests {
         assert_eq!(quotes[0].close_delimiter_metadata.value, "'");
         assert_eq!(quotes[0].close_delimiter_metadata.raw, "'");
         assert_eq!(quotes[0].kind, QuoteKind::Single);
-        assert_eq!(quotes[0].word_index, Some(1));
         assert_eq!(quotes[1].text, "\"three $HOME\"");
         assert_eq!(quotes[1].open_delimiter, "\"");
         assert_eq!(quotes[1].body, "three $HOME");
         assert_eq!(quotes[1].close_delimiter, "\"");
         assert_eq!(quotes[1].kind, QuoteKind::Double);
-        assert_eq!(quotes[1].word_index, Some(2));
         assert_eq!(quotes[2].text, "$'line\\n'");
         assert_eq!(quotes[2].open_delimiter, "$'");
         assert_eq!(quotes[2].open_delimiter_metadata.value, "$'");
@@ -4307,13 +4355,11 @@ mod word_quote_tests {
         assert_eq!(quotes[2].close_delimiter_metadata.value, "'");
         assert_eq!(quotes[2].close_delimiter_metadata.raw, "'");
         assert_eq!(quotes[2].kind, QuoteKind::AnsiC);
-        assert_eq!(quotes[2].word_index, Some(3));
         assert_eq!(quotes[3].text, "$\"locale\"");
         assert_eq!(quotes[3].open_delimiter, "$\"");
         assert_eq!(quotes[3].body, "locale");
         assert_eq!(quotes[3].close_delimiter, "\"");
         assert_eq!(quotes[3].kind, QuoteKind::Locale);
-        assert_eq!(quotes[3].word_index, Some(4));
     }
 
     #[test]
@@ -4323,22 +4369,18 @@ mod word_quote_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
 
-        let quotes = ast.commands[0].word_quotes.as_slice();
+        let quotes = quotes_for_raws(&ast.commands[0]);
         assert_eq!(quotes.len(), 2);
         assert_eq!(quotes[0].text, "'value one'");
         assert_eq!(quotes[0].open_delimiter, "'");
         assert_eq!(quotes[0].body, "value one");
         assert_eq!(quotes[0].close_delimiter, "'");
         assert_eq!(quotes[0].kind, QuoteKind::Single);
-        assert_eq!(quotes[0].assignment_name.as_deref(), Some("name"));
-        assert_eq!(quotes[0].word_index, None);
         assert_eq!(quotes[1].text, "\"two words\"");
         assert_eq!(quotes[1].open_delimiter, "\"");
         assert_eq!(quotes[1].body, "two words");
         assert_eq!(quotes[1].close_delimiter, "\"");
         assert_eq!(quotes[1].kind, QuoteKind::Double);
-        assert_eq!(quotes[1].assignment_name.as_deref(), Some("target"));
-        assert_eq!(quotes[1].word_index, Some(1));
     }
 }
 
