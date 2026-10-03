@@ -836,6 +836,20 @@ pub fn external_command_for_named_program(
     let native_args = args
         .iter()
         .map(|arg| {
+            // unixwin/niubash#164: a virtual-system-root operand (/usr/bin,
+            // /etc/..., /tmp, /home/...) exists only in the shell's root
+            // map and NO non-shell child resolves it, so it translates
+            // through the same map for every child class BEFORE the
+            // per-child dialect branches below. Real drive forms (/d/x,
+            // /mnt/d/x, /cygdrive/d/x) keep the Option B dialect: verbatim
+            // for POSIX-aware children (their own native layer converts
+            // those), converted for natives.
+            #[cfg(windows)]
+            if let Some(translated) =
+                translated_virtual_system_root_argument(arg, shell_wrapped, env_vars)
+            {
+                return translated;
+            }
             if preserve_native_args || shell_wrapped || posix_aware {
                 arg.clone()
             } else {
@@ -1379,6 +1393,63 @@ fn windows_external_absolute_argument_needs_translation(
         return false;
     }
 
+    // Virtual system roots (unixwin/niubash#164) resolve through the root
+    // map for native children exactly as they already did before the
+    // extraction; see windows_virtual_system_root_argument for the class.
+    if windows_virtual_system_root_argument(normalized, env_vars) {
+        return true;
+    }
+
+    // /mnt/X drive paths need translation for all drive letters.
+    // Must be exactly /mnt/X or /mnt/X/... to avoid false matches like /mnt/cfoo.
+    if normalized.starts_with("/mnt/") && normalized.len() >= 6 {
+        let bytes = normalized.as_bytes();
+        if bytes[5].is_ascii_alphabetic() && (normalized.len() == 6 || bytes[6] == b'/') {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// unixwin/niubash#164: whether a POSIX-shaped argument names a VIRTUAL
+/// SYSTEM ROOT — /usr, /etc, /tmp, /home, /bin, ... — a location that
+/// exists only in the shell's root map (`shell_path_to_windows`, the same
+/// funnel the `cd` builtin resolves through: `cd /usr/bin` reaches the
+/// install tree, `pwd` echoes /usr/bin), not on the host filesystem. This
+/// is a third POSIX argument shape beside the single-character `/` operand
+/// (niubash#153) and the `/X/` drive forms (niubash#62): a drive form
+/// names a real host location the child's own POSIX layer resolves
+/// (WinuxCmd native_path.cppm normalize_api_operand converts /d/repo/file
+/// in-child; MSYS2 runtimes do the same), but no non-shell child maps
+/// virtual roots — WinuxCmd falls back to the CURRENT DRIVE root (probed
+/// 2026-10-02 against build-dev WinuxCmd 1.0.3: `winuxcmd ls /usr/bin` ->
+/// "cannot access '/usr/bin'" while `winuxcmd ls /c/Windows` succeeds),
+/// and native exes / cmd.exe have no POSIX layer at all. MSYS confirms
+/// the split at its own Win32 boundary: for native children the runtime
+/// converts /usr/bin -> <install>/usr/bin and /tmp -> the user temp dir
+/// (Git Bash 2026-10-02 probe: `cmd //c echo /usr/bin` prints
+/// D:/Git/usr/bin, `/tmp` prints the %TEMP% spelling).
+///
+/// The targets are exactly the existing root map's entries — this
+/// function invents nothing: /tmp and /var/tmp resolve to the per-user
+/// temp base (niubash#94), /home to the real home's parent
+/// (HOME/USERPROFILE), and the install-tree components {bin,etc,lib,
+/// lib64,opt,sbin,usr,var} join below the configured shell root
+/// (WINUXSH_ROOT et al.) with the same Option B gating native children
+/// already use (niubash#124(b)). `normalized` must already be
+/// backslash-folded; only `/`-prefixed spellings name the namespace.
+fn windows_virtual_system_root_argument(
+    normalized: &str,
+    env_vars: &HashMap<String, String>,
+) -> bool {
+    if !normalized.starts_with('/') {
+        return false;
+    }
+
+    // /tmp is a per-user temporary namespace, not part of the install
+    // tree (niubash#94): it maps through the temp base even when no shell
+    // root is configured, so it is root-map-shaped for every child class.
     if normalized == "/tmp" || normalized.starts_with("/tmp/") {
         return true;
     }
@@ -1392,15 +1463,6 @@ fn windows_external_absolute_argument_needs_translation(
             || configured_shell_root(env_vars).is_some();
     }
 
-    // /mnt/X drive paths need translation for all drive letters.
-    // Must be exactly /mnt/X or /mnt/X/... to avoid false matches like /mnt/cfoo.
-    if normalized.starts_with("/mnt/") && normalized.len() >= 6 {
-        let bytes = normalized.as_bytes();
-        if bytes[5].is_ascii_alphabetic() && (normalized.len() == 6 || bytes[6] == b'/') {
-            return true;
-        }
-    }
-
     if configured_shell_root(env_vars).is_some()
         && matches!(
             normalized.split('/').nth(1),
@@ -1408,15 +1470,52 @@ fn windows_external_absolute_argument_needs_translation(
         )
     {
         // Option B (niubash#124(b)): translate shell-root-prefixed operands
-        // for native children unconditionally — the previous exists() gate
-        // split one argv into mixed dialects (an existing /etc/config became
-        // root\etc\config while a missing sibling stayed /etc/...). Only the
-        // legacy escape hatch keeps the existence probe.
+        // unconditionally — the previous exists() gate split one argv into
+        // mixed dialects (an existing /etc/config became root\etc\config
+        // while a missing sibling stayed /etc/...). Only the legacy escape
+        // hatch keeps the existence probe.
         return !argv_dialect_legacy(env_vars)
             || shell_path_to_windows(normalized, env_vars).exists();
     }
 
     false
+}
+
+/// unixwin/niubash#164: the root-map translation itself for one argv word,
+/// applied at the single argv funnel (external_command_for_named_program)
+/// so that EVERY non-shell child class receives the same resolved form:
+/// the winuxcmd dispatcher and applets under the tree (posix_aware), the
+/// cmd.exe command processor (whose slash switches must stay verbatim —
+/// only the multi-component root names translate), and plain native exes.
+/// GNU hands argv verbatim to execve (execute_cmd.c:6119-6127
+/// shell_execve); the only Windows-side rewrites are the ones the child
+/// cannot perform itself, and resolving the shell's own virtual namespace
+/// is one of them (the applet's native layer covers drive forms and
+/// /dev/*, not the roots — see windows_virtual_system_root_argument).
+///
+/// Returns None when the word keeps its per-child dialect: drive forms
+/// (`/d/x`, `/mnt/d/x`, `/cygdrive/d/x`), the bare `/` operand
+/// (niubash#153), /dev/* (rubash#120), switches and data words, a
+/// leading-backslash spelling (escape data, external_argument_path's
+/// rule), a legacy-dialect session (__RUBASH_ARGV_DIALECT=legacy reverts
+/// to the pre-fix behavior), or a shell-wrapped child — a child SHELL
+/// (ENOEXEC re-entry model, execute_cmd.c:6252) resolves /usr/... through
+/// its own identical root map and must see the words verbatim.
+#[cfg(windows)]
+fn translated_virtual_system_root_argument(
+    arg: &str,
+    shell_wrapped: bool,
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
+    if shell_wrapped || argv_dialect_legacy(env_vars) || !arg.starts_with('/') {
+        return None;
+    }
+    let normalized = arg.replace('\\', "/");
+    windows_virtual_system_root_argument(&normalized, env_vars).then(|| {
+        shell_path_to_windows(arg, env_vars)
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 fn dispatcher_command_name(command_name: &str) -> String {
@@ -3776,6 +3875,294 @@ mod tests {
             shell_path_to_windows("/mnt/c/", &env_vars),
             PathBuf::from(r"C:\")
         );
+    }
+
+    // ---- unixwin/niubash#164: virtual system roots for every child class ----
+
+    /// Fixture install tree: <root>/usr/bin/{winuxcmd.exe marker,ls.exe},
+    /// <root>/etc/i164.conf. WINUXSH_ROOT points at <root> so the root map
+    /// (/usr -> <root>\usr etc.) is active, mirroring the niu host.
+    #[cfg(windows)]
+    fn i164_fixture_root() -> PathBuf {
+        let root = std::env::temp_dir().join("rubash-i164-root");
+        let _ = fs::remove_dir_all(&root);
+        let usr_bin = root.join("usr").join("bin");
+        fs::create_dir_all(&usr_bin).unwrap();
+        fs::create_dir_all(root.join("etc")).unwrap();
+        fs::write(usr_bin.join("winuxcmd.exe"), b"MZ").unwrap();
+        fs::write(usr_bin.join("ls.exe"), b"MZ").unwrap();
+        fs::write(root.join("etc").join("i164.conf"), b"i164\n").unwrap();
+        root
+    }
+
+    #[cfg(windows)]
+    fn i164_rooted_env(root: &Path) -> HashMap<String, String> {
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "WINUXSH_ROOT".to_string(),
+            root.to_string_lossy().into_owned(),
+        );
+        env_vars
+    }
+
+    #[cfg(windows)]
+    fn child_argv(
+        program: &Path,
+        args: &[&str],
+        env_vars: &HashMap<String, String>,
+    ) -> Vec<String> {
+        let (command, _) = external_command_for_program(
+            program,
+            &args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
+            env_vars,
+        );
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_virtual_system_root_arguments_translate_for_every_child_class() {
+        // niubash#164 matrix {/usr, /usr/bin, /etc/..., /tmp, /home} x
+        // {dispatcher applet, under-tree applet exe, native exe, cmd.exe}:
+        // every NON-SHELL child class resolves virtual roots through the
+        // same root map (shell_path_to_windows — the funnel `cd` uses), so
+        // `ls /usr/bin | wc -l` lists the bundled tree instead of failing
+        // with rc=2 on the verbatim POSIX spelling. MSYS model evidence:
+        // Git Bash hands native children `D:/Git/usr/bin` for /usr/bin and
+        // the %TEMP% spelling for /tmp.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+        let mut env_with_home = env_vars.clone();
+        env_with_home.insert("HOME".to_string(), r"C:\Users\i164home".to_string());
+
+        let dispatcher = root.join("usr").join("bin").join("winuxcmd.exe");
+        let applet = root.join("usr").join("bin").join("ls.exe");
+        let native = PathBuf::from("git.exe");
+        let cmd = PathBuf::from(r"C:\Windows\System32\cmd.exe");
+
+        let usr_bin = root.join("usr").join("bin").to_string_lossy().into_owned();
+        let usr = root.join("usr").to_string_lossy().into_owned();
+        let etc_conf = root
+            .join("etc")
+            .join("i164.conf")
+            .to_string_lossy()
+            .into_owned();
+        let tmp_base = std::env::temp_dir().to_string_lossy().into_owned();
+
+        for (operand, expected) in [
+            ("/usr", usr.as_str()),
+            ("/usr/bin", usr_bin.as_str()),
+            ("/etc/i164.conf", etc_conf.as_str()),
+        ] {
+            // Applet class 1: the winuxcmd dispatcher route (prepends the
+            // dispatch name, then the translated operand).
+            let (command, _) = external_command_for_named_program(
+                &dispatcher,
+                Some("ls"),
+                &[operand.to_string()],
+                &env_vars,
+            );
+            let argv = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(argv, vec!["ls".to_string(), expected.to_string()]);
+
+            // Applet class 2: an applet executable under the WinuxCmd tree.
+            assert_eq!(child_argv(&applet, &[operand], &env_vars), vec![expected]);
+
+            // Native exe: same form (this was already the Option B native
+            // behavior — pin it as the class invariant).
+            assert_eq!(child_argv(&native, &[operand], &env_vars), vec![expected]);
+
+            // cmd.exe: the root operand translates while /C switches stay
+            // verbatim (windows_cmd_switches_are_not_mapped_into_shell_root
+            // pins the switch half).
+            assert_eq!(
+                child_argv(&cmd, &["/C", "echo", operand], &env_vars),
+                vec!["/C".to_string(), "echo".to_string(), expected.to_string()]
+            );
+        }
+
+        // /tmp maps to the per-user temp base (niubash#94), not the install
+        // tree — exactly the target MSYS uses for native children.
+        assert_eq!(
+            child_argv(&dispatcher, &["/tmp"], &env_vars),
+            vec![tmp_base]
+        );
+        assert_eq!(
+            child_argv(&applet, &["/tmp/x"], &env_vars),
+            vec![std::env::temp_dir()
+                .join("x")
+                .to_string_lossy()
+                .into_owned()]
+        );
+
+        // /home maps to the real home's parent (HOME/USERPROFILE map).
+        assert_eq!(
+            child_argv(&dispatcher, &["/home"], &env_with_home),
+            vec![r"C:\Users".to_string()]
+        );
+        assert_eq!(
+            child_argv(&native, &["/home/u/x"], &env_with_home),
+            vec![r"C:\Users\u\x".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_virtual_system_root_arguments_keep_option_b_shapes_verbatim() {
+        // niubash#164 does NOT widen translation past the root class: the
+        // regression guards for the sibling shapes must hold for the applet
+        // child. /c/Windows and /mnt/c are drive forms the applet's own
+        // native layer resolves (Option B, niubash#124(b)/#62); "/" is an
+        // operand character (niubash#153); /dev/* belongs to the child's
+        // descriptor map (rubash#120); /cygdrive/d/x, switches, relative
+        // words and leading-backslash data never enter the root class.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+        let dispatcher = root.join("usr").join("bin").join("winuxcmd.exe");
+
+        let verbatim = [
+            "/c/Windows",
+            "/mnt/c",
+            "/cygdrive/d/x",
+            "/",
+            "/dev/null",
+            "/dev/stdout",
+            "/nologo",
+            "/CN=test",
+            "relative/file",
+            r"\n",
+            "--flag=/usr/bin",
+        ];
+        for operand in verbatim {
+            assert_eq!(
+                child_argv(&dispatcher, &[operand], &env_vars),
+                vec![operand.to_string()],
+                "operand {operand:?} must stay verbatim for the applet"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_virtual_system_root_arguments_shell_wrapped_children_verbatim() {
+        // A child SHELL (ENOEXEC re-entry, execute_cmd.c:6252) resolves
+        // /usr/... through its own identical root map and must see the
+        // words verbatim — GNU hands the child shell argv raw. argv[0] is
+        // the child shell's script word ($0), not an operand.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+        let script = root.join("i164script.sh");
+        fs::write(&script, b"#!/bin/sh\n").unwrap();
+
+        let argv = child_argv(&script, &["/usr/bin", "/etc/i164.conf"], &env_vars);
+        assert_eq!(argv.len(), 3, "shell-wrapped child: $0 + two operands");
+        assert_eq!(argv[0], script.to_string_lossy().replace('\\', "/"));
+        assert_eq!(argv[1], "/usr/bin");
+        assert_eq!(argv[2], "/etc/i164.conf");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_virtual_system_root_arguments_legacy_dialect_reverts() {
+        // __RUBASH_ARGV_DIALECT=legacy is the field rollback hatch for the
+        // argv dialect: it must also revert the #164 translation, landing
+        // on the pre-fix behavior (existence-gated translation through the
+        // native funnel: an EXISTING root target still translates, a
+        // missing one stays verbatim).
+        let root = i164_fixture_root();
+        let mut env_vars = i164_rooted_env(&root);
+        env_vars.insert("__RUBASH_ARGV_DIALECT".to_string(), "legacy".to_string());
+        let dispatcher = root.join("usr").join("bin").join("winuxcmd.exe");
+
+        // Missing root target under legacy: verbatim (pre-Option-B gate).
+        assert_eq!(
+            child_argv(&dispatcher, &["/usr/definitely/missing"], &env_vars),
+            vec!["/usr/definitely/missing".to_string()]
+        );
+        // Existing root target under legacy: still translated.
+        assert_eq!(
+            child_argv(&dispatcher, &["/usr/bin"], &env_vars),
+            vec![root.join("usr").join("bin").to_string_lossy().into_owned()]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_virtual_system_root_argument_shape_class() {
+        // The admission predicate owns the class boundary: install-tree
+        // components under a configured root, the temp namespaces, and
+        // /home. Drive forms, /dev, switches, relative words and the empty
+        // string are not in the class.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+
+        for shape in [
+            "/usr",
+            "/usr/bin",
+            "/bin",
+            "/etc",
+            "/etc/passwd",
+            "/lib",
+            "/lib64",
+            "/opt",
+            "/sbin",
+            "/var/log",
+            "/var/tmp",
+            "/tmp",
+            "/tmp/x",
+            "/home",
+            "/home/u",
+        ] {
+            assert!(
+                windows_virtual_system_root_argument(shape, &env_vars),
+                "{shape:?} is a virtual system root"
+            );
+        }
+        for shape in [
+            "/c/Windows",
+            "/d",
+            "/mnt/c",
+            "/cygdrive/d/x",
+            "/dev/null",
+            "/",
+            "/nologo",
+            "/CN=test",
+            "usr/bin",
+            "",
+        ] {
+            assert!(
+                !windows_virtual_system_root_argument(shape, &env_vars),
+                "{shape:?} is not a virtual system root"
+            );
+        }
+
+        // Without a configured shell root the install-tree components have
+        // no root-map entry (the tools-dir fallback belongs to command
+        // lookup, not argv), while the temp namespaces still do.
+        let unrooted = HashMap::new();
+        assert!(!windows_virtual_system_root_argument("/usr/bin", &unrooted));
+        assert!(!windows_virtual_system_root_argument("/etc", &unrooted));
+        assert!(windows_virtual_system_root_argument("/tmp", &unrooted));
+        assert!(windows_virtual_system_root_argument(
+            "/var/tmp/x",
+            &unrooted
+        ));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(windows)]
