@@ -421,12 +421,14 @@ impl Executor {
                 self.exit_code = 2;
                 return Err(ExecuteError::ExitCode(2));
             }
-            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                eprintln!(
-                    "{}`{}'",
-                    self.parser_diagnostic_prefix(),
-                    parse_error_source_display(source)
-                );
+            if self.offending_line_echo_enabled() {
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    eprintln!(
+                        "{}`{}'",
+                        self.parser_diagnostic_prefix(),
+                        parse_error_source_display(source)
+                    );
+                }
             }
             self.exit_code = 1;
             return Ok(true);
@@ -550,12 +552,16 @@ impl Executor {
                     self.exit_code = 2;
                     return Err(ExecuteError::ExitCode(2));
                 }
-                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                    eprintln!(
-                        "{}`{}'",
-                        self.parser_diagnostic_prefix_for_line(aux_b),
-                        parse_error_source_display(source)
-                    );
+                // parse.y:6865: no offending-line echo in an interactive
+                // shell.
+                if self.offending_line_echo_enabled() {
+                    if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                        eprintln!(
+                            "{}`{}'",
+                            self.parser_diagnostic_prefix_for_line(aux_b),
+                            parse_error_source_display(source)
+                        );
+                    }
                 }
             }
             self.exit_code = 2;
@@ -614,12 +620,15 @@ impl Executor {
             // The producer stores the verbatim physical line (parse.y
             // y.error echoes it as read); parse_error_source_display would
             // trim GNU's leading whitespace.
-            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                eprintln!(
-                    "{}`{}'",
-                    self.parser_diagnostic_prefix_for_line(line),
-                    source
-                );
+            // parse.y:6865: no offending-line echo in an interactive shell.
+            if self.offending_line_echo_enabled() {
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    eprintln!(
+                        "{}`{}'",
+                        self.parser_diagnostic_prefix_for_line(line),
+                        source
+                    );
+                }
             }
             self.exit_code = 2;
             return Err(ExecuteError::ExitCode(2));

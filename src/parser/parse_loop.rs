@@ -1532,14 +1532,24 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
     }
 
     if command_allows_compound_start(&state.current_cmd) && token.value == "[[" {
-        if let Some((conditional_cmd, next_i)) = parse_conditional_command(tokens, i) {
+        if let Some((conditional_cmd, next_i)) = parse_conditional_command(
+            tokens,
+            i,
+            state.diagnostic_text.as_ref(),
+            state.source_line_offset,
+        ) {
             push_compound_command(state, conditional_cmd);
             return Some(next_i);
         }
         // Unclosed `[[`: GNU's cond parser (parse.y cond_term/cond_error)
         // consumes the remaining tokens and reports the first offending
         // token or the `unexpected EOF while looking for `]]'' diagnostic.
-        let (command, next_i) = conditional_eof_error_command(tokens, i);
+        let (command, next_i) = conditional_eof_error_command(
+            tokens,
+            i,
+            state.diagnostic_text.as_ref(),
+            state.source_line_offset,
+        );
         state.current_cmd = command;
         state
             .ast
@@ -2584,7 +2594,7 @@ pub(super) fn parse_time_prefixed_compound_command(
     } else if let Some(parsed) = parse_function_command(tokens, i) {
         parsed
     } else if tokens.get(i).is_some_and(|token| token.value == "[[") {
-        parse_conditional_command(tokens, i)?
+        parse_conditional_command(tokens, i, None, 0)?
     } else if is_keyword(tokens, i, "{")
         || tokens.get(i).is_some_and(|token| {
             token.kind == TokenKind::Keyword

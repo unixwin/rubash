@@ -140,6 +140,17 @@ impl Executor {
         } else {
             subshell.execute_command(command)
         };
+        // A failglob-aborted redirect expansion must escape the stage
+        // boundary (GNU subst.c:12663-12668 DISCARD): the forked child owns
+        // the element's do_redirections, so the parent never re-applies
+        // them. Converting the abort into a stage status here would let the
+        // parent's routing phase re-expand the target, print `no match' a
+        // second time, and open the literal — propagate instead.
+        if subshell.shell_state.redirect_failglob_seen.replace(false) {
+            if let Err(error) = result {
+                return Err(error);
+            }
+        }
         // GNU execute_cmd.c:1761-1763 (execute_in_subshell): a pipeline
         // element is a forked subshell whose exit — implicit after the body
         // as much as via `exit` — runs the subshell's EXIT trap

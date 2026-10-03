@@ -813,10 +813,24 @@ impl<'a> Lexer<'a> {
     }
 
     fn word_so_far_ends_extglob_operator(&self, start: usize) -> bool {
-        self.slice(start)
-            .chars()
-            .last()
-            .is_some_and(|ch| matches!(ch, '@' | '*' | '+' | '?' | '!'))
+        let word = self.slice(start);
+        let mut chars = word.chars().rev();
+        let Some(op) = chars.next() else {
+            return false;
+        };
+        if !matches!(op, '@' | '*' | '+' | '?' | '!') {
+            return false;
+        }
+        // GNU parse.y:5366-5375 (read_token_word backslash branch): a `\c`
+        // pair is consumed as an escaped character BEFORE the EXTENDED_GLOB
+        // PATTERN_CHAR rule (parse.y:5466) can see `c', so an escaped
+        // operator (`\@(') never opens a pattern group — the `(' then ends
+        // the word and is a syntax error in redirect-target/argument
+        // position (verified vs WSL GNU 5.3.0: `echo e >\@(zz)esc' with
+        // extglob on is `syntax error near unexpected token `('). Count the
+        // backslashes immediately before the operator: odd = escaped.
+        let escaped = chars.take_while(|ch| *ch == '\\').count() % 2 == 1;
+        !escaped
     }
 
     fn skip_extglob_group(&mut self) {

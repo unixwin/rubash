@@ -48,6 +48,19 @@ impl Executor {
         self.parse_error_occurred = true;
     }
 
+    /// GNU parse.y:6865/6886 (report_syntax_error): the offending-input-line
+    /// echo (`print_offending_line', parse.y:6814) runs only `if (interactive
+    /// == 0)'. An interactive shell prints the two `parser_error' diagnostic
+    /// lines and NO `` `line' `` echo (verified: `bash -i < err.sh' prints
+    /// the syntax error pair without the third backquote line). Every
+    /// `__RUBASH_PARSE_SOURCE__' echo site must consult this gate.
+    pub(in crate::executor) fn offending_line_echo_enabled(&self) -> bool {
+        !self
+            .shell_state
+            .env_vars
+            .contains_key("__RUBASH_INTERACTIVE")
+    }
+
     /// GNU error.c:324-327 (parser_error): when `exit_immediately_on_error`
     /// is live at diagnostic time the first line of a syntax-error report is
     /// followed by an immediate exit_shell(2). The dynamic state mirrors
@@ -103,8 +116,11 @@ impl Executor {
             if self.errexit_active_at_diagnostic() {
                 return;
             }
-            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                eprintln!("{prefix}syntax error: `{source}'");
+            // parse.y:6865: the offending-line echo is non-interactive only.
+            if self.offending_line_echo_enabled() {
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    eprintln!("{prefix}syntax error: `{source}'");
+                }
             }
         } else {
             let message = super::command_execute::bash_style_unexpected_token_message(message);
@@ -117,8 +133,11 @@ impl Executor {
             // stripped; leading whitespace and the original spacing
             // (`if :;then ...') stay as read (rubash#285: the old
             // trim/`;then' display rewrite corrupted the physical line).
-            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                eprintln!("{prefix}`{source}'");
+            // parse.y:6865: the echo is non-interactive only.
+            if self.offending_line_echo_enabled() {
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    eprintln!("{prefix}`{source}'");
+                }
             }
         }
     }
@@ -139,8 +158,11 @@ impl Executor {
                 .unwrap_or_else(|| cmd.line.unwrap_or(1));
             let prefix = self.parser_diagnostic_prefix_for_line(line);
             eprintln!("{prefix}syntax error near unexpected token `{token}'");
-            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                eprintln!("{prefix}`{source}'");
+            // parse.y:6865: the offending-line echo is non-interactive only.
+            if self.offending_line_echo_enabled() {
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    eprintln!("{prefix}`{source}'");
+                }
             }
             return;
         }

@@ -2899,9 +2899,21 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 let parse_error = executor.take_parse_error();
                 pending.clear();
                 group.clear();
-                if parse_error {
-                    let _ = executor.take_exit_jump_pending();
-                } else if executor.take_exit_jump_pending()
+                // GNU eval.c:202-205 (reader_loop): a failing read_command
+                // sets EOF_Reached only `if (interactive == 0)'. An
+                // interactive shell reports the syntax error, discards the
+                // rest of the incomplete command, and PROMPTS AGAIN — the
+                // session survives (verified: `bash -i < c12.sh' prints the
+                // error, then runs `echo DEF-OK' / `c12' -> 127 / `echo
+                // AFTER' -> 0). The ExitCode(2) a parse error raises is the
+                // DISCARD classification run_source_impl records as an exit
+                // jump, not an exit-shell jump — only a real `exit' (or the
+                // interactive errexit clause, verified `set -e; false' under
+                // `bash -i' exits 1) ends the session. The non-interactive
+                // stdin driver (run_stdin_script) keeps its own parse-error
+                // break.
+                let exit_jump = executor.take_exit_jump_pending();
+                if (exit_jump && !parse_error)
                     || (status != 0
                         && stdin_script_errexit_enabled(executor)
                         && !executor.last_command_inverted())

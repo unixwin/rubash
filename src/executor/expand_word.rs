@@ -44,6 +44,25 @@ fn resolve_dollar_quoted_parameter_name(name: &str) -> Option<String> {
     (resolved != name).then_some(resolved)
 }
 
+/// The literal a redirect operand becomes when pathname expansion does not
+/// apply to it (no match, or globbing suppressed for the word). GNU runs
+/// dequote_string on the word at that point (subst.c:12645-12649 for the
+/// no-match retention, subst.c:12683-12688 for the no-glob branch), so the
+/// retained filename is QUOTE-REMOVED data. Rubash's expansion carries
+/// quote protection in-band (markers.rs: CTLESC \x11 prefixes a quoted glob
+/// metachar; \u{17}..\u{1a} carry quoted `/` `"` `$` `` ` ``), so decode
+/// them at this value boundary or the open() receives carrier bytes
+/// (rubash#424: `>"@(zz)q"` failed open with ERROR_INVALID_NAME because the
+/// CTLESC byte led the name).
+fn redirect_operand_literal(expanded: &str) -> String {
+    if !crate::executor::markers::contains_word_marker_bytes(expanded) {
+        return expanded.to_string();
+    }
+    crate::executor::markers::decode_word_position_carriers(
+        &expanded.replace(crate::executor::markers::CTLESC, ""),
+    )
+}
+
 impl Executor {
     /// GNU redir.c:298 redirection_expand: a redirect word is expanded
     /// exactly once, inside do_redirections' left-to-right pass. Rubash
@@ -54,6 +73,19 @@ impl Executor {
     /// the memo keys on the redirect's semantic identity. Side effects
     /// (`$((n+=1))`, `$(cmd)`) in a target run once per command execution;
     /// the memo is cleared at each execute_command entry.
+    /// Consume a pending redirect-target failglob (set by
+    /// expand_redirect_operand_fields, GNU subst.c:12663-12668): the
+    /// `no match: WORD' diagnostic has already printed; the caller aborts
+    /// the command list with ExpansionFailure(1) so nothing opens,
+    /// anchors, or splices the failed target (the compound appliers call
+    /// this immediately after expand_redirect_target, before
+    /// create/anchor).
+    pub(in crate::executor) fn redirect_failglob_aborted(&mut self) -> bool {
+        let aborted = self.shell_state.redirect_failglob_error.replace(false);
+        self.shell_state.redirect_failglob_seen.set(false);
+        aborted
+    }
+
     pub(crate) fn expand_redirect_target(&self, redirect: &crate::parser::Redirect) -> String {
         // GNU redir.c:298 redirection_expand → expand_words_no_vars →
         // subst.c:11349-11378 (`expand_word_internal`, cases '<'/'>'): a
@@ -180,7 +212,10 @@ impl Executor {
         // (rubash#379: `> $'out tab1.txt'` must write that literal name).
         let expanded = expanded.replace(crate::executor::markers::ANSI_C_IFS_GUARD, "");
         if suppress_glob {
-            return expanded;
+            // GNU subst.c:12683-12688 (expand_words_no_vars else-branch): a
+            // word that does not glob is still DEQUOTED before it becomes
+            // the literal filename.
+            return redirect_operand_literal(&expanded);
         }
         match glob::pathname_expand_word(&expanded, &self.shell_state.env_vars) {
             // Multiple matches are multiple fields (`> $multi` where the
@@ -196,9 +231,40 @@ impl Executor {
                 matches.into_iter().next().unwrap_or_default()
             }
             // NoMatch keeps the literal pattern (nullglob off, glob.c
-            // returns the pattern itself); Fail is the failglob pattern
-            // text, also kept verbatim.
-            glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => expanded,
+            // returns the pattern itself) — DEQUOTED, because GNU replaces
+            // the no-match word with dequote_string's output before
+            // reusing it as the literal (subst.c:12645-12649: the word is
+            // dequoted "in case we have to use it", then kept unchanged at
+            // subst.c:12676). Rubash's expansion carries the quoting
+            // protection in-band (markers.rs CTLESC / word-position data
+            // carriers), so the retained literal must decode them at this
+            // boundary — a `>"@(zz)q"` target opens `@(zz)q`, not a name
+            // led by the CTLESC byte \x11 (rubash#424: Windows open()
+            // failed ERROR_INVALID_NAME on the carrier byte).
+            glob::PathnameExpansion::NoMatch => redirect_operand_literal(&expanded),
+            // GNU subst.c:12663-12668 (fail_glob_expansion): report_error
+            // `no match: WORD' (the dequoted word) and exp_jump_to_
+            // top_level(DISCARD) — the redirection NEVER opens and the
+            // command list aborts with status 1. The diagnostic prints
+            // here, exactly once per expansion (expand_redirect_target's
+            // memo); the flag aborts the command at the first expansion
+            // site (redirect gate / compound binding), mirroring the
+            // argument-word failglob port (command_prepare.rs).
+            glob::PathnameExpansion::Fail(pattern) => {
+                // GNU performs ONE do_redirections per command, so the
+                // word expands (and reports) exactly once. Rubash's
+                // multi-phase redirect pipeline can expand the same operand
+                // again (splice pass, null-command pass); `seen' collapses
+                // the repeat report — every consumer of the abort clears
+                // both latches, so the NEXT command occurrence reports
+                // again (`echo x >p; echo y >p' prints twice, like GNU).
+                if !self.shell_state.redirect_failglob_seen.get() {
+                    eprintln!("{}no match: {pattern}", self.diagnostic_prefix());
+                }
+                self.shell_state.redirect_failglob_error.set(true);
+                self.shell_state.redirect_failglob_seen.set(true);
+                pattern
+            }
         }
     }
 

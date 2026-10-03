@@ -4,6 +4,8 @@ use crate::lexer::{Token, TokenKind};
 pub(super) fn parse_conditional_command(
     tokens: &[Token],
     start: usize,
+    diagnostic_text: Option<&std::rc::Rc<str>>,
+    source_line_offset: usize,
 ) -> Option<(CommandNode, usize)> {
     if tokens.get(start)?.value != "[[" {
         return None;
@@ -40,7 +42,14 @@ pub(super) fn parse_conditional_command(
     command.logical_line = tokens.get(start).map(|token| token.logical_line);
     if let Some((spec, echo_line)) = conditional_syntax_error_spec(&merged_args, true) {
         command.insert_assignment("__RUBASH_PARSE_ERROR_COND__".to_string(), spec);
-        if let Some(source) = conditional_error_source(tokens, start, end, echo_line) {
+        if let Some(source) = conditional_offending_line(
+            tokens,
+            start,
+            end,
+            echo_line,
+            diagnostic_text,
+            source_line_offset,
+        ) {
             command.insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
         }
     }
@@ -545,6 +554,40 @@ fn cond_offending_text(cursor: &CondCursor, tok: &CondTok, index: Option<usize>)
     }
 }
 
+/// The offending-line echo for `[[` conditional syntax errors.
+///
+/// GNU parse.y:6814-6826 `print_offending_line` echoes the ENTIRE physical
+/// `shell_input_line' of the error's line number — trailing newlines
+/// stripped, everything else verbatim. That line regularly contains text
+/// OUTSIDE the conditional's own token slice: a function-definition body is
+/// re-parsed from a re-lexed slice (`c12() { [[ ((zz)) == zz ]] ...; }'
+/// echoes with the `c12() { ' prefix and closing `}'), an inline section
+/// (`while false; do [[ ... ]]; done') echoes with the loop head and
+/// `done'. Token-slice reconstruction cannot see that text, so when the
+/// parse carries the original source (ParseLoopOptions::diagnostic_text /
+/// source_text), the echo is the verbatim physical line from it; the token
+/// walk below remains the fallback for synthesized inputs (eval bodies,
+/// alias-spliced groups without text).
+fn conditional_offending_line(
+    tokens: &[Token],
+    start: usize,
+    end: usize,
+    echo_line: Option<usize>,
+    diagnostic_text: Option<&std::rc::Rc<str>>,
+    source_line_offset: usize,
+) -> Option<String> {
+    let line = echo_line.or_else(|| tokens.get(start).map(|token| token.position))?;
+    if let Some(text) = diagnostic_text {
+        if let Some(source) = line
+            .checked_sub(source_line_offset)
+            .and_then(|in_text| super::parse_loop::source_line_by_number(text, in_text))
+        {
+            return Some(source);
+        }
+    }
+    conditional_error_source(tokens, start, end, echo_line)
+}
+
 /// Echo the input line containing the offending token for `syntax error
 /// near` reports (print_offending_line, parse.y:6814): GNU echoes that one
 /// input line verbatim; reconstruct it from the tokens sharing its line,
@@ -780,6 +823,8 @@ fn matching_conditional_end(tokens: &[Token], start: usize) -> Option<usize> {
 pub(super) fn conditional_eof_error_command(
     tokens: &[Token],
     start: usize,
+    diagnostic_text: Option<&std::rc::Rc<str>>,
+    source_line_offset: usize,
 ) -> (CommandNode, usize) {
     let merged = merge_pattern_rhs_fragments(collect_conditional_args(
         tokens,
@@ -804,7 +849,14 @@ pub(super) fn conditional_eof_error_command(
     command.line = tokens.get(start).map(|token| token.position);
     command.logical_line = tokens.get(start).map(|token| token.logical_line);
     command.insert_assignment("__RUBASH_PARSE_ERROR_COND__".to_string(), spec);
-    if let Some(source) = conditional_error_source(tokens, start, tokens.len() - 1, echo_line) {
+    if let Some(source) = conditional_offending_line(
+        tokens,
+        start,
+        tokens.len() - 1,
+        echo_line,
+        diagnostic_text,
+        source_line_offset,
+    ) {
         command.insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
     }
     (command, tokens.len())

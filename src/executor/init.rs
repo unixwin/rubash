@@ -281,6 +281,8 @@ impl Executor {
                 arithmetic_nounset_error: Cell::new(false),
                 arithmetic_last_error_category: Cell::new(None),
                 parameter_bad_substitution: Cell::new(false),
+                redirect_failglob_error: Cell::new(false),
+                redirect_failglob_seen: Cell::new(false),
                 debug_trap_command: std::cell::RefCell::new(None),
                 xtrace_fd: Cell::new(-1),
                 xtrace_fd_source: std::cell::RefCell::new(String::new()),

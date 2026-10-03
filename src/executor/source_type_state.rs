@@ -82,6 +82,11 @@ impl Executor {
             .filter(|r| r.fd.unwrap_or(1) == 1)
         {
             let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before creating or
+            // splicing the failed target into the body.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             if redirect_target_fd(&target).is_none() {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
@@ -93,8 +98,14 @@ impl Executor {
         }
 
         if let Some(redirect) = command.append.as_ref().filter(|r| r.fd.unwrap_or(1) == 1) {
+            let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before splicing.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             let mut append_redirect = redirect.clone();
-            append_redirect.target = self.expand_redirect_target(redirect);
+            append_redirect.target = target;
+            append_redirect.append = true;
             apply_stdout_append_redirect(body, &append_redirect);
         }
 
@@ -104,6 +115,11 @@ impl Executor {
             .filter(|r| r.fd.unwrap_or(2) == 2)
         {
             let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before creating or
+            // splicing (see the redirect_out arm above).
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
@@ -119,8 +135,13 @@ impl Executor {
             .as_ref()
             .filter(|r| r.fd.unwrap_or(2) == 2)
         {
+            let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before splicing.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             let mut append_redirect = redirect.clone();
-            append_redirect.target = self.expand_redirect_target(redirect);
+            append_redirect.target = target;
             apply_stderr_append_redirect(body, &append_redirect);
         }
 

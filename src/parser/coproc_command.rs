@@ -373,7 +373,7 @@ fn parse_coproc_compound_body(tokens: &[Token], start: usize) -> Option<(Command
         "case" => parse_case_command(tokens, start, None, 0),
         "select" => parse_select_command(tokens, start, None, 0),
         "coproc" => parse_coproc_command(tokens, start),
-        "[[" => parse_conditional_command(tokens, start),
+        "[[" => parse_conditional_command(tokens, start, None, 0),
         _ => None,
     }
 }

@@ -164,6 +164,14 @@ impl Executor {
                 continue;
             }
             let target = self.expand_redirect_target(redirect);
+            // GNU subst.c:12663-12668: failglob inside redirection_expand
+            // prints `no match: WORD' (done, at the expansion) and DISCARDs
+            // the command list with status 1 — the command never runs and
+            // nothing opens. This gate is the FIRST expansion site of a
+            // simple command's redirect list, so it owns the abort.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             let raw_word = redirect
                 .target_metadata
                 .raw
@@ -816,6 +824,15 @@ impl Executor {
                 | crate::parser::RedirectKind::ClobberOutput => {
                     let fd = redirect_fd_or_default(redirect, 1);
                     let target = self.expand_redirect_target(redirect);
+                    // subst.c:12663-12668 failglob: the diagnostic already
+                    // printed at the expansion; this routing pass must not
+                    // open the failed target either — follow the established
+                    // redirect_failed protocol (no write, status 1).
+                    if self.redirect_failglob_aborted() {
+                        self.exit_code = 1;
+                        state.redirect_failed = true;
+                        return Ok(true);
+                    }
                     // See injected_redirect_fd_is_bound: an injected group
                     // redirect is already realized when the seeded fd holds
                     // the group's shared File binding (the seeded state maps
@@ -864,6 +881,12 @@ impl Executor {
                 crate::parser::RedirectKind::CombinedOutput
                 | crate::parser::RedirectKind::CombinedAppend => {
                     let target = self.expand_redirect_target(redirect);
+                    // subst.c:12663-12668 failglob — see the file arm above.
+                    if self.redirect_failglob_aborted() {
+                        self.exit_code = 1;
+                        state.redirect_failed = true;
+                        return Ok(true);
+                    }
                     self.open_command_output_target(state, 1, &target, redirect)?;
                     let stdout_target = state.fd_target(1).cloned().unwrap_or(OutputTarget::Stdout);
                     state.fds.insert(2, stdout_target);

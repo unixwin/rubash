@@ -221,7 +221,9 @@ pub(super) fn parse_function_command_with_diagnostic(
         command.function_command = Some(function);
         return Some(finish_function_command(command, tokens, i + 1));
     }
-    if let Some((mut body_command, body_end)) = parse_function_compound_body(tokens, i) {
+    if let Some((mut body_command, body_end)) =
+        parse_function_compound_body(tokens, i, diagnostic_text, source_line_offset)
+    {
         if body_command.line.is_none() {
             body_command.line = tokens.get(start).map(|token| token.position);
             body_command.logical_line = tokens.get(start).map(|token| token.logical_line);
@@ -733,7 +735,12 @@ fn matching_function_loop_end(tokens: &[Token], start: usize) -> Option<usize> {
     None
 }
 
-fn parse_function_compound_body(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+fn parse_function_compound_body(
+    tokens: &[Token],
+    start: usize,
+    diagnostic_text: Option<&std::rc::Rc<str>>,
+    source_line_offset: usize,
+) -> Option<(CommandNode, usize)> {
     if let Some(parsed) = parse_arithmetic_command(tokens, start) {
         return Some(parsed);
     }
@@ -747,7 +754,7 @@ fn parse_function_compound_body(tokens: &[Token], start: usize) -> Option<(Comma
         "case" => parse_case_command(tokens, start, None, 0),
         "select" => parse_select_command(tokens, start, None, 0),
         "coproc" => parse_coproc_command(tokens, start),
-        "[[" => parse_conditional_command(tokens, start),
+        "[[" => parse_conditional_command(tokens, start, diagnostic_text, source_line_offset),
         _ => None,
     }
 }

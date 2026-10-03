@@ -48,8 +48,11 @@ impl Executor {
                 "{}syntax error near unexpected token `{token}'",
                 self.parser_diagnostic_prefix_for_line(line)
             );
-            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                eprintln!("{}`{source}'", self.parser_diagnostic_prefix_for_line(line));
+            // parse.y:6865: no offending-line echo in an interactive shell.
+            if self.offending_line_echo_enabled() {
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    eprintln!("{}`{source}'", self.parser_diagnostic_prefix_for_line(line));
+                }
             }
             self.exit_code = 2;
             return Err(ExecuteError::ExitCode(2));

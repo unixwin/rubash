@@ -1327,6 +1327,11 @@ impl Executor {
             // the propagated per-leaf redirect, which opens later and must
             // survive a `cd` inside the body (niubash#118).
             let expanded = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before the target is
+            // created/anchored and spliced into the body leaves.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             // fd-dup targets (`>&1`) are entry-time dup2s — see the
             // redirect_err guard above (rubash#170).
             if redirect_target_fd(&expanded).is_none() {
@@ -1359,8 +1364,12 @@ impl Executor {
                 apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
             }
         } else if let Some(redirect) = cmd.append.as_ref().filter(|r| r.fd.unwrap_or(1) == 1) {
-            let target =
-                self.anchor_compound_redirect_target(&self.expand_redirect_target(redirect));
+            let expanded = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before anchoring.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+            let target = self.anchor_compound_redirect_target(&expanded);
             let append_redirect = Redirect {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
@@ -1381,6 +1390,11 @@ impl Executor {
 
         if let Some(redirect) = cmd.redirect_err.as_ref().filter(|r| r.fd.unwrap_or(2) == 2) {
             let expanded = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before the target is
+            // created/anchored (see the redirect_out arm above).
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             // An fd-dup target (`2>&1`) is a dup2 GNU applies ONCE at
             // compound entry (redir.c do_redirection_internal), snapshotted
             // by open_compound_output_redirects' scoped fd-table binding.
@@ -1425,6 +1439,10 @@ impl Executor {
             .filter(|r| r.fd.unwrap_or(2) == 2)
         {
             let expanded = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before anchoring.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             // fd-dup targets (`2>>&1` is still a dup2 in GNU — the append
             // marker on an fd target is ignored) bind at entry; see the
             // redirect_err guard above (rubash#170).

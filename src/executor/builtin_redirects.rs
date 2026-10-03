@@ -63,6 +63,12 @@ impl Executor {
 
         if let Some(redirect) = &cmd.redirect_in {
             let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: the diagnostic already
+            // printed at the expansion; the null-command redirect pass
+            // must not open the failed target either.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             if redirect.fd_var.is_some() {
             } else if is_closed_redirect_target(&target) {
             } else if let Some((source_fd, _)) = redirect_target_fd_and_move(&target) {
@@ -91,6 +97,12 @@ impl Executor {
 
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: the diagnostic already
+            // printed at the expansion; the null-command redirect pass
+            // must not open the failed target either.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             if redirect.fd_var.is_some() {
             } else if is_closed_redirect_target(&target) {
             } else if let Some((source_fd, _)) = redirect_target_fd_and_move(&target) {
@@ -113,6 +125,12 @@ impl Executor {
 
         if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: the diagnostic already
+            // printed at the expansion; the null-command redirect pass
+            // must not open the failed target either.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             if redirect.fd_var.is_some() {
             } else if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                 self.open_output_fd_append(&target).or_else(|_| {
@@ -130,6 +148,12 @@ impl Executor {
 
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: the diagnostic already
+            // printed at the expansion; the null-command redirect pass
+            // must not open the failed target either.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             if redirect.fd_var.is_some() {
             } else if !is_closed_redirect_target(&target)
                 && !is_null_device(&target)
@@ -141,6 +165,12 @@ impl Executor {
 
         if let Some(redirect) = &cmd.redirect_err_append {
             let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: the diagnostic already
+            // printed at the expansion; the null-command redirect pass
+            // must not open the failed target either.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             if redirect.fd_var.is_some() {
             } else if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                 OpenOptions::new()

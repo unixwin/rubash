@@ -207,6 +207,11 @@ impl Executor {
                 continue;
             }
             let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: the diagnostic already printed
+            // at the expansion; abort the compound before any fd binding.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             if !saved.iter().any(|saved| saved.fd == fd) {
                 saved.push(SavedNumberedFd {
                     fd,
@@ -388,6 +393,11 @@ impl Executor {
                 _ => continue,
             };
             let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: the diagnostic already printed
+            // at the expansion; abort the compound before any fd binding.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
 
             // See injected_redirect_fd_is_bound (redirection.rs): a redirect
             // injected from an enclosing compound is already realized by the

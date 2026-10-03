@@ -141,6 +141,22 @@ pub struct ShellState {
     /// substitution's command list, never the enclosing word's command.
     /// TODO: Move to ShellState::clone() for automatic isolation (requires &mut self API change)
     pub(crate) parameter_bad_substitution: Cell<bool>,
+    /// A redirect-target pathname expansion failed under failglob (GNU
+    /// subst.c:12668 report_error + exp_jump_to_top_level(DISCARD) inside
+    /// redirection_expand -> expand_words_no_vars). The diagnostic prints
+    /// at detection (expand_word.rs expand_redirect_operand_fields); the
+    /// first redirect-expansion site of the command (the simple-command
+    /// redirect gate, the compound redirect appliers) consumes the flag
+    /// and aborts the command list with status 1, like the argument-word
+    /// failglob port.
+    pub(crate) redirect_failglob_error: Cell<bool>,
+    /// Non-consumed latch for the same event: the stage-subshell boundary
+    /// (pipeline_stages.rs execute_compound_pipeline_stage) reads it to
+    /// propagate the abort OUT of the stage instead of letting the parent
+    /// routing phase re-expand and open the failed target (GNU performs one
+    /// do_redirections in the forked child and the parent never applies the
+    /// element's redirections at all).
+    pub(crate) redirect_failglob_seen: Cell<bool>,
     /// variables.c this_command_name / BASH_COMMAND source — the command
     /// text the DEBUG trap reports. A command substitution evaluates it
     /// against the substitution's own source; the clone boundary restores
@@ -200,6 +216,8 @@ pub(crate) struct InteriorSnapshot {
     arithmetic_nounset_error: bool,
     arithmetic_last_error_category: Option<crate::executor::arithmetic::ArithmeticErrorCategory>,
     parameter_bad_substitution: bool,
+    redirect_failglob_error: bool,
+    redirect_failglob_seen: bool,
     debug_trap_command: Option<String>,
     xtrace_fd: i32,
     xtrace_fd_source: String,
@@ -228,6 +246,8 @@ impl ShellState {
             arithmetic_nounset_error: self.arithmetic_nounset_error.get(),
             arithmetic_last_error_category: self.arithmetic_last_error_category.get(),
             parameter_bad_substitution: self.parameter_bad_substitution.get(),
+            redirect_failglob_error: self.redirect_failglob_error.get(),
+            redirect_failglob_seen: self.redirect_failglob_seen.get(),
             debug_trap_command: self.debug_trap_command.borrow().clone(),
             xtrace_fd: self.xtrace_fd.get(),
             xtrace_fd_source: self.xtrace_fd_source.borrow().clone(),
@@ -267,6 +287,10 @@ impl ShellState {
             .set(snapshot.arithmetic_last_error_category);
         self.parameter_bad_substitution
             .set(snapshot.parameter_bad_substitution);
+        self.redirect_failglob_error
+            .set(snapshot.redirect_failglob_error);
+        self.redirect_failglob_seen
+            .set(snapshot.redirect_failglob_seen);
         *self.debug_trap_command.borrow_mut() = snapshot.debug_trap_command.clone();
         self.xtrace_fd.set(snapshot.xtrace_fd);
         *self.xtrace_fd_source.borrow_mut() = snapshot.xtrace_fd_source.clone();
@@ -318,6 +342,8 @@ impl Clone for ShellState {
             arithmetic_nounset_error: Cell::new(self.arithmetic_nounset_error.get()),
             arithmetic_last_error_category: Cell::new(self.arithmetic_last_error_category.get()),
             parameter_bad_substitution: Cell::new(self.parameter_bad_substitution.get()),
+            redirect_failglob_error: Cell::new(self.redirect_failglob_error.get()),
+            redirect_failglob_seen: Cell::new(self.redirect_failglob_seen.get()),
             xtrace_fd: Cell::new(self.xtrace_fd.get()),
             xtrace_fd_source: RefCell::new(self.xtrace_fd_source.borrow().clone()),
             debug_trap_command: RefCell::new(self.debug_trap_command.borrow().clone()),
