@@ -2972,7 +2972,7 @@ fn word_contains_brace_group(word: &str) -> bool {
         }
         if ch == '\\' {
             escaped = true;
-        } else if ch == '$'
+        } else if (ch == '$' || ch == crate::executor::markers::DATA_DOLLAR)
             && matches!(chars.get(index + 1), Some(&next) if next == '{' || next == '(')
         {
             let open_ch = chars[index + 1];
@@ -3748,5 +3748,27 @@ mod command_word_materialization_tests {
             )),
             "prefix\\Asuffix"
         );
+    }
+
+    /// rubash#416/#417: the DATA_DOLLAR carrier (U+001F) in a COOKED word is
+    /// the transport of a quoted `$`; the brace-group detector must skip the
+    /// body it opens exactly like a literal `${...}` (GNU braces.c:679-680
+    /// brace_gobbler "treat ${...} like an escaped brace"). A false positive
+    /// made expand_braces_with_optional_raw run remove_shell_quotes over
+    /// cooked DATA and eat backslashes: the cooked form of the single-quoted
+    /// word `a\nb${VAR}c` lost its backslash and reached sed as `anb...`.
+    #[test]
+    fn word_contains_brace_group_skips_data_dollar_carrier_bodies() {
+        use super::word_contains_brace_group;
+        use crate::executor::markers::DATA_DOLLAR;
+        // Cooked single-quoted `a\nb${VAR}c`: the carrier-opened body is
+        // parameter text, so the word carries NO brace group.
+        let cooked = format!("a\\nb{DATA_DOLLAR}{{VAR}}c");
+        assert!(!word_contains_brace_group(&cooked));
+        // ...and the real brace group in the same word is still detected.
+        assert!(word_contains_brace_group(&format!("{cooked}{{a,b}}")));
+        // Literal `${` keeps its skip; a plain `{a,b}` is a real group.
+        assert!(!word_contains_brace_group("${VAR}"));
+        assert!(word_contains_brace_group("{a,b}"));
     }
 }

@@ -175,6 +175,20 @@ const DQUOTE_CARRIER: &[u8] = "\u{E302}".as_bytes();
 /// of a `'` in de-quoted assignment text.
 const SQUOTE_CARRIER: &[u8] = "\u{E301}".as_bytes();
 
+/// True for a `$` byte OR its cooked-word carrier DATA_DOLLAR (U+001F,
+/// markers.rs): quoting already turned this dollar into data, so the brace
+/// scanners must give a following `{` the same treatment GNU gives `${` —
+/// braces.c:679-680 brace_gobbler "treat ${...} like \{...}" — and never
+/// read it as brace syntax. A cooked `'${x,y}'` word arrives here as
+/// `\x1f{x,y}`; without this predicate the scanner expands the member list
+/// that quoting made literal.
+fn is_dollar_or_carrier(byte: u8) -> bool {
+    byte == b'$' || byte == DATA_DOLLAR_BYTE
+}
+
+/// UTF-8 byte of markers.rs DATA_DOLLAR (U+001F) — single-byte C0 carrier.
+const DATA_DOLLAR_BYTE: u8 = 0x1f;
+
 /// Returns the DATA-quote carrier starting at `i`, if any.
 fn data_quote_carrier_at(bytes: &[u8], i: usize) -> Option<&'static [u8]> {
     if bytes.len() >= i + DQUOTE_CARRIER.len()
@@ -267,12 +281,12 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
             i = skip_backtick_body(bytes, i);
             continue;
         }
-        if bytes[i] == b'$' {
+        if is_dollar_or_carrier(bytes[i]) {
             if i + 1 < bytes.len() && bytes[i + 1] == b'(' {
                 i = skip_dollar_paren_body(bytes, i);
                 continue;
             }
-            if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+            if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
                 // $'...' ANSI-C quoting: the single quote opens a quoted
                 // unit, not a quoting state toggle for later bytes.
                 i = skip_single_quoted(bytes, i + 1);
@@ -282,7 +296,8 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
                 // Skip the whole ${...} parameter body: its closing brace is
                 // part of the expansion (subst.c extract_dollar_brace_string),
                 // never the closing brace of an enclosing brace group, and a
-                // comma inside it (foo{bar,${var}.}) does not split.
+                // comma inside it (foo{bar,${var}.}) does not split. The
+                // DATA_DOLLAR carrier form (cooked word) is the same body.
                 i = skip_dollar_brace_body(bytes, i);
                 continue;
             }
@@ -300,8 +315,9 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
             i += 1;
             continue;
         }
-        // Skip ${...} parameter expansions
-        if i > 0 && bytes[i - 1] == b'$' {
+        // Skip ${...} parameter expansions (and the DATA_DOLLAR carrier
+        // form of the same opener in cooked words).
+        if i > 0 && is_dollar_or_carrier(bytes[i - 1]) {
             i += 1;
             continue;
         }
@@ -353,11 +369,11 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
                     j += 1;
                     continue;
                 }
-                b'$' if j + 1 < bytes.len() && bytes[j + 1] == b'{' => {
+                c if is_dollar_or_carrier(c) && j + 1 < bytes.len() && bytes[j + 1] == b'{' => {
                     j = skip_dollar_brace_body(bytes, j);
                     continue;
                 }
-                b'$' if j + 1 < bytes.len() && bytes[j + 1] == b'(' => {
+                c if is_dollar_or_carrier(c) && j + 1 < bytes.len() && bytes[j + 1] == b'(' => {
                     j = skip_dollar_paren_body(bytes, j);
                     continue;
                 }
@@ -704,6 +720,38 @@ mod tests {
     #[test]
     fn test_range_numeric() {
         assert_eq!(expand_braces("{1..3}"), vec!["1", "2", "3"]);
+    }
+
+    /// rubash#416/#417: the DATA_DOLLAR carrier (U+001F) is the cooked-word
+    /// transport of a quoted `$`; a brace body it opens is `${...}`
+    /// parameter text and must be skipped exactly like a literal `${`
+    /// (GNU braces.c:679-680 brace_gobbler "treat ${...} like \{...}").
+    /// Before this invariant the scanner expanded the member list that
+    /// quoting had made literal and downstream remove_shell_quotes ate the
+    /// word's data backslashes (`'a\nb${VAR}c'` -> `anb${VAR}c`).
+    #[test]
+    fn data_dollar_carrier_opens_a_parameter_body_not_a_brace_group() {
+        let cooked_single_quoted = "a\\nb\u{1f}{VAR}c";
+        assert_eq!(
+            expand_braces(cooked_single_quoted),
+            vec![cooked_single_quoted]
+        );
+        // A comma inside the carrier-opened body is parameter text, not a
+        // member separator: `'${x,y}'` stays literal.
+        let cooked_comma_body = "\u{1f}{x,y}";
+        assert_eq!(expand_braces(cooked_comma_body), vec![cooked_comma_body]);
+        // The carrier form of `$(` (command substitution) is skipped the
+        // same way.
+        let cooked_comsub = "\u{1f}(echo {1,2})";
+        assert_eq!(expand_braces(cooked_comsub), vec![cooked_comsub]);
+        // A REAL brace group in the same word still expands; the carrier
+        // body's closing brace is never consumed as the group's.
+        assert_eq!(
+            expand_braces("x\u{1f}{V}r{a,b}"),
+            vec!["x\u{1f}{V}ra", "x\u{1f}{V}rb"]
+        );
+        // Literal `${` keeps its GNU skip.
+        assert_eq!(expand_braces("${V}r{a,b}"), vec!["${V}ra", "${V}rb"]);
     }
 
     #[test]

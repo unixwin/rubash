@@ -2150,8 +2150,17 @@ impl Executor {
             return Ok(Some((String::new(), String::new(), code)));
         }
 
-        let expanded = self.brace_expanded_pipeline_stage(command);
-        let command = &expanded;
+        // GNU runs brace expansion exactly ONCE per word, inside
+        // expand_word_internal (subst.c:11229 -> braces.c brace_expand),
+        // reached from this stage through the per-word machinery below
+        // (split_pipeline_stage_command_word's expand_command_word for the
+        // head, expand_pipeline_stage_arg_words for the arguments). The
+        // text-level pre-pass this port used to pay here rewrote `words`
+        // while leaving `word_metadata` on the pre-expansion word, so the
+        // per-word expansion re-ran braces from the stale raw and
+        // duplicated the tail fields (`printf 'x\n' | printf '%s\n' {a,b}`
+        // printed a, b, b), and for a quoted-brace word (`'{a,b}'{c,d}`)
+        // the rewritten field lost the quote state only the raw carries.
         let command = self.split_pipeline_stage_command_word(command);
         let command = &command;
         let Some(name) = command.words.first().map(String::as_str) else {
@@ -2708,27 +2717,6 @@ impl Executor {
             }
         }
         None
-    }
-
-    fn brace_expanded_pipeline_stage(&self, command: &CommandNode) -> CommandNode {
-        if !self.is_brace_expand_enabled() {
-            return command.clone();
-        }
-
-        let mut expanded = command.clone();
-        expanded.words = command
-            .words
-            .iter()
-            .enumerate()
-            .flat_map(|(index, word)| {
-                let raw = command
-                    .word_metadata
-                    .get(index)
-                    .map(|metadata| metadata.raw.as_str());
-                crate::executor::command_prepare::expand_braces_with_optional_raw(word, raw)
-            })
-            .collect();
-        expanded
     }
 
     fn lastpipe_enabled(&self) -> bool {

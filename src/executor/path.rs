@@ -691,16 +691,33 @@ pub fn external_command_for_program(
 ///
 /// GNU shell_execve (execute_cmd.c:6139+) hands execve the word list that
 /// expand_word_internal produced, so a quoted wildcard reaches the child
-/// literally and nothing ever expands it again. MSYS2- and WinuxCmd-hosted
-/// children instead glob wildcard characters in *unquoted* command-line
-/// arguments themselves (CRT wildcard expansion): `ls "*.txt"` reached the
-/// child as a bare `*.txt` token and was expanded a second time
-/// (niubash#119, rubash-side of #83). Rubash already ran pathname expansion
-/// with quote suppression in expand_command_words, so every `*`/`?`/`[`
-/// surviving in an argument is literal — emit those arguments quoted so the
-/// child runtime does not re-expand them. Command processors that reparse
-/// their own line (cmd.exe batch, PowerShell -File) keep plain .args().
+/// literally and nothing ever expands it again. Two Windows child families
+/// instead re-expand *unquoted* command-line arguments at their runtime
+/// boundary:
+///
+/// - CRT wildcard expansion (any child compiled with setargv): `ls "*.txt"`
+///   reached the child as a bare `*.txt` token and was globbed a second time
+///   (niubash#119, rubash-side of #83) — wildcard-bearing args are quoted for
+///   every child.
+/// - MSYS2/cygwin-hosted children (Git-for-Windows `usr/bin` tools et al.)
+///   rebuild argv from the command line and run shell-like expansion on
+///   unquoted tokens: probe 2026-10-02 against Git GNU sed 4.9 spawned
+///   natively — `s/n/${S}/` reached sed as `s/n/$S/`, `s/n/{S}/` as
+///   `s/n/S/`, `s/n/\n/` as `s/n/<newline>/`, `s/n/\t/` as `s/n/<tab>/`.
+///   A single-quoted sed program inside `$( )` therefore lost its
+///   backslashes and `${...}` braces before exec (rubash#417 — hawaii50's
+///   `sed -e :a -e '$!N;s/\n/${SEP}/;ta'` joined lines with `$SEP`), so for
+///   those children any argument carrying a byte of the MSYS expansion
+///   grammar (`\` escape, `$`, braces, `~`, backtick, quote) is quoted too.
+///
+/// A double-quoted argument decodes to the same string under
+/// CommandLineToArgvW, and the quoting is gated on the child actually being
+/// MSYS-hosted (its program directory ships the POSIX runtime DLL), so
+/// native children keep the exact unquoted command line the argv-dialect
+/// contracts pin (niubash#124(b): path parameters never arrive quoted).
 fn push_external_args(command: &mut Command, args: &[String]) {
+    #[cfg(windows)]
+    let posix_runtime_hosted = windows_program_is_posix_runtime_hosted(command);
     for arg in args {
         #[cfg(windows)]
         {
@@ -708,9 +725,34 @@ fn push_external_args(command: &mut Command, args: &[String]) {
                 command.raw_arg(windows_quoted_wildcard_arg(arg));
                 continue;
             }
+            if posix_runtime_hosted && arg.contains(['\\', '$', '{', '}', '~', '`', '\'']) {
+                command.raw_arg(windows_quoted_wildcard_arg(arg));
+                continue;
+            }
         }
         command.arg(arg);
     }
+}
+
+/// Whether the child program is hosted by an MSYS2/cygwin POSIX runtime —
+/// i.e. it will rebuild its argv from the Windows command line and re-expand
+/// unquoted tokens. Detected by the runtime DLL shipping beside the program
+/// (msys-2.0.dll for MSYS2/Git-for-Windows `usr/bin`, cygwin1.dll for
+/// Cygwin); a failed lookup classifies the child as native, which keeps the
+/// historical unquoted command line.
+#[cfg(windows)]
+fn windows_program_is_posix_runtime_hosted(command: &Command) -> bool {
+    let program = command.get_program();
+    let Some(directory) = std::path::Path::new(program).parent() else {
+        return false;
+    };
+    ["msys-2.0.dll", "cygwin1.dll"].iter().any(|dll| {
+        directory
+            .join(dll)
+            .metadata()
+            .map(|meta| meta.is_file())
+            .unwrap_or(false)
+    })
 }
 
 /// Quote one argument for a Windows command line so the child's argv sees
