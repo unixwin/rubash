@@ -2766,14 +2766,23 @@ struct ISearchState {
 /// compound_exec.rs rubash_spawn_inherited_state, keeps it internal).
 pub const READ_STDIN_MARKER: &str = "__RUBASH_READ_STDIN";
 
-/// bash -i reading commands from a non-tty stdin. GNU still drives readline
-/// here (parse.y yy_readline_get -> bashline.c bash_readline): the prompt is
-/// written to stderr, the input line is echoed, and editing keystrokes in
-/// the stream are honored — C-p/C-n walk the history list, C-r starts
-/// reverse-i-search, and C-o (operate-and-get-next, readline/misc.c
-/// rl_operate_and_get_next) executes the current line and replaces the
-/// buffer with the next history entry.
+/// GNU's interactive command reader for every shape this engine serves:
+/// parse.y:1710-1711 routes an interactive shell's reads through
+/// yy_readline_get -> bashline.c bash_readline -> readline(), whose prompt
+/// stream is stderr (bashline.c:460-461 `rl_outstream = stderr`), whether
+/// stdin is a terminal (raw-mode editing, the engine leaves line editing
+/// to host products' editors) or a pipe (the dumb-terminal echo path):
+/// the prompt is written to stderr, the non-tty input line is echoed, and
+/// editing keystrokes in the stream are honored — C-p/C-n walk the history
+/// list, C-r starts reverse-i-search, and C-o (operate-and-get-next,
+/// readline/misc.c rl_operate_and_get_next) executes the current line and
+/// replaces the buffer with the next history entry.
 pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
+    // parse.y:1710: the SAME reader serves tty and non-tty stdin; the two
+    // cases differ only in who echoes the accepted line (readline echoes
+    // itself on a tty — the Windows cooked console echoes each typed key —
+    // while the dumb-terminal path echoes through rl_outstream).
+    let stdin_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
     executor.set_env(READ_STDIN_MARKER, "1");
     executor.inherit_process_stdin();
     // The first primary-prompt read initializes readline
@@ -2876,11 +2885,23 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                         None,
                     )
                 };
+                // eval.c:203-207 reader_loop: a parse error sets
+                // EOF_Reached only `if (interactive == 0)` — an interactive
+                // shell reports the diagnostic and keeps reading (verified
+                // WSL GNU 5.3.0 `bash --rcfile /dev/null -i`: `echo )bad`
+                // -> "bash: syntax error near unexpected token `)'" and the
+                // NEXT command still runs, rc 0). The parse abort raised
+                // ExitCode(2) -> exit_jump_pending; this driver is the
+                // interactive reader, so a parse-flagged jump discards the
+                // group only and must not end the session. A real `exit`
+                // builtin (or errexit, which GNU's piped-`-i` also honors)
+                // still terminates below.
                 let parse_error = executor.take_parse_error();
                 pending.clear();
                 group.clear();
-                if parse_error
-                    || executor.take_exit_jump_pending()
+                if parse_error {
+                    let _ = executor.take_exit_jump_pending();
+                } else if executor.take_exit_jump_pending()
                     || (status != 0
                         && stdin_script_errexit_enabled(executor)
                         && !executor.last_command_inverted())
@@ -2898,17 +2919,27 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
         if pending.is_empty() {
             executor.execute_prompt_command();
         }
-        // readline.c readline(): print the EXPANDED PS1 on stderr, then echo
-        // the input line (non-tty input is echoed by readline's
+        // readline.c readline(): print the EXPANDED prompt on stderr, then
+        // echo the input line (non-tty input is echoed by readline's
         // dumb-terminal path). bashline.c:461-462 rl_outstream = stderr;
-        // parse.y:6158-6159 prompt_again passes PS1 through
+        // parse.y:6158-6159 prompt_again passes the prompt through
         // decode_prompt_string, so raw-byte markers (ESC carriers) must be
         // rendered as their real bytes — visible ESC noise in the echo was
-        // rubash#297's family symptom.
-        let ps1 = executor.get_env("PS1").unwrap_or_default().to_string();
+        // rubash#297's family symptom. parse.y:6148-6160 prompt_again decodes
+        // *prompt_string_pointer: PS1 for the primary read, PS2 for every
+        // continuation read within one command (read_secondary_line
+        // parse.y:2327 `prompt_string_pointer = &ps2_prompt`); a non-empty
+        // `pending` is exactly an open command/heredoc, so its prompt is the
+        // expanded PS2 (WSL GNU 5.3.0 piped-`-i` renders `> ` for the
+        // `then`/`fi` lines of an open `if`).
+        let prompt_name = if pending.is_empty() { "PS1" } else { "PS2" };
+        let prompt_text = executor
+            .get_env(prompt_name)
+            .unwrap_or_default()
+            .to_string();
         let rendered =
             crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(
-                &executor.expand_prompt_string(&ps1),
+                &executor.expand_prompt_string(&prompt_text),
             );
         // readline display.c:437-463 (expand_prompt): the \[ \] prompt
         // markers (RL_PROMPT_START/END_IGNORE) are width-accounting
@@ -2931,6 +2962,19 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             Some(count) => Ok(count),
             None => read_unbuffered_line(&mut raw),
         };
+        if stdin_is_tty && raw.ends_with("\r\n") {
+            // The Windows console delivers cooked lines ending "\r\n".
+            // GNU tty input runs with ICRNL (termios: the Enter key's CR is
+            // translated to NL before bash reads a byte), so the reader
+            // never sees the CR — strip the pair's CR here to keep the
+            // dispatch loop from accepting the line twice (once at '\r'
+            // with the content, once at '\n' with an empty buffer). Piped
+            // input keeps a literal CR, exactly like GNU on a pipe.
+            let newline = raw.pop();
+            debug_assert_eq!(newline, Some('\n'));
+            raw.pop();
+            raw.push('\n');
+        }
         match line_result {
             // bashline.c bash_readline: interactive EOF synthesizes the
             // `exit` command, whose builtin echoes "exit" (or "logout")
@@ -2946,7 +2990,14 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             Ok(_) => {}
             Err(_) => eof = true,
         }
-        eprint!("{raw}");
+        // readline's echo of the accepted line: the dumb-terminal
+        // (non-tty) path echoes through rl_outstream because a pipe has no
+        // echo; on a tty readline owns the echo itself (raw mode) — the
+        // Windows cooked console likewise echoes every typed key as it is
+        // pressed, so echoing again would double-print each line.
+        if !stdin_is_tty {
+            eprint!("{raw}");
+        }
 
         let chars: Vec<char> = raw.chars().collect();
         let mut i = 0usize;

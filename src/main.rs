@@ -95,12 +95,13 @@ fn run_main() -> i32 {
         return run_args(&mut executor, &args[1..]);
     }
 
-    if io::stdin().is_terminal() {
-        run_repl(&mut executor);
-        0
-    } else {
-        run_stdin_script(&mut executor)
-    }
+    // GNU shell.c:541-547: with no operands (and no -c string), tty stdin +
+    // tty stderr make the shell interactive — init_interactive — and POSIX
+    // says "the -s option shall be assumed", so commands come from stdin
+    // either way (shell.c:787-790 read_from_stdin). The stdin-script vs
+    // interactive-reader split inside run_no_script_with_init mirrors the
+    // same C: a non-tty stdin stays the script driver (shell.c:780-786).
+    run_no_script_with_init(&mut executor, None)
 }
 
 fn print_usage() {
@@ -1101,6 +1102,20 @@ fn apply_init_interactive_defaults(executor: &mut Executor) {
 }
 
 fn run_no_script_with_init(executor: &mut Executor, init_file: Option<&str>) -> i32 {
+    // GNU shell.c:541-547: `forced_interactive (-i) || (no -c command and
+    // no --wordexp and (no remaining operands or -s) and isatty(stdin) and
+    // isatty(stderr))` -> init_interactive, which runs before the startup
+    // files. Every caller of this driver has consumed its operands (bare
+    // invocation or trailing options only), so the tty pair alone derives
+    // the same interactivity `-i` forces. stderr not a terminal (e.g.
+    // `rubash 2>log` on a console) keeps the shell NON-interactive — GNU
+    // then reads the tty stdin as a plain script with no prompts.
+    if executor.get_env("__RUBASH_INTERACTIVE").is_none()
+        && io::stdin().is_terminal()
+        && io::stderr().is_terminal()
+    {
+        executor.set_env("__RUBASH_INTERACTIVE", "1");
+    }
     executor.inherit_process_stdin();
     apply_startup_job_control(executor);
     if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
@@ -1124,15 +1139,12 @@ fn run_no_script_with_init(executor: &mut Executor, init_file: Option<&str>) -> 
         // fallback previously did this before them (main.rs call site).
         prepare_interactive_history(executor);
     }
-    if io::stdin().is_terminal() {
-        run_repl(executor);
-        0
-    } else if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
-        // shell.c: interactive shell with piped stdin still reads commands
-        // through readline (parse.y yy_readline_get -> bashline.c
-        // bash_readline), which echoes the prompt and input to stderr and
-        // honors editing keys (C-p/C-n history, C-r i-search, C-o
-        // operate-and-get-next) even without a tty.
+    // parse.y:1710-1711: an interactive shell reads EVERY command through
+    // yy_readline_get -> bashline.c:460-461 bash_readline -> readline(),
+    // whose prompt stream is stderr — for the tty (console) case just as
+    // for the piped one. The old branch here ran a placeholder banner +
+    // hardcoded `$ ` reader instead (rubash#419).
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
         run_interactive_stdin(executor)
     } else {
         run_stdin_script(executor)
@@ -1140,6 +1152,16 @@ fn run_no_script_with_init(executor: &mut Executor, init_file: Option<&str>) -> 
 }
 
 fn run_stdin_script_with_init(executor: &mut Executor, init_file: Option<&str>) -> i32 {
+    // GNU shell.c:541-547: the interactive test's second arm is
+    // `(arg_index == argc) || read_from_stdin`; `-s` sets read_from_stdin,
+    // so tty stdin + tty stderr make `bash -s` interactive too. Without
+    // `-i` and with a piped stdin the shell stays non-interactive.
+    if executor.get_env("__RUBASH_INTERACTIVE").is_none()
+        && io::stdin().is_terminal()
+        && io::stderr().is_terminal()
+    {
+        executor.set_env("__RUBASH_INTERACTIVE", "1");
+    }
     executor.inherit_process_stdin();
     // Same ordering as the script-file path: shell.c:1969
     // initialize_job_control precedes stdin reader setup, and shell.c:547 +
@@ -1163,7 +1185,16 @@ fn run_stdin_script_with_init(executor: &mut Executor, init_file: Option<&str>) 
     if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
         prepare_interactive_history(executor);
     }
-    run_stdin_script(executor)
+    // Interactive (-i forced, or the `-s` tty pair above): GNU reads the
+    // commands through readline with the prompt on stderr (parse.y:1710
+    // yy_readline_get; verified WSL GNU 5.3.0: `printf 'echo $-\n' | bash
+    // -i -s` renders PS1 on stderr before the echo). Non-interactive `-s`
+    // with piped stdin stays the promptless script driver.
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+        run_interactive_stdin(executor)
+    } else {
+        run_stdin_script(executor)
+    }
 }
 
 fn run_init_file(executor: &mut Executor, init_file: &str) -> i32 {
@@ -1189,45 +1220,6 @@ fn run_init_file(executor: &mut Executor, init_file: &str) -> i32 {
     let status = run_source(executor, &contents, false);
     executor.remove_env("__RUBASH_INTERACTIVE_FLAG_OFF");
     status
-}
-
-fn run_repl(executor: &mut Executor) {
-    // shell.c:787-790: an interactive shell with no script operand reads its
-    // commands from stdin, so GNU sets read_from_stdin and `$-` gains `s`.
-    executor.set_env(rubash::script_driver::READ_STDIN_MARKER, "1");
-    // First primary-prompt read = readline initialization, which binds
-    // LINES/COLUMNS (terminal.c:374 sh_set_lines_and_columns; rubash#300).
-    rubash::script_driver::bind_interactive_screen_size(executor);
-    println!("Rubash - A Rust implementation of GNU Bash");
-    println!("Type 'exit' to quit.\n");
-
-    let stdin = io::stdin();
-    let mut input = String::new();
-
-    loop {
-        // eval.c:336 parse_command runs PROMPT_COMMAND before each primary
-        // prompt read (interactive, non-string input, not mid-alias). The
-        // REPL loop reads one command per iteration, so the hook belongs
-        // at the loop head.
-        executor.execute_prompt_command();
-        print!("$ ");
-        io::stdout().flush().unwrap();
-
-        input.clear();
-        match stdin.lock().read_line(&mut input) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => break,
-        }
-
-        let input = input.trim();
-        if input == "exit" || input == "quit" {
-            println!("Goodbye!");
-            break;
-        }
-
-        run_line(executor, input, true);
-    }
 }
 
 fn run_stdin_script(executor: &mut Executor) -> i32 {
@@ -1446,13 +1438,4 @@ fn internal_head_line_count(args: &[String]) -> Option<usize> {
         index += 1;
     }
     None
-}
-
-fn run_line(executor: &mut Executor, input: &str, interactive: bool) -> i32 {
-    let input = input.trim();
-    if input.is_empty() {
-        return executor.last_exit_code();
-    }
-
-    run_source(executor, input, interactive)
 }
