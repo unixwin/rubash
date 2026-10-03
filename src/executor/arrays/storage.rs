@@ -193,6 +193,45 @@ pub(in crate::executor) fn parse_array_subscript(name: &str) -> Option<(&str, &s
     Some((array_name, &rest[..close]))
 }
 
+/// Tokenize an array reference in ALREADY-EXPANDED operand text (the `-v' /
+/// `printf -v' / `unset' operand rewrites). GNU's cond_expand_word ends in
+/// dequote_list, which only strips CTLESC pairs (subst.c:4807
+/// dequote_string) — a `"' around a `$var' still brackets the subscript
+/// when test.c's flag-0 skipsubscript runs, so GNU's scan sees balanced
+/// quotes. The rubash operand is fully dequoted, so an expansion-produced
+/// quote is DATA indistinguishable from syntax; a quote-active scan would
+/// swallow its `]' (`assoc["]' with value `"' — quotearray1.sub mytest
+/// '"'). Scan with quote state off — skip_matched_pair's flags&1 mode
+/// for text "after expansion has been performed" (subst.c:2080-2086):
+/// backslash pairs and bracket depth only.
+pub(in crate::executor) fn parse_expanded_array_subscript(name: &str) -> Option<(&str, &str)> {
+    let open = name.find('[')?;
+    let bytes = name.as_bytes();
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    let mut close = None;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 1,
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    let close = close?;
+    if close != bytes.len() - 1 || close == open + 1 {
+        return None;
+    }
+    Some((&name[..open], &name[open + 1..close]))
+}
+
 pub(in crate::executor) fn format_indexed_array_storage(
     entries: BTreeMap<usize, String>,
 ) -> String {

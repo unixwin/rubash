@@ -521,7 +521,7 @@ impl Executor {
             &self.shell_state.env_vars,
         );
         let cooked = self.expand_conditional_word(operand);
-        let rewritten = self.rewrite_conditional_v_operand(&cooked, arrayref)?;
+        let rewritten = self.rewrite_conditional_v_operand(&cooked, arrayref, raw)?;
 
         Ok(crate::builtins::test::variable_is_set(
             &rewritten,

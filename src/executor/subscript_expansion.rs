@@ -391,12 +391,58 @@ impl Executor {
     /// the cooked text with cooked quotes hoisted to data carriers before
     /// the expand pass. A raw word that fails flag-1 (`F[]]`) has no
     /// protected `]` and fails flag-0 outright.
+    ///
+    /// The faithful boundary derivation needs the RAW token: under Q_ARITH
+    /// an unquoted `[` runs `expand_array_subscript` (subst.c:11500-11506
+    /// `case '['`), whose `skipsubscript(.., 0)` takes the flag-0 span of
+    /// the RAW subscript, expands it once (`expand_subscript_string`) and
+    /// `sh_backslash_quote`s the result (abstab: `[ ] $ ` ~ \ ' "`) —
+    /// `dequote_string` strips only CTLESC pairs, so the escapes survive
+    /// into arg1 and the flag-0 re-scan sees the structural `]` as the
+    /// LAST unescaped one. test.c's `case 'v'` ignores its flags argument
+    /// entirely (TEST_ARRAYEXP is dead in 5.3), so the raw token alone
+    /// fixes the boundary: when the raw word IS `name[sub]` with the
+    /// flag-0 `]` ending the token, the cooked operand is
+    /// `name[<once-expanded sub>]` — the content between the first `[` and
+    /// the final byte, taken VERBATIM (Protected: GNU's second
+    /// `expand_subscript_string` pass only unescapes). An expansion that
+    /// empties the subscript makes arg1 `name[]`, which flag-0 rejects
+    /// (`len == 1`, arrayfunc.c:1322), so the whole word falls back to a
+    /// scalar lookup.
     pub(in crate::executor) fn rewrite_conditional_v_operand(
         &mut self,
         operand: &str,
         arrayref: bool,
+        raw: Option<&str>,
     ) -> Result<String, ()> {
-        let Some((name, subscript)) = parse_array_subscript(operand) else {
+        if let Some(raw_token) = raw {
+            if let Some((rname, _raw_sub)) = parse_array_subscript(raw_token) {
+                if is_shell_name(rname)
+                    && operand.starts_with(rname)
+                    && operand[rname.len()..].starts_with('[')
+                    && operand.ends_with(']')
+                {
+                    let content = &operand[rname.len() + 1..operand.len() - 1];
+                    let assoc = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, rname);
+                    if content.is_empty() || (!assoc && matches!(content, "@" | "*")) {
+                        return Ok(operand.to_string());
+                    }
+                    if assoc {
+                        let key = self.resolve_array_subscript(SubscriptSource::Protected(content));
+                        return Ok(format!(
+                            "{rname}[{}]",
+                            crate::executor::arithmetic::encode_arithmetic_assoc_key(&key)
+                        ));
+                    }
+                    return match self.eval_indexed_subscript(SubscriptSource::Protected(content)) {
+                        IndexedSubscript::Index(index) => Ok(format!("{rname}[{index}]")),
+                        IndexedSubscript::Empty => Ok(operand.to_string()),
+                        IndexedSubscript::Error => Err(()),
+                    };
+                }
+            }
+        }
+        let Some((name, subscript)) = parse_expanded_array_subscript(operand) else {
             return Ok(operand.to_string());
         };
         if !is_shell_name(name) {
@@ -535,7 +581,42 @@ impl Executor {
         // already derived the VA_ONEWORD half via word_is_arrayref, so strip
         // the carrier byte before name/subscript parsing.
         let operand = crate::builtins::arrayref::take_arrayref_flag(operand).1;
-        let Some((name, subscript)) = parse_array_subscript(operand) else {
+        // tokenize_array_reference (arrayfunc.c:1286-1324) picks the scan
+        // from the VA bits: VA_ONEWORD takes `strlen(t) - 1` — the LAST
+        // byte `]` closes and no quote/escape scan runs (`printf -v
+        // A[$rkey]` with rkey=`]` arrives as `A[]]`, whose flag-0 scan
+        // closes at the FIRST `]` and leaves an empty subscript); an assoc
+        // base under VA_NOEXPAND uses skipsubscript flag-1 (the first `]`
+        // closes; quotes and backslashes are data — `declare
+        // B["foo[bar"]=v` under assoc_expand_once); every other case runs
+        // the flag-0 quote-aware scan.
+        let operand_open = operand.find('[');
+        let va_parsed: Option<(&str, &str)> = if oneword {
+            operand_open
+                .and_then(|open| operand.get(open + 1..))
+                .and_then(|sub| {
+                    (sub.len() >= 2 && sub.ends_with(']')).then(|| {
+                        let open = operand_open.expect("checked above");
+                        (&operand[..open], &sub[..sub.len() - 1])
+                    })
+                })
+        } else if noexpand
+            && operand_open.is_some_and(|open| {
+                is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &operand[..open])
+            })
+        {
+            operand_open.and_then(|open| {
+                operand.get(open + 1..).and_then(|sub| {
+                    sub.find(']')
+                        .filter(|close| *close >= 1 && *close == sub.len() - 1)
+                        .map(|close| (&operand[..open], &sub[..close]))
+                })
+            })
+        } else {
+            None
+        };
+        let Some((name, subscript)) = va_parsed.or_else(|| parse_expanded_array_subscript(operand))
+        else {
             return Ok(operand.to_string());
         };
         let is_assoc =
