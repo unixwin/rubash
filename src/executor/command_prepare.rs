@@ -2401,7 +2401,10 @@ impl Executor {
     // alternate is expanded here as the body of a double-quoted span: affix
     // text attaches to the first/last positional word, one word per
     // parameter. Returning None leaves every other form on its existing path.
-    fn quoted_braced_alternate_positional_at_values(&mut self, word: &str) -> Option<Vec<String>> {
+    pub(in crate::executor) fn quoted_braced_alternate_positional_at_values(
+        &mut self,
+        word: &str,
+    ) -> Option<Vec<String>> {
         let braced = word.strip_prefix(STORAGE_WORD_PREFIX)?;
         if !braced.starts_with("${") || !braced.ends_with('}') {
             return None;
@@ -2461,6 +2464,43 @@ impl Executor {
         }
 
         if !word_used {
+            // A `[@]`-subscripted list operand that is unset or empty leaves
+            // temp NULL (arrayfunc.c:1517-1533 array_value_internal returns
+            // NULL for an unset variable and for an empty element list)
+            // while chk_atstar — called before the operator switch
+            // (subst.c:10119-10128) — has already set quoted_dollar_at for
+            // the `[@]` reference under double quotes (subst.c:7635-7639).
+            // The `+` arm's not-used branch then leaves the word NULL
+            // (subst.c:10386-10420), and an empty expansion in a
+            // quoted_dollar_at word is discarded whole (subst.c:12036-12048):
+            // ZERO words, exactly like `"$@"` with no positional parameters.
+            // A scalar cell is NOT empty — GNU reads value_cell as a
+            // one-element list (arrayfunc.c:1535-1539), so `"${s[@]:+y}"`
+            // with s=abc keeps using the alternate — and all-empty elements
+            // (a=("" "")) are not empty either: their string_list_dollar_at
+            // value is non-null and `:+` uses the alternate (array22.sub).
+            // `[*]` never sets quoted_dollar_at under double quotes
+            // (subst.c:7641-7646 requires quoted == 0), so it keeps the
+            // one-empty-word quoted-null result of the existing paths.
+            if let Some(base) = var_name.strip_suffix("[@]") {
+                if is_shell_name(base) {
+                    let empty_list = match self.braced_operator_list_values(var_name) {
+                        Some((values, _)) => values.is_empty(),
+                        None => {
+                            // No array storage: unset, or a scalar/dynamic
+                            // cell that answers by name. Only a variable
+                            // with neither storage nor cell is truly unset.
+                            self.shell_variable_value(base).is_none()
+                                && self
+                                    .dynamic_stack_array_values(base)
+                                    .map_or(true, |values| values.is_empty())
+                        }
+                    };
+                    if empty_list {
+                        return Some(Vec::new());
+                    }
+                }
+            }
             // Alternate unused: quoted-empty/quoted-null handling belongs to
             // the existing paths, which already match GNU for those forms.
             return None;

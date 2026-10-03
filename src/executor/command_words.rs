@@ -331,6 +331,30 @@ impl Executor {
             }
             return Ok(values);
         }
+        // A fully double-quoted for-list word (STORAGE_WORD_PREFIX marker)
+        // runs the same quoted braced-alternate fan-outs the command-argv
+        // path runs (command_prepare.rs): GNU subst.c:10119-10128
+        // parameter_brace_expand calls chk_atstar on every valid array
+        // reference BEFORE the operator switch, so a double-quoted
+        // `"${a[@]:-}"` sets quoted_dollar_at (subst.c:7635-7639) even with
+        // the `:-` operator present; with the array set and non-null the
+        // `-`/`:-` arm just uses TEMP (subst.c:10350-10390), the
+        // string_list_dollar_at value whose element separators survive
+        // double-quote joining — one word per element (arrayfunc.c:1552).
+        // For-in lists expand words exactly like command words
+        // (subst.c:13219 expand_word_list_internal), so the argv path's
+        // STORAGE_WORD_PREFIX block applies here unchanged; without it the
+        // for path fell to the scalar operator expander, which joins
+        // `[@]` with spaces (parameter_operator_value) and lost the
+        // element boundaries (bash_it.sh `for f in "${BASH_IT_LIB[@]:-}"`).
+        if word.starts_with(STORAGE_WORD_PREFIX) {
+            if let Some(values) = self.quoted_braced_alternate_positional_at_values(word) {
+                return Ok(values);
+            }
+            if let Some(values) = self.braced_alternate_word_values(word, raw) {
+                return Ok(values);
+            }
+        }
         // GNU runs brace expansion before parameter expansion; the brace
         // scanner skips dollar-brace bodies, so a dollar-brace in the word
         // does not suppress the split (foo{bar,${var.} -> foobar foobaz.).
