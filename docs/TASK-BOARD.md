@@ -375,3 +375,12 @@
 - **defaults-as-floor 落地**（162e9cb，含与 niu365 的 shell.rs/docs 冲突手工合并）：槽位认领模型（非空 PS1=认领、PROMPT_COMMAND 只算钩子、释放即回地板、地板从不写 PS1）+rc 顺序契约+**发售面死字段清零**（example+README+getting-started+advanced-usage 五文档+6 个退役动词）+冲突实证（单测 4/二进制 5/ConPTY 3：真装 OMB 全链认领、unset 回地板、#117 不误伤）
 - **#161 开（1.2.6 发布门）**：package-release.ps1 仍 staging 退役 bundle 而产品动词硬拒——发布前必须裁（顺带 hooks.md 死契约 owner 裁定）
 - 六车道在飞：pool1/pool2/olddebt/parse4/anyplug/lazystudy
+
+## 2026-10-03 终 VII：wt48 四车道齐发——开单池全量推进
+
+- **盘点**：rubash 7 开（#413/#378/#375/#359/#281/#242/#241——后三为 perf 深水记账单）；niubash 4 开（#161 发布门/#124 等上游/#156 等上游/#104 winget）；WinuxCmd 5 开（#1145 POSIX argv/#1143/#1142/#1127/计划）
+- **wt48/resid413**：#413 batch-2 四形态（已有关联引用+探针）+ #359（`:` 文件名追加重定向）
+- **wt48/assoc391**：assoc 16 行 typed-carrier 深水（E309 WS 粘合传输；83 套件全量 A/B 硬门禁）
+- **wt48/release161**：niubash#161 发布门（删退役 bundle staging+hooks.md 处置）+ lazystudy 遗留 3 commit 手工合并（独立下载驱动/合集+TUI/文档）
+- **wt48/wcmd1145**：WinuxCmd#1145（cp/ls POSIX argv 补齐——Option B 产品面兑现的最后上游项）
+- 四车道并行；交付即回收
