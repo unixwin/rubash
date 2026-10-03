@@ -437,3 +437,11 @@
 - **niubash 1.3.1**（a6902b23）：syncadopt 六修（c54062f）+引擎升级+CHANGELOG；tag v1.3.1 已推、release 工作流在跑（WinuxCmd 最新=v1.1.5 自动取）
 - **插曲**：c54062f CI 首跑 shell::tests 单 env 竞态断言+持锁 panic→PoisonError 级联八连红（本地双轮全绿、重跑绿=坐实 flake）；**毒锁级联硬化待单开**（PROCESS_STATE_LOCK 用 unwrap_or_else(into_inner)，让 flake 只红自己）
 - **发版链新坑入账**：cargo 改 rubash 版本要求后 build 会去拉 git 依赖——TLS 窗口期需 https_proxy 前缀跑 build 让 lock 同步，lock 未进 commit=release --locked 必炸（amend 补救）
+
+## 2026-10-04 终 XV：v1.3.2 三平台首发成功（九跑三根因马拉松收局）
+
+- **v1.3.2 发布**：12 产物（win x64/arm64 setup+zip 双命名系 + linux x86_64/aarch64 + macos arm64/x86_64 tarball）；四门全绿（六平台构建各自烟雾+金用户旅程门）；winget PR 444854 第 7 次换版至 1.3.2
+- **旅程门九跑考古（三根因全闭环入档）**：①charmap 编码（env+reconfigure 修）②Copy-Item 嵌套陷阱——tag 自带 wt57 原版脚本，restore 嵌套复制使 2-5 跑全执行旧版（物证：0 唤醒字节/无&&）③工作区副本生死无常+推送静默失败——终局方案=运行步内 `git checkout origin/master -- scripts/journey` 从 git 对象库确定性投递 + dispatch 前必验远端 SHA（发版链新规）
+- **门禁能力沉淀**：UTF-8 stdio/投递验证（静默+Ctrl-U 唤醒+回显确认+投递级重发）/输出锚定排序/J6 单发送——全在脚本+docs/journey-gate.md；#167（时钟重绘吃首键，产品 bug）由投递加固顺带发现
+- **本日引擎侧**：#424（与 #419 冲突手工合流）、wt66 `${arr[@]:-}` 待 cherry-pick、wt65 诚实否决（#241 两条路线 1.7-1.8% 低于诚实线；火力转 #281 lextok=46% 墙钟）
+- 1.3.3 池：wt66、#167、#281 车道、#242/#375/#378、套件计数三面一致（SKILL.md 57/83 vs README vs 台账 63/83）
