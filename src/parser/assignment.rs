@@ -312,6 +312,20 @@ pub fn split_compound_assignment_words(inner: &str) -> Vec<String> {
             _ => {}
         }
 
+        // U+E309 tags expansion-produced field boundaries inside a glued
+        // word-expansion product (executor compound_field_split_transport):
+        // the tagged pair rides INSIDE the element word (GNU
+        // parse_string_to_word_list sees the raw pre-expansion word list —
+        // the assoc kvpair key/value never field-split, arrayfunc.c:630), so
+        // the pair is glued here exactly like the storage splitters do.
+        if ch == crate::executor::markers::COMPOUND_EXPANSION_WS_TAG && !single && !double {
+            current.push(ch);
+            if let Some((_, next)) = chars.next() {
+                current.push(next);
+            }
+            continue;
+        }
+
         if ch.is_ascii_whitespace() && !single && !double && bracket_depth == 0 && paren_depth == 0
         {
             if !current.is_empty() {

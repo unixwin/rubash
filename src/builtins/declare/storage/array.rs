@@ -44,10 +44,9 @@ pub(in crate::builtins) fn append_array_value(
         .unwrap_or(0);
     let scalar_append = !value.starts_with('(');
 
-    for token in parse_array_tokens(value)
-        .into_iter()
-        .flat_map(|token| split_indexed_tagged_token(&token))
-    {
+    for token in parse_array_tokens(value).into_iter().flat_map(|token| {
+        split_indexed_tagged_token(&token, env_vars.get("IFS").map(String::as_str))
+    }) {
         // GNU arrayfunc.c:753 assign_compound_array_list: only words with
         // the W_ASSIGNMENT flag (set during parsing) are checked for
         // [subscript]=value form. Words produced by field-splitting an

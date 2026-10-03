@@ -172,7 +172,14 @@ fn declaration_compound_trace_text(interior: &str) -> String {
         .iter()
         .map(|element| {
             let text = compound_element_xtrace_text(element);
-            let dequoted = crate::lexer::quotes::remove_shell_quotes(&text);
+            let dequoted = crate::lexer::quotes::remove_shell_quotes(&text)
+                // A glued word-expansion product (compound_field_split_
+                // transport) rides behind the ARRAY_FIELD_SPLIT_MARKER
+                // prefix with U+E309-tagged field separators; the trace
+                // prints the element's visible text (GNU expands the RAW
+                // word list), so the transport markers come off here.
+                .trim_start_matches(crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER)
+                .replace(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG, "");
             match crate::parser::assignment::split_subscripted_element(&dequoted) {
                 Some((subscript, value, append)) => {
                     let operator = if append { "+=" } else { "=" };

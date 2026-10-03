@@ -897,14 +897,26 @@ impl Executor {
         if assoc {
             // GNU kvpair_assignment_p (arrayfunc.c:665): the FIRST word
             // decides — a `[`-led word selects the strict [key]=value loop,
-            // anything else is alternating literal key/value pairs.
+            // anything else is alternating literal key/value pairs. A glued
+            // word-expansion product (compound_field_split_transport) rides
+            // behind the ARRAY_FIELD_SPLIT_MARKER prefix, so its `[` bytes
+            // are data and it never selects strict mode (W_ASSIGNMENT is
+            // parse-time only, parse.y:5786) — but the prefix is transport,
+            // not key text, so it comes off before the expansion.
             let strict = tokens.first().is_some_and(|token| token.starts_with('['));
+            fn strip_transport(token: &str) -> &str {
+                token
+                    .strip_prefix(ARRAY_FIELD_SPLIT_MARKER)
+                    .unwrap_or(token)
+            }
             if !strict {
                 for pair in tokens.chunks(2) {
-                    let key = self.expand_subscript_string(&pair[0]);
+                    let key = self.expand_subscript_string(strip_transport(&pair[0]));
                     let value = pair
                         .get(1)
-                        .map(|value| self.expand_compound_assignment_rhs(name, value))
+                        .map(|value| {
+                            self.expand_compound_assignment_rhs(name, strip_transport(value))
+                        })
                         .unwrap_or_default();
                     elements.push(quote_compound_field_value(&key));
                     elements.push(quote_compound_field_value(&value));

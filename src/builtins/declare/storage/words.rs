@@ -329,14 +329,32 @@ fn unquote_ansi_c_storage(value: &str) -> String {
 /// (embedded_mutations expansion_ws_marked) is a split boundary for
 /// indexed arrays even though the same bytes stay glued for associative
 /// words. Empty fields drop like GNU's field splitting.
-pub(in crate::builtins::declare) fn split_indexed_tagged_token(token: &str) -> Vec<String> {
+pub(in crate::builtins::declare) fn split_indexed_tagged_token(
+    token: &str,
+    ifs: Option<&str>,
+) -> Vec<String> {
+    // A glued word-expansion product (executor compound_field_split_transport)
+    // keeps its ARRAY_FIELD_SPLIT_MARKER prefix through this re-split: every
+    // field regains the prefix so downstream passes treat each field as the
+    // word-expansion product it is (issue #198 `[sub]=` re-read protection,
+    // per-field glob routing — identical tokens to the pre-glue transport).
+    // The U+E309 boundary is the IFS character set the producer split on
+    // (None = the default " \t\n"); the IFS_GLUE sentinel pairs (quoted
+    // expansion whitespace) stay glued like the executor-side twin.
+    let ifs_chars: &str = match ifs {
+        Some(ifs) if !ifs.is_empty() => ifs,
+        _ => " \t\n",
+    };
+    let is_boundary = |ch: char| ifs_chars.contains(ch);
+    let tagged = token.starts_with(crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER);
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut chars = token.chars().peekable();
     while let Some(ch) = chars.next() {
         if (ch == crate::executor::markers::IFS_GLUE
-            || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG)
-            && matches!(chars.peek(), Some(' ' | '\t' | '\n'))
+            && matches!(chars.peek(), Some(' ' | '\t' | '\n')))
+            || (ch == crate::executor::COMPOUND_EXPANSION_WS_TAG
+                && chars.peek().is_some_and(|next| is_boundary(*next)))
         {
             chars.next();
             if !current.is_empty() {
@@ -348,6 +366,24 @@ pub(in crate::builtins::declare) fn split_indexed_tagged_token(token: &str) -> V
     }
     if !current.is_empty() {
         parts.push(current);
+    }
+    if tagged {
+        parts = parts
+            .into_iter()
+            .map(|part| {
+                // The first part keeps the input's own prefix; later parts
+                // (and parts that already carry one) must not double up —
+                // the storage loop strips exactly one marker per token.
+                if part.starts_with(crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER) {
+                    part
+                } else {
+                    format!(
+                        "{}{part}",
+                        crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER
+                    )
+                }
+            })
+            .collect();
     }
     parts
 }

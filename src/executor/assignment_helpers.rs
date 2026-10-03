@@ -65,9 +65,17 @@ pub(in crate::executor) fn append_assoc_value(
     // GNU arrayfunc.c kvpair_assignment_p: the FIRST compound word decides
     // the mode — kvpair (alternating pairs) requires the first word to NOT
     // start with `[` (assoc-kv2 probe M2: a=(a=b c=d) stores [a=b]="c=d").
+    // A word carrying U+E309 glue is a word-expansion product
+    // (compound_field_split_transport): GNU decides assignment-ness on the
+    // RAW pre-expansion word (parse.y:5786 sets W_ASSIGNMENT at parse time
+    // only), so expansion-produced `[`/`]` bytes are data and such a word
+    // never opens strict mode.
     let explicit_subscripts = tokens
         .first()
-        .map(|token| token.starts_with('['))
+        .map(|token| {
+            token.starts_with('[')
+                && !token.contains(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG)
+        })
         .unwrap_or(false);
 
     if !explicit_subscripts {
@@ -164,10 +172,16 @@ pub(in crate::executor) fn assoc_bare_elements(value: &str) -> Vec<String> {
     // first word to NOT start with `[` (strict [key]=value words always
     // start with the bracket). A first word like `a=b` is kvpair data: the
     // `=` inside a compound assignment list has no assignment semantics
-    // (assoc-kv2 probe M2: a=(a=b c=d) stores [a=b]="c=d").
+    // (assoc-kv2 probe M2: a=(a=b c=d) stores [a=b]="c=d"). A word carrying
+    // U+E309 glue is a word-expansion product whose `[` bytes are data
+    // (W_ASSIGNMENT is parse-time only, parse.y:5786), so it never selects
+    // strict mode either.
     let strict_mode = tokens
         .first()
-        .map(|token| token.starts_with('['))
+        .map(|token| {
+            token.starts_with('[')
+                && !token.contains(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG)
+        })
         .unwrap_or(false);
     if !strict_mode {
         return Vec::new();
@@ -188,9 +202,14 @@ pub(in crate::executor) fn assoc_bare_elements(value: &str) -> Vec<String> {
 /// err_badarraysub instead.
 pub(crate) fn assoc_empty_key_words(value: &str) -> Vec<String> {
     let tokens = merge_assoc_subscript_tokens(array_assignment_tokens(value));
+    // Same kvpair_assignment_p first-word rule as append_assoc_value: a
+    // U+E309-glued word-expansion product never selects strict mode.
     let strict_mode = tokens
         .first()
-        .map(|token| token.starts_with('['))
+        .map(|token| {
+            token.starts_with('[')
+                && !token.contains(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG)
+        })
         .unwrap_or(false);
     if strict_mode {
         return Vec::new();
@@ -599,13 +618,32 @@ pub(in crate::executor) fn split_storage_words(value: &str) -> impl Iterator<Ite
 /// (rubash#212) — exactly like assoc words (arrayfunc.c:652/865
 /// expand_assignment_string_to_string never field-splits). Empty fields
 /// drop like GNU's field splitting.
-pub(in crate::executor) fn split_indexed_tagged_token(token: &str) -> Vec<String> {
+pub(in crate::executor) fn split_indexed_tagged_token(
+    token: &str,
+    ifs: Option<&str>,
+) -> Vec<String> {
+    // A glued word-expansion product (compound_field_split_transport) keeps
+    // its ARRAY_FIELD_SPLIT_MARKER prefix through this re-split: every field
+    // regains the prefix so downstream passes treat each field as the
+    // word-expansion product it is (issue #198 `[sub]=` re-read protection,
+    // arrays.rs append_array_value plain-glob routing — identical tokens to
+    // the pre-glue transport, which prefixed every field individually).
+    // The U+E309 boundary is the IFS character set the producer split on
+    // (None = the default " \t\n"), so a custom IFS (`IFS=:`) re-splits at
+    // the tagged `:` separators exactly like GNU expand_words_no_vars
+    // field splitting would (arrayfunc.c:610).
+    let ifs_chars: &str = match ifs {
+        Some(ifs) if !ifs.is_empty() => ifs,
+        _ => " \t\n",
+    };
+    let is_boundary = |ch: char| ifs_chars.contains(ch);
+    let tagged = token.starts_with(crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER);
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut chars = token.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == crate::executor::COMPOUND_EXPANSION_WS_TAG
-            && matches!(chars.peek(), Some(' ' | '\t' | '\n'))
+            && chars.peek().is_some_and(|next| is_boundary(*next))
         {
             chars.next();
             if !current.is_empty() {
@@ -627,7 +665,92 @@ pub(in crate::executor) fn split_indexed_tagged_token(token: &str) -> Vec<String
     if !current.is_empty() {
         parts.push(current);
     }
+    if tagged {
+        parts = parts
+            .into_iter()
+            .map(|part| {
+                // The first part keeps the input's own prefix; later parts
+                // (and parts that already carry one) must not double up —
+                // the storage loop strips exactly one marker per token.
+                if part.starts_with(crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER) {
+                    part
+                } else {
+                    format!(
+                        "{}{part}",
+                        crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER
+                    )
+                }
+            })
+            .collect();
+    }
     parts
+}
+
+/// Transport one word's unquoted field-split products through the compound
+/// assignment value as ONE storage word (GNU arrayfunc.c:557
+/// expand_compound_array_assignment defers the split decision to the
+/// consumer: an associative target expands each kvpair key/value with NO
+/// field splitting — arrayfunc.c:630 assign_assoc_from_kvlist ->
+/// expand_subscript_string / expand_assignment_string_to_string — while an
+/// indexed target field-splits via expand_words_no_vars, arrayfunc.c:610).
+/// The walker cannot know the target, so the quote-wrapped fields are
+/// re-joined behind the ARRAY_FIELD_SPLIT_MARKER prefix with the ORIGINAL
+/// IFS separator runs between them, each separator character preceded by
+/// U+E309: assoc storage glues the tagged pairs into the element word
+/// (StorageWordIter) and the assoc decode strips the tags, reconstructing
+/// the unsplit expansion result byte-for-byte (custom-IFS separators
+/// included: `IFS=:; declare -A v=( $v 3 )` with v='a:b' keys `a:b`);
+/// indexed storage re-splits at every tag+IFS-character boundary
+/// (split_indexed_tagged_token). Fields are located as verbatim substrings
+/// of `value`; a field the splitter rewrote (IFS_GLUE protection) falls
+/// back to a synthetic tag+space separator — identical boundaries for the
+/// indexed consumer. An empty field list transports no word — an unquoted
+/// expansion producing nothing contributes no element (subst.c:13219).
+pub(in crate::executor) fn compound_field_split_transport(
+    value: &str,
+    fields: Vec<String>,
+) -> Vec<String> {
+    if fields.is_empty() {
+        return Vec::new();
+    }
+    let mut out = String::from(crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER);
+    let mut pos = 0usize;
+    // Tracking stays true while every field so far was located as a
+    // verbatim substring of `value`; the first miss (a field the splitter
+    // rewrote, e.g. IFS_GLUE protection) degrades the rest to synthetic
+    // tag+space separators — identical boundaries for the indexed consumer.
+    let mut tracking = true;
+    for (index, field) in fields.iter().enumerate() {
+        let mut separator: Option<&str> = None;
+        if tracking && !field.is_empty() {
+            if let Some(offset) = value[pos..].find(field.as_str()) {
+                let gap = &value[pos..pos + offset];
+                if !gap.contains('"') {
+                    separator = Some(gap);
+                    pos += offset + field.len();
+                } else {
+                    tracking = false;
+                }
+            } else {
+                tracking = false;
+            }
+        }
+        match separator {
+            Some(gap) => {
+                for ch in gap.chars() {
+                    out.push(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG);
+                    out.push(ch);
+                }
+            }
+            None if index > 0 => {
+                out.push(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG);
+                out.push(' ');
+            }
+            None => {}
+        }
+        out.push_str(&quote_compound_field_value(field));
+    }
+    vec![out]
 }
 
 struct StorageWordIter<'a> {

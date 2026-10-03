@@ -1531,11 +1531,13 @@ impl Executor {
                     );
                 } else {
                     // UNQUOTED $@ / ${@}: joined with IFS[0], then field
-                    // split; each field is a plain word (ARRAY_FIELD_SPLIT_
-                    // MARKER) so append_array_value keeps one element per
-                    // field and pathname-expands it — GNU
-                    // expand_word_list_internal globs each field after
-                    // splitting.
+                    // split; the fields ride as ONE glued storage word
+                    // (compound_field_split_transport) so append_array_value
+                    // re-splits them into one element per field and
+                    // pathname-expands each — GNU expand_word_list_internal
+                    // globs each field after splitting — while an assoc
+                    // kvpair consumer keeps the word unsplit
+                    // (arrayfunc.c:630).
                     let fields = field_split_positional_values_with_ifs(
                         self.shell_state.positional_params.clone(),
                         self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -1543,13 +1545,13 @@ impl Executor {
                     if bare {
                         values.extend(fields);
                     } else {
-                        values.extend(fields.into_iter().map(|field| {
-                            format!(
-                                "{}{}",
-                                crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
-                                quote_compound_field_value(&field)
-                            )
-                        }));
+                        values.extend(compound_field_split_transport(
+                            &self
+                                .shell_state
+                                .positional_params
+                                .join(&self.ifs_first_char_separator()),
+                            fields,
+                        ));
                     }
                 }
             } else if (token_is_quoted_wrap && (token_stripped == "${*}" || token_stripped == "$*"))
@@ -1643,6 +1645,7 @@ impl Executor {
                             // UNQUOTED dynamic `${name[@]}`: same IFS
                             // field-split + glob transport as the storage
                             // arm below (expand_words_no_vars).
+                            let joined = members.join(&self.ifs_first_char_separator());
                             let fields = field_split_positional_values_with_ifs(
                                 members,
                                 self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -1650,13 +1653,9 @@ impl Executor {
                             if bare {
                                 values.extend(fields);
                             } else {
-                                values.extend(fields.into_iter().map(|field| {
-                                    format!(
-                                        "{}{}",
-                                        crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
-                                        quote_compound_field_value(&field)
-                                    )
-                                }));
+                                // Same glued transport as the storage arm
+                                // below (compound_field_split_transport).
+                                values.extend(compound_field_split_transport(&joined, fields));
                             }
                         }
                         continue;
@@ -1678,30 +1677,26 @@ impl Executor {
                         // standard field splitter, and finally
                         // glob_expand_word_list (subst.c:13264) pathname-
                         // expands every surviving field — `a=('*' '*');
-                        // arr=(${a[@]})` stores the matches. Transport each
-                        // field with ARRAY_FIELD_SPLIT_MARKER (the unquoted
-                        // field-split product form; joined-string model of
-                        // field_split_positional_values_with_ifs — an empty
-                        // member between neighbors is an empty field under
-                        // a non-whitespace IFS and vanishes under the
-                        // default one) so the storage boundary globs it; a
-                        // `store!` quoted storage word would CTLESC-protect
-                        // the glob characters (the inverse of the #369
-                        // quoted-element fix).
-                        values.extend(
+                        // arr=(${a[@]})` stores the matches. The fields ride
+                        // as ONE glued storage word (compound_field_split_
+                        // transport, U+E309-tagged separators — the joined-
+                        // string model of field_split_positional_values_
+                        // with_ifs; an empty member between neighbors is an
+                        // empty field under a non-whitespace IFS and
+                        // vanishes under the default one): indexed storage
+                        // re-splits per field and pathname-expands each, an
+                        // assoc kvpair consumer keeps the word unsplit
+                        // (arrayfunc.c:630). A `store!` quoted storage word
+                        // would CTLESC-protect the glob characters (the
+                        // inverse of the #369 quoted-element fix).
+                        let members = array_values(&storage);
+                        values.extend(compound_field_split_transport(
+                            &members.join(&self.ifs_first_char_separator()),
                             field_split_positional_values_with_ifs(
-                                array_values(&storage),
+                                members,
                                 self.shell_state.env_vars.get("IFS").map(String::as_str),
-                            )
-                            .into_iter()
-                            .map(|field| {
-                                format!(
-                                    "{}{}",
-                                    crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
-                                    quote_compound_field_value(&field)
-                                )
-                            }),
-                        );
+                            ),
+                        ));
                     }
                 } else {
                     values.push(store!(""));
@@ -2177,13 +2172,11 @@ impl Executor {
                             if bare {
                                 values.extend(fields);
                             } else {
-                                values.extend(fields.into_iter().map(|field| {
-                                    format!(
-                                        "{}{}",
-                                        crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
-                                        quote_compound_field_value(&field)
-                                    )
-                                }));
+                                // One glued storage word (assoc consumers keep
+                                // it unsplit, arrayfunc.c:630; indexed storage
+                                // re-splits per field, arrayfunc.c:610) — see
+                                // compound_field_split_transport.
+                                values.extend(compound_field_split_transport(&value, fields));
                             }
                             continue;
                         }
@@ -2213,13 +2206,9 @@ impl Executor {
                                 if bare {
                                     values.extend(fields);
                                 } else {
-                                    values.extend(fields.into_iter().map(|field| {
-                                        format!(
-                                            "{}{}",
-                                            crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
-                                            quote_compound_field_value(&field)
-                                        )
-                                    }));
+                                    // Same glued transport as the $N arm above
+                                    // (compound_field_split_transport).
+                                    values.extend(compound_field_split_transport(&value, fields));
                                 }
                             }
                         }
@@ -2493,12 +2482,14 @@ impl Executor {
         // Fully unquoted word WITH an expansion: GNU field-splits the whole
         // expansion string on the current IFS — literal IFS chars of the
         // word participate too (probe 2026-09-27: `R=( x$v )` with
-        // v=$'a b\na c' under IFS=$'\n' stores [xa b][a c]). Each field is
-        // ARRAY_FIELD_SPLIT_MARKER-tagged like the whole-word path
-        // (expand_unquoted_parameter_compound_assignment) so storage keeps
-        // it one element AND pathname-expands it per field
-        // (arrays.rs append_array_value marker arm — GNU
-        // expand_word_list_internal globs each field after splitting).
+        // v=$'a b\na c' under IFS=$'\n' stores [xa b][a c]). The fields ride
+        // as ONE glued storage word (compound_field_split_transport,
+        // U+E309-tagged separators) so an associative consumer keeps the
+        // word unsplit (arrayfunc.c:630 assign_assoc_from_kvlist — assoc
+        // keys/values never field-split) while indexed storage re-splits
+        // per field and pathname-expands each one (arrays.rs
+        // append_array_value marker arm — GNU expand_word_list_internal
+        // globs each field after splitting).
         // An expansion that produces nothing contributes NO field
         // (subst.c:13219): `set --; A=($1)` stores 0 elements — the
         // non-whitespace-IFS split of "" would otherwise yield one empty
@@ -2506,23 +2497,22 @@ impl Executor {
         if text.is_empty() {
             return Vec::new();
         }
-        field_split_values_with_ifs(
+        compound_field_split_transport(
             &text,
-            self.shell_state.env_vars.get("IFS").map(String::as_str),
-        )
-        .into_iter()
-        .map(|field| {
+            field_split_values_with_ifs(
+                &text,
+                self.shell_state.env_vars.get("IFS").map(String::as_str),
+            )
+            .into_iter()
             // The walker protected expansion-result data (backslash/$/
             // backtick) with the E30D/E30A/E30B carriers (GNU
             // subst.c:11862 add_quoted_string); decode to visible data
-            // before quote_array_value serializes the final field.
-            format!(
-                "{}{}",
-                crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
-                quote_array_value(&decode_compound_expansion_carriers(&field))
-            )
-        })
-        .collect()
+            // before the transport serializes the final field. A decoded
+            // field may no longer be a verbatim substring of `text` — the
+            // transport then falls back to synthetic separators.
+            .map(|field| decode_compound_expansion_carriers(&field))
+            .collect::<Vec<_>>(),
+        )
     }
 
     fn compound_plain_element_value(
@@ -2978,24 +2968,20 @@ impl Executor {
         // GNU subst.c:13219: an unquoted expansion that produces nothing
         // contributes NO field — `A=($unsetvar)` stores 0 elements
         // (rubash#298; the non-whitespace-IFS split of "" would otherwise
-        // yield one empty field).
+        // yield one empty field). The fields ride as ONE glued storage word
+        // (compound_field_split_transport) so an associative consumer can
+        // keep them unsplit (arrayfunc.c:630 assign_assoc_from_kvlist) while
+        // indexed storage re-splits per field (arrayfunc.c:610).
         if value.is_empty() {
             return Some(Vec::new());
         }
-        Some(
+        Some(compound_field_split_transport(
+            &value,
             field_split_values_with_ifs(
                 &value,
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
-            )
-            .into_iter()
-            .map(|value| {
-                format!(
-                    "{ARRAY_FIELD_SPLIT_MARKER}{}",
-                    quote_compound_field_value(&value)
-                )
-            })
-            .collect(),
-        )
+            ),
+        ))
     }
 
     /// The single expansion of a whole-word `$name` / `${name...}` parameter

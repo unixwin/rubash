@@ -793,7 +793,7 @@ pub(super) fn append_array_value(
     }
     let tokens = array_assignment_tokens(value)
         .into_iter()
-        .flat_map(|token| split_indexed_tagged_token(&token))
+        .flat_map(|token| split_indexed_tagged_token(&token, ifs))
         .flat_map(|token| {
             if brace_expand && !token.contains("${") && !token.contains('=') {
                 crate::expand::braces::expand_braces(&token)
