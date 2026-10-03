@@ -176,7 +176,10 @@ fn check_reserved_word(
         "{" => Some(Tok::LBrace),
         "}" if *open_brace > 0 => Some(Tok::RBrace),
         "[[" => Some(Tok::CondStart),
-        "]]" if *cond > 0 => Some(Tok::CondEnd),
+        // `]]' is NOT here: parse.y:3481-3484 intercepts it in
+        // special_case_tokens before this function (and before alias
+        // expansion) on PST_CONDEXPR alone; see the intercept in
+        // expand_aliases_in_source.
         _ => None,
     }?;
     match tok {
@@ -191,7 +194,6 @@ fn check_reserved_word(
         Tok::LBrace => *open_brace += 1,
         Tok::RBrace => *open_brace = open_brace.saturating_sub(1),
         Tok::CondStart => *cond += 1,
-        Tok::CondEnd => *cond = cond.saturating_sub(1),
         _ => {}
     }
     Some(tok)
@@ -225,6 +227,12 @@ pub(crate) fn expand_aliases_in_source(
     let source = source.as_str();
     let mut buf: Vec<char> = source.chars().collect();
     let mut pos = 0usize;
+    // Live parse-time extglob gate (shopt.def:640 `extglob_flag' ->
+    // reset_parser parse.y:3502 `extended_glob'). Sampled once per pass:
+    // the grouped driver runs the pre-pass per command group, after the
+    // previous groups' `shopt' calls have executed — the same instant
+    // GNU's reader would see the flag.
+    let extglob = super::parse_extended_glob();
     // AL_BEINGEXPANDED stack (parse.y:3259) — an alias does not expand
     // while its own pushed text is still being consumed.
     let mut expanding: Vec<String> = Vec::new();
@@ -308,14 +316,14 @@ pub(crate) fn expand_aliases_in_source(
                         // (parse.y:5652-5673, `goto next_character`), so a
                         // word glued to the closer (`A=(1)B`) continues the
                         // same token and is never an alias candidate.
-                        let (cont, _) = scan_word(&buf, pos);
+                        let (cont, _) = scan_word(&buf, pos, extglob);
                         pos = cont;
                         emit!(Tok::Assign);
                     }
                 }
                 _ => {
                     let ws = pos;
-                    let (end, quoted) = scan_word(&buf, pos);
+                    let (end, quoted) = scan_word(&buf, pos, extglob);
                     pos = end;
                     let word: String = buf[ws..end].iter().collect();
                     if alexpnext && !quoted && !expanding.iter().any(|name| name == &word) {
@@ -464,7 +472,7 @@ pub(crate) fn expand_aliases_in_source(
             _ => {
                 // Word token: quoted regions and substitutions stay opaque.
                 let ws = pos;
-                let (end, quoted) = scan_word(&buf, pos);
+                let (end, quoted) = scan_word(&buf, pos, extglob);
                 pos = end;
                 let word: String = buf[ws..end].iter().collect();
 
@@ -518,6 +526,21 @@ pub(crate) fn expand_aliases_in_source(
                 {
                     emit!(Tok::RedirOp);
                     pos += redir_op_len(&buf, pos);
+                    continue;
+                }
+
+                // special_case_tokens (parse.y:3481-3484): `]]' returns
+                // COND_END while a conditional is being parsed
+                // (PST_CONDEXPR), with NO last-token condition — the cond
+                // reader freezes last_read_token at COND_START, so the
+                // normal reserved-word gate could never fire for the
+                // everyday `[[ a == b ]]` shape. special_case_tokens runs
+                // BEFORE alias expansion (parse.y:5743-5750), so `]]' is
+                // never alias text even after `(' `)' `&&' `||' where the
+                // frozen-token rule alone would leave it eligible.
+                if cond > 0 && word == "]]" {
+                    cond = cond.saturating_sub(1);
+                    emit!(Tok::CondEnd);
                     continue;
                 }
 
@@ -587,8 +610,23 @@ pub(crate) fn expand_aliases_in_source(
                 // alias_expand_token (parse.y:3249): unquoted word in a
                 // command position (PST_ALEXPNEXT or
                 // assignment_acceptable) with a live alias that is not
-                // currently being expanded.
-                let eligible = alexpnext || (!casepat && command_pos(last, last2));
+                // currently being expanded. Inside `[[ ]]` (cond > 0) NO
+                // word is command-position eligible: the cond interior is
+                // read by parse_cond_command's recursive descent
+                // (parse.y:3586-3604 read_token cond branch → parse.y:5254),
+                // whose read_token calls bypass yylex — the ONLY
+                // `last_read_token' bookkeeper (parse.y:3076-3078) — so the
+                // token stays frozen at COND_START, which
+                // reserved_word_acceptable never accepts (parse.y:3157
+                // command_token_position). Verified against GNU 5.3.0:
+                // `[[ ( zz == zz ) ]]`, `[[ a || zz == zz ]]`,
+                // `[[ $cur != ?(*/).. ]]` never expand (2026-10-02
+                // wt56-aliascond matrix). PST_ALEXPNEXT (parse.y:3254)
+                // still applies — but it is always clear at the interior's
+                // first word: the `[[` word itself read it off
+                // (parse.y:5763 NO_EXPANSION clears it), and no interior
+                // expansion can set it again.
+                let eligible = alexpnext || (cond == 0 && !casepat && command_pos(last, last2));
                 if eligible && !quoted && !expanding.iter().any(|name| name == &word) {
                     if let Some((value, expand_next)) = lookup(&word) {
                         // push_string: splice the replacement text in place
@@ -698,8 +736,13 @@ fn splice_alias_value(
 
 /// Scan one word starting at `pos`: returns (end, quoted). Quoting and
 /// substitution constructs are consumed opaquely; the word ends at an
-/// unquoted shell break (blank, newline, or metachar).
-fn scan_word(buf: &[char], mut pos: usize) -> (usize, bool) {
+/// unquoted shell break (blank, newline, or metachar). With `extglob` on,
+/// a ksh extended-pattern opener `X(` (X a PATTERN_CHAR, syntax.h:90-91:
+/// `@ * + ? !`) consumes its matched `(...)` into the SAME word
+/// (read_token_word parse.y:5464-5477: parse_matched_pair + `goto
+/// next_character`), so the pattern's interior and the text glued after
+/// its `)` are never separate alias candidates.
+fn scan_word(buf: &[char], mut pos: usize, extglob: bool) -> (usize, bool) {
     let mut quoted = false;
     while pos < buf.len() {
         match buf[pos] {
@@ -732,10 +775,46 @@ fn scan_word(buf: &[char], mut pos: usize) -> (usize, bool) {
                 '{' => pos = skip_dollar_brace(buf, pos),
                 _ => pos += 1,
             },
+            // parse.y:5464-5477: `extended_glob && PATTERN_CHAR (character)'
+            // with a peeked `(' — parse_matched_pair splices the whole
+            // `(...)' into the token and the word continues after it.
+            '@' | '*' | '+' | '?' | '!' if extglob && matches!(buf.get(pos + 1), Some('(')) => {
+                pos = skip_matched_paren(buf, pos + 1);
+            }
             _ => pos += 1,
         }
     }
     (pos, quoted)
+}
+
+/// parse_matched_pair (parse.y:3877) over one `(...)` unit: `buf[pos]` is
+/// the `('; skips quotes, escapes, and nested pairs; returns the index
+/// just past the matching `)'. An unbalanced opener swallows the rest of
+/// the input — the downstream parser reports the syntax error GNU raises
+/// as matched_pair_error.
+fn skip_matched_paren(buf: &[char], mut pos: usize) -> usize {
+    let mut depth = 1usize;
+    while pos < buf.len() {
+        match buf[pos] {
+            '\\' => pos = (pos + 2).min(buf.len()),
+            '\'' => pos = skip_single_quote(buf, pos),
+            '"' => pos = skip_double_quote(buf, pos),
+            '`' => pos = skip_backtick(buf, pos),
+            '(' => {
+                depth += 1;
+                pos += 1;
+            }
+            ')' => {
+                depth -= 1;
+                pos += 1;
+                if depth == 0 {
+                    return pos;
+                }
+            }
+            _ => pos += 1,
+        }
+    }
+    pos
 }
 
 fn skip_single_quote(buf: &[char], mut pos: usize) -> usize {

@@ -1007,3 +1007,108 @@ fn alexpnext_still_expands_inside_compound_array_assignment() {
     // the executor, which is why the e2e output matches GNU byte-for-byte.
     assert_eq!(out, "MULTI=(  echo ZQ 0)\n");
 }
+
+/// wt56/alias-cond: the `[[ ]]` interior is alias-inert. GNU reads the
+/// conditional through parse_cond_command's recursive descent (read_token
+/// cond branch parse.y:3586-3604, parse_cond_command parse.y:5254), whose
+/// direct read_token calls bypass yylex — the ONLY `last_read_token'
+/// bookkeeper (parse.y:3076-3078). The token therefore stays frozen at
+/// COND_START, which reserved_word_acceptable never accepts, so
+/// alias_expand_token's assignment_acceptable gate (parse.y:3254) can
+/// never fire inside `[[ ]]`. Verified byte-for-byte against WSL GNU Bash
+/// 5.3.0 (wt56-aliascond matrix, 2026-10-02); the extglob cells hold with
+/// the shopt off as well — the frozen token protects the split fragments
+/// just like the consumed whole word.
+#[test]
+fn cond_interior_words_are_never_alias_candidates() {
+    let lookup = |name: &str| match name {
+        "zz" => Some(("echo ZZ".to_string(), false)),
+        ".." => Some(("cd ..".to_string(), false)),
+        _ => None,
+    };
+    let forms = [
+        // The owner's production shape (bash_completion line 1376 via
+        // oh-my-bash `alias ..='cd ..'`): the fragment after the extglob
+        // `)` used to land in pseudo command position and splice
+        // `cd ..` into the pattern.
+        "if [[ $cur != ?(*/).. ]]; then echo hit; fi",
+        "[[ $cur == ?(*/).. ]] && echo y",
+        "[[ zz == zz ]]",
+        "[[ ( zz == zz ) ]]",
+        "[[ a == b || zz == zz ]]",
+        "[[ a == b && zz == zz ]]",
+        "[[ ! zz == zz ]]",
+        "[[ ab == zz* ]]",
+        "[[ abc =~ zz ]]",
+        "[[ -f zz ]]",
+        "[[ ((zz)) == zz ]]",
+        "[[ a == b ]] > zz",
+    ];
+    for form in forms {
+        let out = expand_aliases_in_source(&format!("{form}\n"), &lookup, false);
+        assert_eq!(out, format!("{form}\n"), "leaked in {form:?}");
+    }
+}
+
+/// parse.y:3481-3484 (special_case_tokens): `]]' is COND_END on
+/// PST_CONDEXPR alone — no reserved_word_acceptable(last) condition —
+/// and it runs BEFORE alias expansion (parse.y:5743-5750), so the
+/// everyday `[[ a == b ]]` shape closes the conditional and the token
+/// AFTER it is a normal command position again. Verified against GNU
+/// 5.3.0: `[[ a == a ]] && zz` prints ZZ, `[[ a == b ]] zz` splices and
+/// then fails to parse in both engines.
+#[test]
+fn cond_end_is_recognized_and_command_position_resumes() {
+    let lookup = |name: &str| match name {
+        "zz" => Some(("echo ZZ".to_string(), false)),
+        _ => None,
+    };
+    let cases = [
+        ("[[ a == b ]]; zz\n", "[[ a == b ]]; echo ZZ\n"),
+        ("[[ a == b ]] && zz\n", "[[ a == b ]] && echo ZZ\n"),
+        ("[[ a == b ]] zz\n", "[[ a == b ]] echo ZZ\n"),
+        // `]]` after an interior `(`/`)` is the closer, never alias text.
+        ("[[ ( a == b ) ]] && zz\n", "[[ ( a == b ) ]] && echo ZZ\n"),
+        // A later conditional still tracks open/close correctly.
+        (
+            "[[ a == b ]]; [[ c == d ]]; zz\n",
+            "[[ a == b ]]; [[ c == d ]]; echo ZZ\n",
+        ),
+    ];
+    for (input, want) in cases {
+        let out = expand_aliases_in_source(input, &lookup, false);
+        assert_eq!(out, want, "for {input:?}");
+    }
+}
+
+/// parse.y:5464-5477 (read_token_word): with `extended_glob' on, a ksh
+/// extglob opener `X(` (PATTERN_CHAR syntax.h:90-91: @ * + ? !) consumes
+/// its matched `(...)` into the SAME word via parse_matched_pair, so the
+/// pattern interior and anything glued after its `)` are one token —
+/// never separate alias candidates in argument, assignment-RHS, or
+/// case-pattern position (the pattern word keeps PST_CASEPAT intact for
+/// the clause's own `)` at parse.y:3787). Verified byte-for-byte against
+/// WSL GNU Bash 5.3.0 with `shopt -s extglob`.
+#[test]
+fn extglob_pattern_words_stay_single_words() {
+    crate::lexer::set_parse_extended_glob(true);
+    let lookup = |name: &str| match name {
+        "zz" => Some(("echo ZZ".to_string(), false)),
+        ".." => Some(("cd ..".to_string(), false)),
+        _ => None,
+    };
+    let forms = [
+        "echo @(zz)/tail",
+        "x=?(zz)file",
+        "case zz in ?(a)|zz) echo pat;; *) echo star;; esac",
+        "case x in @(zz|..)) echo pat;; *) echo star;; esac",
+        "case ../x in ?(*/)..) echo pat;; *) echo star;; esac",
+        "[[ $cur != ?(*/).. ]] && echo y",
+        "[[ ab == ?(zz|..) ]] && echo y",
+    ];
+    for form in forms {
+        let out = expand_aliases_in_source(&format!("{form}\n"), &lookup, false);
+        assert_eq!(out, format!("{form}\n"), "leaked in {form:?}");
+    }
+    crate::lexer::set_parse_extended_glob(false);
+}
