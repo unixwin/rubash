@@ -65,7 +65,7 @@ impl<'a> Lexer<'a> {
             } else if c == '}' && parameter_depth > 0 {
                 parameter_depth -= 1;
             }
-            let rest = &self.input[self.position..];
+            let next = self.peek();
             update_command_substitution_case_depth(
                 c,
                 false,
@@ -74,7 +74,7 @@ impl<'a> Lexer<'a> {
                 &mut case_depth,
                 &mut word_boundary,
                 &mut current_word_boundary,
-                rest,
+                next,
                 &mut case_in_stage,
                 &mut case_pattern_region,
                 prev_sig,
@@ -1236,7 +1236,7 @@ pub(super) fn update_command_substitution_case_depth(
     case_depth: &mut usize,
     word_boundary: &mut bool,
     current_word_boundary: &mut bool,
-    rest: &str,
+    next: Option<char>,
     case_in_stage: &mut u8,
     case_pattern_region: &mut bool,
     prev_sig: Option<char>,
@@ -1260,7 +1260,7 @@ pub(super) fn update_command_substitution_case_depth(
             if ch == ')' && *case_pattern_region {
                 // parse.y:3787-3788: `)` closes the pattern list.
                 *case_pattern_region = false;
-            } else if ch == ';' && (rest.starts_with(';') || rest.starts_with('&')) {
+            } else if ch == ';' && matches!(next, Some(';') | Some('&')) {
                 // parse.y:3710/3759: `;;`, `;&`, `;;&` start the next
                 // pattern list.
                 *case_pattern_region = true;
@@ -1346,6 +1346,30 @@ pub(super) fn update_command_substitution_case_depth(
             false
         }
     };
+    // PST_CASEPAT port, word-completion half (parse.y:3787-3788): the
+    // unquoted `)` terminates the pattern list even when it is GLUED to
+    // the last pattern word (`case k in x) body`) — the word-empty branch
+    // above never sees this `)` because it completes the word. Without
+    // clearing here the pattern region leaks into the clause body, the
+    // reserved-word arms (`for`..`done`, `!in_pattern_region`) stop
+    // matching, their completing SPACE clears word_boundary, and the real
+    // closing `esac` is never recognized as the keyword — the comsub scan
+    // then runs past its closer and swallows the rest of the line
+    // (rubash#405: `$(case k in x) for f in 1 2; do printf x; done esac)`
+    // lost everything after the comsub). Same tail re-check as
+    // parser/command_substitution.rs and the embedded_mutations region
+    // machine; every continuation.rs twin already has it. The `;;`/`;&`
+    // re-arm uses `next` — this tail's `;` is the FIRST char of the pair,
+    // so the word-empty branch's second `;` alone would re-arm too late
+    // for a `case`-text pattern right after `;;` (`(case|d)` would push a
+    // phantom nested case when the region is still clear).
+    if *case_depth > 0 {
+        if ch == ')' && *case_pattern_region {
+            *case_pattern_region = false;
+        } else if ch == ';' && matches!(next, Some(';') | Some('&')) {
+            *case_pattern_region = true;
+        }
+    }
     word.clear();
     *word_boundary =
         reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
@@ -1634,21 +1658,12 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             index += 1;
             continue;
         }
-        // The suffix is consulted ONLY by update_command_substitution_case_
-        // depth's `esac` arm via case_pattern_starts_with_esac_rest — and
-        // that function returns (false, false) without reading `rest`
-        // unless the terminating char is `)` or `|`. Materialize the suffix
-        // just for that rare shape; collecting it per character made this
-        // scan O(span^2) (nvm.sh -n: 2.4s over 44 comsub spans, rubash#241).
-        // When materialized, the value is byte-identical to the old
-        // unconditional collect sliced by ch's UTF-8 width.
-        let owned_rest: String;
-        let rest: &str = if word == "esac" && matches!(ch, ')' | '|') {
-            owned_rest = chars[index..].iter().collect();
-            &owned_rest[ch.len_utf8()..]
-        } else {
-            ""
-        };
+        // The machine's only lookahead need is the char right after a `;`
+        // (is this `;;`/`;&`, the pattern-list re-arm of parse.y:3710/3759)
+        // — one indexed get, never a suffix materialization (the per-char
+        // collect this replaces was O(span^2), rubash#241; the esac arm
+        // has used the backward prev_sig witness since rubash#380).
+        let next = chars.get(index + 1).copied();
         update_command_substitution_case_depth(
             ch,
             false,
@@ -1657,10 +1672,7 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             &mut case_depth,
             &mut word_boundary,
             &mut current_word_boundary,
-            // `rest` begins at `ch`: advance by its UTF-8 width, not a fixed
-            // byte — multibyte chars here panicked on the byte slice
-            // (niubash#139 `"${v}$(echo 中)"`).
-            rest,
+            next,
             &mut case_in_stage,
             &mut case_pattern_region,
             prev_sig,

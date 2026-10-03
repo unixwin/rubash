@@ -600,7 +600,6 @@ fn test_case_command_substitution_allows_nested_case_without_outer_terminator() 
     let _ = fs::remove_file(output_path);
 }
 
-#[ignore = "rubash#405: see issue (probe wt37-374 K003)"]
 #[test]
 fn test_case_command_substitution_keeps_reserved_patterns_before_for_body() {
     let output_path = "target/rubash-case-command-subst-reserved-patterns-output.txt";
@@ -611,9 +610,13 @@ fn test_case_command_substitution_keeps_reserved_patterns_before_for_body() {
     );
     // wt33 (#374, corrected wt37): the wt33 G/H probe for this script was
     // corrupted; the mechanically re-extracted probe (wt37-374 K003) shows
-    // the CLI diverges from GNU 5.3.0: GNU runs the line and writes
-    // `v=<> status:0`, rubash's comsub swallows the follow-up printf (file
-    // absent, rc 0). Tracked by rubash#405.
+    // the CLI diverged from GNU 5.3.0: GNU runs the line and writes
+    // `v=<> status:0`, while rubash's comsub swallowed the follow-up
+    // printf (file absent, rc 0). Fixed for rubash#405: the streaming
+    // skip.rs case-depth machine now clears the pattern region at the
+    // word-glued `)` (parse.y:3787-3788) and re-arms it at `;;`/`;&`
+    // (parse.y:3710/3759) via a one-char lookahead, so the closing `esac`
+    // after `done` is recognized and the comsub ends at its own `)`.
     let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
     assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(output_path).unwrap(), "v=<> status:0\n");

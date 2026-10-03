@@ -895,3 +895,34 @@ fn continuation_join_tokens_keep_physical_lines_and_shared_logical_line() {
     assert_eq!(word.position, 1);
     assert_eq!(word.logical_line, 1);
 }
+
+#[test]
+fn comsub_case_word_glued_pattern_close_arms_region_and_rearm() {
+    // rubash#405: the streaming skip.rs case-depth machine must clear the
+    // PST_CASEPAT pattern region at the `)` GLUED to the last pattern word
+    // (`x)` — parse.y:3787-3788 terminates the pattern list wherever the
+    // unquoted `)` arrives) and re-arm it at `;;`/`;&` (parse.y:3710/3759)
+    // so a `case`/`esac` WORD in a later pattern list stays pattern text
+    // and the final `esac` after `done` is recognized as the keyword.
+    // Without it the comsub scan swallows everything after its `)`.
+    let forms = [
+        "v=$(case k in x) for f in 1 2; do printf x; done esac)\n",
+        "v=$(case k in else|done|time|esac) for f in 1 2 3; do printf x; done esac)\n",
+        "v=$(case y in (b|case) echo x;; (case|d) echo y;; esac)\n",
+        "v=$(case k in x) echo body;; esac)\n",
+        "v=$(case k in x) echo a;& y) echo b;; esac)\n",
+    ];
+    for input in forms {
+        let tokens = tokenize(input);
+        assert_eq!(tokens[0].kind, TokenKind::Assignment, "for {input:?}");
+        assert_eq!(
+            tokens[0].value,
+            input.trim_end(),
+            "comsub span for {input:?}"
+        );
+        assert!(
+            !has_unclosed_input_syntax_posix(input, false),
+            "admission rejected {input:?}"
+        );
+    }
+}

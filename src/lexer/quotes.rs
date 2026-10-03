@@ -473,13 +473,11 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
             }
             continue;
         }
-        // `case WORD in' chain tracker lookahead (rubash#276/#284): computed
-        // only at the esac `)`/`|` decision, exactly like the original.
-        let tail: &str = if word == "esac" && matches!(ch, ')' | '|') {
-            &rest[idx..]
-        } else {
-            ""
-        };
+        // `case WORD in' chain tracker lookahead (rubash#276/#284): the
+        // machine only needs the char after `ch` (the `;;`/`;&`
+        // pattern-list re-arm of parse.y:3710/3759); `idx` already points
+        // past `ch`.
+        let next = rest[idx..].chars().next();
         super::skip::update_command_substitution_case_depth(
             ch,
             false,
@@ -488,7 +486,7 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
             &mut case_depth,
             &mut word_boundary,
             &mut current_word_boundary,
-            tail,
+            next,
             &mut case_in_stage,
             &mut case_pattern_region,
             prev_sig,
@@ -1420,14 +1418,10 @@ fn copy_dollar_paren_body_raw(
             }
             continue;
         }
-        // `rest` (input after the delimiter) feeds only the esac-is-a-pattern
-        // lookahead (skip.rs case_pattern_starts_with_esac_rest); compute it
-        // lazily so common bodies pay no O(n) clone per character.
-        let rest = if word == "esac" && matches!(ch, ')' | '|') {
-            chars.clone().collect::<String>()
-        } else {
-            String::new()
-        };
+        // The machine only needs the char after `ch` (the `;;`/`;&`
+        // pattern-list re-arm of parse.y:3710/3759); the peekable cursor
+        // already points at it.
+        let next = chars.peek().copied();
         super::skip::update_command_substitution_case_depth(
             ch,
             false,
@@ -1436,7 +1430,7 @@ fn copy_dollar_paren_body_raw(
             &mut case_depth,
             &mut word_boundary,
             &mut current_word_boundary,
-            &rest,
+            next,
             &mut case_in_stage,
             &mut case_pattern_region,
             prev_sig,
