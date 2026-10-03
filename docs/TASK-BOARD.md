@@ -369,3 +369,9 @@
 - **Option B 引擎终态**（f633abef/04d3275a/c37eb9f0）：唯一 argv 漏斗（path.rs，8 spawn 点全审计无旁路）+posix_aware_child 三路判定（dispatcher/WINUXCMD_HOME/标记探针 memoize）+删两处 exists() 半翻译门+逃生门 __RUBASH_ARGV_DIALECT=legacy；83 套件 A/B **0 行 rubash-caused**（coproc/nameref 波动均证伪为环境噪声）；上游缺口 cp/mv/ls 逐字 POSIX → WinuxCmd#1145；1.2.6 发布门=WinuxCmd release 进 bundle 或默认 legacy
 - **插件系统三裁定**（常设记忆）：①独立实现红线（下载绝不绑 wpm/apt——跨平台关键，推翻"wpm 驱动"设计；直下=runtime 纯 Rust HTTP）；②文档/帮助/AI 速查与实现同 PR 交付；③索引全量化（五类分门别类）+lazy 家族研究加设计哲学/CLI-TUI/用户友好专节
 - 十车道并行中；lazystudy/anyplug 已收更正令
+
+## 2026-10-03 VI：floor 回收（niubash f50abaa）+ 1.2.6 发布门新增
+
+- **defaults-as-floor 落地**（162e9cb，含与 niu365 的 shell.rs/docs 冲突手工合并）：槽位认领模型（非空 PS1=认领、PROMPT_COMMAND 只算钩子、释放即回地板、地板从不写 PS1）+rc 顺序契约+**发售面死字段清零**（example+README+getting-started+advanced-usage 五文档+6 个退役动词）+冲突实证（单测 4/二进制 5/ConPTY 3：真装 OMB 全链认领、unset 回地板、#117 不误伤）
+- **#161 开（1.2.6 发布门）**：package-release.ps1 仍 staging 退役 bundle 而产品动词硬拒——发布前必须裁（顺带 hooks.md 死契约 owner 裁定）
+- 六车道在飞：pool1/pool2/olddebt/parse4/anyplug/lazystudy
