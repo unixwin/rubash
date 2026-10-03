@@ -315,7 +315,22 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     // assignment when the `(` is adjacent to `=`. The lexer
                     // marks that with a trailing `(` on the raw; `a= (1 2)`
                     // (space) stays a plain assignment and is a syntax error.
-                    if var_value.is_empty() && token.raw.ends_with("=(") {
+                    if token.compound_unclosed {
+                        // rubash#413: the lexer's word scan ended at end of
+                        // input with the compound list still open (the
+                        // element-leading `[...]` subscript arm of
+                        // read_token_word, parse.y:5635-5651, can swallow the
+                        // `)` that would have closed it, e.g. `x=([)]`).
+                        // GNU parse_compound_assignment's clean-EOF arm
+                        // (parse.y:7140-7152) reports
+                        // "unexpected EOF while looking for matching `)'"
+                        // with EXECUTION_FAILURE (exit 1) and never stores
+                        // the truncated list.
+                        state.current_cmd.insert_assignment(
+                            "__RUBASH_PARSE_ERROR_EOF_PAREN__".to_string(),
+                            "unexpected EOF while looking for matching `)'".to_string(),
+                        );
+                    } else if var_value.is_empty() && token.raw.ends_with("=(") {
                         if let Some((compound_value, next_i)) =
                             collect_compound_assignment(tokens, *i)
                         {

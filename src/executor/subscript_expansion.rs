@@ -1013,6 +1013,45 @@ impl Executor {
             // pathname expansion included. Re-lexing the raw token through
             // the command-word expander reproduces all of it, including the
             // multi-word result of a quoted "${d[@]}" element.
+            //
+            // rubash#413: field splitting applies only to UNQUOTED
+            // EXPANSION RESULTS (subst.c:13205 expand_word_list_internal —
+            // list_string splits what `$`-expansion produced, never the
+            // literal word bytes). The element word itself was already
+            // assembled by the P_ARRAYSUB element-leading-`[` rule
+            // (parse.y:5635-5651, #391): `[ empty ]` is ONE word whose
+            // spaces are span data. A token with no unquoted `$`/backtick
+            // trigger has nothing to expand, so the re-lex can only
+            // field-split raw span spaces GNU keeps glued — handle such
+            // words like the declare storage glob gate does
+            // (compound_element_glob_pattern over the raw token, quote
+            // removal on the stored value).
+            if compound_element_word_has_no_expansion(token) {
+                let glob_word = crate::executor::glob::compound_element_glob_pattern(token);
+                match super::glob::pathname_expand_word(&glob_word, &self.shell_state.env_vars) {
+                    super::glob::PathnameExpansion::Matches(matches) => {
+                        for value in matches {
+                            elements.push(format!(
+                                "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                                quote_compound_field_value(&value)
+                            ));
+                        }
+                    }
+                    super::glob::PathnameExpansion::NoMatch => {
+                        elements.push(format!(
+                            "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                            quote_compound_field_value(
+                                &super::arrays::dequote_compound_element_rhs(token)
+                            )
+                        ));
+                    }
+                    super::glob::PathnameExpansion::Fail(pattern) => {
+                        self.report_failglob(&pattern);
+                        return Err(format!("({})", elements.join(" ")));
+                    }
+                }
+                continue;
+            }
             for field in self.expand_alternate_word_fragment(token) {
                 let fields =
                     match super::glob::pathname_expand_word(&field, &self.shell_state.env_vars) {
@@ -1627,6 +1666,33 @@ pub(crate) fn valid_array_reference_env(
         Some((close, _)) => close == name.len() - 1 && close > open + 1,
         None => false,
     }
+}
+
+/// rubash#413: whether a parsed compound-assignment element word carries no
+/// unquoted expansion trigger (`$` or backtick outside quotes/escapes).
+/// GNU expand_words_no_vars (arrayfunc.c:610 → subst.c:12590) field-splits
+/// only what expansion PRODUCED (list_string over `$`-results); a
+/// trigger-free word keeps its parsed shape — including the spaces inside an
+/// element-leading `[...]` subscript span (parse.y:5635-5651, #391) — as one
+/// field through quote removal and pathname expansion.
+fn compound_element_word_has_no_expansion(token: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for ch in token.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '$' | '`' if !in_single => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 impl Executor {

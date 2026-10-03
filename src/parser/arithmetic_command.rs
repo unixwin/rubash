@@ -141,29 +141,105 @@ pub(super) fn parse_arithmetic_command(
 // combined `((` token or an adjacent `(` `(` pair.
 pub(super) fn dparen_lexically_arithmetic(tokens: &[Token], start: usize) -> bool {
     let combined_open = tokens.get(start).is_some_and(|token| token.value == "((");
-    let mut depth = 1usize;
-    let mut i = if combined_open { start + 1 } else { start + 2 };
-    while i < tokens.len() {
-        if super::is_unquoted_operator(&tokens[i], "(") {
-            depth += 1;
-        } else if super::is_unquoted_operator(&tokens[i], ")") {
-            depth -= 1;
-            if depth == 0 {
-                return tokens
-                    .get(i + 1)
-                    .is_some_and(|token| super::is_unquoted_operator(token, ")"));
-            }
-        } else {
-            match tokens[i].value.as_str() {
-                "))" if depth == 1 => {
-                    // The token closes this group and the following `)` is the
-                    // next character: arithmetic, like GNU reading `))` here.
-                    return true;
-                }
-                _ => {}
-            }
+    // rubash#413: the verdict is GNU's CHARACTER-level parse_matched_pair
+    // scan (parse.y:4970 parse_arith_cmd → parse.y:3906), which counts every
+    // unquoted `(`/`)` in the raw text — including parens the word layer
+    // folded inside a `name=(...)` compound-assignment body. A token-level
+    // paren count diverges exactly there: `(( x=([))] ))` folds
+    // `x=([))] )` into one assignment word, hides the `)` that GNU's scan
+    // counts (closing the group right before `]`), and misreads the
+    // construct as arithmetic. Rebuild the character stream from the token
+    // raws (the same reconstruction arithmetic_raw_slice performs) and scan
+    // it with parse_matched_pair's P_ARITH rules: backslashes escape, quote
+    // spans and `$(`/`${`/`$[` units are opaque (parse.y:4138-4186
+    // parse_dollar_word), every other paren shifts the depth.
+    let mut text = String::new();
+    let body_start = if combined_open {
+        // The combined `((...))` token's own raw already ends at `))`; the
+        // verdict only matters for the split `(` `(` form, but keep the
+        // combined shape sound: scan inside its raw body.
+        if let Some(raw) = tokens.get(start).map(|token| token.raw.as_str()) {
+            text.push_str(raw.strip_prefix("((").unwrap_or(raw));
         }
-        i += 1;
+        start + 1
+    } else {
+        start + 2
+    };
+    for token in tokens.iter().skip(body_start) {
+        text.push_str(&token.leading_ws);
+        if token.kind == TokenKind::Semicolon && token.line_break {
+            // A physical line break folded into a `;` token is a newline in
+            // the char stream (parse_matched_pair reads across lines).
+            text.push('\n');
+        } else {
+            text.push_str(&token.raw);
+        }
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut depth = 1usize;
+    let mut scan = 0usize;
+    while scan < chars.len() {
+        match chars[scan] {
+            '\\' => scan += 1,
+            '\'' => {
+                scan += 1;
+                while scan < chars.len() && chars[scan] != '\'' {
+                    scan += 1;
+                }
+            }
+            '"' => {
+                scan += 1;
+                while scan < chars.len() {
+                    if chars[scan] == '\\' {
+                        scan += 2;
+                        continue;
+                    }
+                    if chars[scan] == '"' {
+                        break;
+                    }
+                    scan += 1;
+                }
+            }
+            '`' => {
+                scan += 1;
+                while scan < chars.len() {
+                    if chars[scan] == '\\' {
+                        scan += 2;
+                        continue;
+                    }
+                    if chars[scan] == '`' {
+                        break;
+                    }
+                    scan += 1;
+                }
+            }
+            '$' if matches!(chars.get(scan + 1), Some('(' | '{' | '[')) => {
+                let (open, close) = match chars[scan + 1] {
+                    '(' => ('(', ')'),
+                    '{' => ('{', '}'),
+                    _ => ('[', ']'),
+                };
+                // Nested dollar-word: consumed as a unit by parse_dollar_word
+                // (parse.y:4146-4186) — its interior never shifts this
+                // group's depth. If it never closes, neither does the group.
+                match crate::lexer::dollar_word_group_len(&chars, scan + 1, open, close) {
+                    Some(end) => scan = end,
+                    None => return false,
+                }
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    // parse.y:4976: the character immediately after the
+                    // matched group decides — `)` means arithmetic, anything
+                    // else the nested-subshell reinterpretation.
+                    return chars.get(scan + 1) == Some(&')');
+                }
+            }
+            _ => {}
+        }
+        scan += 1;
     }
     false
 }

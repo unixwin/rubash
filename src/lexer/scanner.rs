@@ -152,6 +152,11 @@ pub(super) struct Lexer<'a> {
     /// after an extglob operator with the parse-time gate closed; consumed
     /// by `finish_word_token` onto the produced token (rubash#131).
     pub(super) extglob_split_pending: bool,
+    /// Set by `skip_word_inner` when the word ended with a compound-assignment
+    /// list still open (rubash#413); consumed by `finish_word_token` onto the
+    /// produced token so the parser reports parse_compound_assignment's
+    /// clean-EOF diagnostic instead of storing the truncated list.
+    pub(super) compound_unclosed_pending: bool,
 }
 
 /// One open `(` group tracked while scanning a logical line.
@@ -179,6 +184,7 @@ impl<'a> Lexer<'a> {
             last_token_end: None,
             last_token_was_open_paren: false,
             extglob_split_pending: false,
+            compound_unclosed_pending: false,
         }
     }
 

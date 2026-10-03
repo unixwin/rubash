@@ -1246,13 +1246,18 @@ mod command_body_kind_tests {
     // tracked by rubash#390). What must hold on both: the incomplete
     // arithmetic command does not leak a tail command — the AST stays a
     // single command carrying the error marker.
+    // rubash#413: the dparen verdict is now the char-level P_ARITH scan, so
+    // this shape parses as the nested-subshell reinterpretation and the
+    // marker is the compound-assignment EOF one (parse.y:7140-7152) — the
+    // exact marker GNU's diagnostic is built from (issue390
+    // q1_dparen_subshell_reparse_compound_eof_rc1 pins the wording+rc).
     #[test]
     fn test_unclosed_arithmetic_subscript_does_not_leak_tail_command() {
         let ast = parse(&tokenize("((X=([))]"));
 
         assert_eq!(ast.commands.len(), 1);
         assert!(ast.commands[0]
-            .get_assignment("__RUBASH_PARSE_ERROR__")
+            .get_assignment("__RUBASH_PARSE_ERROR_EOF_PAREN__")
             .is_some());
         assert!(ast.commands[0].arithmetic_command.is_none());
     }

@@ -64,6 +64,10 @@ pub struct Token {
     /// the body re-parse must use this snapshot, not the current value.
     /// Defaults to open so legacy producers keep accepting.
     pub extglob_gate: bool,
+    /// rubash#413: the word scan ended at end of input with a
+    /// compound-assignment list still open (parse.y:7140
+    /// parse_compound_assignment hit EOF looking for the closing `)`).
+    pub compound_unclosed: bool,
     /// rubash#305: for a HereDocBody token, the PHYSICAL line on which its
     /// gathering ended (the closing-delimiter line). GNU reads the '\n'
     /// that ends the delimiter line only after gather_here_documents
@@ -89,6 +93,7 @@ impl Token {
             leading_ws: String::new(),
             extglob_split: false,
             extglob_gate: true,
+            compound_unclosed: false,
             heredoc_end_line: None,
         }
     }
@@ -119,6 +124,7 @@ impl Token {
             leading_ws: String::new(),
             extglob_split: false,
             extglob_gate: true,
+            compound_unclosed: false,
             heredoc_end_line: None,
         }
     }
@@ -139,6 +145,7 @@ impl Token {
             leading_ws: String::new(),
             extglob_split: false,
             extglob_gate: true,
+            compound_unclosed: false,
             heredoc_end_line: None,
         }
     }

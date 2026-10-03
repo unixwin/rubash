@@ -3136,7 +3136,7 @@ fn paren_group_close(chars: &[char], from: usize) -> Option<usize> {
 /// (parse.y parse_dollar_word → parse_matched_pair with the pair's own
 /// open/close). Returns the index just past the closer, or None when it
 /// never closes. Quote/escape aware like the P_ARITH walker.
-fn dollar_word_group_len(
+pub(crate) fn dollar_word_group_len(
     chars: &[char],
     open: usize,
     open_ch: char,

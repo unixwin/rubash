@@ -191,8 +191,11 @@ impl<'a> Lexer<'a> {
             // past it with no operator state: record the gated split here.
             self.extglob_split_pending = true;
         }
-        self.skip_word_at(start);
+        // Direct inner call: the public wrappers reset the pending flags for
+        // the raw-skip callers, but THIS caller is the flags' consumer.
+        self.skip_word_inner(start);
         let extglob_split = std::mem::take(&mut self.extglob_split_pending);
+        let compound_unclosed = std::mem::take(&mut self.compound_unclosed_pending);
         let raw = self.slice(start);
         // perf21: is_assignment walks the word for `=` + name validation —
         // compute it once for the consumers below instead of one walk each.
@@ -335,6 +338,7 @@ impl<'a> Lexer<'a> {
         // String allocations was this exact copy).
         let mut token = Token::new_with_raw_owned(kind, value, raw_ref, start);
         token.extglob_split = extglob_split;
+        token.compound_unclosed = compound_unclosed;
         // rubash#389/#131: stamp this pass's extglob gate so parse-side
         // scanners answer with the state at READ time (parse.y:5466 gates
         // on the live `extended_glob' as each word is lexed), not the
@@ -345,10 +349,15 @@ impl<'a> Lexer<'a> {
 
     pub(super) fn skip_word_at(&mut self, token_start: usize) {
         self.skip_word_inner(token_start);
+        // Only finish_word_token consumes the pending flags onto a token;
+        // the raw-skip callers (number/`!`/extglob arms in scanner.rs) build
+        // plain tokens, so the pending bit must not leak into the next word.
+        self.compound_unclosed_pending = false;
     }
 
     pub(super) fn skip_word(&mut self) {
         self.skip_word_inner(self.position);
+        self.compound_unclosed_pending = false;
     }
 
     fn skip_word_inner(&mut self, token_start: usize) {
@@ -367,6 +376,18 @@ impl<'a> Lexer<'a> {
         // b=([1]="" [2]="bdef")"); the word must not be split at the
         // whitespace inside the parentheses.
         let mut compound_paren_depth = 0usize;
+        // GNU parse.y:7104 parse_compound_assignment sets PST_COMPASSIGN and
+        // pulls every element through read_token; read_token_word's subscript
+        // arm (parse.y:5633-5651) then consumes a matched `[...]` span via
+        // parse_matched_pair('[', ']', P_ARRAYSUB) whenever the word is empty
+        // (token_index == 0, parse.y:5637). The span's interior — spaces and
+        // PARENS included — is word data: a `)` inside `[)]` can never close
+        // the compound list, and the word continues past the `]` up to the
+        // next real shellbreak (rubash#413: `(X=([)])` must leave the
+        // subshell unclosed, not silently balance). Element starts are token
+        // boundaries: right after the opening `(` and after in-list
+        // whitespace.
+        let mut compound_element_start = false;
         while let Some(c) = self.peek() {
             let in_array_value = array_assignment && array_value_paren_depth > 0;
             // GNU syntax.h:29-30 shell_break_chars "()<>;&| \t\n": `{`/`}` are
@@ -436,14 +457,28 @@ impl<'a> Lexer<'a> {
                 {
                     self.advance();
                     compound_paren_depth = 1;
+                    compound_element_start = true;
+                }
+                '[' if (compound_paren_depth > 0 || in_array_value) && compound_element_start => {
+                    // parse.y:5635-5651: an element-LEADING `[` under
+                    // PST_COMPASSIGN scans the matched `[...]` span
+                    // (P_ARRAYSUB: quotes, escapes and nested `[` pairs) into
+                    // the word — parens inside are data, so they can neither
+                    // close this compound list nor open a nested one.
+                    self.advance();
+                    self.skip_compound_element_subscript();
+                    compound_element_start = false;
+                    extglob_operator = false;
                 }
                 '(' if compound_paren_depth > 0 => {
                     self.advance();
                     compound_paren_depth += 1;
+                    compound_element_start = false;
                 }
                 ')' if compound_paren_depth > 0 => {
                     self.advance();
                     compound_paren_depth -= 1;
+                    compound_element_start = false;
                 }
                 '(' if array_assignment
                     && array_subscript_depth == 0
@@ -452,14 +487,17 @@ impl<'a> Lexer<'a> {
                 {
                     self.advance();
                     array_value_paren_depth = 1;
+                    compound_element_start = true;
                 }
                 '(' if in_array_value => {
                     self.advance();
                     array_value_paren_depth += 1;
+                    compound_element_start = false;
                 }
                 ')' if in_array_value => {
                     self.advance();
                     array_value_paren_depth = array_value_paren_depth.saturating_sub(1);
+                    compound_element_start = false;
                 }
                 '`' => {
                     // TODO(parse.y/subst.c): Command substitution is part of
@@ -468,26 +506,31 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     self.skip_backtick();
                     extglob_operator = false;
+                    compound_element_start = false;
                 }
                 '\'' => {
                     self.advance();
                     self.skip_single();
                     extglob_operator = false;
+                    compound_element_start = false;
                 }
                 '"' => {
                     self.advance();
                     self.skip_double();
                     extglob_operator = false;
+                    compound_element_start = false;
                 }
                 '\\' => {
                     self.advance();
                     self.advance();
                     extglob_operator = false;
+                    compound_element_start = false;
                 }
                 '[' if array_assignment => {
                     self.advance();
                     array_subscript_depth += 1;
                     extglob_operator = false;
+                    compound_element_start = false;
                 }
                 '#' if (compound_paren_depth > 0 || in_array_value)
                     && self.compound_body_comment_starts() =>
@@ -504,6 +547,7 @@ impl<'a> Lexer<'a> {
                     // `('; quoted `#'s never reach this arm (their skip_*
                     // spans consume them).
                     while self.advance().is_some_and(|ch| ch != '\n') {}
+                    compound_element_start = false;
                 }
                 '<' | '>' if self.peek_after(1) == Some('(') => {
                     // GNU parse.y:5514-5524: `<(`/`>(` mid-word — parse_comsub
@@ -512,11 +556,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     self.skip_cmd_subst();
                     extglob_operator = false;
+                    compound_element_start = false;
                 }
                 ']' if array_assignment && array_subscript_depth > 0 => {
                     self.advance();
                     array_subscript_depth -= 1;
                     extglob_operator = false;
+                    compound_element_start = false;
                 }
                 '$' => {
                     self.advance();
@@ -545,11 +591,55 @@ impl<'a> Lexer<'a> {
                         _ => {}
                     }
                     extglob_operator = false;
+                    compound_element_start = false;
                 }
                 _ => {
                     self.advance();
                     extglob_operator = matches!(c, '@' | '*' | '+' | '?' | '!');
+                    // Inside a compound-assignment list only whitespace is a
+                    // token boundary (parse_compound_assignment pulls whole
+                    // element words through read_token); the state feeds the
+                    // element-leading `[` arm above.
+                    if compound_paren_depth > 0 || in_array_value {
+                        compound_element_start = c.is_ascii_whitespace();
+                    } else {
+                        compound_element_start = false;
+                    }
                 }
+            }
+        }
+        // parse.y:7140-7152: end of input with the list still open is
+        // parse_compound_assignment's clean-EOF error — the word never got
+        // its closing `)`. Park the condition for finish_word_token.
+        self.compound_unclosed_pending = compound_paren_depth > 0 || array_value_paren_depth > 0;
+    }
+
+    /// GNU parse.y:3635-5651 read_token_word: the `[` subscript arm calls
+    /// `parse_matched_pair (cd, '[', ']', &ttoklen, P_ARRAYSUB)`
+    /// (parse.y:3906) for the element-leading bracket inside a compound
+    /// assignment. The scan counts `[`/`]` pairs only; quotes recurse as
+    /// units (parse.y:4040-4051), backslashes escape (parse.y:3997-3998),
+    /// and EVERY other character — spaces, `(` and `)` included — is span
+    /// data. An unterminated scan runs to end of input (its own `]' EOF
+    /// diagnostic family owns that case, skip::unclosed_array_subscript_*).
+    fn skip_compound_element_subscript(&mut self) {
+        let mut depth = 1usize;
+        while let Some(c) = self.advance() {
+            match c {
+                '\\' => {
+                    self.advance();
+                }
+                '\'' => self.skip_single(),
+                '"' => self.skip_double(),
+                '`' => self.skip_backtick(),
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return;
+                    }
+                }
+                _ => {}
             }
         }
     }

@@ -1798,6 +1798,80 @@ fn push_parse_error_until(
 /// the details are carried to the executor on the error node.
 fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: usize) -> usize {
     let paren_line = tokens.get(start).map(|token| token.position).unwrap_or(1);
+    // rubash#413: GNU's parser dies at the FIRST offending event inside the
+    // unclosed `(`, not at EOF. Two such events precede the pure-EOF report
+    // of parse.y:6892-6901 ("unexpected end of file from `(' command"):
+    //
+    //   (a) a word whose compound-assignment list never closed —
+    //       parse_compound_assignment's clean-EOF arm (parse.y:7140-7152)
+    //       reports `unexpected EOF while looking for matching `)'' at the
+    //       list's open line and exits 1 (`(x=([)]`, `(( x=([))] ))`);
+    //   (b) a command word directly after a nested subshell's closing `)` —
+    //       the grammar's compound_list requires a separator between
+    //       commands (parse.y:1097 subshell → parse.y:1252-1279
+    //       compound_list), so the parser rejects the word:
+    //       "syntax error near unexpected token `X'" plus the offending
+    //       line echo (`((X=([a]))]`, `( (echo hi) x`).
+    //
+    // Scan left to right; the earliest event owns the diagnostic.
+    {
+        let mut depth = 1usize;
+        let mut scan = start + 1;
+        while scan < tokens.len() {
+            let token = &tokens[scan];
+            if token.compound_unclosed {
+                state.current_cmd.line = Some(token.position);
+                state.current_cmd.insert_assignment(
+                    "__RUBASH_PARSE_ERROR_EOF_PAREN__".to_string(),
+                    "unexpected EOF while looking for matching `)'".to_string(),
+                );
+                state
+                    .ast
+                    .commands
+                    .push(std::mem::take(&mut state.current_cmd));
+                return tokens.len();
+            }
+            if token.kind == TokenKind::Keyword && token.value == "(" {
+                depth += 1;
+            } else if token.kind == TokenKind::Keyword && token.value == ")" {
+                if depth > 1 {
+                    depth -= 1;
+                    if let Some(next) = tokens.get(scan + 1) {
+                        if matches!(next.kind, TokenKind::Word | TokenKind::Assignment) {
+                            let mut command = CommandNode::new();
+                            command.line = Some(next.position);
+                            command.insert_assignment(
+                                "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+                                format!(
+                                    "{raw}{PARSE_ERROR_FIELD_SEP}{}",
+                                    next.position,
+                                    raw = next.raw
+                                ),
+                            );
+                            command.insert_assignment(
+                                "__RUBASH_PARSE_SOURCE__".to_string(),
+                                offending_line_text(
+                                    tokens,
+                                    scan + 1,
+                                    state.diagnostic_text.as_deref(),
+                                    state.source_line_offset,
+                                ),
+                            );
+                            state.current_cmd = command;
+                            state
+                                .ast
+                                .commands
+                                .push(std::mem::take(&mut state.current_cmd));
+                            return tokens.len();
+                        }
+                    }
+                } else {
+                    depth = depth.saturating_sub(1);
+                }
+            }
+            scan += 1;
+        }
+    }
     // Pair each HereDocBody token with its `<<` delimiter word in emission
     // order: each `<<` pushes the following word and each body pops it.
     // The queue is fed from the whole token stream so a `<<` seen before

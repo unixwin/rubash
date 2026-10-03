@@ -1989,12 +1989,24 @@ pub(crate) fn run_source_pre_lexed_with_line_offset(
 /// matched-pair verdicts the tokenizer does not model and are never
 /// overridden here.
 fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> bool {
-    let Some((close, _, _, _, command, _)) =
+    let Some((close, open_line, _, _, command, _)) =
         crate::lexer::unclosed_input_close_char_posix(input, parse_posix)
     else {
         return false;
     };
     if close != ')' || !command {
+        return false;
+    }
+    // The router's higher-priority EOF families own the diagnostic before
+    // any parser-marker event: an unclosed `[` subscript (parse.y:5635-5651
+    // -> parse_matched_pair's `]' report, rubash#221/#390 q2) and a `((` whose
+    // P_ARITH group never closes (parse.y:4970 -> `)' at the `((` line,
+    // rubash#390 q1 - parse_dparen consumes the input before any word scan
+    // could report a compound-assignment EOF).
+    if crate::lexer::unclosed_array_subscript_eof(input).is_some() {
+        return false;
+    }
+    if crate::lexer::dparen_arith_group_never_closes(input, open_line) {
         return false;
     }
     let tokens = tokenize_with_initial_posix(input, parse_posix);
@@ -2010,7 +2022,34 @@ fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> 
             source_line_offset: 0,
         },
     );
-    !ast.commands.iter().any(command_tree_has_parse_error)
+    if !ast.commands.iter().any(command_tree_has_parse_error) {
+        return true;
+    }
+    // rubash#413: GNU's parser reports the FIRST offending event inside the
+    // still-open `(` — a word right after a nested subshell's `)` (grammar
+    // compound_list needs a separator, parse.y:1097/1252-1279) or a
+    // compound-assignment list that never closed (parse.y:7140-7152
+    // parse_compound_assignment clean EOF) — BEFORE the pure-EOF report of
+    // parse.y:6892-6901 ("unexpected end of file from `(' command"). When
+    // the parser carries such a pre-EOF event marker, that marker's
+    // diagnostic is GNU's; let the normal path run and print it.
+    ast.commands
+        .iter()
+        .any(command_tree_has_pre_eof_event_marker)
+}
+
+/// True when this command (or any nested command) carries one of the two
+/// pre-EOF event markers the unclosed-`(` parse can raise ahead of the
+/// eof-from-`(` report: `__RUBASH_PARSE_ERROR_NEAR__` (word after a nested
+/// subshell's closer) and `__RUBASH_PARSE_ERROR_EOF_PAREN__` (compound
+/// assignment never closed).
+fn command_tree_has_pre_eof_event_marker(command: &CommandNode) -> bool {
+    if command.assignments.iter().any(|(name, _)| {
+        name == "__RUBASH_PARSE_ERROR_NEAR__" || name == "__RUBASH_PARSE_ERROR_EOF_PAREN__"
+    }) {
+        return true;
+    }
+    command_tree_walk_nested(command, command_tree_has_pre_eof_event_marker)
 }
 
 /// True when this command node, or any command nested inside it (pipeline
@@ -2025,7 +2064,13 @@ fn command_tree_has_parse_error(command: &CommandNode) -> bool {
     {
         return true;
     }
-    let mut nested = |body: &[CommandNode]| body.iter().any(command_tree_has_parse_error);
+    command_tree_walk_nested(command, command_tree_has_parse_error)
+}
+
+/// Drives `predicate` over every command nested inside `command`
+// (pipeline stages, and-or lists, compound bodies, clause bodies).
+fn command_tree_walk_nested(command: &CommandNode, predicate: fn(&CommandNode) -> bool) -> bool {
+    let mut nested = |body: &[CommandNode]| body.iter().any(predicate);
     command
         .pipeline_command
         .as_ref()
@@ -2037,15 +2082,15 @@ fn command_tree_has_parse_error(command: &CommandNode) -> bool {
         || command
             .time_command
             .as_ref()
-            .is_some_and(|time| command_tree_has_parse_error(&time.command))
+            .is_some_and(|time| predicate(&time.command))
         || command
             .background_command
             .as_ref()
-            .is_some_and(|background| command_tree_has_parse_error(&background.command))
+            .is_some_and(|background| predicate(&background.command))
         || command
             .inverted_command
             .as_ref()
-            .is_some_and(|inverted| command_tree_has_parse_error(&inverted.command))
+            .is_some_and(|inverted| predicate(&inverted.command))
         || command
             .for_command
             .as_ref()
