@@ -401,3 +401,11 @@
 - **WinuxCmd v1.1.5 切版中**：changelog 版本节 PR #1147 已合并、tag v1.1.5=4d606ba、多架构构建在跑——载 xargs#1139/mv#1140/mktemp#1141/cp-ls#1145（=niubash#124/#156 共同解锁件）；winget PR 444854 01-10 全绿等版主（合并即关 niubash#104）
 - **wt50/yes1142**（D:/repo/winuxcmd-wt-yes1142，后台 agent）：WinuxCmd yes SIGPIPE→141 修复（复用既有 broken-pipe 模拟模式；v1.1.6 候选）
 - 1.3.0 链：dlretract 合入→niubash CI 绿→冒烟（含开箱旅程断言+装完即选）→bump 1.3.0+CHANGELOG→**owner 口令发版**
+
+## 2026-10-03 终 X：dlretract 回收闭环（niubash CI 绿）+ v1.1.5 发布 + #124/#156 关单
+
+- **niubash master 7cc42715 CI 全绿**（3518b2fd 以来首次）：dlretract 466d4ed + 船长热修——`WizardIo::choice` 的无根 `#[cfg(windows)]` 门（E0599，lazystudy 合集问题上 master 时埋下，比 union-resolve 更早的暗断）；本地以 CI 同款 linux/macos 交叉目标双验证
+- **WinuxCmd v1.1.5 已发**（8 产物双架构；第一次构建失败根因=切版漏 bump 根目录 PROJECT_VERSION，PR #1149 补上后 tag 重建 a557f066）
+- **niubash#124/#156 探针证据关单**：v1.1.5 产物+当前引擎实测——eval `'\''` 拼接 mkdir rc=0 零字面引号（脚本+-c 双模式）；xargs 七形状全对齐 GNU 列（wc 形状 rc=123=子命令自身报错）；探针产物 target/wcmd115/
+- **bundle 门已自然满足**：release.yml winuxcmd_tag 默认取最新（资产模式 `WinuxCmd-*-win-x64.zip` 匹配 1.1.5）——1.3.0 自动 bundle v1.1.5（Option B 默认安全）；发版时可显式钉 v1.1.5 保复现
+- 在途：wt50/themepick（装完即选主题）；niubash 开放池仅剩 #104（winget 版主）
