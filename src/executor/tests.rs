@@ -759,4 +759,86 @@ mod dollar_flags_tests {
         executor.set_shell_option("xtrace", true);
         assert_eq!(executor.shell_option_flags(), "ehiuxBHs");
     }
+
+    #[test]
+    fn prompt_w_applies_prompt_dirtrim_like_gnu() {
+        // GNU general.c:942 trim_pathname, applied by decode_prompt_string
+        // at parse.y:6524 for \w and \W (after the tilde collapse at
+        // :6519). All expected values byte-verified against WSL GNU bash
+        // 5.3.0 (dirtrim3 / tilde probe scripts, 2026-10-03). Bug B
+        // (powerbash10k): oh-my-bash sets PROMPT_DIRTRIM=2 (lib/shopt.sh:22),
+        // so without the trim the theme's top-left segment is ~40 columns
+        // longer than GNU's and the right-aligned geometry diverges.
+        let mut executor = Executor::new();
+        let deep = "/tmp/a/bb/ccc/dddd/eeeee";
+        executor
+            .shell_state
+            .env_vars
+            .insert("PWD".to_string(), deep.to_string());
+        for (trim, want) in [
+            ("1", ".../eeeee"),
+            ("2", ".../dddd/eeeee"),
+            ("3", ".../ccc/dddd/eeeee"),
+            ("4", ".../bb/ccc/dddd/eeeee"),
+            ("5", ".../a/bb/ccc/dddd/eeeee"),
+            ("0", deep),
+            ("-1", deep),
+            ("xx", deep),
+            ("", deep),
+        ] {
+            executor
+                .shell_state
+                .env_vars
+                .insert("PROMPT_DIRTRIM".to_string(), trim.to_string());
+            assert_eq!(executor.expand_prompt_string(r"\w"), want, "trim={trim:?}");
+        }
+        executor.shell_state.env_vars.remove("PROMPT_DIRTRIM");
+        assert_eq!(executor.expand_prompt_string(r"\w"), deep);
+
+        // general.c:967-968: fewer separators than N -> no trim;
+        // general.c:984-988: the kept tail starting at the prefix or an
+        // elided span <= 3 chars -> no trim.
+        executor
+            .shell_state
+            .env_vars
+            .insert("PWD".to_string(), "/tmp/a/bb/ccc".to_string());
+        for (trim, want) in [("3", ".../a/bb/ccc"), ("4", "/tmp/a/bb/ccc")] {
+            executor
+                .shell_state
+                .env_vars
+                .insert("PROMPT_DIRTRIM".to_string(), trim.to_string());
+            assert_eq!(executor.expand_prompt_string(r"\w"), want, "trim={trim}");
+        }
+
+        // general.c:956: a `~' prefix is kept ahead of the ellipsis; GNU
+        // verifies: ~/a/b/c/d/e with trim 2 is `~/.../d/e', trim 3 keeps
+        // the whole path (elided span <= 3).
+        executor
+            .shell_state
+            .env_vars
+            .insert("HOME".to_string(), "/home/u".to_string());
+        executor
+            .shell_state
+            .env_vars
+            .insert("PWD".to_string(), "/home/u/a/b/c/d/e".to_string());
+        for (trim, want) in [("1", "~/.../e"), ("2", "~/.../d/e"), ("3", "~/a/b/c/d/e")] {
+            executor
+                .shell_state
+                .env_vars
+                .insert("PROMPT_DIRTRIM".to_string(), trim.to_string());
+            assert_eq!(
+                executor.expand_prompt_string(r"\w"),
+                want,
+                "tilde trim={trim}"
+            );
+        }
+
+        // \W takes the basename first (parse.y:6501-6510), then the same
+        // trim_pathname — a basename has no separators, so no trim.
+        executor
+            .shell_state
+            .env_vars
+            .insert("PROMPT_DIRTRIM".to_string(), "2".to_string());
+        assert_eq!(executor.expand_prompt_string(r"\W"), "e");
+    }
 }

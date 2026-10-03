@@ -2910,6 +2910,20 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(
                 &executor.expand_prompt_string(&ps1),
             );
+        // readline display.c:437-463 (expand_prompt): the \[ \] prompt
+        // markers (RL_PROMPT_START/END_IGNORE) are width-accounting
+        // delimiters only — the displayed prompt is assembled WITHOUT
+        // them, so the terminal never receives the \x01/\x02 bytes
+        // (byte-verified: WSL GNU bash 5.3.0 piped-`-i` prompt stderr
+        // carries no marker bytes). Leaking them broke strict VT parsers
+        // downstream (a pyte replay swallowed everything after \x01).
+        let rendered: String = rendered
+            .chars()
+            .filter(|ch| {
+                ch != &crate::executor::markers::PROMPT_IGNORE_START
+                    && ch != &crate::executor::markers::PROMPT_IGNORE_END
+            })
+            .collect();
         eprint!("{rendered}");
 
         let mut raw = String::new();

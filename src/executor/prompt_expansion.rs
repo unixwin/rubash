@@ -486,17 +486,19 @@ impl Executor {
         if basename_only {
             // GNU polite_directory_format (parse.y): ROOT_PATH renders as
             // itself; the basename of `/` is not the empty string.
-            if rendered == "/" {
-                return rendered;
-            }
-            rendered
-                .trim_end_matches('/')
-                .rsplit('/')
-                .next()
-                .unwrap_or(&rendered)
-                .to_string()
+            let base = if rendered == "/" {
+                rendered
+            } else {
+                rendered
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&rendered)
+                    .to_string()
+            };
+            prompt_dirtrim(&base, &self.shell_state.env_vars)
         } else {
-            rendered
+            prompt_dirtrim(&rendered, &self.shell_state.env_vars)
         }
     }
 
@@ -1025,6 +1027,67 @@ fn prompt_short_version(env_vars: &HashMap<String, String>) -> String {
         (Some(major), Some(minor)) => format!("{major}.{minor}"),
         _ => release,
     }
+}
+
+/// GNU general.c:942 trim_pathname — with PROMPT_DIRTRIM=N (N > 0), keep
+/// any `~' prefix plus the final N directory components and replace the
+/// elided middle with `...'. decode_prompt_string applies it to both \w
+/// and \W (parse.y:6524, after the tilde collapse at :6519 / the \W
+/// basename at :6501-6510). No trim when the variable is unset, empty,
+/// non-numeric, or <= 0 (general.c:947-953), when the path has fewer
+/// than N separators after the prefix (general.c:967-968), when nothing
+/// precedes the kept tail (general.c:984-985), or when the elided span
+/// is <= 3 characters (general.c:987-988).
+fn prompt_dirtrim(name: &str, env_vars: &HashMap<String, String>) -> String {
+    let Some(value) = env_vars.get("PROMPT_DIRTRIM") else {
+        return name.to_string();
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return name.to_string();
+    }
+    let Ok(skip) = value.parse::<i64>() else {
+        return name.to_string();
+    };
+    if skip <= 0 {
+        return name.to_string();
+    }
+    // Skip a `~' prefix: GNU advances past the first `/' (general.c:956);
+    // a name that is only `~' (or `~/') is left alone (general.c:962).
+    let beg = match name.starts_with('~') {
+        true => match name.find('/') {
+            Some(slash) => slash + 1,
+            None => return name.to_string(),
+        },
+        false => 0,
+    };
+    if beg >= name.len() {
+        return name.to_string();
+    }
+    let body = &name[beg..];
+    if (body.matches('/').count() as i64) < skip {
+        return name.to_string();
+    }
+    // Walk back over the final N separators (general.c:975-982): the tail
+    // starts at the Nth-from-last `/'.
+    let mut remaining = skip;
+    let mut tail = None;
+    for (index, ch) in body.char_indices().rev() {
+        if ch == '/' {
+            remaining -= 1;
+            if remaining == 0 {
+                tail = Some(beg + index);
+                break;
+            }
+        }
+    }
+    let Some(tail) = tail else {
+        return name.to_string();
+    };
+    if tail == beg || tail - beg <= 3 {
+        return name.to_string();
+    }
+    format!("{}...{}", &name[..beg], &name[tail..])
 }
 
 fn prompt_terminal_basename(env_vars: &HashMap<String, String>) -> String {
