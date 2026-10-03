@@ -237,16 +237,21 @@ impl Executor {
             "((" => {
                 self.apply_no_output_builtin_redirects(cmd)?;
                 self.exit_code = self.execute_arithmetic_command(cmd);
-                // GNU expr.c: an unbound variable under `set -u` inside `((
-                // ))` raises FORCE_EOF and terminates the noninteractive
-                // shell (probe a2: `set -u; ((b)); echo after` never prints
-                // "after"). The status alone would otherwise keep the script
-                // running.
+                // GNU expr.c:1190-1216: an unbound variable under `set -u`
+                // inside `(( ))` raises FORCE_EOF and terminates the
+                // noninteractive shell (probe a2: `set -u; ((b)); echo
+                // after` never prints "after"). The status alone would
+                // otherwise keep the script running. The exit code is
+                // context-owned: 127 only at the `-c` top-level catch
+                // (shell.c:1471); script mode exits 1 (eval.c:104-109) and
+                // a `( ... )` subshell child contains the jump at
+                // execute_cmd.c:1811 and exits 1 (niubash#163).
                 if self.shell_state.arithmetic_nounset_error.get() {
                     self.shell_state.arithmetic_nounset_error.set(false);
                     self.shell_state.arithmetic_expansion_error.set(false);
-                    self.exit_code = 127;
-                    return Err(ExecuteError::ExitCode(127));
+                    let code = self.expansion_fatal_status();
+                    self.exit_code = code;
+                    return Err(ExecuteError::ExitCode(code));
                 }
                 Ok(())
             }

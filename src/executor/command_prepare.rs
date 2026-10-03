@@ -260,8 +260,13 @@ impl Executor {
         if self.shell_state.arithmetic_nounset_error.get() {
             self.shell_state.arithmetic_nounset_error.set(false);
             self.shell_state.arithmetic_expansion_error.set(false);
-            self.exit_code = 127;
-            return Err(ExecuteError::ExitCode(127));
+            // GNU expr.c:1190-1216: `(( ))` nounset is FORCE_EOF; the
+            // status is context-owned (shell.c:1471 remaps it to 127 only
+            // at the `-c` top level; a `( ... )` subshell child contains
+            // the jump at execute_cmd.c:1811 and exits 1 — niubash#163).
+            let code = self.expansion_fatal_status();
+            self.exit_code = code;
+            return Err(ExecuteError::ExitCode(code));
         }
         if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
             return Err(ExecuteError::ExitCode(self.exit_code));
@@ -421,11 +426,11 @@ impl Executor {
                         .map(String::as_str)
                         != Some("1")
                 {
-                    let code = if self.shell_state.env_vars.get("__RUBASH_IS_C").is_some() {
-                        127
-                    } else {
-                        1
-                    };
+                    // FORCE_EOF status is context-owned: 127 only at the
+                    // `-c` top-level catch (shell.c:1471); a `( ... )`
+                    // subshell child contains the jump at
+                    // execute_cmd.c:1811 and exits 1 (niubash#163).
+                    let code = self.expansion_fatal_status();
                     self.exit_code = code;
                     return Err(ExecuteError::ExitCode(code));
                 }
@@ -445,8 +450,13 @@ impl Executor {
                 // other fatal categories abandon only the command list
                 // (probe a6: `x=$((1/0)); echo after` prints "after").
                 if self.shell_state.arithmetic_nounset_error.replace(false) {
-                    self.exit_code = 127;
-                    return Err(ExecuteError::ExitCode(127));
+                    // Context-owned FORCE_EOF status: 127 only at the `-c`
+                    // top level (shell.c:1471); script mode exits 1
+                    // (eval.c:104-109) and a `( ... )` subshell contains it
+                    // to 1 (execute_cmd.c:1811 — niubash#163).
+                    let code = self.expansion_fatal_status();
+                    self.exit_code = code;
+                    return Err(ExecuteError::ExitCode(code));
                 }
                 self.exit_code = 1;
                 return Err(ExecuteError::ExpansionFailure(1));

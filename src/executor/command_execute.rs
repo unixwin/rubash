@@ -971,15 +971,21 @@ impl Executor {
             let was_fatal = self.shell_state.arithmetic_fatal_error.replace(false);
             let nounset = self.shell_state.arithmetic_nounset_error.replace(false);
             if nounset {
-                // GNU expr.c expr_streval: an unbound variable under `set -u`
-                // raises FORCE_EOF and terminates the noninteractive shell.
+                // GNU expr.c:1190-1216 expr_streval: an unbound variable
+                // under `set -u` set_exit_status(EXECUTION_FAILURE) and
+                // raises FORCE_EOF, terminating the noninteractive shell.
                 // This mirrors the plain-parameter nounset path
                 // (command_prepare.rs), which also exits the script; other
                 // arithmetic evaluation errors keep the nonfatal
                 // ExpansionFailure line-skip semantics (GNU probe d2:
                 // `echo $((1/0)); echo after` still prints "after").
-                self.exit_code = 127;
-                return Err(ExecuteError::ExitCode(127));
+                // The FORCE_EOF status is context-owned: 127 only at the
+                // `-c` top-level catch (shell.c:1471); a `( ... )` subshell
+                // child contains the jump at execute_cmd.c:1811 and exits
+                // 1 (niubash#163).
+                let code = self.expansion_fatal_status();
+                self.exit_code = code;
+                return Err(ExecuteError::ExitCode(code));
             }
             // GNU subst.c:10881-10888: an expok==0 result from $((...)) word
             // expansion is expand_wdesc_fatal when posixly_correct &&
@@ -987,7 +993,10 @@ impl Executor {
             // exp_jump_to_top_level(FORCE_EOF). shell.c:1471 run_one_command
             // maps FORCE_EOF to status 127 for `-c`; eval.c:104-109
             // (reader_loop) sets EOF_Reached so a script-mode shell exits
-            // with last_command_exit_value (EXECUTION_FAILURE=1).
+            // with last_command_exit_value (EXECUTION_FAILURE=1). A subshell
+            // child re-arms top_level (execute_cmd.c:1811) and contains the
+            // jump to 1 (niubash#163), so the status is owned by
+            // expansion_fatal_status.
             if self.posix_mode_enabled()
                 && self
                     .shell_state
@@ -996,11 +1005,7 @@ impl Executor {
                     .map(String::as_str)
                     != Some("1")
             {
-                let code = if self.shell_state.env_vars.get("__RUBASH_IS_C").is_some() {
-                    127
-                } else {
-                    1
-                };
+                let code = self.expansion_fatal_status();
                 self.exit_code = code;
                 return Err(ExecuteError::ExitCode(code));
             }
@@ -1017,7 +1022,9 @@ impl Executor {
         // expand_word_error — DISCARD for ordinary noninteractive shells,
         // FORCE_EOF when posixly_correct. shell.c:1471 maps FORCE_EOF to
         // 127 under `-c`; eval.c:104-109 ends script input so the shell
-        // exits with last_command_exit_value (EXECUTION_FAILURE=1).
+        // exits with last_command_exit_value (EXECUTION_FAILURE=1). A
+        // subshell child contains the jump at execute_cmd.c:1811 and exits
+        // 1 (niubash#163), so expansion_fatal_status owns the mapping.
         if self.shell_state.parameter_bad_substitution.replace(false) {
             if self.posix_mode_enabled()
                 && self
@@ -1027,11 +1034,7 @@ impl Executor {
                     .map(String::as_str)
                     != Some("1")
             {
-                let code = if self.shell_state.env_vars.get("__RUBASH_IS_C").is_some() {
-                    127
-                } else {
-                    1
-                };
+                let code = self.expansion_fatal_status();
                 self.exit_code = code;
                 return Err(ExecuteError::ExitCode(code));
             }

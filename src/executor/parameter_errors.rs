@@ -756,21 +756,35 @@ impl Executor {
         self.parameter_expansion_error_in_word_context(word, true)
     }
 
-    /// GNU subst.c:8221 parameter_brace_expand_error →
-    /// set_exit_status(EXECUTION_FAILURE): a fatal `${var?msg}` / nounset
-    /// expansion error reports status 1 in script mode. In `-c` mode
-    /// shell.c:1471 run_one_command maps FORCE_EOF to 127.
+    /// The single owner of the fatal-expansion exit status (FORCE_EOF
+    /// class: `${var?msg}` / nounset word errors, nounset and posix-fatal
+    /// arithmetic). GNU chain: subst.c:10168/11027 (nounset),
+    /// subst.c:8158 (`:?`), expr.c:1190 (`(( ))` nounset), subst.c:4295-4296
+    /// and subst.c:8221 all `set_exit_status(EXECUTION_FAILURE)` = 1 and
+    /// `jump_to_top_level(FORCE_EOF)`. The 127 remap exists ONLY at the
+    /// `-c` top-level catch, shell.c:1471 run_one_command
+    /// (`case FORCE_EOF: return last_command_exit_value = 127`); in script
+    /// mode eval.c:98-107 reader_loop ends input and exits with
+    /// last_command_exit_value (1).
     ///
-    /// Inside a $( )/backtick command substitution the fatal longjmp lands
-    /// on the child's own top_level setjmp (subst.c:7393-7404) and exits
-    /// EXECUTION_FAILURE — 1 — even when the session is `-c`, because the
-    /// comsub child runs parse_and_execute, never run_one_command
-    /// (rubash#154 comsub corner: `bash -c 'v=$(echo ${x:?})'` exits 1).
+    /// Every forked child that re-arms `top_level` contains the jump and
+    /// exits with last_command_exit_value — 1 — instead: the `( ... )`
+    /// subshell child (execute_cmd.c:1811 execute_in_subshell: any jump
+    /// → `return_code = last_command_exit_value ?: EXECUTION_FAILURE`,
+    /// niubash#163: `bash -c '( set -u; echo $U )'` exits 1) and the
+    /// `$( )`/backtick comsub child (subst.c:7393-7404, rubash#154:
+    /// `bash -c 'v=$(echo ${x:?})'` exits 1). In rubash those boundaries
+    /// are `subshell_depth > 0` (compound_exec.rs/ast_exec.rs/
+    /// external_finish.rs/comsub fork copies) plus the
+    /// `__RUBASH_COMSUB_BODY` fast-path comsub marker. The nofork funsub
+    /// `${ ...; }` runs in the parent and keeps the 127 mapping (GNU
+    /// subst.c:7057 exp_jump_to_top_level out of the in-parent body).
     pub(in crate::executor) fn expansion_fatal_status(&self) -> i32 {
         if self
             .shell_state
             .env_vars
             .contains_key("__RUBASH_COMSUB_BODY")
+            || self.shell_state.subshell_depth.get() > 0
         {
             1
         } else if self.shell_state.env_vars.contains_key("__RUBASH_IS_C") {

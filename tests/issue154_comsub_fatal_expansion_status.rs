@@ -177,3 +177,161 @@ fn script_mode_comsub_fatal_reports_one_and_continues() {
         .contains("probe.sh: line 4: UNDEF_INNER: unbound variable\n"));
     assert_eq!(out.stderr.lines().count(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// niubash#163 lane wt55/subshell-rc: the `-c` subshell exit-status cell.
+//
+// GNU spec: a fatal expansion error raises FORCE_EOF with
+// last_command_exit_value = EXECUTION_FAILURE (subst.c:10168/11027 nounset,
+// subst.c:8158 `:?`, expr.c:1190-1216 `(( ))`/arith nounset). The 127 remap
+// exists ONLY at shell.c:1471 run_one_command — the `-c` top-level catch.
+// A `( ... )` subshell child re-arms top_level at execute_cmd.c:1811
+// (execute_in_subshell) and converts any jump to last_command_exit_value
+// (1), so `bash -c '( set -u; echo $U )'` exits 1, while the same fatal at
+// `-c` top level, in a function, or in a `for` body still exits 127. The
+// comsub child does the same at subst.c:7393-7404 (rubash#154 above).
+//
+// Rust semantic owner: parameter_errors.rs expansion_fatal_status — the
+// single context owner (subshell_depth > 0 / __RUBASH_COMSUB_BODY → 1,
+// else __RUBASH_IS_C → 127, else 1). Every matrix row below was measured
+// against WSL GNU Bash 5.3.0 (/usr/local/bin/bash) on 2026-10-02, both
+// `-c` and script-file mode.
+// ---------------------------------------------------------------------------
+
+/// Run `rubash -c` with #163 probe hygiene (U_X scrubbed from the
+/// environment so `set -u` fatality is deterministic).
+fn run163_c(command: &str) -> RunOutcome {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .args(["-c", command])
+        .stdin(Stdio::null())
+        .env_remove("BASH_ENV")
+        .env_remove("WINUXSH_ROOT")
+        .env_remove("U_X")
+        .output()
+        .expect("run rubash -c");
+    RunOutcome {
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// Script-file mode counterpart of [`run163_c`].
+fn run163_file(script: &str) -> RunOutcome {
+    let dir = std::env::temp_dir().join(format!("rubash-issue163-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create issue163 scratch dir");
+    let script_path = dir.join("probe.sh");
+    let mut file = std::fs::File::create(&script_path).expect("write probe script");
+    file.write_all(script.as_bytes())
+        .expect("write probe script");
+    drop(file);
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&script_path)
+        .stdin(Stdio::null())
+        .env_remove("BASH_ENV")
+        .env_remove("WINUXSH_ROOT")
+        .env_remove("U_X")
+        .output()
+        .expect("run rubash script");
+    let _ = std::fs::remove_dir_all(&dir);
+    RunOutcome {
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// The niubash#163 seven-shape matrix × two modes, rc parity with GNU:
+/// (shape, -c rc, script-file rc). The subshell rows are the #163 fix
+/// (were 127 under `-c`); the 127 rows are the protected top-level /
+/// function / for shapes that must NOT regress to 1.
+#[test]
+fn issue163_matrix_c_and_file_mode_exit_parity() {
+    // (shape, expected -c rc, expected file rc) — GNU-measured.
+    let matrix: &[(&str, i32, i32)] = &[
+        // #163 headline shapes: subshell-contained fatals exit 1.
+        ("( set -u; echo \"$U_X\" )", 1, 1),
+        ("( echo \"${U_X:?boom}\" )", 1, 1),
+        // Protected 127 shapes: fatal reaches run_one_command's catch.
+        ("set -u; echo \"$U_X\"", 127, 1),
+        ("f(){ set -u; echo \"$U_X\"; }; f", 127, 1),
+        ("for i in 1; do set -u; echo \"$U_X\"; done", 127, 1),
+        // Comsub child (rubash#154) and continuation shapes.
+        ("x=$( set -u; echo \"$U_X\" )", 1, 1),
+        ("( set -u; echo \"$U_X\" ); :", 0, 0),
+        // The same containment for the arithmetic-nounset and posix-fatal
+        // FORCE_EOF raisers (expr.c:1190, subst.c:4295) inside `( )`.
+        ("( set -u; echo $((U_X)) )", 1, 1),
+        ("( ( set -u; echo \"$U_X\" ) )", 1, 1),
+        ("( set -o posix; echo $((1/0)) )", 1, 1),
+        ("( set -u; v=$((U_X)) )", 1, 1),
+        // Top-level arithmetic nounset keeps the `-c` 127 (and is 1 in
+        // script mode — eval.c:104-109 exits last_command_exit_value).
+        ("set -u; echo $((U_X))", 127, 1),
+        ("set -u; ((U_X))", 127, 1),
+        ("set -u; v=$((U_X))", 127, 1),
+        ("set -o posix; echo $((1/0))", 127, 1),
+    ];
+    for (shape, c_rc, file_rc) in matrix {
+        let out = run163_c(shape);
+        assert_eq!(out.code, Some(*c_rc), "-c rc mismatch for: {shape}");
+        let out = run163_file(&format!("{shape}\n"));
+        assert_eq!(out.code, Some(*file_rc), "file rc mismatch for: {shape}");
+    }
+}
+
+/// The subshell boundary CONTAINS the fatal (the script continues with
+/// $? = 1) — GNU `bash -c '( echo "${U_X:?boom}" ); echo after=$?'`
+/// prints `after=1`, rc 0.
+#[test]
+fn issue163_subshell_fatal_is_contained_with_status_one() {
+    let out = run163_c("( echo \"${U_X:?boom}\" ); echo after=$?");
+    assert_eq!(out.code, Some(0));
+    assert_eq!(out.stdout, "after=1\n");
+    assert_eq!(out.stderr, "bash: line 1: U_X: boom\n");
+
+    let out = run163_file("( set -u; echo \"$U_X\" ); echo after=$?\n");
+    assert_eq!(out.code, Some(0));
+    assert_eq!(out.stdout, "after=1\n");
+}
+
+/// GNU-measured diagnostics for the two #163 headline shapes (stderr text
+/// is part of the parity contract).
+#[test]
+fn issue163_subshell_fatal_diagnostics_match() {
+    let out = run163_c("( set -u; echo \"$U_X\" )");
+    assert_eq!(out.stderr, "bash: line 1: U_X: unbound variable\n");
+    assert_eq!(out.stdout, "");
+
+    let out = run163_c("( echo \"${U_X:?boom}\" )");
+    assert_eq!(out.stderr, "bash: line 1: U_X: boom\n");
+}
+
+/// An async paren subshell is a forked child that re-arms top_level: its
+/// fatal exit is 1 (`wait` reports 1; GNU execute_cmd.c:1811). A plain
+/// async command's fork does NOT re-arm, so under `-c` it inherits the
+/// run_one_command catch and `wait` reports 127.
+#[test]
+fn issue163_async_paren_subshell_waits_with_one() {
+    let out = run163_c("( echo \"${U_X:?}\" ) & wait $!; echo bg=$?");
+    assert_eq!(out.code, Some(0));
+    assert_eq!(out.stdout, "bg=1\n");
+
+    let out = run163_c("set -u; echo \"$U_X\" & wait $!; echo bg=$?");
+    assert_eq!(out.code, Some(0));
+    assert_eq!(out.stdout, "bg=127\n");
+}
+
+/// The nofork funsub boundary is NOT a subshell: it keeps the `-c` 127
+/// even though it looks like a substitution (GNU subst.c:7057 runs the
+/// body in-parent). Companion guard for the pinned test above.
+#[test]
+fn issue163_funsub_inside_subshell_is_contained_but_direct_stays_127() {
+    // Direct funsub fatal: 127 (protected above as
+    // c_mode_funsub_fatal_stays_127). Inside `( )` the funsub's fatal
+    // dies at the subshell boundary: 1.
+    let out = run163_c("( v=${ echo ${x:?fs}; }; echo after )");
+    assert_eq!(out.code, Some(1));
+    assert_eq!(out.stdout, "");
+}
