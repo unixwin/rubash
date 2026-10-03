@@ -1002,3 +1002,78 @@ rc-parity per snippet. **2157/2164 parity (99.7%).** 7 divergent -> 4 shapes:
 - A6: `gh/` (gen.py, work_extscript.sh, drivers)
 - A4: `choco/` (drivers + outputs)
 - B: `b-workspace-test.log` (full-workspace zero-point run)
+
+# ===== SECTION: themesweep lane (wt53/themesweep, 2026-10-03) — APPENDED, DO NOT REORDER =====
+
+Owner directive 2026-10-03: EVERY oh-my-bash theme, LOAD **and** interactive
+RENDER, vs WSL GNU Bash 5.3.0; then a standing smoke-leg proposal. Engine:
+target/release/rubash.exe 1.3.0 (master a226108c, fresh build). Corpus:
+oh-my-bash LF clone @abf8461 (re-cloned from the local install;
+`target/ecosweep-corpus/oh-my-bash-lf` — the ecosweep copy had been cleaned).
+Sandbox: `target/issue-suites/results/themesweep/` (harness/, omb-a/, render/,
+probes/, smoke-leg/, THEMES-SWEEP.md, themes-final.md). 83 themes; `random`
+excluded from render (nondeterministic per load).
+
+## Method (new ground: interactive RENDER)
+
+Part A (load, ecosweep harness shape re-run INTERACTIVE): `--rcfile rc -i
+</dev/null`, fresh HOME/cache per theme, markers `@@SOURCE-DONE` /
+`@@VERSINFO` / PROMPT_COMMAND loop / raw PS1 dump; GNU side via
+`setsid timeout -k 5 20` (a bare `bash -i` in a new pgroup of the relay tty
+gets SIGTSTP'd — state T — and timeout's TERM never lands; recorded as a
+harness pitfall). Rubash leg re-run with USER exported (out-rb2) after the
+first pass showed themes gating on `-n $USER` (powerline user segment,
+kitsune/morris titlebar) — harness env parity, not engine. GNU second pass
+with FRESH homes (out-gnu2) after the first gnu2 reused HOME (nwinkler family
+caches random colors in $HOME → fake stability).
+
+Part B (render, NEW): ConPTY (pywinpty+pyte, technique from
+D:/repo/niubash/scripts/smoke-wizard-journey.py — repo untouched), 100x30,
+TERM=xterm-256color; per theme wait prompt#1 → `echo S-MARK` → prompt#2 →
+`ls` → prompt#3; pyte screen text+cursor+attrs + raw stream per theme/side.
+**Engine note:** bare rubash.exe --rcfile rc -i with a console on stdin
+reaches main.rs run_repl (banner + hardcoded `$ `, no PS1) — so the rubash
+leg drives the PS1-rendering reader (script_driver.rs run_interactive_stdin)
+through a line relay (harness/relay.sh: Git Bash `read -rs` line → pipe into
+rubash). Normalizations documented in THEMES-SWEEP.md (paths/user/host/time/
+date/dirtrim-remnant/fixture-ls/SOH-STH strip).
+
+## Verdicts (details + families in themesweep/THEMES-SWEEP.md)
+
+| leg | result |
+| --- | --- |
+| load (83) | 60 PASS (PS1 normalized-equal vs GNU); 4 FAIL-engine (#416 iterate, #417 hawaii50, #418 powerbash10k+brainy); 14 FAIL-env (8 euid-red/root-mark/`#`-sigil — GNU ran as root; 6 platform: OSTYPE-gated battery block (demula/pzq/rana), tput caps (mairan), no ip/ifconfig (developer), no `rev` in Git-for-Windows (duru)); 2 FAIL-env-suspected (powerline-icon/-wizard clock segment); 3 VOLATILE excluded (random, emperor, nwinkler_random_colors) |
+| render (82) | 18 EQUIVALENT; 64 DIVERGENT partitioned: 33 wrap/width → **#420** (PROMPT_DIRTRIM ignored in `\w`), 22 redraw-glyph-leak → **#422** (`\[`/`\]` markers emitted as printable glyphs on prompt#3), 2 right-align-drift (powerbash10k = wt52 family, vscode), 1 glued (brainy, #418), 1 prompt-height (duru), 5 other (absimple history counter, iterate #416 empty, powerline-naked/-plain GNU-redraw residue = #419 reader model, pro `\h`→localhost env fallback) |
+| wt52 bucket (alias-leak → arithmetic syntax error / OMB_VERSINFO corruption) | **0 hits** — all 83 themes print exact `OMB_VERSINFO=1 0 0 0 master noarch` on current master (positive confirmation for wt52/pb10k's fix) |
+
+## Issues opened (all with minimal file repro + raw artifact paths)
+
+#416 single-quoted `${var/pat/repl}` inside `$( )` expanded (iterate);
+#417 single-quoted external arg in `$( )`: backslash dropped + `${VAR}`
+brace-stripped before exec (hawaii50); #418 powerbash10k+brainy PS1 right-side
+segment as literal `" $'...' "` + literal `\E` (wt52 render-family, load-time
+variant); #419 bare rubash.exe console interactive = placeholder REPL
+(banner + hardcoded `$ `, PS1 ignored); #420 PROMPT_DIRTRIM ignored in `\w`;
+#421 `\u` honors empty `$USER` env (GNU getwpuid); #422 prompt redraw emits
+`\[`/`\]` as printable glyphs.
+
+## Smoke-leg proposal (NOT landed — captain to land)
+
+`target/issue-suites/results/themesweep/smoke-leg/`:
+README-SMOKE-LEG.md + smoke-theme-load.sh (validated: 5/5 PASS) +
+smoke-theme-render.py (validated: robbyrussell PASS, powerbash10k
+xfail-masked) + relay.sh. Fixed core powerbash10k/agnoster/robbyrussell + 2
+week-rotating themes; load markers + ConPTY render invariants; XFAIL registry
+tied to the issue tracker.
+
+## Pitfalls recorded for future lanes
+
+- pyte 0.8.2 eats text following a raw `\x01` (SOH) — strip SOH/STX from
+  rubash's non-tty prompt stream BEFORE feeding pyte (documented B1).
+- pywinpty ConPTY pre-echoes typed input lines unless the reader disables
+  echo (relay uses `read -rs`); otherwise screens gain phantom rows.
+- WSL `bash -i` from a non-tty parent needs `setsid` (see above).
+- A GNU-side "stability" re-run MUST use fresh HOMEs — OMB themes cache
+  random state in $HOME and fake determinism.
+- Rubash under ConPTY reaches the placeholder REPL (#419) — render probes
+  must pipe stdin (relay) to reach the PS1-rendering reader.
