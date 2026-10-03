@@ -1956,7 +1956,6 @@ fn test_pipeline_brace_group_stage_keeps_cwd_isolated() {
     let _ = fs::remove_file(output_path);
 }
 
-#[ignore = "rubash#412: see issue (probe wt37-374 K109)"]
 #[test]
 fn test_pipeline_function_stage_keeps_cwd_isolated() {
     let output_path = target_test_path("rubash-pipeline-function-stage-cwd-output.txt");
@@ -1973,9 +1972,12 @@ fn test_pipeline_function_stage_keeps_cwd_isolated() {
 
     let current = env::current_dir().unwrap();
     let parent = current.parent().unwrap();
-    // wt37 (#374): GNU 5.3.0 expectation (probe wt37-374 K109). rubash
-    // currently loses the whole redirected stage output - tracked by
-    // rubash#412; the brace-group form (K108) works.
+    // wt37 (#374): GNU 5.3.0 expectation (probe wt37-374 K109). Fixed for
+    // rubash#412: the function stage applies its own output redirects onto
+    // the stage fd table (GNU execute_cmd.c: the element's redirections run
+    // inside the element after the pipe binds fd 1) and marks the stage
+    // fds pre-wired, so the pipeline routing walk no longer re-opens `>`
+    // and truncates what the body wrote.
     assert_eq!(
         fs::read_to_string(&output_path).unwrap(),
         format!(

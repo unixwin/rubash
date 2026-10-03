@@ -250,6 +250,21 @@ impl Executor {
         });
         let mut output = subshell.stdout_capture.take().unwrap_or_default();
         output.extend_from_slice(&thread_captured);
+        // The call's ORDERED redirect list (call.redirects) still carries
+        // the stage's output redirects, and execute_function's redirect
+        // walk applied them onto the subshell's fd table before the body
+        // ran -- GNU execute_cmd.c semantics: an element's redirections
+        // run inside the element after the pipe binds fd 1, so the body's
+        // writes already landed on the opened targets. Tell the pipeline
+        // loop this stage owns its stream placement; the routing walk
+        // would re-open `>f` and TRUNCATE what the body just wrote
+        // (rubash#412: `printf x | f > OUT` lost pwd's line and the
+        // piped payload). Brace-group stages get the same skip via
+        // command_is_compound_pipeline_stage; external stages that wire
+        // both fds onto one open file set this flag themselves.
+        if command_has_output_redirects(command) {
+            self.pipeline_stage_fds_pre_wired.set(true);
+        }
         let stderr = subshell.stderr_capture.take().unwrap_or_default();
         let status = subshell.last_exit_code();
 
