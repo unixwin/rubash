@@ -1,13 +1,61 @@
 use super::*;
 
-pub(in crate::executor) fn prompt_username(env_vars: &HashMap<String, String>) -> String {
-    env_vars
-        .get("USER")
-        .or_else(|| env_vars.get("USERNAME"))
-        .cloned()
-        .or_else(|| env::var("USER").ok())
-        .or_else(|| env::var("USERNAME").ok())
-        .unwrap_or_default()
+pub(in crate::executor) fn prompt_username(_env_vars: &HashMap<String, String>) -> String {
+    // GNU parse.y:6542-6551 (decode_prompt_string `case 'u'`): the prompt
+    // renders current_user.user_name, which get_current_user_info
+    // (shell.c:1877-1915) fills ONCE per process from
+    // getpwuid(current_user.uid) -- the passwd database, never the USER
+    // environment variable. A session running with USER="" (or USER=spoof)
+    // therefore still shows the real account name in \u (rubash#421); a
+    // userless lookup renders GNU's literal "I have no name!". Port: the
+    // OS account API (GetUserNameW on Windows -- the token's account name,
+    // the geteuid analog; getpwuid on Unix), cached once like current_user.
+    static USER_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    USER_NAME.get_or_init(os_account_user_name).clone()
+}
+
+fn os_account_user_name() -> String {
+    #[cfg(windows)]
+    {
+        // advapi32 GetUserNameW: the account name of the running access
+        // token. The name buffer starts generous (UNLEN + 1 = 257); a
+        // ERROR_INSUFFICIENT_BUFFER retry is the documented contract but
+        // cannot fire with UNLEN-sized input.
+        const UNLEN: u32 = 256;
+        let mut buffer = [0u16; UNLEN as usize + 1];
+        let mut size = buffer.len() as u32;
+        let ok = unsafe {
+            windows_sys::Win32::System::WindowsProgramming::GetUserNameW(
+                buffer.as_mut_ptr(),
+                &mut size,
+            )
+        };
+        if ok != 0 && size > 0 {
+            let end = buffer[..size as usize]
+                .iter()
+                .position(|&ch| ch == 0)
+                .unwrap_or(size as usize);
+            return String::from_utf16_lossy(&buffer[..end]);
+        }
+        "I have no name!".to_string()
+    }
+    #[cfg(unix)]
+    {
+        // shell.c:1890 getpwuid(geteuid()); a missing passwd entry takes
+        // the literal fallback at shell.c:1905.
+        let uid = unsafe { libc::geteuid() };
+        let entry = unsafe { libc::getpwuid(uid) };
+        if entry.is_null() {
+            return "I have no name!".to_string();
+        }
+        let name = unsafe { (*entry).pw_name };
+        if name.is_null() {
+            return "I have no name!".to_string();
+        }
+        unsafe { std::ffi::CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 pub(in crate::executor) fn prompt_hostname(

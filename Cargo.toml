@@ -33,7 +33,7 @@ regex = "1"
 os_pipe = "1.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Globalization", "Win32_System_SystemInformation", "Win32_System_Pipes", "Win32_System_Time"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Globalization", "Win32_System_SystemInformation", "Win32_System_Pipes", "Win32_System_Time", "Win32_System_WindowsProgramming"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
