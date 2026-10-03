@@ -926,3 +926,84 @@ fn comsub_case_word_glued_pattern_close_arms_region_and_rearm() {
         );
     }
 }
+
+#[test]
+fn aliases_never_expand_inside_compound_array_assignment() {
+    // parse.y:5652-5673 read_token_word: `NAME=` + `(` hands the whole
+    // `( ... )` to parse_compound_assignment (parse.y:7104) INSIDE the same
+    // word; element words are read with last_read_token = WORD — "we won't
+    // be in a command position and so alias expansion won't happen"
+    // (parse.y:7113-7117). Bug family: niubash 1.3.0 + oh-my-bash
+    // powerbash10k corrupted `OMB_VERSINFO=(1 0 0 0 master noarch)` when a
+    // default `alias 1='cd -'` was live, and the later version arithmetic
+    // died on the bare `-` element (`niu: -: arithmetic syntax error`).
+    let lookup = |name: &str| match name {
+        "zq" => Some(("echo ZQ".to_string(), false)),
+        "1" => Some(("cd -".to_string(), false)),
+        _ => None,
+    };
+    // The reported corruption: element words are never alias candidates.
+    let forms = [
+        "A=(zq 0)",
+        "OMB_VERSINFO=(1 0 0 0 master noarch)",
+        "V=(a zq b)",          // non-first element too
+        "declare -a E=(zq 0)", // declaration utility argument
+        "export F=(zq 0)",
+        "G+=(zq 0)",         // append form
+        "J=([k]=zq)",        // subscripted element
+        "K=('zq' \"zq\")",   // quoted elements
+        "N=( if then )",     // reserved words stay words
+        "M=(zq)tail",        // word glued to the closer
+        "A=(\n  zq\n  0\n)", // newlines are whitespace
+        "S=(# comment\nzq)", // comments skipped (parse.y:7142)
+        "h() { g=(zq 0); }", // inside a function body
+        "if true; then I=(zq 0); fi",
+    ];
+    for form in forms {
+        let out = expand_aliases_in_source(&format!("{form}\n"), &lookup, false);
+        assert_eq!(out, format!("{form}\n"), "leaked in {form:?}");
+    }
+}
+
+#[test]
+fn command_position_aliases_still_expand_around_array_assignments() {
+    // The fix must not over-reach: alias candidates remain exactly GNU's
+    // command positions (parse.y:3157 command_token_position), which
+    // includes the word AFTER a whole assignment word (ASSIGNMENT_WORD)
+    // and the first word of a subshell — but not argument position.
+    let lookup = |name: &str| match name {
+        "zq" => Some(("echo ZQ".to_string(), false)),
+        _ => None,
+    };
+    let cases = [
+        ("zq hi\n", "echo ZQ hi\n"),
+        ("( zq hi )\n", "( echo ZQ hi )\n"),
+        ("x=1 zq hi\n", "x=1 echo ZQ hi\n"),
+        ("A=(zq 0) zq hi\n", "A=(zq 0) echo ZQ hi\n"),
+        ("echo zq\n", "echo zq\n"),
+    ];
+    for (input, want) in cases {
+        let out = expand_aliases_in_source(input, &lookup, false);
+        assert_eq!(out, want, "for {input:?}");
+    }
+}
+
+#[test]
+fn alexpnext_still_expands_inside_compound_array_assignment() {
+    // parse.y:3254: alias_expand_token fires on PST_ALEXPNEXT alone, even
+    // inside a compound assignment — an alias whose value ends in a blank
+    // (AL_EXPANDNEXT, popped at parse.y:2098) and OPENS the array literal
+    // makes the next element word expandable. Verified byte-for-byte
+    // against WSL GNU Bash 5.3.0: `alias opener='MULTI=( '` + `opener zq 0)`
+    // yields elements echo ZQ 0.
+    let lookup = |name: &str| match name {
+        "opener" => Some(("MULTI=( ".to_string(), true)),
+        "zq" => Some(("echo ZQ".to_string(), false)),
+        _ => None,
+    };
+    let out = expand_aliases_in_source("opener zq 0)\n", &lookup, false);
+    // Two blanks before `echo`: the alias value's trailing blank plus the
+    // input's separator — the splice is textual; word splitting happens in
+    // the executor, which is why the e2e output matches GNU byte-for-byte.
+    assert_eq!(out, "MULTI=(  echo ZQ 0)\n");
+}

@@ -246,6 +246,18 @@ pub(crate) fn expand_aliases_in_source(
                                  // ever applies inside a heredoc body.
     let mut expect_heredoc: Option<bool> = None; // strip_tabs for <<-
     let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
+    // >0 while scanning the element words of a compound array assignment
+    // `NAME=( w1 w2 ... )` (the value is the nesting depth of raw `(`).
+    // parse.y:5652-5673 read_token_word consumes the whole `( ... )` into
+    // the SAME word via parse_compound_assignment (parse.y:7104), which
+    // reads the element words with `last_read_token = WORD` — "so it means
+    // we won't be in a command position and so alias expansion won't
+    // happen" (parse.y:7113-7117). Element words are alias candidates only
+    // through PST_ALEXPNEXT (parse.y:3254) and are never reserved words.
+    // Newlines are plain whitespace here (parse.y:7142); operator
+    // characters are a syntax error GNU raises after the alias pass, so
+    // they pass through unrewritten.
+    let mut compassign = 0usize;
 
     macro_rules! emit {
         ($tok:expr) => {{
@@ -268,6 +280,69 @@ pub(crate) fn expand_aliases_in_source(
             break;
         }
         let c = buf[pos];
+        if compassign > 0 {
+            // Inside `NAME=( ... )` — parse.y:7104 parse_compound_assignment
+            // reads element words with last_read_token = WORD: no command
+            // position, so no alias candidates and no reserved words; only
+            // PST_ALEXPNEXT (parse.y:3254) can still expand an element.
+            match c {
+                ' ' | '\t' | '\n' | ';' | '&' | '|' | '<' | '>' => pos += 1,
+                '#' => {
+                    // Comments are skipped by the reader, never token input.
+                    while pos < buf.len() && buf[pos] != '\n' {
+                        pos += 1;
+                    }
+                }
+                '(' => {
+                    // A raw nested `(` is a syntax error GNU raises after
+                    // the alias pass; depth-count through it so the real
+                    // closer still lands.
+                    compassign += 1;
+                    pos += 1;
+                }
+                ')' => {
+                    compassign -= 1;
+                    pos += 1;
+                    if compassign == 0 {
+                        // The whole `NAME=( ... )` is one ASSIGNMENT_WORD
+                        // (parse.y:5652-5673, `goto next_character`), so a
+                        // word glued to the closer (`A=(1)B`) continues the
+                        // same token and is never an alias candidate.
+                        let (cont, _) = scan_word(&buf, pos);
+                        pos = cont;
+                        emit!(Tok::Assign);
+                    }
+                }
+                _ => {
+                    let ws = pos;
+                    let (end, quoted) = scan_word(&buf, pos);
+                    pos = end;
+                    let word: String = buf[ws..end].iter().collect();
+                    if alexpnext && !quoted && !expanding.iter().any(|name| name == &word) {
+                        if let Some((value, expand_next)) = lookup(&word) {
+                            splice_alias_value(
+                                &mut buf,
+                                &mut bounds,
+                                &mut expanding,
+                                ws,
+                                end,
+                                &word,
+                                &value,
+                                expand_next,
+                                false,
+                            );
+                            pos = ws;
+                            continue;
+                        }
+                    }
+                    // parse.y:5766: an eligible token with no expansion
+                    // clears PST_ALEXPNEXT; every element word is a plain
+                    // WORD for the token stream.
+                    emit!(Tok::Word);
+                }
+            }
+            continue;
+        }
         match c {
             ' ' | '\t' => pos += 1,
             '\n' => {
@@ -393,6 +468,28 @@ pub(crate) fn expand_aliases_in_source(
                 pos = end;
                 let word: String = buf[ws..end].iter().collect();
 
+                // `NAME=` immediately followed by `(` opens a compound array
+                // assignment (parse.y:5652-5673 read_token_word): the whole
+                // `( ... )` is consumed into this one word by
+                // parse_compound_assignment (parse.y:7104), whose element
+                // words are read with last_read_token = WORD — outside
+                // command position, so "alias expansion won't happen"
+                // (parse.y:7113-7117). Not after a redirection operator:
+                // there the word is the target/delimiter and GNU never
+                // starts a compound assignment (it is a syntax error).
+                if compassign == 0
+                    && last != Tok::RedirOp
+                    && buf.get(pos) == Some(&'(')
+                    && word.ends_with('=')
+                    && is_assignment_syntax(&word)
+                {
+                    compassign = 1;
+                    pos += 1;
+                    last2 = Tok::Word;
+                    last = Tok::Word;
+                    continue;
+                }
+
                 // A word right after a redirection operator is its target
                 // (file, fd, or heredoc delimiter): not command position,
                 // but PST_ALEXPNEXT still expands it (alias `c='< '` makes
@@ -496,31 +593,17 @@ pub(crate) fn expand_aliases_in_source(
                     if let Some((value, expand_next)) = lookup(&word) {
                         // push_string: splice the replacement text in place
                         // and re-read it under the same parser state.
-                        let mut value_chars: Vec<char> = value.chars().collect();
-                        // A pushed string end is a token boundary for the
-                        // fd-prefix rule (y.tab.c:8085): digits at the end
-                        // of pushed text do not merge with a < or > from
-                        // the outer input. A literal space reproduces that
-                        // boundary in flat text (`alias foo='echo 0'` +
-                        // `foo>&2` is `echo 0 >&2`, printing `0` on stderr).
-                        if value_chars.last().is_some_and(|ch| ch.is_ascii_digit())
-                            && matches!(buf.get(end), Some('<') | Some('>'))
-                        {
-                            value_chars.push(' ');
-                        }
-                        let vlen = value_chars.len();
-                        let removed = end - ws;
-                        buf.splice(ws..end, value_chars);
-                        let delta = vlen as isize - removed as isize;
-                        for b in bounds.iter_mut() {
-                            b.end = (b.end as isize + delta) as usize;
-                        }
-                        bounds.push(Boundary {
-                            end: ws + vlen,
-                            expander: word.clone(),
+                        splice_alias_value(
+                            &mut buf,
+                            &mut bounds,
+                            &mut expanding,
+                            ws,
+                            end,
+                            &word,
+                            &value,
                             expand_next,
-                        });
-                        expanding.push(word);
+                            true,
+                        );
                         pos = ws;
                         continue;
                     }
@@ -571,6 +654,46 @@ pub(crate) fn expand_aliases_in_source(
         }
     }
     buf.iter().collect()
+}
+
+/// push_string (parse.y:2055): replace the just-scanned word at `ws..end`
+/// with the alias value; the caller re-reads from `ws` under the same
+/// parser state. Pushed-string boundaries after the splice shift by the
+/// length delta. `fd_boundary` appends the literal blank that keeps a
+/// value-final digit from merging with a `<`/`>` of the outer input
+/// (y.tab.c:8085): `alias foo='echo 0'` + `foo>&2` is `echo 0 >&2`,
+/// printing `0` on stderr.
+fn splice_alias_value(
+    buf: &mut Vec<char>,
+    bounds: &mut Vec<Boundary>,
+    expanding: &mut Vec<String>,
+    ws: usize,
+    end: usize,
+    word: &str,
+    value: &str,
+    expand_next: bool,
+    fd_boundary: bool,
+) {
+    let mut value_chars: Vec<char> = value.chars().collect();
+    if fd_boundary
+        && value_chars.last().is_some_and(|ch| ch.is_ascii_digit())
+        && matches!(buf.get(end), Some('<') | Some('>'))
+    {
+        value_chars.push(' ');
+    }
+    let vlen = value_chars.len();
+    let removed = end - ws;
+    buf.splice(ws..end, value_chars);
+    let delta = vlen as isize - removed as isize;
+    for b in bounds.iter_mut() {
+        b.end = (b.end as isize + delta) as usize;
+    }
+    bounds.push(Boundary {
+        end: ws + vlen,
+        expander: word.to_string(),
+        expand_next,
+    });
+    expanding.push(word.to_string());
 }
 
 /// Scan one word starting at `pos`: returns (end, quoted). Quoting and
