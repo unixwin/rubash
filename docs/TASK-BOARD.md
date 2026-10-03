@@ -384,3 +384,10 @@
 - **wt48/release161**：niubash#161 发布门（删退役 bundle staging+hooks.md 处置）+ lazystudy 遗留 3 commit 手工合并（独立下载驱动/合集+TUI/文档）
 - **wt48/wcmd1145**：WinuxCmd#1145（cp/ls POSIX argv 补齐——Option B 产品面兑现的最后上游项）
 - 四车道并行；交付即回收
+
+## 2026-10-03 终 VIII：release161 回收（niubash c36b07b）——1.2.6 发布门一号解除
+
+- **#161 关**：发布管道退役 bundle staging 全删（含 release.yml 调用点）；installer/architecture 文档同步；hooks.md 改写为活面（PROMPT_COMMAND/PS0/trap/PS1 认领=活机器，原生命名钩子标注待实作）；AGENTS.md Product Direction 留 owner 改
+- **lazystudy 三 commit 完整合入**（发现 master cherry-pick 曾漏 mod recipes 声明致死文件）：独立下载驱动（ureq+flate2+tar 零 wpm/apt 耦合）+合集/distro+TUI MVP+501 行配方索引；recipe/distro/tool/ui 四动词全套；506 测试全绿
+- 在途：wt48/resid413（#413+#359）、wt48/assoc391（assoc 16 深水）、wt48/wcmd1145（上游）
+- 1.2.6 剩余发布门：#1145 WinuxCmd POSIX argv 补齐+WinuxCmd release 进 bundle
