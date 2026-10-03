@@ -391,3 +391,13 @@
 - **lazystudy 三 commit 完整合入**（发现 master cherry-pick 曾漏 mod recipes 声明致死文件）：独立下载驱动（ureq+flate2+tar 零 wpm/apt 耦合）+合集/distro+TUI MVP+501 行配方索引；recipe/distro/tool/ui 四动词全套；506 测试全绿
 - 在途：wt48/resid413（#413+#359）、wt48/assoc391（assoc 16 深水）、wt48/wcmd1145（上游）
 - 1.2.6 剩余发布门：#1145 WinuxCmd POSIX argv 补齐+WinuxCmd release 进 bundle
+
+## 2026-10-03 终 IX：下载全收缴（wt50/dlretract）+ wpm-first 纠偏 + v1.1.5 切版 + 装完即选主题拍板
+
+- **owner 下载全收缴 FINAL 裁定**：niu shell 零网络职责——删 ureq/flate2/tar+download.rs；插件驱动=纯 git clone；字体=检测+推荐 only；可执行工具=包管理器推荐；镜像=git insteadOf only
+- **owner 第十二次校准（wpm-first 纠偏）**：剥离≠降级——Windows 上 wpm 是命令层可执行工具的**一等推荐**（`wpm install <tool>`），winget/scoop 只补 wpm 不覆盖的品类（字体/GUI 应用）；非 Windows 红线不变（原生包管理器 apt/dnf/yum/brew+wpm 字符串编译期 cfg 禁现，688f224）；字体主渠道=winget nerd-fonts.*（wpm 载命令不载字体）
+- **wt50/dlretract**（D:/repo/niubash-wt-dlretract，基于 e07e389，后台 agent）：收缴十项+三追加令（wizard full 合集行措辞诚实化/niu-git 推荐指 `wpm install niugit` 并改写过时裁决注释/`niu plugin discover` 动词保活）；71 个 union-resolve 测试红随 download.rs 删除消失=niubash master CI 转绿路径；五门+冒烟
+- **owner 拍板"装完即选主题"（这得做）**：向导在装完合集（recommended=oh-my-bash+默认主题+补全）后**立即弹主题画廊**，免二跑 `niu setup`——排 dlretract 合入后串行车道（同文件 setup_wizard.rs Q1/Q2.5，避免互踩）；冒烟断言覆盖全旅程（空画廊→recommended→trust→主题生效→重跑换主题→装完即选）
+- **WinuxCmd v1.1.5 切版中**：changelog 版本节 PR #1147 已合并、tag v1.1.5=4d606ba、多架构构建在跑——载 xargs#1139/mv#1140/mktemp#1141/cp-ls#1145（=niubash#124/#156 共同解锁件）；winget PR 444854 01-10 全绿等版主（合并即关 niubash#104）
+- **wt50/yes1142**（D:/repo/winuxcmd-wt-yes1142，后台 agent）：WinuxCmd yes SIGPIPE→141 修复（复用既有 broken-pipe 模拟模式；v1.1.6 候选）
+- 1.3.0 链：dlretract 合入→niubash CI 绿→冒烟（含开箱旅程断言+装完即选）→bump 1.3.0+CHANGELOG→**owner 口令发版**
