@@ -430,3 +430,10 @@
 - **门禁**：0 警告、lib 315/0、workspace 546/0、linux/macos 交叉过、smoke 17/17（d2 旅程新增 spec-managed+sync-no-op 断言）；合并树重验过；推送 c54062f，CI 哨在跑
 - **算术错根因链闭环**（船长三段式定位）：OMB lib/directories.sh:61 `alias 1='cd -'`（上游设计）× rubash 交互别名泄漏进数组字面量（GNU 仅命令位展开）× oh-my-bash.sh:24 `OMB_VERSINFO=(1 0 0...)` → `(函数名 - 0 0...)` → 版本算术吃 "-" 报错；最小复现（-i 独有）已移交 wt52/pb10k 修引擎不变量
 - **在途**：wt52/pb10k（别名修复已催拆分赶 1.3.1 列车+渲染调查续 1.3.2）、wt53/themesweep（owner 指令全量主题×交互渲染双壳清点+常设冒烟腿）
+
+## 2026-10-03 终 XIV：1.3.1 列车（tag 已打，release 在跑）
+
+- **引擎修复上车**：wt52 Bug A（别名不进复合数组赋值）cherry-pick 8af95f75（GNU parse.y:7104/7113-7117 对齐，alias_stream.rs compassign 扫描态；三电池 GNU 字节验证；2 个 -i 钉死回归）；rubash 1.3.1 bump+lock 同笔 e3d7737a CI 绿
+- **niubash 1.3.1**（a6902b23）：syncadopt 六修（c54062f）+引擎升级+CHANGELOG；tag v1.3.1 已推、release 工作流在跑（WinuxCmd 最新=v1.1.5 自动取）
+- **插曲**：c54062f CI 首跑 shell::tests 单 env 竞态断言+持锁 panic→PoisonError 级联八连红（本地双轮全绿、重跑绿=坐实 flake）；**毒锁级联硬化待单开**（PROCESS_STATE_LOCK 用 unwrap_or_else(into_inner)，让 flake 只红自己）
+- **发版链新坑入账**：cargo 改 rubash 版本要求后 build 会去拉 git 依赖——TLS 窗口期需 https_proxy 前缀跑 build 让 lock 同步，lock 未进 commit=release --locked 必炸（amend 补救）
