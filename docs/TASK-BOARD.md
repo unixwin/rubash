@@ -423,3 +423,10 @@
 - **niubash 链**：2c43dd1d(bump+CHANGELOG 1.3.0 节，重写 Unreleased 删已收缴代码描述)；tag v1.3.0 首跑失败=rubash lock 未随 bump 提交（--locked 门）→补推后 **workflow_dispatch 重跑成功**（tag=v1.3.0 + winuxcmd_tag=v1.1.5 钉版）：x64/arm64 构建+release 全绿、8 产物、master CI 绿；crates.io job 失败=非阻塞常态
 - **1.3.0 内容**：插件生态管理器（spec/sync/bootstrap/lockfile/任意插件/合集/TUI/500+配方索引）、下载全收缴（零网络 crate、二进制-16%、字体/工具=包管理器推荐 wpm-first）、单跑开箱向导（合集→trust→选主题一次完成）、WinuxCmd 1.1.5 bundle（xargs/mv/mktemp/cp/ls/yes 全兑现）、#162 TMPDIR 修复
 - **winget PR 444854 第 6 次换版至 1.3.0**：全程 GitHub API 免克隆（PUT 1.3.0/ 三件+DELETE 1.2.5/+改标题+评论）；检查重跑中，待版主合并后关 #104
+
+## 2026-10-03 终 XIII：wt51/syncadopt 回收（niubash c54062f）——1.3.1 发版列车启动
+
+- **六修全落地**（dac5463，12 文件 +1273/−76）：F1 启动唠叨按 spec_present 门控（命令式模式静默）；F2 `niu plugin sync --adopt` 收编（快照 live_selection→enable/theme，往返字节等价有钉死测试）；F3 交互提示给出路；F4 向导装完即落 spec+`add` 幂等收编（identity 三级解析：derived-id→origin→post-fetch）+顺手两修（`source remove` 同步撤声明防复活、重复声明合并防 rc 翻转）；F5 bootstrap 失败账本（sources-root/bootstrap-failures.toml，按 origin+ref 记，仅启动记仅启动查，显式 sync 清除——重下载循环根杀）；F6 bash-it 指纹按真上游修（**lib/composure.bash 已被上游删除**=旧指纹失败真因；OMB/bash-completion 同场审计通过）
+- **门禁**：0 警告、lib 315/0、workspace 546/0、linux/macos 交叉过、smoke 17/17（d2 旅程新增 spec-managed+sync-no-op 断言）；合并树重验过；推送 c54062f，CI 哨在跑
+- **算术错根因链闭环**（船长三段式定位）：OMB lib/directories.sh:61 `alias 1='cd -'`（上游设计）× rubash 交互别名泄漏进数组字面量（GNU 仅命令位展开）× oh-my-bash.sh:24 `OMB_VERSINFO=(1 0 0...)` → `(函数名 - 0 0...)` → 版本算术吃 "-" 报错；最小复现（-i 独有）已移交 wt52/pb10k 修引擎不变量
+- **在途**：wt52/pb10k（别名修复已催拆分赶 1.3.1 列车+渲染调查续 1.3.2）、wt53/themesweep（owner 指令全量主题×交互渲染双壳清点+常设冒烟腿）
