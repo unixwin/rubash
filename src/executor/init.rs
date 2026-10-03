@@ -452,28 +452,6 @@ impl Executor {
                 }
             }
         }
-        // GNU variables.c initialize_shell_variables only imports TMPDIR from
-        // the environment — it never invents a value (WSL probe: `env -i
-        // bash -c 'echo ${TMPDIR-UNSET}'` prints UNSET). The injection below
-        // is the Windows fixture: suites write unquoted `$TMPDIR/...` paths
-        // and /tmp resolution needs a backing directory, so keep it there.
-        // The /var/tmp backing directory is NOT created here: GNU touches
-        // $TMPDIR only when a scratch file is actually needed (rubash#328 —
-        // an eager `var/tmp` subtree below every TMPDIR, including the
-        // caller's cwd, was visible to `ls`/globs of untouched directories;
-        // the mapping in path.rs now materializes it lazily on first
-        // /var/tmp use).
-        #[cfg(windows)]
-        {
-            env_vars.entry("TMPDIR".to_string()).or_insert_with(|| {
-                // rubash#331: the injected TMPDIR default is a value WE
-                // produce, so it renders in POSIX form (/d/...) like $PWD
-                // — the doc's FFmpeg-TMPDIR corollary and the form clash
-                // with $PWD both die here. path.rs resolves /d/ paths for
-                // /tmp mapping, so the internal consumers are unaffected.
-                shell_pwd_display(&safe_temp_dir_string().replace('\\', "/"))
-            });
-        }
         env_vars
             .entry("SHELL".to_string())
             .or_insert_with(shell_path_value);
@@ -530,6 +508,38 @@ impl Executor {
         initialize_shell_level(env_vars);
         mark_initial_exported_vars(env_vars);
         mark_env_name(env_vars, EXPORTED_VARS, "OLDPWD");
+        // GNU variables.c initialize_shell_variables only imports TMPDIR from
+        // the environment — it never invents a value (WSL probe: `env -i
+        // bash -c 'echo ${TMPDIR-UNSET}'` prints UNSET), and a value it never
+        // had is never exported either. The injection below is the Windows
+        // fixture: suites write unquoted `$TMPDIR/...` paths and /tmp
+        // resolution needs a backing directory, so keep the SHELL variable —
+        // but it MUST be inserted after mark_initial_exported_vars so the
+        // injected default never enters the exported set (unixwin/niubash#162):
+        // an exported POSIX-form `/c/...` TMPDIR reaches every foreign child
+        // (Bun-compiled opencode resolves TMPDIR ahead of TEMP/TMP, treats the
+        // slash-drive value as a drive-relative path, and its bunfs `B:`
+        // virtual-drive extraction fails -> dlopen falls back to
+        // `B:/~BUN/root/...` -> ERROR_MOD_NOT_FOUND 126). An inherited TMPDIR
+        // still is: the or_insert no-ops and the import-time export marking
+        // stands.
+        // The /var/tmp backing directory is NOT created here: GNU touches
+        // $TMPDIR only when a scratch file is actually needed (rubash#328 —
+        // an eager `var/tmp` subtree below every TMPDIR, including the
+        // caller's cwd, was visible to `ls`/globs of untouched directories;
+        // the mapping in path.rs now materializes it lazily on first
+        // /var/tmp use).
+        #[cfg(windows)]
+        {
+            env_vars.entry("TMPDIR".to_string()).or_insert_with(|| {
+                // rubash#331: the injected TMPDIR default is a value WE
+                // produce, so it renders in POSIX form (/d/...) like $PWD
+                // — the doc's FFmpeg-TMPDIR corollary and the form clash
+                // with $PWD both die here. path.rs resolves /d/ paths for
+                // /tmp mapping, so the internal consumers are unaffected.
+                shell_pwd_display(&safe_temp_dir_string().replace('\\', "/"))
+            });
+        }
         env_vars
             .entry("IFS".to_string())
             .or_insert_with(|| " \t\n".to_string());

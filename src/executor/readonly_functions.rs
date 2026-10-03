@@ -229,11 +229,23 @@ impl Executor {
             return shell_path_to_process(value, &self.shell_state.env_vars);
         }
         if cfg!(windows) && name == "TMPDIR" {
-            return shell_display_path(
-                &shell_path_to_windows(value, &self.shell_state.env_vars)
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            );
+            // unixwin/niubash#162: an exported TMPDIR must cross the child
+            // boundary in Windows-native form (drive letter, forward slashes
+            // so script children can re-parse it without backslash escapes —
+            // docs/issue329-path-form-policy-analysis.md FFmpeg corollary).
+            // The previous slash-drive `/c/...` form is not a Windows path:
+            // foreign children that prefer TMPDIR over TEMP/TMP (Bun-compiled
+            // executables, e.g. the opencode TUI) resolve it drive-relative,
+            // the bunfs `B:` extraction then fails, and dlopen falls back to
+            // the virtual `B:/~BUN/root/...` path — ERROR_MOD_NOT_FOUND 126.
+            // Same boundary contract as the PATH branch above
+            // (shell_path_to_process): shell display form inside, process
+            // form outside. `/tmp` maps to the real temp backing dir via
+            // shell_path_to_windows, so an exported POSIX TMPDIR stays
+            // usable too.
+            return shell_path_to_windows(value, &self.shell_state.env_vars)
+                .to_string_lossy()
+                .replace('\\', "/");
         }
         // GNU export puts the variable's raw bytes in the child's
         // environment (variables.c:4850 make_env_array_from_var_list:

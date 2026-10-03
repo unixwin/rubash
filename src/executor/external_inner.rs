@@ -1284,6 +1284,15 @@ fn apply_env_command_environment(
         if is_valid_process_env(name, value) {
             let value = if cfg!(windows) && name.eq_ignore_ascii_case("PATH") {
                 shell_path_to_process(value, env_vars)
+            } else if cfg!(windows) && name == "TMPDIR" {
+                // Same child-boundary contract as child_env_value
+                // (unixwin/niubash#162): exported TMPDIR crosses in
+                // Windows-native forward-slash form, never the slash-drive
+                // `/c/...` display form that foreign children (Bun-compiled
+                // executables) resolve drive-relative and fail on.
+                shell_path_to_windows(value, env_vars)
+                    .to_string_lossy()
+                    .replace('\\', "/")
             } else {
                 // Raw-byte marker pairs in a stored value must map to byte
                 // chars at the child boundary (same rubash#141 contract as
