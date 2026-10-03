@@ -1393,24 +1393,6 @@ pub(in crate::executor) fn cat_v_filter(input: &[u8]) -> Vec<u8> {
     output
 }
 
-/// Check whether the cat command has -v, -A, -e, or -t flags (all imply
-/// show-nonprinting in GNU coreutils cat).
-pub(in crate::executor) fn cat_has_show_nonprinting(cmd: &CommandNode) -> bool {
-    for word in cmd.words.iter().skip(1) {
-        if word == "--show-nonprinting" || word == "--show-all" {
-            return true;
-        }
-        if word.starts_with('-') && !word.starts_with("--") && word.len() > 1 {
-            for ch in word[1..].chars() {
-                if ch == 'v' || ch == 'A' || ch == 'e' || ch == 't' {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
 /// GNU coreutils cat option model (rubash#415). Byte-for-byte behavioral
 /// reference: WSL GNU coreutils 9.4 `/usr/bin/cat` probes
 /// (target/i415/gnu-matrix.out, corners/corners2/perm/order2 probes,
@@ -1428,7 +1410,7 @@ pub(in crate::executor) fn cat_has_show_nonprinting(cmd: &CommandNode) -> bool {
 ///   reports the invalid option; `--' ends option parsing; a bare `-'
 ///   operand is stdin at that position.
 #[derive(Default)]
-struct CatOptions {
+pub(in crate::executor) struct CatOptions {
     /// -b/--number-nonblank: number non-empty lines only (wins over -n).
     number_nonblank: bool,
     /// -n/--number: number all lines.
@@ -1446,7 +1428,7 @@ struct CatOptions {
 impl CatOptions {
     /// No transformation at all: the plain-concatenation fast path keeps
     /// its byte-identical passthrough (and the streaming stdin read).
-    fn identity(&self) -> bool {
+    pub(in crate::executor) fn identity(&self) -> bool {
         !(self.number_nonblank
             || self.number_all
             || self.squeeze_blank
@@ -1487,7 +1469,7 @@ const CAT_LONG_OPTIONS: [(&str, &str); 9] = [
     ("version", ""),
 ];
 
-enum CatParsed<'a> {
+pub(in crate::executor) enum CatParsed<'a> {
     Options {
         options: CatOptions,
         /// Operand words in argv order (`-' operands included verbatim).
@@ -1505,7 +1487,11 @@ enum CatParsed<'a> {
 /// operand, and argv permutation (options after operands still parse).
 /// Words glued to redirection operators and redirect-target words stay
 /// out of the operand list, like the previous classifier kept them.
-fn parse_cat_argv(cmd: &CommandNode) -> CatParsed<'_> {
+/// Shared owner: both the simple-command path (external_cat) and the
+/// inline pipeline stage arm parse through this one function
+/// (niubash#165 — a second, option-dropping parser there lost -n/-s/-E
+/// on pipe input).
+pub(in crate::executor) fn parse_cat_argv(cmd: &CommandNode) -> CatParsed<'_> {
     let program = cmd.words.first().map(String::as_str).unwrap_or("cat");
     let mut options = CatOptions::default();
     let mut operands: Vec<&String> = Vec::new();
@@ -1617,7 +1603,7 @@ fn parse_cat_argv(cmd: &CommandNode) -> CatParsed<'_> {
 /// (the concatenation of all operands / stdin — GNU's line filters see
 /// one stream, so a squeeze or numbering counter carries across operand
 /// boundaries). Byte semantics fixed by the WSL 9.4 probes above.
-fn cat_format(input: &[u8], options: &CatOptions) -> Vec<u8> {
+pub(in crate::executor) fn cat_format(input: &[u8], options: &CatOptions) -> Vec<u8> {
     if options.identity() {
         return input.to_vec();
     }

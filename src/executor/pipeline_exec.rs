@@ -2308,27 +2308,45 @@ impl Executor {
                 Ok(Some((output, String::new(), 0)))
             }
             "cat" => {
+                use crate::executor::external_file_builtins::{
+                    cat_format, parse_cat_argv, CatParsed,
+                };
+                // niubash#165: GNU cat (coreutils 9.4 src/cat.c) parses its
+                // whole option surface once in main() (getopt_long) and
+                // passes the SAME option block to cat() for every input fd
+                // — file operands, `-', and the no-operand stdin fallback
+                // all run the identical filter loop, so options apply
+                // identically on pipe input. This inline stage arm used to
+                // carry its own `-v'-only mini-cat, silently dropping
+                // -n/-b/-s/-E/-T/-e/-t/-A, long options, cross-operand
+                // filter state, and usage-error validation whenever cat
+                // read a pipe (`printf 'z\n' | cat -n' printed `z').
+                // Route the stage through the same parse_cat_argv +
+                // cat_format pair the simple-command path (external_cat,
+                // rubash#415) uses: one parser, one formatter.
+                let (options, operands) = match parse_cat_argv(command) {
+                    CatParsed::HelpOrVersion => {
+                        // The real binary prints its own --help/--version.
+                        return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                    }
+                    CatParsed::Usage(message) => {
+                        return Ok(Some((String::new(), message, 1)));
+                    }
+                    CatParsed::Options { options, operands } => (options, operands),
+                };
                 // Pathname-expand the operands the way
                 // execute_simple_command does, or `cat f*` opens the
                 // literal name "f*" and reports it as missing (probe
                 // 2026-09-09: `printf x | cat f*` printed nothing).
-                let show_nonprinting =
-                    crate::executor::external_file_builtins::cat_has_show_nonprinting(command);
+                // parse_cat_argv lends references straight out of
+                // command.words, so pointer identity recovers each
+                // operand's word index for its quoting metadata.
                 let mut file_operands: Vec<String> = Vec::new();
-                let mut options_done = false;
-                for (arg_index, word) in command.words[1..].iter().enumerate() {
-                    let word_index = arg_index + 1;
-                    // GNU cat: a bare `-` operand is stdin at that position
-                    // and `--` ends option processing; neither is a flag.
-                    if word == "--" && !options_done {
-                        options_done = true;
-                        continue;
-                    }
-                    if word == "-" {
+                for word in operands {
+                    // GNU cat: a bare `-` operand is stdin at that
+                    // position, never a flag.
+                    if word.as_str() == "-" {
                         file_operands.push(word.clone());
-                        continue;
-                    }
-                    if !options_done && word.starts_with('-') {
                         continue;
                     }
                     let value = self.expand_word(word);
@@ -2341,6 +2359,11 @@ impl Executor {
                         continue;
                     }
                     // Quoted words (e.g. "*.txt") must not be glob-expanded.
+                    let word_index = command
+                        .words
+                        .iter()
+                        .position(|candidate| std::ptr::eq(candidate, word))
+                        .unwrap_or(0);
                     let metadata = command.word_metadata.get(word_index);
                     let raw = metadata.map(|metadata| metadata.raw.as_str());
                     if crate::executor::command_prepare::raw_word_suppresses_pathname_expansion(
@@ -2357,7 +2380,11 @@ impl Executor {
                     }
                 }
                 if !file_operands.is_empty() {
-                    let mut output = String::new();
+                    // GNU cat.c: one filter pass over the concatenation —
+                    // the numbering counter and squeeze state carry across
+                    // operand boundaries, so `cat -n - f' numbers f's
+                    // first line after stdin's (WSL 9.4 probes, rubash#415).
+                    let mut stream: Vec<u8> = Vec::new();
                     let mut stderr = String::new();
                     let mut status = 0;
                     // `cat -` consumes the stage's stdin once; later `-`
@@ -2373,18 +2400,9 @@ impl Executor {
                                 );
                             }
                             let text = stdin_remaining.take().unwrap_or_default();
-                            let bytes = if show_nonprinting {
-                                crate::executor::external_file_builtins::cat_v_filter(
-                                    &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&text),
-                                )
-                            } else {
+                            stream.extend(
                                 crate::executor::substitution_metadata::shell_text_to_raw_bytes(
                                     &text,
-                                )
-                            };
-                            output.push_str(
-                                &crate::executor::substitution_metadata::bytes_to_shell_text(
-                                    &bytes,
                                 ),
                             );
                             continue;
@@ -2424,20 +2442,7 @@ impl Executor {
                                 }
                             };
                             match bytes_opt {
-                                Some(bytes) => {
-                                    let bytes = if show_nonprinting {
-                                        crate::executor::external_file_builtins::cat_v_filter(
-                                            &bytes,
-                                        )
-                                    } else {
-                                        bytes
-                                    };
-                                    output.push_str(
-                                        &crate::executor::substitution_metadata::bytes_to_shell_text(
-                                            &bytes,
-                                        ),
-                                    );
-                                }
+                                Some(bytes) => stream.extend(bytes),
                                 None => {
                                     stderr.push_str(&format!(
                                         "{}cat: {path}: No such file or directory\n",
@@ -2449,18 +2454,7 @@ impl Executor {
                             continue;
                         }
                         match fs::read(shell_path_to_windows(&path, &self.shell_state.env_vars)) {
-                            Ok(bytes) => {
-                                let bytes = if show_nonprinting {
-                                    crate::executor::external_file_builtins::cat_v_filter(&bytes)
-                                } else {
-                                    bytes
-                                };
-                                output.push_str(
-                                    &crate::executor::substitution_metadata::bytes_to_shell_text(
-                                        &bytes,
-                                    ),
-                                );
-                            }
+                            Ok(bytes) => stream.extend(bytes),
                             Err(_) => {
                                 stderr.push_str(&format!(
                                     "{}cat: {path}: No such file or directory\n",
@@ -2470,23 +2464,29 @@ impl Executor {
                             }
                         }
                     }
+                    let output = crate::executor::substitution_metadata::bytes_to_shell_text(
+                        &cat_format(&stream, &options),
+                    );
                     return Ok(Some((output, stderr, status)));
                 }
-                let output = if show_nonprinting {
-                    // cat -v renders the user's byte stream: decode the
-                    // transport text first or marker escapes (E400 literal
-                    // prefix, E000 byte pairs) filter as stray M-^ bytes.
+                let output = if options.identity() {
+                    // Byte-identical passthrough keeps the transport text
+                    // as-is (no decode round trip).
+                    self.stdin_string_for_command_mut(command)
+                        .unwrap_or_else(|| input.to_string())
+                } else {
+                    // The line filters (numbering, squeeze, $-ends) carry
+                    // state across the whole stream, so a formatting
+                    // invocation formats the complete stdin (GNU streams;
+                    // the in-process emulation buffers — bounded by the
+                    // stage input, like every other emulated reader).
                     let text = self
                         .stdin_string_for_command_mut(command)
                         .unwrap_or_else(|| input.to_string());
-                    let bytes = crate::executor::external_file_builtins::cat_v_filter(
+                    crate::executor::substitution_metadata::bytes_to_shell_text(&cat_format(
                         &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&text),
-                    );
-                    crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
-                } else if let Some(input) = self.stdin_string_for_command_mut(command) {
-                    input
-                } else {
-                    input.to_string()
+                        &options,
+                    ))
                 };
                 Ok(Some((output, String::new(), 0)))
             }
