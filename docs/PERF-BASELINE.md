@@ -3519,3 +3519,111 @@ stacks to the combined -4.7% / -5.7%.
   100000; `seq 5000000|wc -l` x3 full (5000000). Underscore matrix
   (loop/word binds, readonly `_`, set -a window, `$LINENO`) base-vs-lane
   byte-identical. No stuck rubash/bash suite processes at turn end.
+
+## parse4 round (2026-10-03, wt44/parse4 on 69f0934c): the scan-relocation
+design section executed (phases 1-2) + store/body-reparse evaluation
+
+Sixth attack at #241, executing perf2b's design section ("relocate
+per-word parse-time scans to expansion time"). Two commits, one tree
+(wt44/parse4), all numbers RELEASE, interleaved A/B medians vs binaries
+built this session: pristine master 69f0934c (`rubash-base-wt44.exe`),
+phase-1 HEAD 4f5f7b23 (`rubash-c1-wt44.exe`), phase-2 HEAD 44f7227a
+(`target/release/rubash.exe`). GNU anchor re-measured inner-WSL from a
+tmpfs copy (nvm -n median 18.5 ms over 5 runs).
+
+### Phase 1 (4f5f7b23, predecessor): zero-reader scans deleted
+
+Parameter / arithmetic / brace / tilde parse-time word scans and their
+record_* wrappers (~1300 lines): the store vectors had ZERO readers
+(field-syntax audit across src/); the executor re-derives all four from
+the word text at expansion time — GNU parse.y:5305 read_token_word
+builds the word once, make_cmd.c stores the WORD_DESC once, subst.c
+analyzes at use.
+
+### Phase 2 (44f7227a, this continuation): comsub + word-quote scans
+move to their consumers
+
+The remaining two parse-time word scans had only re-derivable readers:
+cmd/WordMetadata.command_substitutions fed only the pretty-print
+renderer (ast_print render_word) and the bare-`((` admission
+(arithmetic_command_is_bare); cmd/WordMetadata.word_quotes fed only the
+conditional quoted-RHS check. Both now re-derive on demand via
+command_substitutions_in_word_public / word_quotes_in_raw_public — the
+same pure scans over the same inputs (identical span boundaries; the
+former is print_comsub's oracle per rubash#274). The bare-`((`
+admission becomes a whitelist (every comsub needs a `$`/backtick byte
+in a word or assignment value — exactly the surfaces the old store
+covered). The LIVE word_quotes stores (ArrayElementAssignment /
+CompoundAssignmentElement, read by array_assignment_exec's
+syntactic-compound-list decision) stay.
+
+### Numbers (interleaved A/B medians)
+
+| probe | master -> p1 | p1 -> p2 | master -> p2 | GNU anchor |
+|---|---:|---:|---:|---:|
+| nvm -n | 315.4 -> 284.5 (-9.8%) | 278.0 -> 237.6 (-14.5%) | 315.4 -> 230.8 (**-26.6%**) | 18.5 ms -> 17.0x -> 12.7x |
+| nvm load | 409.8 -> 376.3 (-8.2%) | 373.8 -> 322.8 (-13.7%) | 411.8 -> 323.0 (**-21.6%**) | — |
+| configure-head1374 -n | 1174.8 -> 1094.9 (-6.8%) | 1117.5 -> 1081.7 (-3.2%) | (same-window pairs) | — |
+| p-null 20000-iter | — | — | 200.1 -> 199.1 (-0.5%, noise) | — |
+
+Final clean-binary re-verification after instrumentation removal: nvm
+-n -24.7% vs master; canaries 12/12.
+
+### Gates (phase 2, final tree)
+
+- 535-file -n corpus differential master-vs-lane: 0 differ, 0 timeout
+  (`target/issue-suites/results/parse4/c3-corpus/`).
+- true-baseline 18-suite slice (exp new-exp more-exp posixexp array
+  assoc comsub comsub2 quote braces extglob case cond errors read
+  dstack heredoc redir): rb.out/rb.rc byte-identical; rb.err
+  byte-identical modulo each binary's own $0 path (errors/redir only,
+  0 diff lines beyond the path). RUB_OVERRIDE must be a /mnt/... path —
+  a `D:\...` path makes WSL timeout fail to exec the exe and the rb
+  side goes vacuously empty (caught; artifacts
+  `c3-tb-base`/`c3-tb-lane` are the valid rerun).
+- Canary batteries 21/21 byte-identical: the 12-case predecessor
+  battery (#380/#414 shapes, seq 20000|cat, seq 5000000, yes|head,
+  wordfor, compound/array, tilde, arith) + 9 new consumer-shaped cases
+  (pretty-print comsub-dense/heredoc-comsub/nested-backtick,
+  declare -f comsub/backtick, quoted-RHS =~ matrix, bare-`((`
+  mixed/comsub-var, assignment-position comsub) — the -n corpus does
+  not cover these consumer paths.
+- lib 560/560; parser_tests 316/316; full cargo test --no-fail-fast
+  failure set identical to master (5 pre-existing: 3 bashdb fixture +
+  invalid_cli_shopt + parameter_transform flake); cargo fmt --check
+  clean; continuation.rs untouched.
+
+### Store triple-clone evaluation (quoterm22 discipline: measure first)
+
+Fresh instrumentation (env-gated hierarchical timers, removed before
+handoff): store_self = **3.1-3.3 ms** on nvm -n (6,723 words, ~470
+ns/word; word_intake minus scans and store is 1.0 ms, the remaining
+extglob/pathname/procsub scan trio 0.8 ms) and **0.2-0.3 ms** on
+configure-head1374 -n (the posix driver's parse phase there is only
+~4.5 ms of a ~1080 ms wall — the grouped-driver scans dominate, not
+parse). Ceiling ~1.3% of the nvm -n wall. The only real implementation
+path is Token.value/raw -> Rc<str> PLUS WordMetadata.value/raw ->
+Rc<str> PLUS cmd.words -> Vec<Rc<str>> in one change (parse holds
+tokens as &[Token], so with String fields every store copy MUST be a
+fresh allocation; a 2-of-3 share cannot be constructed). That is the
+carrier-family-wide token-architecture round (quoterm22 leftover #3),
+not a standalone zero-A/B-change lane. **REJECTED this round — below
+the honesty bar** (quoterm22 precedent); recorded for the
+token-architecture round.
+
+### Body-reparse cache feasibility: REJECTED (no reuse exists)
+
+Fresh numbers: nvm -n runs 481 nested body parses (62.8 ms inclusive
+sum, nesting double-counted; the whole parse phase is 29.2 ms of the
+238 ms wall), configure-head 179 / ~5 ms. Every body is parsed exactly
+once: function bodies parse once at definition and execute_function
+reuses the stored AST per call (clones it, never re-parses); each
+case/for/loop/brace/subshell body occurs once per script position. A
+text-keyed cache has zero expected hits — the 91-108 ms perf2b saw was
+the two-pass architecture (scan-for-closer + recursive parse), not
+repetition. Load-mode comsub bodies DO re-parse per evaluation, but
+that is GNU parity (subst.c:7143 command_substitute ->
+parse_and_execute per evaluation). The structural fix is extending
+parse20's inline-section mechanism (if-family is already single-pass
+in run_command_loop) to case/for/loop/brace/subshell/function — six
+parser integrations, deep subsystem, its own round.
