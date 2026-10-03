@@ -1675,6 +1675,46 @@ fn unix_bin_basename(name: &str) -> Option<&str> {
 }
 
 pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, String>) -> PathBuf {
+    let mapped = shell_path_to_windows_inner(path, env_vars);
+    if cfg!(windows) {
+        map_ntfs_colon_final_component(mapped)
+    } else {
+        mapped
+    }
+}
+
+/// rubash#359: on Windows the Win32/NTFS layer reads `:` in the LAST path
+/// component as the `name:stream` alternate-data-stream separator. A legal
+/// POSIX filename like `2026-09-30 14:48:26 UTC.log` therefore fails open()
+/// with EINVAL ("Invalid argument") — a single-colon name "succeeds" but
+/// silently targets an ADS on a different host file. GNU bash has no such
+/// rule (redir.c:706 redir_open passes the expanded filename to open(2)
+/// verbatim; `:` is an ordinary filename byte), and MSYS2/cygwin — the
+/// reference Windows POSIX layer — stores such names by encoding `:` as
+/// U+F03A from the Unicode private-use area (verified on this volume:
+/// Git Bash's `a:b.log` occupies the on-disk name `61 F03A 62 2E 6C 6F 67`).
+/// Do the same in this, the single shell-name -> NT-name funnel, so every
+/// consumer (redirect open, test/cd/stat, glob directory walks) agrees on
+/// one backing file. `shell_path_display_from_windows` reverses the
+/// encoding for shell-visible names. Only the final component is mapped:
+/// drive (`D:`) and server (`\\srv`) colons live in earlier components.
+fn map_ntfs_colon_final_component(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if !text.contains(':') {
+        return path;
+    }
+    let tail_start = text
+        .rfind(['\\', '/'])
+        .map(|separator| separator + 1)
+        .unwrap_or(0);
+    let (head, tail) = text.split_at(tail_start);
+    if !tail.contains(':') {
+        return path;
+    }
+    PathBuf::from(format!("{head}{}", tail.replace(':', "\u{F03A}")))
+}
+
+fn shell_path_to_windows_inner(path: &str, env_vars: &HashMap<String, String>) -> PathBuf {
     // On Windows, a single leading backslash indicates a UNC path whose
     // prefix was consumed by shell backslash escaping.  For example, the
     // user types `cd \\DFDB-A1`, bash escaping reduces `\\` to `\`, and
@@ -1874,6 +1914,10 @@ pub(crate) fn shell_path_display_from_windows(name: &str) -> String {
     if cfg!(windows) {
         name.replace(WINDOWS_LITERAL_STAR, "*")
             .replace(WINDOWS_LITERAL_QUESTION, "?")
+            // rubash#359: reverse map_ntfs_colon_final_component's U+F03A
+            // encoding so shell-visible names (glob results, directory
+            // listings) show the POSIX filename byte.
+            .replace('\u{F03A}', ":")
     } else {
         name.to_string()
     }
