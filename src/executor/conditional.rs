@@ -962,6 +962,13 @@ impl Executor {
             return 1;
         };
         self.flush_arith_diags(Some("[["));
+        // rubash#404: GNU test.c:357-372 arithcomp -> evalexp binds the
+        // operand's assignment side effects into the one variable store, so
+        // the next parameter expansion sees them (`n=1; x='n+=2';
+        // [[ x -eq 3 ]]; echo $n` prints 3). The evaluator wrote env_vars
+        // only; sync the typed variables map at this boundary like the
+        // `(( ))` / `let` / subscript evaluators do.
+        super::arithmetic::sync_arith_writes(self);
         let right_eval = self.expand_arith_indexed_subscripts(&right_expanded);
         let right_dynamic = self.arith_dynamic_context();
         let (Some(right_val), _) = eval_mutable_arith_value_with_random_flags(
@@ -976,6 +983,7 @@ impl Executor {
             return 1;
         };
         self.flush_arith_diags(Some("[["));
+        super::arithmetic::sync_arith_writes(self);
         let matched = match op {
             "-eq" => left_val == right_val,
             "-ne" => left_val != right_val,

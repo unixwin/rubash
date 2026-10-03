@@ -275,13 +275,20 @@ fn test_arithmetic_assignments_evaluate_rhs_recursively() {
     let _ = fs::remove_file(output_path);
 }
 
-#[ignore = "rubash#404: see issue (probe wt37-374 K081)"]
+// rubash#404 (probe wt37-374 K081 / wt38 run404 p404m): a recursively
+// evaluated arithmetic variable's assignment side effects bind through
+// expr.c expassign -> bind_variable into the ONE variable store, in every
+// evaluation context — `(( ))`, let, and `[[ -eq ... ]]` (test.c:357
+// arithcomp -> evalexp). The `[[ ]]` boundary used to write env_vars
+// without syncing the typed variables map, so the next `$n` read the
+// stale value (`0 1` instead of GNU's `0 3`). The `n=0` member from the
+// issue is included; matrix probed byte-identical on WSL GNU 5.3.0.
 #[test]
 fn test_arithmetic_variables_evaluate_recursively() {
     let output_path = "target/rubash-arithmetic-recursive-vars-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "x='1+2'; echo $((x)) > {output_path}; x=y; y=5; echo $((x)) >> {output_path}; n=1; x='n+=2'; echo $((x)) $n >> {output_path}; n=1; x='n+=2'; [[ x -eq 3 ]]; echo $? $n >> {output_path}"
+        "x='1+2'; echo $((x)) > {output_path}; x=y; y=5; echo $((x)) >> {output_path}; n=1; x='n+=2'; echo $((x)) $n >> {output_path}; n=1; x='n=0'; echo $((x)) $n >> {output_path}; n=1; x='n+=2'; [[ x -eq 3 ]]; echo $? $n >> {output_path}; n=1; x='n=0'; [[ x -eq 0 ]]; echo $? $n >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -291,6 +298,9 @@ fn test_arithmetic_variables_evaluate_recursively() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "3\n5\n3 3\n0 3\n");
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "3\n5\n3 3\n0 0\n0 3\n0 0\n"
+    );
     let _ = fs::remove_file(output_path);
 }

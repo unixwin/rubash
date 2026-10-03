@@ -62,6 +62,19 @@ fn take_arith_writes() -> Vec<(String, Option<String>)> {
     ARITH_WRITES.with(|log| std::mem::take(&mut *log.borrow_mut()))
 }
 
+/// Executor-visible wrapper for evaluation boundaries outside this module.
+/// GNU expr.c binds assignments through expr_bind_variable -> bind_variable
+/// into the ONE variable store, so every caller of the evaluator — `(( ))`,
+/// `let`, array subscripts AND `[[ -eq ... ]]` (test.c:357 arithcomp ->
+/// evalexp) — sees the write in the next parameter expansion. Rubash's
+/// evaluator writes env_vars while parameter lookup prefers the typed
+/// `shell_state.variables` map, so each boundary must sync; the `[[ ]]`
+/// boundary missed it (rubash#404: `n=1; x='n=0'; [[ x -eq 0 ]]; echo $n`
+/// left the stale n).
+pub(in crate::executor) fn sync_arith_writes(executor: &mut Executor) {
+    sync_arith_writes_to_shell_state(executor)
+}
+
 /// Sync shell_state with the variables the arithmetic evaluator wrote.
 /// Mirrors the former whole-map diff semantics: a name whose env_vars value
 /// equals its pre-evaluation value is left alone; a removed name is ignored
