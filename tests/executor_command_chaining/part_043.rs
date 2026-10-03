@@ -282,7 +282,9 @@ fn test_path_tool_option_calls_fall_back_to_external_commands() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         read_normalized(output_path),
-        "external-basename:-a alpha/b beta/d\nexternal-basename:--help\nexternal-dirname:-z /a/b\nexternal-dirname:--version\n"
+        // Option B argv dialect (rubash#124b): native children receive
+        // Windows-form paths uniformly, existence-independent.
+        "external-basename:-a alpha/b beta/d\nexternal-basename:--help\nexternal-dirname:-z A:\\b\nexternal-dirname:--version\n"
     );
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_dir_all(bin_dir);
