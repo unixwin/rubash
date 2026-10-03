@@ -409,3 +409,10 @@
 - **niubash#124/#156 探针证据关单**：v1.1.5 产物+当前引擎实测——eval `'\''` 拼接 mkdir rc=0 零字面引号（脚本+-c 双模式）；xargs 七形状全对齐 GNU 列（wc 形状 rc=123=子命令自身报错）；探针产物 target/wcmd115/
 - **bundle 门已自然满足**：release.yml winuxcmd_tag 默认取最新（资产模式 `WinuxCmd-*-win-x64.zip` 匹配 1.1.5）——1.3.0 自动 bundle v1.1.5（Option B 默认安全）；发版时可显式钉 v1.1.5 保复现
 - 在途：wt50/themepick（装完即选主题）；niubash 开放池仅剩 #104（winget 版主）
+
+## 2026-10-03 终 XI：themepick 回收（niubash ee54f8c）——开箱即用旅程闭环
+
+- **装完即选主题落地**（wt50/themepick 759d18b，+1094/−56，7 文件）：合集 apply 后、journal 写入前弹一次 trust 问句（Skip 默认，=显式 `niu plugin trust` 动词同校验级）→ 信任即列新装源的主题画廊（复用 Q1 问题体 ask_theme_question/ThemePick/守卫激活块/journal-undo，全 run 仍一次 journal 一次 finish）→ 拒绝则打印确切后续命令；minimal/Skip/纯补全零追问（theme_bearing_untrusted_sources 谓词）；Ctrl-C after Apply 不撒"什么都没写"的谎（undo 收据必须交接）
+- **门禁全绿**：0→0 警告、lib 307/0（16 向导测试含 3 新+zh 词表 5 新键）、workspace 全 ok、-D warnings/fmt 干净、**smoke 17/17**（新腿 d2-one-run-theme：empty→recommended→trust→agnoster 单跑）；ConPTY 双驱动 10/10+8/8（本地 git 镜像离线）；附带修 Q1 zh 提示键一字之差（`|`≠`│` 致中文翻译从未命中）
+- **合并树重验**：build 0 警告、fmt 干净、linux/macos 交叉目标过、smoke 17/17；推送 ee54f8ca，CI 哨在跑
+- **1.3.0 就绪态**（等 owner 口令）：CI 绿→bump 1.3.0+CHANGELOG（素材=终 IX/XI 条目）→release（bundle 自动取 WinuxCmd v1.1.5，可钉 winuxcmd_tag=v1.1.5 保复现）
