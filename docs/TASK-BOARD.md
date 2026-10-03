@@ -416,3 +416,10 @@
 - **门禁全绿**：0→0 警告、lib 307/0（16 向导测试含 3 新+zh 词表 5 新键）、workspace 全 ok、-D warnings/fmt 干净、**smoke 17/17**（新腿 d2-one-run-theme：empty→recommended→trust→agnoster 单跑）；ConPTY 双驱动 10/10+8/8（本地 git 镜像离线）；附带修 Q1 zh 提示键一字之差（`|`≠`│` 致中文翻译从未命中）
 - **合并树重验**：build 0 警告、fmt 干净、linux/macos 交叉目标过、smoke 17/17；推送 ee54f8ca，CI 哨在跑
 - **1.3.0 就绪态**（等 owner 口令）：CI 绿→bump 1.3.0+CHANGELOG（素材=终 IX/XI 条目）→release（bundle 自动取 WinuxCmd v1.1.5，可钉 winuxcmd_tag=v1.1.5 保复现）
+
+## 2026-10-03 终 XII：niubash v1.3.0 发布（owner 口令"来吧"）
+
+- **rubash 链**：9467694f(bump 1.3.0)+8c62d314(**Win32_Security 如实声明**——CreateFileW 在 0.61.2 被 cfg 门住、旧理论"降级炸"实为 feature 并集陷阱，直接 import 的 API 所需 feature 必须进自己清单)+32553d07(lock 同步)；CI 三笔全绿
+- **niubash 链**：2c43dd1d(bump+CHANGELOG 1.3.0 节，重写 Unreleased 删已收缴代码描述)；tag v1.3.0 首跑失败=rubash lock 未随 bump 提交（--locked 门）→补推后 **workflow_dispatch 重跑成功**（tag=v1.3.0 + winuxcmd_tag=v1.1.5 钉版）：x64/arm64 构建+release 全绿、8 产物、master CI 绿；crates.io job 失败=非阻塞常态
+- **1.3.0 内容**：插件生态管理器（spec/sync/bootstrap/lockfile/任意插件/合集/TUI/500+配方索引）、下载全收缴（零网络 crate、二进制-16%、字体/工具=包管理器推荐 wpm-first）、单跑开箱向导（合集→trust→选主题一次完成）、WinuxCmd 1.1.5 bundle（xargs/mv/mktemp/cp/ls/yes 全兑现）、#162 TMPDIR 修复
+- **winget PR 444854 第 6 次换版至 1.3.0**：全程 GitHub API 免克隆（PUT 1.3.0/ 三件+DELETE 1.2.5/+改标题+评论）；检查重跑中，待版主合并后关 #104
