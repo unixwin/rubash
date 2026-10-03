@@ -301,13 +301,22 @@ fn test_background_if_command_executes_and_updates_bang_pid() {
     let _ = fs::remove_file(output_path);
 }
 
-#[ignore = "rubash#403: see issue (probe wt37-374 K009)"]
+// rubash#403 (probe wt37-374 K009 / wt38 run403 p403m): GNU increments
+// subshell_level exactly once per substitution, in the CHILD
+// (execute_cmd.c:1576 execute_in_subshell; variables.c get_bash_subshell
+// reads the child's counter), so the comsum body reports 1, the enclosing
+// word stays 0, and nesting adds one level each. The matrix members
+// (nested 2, parens-in-comsum 2, double parens 3, comsum-in-parens 2,
+// backtick 1, function body 1, plain parens 1) are probed byte-identical
+// on WSL GNU 5.3.0 under target/probe-wt38/run403/p403m.sh.
 #[test]
 fn test_bash_subshell_tracks_command_substitution_depth() {
     let output_path = "target/rubash-bash-subshell-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "printf '%s:%s:%s\\n' \"$BASH_SUBSHELL\" \"$(echo $BASH_SUBSHELL)\" \"$BASH_SUBSHELL\" > {output_path}"
+        "printf '%s:%s:%s\\n' \"$BASH_SUBSHELL\" \"$(echo $BASH_SUBSHELL)\" \"$BASH_SUBSHELL\" > {output_path}; \
+         echo nested:$(echo $(echo $BASH_SUBSHELL)) >> {output_path}; \
+         echo parens:$( (echo $BASH_SUBSHELL) ) >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -317,7 +326,10 @@ fn test_bash_subshell_tracks_command_substitution_depth() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "0:1:0\n");
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "0:1:0\nnested:2\nparens:2\n"
+    );
     let _ = fs::remove_file(output_path);
 }
 

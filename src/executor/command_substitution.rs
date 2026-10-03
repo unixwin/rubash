@@ -587,9 +587,15 @@ impl Executor {
         // snapshot/restore (issue #67: `x=$(echo $((b)))` under `set -u`
         // prints the diagnostic, leaves x empty, keeps running).
         let saved_state = self.shell_state.snapshot_interior();
-        self.shell_state
-            .subshell_depth
-            .set(saved_state.subshell_depth() + 1);
+        // rubash#403: subshell_depth is NOT bumped here. GNU increments
+        // subshell_level exactly once per substitution — in the CHILD
+        // (execute_in_subshell; variables.c get_bash_subshell reads the
+        // child's counter, so `0:$(...):0` is 0:1:0) — and the fork copy
+        // (command_substitution_executor) already models that single +1.
+        // Bumping on the parent as well double-counted every level
+        // (`$(echo $BASH_SUBSHELL)` reported 2, nested 4). The one level
+        // this wrapper must still add is a textually STRIPPED `( )` group
+        // (see strip_wrapping_subshell_group below).
         // execute_cmd.c:1576 execute_in_subshell marks SUBSHELL_COMSUB —
         // start_job (jobs.c:3837) refuses fg/bg inside it.
         self.shell_state.in_command_substitution.set(true);
@@ -644,7 +650,22 @@ impl Executor {
         // eval builtin with full re-parse semantics (alias4.sub
         // `$(eval echo b)` included).
         if let Some(inner) = strip_wrapping_subshell_group(source) {
-            return self.expand_command_substitution_inner(inner, context);
+            // rubash#403: GNU keeps the stripped `( )` as a real subshell
+            // level between the comsum child and the body —
+            // `$( (echo $BASH_SUBSHELL) )` reports 2 (comsub child 1 +
+            // parens 1, execute_in_subshell twice), and
+            // `$( ( (echo $BASH_SUBSHELL) ) )` reports 3. Removing the
+            // parens textually would lose that level (the comsum level
+            // itself is added by the fork copy below), so bump the depth
+            // around the recursion. &self: the parent's counter is restored
+            // afterwards, and the wrapper's snapshot would restore it too.
+            let saved_depth = self
+                .shell_state
+                .subshell_depth
+                .replace(self.shell_state.subshell_depth.get() + 1);
+            let result = self.expand_command_substitution_inner(inner, context);
+            self.shell_state.subshell_depth.set(saved_depth);
+            return result;
         }
         // GNU execute_cmd.c:4648-4649: every simple command — `true`,
         // `false`, `:` included — prints its xtrace head line inside the
