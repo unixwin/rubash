@@ -158,7 +158,12 @@ fn test_nested_parameter_assignment_expansion_assigns_outer_rhs() {
     let _ = fs::remove_file(output_path);
 }
 
-#[ignore = "rubash#402: see issue (probe wt37-374 K074)"]
+// rubash#402 (probe wt37-374 K074 / wt38 run402 p402m M1): `${RO:=new}`
+// against a readonly target is an expansion-time assignment failure —
+// GNU subst.c:8158-8166 leaves last_command_exit_value = EX_BADUSAGE (2)
+// before bash_variable_assignment_error(0) -> exp_jump_to_top_level
+// (DISCARD): the diagnostic goes to stderr, the printf never runs, and
+// the next line observes $? 2. Probed byte-identical on WSL GNU 5.3.0.
 #[test]
 fn test_parameter_assignment_expansion_rejects_readonly_targets() {
     let output_path = target_test_path("rubash-param-assign-readonly-output.txt");
@@ -175,13 +180,18 @@ fn test_parameter_assignment_expansion_rejects_readonly_targets() {
 
     let result = executor.execute_ast(&ast);
 
-    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
-    assert_eq!(executor.last_exit_code(), 1);
+    // The DISCARD abort ends the failing list (last command here), so the
+    // run completes while $? carries EX_BADUSAGE (2).
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 2);
     assert!(!output_path.exists());
     std::env::remove_var("RUBASH_PARAM_ASSIGN_RO");
 }
 
-#[ignore = "rubash#402: see issue (probe wt37-374 K075)"]
+// rubash#402 (probe wt37-374 K075 / wt38 run402 p402m M3): same EX_BADUSAGE
+// (2) expansion failure through a nameref — the diagnostic names the TARGET
+// variable (GNU err_readonly on the resolved cell), the printf never runs,
+// and the next line observes $? 2.
 #[test]
 fn test_parameter_assignment_expansion_reports_readonly_nameref_target() {
     let output_path = target_test_path("rubash-param-assign-readonly-nameref-output.txt");
@@ -201,8 +211,8 @@ fn test_parameter_assignment_expansion_reports_readonly_nameref_target() {
 
     let result = executor.execute_ast(&ast);
 
-    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
-    assert_eq!(executor.last_exit_code(), 1);
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 2);
     assert!(!output_path.exists());
     std::env::remove_var("RUBASH_PARAM_ASSIGN_RO_TARGET");
     std::env::remove_var("RUBASH_PARAM_ASSIGN_RO_REF");

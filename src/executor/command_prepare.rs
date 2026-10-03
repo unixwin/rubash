@@ -316,16 +316,23 @@ impl Executor {
         if let Some((name, message)) = self.parameter_assignment_error(cmd) {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_redirected_command_stderr(cmd, line.as_bytes())?;
-            self.exit_code = 1;
-            // GNU Bash 5.2 subst.c:10404-10410: `${special=word}` on a
-            // special/positional param reports "$N: cannot assign in this
-            // way" and returns &expand_wdesc_error (NON-fatal); err_readonly
-            // for `${ro=word}` likewise leaves the shell alive. Both reach
-            // call_expand_word_internal (subst.c:4288-4296) as
-            // expand_word_error -> exp_jump_to_top_level(DISCARD): abandon the
-            // current command list, keep running the script. ExitCode(1) here
-            // bubbled to the top and terminated the whole script.
-            return Err(ExecuteError::ExpansionFailure(1));
+            // rubash#402: the two arms leave different statuses behind.
+            // GNU subst.c:8158-8166: a readonly target under `=`/`:=`
+            // leaves last_command_exit_value = EX_BADUSAGE (2) before
+            // bash_variable_assignment_error(0) ->
+            // exp_jump_to_top_level(DISCARD); the positional/special arm
+            // (subst.c:10403-10410, "cannot assign in this way") is
+            // set_exit_status(EXECUTION_FAILURE) = 1. Both are
+            // expand_wdesc_error -> non-fatal DISCARD via
+            // call_expand_word_internal (subst.c:4288-4296): abandon the
+            // current command list, keep running the script, and the next
+            // line observes the status (GNU probe wt38 run402 k074b/k075:
+            // readonly next-line $? is 2; positional next-line $? is 1).
+            // ExitCode(1) here would bubble to the top and terminate the
+            // whole script.
+            let status = if message == "readonly variable" { 2 } else { 1 };
+            self.exit_code = status;
+            return Err(ExecuteError::ExpansionFailure(status));
         }
         // Bash 5.3 (parser.h FUNSUB_CHAR) executes whitespace-led
         // `${ command; }` as a foreground current-shell command
@@ -587,12 +594,14 @@ impl Executor {
         if let Some((name, message)) = self.parameter_assignment_error(cmd) {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_redirected_command_stderr(cmd, line.as_bytes())?;
-            self.exit_code = 1;
-            // Same GNU DISCARD class as execute_empty_words_command above:
-            // subst.c:10404-10410 expand_wdesc_error (non-fatal) for
-            // `${special=word}` / `${ro=word}` readonly; the script keeps
-            // running after the diagnostic.
-            return Err(ExecuteError::ExpansionFailure(1));
+            // Same GNU DISCARD class and same two-arm status split as
+            // execute_empty_words_command above (rubash#402): readonly
+            // target -> EX_BADUSAGE 2 (subst.c:8164); positional/special
+            // "cannot assign in this way" -> EXECUTION_FAILURE 1
+            // (subst.c:10404-10410); the script keeps running either way.
+            let status = if message == "readonly variable" { 2 } else { 1 };
+            self.exit_code = status;
+            return Err(ExecuteError::ExpansionFailure(status));
         }
         // Bash 5.3 (parser.h FUNSUB_CHAR) executes whitespace-led
         // `${ command; }` as a foreground current-shell command
