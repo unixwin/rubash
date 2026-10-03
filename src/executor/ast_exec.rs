@@ -327,7 +327,12 @@ impl Executor {
                         self.reader_command_line.get()
                     );
                 }
-                if boundary.is_some() && command.line == boundary {
+                // The discard boundary is the LOGICAL line (GNU abandons
+                // the reader's whole current list): commands joined by
+                // backslash-newline continuations share it even though
+                // their physical lines differ (rubash#411).
+                let command_list_line = command.logical_line.or(command.line);
+                if boundary.is_some() && command_list_line == boundary {
                     index += 1;
                     continue;
                 }
@@ -335,7 +340,8 @@ impl Executor {
                 self.evalerror_line.set(None);
             }
             if self.evalerror_exec_depth.get() == 1 {
-                self.reader_command_line.set(command.line);
+                self.reader_command_line
+                    .set(command.logical_line.or(command.line));
                 // rubash#353: record the locale in effect when this SOURCE
                 // LINE is first reached at reader level — the locale GNU's
                 // parser would decode the line's `$'...'` backslash-u
@@ -1156,10 +1162,21 @@ impl Executor {
                     {
                         return Err(ExecuteError::ExitCode(self.exit_code));
                     }
-                    let failed_line = command.line;
-                    if failed_line.is_some_and(|line| line != 0) {
+                    // GNU eval.c:111 (reader_loop case DISCARD): the rest of
+                    // the current command LIST — the whole LOGICAL line,
+                    // including commands joined onto it by backslash-newline
+                    // continuations — is abandoned. `logical_line` carries
+                    // that list boundary; comparing physical `line` would
+                    // stop the skip at the first continuation join and run
+                    // commands GNU discarded (rubash#411).
+                    let failed_line = command
+                        .logical_line
+                        .or(command.line)
+                        .filter(|line| *line != 0);
+                    if failed_line.is_some() {
                         while let Some(next) = commands.get(index + 1) {
-                            if next.line == failed_line && !next.subshell_end {
+                            let next_logical = next.logical_line.or(next.line);
+                            if next_logical == failed_line && !next.subshell_end {
                                 index += 1;
                             } else {
                                 break;

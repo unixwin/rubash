@@ -219,6 +219,7 @@ pub(super) fn parse_for_command(
         );
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
+    command.logical_line = tokens.get(start).map(|token| token.logical_line);
     command.for_command = Some(Box::new(ForCommand {
         keyword: tokens[start].value.clone(),
         keyword_metadata: build_keyword_metadata(&tokens[start]),

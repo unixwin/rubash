@@ -41,6 +41,7 @@ pub(super) fn parse_subshell_command(
     // line to the `)` line, so diagnostics inside the subshell (e.g.
     // "break: is a special builtin" in func5.sub) report the `)` line.
     command.line = tokens.get(close).map(|token| token.position);
+    command.logical_line = tokens.get(close).map(|token| token.logical_line);
     command.subshell_command = Some(Box::new(SubshellCommand {
         open_delimiter: "(".to_string(),
         open_delimiter_metadata: token_metadata(&tokens[start]),

@@ -37,6 +37,7 @@ pub(super) fn parse_conditional_command(
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
+    command.logical_line = tokens.get(start).map(|token| token.logical_line);
     if let Some((spec, echo_line)) = conditional_syntax_error_spec(&merged_args, true) {
         command.insert_assignment("__RUBASH_PARSE_ERROR_COND__".to_string(), spec);
         if let Some(source) = conditional_error_source(tokens, start, end, echo_line) {
@@ -801,6 +802,7 @@ pub(super) fn conditional_eof_error_command(
     });
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
+    command.logical_line = tokens.get(start).map(|token| token.logical_line);
     command.insert_assignment("__RUBASH_PARSE_ERROR_COND__".to_string(), spec);
     if let Some(source) = conditional_error_source(tokens, start, tokens.len() - 1, echo_line) {
         command.insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);

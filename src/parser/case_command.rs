@@ -68,6 +68,7 @@ pub(super) fn parse_case_command(
         // consumed the `)`).
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
+        command.logical_line = tokens.get(start).map(|token| token.logical_line);
         command.case_command = Some(Box::new(CaseCommand {
             keyword: tokens[start].value.clone(),
             keyword_metadata: build_keyword_metadata(&tokens[start]),
@@ -144,6 +145,7 @@ pub(super) fn parse_case_command(
                 let token_text = if tokens[i].line_break { "newline" } else { ";" };
                 let mut command = CommandNode::new();
                 command.line = tokens.get(start).map(|token| token.position);
+                command.logical_line = tokens.get(start).map(|token| token.logical_line);
                 command.insert_assignment(
                     "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
                     format!(
@@ -235,6 +237,7 @@ pub(super) fn parse_case_command(
                         // `case ab in a?(b)) echo m;; *) echo n;; esac').
                         let mut command = CommandNode::new();
                         command.line = tokens.get(start).map(|token| token.position);
+                        command.logical_line = tokens.get(start).map(|token| token.logical_line);
                         command.insert_assignment(
                             "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
                             format!(
@@ -369,6 +372,7 @@ pub(super) fn parse_case_command(
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
+    command.logical_line = tokens.get(start).map(|token| token.logical_line);
     command.case_command = Some(Box::new(CaseCommand {
         keyword: tokens[start].value.clone(),
         keyword_metadata: build_keyword_metadata(&tokens[start]),

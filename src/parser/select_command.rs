@@ -201,6 +201,7 @@ pub(super) fn parse_select_command(
         );
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
+    command.logical_line = tokens.get(start).map(|token| token.logical_line);
     command.select_command = Some(Box::new(SelectCommand {
         keyword: tokens[start].value.clone(),
         keyword_metadata: build_keyword_metadata(&tokens[start]),

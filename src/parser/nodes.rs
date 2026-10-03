@@ -1250,6 +1250,15 @@ pub struct CommandNode {
     pub coproc_command: Option<Box<CoprocCommand>>,
     /// Script line number where this command starts, when known.
     pub line: Option<usize>,
+    /// The LOGICAL line this command starts on (the reader's command-list
+    /// boundary — commands joined onto the previous line by a
+    /// backslash-newline continuation share its logical line while their
+    /// physical `line` differs). GNU's DISCARD-family aborts (eval.c:111,
+    /// subst.c:11181 posix_variable_assignment_error) abandon the rest of
+    /// the current command LIST, so the executor's skip loops compare this
+    /// instead of `line` (rubash#411). None for synthetic commands; the
+    /// consumers fall back to `line`.
+    pub logical_line: Option<usize>,
     /// Script line number where this command's parse ENDED (the line of
     /// its last token — closing keyword or trailing redirect target).
     /// GNU tracks `line_number` at the point each top-level command
@@ -1347,6 +1356,7 @@ impl CommandNode {
             brace_group: None,
             coproc_command: None,
             line: None,
+            logical_line: None,
             end_line: None,
             heredoc_gather_line: None,
         }

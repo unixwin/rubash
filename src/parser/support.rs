@@ -5,6 +5,12 @@ pub(super) fn note_command_line(cmd: &mut CommandNode, token: &Token) {
     if cmd.line.is_none() {
         cmd.line = Some(token.position);
     }
+    // The logical line (the reader's command-list boundary) travels beside
+    // the physical line so DISCARD-family skips keep working across
+    // backslash-newline continuations (rubash#411).
+    if cmd.logical_line.is_none() {
+        cmd.logical_line = Some(token.logical_line);
+    }
 }
 
 pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
@@ -139,6 +145,7 @@ pub(super) fn set_body_line(body: &mut [CommandNode], line: usize) {
     // recover the definition line for diagnostics such as readonly errors.
     for command in body {
         command.line = Some(line);
+        command.logical_line = command.logical_line.or(Some(line));
     }
 }
 

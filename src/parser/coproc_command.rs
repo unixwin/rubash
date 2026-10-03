@@ -42,6 +42,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             let body = parse_inline_brace_body(token);
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
+            command.logical_line = tokens.get(start).map(|t| t.logical_line);
             command.coproc_command = Some(coproc_command(
                 name,
                 Vec::new(),
@@ -57,6 +58,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             let (body, close_i) = parse_split_brace_body(tokens, i)?;
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
+            command.logical_line = tokens.get(start).map(|t| t.logical_line);
             command.coproc_command = Some(coproc_command(
                 name,
                 Vec::new(),
@@ -71,6 +73,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         if let Some((body_command, body_end)) = parse_coproc_compound_body(tokens, i) {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
+            command.logical_line = tokens.get(start).map(|t| t.logical_line);
             command.coproc_command = Some(coproc_command(
                 name,
                 Vec::new(),
@@ -85,6 +88,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         if let Some((body, body_end)) = parse_coproc_command_sequence_body(tokens, i) {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
+            command.logical_line = tokens.get(start).map(|t| t.logical_line);
             command.coproc_command = Some(coproc_command(
                 name,
                 Vec::new(),
@@ -128,6 +132,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 let body = parse(&tokens[body_start..i]).commands;
                 let mut command = CommandNode::new();
                 command.line = tokens.get(start).map(|t| t.position);
+                command.logical_line = tokens.get(start).map(|t| t.logical_line);
                 command.coproc_command = Some(coproc_command(
                     name,
                     Vec::new(),
@@ -165,6 +170,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|t| t.position);
+    command.logical_line = tokens.get(start).map(|t| t.logical_line);
     command.coproc_command = Some(coproc_command(
         name,
         words,

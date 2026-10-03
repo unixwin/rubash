@@ -1,7 +1,6 @@
 use super::super::*;
 use std::fs;
 
-#[ignore = "rubash#411: see issue (probe wt37-374 K020)"]
 #[test]
 fn test_direct_readonly_assignment_stops_noninteractive_script() {
     let output_path = target_test_path("rubash-direct-readonly-fatal-output.txt");
@@ -11,16 +10,23 @@ fn test_direct_readonly_assignment_stops_noninteractive_script() {
         "readonly RUBASH_DIRECT_READONLY=1; \\
          RUBASH_DIRECT_READONLY=2; echo after > {shell_output_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_err());
-    assert_eq!(executor.last_exit_code(), 1);
+    // GNU 5.3.0 (probe wt37-374 K020, re-measured 2026-10-02 against WSL
+    // /usr/local/bin/bash from a script file): a backslash-newline
+    // continuation still crosses the physical line (parse.y:2846 bumps
+    // line_number even though the pair is elided), so the readonly
+    // diagnostic reports line 2 — the PHYSICAL line the failing
+    // assignment starts on, not the logical line's start (rubash#411).
+    // The failure is a DISCARD abort (subst.c:13178 sets status 1,
+    // posix_variable_assignment_error jumps to eval.c:111): the rest of
+    // the LOGICAL line (`echo after > OUT`) never runs and the script
+    // exits 1.
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(1), "stderr: {cli_err}");
+    assert!(
+        cli_err.contains("line 2: RUBASH_DIRECT_READONLY: readonly variable"),
+        "stderr: {cli_err}"
+    );
     assert!(!std::path::Path::new(&output_path).exists());
-    std::env::remove_var("RUBASH_DIRECT_READONLY");
     let _ = fs::remove_file(&output_path);
 }
 

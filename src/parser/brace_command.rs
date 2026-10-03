@@ -156,6 +156,7 @@ pub(super) fn parse_brace_group_command(
     {
         let mut command = CommandNode::new();
         command.line = tokens.get(i).map(|token| token.position);
+        command.logical_line = tokens.get(i).map(|token| token.logical_line);
         command.insert_assignment(
             "__RUBASH_PARSE_ERROR__".to_string(),
             "unexpected token `}'".to_string(),
@@ -176,6 +177,7 @@ pub(super) fn parse_brace_group_command(
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
+    command.logical_line = tokens.get(start).map(|token| token.logical_line);
     command.brace_group = Some(Box::new(BraceGroupCommand {
         open_delimiter: "{".to_string(),
         open_delimiter_metadata: token_metadata(&tokens[start]),

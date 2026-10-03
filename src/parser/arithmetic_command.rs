@@ -18,6 +18,7 @@ pub(super) fn parse_arithmetic_command(
             .map(str::to_string);
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
+        command.logical_line = tokens.get(start).map(|token| token.logical_line);
         // GNU parse.y:4976-4982 parse_arith_cmd keeps the matched-pair body
         // verbatim; the expression is whitespace-insensitive (expr.c), so
         // trim only the surrounding blanks for the structured word.
@@ -53,6 +54,7 @@ pub(super) fn parse_arithmetic_command(
         if paren_depth == 0 && bracket_depth == 0 && tokens[i].value == "))" {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|token| token.position);
+            command.logical_line = tokens.get(start).map(|token| token.logical_line);
             let raw = arithmetic_raw_slice(tokens, open_end, Some(i));
             set_arithmetic_command_words(&mut command, parts.join(" "), Some(raw));
             return Some(finish_arithmetic_command(command, tokens, i + 1));
@@ -65,6 +67,7 @@ pub(super) fn parse_arithmetic_command(
         {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|token| token.position);
+            command.logical_line = tokens.get(start).map(|token| token.logical_line);
             let raw = arithmetic_raw_slice(tokens, open_end, Some(i));
             set_arithmetic_command_words(&mut command, parts.join(" "), Some(raw));
             return Some(finish_arithmetic_command(command, tokens, i + 2));
@@ -124,6 +127,7 @@ pub(super) fn parse_arithmetic_command(
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
+    command.logical_line = tokens.get(start).map(|token| token.logical_line);
     let raw = arithmetic_raw_slice(tokens, open_end, None);
     set_arithmetic_command_words(&mut command, parts.join(" "), Some(raw));
     Some(finish_arithmetic_command(command, tokens, i))

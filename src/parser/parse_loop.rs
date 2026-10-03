@@ -685,6 +685,7 @@ fn fold_inverted_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             command.background = false;
             let mut inverted = CommandNode::new();
             inverted.line = line;
+            inverted.logical_line = command.logical_line;
             inverted.and_or = and_or;
             inverted.background = background_flag;
             inverted.inverted_command = Some(InvertedCommand {
@@ -709,6 +710,7 @@ fn fold_background_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             let line = command.line;
             let mut background = CommandNode::new();
             background.line = line;
+            background.logical_line = command.logical_line;
             background.background_command = Some(BackgroundCommand {
                 operator: "&".to_string(),
                 operator_metadata: operator_metadata("&"),
@@ -784,6 +786,7 @@ fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             .expect("and-or list has a last command");
         let mut list = CommandNode::new();
         list.line = first.line;
+        list.logical_line = first.logical_line;
         list.background = last.background;
         list.and_or_list = Some(AndOrListCommand {
             commands: list_commands,
@@ -859,6 +862,7 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         let last = stages.last().expect("pipeline has a last stage");
         let mut pipeline = CommandNode::new();
         pipeline.line = first.line;
+        pipeline.logical_line = first.logical_line;
         pipeline.inverted = first.inverted;
         pipeline.background = last.background;
         pipeline.and_or = last.and_or;
@@ -916,6 +920,7 @@ fn fold_time_pipeline_stage_command(mut command: CommandNode) -> CommandNode {
 
     let mut timed = CommandNode::new();
     timed.line = command.line;
+    timed.logical_line = command.logical_line;
     timed.inverted = command.inverted;
     timed.pipe = command.pipe.take();
     timed.redirect_in = command.redirect_in.clone();
@@ -956,6 +961,7 @@ fn fold_time_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             command.and_or = None;
             let mut timed = CommandNode::new();
             timed.line = line;
+            timed.logical_line = command.logical_line;
             timed.inverted = inverted;
             timed.and_or = and_or;
             timed.background = background;
@@ -1006,6 +1012,7 @@ fn fold_time_simple_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             command.background = false;
             let mut timed = CommandNode::new();
             timed.line = line;
+            timed.logical_line = command.logical_line;
             timed.inverted = inverted;
             timed.and_or = and_or;
             timed.background = background;
@@ -2526,6 +2533,7 @@ pub(super) fn parse_time_prefixed_compound_command(
     command.background = false;
     let mut timed = CommandNode::new();
     timed.line = tokens.get(start).map(|token| token.position);
+    timed.logical_line = tokens.get(start).map(|token| token.logical_line);
     timed.pipe = pipe;
     timed.and_or = and_or;
     timed.background = background;

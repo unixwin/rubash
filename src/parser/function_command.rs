@@ -197,6 +197,7 @@ pub(super) fn parse_function_command_with_diagnostic(
         });
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
+        command.logical_line = tokens.get(start).map(|token| token.logical_line);
         let mut function = function_command(
             name.clone(),
             name_raw.clone(),
@@ -223,9 +224,11 @@ pub(super) fn parse_function_command_with_diagnostic(
     if let Some((mut body_command, body_end)) = parse_function_compound_body(tokens, i) {
         if body_command.line.is_none() {
             body_command.line = tokens.get(start).map(|token| token.position);
+            body_command.logical_line = tokens.get(start).map(|token| token.logical_line);
         }
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
+        command.logical_line = tokens.get(start).map(|token| token.logical_line);
         command.function_command = Some(function_command(
             name.clone(),
             name_raw.clone(),
@@ -260,6 +263,7 @@ pub(super) fn parse_function_command_with_diagnostic(
         };
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
+        command.logical_line = tokens.get(start).map(|token| token.logical_line);
         command.function_command = Some(function_command(
             name.clone(),
             name_raw.clone(),
@@ -285,6 +289,7 @@ pub(super) fn parse_function_command_with_diagnostic(
     {
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
+        command.logical_line = tokens.get(start).map(|token| token.logical_line);
         command.function_command = Some(function_command(
             name.clone(),
             name_raw.clone(),
@@ -402,6 +407,7 @@ pub(super) fn parse_function_command_with_diagnostic(
     {
         let mut command = CommandNode::new();
         command.line = tokens.get(i).map(|token| token.position);
+        command.logical_line = tokens.get(i).map(|token| token.logical_line);
         command.insert_assignment(
             "__RUBASH_PARSE_ERROR__".to_string(),
             "unexpected token `}'".to_string(),
@@ -422,6 +428,7 @@ pub(super) fn parse_function_command_with_diagnostic(
     }
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
+    command.logical_line = tokens.get(start).map(|token| token.logical_line);
     command.function_command = Some(function_command(
         name,
         name_raw,

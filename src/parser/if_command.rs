@@ -189,6 +189,7 @@ fn parse_if_command_after_condition(
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
+    command.logical_line = tokens.get(start).map(|token| token.logical_line);
     command.if_command = Some(IfCommand {
         keyword: tokens[start].value.clone(),
         keyword_metadata,

@@ -932,10 +932,19 @@ impl Executor {
             return Some((index + 2).min(commands.len()));
         }
 
-        let start_line = commands.get(index + 1).and_then(|command| command.line);
+        // The skip is bounded by the LOGICAL line (GNU executes the
+        // and_or list as one unit regardless of line breaks): commands
+        // joined by backslash-newline continuations share the boundary
+        // even though their physical lines differ (rubash#411).
+        let start_line = commands
+            .get(index + 1)
+            .and_then(|command| command.logical_line.or(command.line));
         let mut next_index = index + 1;
         while next_index < commands.len()
-            && commands[next_index].line == start_line
+            && commands[next_index]
+                .logical_line
+                .or(commands[next_index].line)
+                == start_line
             && commands[next_index].and_or().is_none()
         {
             next_index += 1;

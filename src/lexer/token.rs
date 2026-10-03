@@ -33,6 +33,17 @@ pub struct Token {
     pub raw: String,
     pub position: usize,
     pub column: usize,
+    /// The LOGICAL line this token belongs to (the feeder's
+    /// logical_start_line). GNU parse.y:2504 bumps line_number per
+    /// PHYSICAL line, and diagnostics print the reader's line at the
+    /// event (rubash#411), so `position`/`column` map tokens to physical
+    /// lines; the DISCARD-family skips (execute_cmd.c rest-of-list
+    /// abandonment) span a whole logical line — commands joined by
+    /// backslash-newline continuations must stay comparable even though
+    /// their physical lines differ. Defaults to `position` for
+    /// standalone-produced tokens (single-physical-line inputs, where
+    /// the two coincide).
+    pub logical_line: usize,
     /// Whether this separator came from a physical line break.
     pub line_break: bool,
     /// Whitespace immediately before this token in the tokenized source
@@ -73,6 +84,7 @@ impl Token {
             raw: value.to_string(),
             position,
             column: position,
+            logical_line: position,
             line_break: false,
             leading_ws: String::new(),
             extglob_split: false,
@@ -102,6 +114,7 @@ impl Token {
             raw: raw.to_string(),
             position,
             column: position,
+            logical_line: position,
             line_break: false,
             leading_ws: String::new(),
             extglob_split: false,
@@ -121,6 +134,7 @@ impl Token {
             raw: raw.to_string(),
             position,
             column: position,
+            logical_line: position,
             line_break: false,
             leading_ws: String::new(),
             extglob_split: false,

@@ -852,3 +852,46 @@ fn comsub_esac_pattern_positions_follow_previous_token_rule() {
         false
     ));
 }
+
+#[test]
+fn continuation_join_tokens_keep_physical_lines_and_shared_logical_line() {
+    // GNU parse.y:2846: the unquoted `\<newline>` pair is elided from the
+    // token text but the reader still bumps line_number, so a token that
+    // STARTS after the join sits on the later PHYSICAL line while every
+    // command of the joined list shares one LOGICAL line (rubash#411:
+    // `readonly RO=1; \` + `RO=2; echo after` reports `line 2`, and the
+    // DISCARD abort (eval.c:111) still kills `echo after` on the joined
+    // line — the skip needs the logical identity, not the physical line).
+    let tokens = tokenize("readonly RO=1; \\\nRO=2; echo after\n");
+    let ro2 = tokens
+        .iter()
+        .find(|token| token.value == "RO=2")
+        .expect("assignment token");
+    assert_eq!(ro2.position, 2, "assignment on the joined physical line");
+    assert_eq!(ro2.logical_line, 1, "assignment on the first logical line");
+    let echo = tokens
+        .iter()
+        .find(|token| token.value == "echo")
+        .expect("echo token");
+    assert_eq!(echo.position, 2, "echo on the joined physical line");
+    assert_eq!(echo.logical_line, 1, "echo on the first logical line");
+    // A multi-join chain advances one physical line per join while the
+    // logical line stays fixed.
+    let tokens = tokenize("echo \\\nnever; \\\nRO=4\n");
+    let ro4 = tokens
+        .iter()
+        .find(|token| token.value == "RO=4")
+        .expect("third-line token");
+    assert_eq!(ro4.position, 3);
+    assert_eq!(ro4.logical_line, 1);
+    // A word split MID-WORD by the continuation keeps the word's START
+    // line for `position` (GNU's Simple->line word-completion rule is
+    // approximated separately by simple_command_first_word_end_line).
+    let tokens = tokenize("cmd_a\\\n_b\n");
+    let word = tokens
+        .iter()
+        .find(|token| token.value == "cmd_a_b")
+        .expect("joined word");
+    assert_eq!(word.position, 1);
+    assert_eq!(word.logical_line, 1);
+}

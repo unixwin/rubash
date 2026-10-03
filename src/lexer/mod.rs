@@ -399,6 +399,14 @@ pub(crate) struct GroupScanFeeder {
     logical_start_line: usize,
     logical_line: String,
     continued_line: bool,
+    /// Byte offsets in `logical_line` where a `\`-newline continuation
+    /// joined two physical lines without a newline separator (the backslash
+    /// popped and the next line appended directly). Token positions must
+    /// map back to PHYSICAL lines — GNU parse.y read_token_word elides the
+    /// `\`+newline but still increments line_number (rubash#411), so a
+    /// command starting after the join reports the later physical line,
+    /// not the logical line's start.
+    continuation_join_columns: Vec<usize>,
     parse_posix: bool,
     extglob_flips_allowed: bool,
     comsub_heredocs: Vec<ComsubHeredocHeader>,
@@ -522,6 +530,7 @@ impl GroupScanFeeder {
             logical_start_line: start_line,
             logical_line: String::new(),
             continued_line: false,
+            continuation_join_columns: Vec::new(),
             parse_posix: initial_posix,
             extglob_flips_allowed: true,
             comsub_heredocs: Vec::new(),
@@ -930,6 +939,7 @@ impl GroupScanFeeder {
         };
         if self.logical_line.is_empty() {
             self.logical_start_line = self.line_number;
+            self.continuation_join_columns.clear();
         }
         if !self.logical_line.is_empty() && !self.continued_line {
             self.logical_line.push('\n');
@@ -1042,6 +1052,12 @@ impl GroupScanFeeder {
             && !in_comsub_heredoc_body
         {
             self.logical_line.pop();
+            // GNU parse.y read_token_word on `\` + newline: the pair is
+            // elided from the token text but the reader still crosses the
+            // physical line (line_number++ in the loop). Record where the
+            // elision happened so token positions can map back to physical
+            // lines at accept time (rubash#411).
+            self.continuation_join_columns.push(self.logical_line.len());
             // The popped byte changes the text every later offset depends
             // on: positional scan caches invalid. The pop also joins the
             // next line WITHOUT a '\n' separator, so a two-character
@@ -1325,8 +1341,35 @@ impl GroupScanFeeder {
             return;
         }
 
-        for token in &mut line_tokens {
-            token.position = self.logical_start_line;
+        // GNU parse.y: a command's reported line is the reader's
+        // line_number when its first token was read — the PHYSICAL line
+        // the token starts on. A logical line that spans physical lines
+        // (brace groups keep their newline separators; backslash-newline
+        // continuations are recorded in continuation_join_columns) must
+        // therefore stamp each token with its own physical line, not the
+        // logical line's start (rubash#411: `readonly RO=1; \`
+        // continued onto `RO=2` reports line 2 like GNU, not the
+        // flattened line 1).
+        if self.logical_line.contains('\n') || !self.continuation_join_columns.is_empty() {
+            let joins = &self.continuation_join_columns;
+            let logical_line = &self.logical_line;
+            let logical_start_line = self.logical_start_line;
+            for token in &mut line_tokens {
+                let column = token.column.min(logical_line.len());
+                token.position = logical_start_line
+                    + logical_line[..column].matches('\n').count()
+                    + joins.iter().filter(|&&join| join <= column).count();
+                // DISCARD-family skips (GNU eval.c:111 — the rest of the
+                // current command LIST is abandoned) span the whole logical
+                // line; executor skip loops compare this, not `position`,
+                // so continuation-joined commands stay comparable.
+                token.logical_line = logical_start_line;
+            }
+        } else {
+            for token in &mut line_tokens {
+                token.position = self.logical_start_line;
+                token.logical_line = self.logical_start_line;
+            }
         }
         // GNU parse.y push_heredoc (shell.h HEREDOC_MAX 16): the 17th heredoc
         // on one command is a fatal parse error. GNU runs report_syntax_error
@@ -1461,16 +1504,24 @@ impl GroupScanFeeder {
             // `column`) back to its physical line instead of stamping the whole
             // run with the first line (`{ </n>cmd1 </n>cmd2` reported the EOF at
             // line 2 where GNU reports line 4, rubash#278).
-            let leftover_spans_lines = self.logical_line.contains('\n');
+            // Same physical-line mapping as the accept path, continuation
+            // joins included (rubash#411).
+            let leftover_spans_lines =
+                self.logical_line.contains('\n') || !self.continuation_join_columns.is_empty();
             for token in &mut line_tokens {
                 token.position = if leftover_spans_lines {
+                    let column = token.column.min(self.logical_line.len());
                     self.logical_start_line
-                        + self.logical_line[..token.column.min(self.logical_line.len())]
-                            .matches('\n')
+                        + self.logical_line[..column].matches('\n').count()
+                        + self
+                            .continuation_join_columns
+                            .iter()
+                            .filter(|&&join| join <= column)
                             .count()
                 } else {
                     self.logical_start_line
                 };
+                token.logical_line = self.logical_start_line;
             }
             self.output.append(&mut line_tokens);
             let mut separator = Token::new(TokenKind::Semicolon, ";", self.logical_start_line);

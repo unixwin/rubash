@@ -36,6 +36,7 @@ pub(super) fn parse_loop_command(
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
+    command.logical_line = tokens.get(start).map(|token| token.logical_line);
     command.loop_command = Some(LoopCommand {
         keyword: tokens[start].value.clone(),
         keyword_metadata: build_loop_keyword_metadata(&tokens[start]),
