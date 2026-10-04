@@ -445,3 +445,12 @@
 - **门禁能力沉淀**：UTF-8 stdio/投递验证（静默+Ctrl-U 唤醒+回显确认+投递级重发）/输出锚定排序/J6 单发送——全在脚本+docs/journey-gate.md；#167（时钟重绘吃首键，产品 bug）由投递加固顺带发现
 - **本日引擎侧**：#424（与 #419 冲突手工合流）、wt66 `${arr[@]:-}` 待 cherry-pick、wt65 诚实否决（#241 两条路线 1.7-1.8% 低于诚实线；火力转 #281 lextok=46% 墙钟）
 - 1.3.3 池：wt66、#167、#281 车道、#242/#375/#378、套件计数三面一致（SKILL.md 57/83 vs README vs 台账 63/83）
+
+## 2026-10-05：v1.3.4 门禁马拉松 + 大审计流水线成形（进行中）
+
+- **门禁校准两连**：P8-S4 状态推导化（任意主题态都验真，红=#168 类真分歧）+主题签名指纹（同主题参照）；perfbudget 钉扎源 checkout 根因=**缩写 refspec 无法 fetch**（非 TLS）——全 40 字符 pin+5 重试+代理回退+fail-open 大字标签+fetch 延迟台账；六秒修复实弹证据（黑匣 origin 启动 3.2s REPL 活）
+- **v1.3.4 重跑待窗**：门校准后 network 窗口期跑（journey 全绿一次已录 run4）
+- **研究三件套回巢**：①wt93 差距矩阵（fish/zsh/nushell 源码级 21 维 162 行：58 缺/49 部分/27 平/26 领先；top 缺口=zsh 式 zle 实时 buffer widget（#185 解锁 everything）/abbr(fish-only)/git 段/用户 prompt 函数/异步 prompt；瞬态提示 reedline 已自带=最便宜一胜）②wt94 形态分类学（13 形态：6 通/2 部分/4 缺/1 n-a；**F03 -F/-C 补全执行+complete -D 懒加载器=卡全 bash-completion 生态的最大单缺口**；F05 bind 桩=键位包全灭含自家 fzf-git.sh 配方；F02+F06 目录契约）③wt88 对抗矩阵 12 车道+6 工具包已合（da44d997）
+- **wt89 setupapply 已合**（56846c8d）：setup 完成后一次性 handoff 标记→活会话下个 prompt 重 source rc（新主题当场生效）+finish 屏真话行；journey d3 腿
+- **大审计流水线成形**：harvest（收割 40 万+资产双用=审计+TUI 索引）→全主题矩阵（wt91 升级全矩阵进行中）→对抗矩阵 12 车道待 dispatch→gap 矩阵（162 行=1.4+/2.0 路线图源）→修复车道流水线
+- **新规矩入档**：大块测试模块冲突必须两分支干净版重建；dispatch 前必验远端 SHA；车道 target/ 不豁免清理；温室测试改敌意默认；覆盖不足即缺陷；历史考古/生态盘点派子 agent 实测不 grep 猜
