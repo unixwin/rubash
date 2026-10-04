@@ -2607,7 +2607,14 @@ impl Executor {
                     .iter()
                     .map(|word| self.expand_word(word))
                     .collect::<Vec<_>>();
-                if args.len() == 2 && matches!(args[0].as_str(), "\\n" | "\n") {
+                // Options (-d/-s/-c/-t/--) are NOT sets: `tr -d b` would be read as
+                // SET1="-d" by the translate fast path — input without '-'
+                // or 'd' then passes through unchanged, rc=0, silent
+                // (niubash#166). GNU coreutils tr owns option parsing; only
+                // plain two-set operands may take the fast path.
+                if args.iter().any(|arg| arg.starts_with('-')) {
+                    self.execute_external_pipeline_stage(command, input, stdin_inherit)
+                } else if args.len() == 2 && matches!(args[0].as_str(), "\\n" | "\n") {
                     Ok(Some((input.replace('\n', &args[1]), String::new(), 0)))
                 } else if args.len() == 2
                     && inline_expand_tr_set(&args[0]).is_some()

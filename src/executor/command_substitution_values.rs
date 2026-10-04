@@ -51,6 +51,11 @@ impl Executor {
                             .replace(DATA_DOLLAR, "$")
                     })
                     .collect::<Vec<_>>();
+                // niubash#166: option-shaped words (`tr -d b`) are not set operands —
+                // never take the translate fast path.
+                if args.iter().any(|arg| arg.starts_with('-')) {
+                    return None;
+                }
                 if args.len() != 2 {
                     return None;
                 }
