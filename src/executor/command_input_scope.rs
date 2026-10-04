@@ -289,7 +289,13 @@ impl Executor {
                 self.set_fd_readwrite_file(fd, &target, true)
                     .map_err(|e| crate::posix_errors::path_error(&target, e))?;
             } else {
-                let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+                // niubash#177: same operand resolution as
+                // open_input_redirect — a virtual-root input operand may
+                // exist only under its `.exe` spelling on disk.
+                let path = crate::executor::path::windows_operand_file_path(
+                    shell_path_to_windows(&target, &self.shell_state.env_vars),
+                    &self.shell_state.env_vars,
+                );
                 let file = FileFd::open_read(path)
                     .map_err(|error| crate::posix_errors::path_error(&target, error))?;
                 self.set_fd_input_file(fd, file, true);
@@ -936,7 +942,12 @@ impl Executor {
         if crate::proc_vfs::proc_file_content(&target).is_some() {
             return None;
         }
-        let path = super::path::shell_path_to_windows(&target, &self.shell_state.env_vars);
+        // niubash#177: same operand resolution as open_input_redirect so
+        // this regular-file probe agrees with the read that follows.
+        let path = super::path::windows_operand_file_path(
+            super::path::shell_path_to_windows(&target, &self.shell_state.env_vars),
+            &self.shell_state.env_vars,
+        );
         if !std::fs::metadata(&path)
             .map(|meta| meta.is_file())
             .unwrap_or(false)
@@ -976,7 +987,13 @@ impl Executor {
         if crate::proc_vfs::proc_file_content(&target).is_some() {
             return None;
         }
-        let path = super::path::shell_path_to_windows(&target, &self.shell_state.env_vars);
+        // niubash#177: same operand resolution as open_input_redirect —
+        // a virtual-root input operand may exist only under its `.exe`
+        // spelling on disk.
+        let path = super::path::windows_operand_file_path(
+            super::path::shell_path_to_windows(&target, &self.shell_state.env_vars),
+            &self.shell_state.env_vars,
+        );
         // `<> word` (r_input_output) opens O_RDWR|O_CREAT (make_cmd.c:682),
         // so a missing name is CREATED by the open and never fails here
         // (rubash#264); a genuine open error (bad directory, permission)

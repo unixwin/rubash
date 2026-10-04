@@ -33,7 +33,13 @@ impl Executor {
         if is_closed_redirect_target(&target) {
             return None;
         }
-        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+        // niubash#177: same operand resolution as open_input_redirect — a
+        // virtual-root input operand may exist only under its `.exe`
+        // spelling on disk.
+        let path = crate::executor::path::windows_operand_file_path(
+            shell_path_to_windows(&target, &self.shell_state.env_vars),
+            &self.shell_state.env_vars,
+        );
         if redirect.append {
             let _ = OpenOptions::new()
                 .create(true)

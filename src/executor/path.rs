@@ -1512,7 +1512,12 @@ fn translated_virtual_system_root_argument(
     }
     let normalized = arg.replace('\\', "/");
     windows_virtual_system_root_argument(&normalized, env_vars).then(|| {
-        shell_path_to_windows(arg, env_vars)
+        // niubash#177: the translated spelling goes through the operand
+        // resolution so a WinuxCmd-tree file operand (`/usr/bin/seq`, only
+        // `seq.exe` on disk) reaches the child in the spelling it can
+        // open. Existence-checked: existing files, directories and
+        // neither-spelling misses keep the plain translated form.
+        windows_operand_file_path(shell_path_to_windows(arg, env_vars), env_vars)
             .to_string_lossy()
             .into_owned()
     })
@@ -1764,6 +1769,53 @@ fn executable_extensions(env_vars: &HashMap<String, String>) -> Vec<String> {
         }
     }
     exts
+}
+
+/// unixwin/niubash#177: the DATA-OPERAND form of the Win32 executable
+/// extension resolution — the read-side counterpart of
+/// `executable_candidate` above, which already covers command NAMES (PATH
+/// lookup, `test -x`) and `shell_path_to_windows_for_lookup`.
+///
+/// GNU opens what it is handed verbatim: execve gets the word bytes
+/// (execute_cmd.c:6128 `execve (command, args, env)` inside shell_execve)
+/// and redir_open opens the expanded filename without rewriting
+/// (redir.c:675, redir.c:702). On POSIX a `/usr/bin/seq` operand IS the
+/// file; on Windows the Win32/NTFS namespace stores it as `seq.exe`, and
+/// the POSIX layer must bridge that at its Win32 boundary — which is what
+/// MSYS does: its runtime resolves an absent as-spelled name to the
+/// existing `<name>.exe` (live probe on this machine, 2026-10-02: Git
+/// Bash's MSYS head.exe, handed `D:\...\usr\bin\seq` with only
+/// `seq.exe` on disk, opens it and reads the exe bytes — the fallback is
+/// in the MSYS runtime, not in coreutils). WinuxCmd applets have no such
+/// runtime layer, so the translation layer must hand them the resolved
+/// spelling itself: `head -1 /usr/bin/seq` under the root map used to
+/// open `...\usr\bin\seq` and fail with "cannot open" (niubash#177) while
+/// `test -f /usr/bin/seq` answered YES through the lookup form above —
+/// one namespace, two contradictory views.
+///
+/// Order is the MSYS open/exec order, existence-checked both ways:
+/// 1. as-spelled exists (file, directory, symlink): hand exactly that
+///    spelling. A directory `seq` is the operand — it is never swapped
+///    for a coincidental `seq.exe` (directory operands `ls /usr/bin`,
+///    `cp x /etc` keep working with NO suffix appended);
+/// 2. else the shell's own candidate set (`executable_candidate` — the
+///    same resolution `test`/hash/PATH lookup apply, so children see the
+///    namespace the shell's internal lookups see) picks the first
+///    existing PATHEXT spelling;
+/// 3. else the AS-SPELLED form stands — never a blind append: a name
+///    missing under both spellings errors in the child exactly as it did
+///    before this resolution existed.
+pub(crate) fn windows_operand_file_path(
+    path: PathBuf,
+    env_vars: &HashMap<String, String>,
+) -> PathBuf {
+    if !cfg!(windows) {
+        return path;
+    }
+    if path.exists() {
+        return path;
+    }
+    executable_candidate(&path, env_vars).unwrap_or(path)
 }
 
 fn find_standard_unix_shell() -> Option<PathBuf> {
@@ -4095,6 +4147,154 @@ mod tests {
         assert_eq!(
             child_argv(&dispatcher, &["/usr/bin"], &env_vars),
             vec![root.join("usr").join("bin").to_string_lossy().into_owned()]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---- unixwin/niubash#177: operand spelling resolution ----------------
+
+    /// Fixture install tree for the operand-resolution family:
+    /// <root>/usr/bin/{winuxcmd.exe marker,seq.exe} (NO plain `seq`),
+    /// <root>/usr/bin/{dirboth/ directory + dirboth.exe file} (collision),
+    /// <root>/etc/i177.conf (existing as-spelled text operand).
+    #[cfg(windows)]
+    fn i177_fixture_root() -> PathBuf {
+        let root = std::env::temp_dir().join("rubash-i177-root");
+        let _ = fs::remove_dir_all(&root);
+        let usr_bin = root.join("usr").join("bin");
+        fs::create_dir_all(usr_bin.join("dirboth")).unwrap();
+        fs::create_dir_all(root.join("etc")).unwrap();
+        fs::write(usr_bin.join("winuxcmd.exe"), b"MZ").unwrap();
+        fs::write(usr_bin.join("seq.exe"), b"MZ").unwrap();
+        fs::write(usr_bin.join("dirboth.exe"), b"MZ").unwrap();
+        fs::write(root.join("etc").join("i177.conf"), b"one\n").unwrap();
+        root
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_operand_file_path_prefers_existing_spelling_then_exe() {
+        // The MSYS open/exec order, pinned directly: (1) an existing
+        // as-spelled path (file OR directory) is handed out verbatim — a
+        // directory `dirboth` is never swapped for a coincidental
+        // `dirboth.exe`; (2) a name absent as-spelled resolves to the
+        // existing `seq.exe` spelling (niubash#177: `head -1 /usr/bin/seq`
+        // must open what `test -f /usr/bin/seq` says exists); (3) a name
+        // missing under BOTH spellings keeps the as-spelled form — never a
+        // blind append (the child reports the original operand, as before).
+        let root = i177_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+
+        let seq = root.join("usr").join("bin").join("seq");
+        assert_eq!(
+            windows_operand_file_path(seq.clone(), &env_vars),
+            root.join("usr").join("bin").join("seq.exe"),
+            "missing as-spelled + seq.exe on disk resolves to the exe"
+        );
+
+        let conf = root.join("etc").join("i177.conf");
+        assert_eq!(
+            windows_operand_file_path(conf.clone(), &env_vars),
+            conf,
+            "existing as-spelled file is handed out verbatim"
+        );
+
+        let dir = root.join("usr").join("bin").join("dirboth");
+        assert_eq!(
+            windows_operand_file_path(dir.clone(), &env_vars),
+            dir,
+            "existing directory wins over the .exe sibling"
+        );
+
+        let missing = root.join("usr").join("bin").join("nope");
+        assert_eq!(
+            windows_operand_file_path(missing.clone(), &env_vars),
+            missing,
+            "neither spelling exists: as-spelled stands, no blind append"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn virtual_system_root_file_operands_resolve_executable_spelling() {
+        // The argv funnel hands every non-shell child class the RESOLVED
+        // spelling for a file operand that exists only as `<name>.exe`
+        // (`head -1 /usr/bin/seq` used to fail with "cannot open
+        // ...\usr\bin\seq", niubash#177), while directory operands keep the
+        // plain translated form and missing operands keep the original
+        // spelling for the child's own error.
+        let root = i177_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+        let dispatcher = root.join("usr").join("bin").join("winuxcmd.exe");
+        let applet = root.join("usr").join("bin").join("seq.exe");
+        let native = PathBuf::from("git.exe");
+
+        let seq_exe = root.join("usr").join("bin").join("seq.exe");
+        let usr_bin = root.join("usr").join("bin");
+        let conf = root.join("etc").join("i177.conf");
+        let missing = root.join("usr").join("bin").join("nope");
+
+        for program in [&dispatcher, &applet, &native] {
+            assert_eq!(
+                child_argv(program, &["/usr/bin/seq"], &env_vars),
+                vec![seq_exe.to_string_lossy().into_owned()],
+                "{program:?} must receive the resolved operand spelling"
+            );
+            assert_eq!(
+                child_argv(program, &["/usr/bin"], &env_vars),
+                vec![usr_bin.to_string_lossy().into_owned()],
+                "{program:?}: directory operand keeps the plain form"
+            );
+            assert_eq!(
+                child_argv(program, &["/etc/i177.conf"], &env_vars),
+                vec![conf.to_string_lossy().into_owned()],
+                "{program:?}: existing file operand keeps the plain form"
+            );
+            assert_eq!(
+                child_argv(program, &["/usr/bin/nope"], &env_vars),
+                vec![missing.to_string_lossy().into_owned()],
+                "{program:?}: missing under both spellings keeps the original"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn virtual_system_root_operand_resolution_keeps_option_b_and_legacy_verbatim() {
+        // The resolution rides ONLY on the root-map translation (#164):
+        // drive forms, /dev/*, "/" and switches never enter the class, and
+        // the legacy dialect hatch reverts the whole translation unchanged.
+        let root = i177_fixture_root();
+        let mut legacy = i164_rooted_env(&root);
+        legacy.insert("__RUBASH_ARGV_DIALECT".to_string(), "legacy".to_string());
+        let dispatcher = root.join("usr").join("bin").join("winuxcmd.exe");
+
+        for verbatim in [
+            "/c/Windows",
+            "/mnt/c",
+            "/cygdrive/d/x",
+            "/",
+            "/dev/null",
+            "/nologo",
+            "relative/file",
+        ] {
+            assert_eq!(
+                child_argv(&dispatcher, &[verbatim], &i164_rooted_env(&root)),
+                vec![verbatim.to_string()],
+                "{verbatim:?} must stay verbatim for the applet"
+            );
+        }
+
+        // Legacy dialect: the #164 translation never applies, so neither
+        // does the operand resolution (pre-fix behavior byte-for-byte).
+        assert_eq!(
+            child_argv(&dispatcher, &["/usr/bin/seq"], &legacy),
+            vec!["/usr/bin/seq".to_string()]
         );
 
         let _ = fs::remove_dir_all(&root);

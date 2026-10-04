@@ -67,7 +67,17 @@ impl Executor {
                 return Ok(unsafe { File::from_raw_fd(fd) });
             }
         }
-        let win_path = shell_path_to_windows(target, &self.shell_state.env_vars);
+        // niubash#177: an input operand under the virtual system root may
+        // exist only under its Windows executable spelling (`/usr/bin/seq`
+        // backs onto `seq.exe`). Resolve with the same exists-first,
+        // existence-checked rule the argv funnel applies, so `< /usr/bin/seq`
+        // opens the same file `test -f /usr/bin/seq` says exists; the
+        // POSIX target word is kept for diagnostics. A path that exists
+        // (or misses under both spellings) keeps the plain mapped form.
+        let win_path = crate::executor::path::windows_operand_file_path(
+            shell_path_to_windows(target, &self.shell_state.env_vars),
+            &self.shell_state.env_vars,
+        );
         // A spawned child reading a `<(cmd)` carrier must get the stream's
         // REMAINING bytes — GNU hands it a dup of the shared pipe offset,
         // so the parent's next open sees what the child left

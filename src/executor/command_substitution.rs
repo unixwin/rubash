@@ -886,7 +886,13 @@ impl Executor {
                     output.push_str(&self.function_stdin_remaining().unwrap_or_default());
                     continue;
                 }
-                match fs::read_to_string(shell_path_to_windows(&path, &self.shell_state.env_vars)) {
+                // niubash#177: same operand resolution as the argv funnel —
+                // a virtual-root file operand may exist only under its
+                // `.exe` spelling on disk.
+                match fs::read_to_string(crate::executor::path::windows_operand_file_path(
+                    shell_path_to_windows(&path, &self.shell_state.env_vars),
+                    &self.shell_state.env_vars,
+                )) {
                     Ok(value) => output.push_str(&value),
                     Err(_) => {
                         status = 1;

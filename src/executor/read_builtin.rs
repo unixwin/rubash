@@ -2605,7 +2605,13 @@ impl Executor {
                     && !target.starts_with("<(")
                     && !is_closed_redirect_target(&target)
                 {
-                    let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+                    // niubash#177: same operand resolution as
+                    // open_input_redirect so `-t` sees the same regular
+                    // file the read itself opens.
+                    let path = crate::executor::path::windows_operand_file_path(
+                        shell_path_to_windows(&target, &self.shell_state.env_vars),
+                        &self.shell_state.env_vars,
+                    );
                     return std::fs::metadata(&path)
                         .map(|m| m.is_file())
                         .unwrap_or(false);

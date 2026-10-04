@@ -948,7 +948,16 @@ impl Executor {
                     output.extend(bytes);
                     continue;
                 }
-                let win = shell_path_to_windows(&target, &self.shell_state.env_vars);
+                // niubash#177: resolve through the operand form so a
+                // virtual-root file operand that exists only under its
+                // `.exe` spelling (`/usr/bin/seq`) opens here exactly as it
+                // would in a spawned cat.exe (same exists-first rule as the
+                // argv funnel). `<(cmd)` carrier paths exist, so the
+                // resolver keeps them byte-identical for procsub_stream_take.
+                let win = crate::executor::path::windows_operand_file_path(
+                    shell_path_to_windows(&target, &self.shell_state.env_vars),
+                    &self.shell_state.env_vars,
+                );
                 // `<(cmd)` carrier path: the word names a draining stream —
                 // serve the shared remainder (subst.c:7143).
                 let read = match self.procsub_stream_take(&win) {
