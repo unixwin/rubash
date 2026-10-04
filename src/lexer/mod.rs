@@ -1048,7 +1048,19 @@ impl GroupScanFeeder {
         }
         let in_comsub_heredoc_body = comsub_open && !self.comsub_heredocs.is_empty();
 
+        // Admission gate for the whole-buffer backslash scan below: the
+        // scan's ONLY `true` exit is the trailing-backslash parity test
+        // (continuation.rs `ends_with_unquoted_backslash` epilogue), which
+        // requires the buffer's final byte to be `\`; every other exit
+        // (comment-to-EOF, innermost-open `'`) returns false regardless of
+        // the scan. A logical line not ending in `\` therefore provably
+        // answers false without the O(whole logical line) delimiter-stack
+        // walk, so gate on the final byte and skip the scan for it
+        // (nvm.sh -n: ~5420 calls -> ~120; GNU parse.y:3557 read_token
+        // streams and never re-walks consumed text — the scan is this
+        // port's substitute and only lines that can answer true need it).
         if line_had_terminator
+            && self.logical_line.ends_with('\\')
             && ends_with_unquoted_backslash(&self.logical_line)
             && !in_comsub_heredoc_body
         {
@@ -1355,10 +1367,22 @@ impl GroupScanFeeder {
             let joins = &self.continuation_join_columns;
             let logical_line = &self.logical_line;
             let logical_start_line = self.logical_start_line;
+            // GNU parse.y line_number is PHYSICAL: one increment per line
+            // crossed. The per-token answer "how many newlines precede this
+            // token's column" is a prefix count; collecting the newline byte
+            // offsets once and binary-searching per token replaces the old
+            // per-token prefix re-walk (O(line x tokens) on the accumulated
+            // multi-megabyte-capable logical lines) with O(line + tokens x
+            // log(line)) — identical counts, byte for byte (nvm.sh -n: the
+            // 51 multi-line stamps held ~3 ms of the lextok slice).
+            let newline_offsets: Vec<usize> = logical_line
+                .match_indices('\n')
+                .map(|(offset, _)| offset)
+                .collect();
             for token in &mut line_tokens {
                 let column = token.column.min(logical_line.len());
                 token.position = logical_start_line
-                    + logical_line[..column].matches('\n').count()
+                    + newline_offsets.partition_point(|&offset| offset < column)
                     + joins.iter().filter(|&&join| join <= column).count();
                 // DISCARD-family skips (GNU eval.c:111 — the rest of the
                 // current command LIST is abandoned) span the whole logical
@@ -1509,11 +1533,19 @@ impl GroupScanFeeder {
             // joins included (rubash#411).
             let leftover_spans_lines =
                 self.logical_line.contains('\n') || !self.continuation_join_columns.is_empty();
+            // Same prefix-count restructure as the accept path: collect the
+            // newline byte offsets once, binary-search per token (identical
+            // counts; the per-token prefix re-walk was O(line x tokens)).
+            let newline_offsets: Vec<usize> = self
+                .logical_line
+                .match_indices('\n')
+                .map(|(offset, _)| offset)
+                .collect();
             for token in &mut line_tokens {
                 token.position = if leftover_spans_lines {
                     let column = token.column.min(self.logical_line.len());
                     self.logical_start_line
-                        + self.logical_line[..column].matches('\n').count()
+                        + newline_offsets.partition_point(|&offset| offset < column)
                         + self
                             .continuation_join_columns
                             .iter()
@@ -1736,7 +1768,11 @@ pub fn has_unclosed_input_syntax_posix(input: &str, posix: bool) -> bool {
 /// line) then correctly reads as an ESCAPED carriage return, which GNU also
 /// does not treat as a continuation.
 pub fn stdin_line_ends_with_continuation(input: &str) -> bool {
-    ends_with_unquoted_backslash(input.strip_suffix('\n').unwrap_or(input))
+    let text = input.strip_suffix('\n').unwrap_or(input);
+    // Same admission as the feeder's per-line gate: the scan's only `true`
+    // exit is the trailing-backslash parity epilogue, so a final byte other
+    // than `\` provably answers false without the whole-buffer walk.
+    text.ends_with('\\') && ends_with_unquoted_backslash(text)
 }
 
 /// Rotate the `)`-that-closed-on-the-header-line segment of a command
@@ -2093,7 +2129,6 @@ fn tokenize_with_boundary(
         }
         // resume was allowed but no checkpoint existed: full re-lex under
         // the ALLOWED stat (tail = whole input).
-        let started = std::time::Instant::now();
         let result = tokenize_plain(input, posix, parse_state, brace_cache);
         return result;
     }
