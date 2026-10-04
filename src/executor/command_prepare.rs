@@ -260,10 +260,17 @@ impl Executor {
         if self.shell_state.arithmetic_nounset_error.get() {
             self.shell_state.arithmetic_nounset_error.set(false);
             self.shell_state.arithmetic_expansion_error.set(false);
-            // GNU expr.c:1190-1216: `(( ))` nounset is FORCE_EOF; the
-            // status is context-owned (shell.c:1471 remaps it to 127 only
-            // at the `-c` top level; a `( ... )` subshell child contains
-            // the jump at execute_cmd.c:1811 and exits 1 — niubash#163).
+            // GNU expr.c:1208-1216 expr_streval: interactive_shell takes
+            // `jump_to_top_level (DISCARD)` — the `(( ))` is abandoned
+            // with status 1 and the session keeps reading; the FORCE_EOF
+            // branch below is noninteractive only. The status is
+            // context-owned (shell.c:1471 remaps it to 127 only at the
+            // `-c` top level; a `( ... )` subshell child contains the jump
+            // at execute_cmd.c:1811 and exits 1 — niubash#163).
+            if self.expansion_error_is_interactive_discard() {
+                self.exit_code = 1;
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             let code = self.expansion_fatal_status();
             self.exit_code = code;
             return Err(ExecuteError::ExitCode(code));
@@ -347,6 +354,17 @@ impl Executor {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_redirected_command_stderr(cmd, line.as_bytes())?;
             if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
+                // Interactive shells take the error branch, not the fatal:
+                // subst.c:10416-10418 (`interactive_shell ?
+                // &expand_wdesc_error : &expand_wdesc_fatal`) -> DISCARD
+                // (subst.c:4296) — abandon this command with status 1 and
+                // keep reading (eval.c:111-128). Without this the whole
+                // interactive session died on `echo ${X?}` — the theme-
+                // source session-killer (wt90).
+                if self.expansion_error_is_interactive_discard() {
+                    self.exit_code = 1;
+                    return Err(ExecuteError::ExpansionFailure(1));
+                }
                 // subst.c expand_wdesc_fatal → exp_jump_to_top_level
                 // (FORCE_EOF): fatal expansion errors end the whole
                 // noninteractive script (subshell/pipeline boundaries
@@ -450,10 +468,17 @@ impl Executor {
                 // other fatal categories abandon only the command list
                 // (probe a6: `x=$((1/0)); echo after` prints "after").
                 if self.shell_state.arithmetic_nounset_error.replace(false) {
-                    // Context-owned FORCE_EOF status: 127 only at the `-c`
-                    // top level (shell.c:1471); script mode exits 1
-                    // (eval.c:104-109) and a `( ... )` subshell contains it
-                    // to 1 (execute_cmd.c:1811 — niubash#163).
+                    // expr.c:1208-1216: interactive_shell DISCARDs — the
+                    // assignment is abandoned with status 1, the session
+                    // keeps reading; only the noninteractive shell takes
+                    // FORCE_EOF. Context-owned FORCE_EOF status: 127 only
+                    // at the `-c` top level (shell.c:1471); script mode
+                    // exits 1 (eval.c:104-109) and a `( ... )` subshell
+                    // contains it to 1 (execute_cmd.c:1811 — niubash#163).
+                    if self.expansion_error_is_interactive_discard() {
+                        self.exit_code = 1;
+                        return Err(ExecuteError::ExpansionFailure(1));
+                    }
                     let code = self.expansion_fatal_status();
                     self.exit_code = code;
                     return Err(ExecuteError::ExitCode(code));
@@ -621,6 +646,13 @@ impl Executor {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_redirected_command_stderr(cmd, line.as_bytes())?;
             if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
+                // Same subst.c:10416-10418 interactivity branch as
+                // execute_empty_words_command above: interactive_shell
+                // selects the DISCARD-class error so the session survives.
+                if self.expansion_error_is_interactive_discard() {
+                    self.exit_code = 1;
+                    return Err(ExecuteError::ExpansionFailure(1));
+                }
                 // Same FORCE_EOF mapping as execute_empty_words_command
                 // above: shell.c:1471 maps it to 127 under `-c`, 1 in
                 // script mode. This site hardcoded 1, so `set -u` unbound

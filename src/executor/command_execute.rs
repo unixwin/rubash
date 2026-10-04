@@ -147,14 +147,21 @@ impl Executor {
                 // GNU expr.c expr_streval: an unbound variable under `set -u`
                 // raises FORCE_EOF from ANY expansion position — the word
                 // expansion's DISCARD classification (ExpansionFailure) must
-                // not downgrade it. `$((missing+1))` as a command argument
-                // abandons the command list and exits the noninteractive
-                // shell (127 under `-c` via shell.c:1471, 1 in script mode;
-                // probe 2026-09-27).
+                // not downgrade it — EXCEPT in the interactive reader, where
+                // expr.c:1208-1216 takes `jump_to_top_level (DISCARD)` (the
+                // command is abandoned with status 1 and the session keeps
+                // reading). `$((missing+1))` as a command argument abandons
+                // the command list and exits the noninteractive shell (127
+                // under `-c` via shell.c:1471, 1 in script mode; probe
+                // 2026-09-27).
                 Err(ExecuteError::ExpansionFailure(_))
                     if self.shell_state.arithmetic_nounset_error.replace(false) =>
                 {
                     self.shell_state.arithmetic_expansion_error.set(false);
+                    if self.expansion_error_is_interactive_discard() {
+                        self.exit_code = 1;
+                        return Err(ExecuteError::ExpansionFailure(1));
+                    }
                     let code = self.expansion_fatal_status();
                     self.exit_code = code;
                     return Err(ExecuteError::ExitCode(code));
@@ -167,6 +174,10 @@ impl Executor {
         // form keeps its own check in command_dispatch_late.
         if self.shell_state.arithmetic_nounset_error.replace(false) {
             self.shell_state.arithmetic_expansion_error.set(false);
+            if self.expansion_error_is_interactive_discard() {
+                self.exit_code = 1;
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             let code = self.expansion_fatal_status();
             self.exit_code = code;
             return Err(ExecuteError::ExitCode(code));
@@ -938,6 +949,14 @@ impl Executor {
             self.exit_code = status;
             return Ok(());
         }
+        // subst.c:10416-10418 / 11032-11034: interactive_shell expands the
+        // heredoc body in the MAIN shell and takes the error branch
+        // (DISCARD) — the command is abandoned with status 1 and the
+        // session keeps reading, whatever the target dispatches to.
+        if self.expansion_error_is_interactive_discard() {
+            self.exit_code = 1;
+            return Err(ExecuteError::ExpansionFailure(1));
+        }
         let code = self.expansion_fatal_status();
         self.exit_code = code;
         if self.heredoc_error_command_runs_in_main_shell(cmd) {
@@ -980,6 +999,14 @@ impl Executor {
             let was_fatal = self.shell_state.arithmetic_fatal_error.replace(false);
             let nounset = self.shell_state.arithmetic_nounset_error.replace(false);
             if nounset {
+                // GNU expr.c:1208-1216 expr_streval: interactive_shell
+                // takes `jump_to_top_level (DISCARD)` — the command is
+                // abandoned with status 1 and the session keeps reading;
+                // the FORCE_EOF branch below is noninteractive only.
+                if self.expansion_error_is_interactive_discard() {
+                    self.exit_code = 1;
+                    return Err(ExecuteError::ExpansionFailure(1));
+                }
                 // GNU expr.c:1190-1216 expr_streval: an unbound variable
                 // under `set -u` set_exit_status(EXECUTION_FAILURE) and
                 // raises FORCE_EOF, terminating the noninteractive shell.

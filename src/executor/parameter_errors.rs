@@ -794,6 +794,52 @@ impl Executor {
         }
     }
 
+    /// GNU's `interactive_shell` at the word-expansion error sites — the
+    /// branch that decides expand_*_error (DISCARD) vs expand_*_fatal
+    /// (FORCE_EOF):
+    /// - subst.c:10416-10418 parameter_brace_expand `?` arm:
+    ///   `return (interactive_shell ? &expand_wdesc_error :
+    ///   &expand_wdesc_fatal)`;
+    /// - subst.c:11032-11034 unbound_variable label (set -u nounset):
+    ///   `return ((unbound_vars_is_error && interactive_shell == 0) ?
+    ///   &expand_wdesc_fatal : &expand_wdesc_error)`;
+    /// - subst.c:8949 parameter_brace_transform (`@xform`):
+    ///   `return (interactive_shell ? &expand_param_error :
+    ///   &expand_param_fatal)`;
+    /// - expr.c:1208-1216 expr_streval (arithmetic unbound under set -u):
+    ///   `if (interactive_shell) { ...; jump_to_top_level (DISCARD); } else
+    ///   jump_to_top_level (FORCE_EOF)`.
+    ///
+    /// DISCARD keeps the interactive session alive: the current command is
+    /// abandoned with status 1 and reader_loop reads the next line
+    /// (eval.c:111-128). Every non-reader context counts as
+    /// non-interactive at these sites: `-c` runs with interactive_shell 0
+    /// even under `-i` (shell.c init_noninteractive; WSL 5.3.0 probe:
+    /// `bash -i -c 'echo ${X?}'` exits 127 without running the tail), and
+    /// a `( )`/`$( )` child has interactive_shell 0, so the fatal stays
+    /// contained (expansion_fatal_status). `bash -i script` is
+    /// init_interactive_script (shell.c:1870, interactive_shell = 1), so
+    /// the DISCARD applies there (WSL probe: `bash -i xq.sh` prints the
+    /// error and still runs the next line).
+    pub(in crate::executor) fn expansion_error_is_interactive_discard(&self) -> bool {
+        self.shell_state
+            .env_vars
+            .get("__RUBASH_INTERACTIVE")
+            .map(String::as_str)
+            == Some("1")
+            && self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_IS_C")
+                .map(String::as_str)
+                != Some("1")
+            && !self
+                .shell_state
+                .env_vars
+                .contains_key("__RUBASH_COMSUB_BODY")
+            && self.shell_state.subshell_depth.get() == 0
+    }
+
     /// `quote_aware` mirrors GNU word expansion (subst.c): quotes in a word
     /// delimit data, so `${` inside `'...'`, a $'...' string, a backtick
     /// body or a $(...) body is not an expansion start of THIS word

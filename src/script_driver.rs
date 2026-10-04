@@ -853,6 +853,19 @@ fn run_history_group(
 ) -> i32 {
     let history_on = executor.get_env("__RUBASH_SETOPT_history").as_deref() == Some("1");
     let histexpand_on = executor.get_env("__RUBASH_SETOPT_histexpand").as_deref() == Some("1");
+    // SEVAL_NOHIST contexts (PROMPT_COMMAND runner, eval.c:305 ->
+    // execute_variable_command -> parse_and_execute): the runner text is
+    // not a readline line — GNU neither history-expands nor records it, and
+    // it runs on the CURRENT shell environment, so `history` builtins
+    // inside PROMPT_COMMAND still act on the live session list. Skipping
+    // the record here is what keeps a theme's `history -a` from flushing
+    // the runner itself into $HISTFILE on every prompt.
+    let seval_nohist = executor
+        .get_env(crate::executor::Executor::PROMPT_COMMAND_NOHIST)
+        .as_deref()
+        == Some("1");
+    let history_on = history_on && !seval_nohist;
+    let histexpand_on = histexpand_on && !seval_nohist;
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let cmdhist = shopt_state_enabled(executor, "cmdhist", true);
     let lithist = shopt_state_enabled(executor, "lithist", false);

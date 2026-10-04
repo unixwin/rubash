@@ -249,6 +249,19 @@ impl Executor {
                 if self.shell_state.arithmetic_nounset_error.get() {
                     self.shell_state.arithmetic_nounset_error.set(false);
                     self.shell_state.arithmetic_expansion_error.set(false);
+                    // GNU expr.c:1208-1216 expr_streval: interactive_shell
+                    // takes `jump_to_top_level (DISCARD)` — the `(( ))` is
+                    // abandoned with status 1 and the session keeps
+                    // reading; the FORCE_EOF branch is noninteractive
+                    // only. The exit code is context-owned: 127 only at
+                    // the `-c` top-level catch (shell.c:1471); script mode
+                    // exits 1 (eval.c:104-109) and a `( ... )` subshell
+                    // child contains the jump at execute_cmd.c:1811 and
+                    // exits 1 (niubash#163).
+                    if self.expansion_error_is_interactive_discard() {
+                        self.exit_code = 1;
+                        return Err(ExecuteError::ExpansionFailure(1));
+                    }
                     let code = self.expansion_fatal_status();
                     self.exit_code = code;
                     return Err(ExecuteError::ExitCode(code));

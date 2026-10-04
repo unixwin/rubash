@@ -682,6 +682,103 @@ mod unit_tests {
         );
         assert_eq!(executor.last_exit_code(), 0);
     }
+    // wt90/themehang: the interactive session-killer family. GNU's word-
+    // expansion error sites branch on interactive_shell
+    // (subst.c:10416-10418 `${x?}` / 11032-11034 set -u nounset / 8949
+    // `@xform`; expr.c:1208-1216 arithmetic unbound): interactive takes
+    // &expand_*_error -> DISCARD (subst.c:4296, eval.c:111-128) — the
+    // command is abandoned with status 1 and the session keeps reading.
+    // Before the fix every one of these killed the whole interactive
+    // session (owner repro: `source <theme>` with `${bold_red?}` unset
+    // colors ended the shell instead of skipping the theme).
+
+    #[test]
+    fn interactive_parameter_error_is_discard_not_exit() {
+        let tokens = tokenize("echo ${UNSET_VAR?}");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_INTERACTIVE", "1");
+        let result = executor.execute_ast(&ast);
+        // The DISCARD lands as a plain status at the top of execute_ast
+        // (the session survives); before the fix this was
+        // Err(ExitCode(1)) — the session-killer.
+        assert!(
+            result.is_ok(),
+            "interactive parameter-error must not end the session, got {:?}",
+            result
+        );
+        assert_eq!(executor.last_exit_code(), 1);
+    }
+
+    #[test]
+    fn noninteractive_parameter_error_stays_fatal() {
+        // Script mode keeps the FORCE_EOF classification
+        // (expand_wdesc_fatal): WSL 5.3.0 `bash xq.sh` exits 1 without
+        // running the tail.
+        let tokens = tokenize("echo ${UNSET_VAR?}\necho UNREACHED");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            matches!(result, Err(crate::executor::ExecuteError::ExitCode(1))),
+            "noninteractive parameter-error must stay FORCE_EOF, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn c_context_stays_fatal_even_under_interactive_flag() {
+        // shell.c init_noninteractive: `bash -i -c 'echo ${X?}'` exits 127
+        // (shell.c:1471 FORCE_EOF mapping) — the -i flag must not flip the
+        // -c context to DISCARD.
+        let tokens = tokenize("echo ${UNSET_VAR?}");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_INTERACTIVE", "1");
+        executor.set_env("__RUBASH_IS_C", "1");
+        let result = executor.execute_ast(&ast);
+        assert!(
+            matches!(result, Err(crate::executor::ExecuteError::ExitCode(127))),
+            "-i -c parameter-error must stay FORCE_EOF/127, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn interactive_nounset_is_discard_not_exit() {
+        // WSL 5.3.0 piped -i: `set -u; echo $UNSET2; echo AFTER` prints
+        // AFTER (subst.c:11032-11034 unbound_variable label).
+        let tokens = tokenize("echo $UNSET2");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_INTERACTIVE", "1");
+        executor.set_shell_option("nounset", true);
+        let result = executor.execute_ast(&ast);
+        assert!(
+            result.is_ok(),
+            "interactive set -u unbound must not end the session, got {:?}",
+            result
+        );
+        assert_eq!(executor.last_exit_code(), 1);
+    }
+
+    #[test]
+    fn interactive_arith_unbound_is_discard_not_exit() {
+        // WSL 5.3.0 piped -i: `set -u; echo $((MISSING)); echo AFTER`
+        // prints AFTER (expr.c:1208-1216 expr_streval DISCARD branch).
+        let tokens = tokenize("echo $((MISSING_ARITH))");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_INTERACTIVE", "1");
+        executor.set_shell_option("nounset", true);
+        let result = executor.execute_ast(&ast);
+        assert!(
+            result.is_ok(),
+            "interactive arithmetic unbound must not end the session, got {:?}",
+            result
+        );
+        assert_eq!(executor.last_exit_code(), 1);
+    }
 }
 
 mod dollar_flags_tests {

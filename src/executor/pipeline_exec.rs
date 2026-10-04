@@ -2143,7 +2143,14 @@ impl Executor {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_default_stderr(line.as_bytes())?;
             let code = if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
-                self.expansion_fatal_status()
+                // subst.c:10416-10418/11032-11034: interactive_shell takes
+                // the error branch (DISCARD) — the pipeline is abandoned
+                // with status 1 and the session keeps reading.
+                if self.expansion_error_is_interactive_discard() {
+                    1
+                } else {
+                    self.expansion_fatal_status()
+                }
             } else {
                 status
             };
