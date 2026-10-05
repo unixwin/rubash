@@ -35,49 +35,81 @@ impl crate::executor::Executor {
         // declared variable still occupies env storage with an empty value,
         // and the empty-string check below covers eval.c:329-330's
         // `command_to_execute && *command_to_execute`.
-        let Some(value) = self.get_env("PROMPT_COMMAND") else {
+        let Some(value) = self.get_env("PROMPT_COMMAND").map(str::to_owned) else {
             return None;
         };
         if value.trim().is_empty() {
             return None;
         }
 
-        const RUNNER: &str = r#"case "${PROMPT_COMMAND@a}" in
-  *a*)
-    # Indexed array: eval each non-empty element in index order
-    # (execute_array_command via array_to_argv, eval.c:294-299).
-    for __rubash_pc in "${PROMPT_COMMAND[@]}"; do
-      [ -n "$__rubash_pc" ] && eval "$__rubash_pc"
-    done
-    ;;
-  *A*)
-    # Associative array: GNU refuses these (eval.c:324-325).
-    ;;
-  *)
-    # Plain string: the evalstring equivalent of execute_variable_command.
-    eval "$PROMPT_COMMAND"
-    ;;
-esac
-unset __rubash_pc 2>/dev/null || true"#;
-        // eval.c:305 execute_prompt_command -> execute_variable_command
-        // (eval.c:318-330) -> parse_and_execute(..., SEVAL_NONINT) in the
-        // CURRENT shell environment: the session history list stays live
-        // across the prompt (bash-it themes drive `history -a/-c/-r` from
-        // PROMPT_COMMAND against the user's own list), and the runner text
-        // is never recorded (it is not a readline line). The grouped
-        // driver's fresh-SessionHistory swap + self-record used to append
-        // the whole runner into $HISTFILE at every prompt via the theme's
-        // `history -a` and drop the commands typed since the last prompt.
+        // eval.c:322-327: the array_p/assoc_p dispatch on the variable's
+        // cell type. eval.c:324-325 refuses associative arrays outright.
+        if self.is_assoc_parameter_array("PROMPT_COMMAND") {
+            return None;
+        }
+
         let session = self.get_session_history();
         self.set_env(Self::PROMPT_COMMAND_NOHIST, "1");
-        let code = match session {
-            Some(session) => {
-                crate::script_driver::run_script_with_history_in(self, RUNNER, session, None)
+        let array_storage = self.parameter_array_storage("PROMPT_COMMAND");
+        let code = if array_storage
+            .as_deref()
+            .is_some_and(crate::executor::arrays::is_array_storage)
+        {
+            // eval.c:286-307 execute_array_command: a plain C loop over
+            // array_to_argv; each non-empty element goes through its OWN
+            // execute_variable_command (eval.c:318-330 ->
+            // parse_and_execute), so nothing an ELEMENT evaluates can
+            // unwind the loop — a failing status is discarded and a
+            // `break` inside an element is a top-level "only meaningful in
+            // a `for', `while', or `until' loop" error while the remaining
+            // elements still run (verified GNU bash 5.3.0). The old
+            // shell-level `for ... eval` runner shared ITS loop with the
+            // evaluated text, so an element's `break` broke the runner
+            // itself and silently dropped every later element
+            // (rubash#430). Existing elements in index order (GNU
+            // array_to_argv walks the element list — sparse holes never
+            // stop the walk), empties skipped (eval.c:296-298).
+            let storage = array_storage.unwrap();
+            let mut last = 0;
+            for (_, element) in crate::executor::arrays::indexed_array_entries(&storage) {
+                let element = crate::executor::arrays::normalize_array_expanded_value(element);
+                if !element.is_empty() {
+                    last = self.run_prompt_command_text(&element, session.clone());
+                }
             }
-            None => crate::script_driver::run_script_with_history(self, RUNNER, None),
+            last
+        } else {
+            // eval.c:327-330: a plain string runs once — the text itself is
+            // the parse_and_execute payload (execute_variable_command),
+            // with no extra eval layer.
+            self.run_prompt_command_text(&value, session)
         };
         self.remove_env(Self::PROMPT_COMMAND_NOHIST);
         Some(code)
+    }
+
+    /// eval.c:318-330 execute_variable_command: parse_and_execute the text
+    /// in the CURRENT shell environment, never recording it as a readline
+    /// line (eval.c:305 execute_prompt_command -> execute_variable_command
+    /// -> parse_and_execute(..., SEVAL_NONINT); nothing in that path calls
+    /// bash_add_history). The session history list stays live across the
+    /// prompt — bash-it themes drive `history -a/-c/-r` from
+    /// PROMPT_COMMAND against the user's own list, and the grouped
+    /// driver's fresh-SessionHistory swap + self-record used to append the
+    /// whole runner into $HISTFILE at every prompt and drop the commands
+    /// typed since the last prompt (wt90/themehang). PROMPT_COMMAND_NOHIST
+    /// gates both the history EXPANSION and the RECORD inside that driver.
+    fn run_prompt_command_text(
+        &mut self,
+        text: &str,
+        session: Option<std::rc::Rc<std::cell::RefCell<crate::history::SessionHistory>>>,
+    ) -> i32 {
+        match session {
+            Some(session) => {
+                crate::script_driver::run_script_with_history_in(self, text, session, None)
+            }
+            None => crate::script_driver::run_script_with_history(self, text, None),
+        }
     }
 }
 
@@ -118,11 +150,54 @@ mod tests {
         assert_eq!(executor.get_env("__pc_b"), Some("2"));
     }
 
+    // rubash#430: eval.c:286-307 execute_array_command runs each non-empty
+    // element through its OWN execute_variable_command — nothing an element
+    // evaluates (a failing status, or a `break` whose loop jump GNU reports
+    // as "only meaningful in a `for', `while', or `until' loop") stops the
+    // remaining elements. The old shell-level `for ... eval` runner let the
+    // element's `break` break the runner loop itself, silently dropping the
+    // rest of the array.
+
+    #[test]
+    fn prompt_command_failing_element_does_not_abort_remaining() {
+        let mut executor = Executor::new();
+        seed(
+            &mut executor,
+            "PROMPT_COMMAND=([0]='false' [1]='__pc_b=1' [2]='false')",
+        );
+        // The last element's status is the reported one, and the middle
+        // element still ran.
+        assert_eq!(executor.execute_prompt_command(), Some(1));
+        assert_eq!(executor.get_env("__pc_b"), Some("1"));
+    }
+
+    #[test]
+    fn prompt_command_break_element_does_not_abort_remaining() {
+        let mut executor = Executor::new();
+        seed(&mut executor, "PROMPT_COMMAND=([0]='break' [1]='__pc_b=1')");
+        assert_eq!(executor.execute_prompt_command(), Some(0));
+        assert_eq!(executor.get_env("__pc_b"), Some("1"));
+    }
+
+    #[test]
+    fn prompt_command_sparse_array_runs_in_index_order() {
+        let mut executor = Executor::new();
+        seed(
+            &mut executor,
+            "PROMPT_COMMAND=([0]='__pc_log=A' [7]='__pc_log=\"$__pc_log B\"')",
+        );
+        assert_eq!(executor.execute_prompt_command(), Some(0));
+        assert_eq!(executor.get_env("__pc_log"), Some("A B"));
+    }
+
     #[test]
     fn prompt_command_associative_array_is_noop() {
         let mut executor = Executor::new();
         seed(&mut executor, "declare -A PROMPT_COMMAND=([x]='__pc_a=1')");
-        assert_eq!(executor.execute_prompt_command(), Some(0));
+        // eval.c:324-325 refuses associative arrays: nothing runs, and the
+        // documented contract returns None ("nothing ran") — the old shell
+        // runner returned its own 0 because the case arm still executed.
+        assert_eq!(executor.execute_prompt_command(), None);
         assert_eq!(executor.get_env("__pc_a"), None);
     }
 
