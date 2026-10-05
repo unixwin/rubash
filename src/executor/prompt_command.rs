@@ -75,6 +75,16 @@ impl crate::executor::Executor {
                 let element = crate::executor::arrays::normalize_array_expanded_value(element);
                 if !element.is_empty() {
                     last = self.run_prompt_command_text(&element, session.clone());
+                    // eval.c:291-301 execute_array_command: the element's
+                    // parse_and_execute re-raises an EXITPROG/ERREXIT jump
+                    // (evalstring.c:618-619), and the longjmp UNWINDS this
+                    // loop — elements after an `exit` element never run
+                    // (verified WSL GNU 5.3.0: PC=([0]='echo A' [1]='exit'
+                    // [2]='echo C') prints only A, rc 0). run_prompt_command_text
+                    // re-arms the jump below; stop the walk to match.
+                    if self.exit_jump_pending.get() {
+                        break;
+                    }
                 }
             }
             last
@@ -91,25 +101,74 @@ impl crate::executor::Executor {
     /// eval.c:318-330 execute_variable_command: parse_and_execute the text
     /// in the CURRENT shell environment, never recording it as a readline
     /// line (eval.c:305 execute_prompt_command -> execute_variable_command
-    /// -> parse_and_execute(..., SEVAL_NONINT); nothing in that path calls
-    /// bash_add_history). The session history list stays live across the
-    /// prompt — bash-it themes drive `history -a/-c/-r` from
-    /// PROMPT_COMMAND against the user's own list, and the grouped
-    /// driver's fresh-SessionHistory swap + self-record used to append the
-    /// whole runner into $HISTFILE at every prompt and drop the commands
-    /// typed since the last prompt (wt90/themehang). PROMPT_COMMAND_NOHIST
-    /// gates both the history EXPANSION and the RECORD inside that driver.
+    /// -> parse_and_execute(..., SEVAL_NONINT|SEVAL_NOHIST); nothing in
+    /// that path calls bash_add_history). SEVAL_NONINT zeroes the
+    /// `interactive` global for the duration (evalstring.c:284-285, restored
+    /// at :612 from interactive_shell): the exit.def:59-62 interactive
+    /// "exit" echo is suppressed while the text runs (verified WSL GNU 5.3.0
+    /// piped-`-i`: PROMPT_COMMAND='exit' dies rc=0 with NO "exit" echo), and
+    /// the `__RUBASH_INTERACTIVE_FLAG_OFF` env is this engine's stand-in for
+    /// that zeroed global. A top-level unwind inside the text — a real
+    /// `exit`, or the errexit break — is RE-ARMED as the exit jump the
+    /// caller must honor: evalstring.c:396-403 catches EXITPROG/ERREXIT at
+    /// parse_and_execute's own setjmp and :618-619 re-raises
+    /// jump_to_top_level, so the jump continues through
+    /// execute_variable_command into the reader's top level and ends the
+    /// shell (rubash#433; verified: PC='exit' dies rc=0, PC='exit 5' dies
+    /// rc=5, PC='set -e; false' dies rc=1 — while a parse error
+    /// (PC='echo )') and a plain failing status (PC='false') leave the shell
+    /// alive). The session history list stays live across the prompt —
+    /// bash-it themes drive `history -a/-c/-r` from PROMPT_COMMAND against
+    /// the user's own list, and the grouped driver's fresh-SessionHistory
+    /// swap + self-record used to append the whole runner into $HISTFILE at
+    /// every prompt and drop the commands typed since the last prompt
+    /// (wt90/themehang). PROMPT_COMMAND_NOHIST gates both the history
+    /// EXPANSION and the RECORD inside that driver.
     fn run_prompt_command_text(
         &mut self,
         text: &str,
         session: Option<std::rc::Rc<std::cell::RefCell<crate::history::SessionHistory>>>,
     ) -> i32 {
-        match session {
+        // evalstring.c:284-285 / :612 — SEVAL_NONINT's zeroed `interactive`
+        // global, keyed the way main.rs's `bash -i script` path keys it.
+        self.set_env("__RUBASH_INTERACTIVE_FLAG_OFF", "1");
+        // parse.y:3013/3021 execute_variable_command brackets the PC's
+        // parse_and_execute with save_parser_state/restore_parser_state;
+        // the snapshot carries last_command_exit_value (parse.y:7221) and
+        // PIPESTATUS (:7223) and is written back at :7313/:7315 — a PC that
+        // returns normally leaves $? and PIPESTATUS untouched (verified WSL
+        // GNU 5.3.0 piped-`-i`: after PROMPT_COMMAND=false the next typed
+        // command sees $? = the pre-PC value, 0). The restore line sits
+        // AFTER parse_and_execute, so the re-raised exit jump longjmps past
+        // it — an `exit'/errexit unwind keeps the jump's status (verified:
+        // PC='exit 5' -> rc 5, PC='set -e; false' -> rc 1).
+        let saved_exit_code = self.exit_code;
+        let saved_pipestatus = self.shell_state.pipestatus.clone();
+        let (status, exit_shell) = match session {
             Some(session) => {
-                crate::script_driver::run_script_with_history_in(self, text, session, None)
+                crate::script_driver::run_script_with_history_in_tracked(self, text, session, None)
             }
-            None => crate::script_driver::run_script_with_history(self, text, None),
+            None => {
+                let fresh = std::rc::Rc::new(std::cell::RefCell::new(
+                    crate::history::SessionHistory::new(),
+                ));
+                crate::script_driver::run_script_with_history_in_tracked(self, text, fresh, None)
+            }
+        };
+        self.remove_env("__RUBASH_INTERACTIVE_FLAG_OFF");
+        if exit_shell {
+            // evalstring.c:618-619: the re-raise. The reader's pre-prompt
+            // hook takes the jump and unwinds its read loop; the exit status
+            // is already in the executor (exit N set it before raising).
+            // parse.y:3021's restore is skipped, like the longjmp past it.
+            self.exit_jump_pending.set(true);
+        } else {
+            // parse.y:7313/:7315 restore_parser_state: $? and PIPESTATUS
+            // roll back to the pre-PC values on every normal return.
+            self.exit_code = saved_exit_code;
+            self.set_pipestatus(saved_pipestatus);
         }
+        status
     }
 }
 
@@ -207,6 +266,74 @@ mod tests {
         assert_eq!(executor.execute_prompt_command(), None);
         executor.set_env("PROMPT_COMMAND", "   ");
         assert_eq!(executor.execute_prompt_command(), None);
+    }
+
+    // rubash#433: evalstring.c:396-403 catches an EXITPROG/ERREXIT jump at
+    // parse_and_execute's own setjmp and :618-619 RE-RAISES jump_to_top_level
+    // — the jump continues out of execute_variable_command (parse.y:3007)
+    // into the reader's top level, ending the shell. eval.c:291-301
+    // execute_array_command's loop is unwound by the same longjmp, so
+    // elements after an `exit` element never run (verified WSL GNU 5.3.0
+    // piped-`-i`: PC=([0]='echo A' [1]='exit' [2]='echo C') prints only A,
+    // rc 0). parse.y:3013/3021 execute_variable_command brackets the run
+    // with save_parser_state/restore_parser_state — last_command_exit_value
+    // and PIPESTATUS snapshot at parse.y:7221/:7223, restored at
+    // :7313/:7315 on every NORMAL return (verified: after PC='false' the
+    // next typed command sees the pre-PC $?), and the restore is skipped
+    // when the jump unwinds (verified: PC='exit 5' -> rc 5).
+
+    #[test]
+    fn prompt_command_exit_rearms_jump_and_sets_status() {
+        let mut executor = Executor::new();
+        executor.set_env("PROMPT_COMMAND", "exit 3");
+        assert_eq!(executor.execute_prompt_command(), Some(3));
+        assert_eq!(executor.exit_jump_pending.get(), true);
+        assert_eq!(executor.last_exit_code(), 3);
+        // The nohist marker must not leak past an exiting run either.
+        assert_eq!(executor.get_env(Executor::PROMPT_COMMAND_NOHIST), None);
+    }
+
+    #[test]
+    fn prompt_command_exit_element_stops_remaining_elements() {
+        let mut executor = Executor::new();
+        seed(
+            &mut executor,
+            "PROMPT_COMMAND=([0]='__pc_a=1' [1]='exit 7' [2]='__pc_c=1')",
+        );
+        assert_eq!(executor.execute_prompt_command(), Some(7));
+        assert_eq!(executor.get_env("__pc_a"), Some("1"));
+        // The longjmp unwound execute_array_command: the later element never
+        // ran and the jump is armed for the reader.
+        assert_eq!(executor.get_env("__pc_c"), None);
+        assert_eq!(executor.exit_jump_pending.get(), true);
+        assert_eq!(executor.last_exit_code(), 7);
+    }
+
+    #[test]
+    fn prompt_command_failing_status_rolls_back_exit_code_and_pipestatus() {
+        let mut executor = Executor::new();
+        seed(&mut executor, "true");
+        assert_eq!(executor.last_exit_code(), 0);
+        executor.set_env("PROMPT_COMMAND", "false");
+        // The run's own last status is still reported (rubash#430 contract).
+        assert_eq!(executor.execute_prompt_command(), Some(1));
+        // parse.y:7313/:7315 restore: $? and PIPESTATUS keep the pre-PC
+        // values, and NO exit jump is armed — the shell must prompt again.
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(executor.shell_state.pipestatus, vec![0]);
+        assert_eq!(executor.exit_jump_pending.get(), false);
+    }
+
+    #[test]
+    fn prompt_command_errexit_break_propagates_jump() {
+        // evalstring.c:387-393: ERREXIT joins EXITPROG in the re-raise.
+        // Verified WSL GNU 5.3.0 piped-`-i`: PROMPT_COMMAND='set -e; false'
+        // ends the shell rc 1 before the next line is read.
+        let mut executor = Executor::new();
+        seed(&mut executor, "PROMPT_COMMAND='set -e; false'");
+        assert_eq!(executor.execute_prompt_command(), Some(1));
+        assert_eq!(executor.exit_jump_pending.get(), true);
+        assert_eq!(executor.last_exit_code(), 1);
     }
 
     // wt90/themehang: eval.c:305 -> execute_variable_command ->

@@ -131,6 +131,32 @@ pub fn run_script_with_history_in(
     session: Rc<RefCell<SessionHistory>>,
     redirect_cmd: Option<&CommandNode>,
 ) -> i32 {
+    let (status, _exit_shell) =
+        run_script_with_history_in_tracked(executor, contents, session, redirect_cmd);
+    status
+}
+
+/// Same grouped driver, reporting whether the run ended in a TOP-LEVEL
+/// UNWIND a caller driving a live shell must honor: a real `exit` (the
+/// ExitCode/FatalFunctionError jump, excluding the parse-abort jump the
+/// interactive readers discard) or the errexit break. GNU's
+/// parse_and_execute catches EXITPROG/ERREXIT at its own setjmp
+/// (evalstring.c:396-403, :387-393) and RE-RAISES them after its `out:`
+/// cleanup (evalstring.c:618-619 jump_to_top_level), so the jump continues
+/// through execute_variable_command (y.tab.c:5365) into the reader's top
+/// level — the PROMPT_COMMAND runner re-arms it for exactly that
+/// (rubash#433). A parse error alone is a DISCARD: evalstring.c:585-601
+/// records the failure and breaks WITHOUT a jump (verified WSL GNU 5.3.0
+/// piped-`-i`: PROMPT_COMMAND='echo )' prints the diagnostic and the shell
+/// keeps reading), while the errexit break — including on a failed parse
+/// status, verified PROMPT_COMMAND with `set -e` preset dies rc=1 — is an
+/// ERREXIT unwind and must propagate.
+pub(crate) fn run_script_with_history_in_tracked(
+    executor: &mut Executor,
+    contents: &str,
+    session: Rc<RefCell<SessionHistory>>,
+    redirect_cmd: Option<&CommandNode>,
+) -> (i32, bool) {
     executor.set_session_history(Some(session.clone()));
     let raw_lines: Vec<&str> = contents.split_inclusive('\n').collect();
     let mut index = 0usize;
@@ -164,18 +190,23 @@ pub fn run_script_with_history_in(
         // A group that ended by unwinding (exit builtin, errexit, POSIX
         // special-builtin failure) stops the reader unconditionally — GNU's
         // jump_to_top_level cannot be resumed at the next command.
-        if parse_error
-            || executor.take_exit_jump_pending()
-            || (status != 0
-                && stdin_script_errexit_enabled(executor)
-                // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN
-                // under errexit — the inverted command's status is exempt.
-                && !executor.last_command_inverted())
-        {
-            break;
+        let exit_jump = executor.take_exit_jump_pending();
+        // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN under
+        // errexit — the inverted command's status is exempt.
+        let errexit_stop = status != 0
+            && stdin_script_errexit_enabled(executor)
+            && !executor.last_command_inverted();
+        if parse_error || exit_jump || errexit_stop {
+            // The parse-abort classification (a reader discard, not an
+            // exit-shell jump) must not read as `exit`; the errexit break
+            // propagates even then (GNU ERREXIT, see above).
+            return (
+                executor.last_exit_code(),
+                (exit_jump && !parse_error) || errexit_stop,
+            );
         }
     }
-    executor.last_exit_code()
+    (executor.last_exit_code(), false)
 }
 
 /// builtins/evalfile.c source_file -> evalstring.c parse_and_execute: a
@@ -2943,6 +2974,21 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
         // marks the start of a new command, i.e. a primary prompt.
         if pending.is_empty() {
             executor.execute_prompt_command();
+            // rubash#433 / evalstring.c:396-403 + :618-619: a top-level
+            // unwind inside PROMPT_COMMAND — `exit`, or the errexit break —
+            // is re-raised out of parse_and_execute into the reader's top
+            // level; reader_loop unwinds and the shell ends with the jump's
+            // status (verified WSL GNU 5.3.0 piped-`-i`: PC='exit' -> rc 0
+            // with no further prompt, PC='exit 5' -> rc 5, and the rest of
+            // the input is never read). A parse error or a plain failing
+            // status does NOT re-raise: the shell prompts again.
+            if executor.take_exit_jump_pending() {
+                // No prompt is rendered and no further line is read — GNU's
+                // jump_to_top_level unwinds reader_loop directly (verified:
+                // GNU's stderr carries exactly ONE prompt before dying).
+                eof = true;
+                continue;
+            }
         }
         // readline.c readline(): print the EXPANDED prompt on stderr, then
         // echo the input line (non-tty input is echoed by readline's
