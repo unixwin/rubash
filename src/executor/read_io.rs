@@ -692,6 +692,25 @@ impl Executor {
         {
             return None;
         }
+        // A captured pipeline-stage stdin IS the command's fd 0, empty or
+        // not: execute_cmd.c execute_pipeline dup2s the pipe over fd 0 for
+        // every element after the first (execute_cmd.c:2702+), so an empty
+        // buffer is the drained pipe — EOF for this command — never an
+        // invitation to read the shell's own stdin. The fallback below
+        // guards the child-shell case (`printf x | rubash -c 'cat'`, where
+        // fd 0 is genuinely the inherited process stdin); inside an
+        // in-process pipeline stage (execute_pipeline_stage arms
+        // FUNCTION_STDIN for every stage) it would consume input GNU leaves
+        // for the shell's own reader — under an interactive driver it
+        // drained the session's pending input lines, and on a live console
+        // it blocked forever (rubash#436). external_finish's
+        // function-stdin arm already removes INHERIT_PROCESS_STDIN for the
+        // function-call shape (external_finish.rs function_call_stdin);
+        // the pipeline-stage arm keeps the flag armed, so the armed-buffer
+        // check here is the boundary.
+        if self.shell_state.env_vars.contains_key(FUNCTION_STDIN) {
+            return None;
+        }
 
         let mut stdin = io::stdin().lock();
         let mut output = String::new();
