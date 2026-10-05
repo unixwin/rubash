@@ -2837,6 +2837,136 @@ pub(crate) fn arraysub_span_len(chars: &[char]) -> Option<usize> {
 /// router: given the 1-based `open_line` of an unclosed command `(`, does
 /// that line start a `((` whose P_ARITH group NEVER closes before end of
 /// input?
+/// rubash#435: does `input` (the text read so far) end inside an OPEN
+/// command-position `((` arithmetic group? GNU parse.y:3726-3733 read_token
+/// hands a reserved-word-acceptable `((` to parse_dparen (parse.y:4895),
+/// whose parse_matched_pair (P_ARITH) scan (parse.y:4963-4978) reads across
+/// physical newlines — read_secondary_line keeps pulling lines until the
+/// group closes. The batch tokenizer's logical-line completeness decision
+/// therefore needs the same question the EOF diagnostic asks
+/// (`dparen_arith_group_never_closes`, rubash#390 q1), asked about the
+/// whole accumulated text instead of one line: a `((` whose group has not
+/// closed as arithmetic yet means the construct is incomplete and the next
+/// physical line belongs to it.
+///
+/// The scan mirrors parse_dparen's character rules: quote spans and
+/// `$(` / `${` / `$[` units are opaque (parse.y:4138-4186
+/// parse_dollar_word consumes them; their parens never count), a `#` in
+/// command position comments to end of line (parse.y:3922), and a `((`
+/// that closes WITHOUT the trailing `)` is the nested-subshell
+/// reinterpretation (parse.y:4938-4948) — the reader then continues
+/// normally, so only a group that never closes keeps the line open.
+pub(crate) fn dparen_arith_group_open_at_end(input: &str) -> bool {
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+    let mut index = 0usize;
+    // GNU reserved_word_acceptable (parse.y:5899): start of input and the
+    // positions after `;` `&` `|` `(` and newlines accept the `((` dispatch;
+    // blanks keep the current answer.
+    let mut command_position = true;
+    while index < len {
+        match chars[index] {
+            '\\' => {
+                index += 2;
+                command_position = false;
+                continue;
+            }
+            '\'' => {
+                index += 1;
+                while index < len && chars[index] != '\'' {
+                    index += 1;
+                }
+                command_position = false;
+            }
+            '"' => {
+                index += 1;
+                while index < len {
+                    if chars[index] == '\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if chars[index] == '"' {
+                        break;
+                    }
+                    index += 1;
+                }
+                command_position = false;
+            }
+            '`' => {
+                index += 1;
+                while index < len {
+                    if chars[index] == '\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if chars[index] == '`' {
+                        break;
+                    }
+                    index += 1;
+                }
+                command_position = false;
+            }
+            '$' if matches!(chars.get(index + 1), Some('(' | '{' | '[')) => {
+                let (open, close) = match chars[index + 1] {
+                    '(' => ('(', ')'),
+                    '{' => ('{', '}'),
+                    _ => ('[', ']'),
+                };
+                // parse_dollar_word consumes the unit; its interior never
+                // shifts command position. An unterminated unit (a `$((`
+                // whose parens are still open — `(( c=$((a+1),` mid-body) is
+                // itself an incomplete construct: keep reading until the
+                // dedicated substitution gates can settle it.
+                match dollar_word_group_len(&chars, index + 1, open, close) {
+                    Some(end) => {
+                        index = end;
+                        command_position = false;
+                        continue;
+                    }
+                    None => return true,
+                }
+            }
+            '#' if command_position => {
+                // parse.y:3922: word-initial `#` runs to end of line; the
+                // newline after it restores command position.
+                while index < len && chars[index] != '\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            '(' => {
+                if command_position && chars.get(index + 1) == Some(&'(') {
+                    return match paren_group_close(&chars, index + 2) {
+                        // Group never closes in the text read so far: the
+                        // construct is incomplete — keep reading.
+                        None => true,
+                        Some(close) => {
+                            // parse.y:4976: a `)` right after the matched
+                            // group makes this a closed arithmetic command;
+                            // the reader resumes past `))`. Anything else is
+                            // the subshell reinterpretation and continues
+                            // after the group's own closer.
+                            if chars.get(close + 1) == Some(&')') {
+                                index = close + 2;
+                            } else {
+                                index = close + 1;
+                            }
+                            command_position = false;
+                            continue;
+                        }
+                    };
+                }
+                command_position = false;
+            }
+            '\n' | ';' | '&' | '|' => command_position = true,
+            c if c.is_whitespace() => {}
+            _ => command_position = false,
+        }
+        index += 1;
+    }
+    false
+}
+
 pub(crate) fn dparen_arith_group_never_closes(input: &str, open_line: usize) -> bool {
     let chars: Vec<char> = input.chars().collect();
     let Some(start) = dparen_open_index(&chars, open_line) else {

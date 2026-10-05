@@ -1112,3 +1112,42 @@ fn extglob_pattern_words_stay_single_words() {
     }
     crate::lexer::set_parse_extended_glob(false);
 }
+#[test]
+fn dparen_arith_group_open_at_end_matches_gnu_reader() {
+    // rubash#435: the feeder join gate's walker. GNU parse.y:4904
+    // parse_dparen reads the arithmetic command body across newlines
+    // (parse.y:4963 parse_arith_cmd), so an unclosed command-position `((`
+    // means the construct is incomplete; a closed one (including the
+    // nested-subshell reinterpretation, parse.y:4938-4948) does not.
+    let joined = |s: &str| s.contains("((") && crate::lexer::dparen_arith_group_open_at_end(s);
+    // Multi-line comma chain (ble.sh color.sh:538 shape): open after line 1.
+    assert!(joined("((h1=H%120,h2=120-h1,"));
+    // Closed on the next line: the whole construct is complete.
+    assert!(!joined(
+        "((h1=H%120,h2=120-h1,
+  x+=1))"
+    ));
+    // Nested ternary groups (init-term.sh:313 shape): open mid-chain.
+    assert!(joined(
+        "((j1=(i1==3?6:
+      (i1==6?3:"
+    ));
+    // `&&`-continued chain inside the group stays open (keymap.vi shape).
+    assert!(joined(
+        "((index=(bol+${COLUMNS:-eol})/2,
+  index>eol&&(index=eol),"
+    ));
+    // Nested-subshell reinterpretation closes: `((echo hi); cat` is a
+    // subshell command, not an open arithmetic group (parse.y:4938-4948).
+    assert!(!joined("((echo hi); cat"));
+    // A `$((` unit still open inside the body keeps the line open
+    // (core-syntax/comsub shape `(( c=$((a+1),`).
+    assert!(joined("(( c=$((a+1),"));
+    // Comments are data inside P_ARITH (rubash#222): the group stays open.
+    assert!(joined(
+        "(( 1+2
+# comment"
+    ));
+    // Single-line arithmetic commands close and never join.
+    assert!(!joined("(( 1+2 ))"));
+}

@@ -1331,7 +1331,19 @@ impl GroupScanFeeder {
         };
         let funcheck =
             opens_function_body_after_previous_signature(&self.logical_line, &self.output);
-        if (brace_group_open || param_expansion_open) && !funcheck && !has_heredoc {
+        // rubash#435: GNU parse.y:4904 parse_dparen -> parse.y:4963
+        // parse_arith_cmd reads the arithmetic command body through
+        // parse_matched_pair (P_ARITH) across physical newlines —
+        // read_secondary_line keeps pulling lines while a command-position
+        // `((` group is still open. Join the same way: the accumulated
+        // logical line ending inside an open `((` group is an incomplete
+        // construct, not a command. The walker re-verifies from the text
+        // (the `((` byte pair is only the admission prefilter); a dparen
+        // join arms no brace fast path because the mid-arith scan has no
+        // token checkpoint to resume.
+        let dparen_open =
+            self.logical_line.contains("((") && dparen_arith_group_open_at_end(&self.logical_line);
+        if (brace_group_open || param_expansion_open || dparen_open) && !funcheck && !has_heredoc {
             // Reaching here proves quotes, command substitutions and
             // compound assignments are all closed: the join stands on the
             // token-level brace-group flag (and/or an open `${...}`, which
@@ -1350,7 +1362,9 @@ impl GroupScanFeeder {
                 }
             } else if param_expansion_open {
             }
-            self.brace_join_active = true;
+            if brace_group_open || param_expansion_open {
+                self.brace_join_active = true;
+            }
             return;
         }
 
@@ -1735,6 +1749,13 @@ pub fn unclosed_array_subscript_eof(input: &str) -> Option<(usize, char, usize, 
 /// diagnostic router (see skip.rs).
 pub fn dparen_arith_group_never_closes(input: &str, open_line: usize) -> bool {
     skip::dparen_arith_group_never_closes(input, open_line)
+}
+
+/// rubash#435 feeder gate: does the accumulated logical line end inside an
+/// open command-position `((` arithmetic group? See
+/// `skip::dparen_arith_group_open_at_end` for the GNU anchors.
+pub(crate) fn dparen_arith_group_open_at_end(input: &str) -> bool {
+    skip::dparen_arith_group_open_at_end(input)
 }
 
 /// rubash#390 q1 class B: the `((` nested-subshell reinterpretation whose
