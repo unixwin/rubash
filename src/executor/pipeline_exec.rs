@@ -2237,6 +2237,28 @@ impl Executor {
             self.xtrace_write(&trace);
         }
 
+        // GNU forks every pipeline element and applies the ELEMENT'S OWN
+        // redirections in the forked child (execute_cmd.c:4617
+        // execute_simple_command -> redir.c do_redirection_internal), so a
+        // stage carrying an fd-0 FILE redirect (`< /dev/null`, `<> f`, `<&N`)
+        // runs with its fd 0 ON THE REDIRECT TARGET — the inline builtin
+        // arms below read the upstream payload instead and would drop the
+        // redirect (`echo hi | cat < /dev/null` prints nothing under GNU).
+        // Only a file/ReadWrite winner routes: a heredoc/here-string winner
+        // IS the payload the inline arms read (initial_pipeline_input), and
+        // the external spawner resolves the same winner through
+        // apply_external_stdin_redirect (rubash#429 class).
+        let stage_fd0_file_redirect =
+            match crate::executor::shell_options::fd0_stdin_redirect_winner(command) {
+                Some(crate::parser::RedirectKind::Input)
+                | Some(crate::parser::RedirectKind::ReadWrite) => true,
+                Some(_) => false,
+                None => command.redirect_in.is_some(),
+            };
+        if stage_fd0_file_redirect {
+            return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+        }
+
         match name {
             "true" | ":" => Ok(Some((String::new(), String::new(), 0))),
             "false" => Ok(Some((String::new(), String::new(), 1))),

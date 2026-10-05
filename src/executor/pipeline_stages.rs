@@ -660,7 +660,28 @@ impl Executor {
                 process.env(base_name, expanded_value);
             }
         }
-        if stdin_inherit {
+        // GNU execute_cmd.c:4617 execute_simple_command: the forked pipeline
+        // element applies ITS OWN redirections after the pipeline binds its
+        // fds (redir.c do_redirection_internal), so a stage's `< file` /
+        // `<> file` fd-0 redirect REPLACES the inherited shell stdin (an
+        // unbound stage 0) or the upstream pipe payload. This spawner only
+        // modeled inherit-or-payload: a stage-0 `< /dev/null` left the child
+        // reading the live console/pipe forever (rubash#429 — the bash-it
+        // iterate theme's per-prompt `$BASH --norc -i < /dev/null | sed`
+        // wedged the whole ConPTY session), and `echo hi | cat < /dev/null`
+        // fed the upstream payload where GNU feeds the empty file.
+        let fd0_file_redirect =
+            match crate::executor::shell_options::fd0_stdin_redirect_winner(command) {
+                Some(crate::parser::RedirectKind::Input)
+                | Some(crate::parser::RedirectKind::ReadWrite) => true,
+                // A heredoc/here-string winner is the payload already fed
+                // through the piped arm below (initial_pipeline_input).
+                Some(_) => false,
+                None => command.redirect_in.is_some(),
+            };
+        if fd0_file_redirect {
+            self.apply_external_stdin_redirect(command, &mut process)?;
+        } else if stdin_inherit {
             process.stdin(Stdio::inherit());
         } else {
             process.stdin(Stdio::piped());
