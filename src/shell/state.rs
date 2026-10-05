@@ -115,6 +115,13 @@ pub struct ShellState {
     pub(crate) coproc_names: HashMap<u32, String>,
     /// pcomplete.c completion spec registry.
     pub(crate) completion_specs: CompletionRegistry,
+    /// readline binding registry (`bind` builtin's data plane):
+    /// function/macro bindings and the `bind -x` command map
+    /// (bashline.c:4771 init_unix_command_map). Unlike session_history,
+    /// the Rc is SHARED across clones: readline keymaps are process-global
+    /// C globals in GNU, so a `bind` inside a subshell must reach the
+    /// parent's world (there is no fork to isolate it).
+    pub(crate) bind_registry: crate::shell::bind_registry::SharedBindRegistry,
     /// bashhist.c per-session history list. Cloned deeply (not the Rc) so a
     /// subshell's `history` mutations cannot reach the parent — GNU gets
     /// the same isolation from the fork copy.
@@ -331,6 +338,8 @@ impl Clone for ShellState {
             last_background_pid: self.last_background_pid,
             coproc_names: self.coproc_names.clone(),
             completion_specs: self.completion_specs.clone(),
+            // Process-global (see field docs): the shared handle, not a copy.
+            bind_registry: self.bind_registry.clone(),
             session_history: self
                 .session_history
                 .as_ref()

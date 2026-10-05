@@ -27,6 +27,7 @@ mod arithmetic_aliases;
 mod array_assignment_exec;
 mod assignment_dispatch;
 mod assignment_expansion;
+mod bind_builtins;
 mod builtin_direct_command;
 mod builtin_redirects;
 mod command_dispatch;

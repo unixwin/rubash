@@ -273,6 +273,9 @@ impl Executor {
                 last_background_pid: None,
                 coproc_names: HashMap::new(),
                 completion_specs: crate::builtins::complete::CompletionRegistry::new(),
+                bind_registry: std::rc::Rc::new(std::cell::RefCell::new(
+                    crate::shell::bind_registry::BindRegistry::default(),
+                )),
                 session_history: None,
                 interactive_hist_engine: crate::history_expand::HistEngineState::default(),
                 arithmetic_expansion_error: Cell::new(false),

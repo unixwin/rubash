@@ -1808,24 +1808,6 @@ impl Executor {
         Ok(status)
     }
 
-    pub(in crate::executor) fn execute_bind(
-        &mut self,
-        cmd: &CommandNode,
-    ) -> Result<i32, ExecuteError> {
-        let mut stderr = Vec::new();
-        let line_editing_enabled = self
-            .get_env("__RUBASH_INTERACTIVE")
-            .is_some_and(|value| value == "1");
-        let status = crate::builtins::bind::execute_with_io(
-            &cmd.words[1..],
-            &self.diagnostic_prefix(),
-            line_editing_enabled,
-            &mut stderr,
-        )?;
-        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-        Ok(status)
-    }
-
     pub(in crate::executor) fn execute_fc(
         &mut self,
         cmd: &CommandNode,
