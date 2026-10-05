@@ -35,6 +35,12 @@ fi
 # Keep entries tight enough that a *different* `as char` in the same file
 # still trips the check.
 ALLOWLIST=$(cat <<'EOF'
+# bind.rs: `d` is a delimiter byte parsed from the spec (always ASCII quote);
+# the error message only echoes it.
+src/builtins/bind.rs::no closing.*d as char
+# bind.rs: `upper & 0x1f` is <= 0x1F by construction — a C0 control char,
+# never a UTF-8 continuation byte (bind -x \C-x keyspec lowering).
+src/builtins/bind.rs::\(upper as u8 & 0x1f\) as char
 src/builtins/cd/paths.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
 src/builtins/printf/float.rs::digits\[value as usize\] as char
 src/builtins/pwd.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
