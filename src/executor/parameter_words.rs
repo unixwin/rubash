@@ -1096,6 +1096,22 @@ impl Executor {
             if let Some(key) = assign_site {
                 crate::executor::expand_braced_indices::assign_applied_store(key, value.clone());
             }
+            // GNU subst.c:8096 parameter_brace_expand_rhs: for op '=' (and
+            // ':=', which only adds check_nullness) the value BOUND to the
+            // parameter is `t1 = dequote_string (temp)` (subst.c:8151
+            // bind_variable, subst.c:8145 assign_array_element) — fully
+            // dequoted. The CTLESC protection expand_string_for_rhs gave the
+            // quoted whitespace (posixexp2 37) belongs to the CURRENT word's
+            // field splitting only; the expansion result is re-derived from
+            // the quote context (subst.c:8196 quote_string(t1)). The IFS_GLUE
+            // pairs unescape_parameter_operator_result added for the
+            // double-quoted context are that CTLESC port, so they must be
+            // decoded out of the stored value — otherwise the variable's
+            // whitespace stays un-splittable forever (rubash#428: after
+            // `: "${W:=u s p}"`, `set -- $W` yielded one word where GNU
+            // yields three).
+            let bound =
+                crate::executor::command_substitution_values::decode_protected_ifs_chars(&value);
             // GNU parameter_brace_assign resolves the subscript AGAIN for
             // the assignment target (array_expand_index on the
             // assign_array_element path), distinct from the set-test's
@@ -1104,16 +1120,16 @@ impl Executor {
             // out of the set-test's cross-pass memo.
             let _assign_site =
                 crate::executor::expand_braced_indices::SubSiteGuard::new(usize::MAX);
-            if self.apply_array_element_parameter_assignment(name, value.clone()) {
+            if self.apply_array_element_parameter_assignment(name, bound.clone()) {
                 return;
             }
-            if self.apply_indirect_parameter_assignment(name, value.clone()) {
+            if self.apply_indirect_parameter_assignment(name, bound.clone()) {
                 return;
             }
             if !is_shell_name(name) {
                 return;
             }
-            if !self.apply_shell_assignment(name, value) {
+            if !self.apply_shell_assignment(name, bound) {
                 self.parameter_assignment_failure.set(true);
             }
             return;
@@ -1126,19 +1142,25 @@ impl Executor {
                 return;
             }
             let value = self.expand_assignment_alternate_mut(value, double_quoted);
+            // Same bind-side dequote as the `:=` arm above (GNU subst.c:8096
+            // dequote_string -> subst.c:8151 bind_variable): the double-quoted
+            // context's IFS_GLUE whitespace protection is word-local and must
+            // not be baked into the stored value (rubash#428).
+            let bound =
+                crate::executor::command_substitution_values::decode_protected_ifs_chars(&value);
             // Same assign-target re-evaluation as `:=` above.
             let _assign_site =
                 crate::executor::expand_braced_indices::SubSiteGuard::new(usize::MAX);
-            if self.apply_array_element_parameter_assignment(name, value.clone()) {
+            if self.apply_array_element_parameter_assignment(name, bound.clone()) {
                 return;
             }
-            if self.apply_indirect_parameter_assignment(name, value.clone()) {
+            if self.apply_indirect_parameter_assignment(name, bound.clone()) {
                 return;
             }
             if !is_shell_name(name) {
                 return;
             }
-            if !self.apply_shell_assignment(name, value) {
+            if !self.apply_shell_assignment(name, bound) {
                 self.parameter_assignment_failure.set(true);
             }
         }

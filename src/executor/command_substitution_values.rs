@@ -1729,7 +1729,7 @@ pub(in crate::executor) fn protect_ifs_field_chars(text: &str, ifs: Option<&str>
 
 /// Decode `\x1c` protection pairs back to their literal characters for the
 /// no-splitting case (IFS explicitly empty).
-fn decode_protected_ifs_chars(text: &str) -> String {
+pub(in crate::executor) fn decode_protected_ifs_chars(text: &str) -> String {
     if !text.contains(crate::executor::markers::IFS_GLUE) {
         return text.to_string();
     }
