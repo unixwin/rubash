@@ -757,8 +757,9 @@ fn windows_program_is_posix_runtime_hosted(command: &Command) -> bool {
 
 /// Quote one argument for a Windows command line so the child's argv sees
 /// the text literally (no CRT wildcard expansion). Follows the
-/// CommandLineToArgvW rules: wrap in double quotes, escape embedded `"` as
-/// `\"`, and double a backslash run that directly precedes the closing quote.
+/// CommandLineToArgvW rules: wrap in double quotes, emit `2n + 1` backslashes
+/// before an embedded `"`, and double trailing backslashes before the closing
+/// quote. Backslash runs not followed by a quote stay literal.
 #[cfg(windows)]
 fn windows_quoted_wildcard_arg(arg: &str) -> String {
     let mut quoted = String::with_capacity(arg.len() + 2);
@@ -769,15 +770,16 @@ fn windows_quoted_wildcard_arg(arg: &str) -> String {
             backslashes += 1;
             continue;
         }
-        for _ in 0..backslashes {
+        let backslashes_to_emit = if ch == '"' {
+            backslashes * 2 + 1
+        } else {
+            backslashes
+        };
+        for _ in 0..backslashes_to_emit {
             quoted.push('\\');
         }
         backslashes = 0;
-        if ch == '"' {
-            quoted.push_str("\\\"");
-        } else {
-            quoted.push(ch);
-        }
+        quoted.push(ch);
     }
     for _ in 0..backslashes {
         quoted.push_str("\\\\");
@@ -2473,6 +2475,70 @@ mod tests {
     use std::collections::HashSet;
     #[cfg(windows)]
     use std::fs;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_argv_probe() {
+        if std::env::var_os("RUBASH_WINDOWS_ARGV_PROBE").is_none() {
+            return;
+        }
+        println!();
+        for arg in std::env::args().skip(1) {
+            let hex: String = arg.bytes().map(|byte| format!("{byte:02x}")).collect();
+            println!("ARGV_HEX:{hex}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_forced_quoted_args_round_trip_through_native_child() {
+        // Run this test executable as a native argv observer. Libtest accepts
+        // arbitrary nonempty --skip values, so no external tools or fixtures
+        // are needed. The child's actual argv parser is the round-trip oracle.
+        let mut args = vec![
+            "--exact".to_string(),
+            "executor::path::tests::windows_native_argv_probe".to_string(),
+            "--nocapture".to_string(),
+        ];
+        let mut cases = vec![
+            r#"console.log(["a b", "", "c\"d", "e\\f", "---"])"#.to_string(),
+            r#"plain*"#.to_string(),
+            "trailing?\\".to_string(),
+            "trailing[\\\\".to_string(),
+        ];
+        for wildcard in ['*', '?', '['] {
+            for count in 0..=4 {
+                cases.push(format!(
+                    "before{wildcard}{}\"after with spaces",
+                    "\\".repeat(count)
+                ));
+            }
+        }
+        cases.push("Unicode[中文]\\\" with spaces\\".to_string());
+        for case in cases {
+            args.push("--skip".to_string());
+            args.push(case);
+        }
+        // A final argument detects a broken closing quote spilling into argv.
+        args.extend(["--skip".to_string(), "__argv_tail__".to_string()]);
+
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command.env("RUBASH_WINDOWS_ARGV_PROBE", "1");
+        push_external_args(&mut command, &args);
+        let output = command.output().expect("run native argv observer");
+        assert!(output.status.success(), "{:?}", output);
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 observer output");
+        let observed: Vec<_> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("ARGV_HEX:"))
+            .collect();
+        let expected: Vec<String> = args
+            .iter()
+            .map(|arg| arg.bytes().map(|byte| format!("{byte:02x}")).collect())
+            .collect();
+        assert_eq!(observed, expected);
+        assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    }
 
     #[cfg(windows)]
     #[test]
