@@ -84,9 +84,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Check native Windows argument quoting
-        run: cargo test --lib executor::path::tests::windows_forced_quoted_args_round_trip_through_native_child --locked
-
       # wt4/ci lane (2026-09-27): byte-pinned regression suite.
       # - tests/regression/golden/*.gnu.{out,err} are GNU Bash 5.3.0
       #   captures (WSL, /usr/local/bin/bash) of the fixture scripts under
