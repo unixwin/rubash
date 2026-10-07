@@ -1404,11 +1404,8 @@ fn windows_external_absolute_argument_needs_translation(
 
     // /mnt/X drive paths need translation for all drive letters.
     // Must be exactly /mnt/X or /mnt/X/... to avoid false matches like /mnt/cfoo.
-    if normalized.starts_with("/mnt/") && normalized.len() >= 6 {
-        let bytes = normalized.as_bytes();
-        if bytes[5].is_ascii_alphabetic() && (normalized.len() == 6 || bytes[6] == b'/') {
-            return true;
-        }
+    if windows_mnt_drive_argument(normalized) {
+        return true;
     }
 
     false
@@ -1483,6 +1480,29 @@ fn windows_virtual_system_root_argument(
     false
 }
 
+/// WSL drive form `/mnt/X` (and `/mnt/X/...`), for the argv funnel.
+///
+/// This is the shape `shell_path_to_windows` already maps to `X:\` (see its
+/// `/mnt/` branch), so the engine-side translation exists and is tested —
+/// what was missing was routing the *external argument* path through it.
+/// WinuxCmd cannot resolve the form itself: `normalize_api_operand_w` folds
+/// `/cygdrive/d/...` into `/d/...` and then maps a bare `/X/...` drive
+/// letter, but its drive-letter test requires the letter to be followed by
+/// a separator or end-of-string, which `/mnt/c` (letter `m` followed by
+/// `n`) never satisfies. Keeping the operand verbatim for POSIX-aware
+/// children therefore handed every applet an unresolvable path
+/// (unixwin/WinuxCmd#1145, the `/d/...` sibling).
+///
+/// Must be exactly `/mnt/X` or `/mnt/X/...`: `/mnt/cfoo` and `/mnt/123` are
+/// ordinary POSIX-shaped words, not drive forms.
+fn windows_mnt_drive_argument(normalized: &str) -> bool {
+    if !normalized.starts_with("/mnt/") || normalized.len() < 6 {
+        return false;
+    }
+    let bytes = normalized.as_bytes();
+    bytes[5].is_ascii_alphabetic() && (normalized.len() == 6 || bytes[6] == b'/')
+}
+
 /// unixwin/niubash#164: the root-map translation itself for one argv word,
 /// applied at the single argv funnel (external_command_for_named_program)
 /// so that EVERY non-shell child class receives the same resolved form:
@@ -1495,14 +1515,47 @@ fn windows_virtual_system_root_argument(
 /// is one of them (the applet's native layer covers drive forms and
 /// /dev/*, not the roots — see windows_virtual_system_root_argument).
 ///
-/// Returns None when the word keeps its per-child dialect: drive forms
-/// (`/d/x`, `/mnt/d/x`, `/cygdrive/d/x`), the bare `/` operand
-/// (niubash#153), /dev/* (rubash#120), switches and data words, a
-/// leading-backslash spelling (escape data, external_argument_path's
-/// rule), a legacy-dialect session (__RUBASH_ARGV_DIALECT=legacy reverts
-/// to the pre-fix behavior), or a shell-wrapped child — a child SHELL
-/// (ENOEXEC re-entry model, execute_cmd.c:6252) resolves /usr/... through
-/// its own identical root map and must see the words verbatim.
+/// Returns None when the word keeps its per-child dialect: MSYS/Cygwin
+/// drive forms the child's own native layer resolves (`/d/x`,
+/// `/cygdrive/d/x` — WinuxCmd `native_path.cppm normalize_api_operand_w`
+/// owns both), the bare `/` operand (niubash#153), /dev/* (rubash#120),
+/// switches and data words, a leading-backslash spelling (escape data,
+/// external_argument_path's rule), a legacy-dialect session
+/// (__RUBASH_ARGV_DIALECT=legacy reverts to the pre-fix behavior), or a
+/// shell-wrapped child — a child SHELL (ENOEXEC re-entry model,
+/// execute_cmd.c:6252) resolves /usr/... through its own identical root
+/// map and must see the words verbatim.
+///
+/// `/mnt/X` WSL drive forms do NOT belong to that verbatim set.
+///
+/// Why the verbatim set exists at all (niubash#62, the design that produced
+/// it): `ls /d/` and `grep -F "/h/"` are textually identical, so the shell
+/// cannot separate "drive path" from "pattern" by shape alone. niubash#164
+/// resolved that by making the split PER-CHILD rather than per-name-list —
+/// one argv arrives in exactly one form, and the child that owns a POSIX
+/// layer decodes it. Two constraints bound this fix:
+///
+/// - niubash#62: "WinuxCmd (coreutils) must NOT change — the rule stays in
+///   the shell layer." So this is fixed here, not by teaching WinuxCmd
+///   `/mnt`.
+/// - niubash#164: "要么都翻、要么都不翻，不应按命令名单切分" — the same path
+///   must reach every child class in the same form.
+///
+/// `/mnt/X` satisfies neither half of the verbatim premise. WinuxCmd's
+/// `native_path.cppm normalize_api_operand_w` folds `/cygdrive/d/...` into
+/// `/d/...` and then maps a bare `/X/...` drive letter, but its letter test
+/// requires a separator or end-of-string after the letter — `mnt` does not
+/// satisfy it, and a repo-wide code search for `mnt` under unixwin/WinuxCmd
+/// returns only docs and scripts, no parsing arm. No native exe has a POSIX
+/// layer at all. So unlike `/d/x` and `/cygdrive/d/x`, `/mnt/X` is resolved
+/// by NOBODY on the child side and must be translated engine-side for every
+/// child class, exactly like the virtual system roots.
+///
+/// `cd` never exposed the gap: the builtin resolves through
+/// `shell_path_to_windows`, which does own a `/mnt` branch, so the split
+/// only surfaces once the same path is handed to an external child
+/// (`cd /mnt/c` worked while `ls /mnt/c` and every other applet failed).
+/// unixwin/WinuxCmd#1145 is the `/d/...` sibling of this gap.
 #[cfg(windows)]
 fn translated_virtual_system_root_argument(
     arg: &str,
@@ -1513,7 +1566,9 @@ fn translated_virtual_system_root_argument(
         return None;
     }
     let normalized = arg.replace('\\', "/");
-    windows_virtual_system_root_argument(&normalized, env_vars).then(|| {
+    (windows_virtual_system_root_argument(&normalized, env_vars)
+        || windows_mnt_drive_argument(&normalized))
+    .then(|| {
         // niubash#177: the translated spelling goes through the operand
         // resolution so a WinuxCmd-tree file operand (`/usr/bin/seq`, only
         // `seq.exe` on disk) reaches the child in the spelling it can
@@ -4137,18 +4192,25 @@ mod tests {
     fn windows_virtual_system_root_arguments_keep_option_b_shapes_verbatim() {
         // niubash#164 does NOT widen translation past the root class: the
         // regression guards for the sibling shapes must hold for the applet
-        // child. /c/Windows and /mnt/c are drive forms the applet's own
-        // native layer resolves (Option B, niubash#124(b)/#62); "/" is an
-        // operand character (niubash#153); /dev/* belongs to the child's
-        // descriptor map (rubash#120); /cygdrive/d/x, switches, relative
-        // words and leading-backslash data never enter the root class.
+        // child. /c/Windows and /cygdrive/d/x are drive forms the applet's
+        // own native layer resolves (Option B, niubash#124(b)/#62); "/" is
+        // an operand character (niubash#153); /dev/* belongs to the child's
+        // descriptor map (rubash#120); switches, relative words and
+        // leading-backslash data never enter the root class.
+        //
+        // /mnt/c is deliberately NOT in this list: WinuxCmd's
+        // normalize_api_operand_w has no /mnt arm (it folds /cygdrive/d/...
+        // to /d/... and then maps a bare /X/... drive letter, a test
+        // /mnt/c cannot satisfy because 'm' is followed by 'n'), so a
+        // verbatim /mnt/c operand reaches the applet unresolvable. It is
+        // translated engine-side for every child class now; the pin lives
+        // in windows_mnt_drive_argument_translates_for_every_child.
         let root = i164_fixture_root();
         let env_vars = i164_rooted_env(&root);
         let dispatcher = root.join("usr").join("bin").join("winuxcmd.exe");
 
         let verbatim = [
             "/c/Windows",
-            "/mnt/c",
             "/cygdrive/d/x",
             "/",
             "/dev/null",
@@ -4166,6 +4228,64 @@ mod tests {
                 "operand {operand:?} must stay verbatim for the applet"
             );
         }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_mnt_drive_argument_translates_for_every_child() {
+        // WSL drive forms have no arm in WinuxCmd's normalize_api_operand_w
+        // (unlike /cygdrive/d/... which it folds, and /d/... which it maps),
+        // so the engine must translate them itself. Before this, `cd /mnt/c`
+        // worked (the builtin resolves through shell_path_to_windows, which
+        // owns a /mnt branch) while `ls /mnt/c` and every other external
+        // command failed — the form only reached a child verbatim.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+        let dispatcher = root.join("usr").join("bin").join("winuxcmd.exe");
+
+        // Shape class: only /mnt/X and /mnt/X/... are drive forms.
+        for drive_form in ["/mnt/c", "/mnt/c/Users", "/mnt/D", "/mnt/d/repo/x", "/mnt/z"] {
+            assert!(
+                windows_mnt_drive_argument(drive_form),
+                "{drive_form:?} is a /mnt drive form"
+            );
+        }
+        for ordinary in ["/mnt", "/mnt/", "/mnt/cfoo", "/mnt/123", "/mntx/c", "/usr/bin"] {
+            assert!(
+                !windows_mnt_drive_argument(ordinary),
+                "{ordinary:?} is not a /mnt drive form"
+            );
+        }
+        // Only ONE letter is a drive designator: /mnt/CD is not a drive form,
+        // and neither is a bare /mnt/<letter> with a second letter behind it.
+        assert!(!windows_mnt_drive_argument("/mnt/CD"));
+        // An uppercase letter is a valid drive designator (the resolver
+        // upper-cases it; the shape test is case-insensitive by construction).
+        assert!(windows_mnt_drive_argument("/mnt/D"));
+
+        // The applet receives the Windows spelling, not the verbatim word.
+        let argv = child_argv(&dispatcher, &["/mnt/c"], &env_vars);
+        assert_eq!(
+            argv,
+            vec![r"C:\".to_string()],
+            "/mnt/c must reach the applet as C:\\"
+        );
+        let argv = child_argv(&dispatcher, &["/mnt/d/repo/x"], &env_vars);
+        assert_eq!(
+            argv,
+            vec![r"D:\repo\x".to_string()],
+            "/mnt/d/repo/x must reach the applet as D:\\repo\\x"
+        );
+
+        // The bare MSYS shapes stay verbatim: /d/x and /cygdrive/d/x are
+        // resolved by the applet's own native layer and must not be
+        // double-translated by the engine.
+        let argv = child_argv(&dispatcher, &["/d/repo/x"], &env_vars);
+        assert_eq!(argv, vec!["/d/repo/x".to_string()]);
+        let argv = child_argv(&dispatcher, &["/cygdrive/d/x"], &env_vars);
+        assert_eq!(argv, vec!["/cygdrive/d/x".to_string()]);
 
         let _ = fs::remove_dir_all(&root);
     }
