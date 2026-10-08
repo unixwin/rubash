@@ -680,7 +680,13 @@ impl Executor {
                 continue;
             };
             if is_valid_process_env(&env_name, expanded_value) {
-                process.env(env_name, expanded_value);
+                // Prefix assignments overwrite apply_child_environment above;
+                // retain its native TMPDIR boundary (niubash#162).
+                if cfg!(windows) && env_name == "TMPDIR" {
+                    process.env(&env_name, self.child_env_value(&env_name, expanded_value));
+                } else {
+                    process.env(env_name, expanded_value);
+                }
             }
         }
     }
