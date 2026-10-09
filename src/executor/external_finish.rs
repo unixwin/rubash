@@ -35,6 +35,35 @@ impl Executor {
         Ok(())
     }
 
+    /// Streaming counterpart of `write_cat_output` for the chunked cat paths
+    /// (`stream_inherited_cat`, `stream_cat_stdin_operand`): a `>`/`>>` target is
+    /// opened ONCE for the whole copy, like GNU cat.c. Calling
+    /// `write_cat_output` per chunk re-created — and therefore truncated — the
+    /// target, so a chunked stdin kept only the last block (niubash#198).
+    /// `None` means the chunk must go through `write_cat_output` per call (no
+    /// redirect, or an fd alias such as `/dev/stdout` whose binding lives in the
+    /// fd table, not on disk).
+    pub(in crate::executor) fn open_cat_output_sink(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<Option<File>, ExecuteError> {
+        let (target, clobber, append) = match (&cmd.redirect_out, &cmd.append) {
+            (Some(redirect), _) => (self.expand_redirect_target(redirect), redirect.clobber, false),
+            (None, Some(append)) => (self.expand_redirect_target(append), true, true),
+            (None, None) => return Ok(None),
+        };
+        // fd aliases (`/dev/stdout`, `/dev/fd/N`) resolve through the fd table,
+        // not a reopened path — leave those to the per-chunk path.
+        if crate::executor::execution_misc::redirect_target_fd(&target).is_some() {
+            return Ok(None);
+        }
+        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+        if append {
+            return Ok(Some(OpenOptions::new().create(true).append(true).open(path)?));
+        }
+        Ok(Some(self.create_redirect_output(&target, clobber)?))
+    }
+
     pub(in crate::executor) fn finish_external_error(
         &mut self,
         cmd: &CommandNode,
