@@ -740,10 +740,13 @@ impl Executor {
                 eprintln!("{name}: command not found");
                 Ok(1)
             }
-            // A dead shared stdout (SIGPIPE analogue) is fatal to the whole
-            // process, not just the child — keep propagating it.
+            // rubash#440: a dead shared stdout (SIGPIPE analogue) is only a
+            // write failure of the command that hit it — GNU's parent shell
+            // ignores SIGPIPE, reports the failed write with status 1 and
+            // keeps running; it never kills the whole process.
             ExecuteError::IoError(error) if is_closed_output_io_error(&error) => {
-                Err(ExecuteError::IoError(error))
+                eprintln!("{error}");
+                Ok(1)
             }
             ExecuteError::IoError(error) => {
                 eprintln!("{error}");
