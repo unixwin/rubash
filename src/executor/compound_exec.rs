@@ -1341,6 +1341,20 @@ impl Executor {
         self.shell_state.subshell_depth.set(saved_depth + 1);
         self.shell_state.loop_depth = 0;
 
+        // Assignment prefix (`x=1 (cmd)`, #452): GNU apply_shell_assignments
+        // runs the prefix inside the forked child, so the values live only
+        // for the body; the whole-state save above restores the parent
+        // afterwards. Scalar assignments only — compound/array-element
+        // prefixes have no GNU verdict in the audit corpus yet and never
+        // reach the parser's subshell gate.
+        for (name, value) in &cmd.assignments {
+            let result = self.expand_assignment_value_result_with_raw(name, value, None);
+            if !self.apply_shell_assignment(name, result.value) {
+                self.exit_code = 1;
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+        }
+
         // GNU executes the `( list )` body by POINTER (execute_in_subshell
         // walks the Subshell->command the parser allocated once; make_cmd.c
         // never copies). The clones below exist only to feed mutations:

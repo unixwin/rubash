@@ -288,15 +288,25 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
         TokenKind::Assignment => {
             state.current_cmd.subshell |= state.in_subshell;
             note_command_line(&mut state.current_cmd, token);
+            // `name= ( ... )` with an EMPTY value is not a compound
+            // assignment — GNU rejects the separated `(` there (the `=(`
+            // adjacency is what makes `name=(list)` a compound array
+            // assignment; rubash#221). But a NON-EMPTY value followed by
+            // `(` is GNU's assignment-prefix + subshell shape
+            // (`x=1 (cmd)`, audit corpus niubash#452: oh-my-bash cli.bash
+            // `x=plugin::@(disable|enable|load)` is GNU-accepted and can
+            // only parse that way), so only the empty-value form is
+            // rejected here.
             if state.current_cmd.words.is_empty()
                 && tokens
                     .get(*i + 1)
                     .is_some_and(|next| next.kind == TokenKind::Keyword && next.value == "(")
                 && !token.raw.ends_with("=(")
+                && token
+                    .value
+                    .rsplit_once('=')
+                    .is_some_and(|(_, value)| value.is_empty())
             {
-                // `name= ( ... )` is not a compound assignment. Bash rejects
-                // the separated `(` during parsing instead of executing the
-                // following words as a command.
                 state.current_cmd.insert_assignment(
                     "__RUBASH_PARSE_ERROR__".to_string(),
                     "unexpected token `('".to_string(),
