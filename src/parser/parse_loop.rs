@@ -297,8 +297,25 @@ pub(super) fn run_command_loop(tokens: &[Token], state: &mut ParseState, start: 
                     break;
                 }
             }
+            // rubash#460: a reserved word DIRECTLY after a closed `[[ ]]` /
+            // `(( ))` (or any compound-closer token in
+            // reserved_word_acceptable's set) is grammatical without a `;'
+            // terminator: compound_list's `newline_list list1' production
+            // (parse.y:1262) accepts a single pipeline_command with no
+            // terminator, and reserved_word_acceptable (parse.y:5899,
+            // COND_END in the set) recognizes `then'/`do` there —
+            // `if [[ $x == y ]] then' inside a function body (cond.tests:230,
+            // shell_function_n_shortcuts/.shortcut). After a plain WORD the
+            // word is still an argument (`if true then' stays rejected), and
+            // after `]]' any non-reserved word keeps the old error.
+            let reserved_follows_compound = tokens.get(next_i).is_some_and(|next| {
+                next.kind == TokenKind::Keyword
+                    && matches!(next.value.as_str(), "then" | "do")
+                    && super::command_boundary_keyword_allowed(tokens, next_i)
+            });
             if !separated
                 && !already_error
+                && !reserved_follows_compound
                 && command_is_empty(&state.current_cmd)
                 && tokens.get(next_i).is_some_and(|next| {
                     !matches!(
