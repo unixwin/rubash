@@ -1234,3 +1234,77 @@ fn dparen_arith_group_open_at_end_matches_gnu_reader() {
     // Single-line arithmetic commands close and never join.
     assert!(!joined("(( 1+2 ))"));
 }
+
+#[test]
+fn word_initial_raw_esc_single_quoted_is_carrier_tagged_niubash_200() {
+    // niubash#200: a raw ESC byte right after the opening `'` is DATA (GNU
+    // keeps a raw ESC in every position), but it is byte-identical to
+    // QUOTED_WORD_PREFIX, so downstream strip_prefix consumers ate it. The
+    // lexer must tag the leading data ESC as the U+E000 raw-byte marker pair.
+    let tokens = tokenize("printf '%s' '\u{1b}[31mAAA\u{1b}[0m'");
+    let value = &tokens[2].value;
+    let chars: Vec<u32> = value.chars().map(|c| c as u32).collect();
+    // U+E000 (RAW_BYTE_MARKER_ESCAPE) + U+E01C (0x1b) — not a bare U+001B,
+    // which the executor's quoted-tilde marker strip would claim.
+    assert_eq!(&chars[..2], &[0xE000, 0xE001 + 0x1b]);
+    // The mid-string ESC stays verbatim data (never word-initial, never
+    // claimed): exactly one carrier tag for the word-initial ESC.
+    assert_eq!(
+        chars.iter().filter(|&&c| c == 0xE000).count(),
+        1,
+        "exactly one carrier tag for the word-initial ESC"
+    );
+}
+
+#[test]
+fn word_initial_raw_esc_mid_word_stays_verbatim_niubash_200() {
+    // A mid-word ESC is never claimed by strip_prefix, so it needs no tag:
+    // `'X<ESC>[32m'` keeps the raw ESC byte verbatim (GNU-identical).
+    let tokens = tokenize("printf '%s' 'X\u{1b}[32mBBB'");
+    let value = &tokens[2].value;
+    assert!(value.starts_with('X'));
+    assert!(value.contains('\u{1b}'));
+    assert!(
+        !value.contains('\u{E000}'),
+        "mid-word ESC must not be tagged"
+    );
+}
+
+#[test]
+fn word_initial_raw_esc_double_quoted_and_unquoted_tagged_niubash_200() {
+    for (input, word_index) in [
+        ("printf '%s' \"\u{1b}[31mC\"", 2usize),
+        ("printf '%s' \u{1b}[31mB", 2usize),
+    ] {
+        let tokens = tokenize(input);
+        let chars: Vec<u32> = tokens[word_index].value.chars().map(|c| c as u32).collect();
+        assert_eq!(
+            &chars[..2],
+            &[0xE000, 0xE001 + 0x1b],
+            "word-initial raw ESC must be carrier-tagged in every quoting context"
+        );
+    }
+}
+
+#[test]
+fn ansi_c_literal_raw_esc_word_initial_tagged_niubash_200() {
+    // $'<raw-ESC>...' pushes the already-raw byte verbatim (only \e/\c[/\033
+    // get the carrier inside decode_ansi_c_quoted), so the same word-initial
+    // collision applies. The textual `$'\033...'` form must stay untouched.
+    let raw = tokenize("printf '%s' $'\u{1b}[31mG'");
+    let chars: Vec<u32> = raw[2].value.chars().map(|c| c as u32).collect();
+    assert_eq!(&chars[..2], &[0xE000, 0xE001 + 0x1b]);
+    let textual = tokenize("printf '%s' $'\\033[31mG'");
+    assert_eq!(textual[2].value, raw[2].value);
+}
+
+#[test]
+fn quoted_literal_tilde_marker_still_emitted_niubash_200() {
+    // The fix must not disturb the legitimate QUOTED_WORD_PREFIX producer:
+    // a quoted literal `~` still carries the U+001B marker for the executor.
+    let tokens = tokenize("printf '%s' '~x'");
+    assert!(tokens[2]
+        .value
+        .starts_with(crate::executor::markers::QUOTED_WORD_PREFIX));
+    assert!(tokens[2].value.ends_with("~x"));
+}
