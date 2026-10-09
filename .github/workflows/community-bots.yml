@@ -35,6 +35,10 @@ jobs:
     steps:
       - uses: actions/first-interaction@v3
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          issue-message: "欢迎！这是你在本仓库的第一个 ISSUE 🎉 维护者会尽快跟进；报 bug 请附 `niu --version`、系统平台与最小复现脚本。"
-          pr-message: "欢迎！这是你的第一个 PR 🎉 请确认已跑过本地测试套件；CI 通过后维护者会 review。"
+          # Inputs are snake_case in first-interaction@v3 (action.yml:
+          # issue_message / pr_message / repo_token). Hyphenated spellings
+          # are not declared by the action, so it warns "Unexpected input(s)"
+          # and every first-time contribution goes ungreeted (niubash#224).
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          issue_message: "欢迎！这是你在本仓库的第一个 ISSUE 🎉 维护者会尽快跟进；报 bug 请附 `rubash --version`、系统平台与最小复现脚本。"
+          pr_message: "欢迎！这是你的第一个 PR 🎉 请确认已跑过本地测试套件；CI 通过后维护者会 review。"
