@@ -590,11 +590,18 @@ pub fn standard_path(_env_vars: &HashMap<String, String>) -> String {
     // and fall back to STANDARD_UTILS_PATH from config-top.h:70-73 when
     // confstr reports nothing. findcmd.c:391 feeds exactly this string to
     // find_user_command_in_path for CMDSRCH_STDPATH lookups.
-    #[cfg(unix)]
+    // bionic (android) has no confstr(), so it skips straight to the
+    // STANDARD_UTILS_PATH fallback.
+    #[cfg(all(unix, not(target_os = "android")))]
     {
         if let Some(path) = confstr_cs_path() {
             return path;
         }
+        "/bin:/usr/bin:/sbin:/usr/sbin".to_string()
+    }
+
+    #[cfg(all(unix, target_os = "android"))]
+    {
         "/bin:/usr/bin:/sbin:/usr/sbin".to_string()
     }
 
@@ -607,7 +614,9 @@ pub fn standard_path(_env_vars: &HashMap<String, String>) -> String {
 /// first call sizes the buffer, second fills it (NUL included in the
 /// returned length). len == 0 means "no value" and selects the
 /// STANDARD_UTILS_PATH fallback, matching GNU's `len > 0` guard.
-#[cfg(unix)]
+// bionic (android) has no confstr(); the caller's STANDARD_UTILS_PATH
+// fallback covers it.
+#[cfg(all(unix, not(target_os = "android")))]
 fn confstr_cs_path() -> Option<String> {
     unsafe {
         let len = libc::confstr(libc::_CS_PATH, std::ptr::null_mut(), 0);

@@ -822,7 +822,13 @@ fn test_unix_eaccess(
     let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
         return false;
     };
-    unsafe { libc::faccessat(libc::AT_FDCWD, cpath.as_ptr(), mode, libc::AT_EACCESS) == 0 }
+    // bionic's <fcntl.h> ships AT_EACCESS (0x200, same value as the Linux
+    // uapi), but the libc crate's android module doesn't re-export it.
+    #[cfg(target_os = "android")]
+    let at_eaccess: std::os::raw::c_int = 0x200;
+    #[cfg(not(target_os = "android"))]
+    let at_eaccess = libc::AT_EACCESS;
+    unsafe { libc::faccessat(libc::AT_FDCWD, cpath.as_ptr(), mode, at_eaccess) == 0 }
 }
 
 #[cfg(not(unix))]

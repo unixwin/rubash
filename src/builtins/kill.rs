@@ -1536,7 +1536,9 @@ mod kernel_signals {
             sa_sigaction: handler,
             sa_flags: 0,
             sa_mask: unsafe { std::mem::zeroed() },
-            #[cfg(target_os = "linux")]
+            // glibc/musl/OH/bionic all expose sa_restorer as Option; None
+            // lets the kernel supply the default restorer.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             sa_restorer: None,
         };
         unsafe { libc::sigaction(sig, &action, std::ptr::null_mut()) };

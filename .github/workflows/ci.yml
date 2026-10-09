@@ -102,7 +102,7 @@ jobs:
         run: cargo test --test regression
 
   cross-target-check:
-    name: Cross-target check (linux/darwin)
+    name: Cross-target check (linux/darwin/android)
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -113,7 +113,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu, aarch64-apple-darwin
+          targets: x86_64-unknown-linux-gnu, aarch64-apple-darwin, aarch64-linux-android, armv7-linux-androideabi
 
       - name: Check Linux target
         run: cargo check --target x86_64-unknown-linux-gnu
@@ -126,6 +126,15 @@ jobs:
 
       - name: Check tests on macOS target
         run: cargo check --tests --target aarch64-apple-darwin
+
+      # Android (bionic): check-only, no linking — the runner has no NDK.
+      # Both targets are Tier 2, so rustup's rust-std is enough for cargo
+      # check. Mirrors the musl/OpenHarmony gate (unixwin/niubash#210).
+      - name: Check Android aarch64 target
+        run: cargo check --target aarch64-linux-android
+
+      - name: Check Android armv7 target
+        run: cargo check --target armv7-linux-androideabi
 
   shell-functionality:
     name: Shell functionality tests
