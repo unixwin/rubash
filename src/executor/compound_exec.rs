@@ -1852,6 +1852,30 @@ impl Executor {
                 child.env(key, value);
             }
         }
+        // GNU coproc forks (execute_cmd.c coproc_getfd -> make_child), so the
+        // coprocess shell inherits the parent's FULL function table — not
+        // just `export -f` names. A DEBUG trap installed before the coproc
+        // (e.g. oh-my-bash's bash-preexec `__bp_preexec_invoke_exec`) fires
+        // inside the child and must resolve (unixwin/rubash#441). Ship a
+        // snapshot as BASH_FUNC_name%% entries: the child's Executor::new
+        // imports them as functions and strips the carrier keys, so the
+        // entries never surface as variables and never leak back into the
+        // parent's table (the parent keeps its own functions untouched).
+        for (name, body) in &self.shell_state.functions {
+            if !is_exportable_function_name(name) {
+                continue;
+            }
+            let def_redirects = self
+                .shell_state
+                .function_def_infos
+                .get(name)
+                .map(|info| info.def_redirects.as_slice())
+                .unwrap_or(&[]);
+            child.env(
+                exported_function_env_name(name),
+                exported_function_env_value(&body.commands, def_redirects),
+            );
+        }
         // Preserve the parent script location for diagnostics emitted by the
         // coprocess shell, while keeping internal executor state isolated.
         if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
