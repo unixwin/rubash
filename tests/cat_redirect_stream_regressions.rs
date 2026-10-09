@@ -20,7 +20,11 @@ fn shell_bin() -> PathBuf {
     if let Some(path) = option_env!("CARGO_BIN_EXE_rubash") {
         return PathBuf::from(path);
     }
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join(profile)
@@ -28,7 +32,8 @@ fn shell_bin() -> PathBuf {
 }
 
 fn scratch_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rubash-cat-redirect-{tag}-{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("rubash-cat-redirect-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -80,7 +85,10 @@ fn append_and_file_redirect_paths_stay_whole() {
     std::fs::write(dir.join("in.txt"), &payload).expect("seed in.txt");
 
     assert_eq!(run_with_stdin("cat >> app.txt", &payload, &dir), 0);
-    assert_eq!(std::fs::read(dir.join("app.txt")).expect("app.txt"), payload);
+    assert_eq!(
+        std::fs::read(dir.join("app.txt")).expect("app.txt"),
+        payload
+    );
 
     assert_eq!(run_with_stdin("cat < in.txt > from_file.txt", &[], &dir), 0);
     assert_eq!(
