@@ -1,0 +1,1981 @@
+[
+ {
+  "content_hash": "017b1c7363d4b7222c25d3d7af0df32b01d666a0",
+  "repo": "binpash/pash",
+  "path": "evaluation/tests/sort.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "02c2dc07bbd32c7e11c26557fa4e639182e34d0d",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/dirs.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:ECO>",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "0b2deff5d7ada86e4ca6258a7010c7592dedc2aa",
+  "repo": "tbrandenburg/shai",
+  "path": "scripts/pipeline_essay.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: unexpected EOF while looking for matching `)'",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "0b4b655df7261bb1e96e4776365a1be825014ca4",
+  "repo": "pipeseroni/pipes.sh",
+  "path": "scripts/gen-man-html.sh",
+  "original_verdicts": [
+   "HANG",
+   "HANG",
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: : No such file or directory",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "0c1f4333a2a87d801cd70a4ded2760ff78fb7efe",
+  "repo": "fissible/ptyunit",
+  "path": "self-tests/hostile/cpu-work.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "TTY-reader class (no engine wedge: completes non-interactively)"
+ },
+ {
+  "content_hash": "0d3811df7e5f92e1a86d2755604b76d82f386998",
+  "repo": "manastria/dotfile",
+  "path": ".bashrc",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "0f2f728582ba8b1b3914c40095732abeda01241a",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/lrzip.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `-${noargopts}@([Smw]|[h?V]*))`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "11043df9610bb398b3032fcd24f6570c795f35d7",
+  "repo": "softprops/awsnap",
+  "path": "awsnap-install.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "upstream-heavy-external",
+  "issue": null,
+  "note": "still runs >15s non-interactively: network fetch / clone / build / server or missing-tool loop; platform+upstream cost, not a semantic wedge"
+ },
+ {
+  "content_hash": "128f3dd500e23b57ffb27fd8c41fcd89cc7d6227",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "themes/vscode/vscode.theme.sh",
+  "original_verdicts": [
+   "HANG",
+   "HANG",
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: line N: syntax error near unexpected token `&&'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": "passes fresh master; wt97b wedge no longer reproduces (rubash#425 evidence updated)",
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "13940489fef708f0bc3b0ac295ed3de199702f06",
+  "repo": "sloria/doitlive",
+  "path": "examples/walkthrough.sh",
+  "original_verdicts": [
+   "HANG",
+   "HANG",
+   "HANG"
+  ],
+  "original_signature": "hang:source:>>>",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "upstream-heavy-external",
+  "issue": null,
+  "note": "still runs >15s non-interactively: network fetch / clone / build / server or missing-tool loop; platform+upstream cost, not a semantic wedge"
+ },
+ {
+  "content_hash": "13ebf2b2866fbdd42fd2b7767745325542ee5c72",
+  "repo": "phil-inc/admiral",
+  "path": ".devcontainer/.bashrc",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: line N: syntax error near unexpected token `&&'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "16c2211044bbedb11d4043210f81c9f0ce35a49c",
+  "repo": "ducksrfr/mac_admin",
+  "path": "scripts/rename_user.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:/usr/bin/tee: /var/log/jamf_account_rename.log: No such file or directory",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-EXITED",
+  "classification": "upstream-exit",
+  "issue": null,
+  "note": "asset calls exit / exec on this environment; sourcing `exit` must end the interactive shell (GNU identical)"
+ },
+ {
+  "content_hash": "17ece8ef0b2e4a4728800780506194fc0eb51c13",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/npm.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "20c563f66c6b0ba9de4e78308df4d166cdf0f204",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/gpgv.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `--help | --version | --weak-digest | --*-fd | -!(-*)[?h]*)`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "21f6def9ff808bc8888d3a8f932a54c9364642ca",
+  "repo": "tbrandenburg/shai",
+  "path": "scripts/browser_automation.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:> build · big-pickle",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: SLOW"
+ },
+ {
+  "content_hash": "2210539dad8e9124b9b40a0080075c5079fd16f6",
+  "repo": "mbailey/bash-my-aws",
+  "path": "test/bash-spec.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO>",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "2466744d0a63afcc9769906214b2b8ac13abfa20",
+  "repo": "ohmyzsh/ohmyzsh",
+  "path": "tools/changelog.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY",
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "/e/eco-harvest/tmp/work-2466744d0a63/asset.sh: line N: syntax error near unexpected token `do' @ `for hash rhash in ${(kv)reverts}; do`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "known-family-zsh-content",
+  "issue": null,
+  "note": "zsh-only syntax; GNU rejects too (see #142 family context)"
+ },
+ {
+  "content_hash": "2648a63b43fc32c31a896501accdcb0ad43a408d",
+  "repo": "jamesmartin/dotfiles",
+  "path": "bash_profile",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:Starting gpg-agent as daemon...",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "279ba8e790c9a0684879182624309efcc935c3f3",
+  "repo": "bivlked/amneziawg-installer",
+  "path": "awg_common_en.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: SLOW"
+ },
+ {
+  "content_hash": "29a5270756470e61ea11ae7dc4ae791ab6489d5f",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/django.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "2abb09e7e678f4d5fff9eb38dc53c8cb198e7af2",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/pdftoppm.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `-[flrxyWH] | -r[xy] | -scale?(-to-[xy]) | -jpegopt | -[ou]pw)`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "2b6644e8a99947b3115dc1446ad577761c8f4505",
+  "repo": "rust-shell-script/rust_cmd_lib",
+  "path": "examples/tetris.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO>",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 1.6s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "2ed2ffdeffda1ace7d95047eb4bdccd2dc8ecf40",
+  "repo": "ciaranm/dotfiles",
+  "path": "bashrc",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "317ba100e859d447346ad81ceee65dd3dcccc1cb",
+  "repo": "Abhinavgupta371/nos_build_make",
+  "path": "envsetup.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:WARNING: Only bash is supported, use of other shell would lead to erroneous results",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "upstream-heavy-external",
+  "issue": null,
+  "note": "still runs >15s non-interactively: network fetch / clone / build / server or missing-tool loop; platform+upstream cost, not a semantic wedge"
+ },
+ {
+  "content_hash": "35e2931f1e9cb5bdff065ba6dbe826a580353ec9",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/ps.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY",
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "/e/eco-harvest/tmp/work-35e2931f1e9c/asset.bash: line N: syntax error near unexpected token `(' @ `?(-)p | [^-]*p | --pid)`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 @ line 24 extglob ?()"
+ },
+ {
+  "content_hash": "386fd920483d09f5569831f00e13e398dc64a90d",
+  "repo": "h4l/json.bash",
+  "path": "examples/jb-cli.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `)' @ `)`",
+  "latest_shared_verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+  "fresh_retest": "SYNTAX-STILL-REJECTED",
+  "classification": "new-engine-bug",
+  "issue": null,
+  "note": "D:/repo/rubash-wt-goldtri/target/goldtri/assets/386fd920483d: line 42: syntax error near unexpected token `)'"
+ },
+ {
+  "content_hash": "389b215591688096caeeef01d1c36be520a961da",
+  "repo": "gingerpaledale/zZshFramework",
+  "path": "src/files.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `fileRemoveWithOverwrite-dirOrFile$(useWithCaution)__hsl() {`",
+  "latest_shared_verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+  "fresh_retest": "SYNTAX-STILL-REJECTED",
+  "classification": "new-engine-bug",
+  "issue": null,
+  "note": "D:/repo/rubash-wt-goldtri/target/goldtri/assets/389b21559168: line 5: syntax error near unexpected token `('"
+ },
+ {
+  "content_hash": "39d9535f2a0a57ec870b7545a889d9d5893de361",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/lsusb.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `--help | --version | -${noargopts}@([sD]|[hV]*))`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "3c6dbdbd7d4380997785608ee3a1aa18217c0157",
+  "repo": "ohmyzsh/ohmyzsh",
+  "path": "oh-my-zsh.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `for plugin ($plugins); do`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "known-family-zsh-content",
+  "issue": null,
+  "note": "zsh-only syntax; GNU rejects too (see #142 family context)"
+ },
+ {
+  "content_hash": "3c921d2d83005097896afeb622e96a560053d964",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/apt-get.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `remove | auto?(-)remove | purge)`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "3cf7b1f64fd611e5e2e8dbd37a9edfbb3ae75677",
+  "repo": "statico/dotfiles",
+  "path": ".vim/update.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:SSL/TLS connection failed",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "upstream-heavy-external",
+  "issue": null,
+  "note": "still runs >15s non-interactively: network fetch / clone / build / server or missing-tool loop; platform+upstream cost, not a semantic wedge"
+ },
+ {
+  "content_hash": "3e41dee4c72aaf136fbfefe2a9e4ccd16ff96bc7",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/valgrind.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `--+([-A-Za-z0-9_]))`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "3e87cfa11a9fbe662b27a1fd50ec782ffddb1bc6",
+  "repo": "Twilight4/nobility",
+  "path": "scripts/web-recon.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `__info() echo \"$fg[blue][*] $@ $reset_color\"`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "3ff532761792818c2ca1cadc259a69172958fb2a",
+  "repo": "puppylinux-woof-CE/woof-CE",
+  "path": "kernel-kit/usrmerge.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: zdrv/etc/modules/build.conf-*: No such file or directory",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.4s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "41bc43cf5821ca184a47960c2f9fc4a6adc04a1f",
+  "repo": "pjh/devcontainer-dotfiles",
+  "path": ".bashrc",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: line N: syntax error near unexpected token `&&'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "45f5ed116eeed44a37c80dc7040ad04056057cb1",
+  "repo": "MidnightCoding1/mForce",
+  "path": "modules/username_osint.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECOSRC : Not found",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "47eb56c84236081043f1fa6ec427243ced1904b0",
+  "repo": "Soroushnk/Astro",
+  "path": "managed/cisco_vpn.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:Invalid choice. Please enter a valid option.",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "47ffc8046ceea4762c140660bc1409218e29a54b",
+  "repo": "filiperochalopes/dev-notes",
+  "path": ".bash_profile",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: Criar: command not found",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "490390557cce5a1d8952ee90bf265e56e77d44d4",
+  "repo": "drj613/obsidian-agent",
+  "path": "agents-bootstrap.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:Should your folders have index/hub notes? [Y/n]:",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "4c3161a4b9a5613248be9f9815fa12dbf530c397",
+  "repo": "cyberark/bash-lib",
+  "path": "test-utils/bats-support/script/install-bats.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:Cloning into 'bats'...",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: SLOW"
+ },
+ {
+  "content_hash": "53176603fa26dc08638bc1412934edb46d85fe18",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/7z.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY",
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "/e/eco-harvest/tmp/work-53176603fa26/asset.bash: line N: syntax error near unexpected token `(' @ `-?(a)[ix]*)`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 @ line 21 extglob -?()"
+ },
+ {
+  "content_hash": "55f8af7966b113a3630a212fa9c342e859c3eb54",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/opera.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `?(-)-widget | ?(-)-urllist | ?(-)-uiparserlog | ?(-)-uiwidgetsparserlog | \\`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "5699e84d08e6a40c92fd037694a1a9b0c4374129",
+  "repo": "binpash/pash",
+  "path": "evaluation/tests/grep.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "5900462c1c6186925f1c6482fad925e01f1b11fa",
+  "repo": "akinomyoga/ble.sh",
+  "path": "src/canvas.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY",
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `0x3100<=code&&code<0xA4D0||0xAC00<=code&&code<0xD7A4?(`",
+  "latest_shared_verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+  "fresh_retest": "ALREADY-FIXED",
+  "classification": "already-fixed",
+  "issue": "fixed by fa87622b (rubash#435)",
+  "note": "fresh master a157656d `rubash -n` accepts; GNU -n accepted all along"
+ },
+ {
+  "content_hash": "5a183aa8af56f41c0d63f3379e87c76c103ab20e",
+  "repo": "alexyuriev/zdotfiles",
+  "path": ".bash_profile",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:enter1:ECOSRC",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "5b9c3c419dcd24bd8f33b79285287b6f334414ea",
+  "repo": "kippesp/home_files",
+  "path": ".bash_zsh/bashrc",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: alias-misc_unix_augmentations: command not found",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "5fcf0660ae13b111a77be34b2eaebab2296c66a9",
+  "repo": "konethegreat/github-final-project",
+  "path": "simple-interest.sh",
+  "original_verdicts": [
+   "HANG",
+   "HANG",
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: bc: command not found",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "606400d19f7d7e3c38ae7a6e217b8a69e9e1dac6",
+  "repo": "TeamExodus/build",
+  "path": "envsetup.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:WARNING: Only bash and zsh are supported, use of other shell may lead to erroneous results",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "upstream-heavy-external",
+  "issue": null,
+  "note": "still runs >15s non-interactively: network fetch / clone / build / server or missing-tool loop; platform+upstream cost, not a semantic wedge"
+ },
+ {
+  "content_hash": "626d591ddb74c57d58cd22d6eb422107c4958480",
+  "repo": "scop/bash-completion",
+  "path": "completions-fallback/nox.bash",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": "567acfd8 captured pipeline-stage stdin (rubash#436)",
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "651b15783ae2d2891dfe405b654d5a17ca601b31",
+  "repo": "akinomyoga/ble.sh",
+  "path": "src/edit.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY",
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `if ((removed_width<arg)); then`",
+  "latest_shared_verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+  "fresh_retest": "ALREADY-FIXED",
+  "classification": "already-fixed",
+  "issue": "fixed by fa87622b (rubash#435)",
+  "note": "fresh master a157656d `rubash -n` accepts; GNU -n accepted all along"
+ },
+ {
+  "content_hash": "6649a710e3d5759ead66e8617d693e1005ea0da3",
+  "repo": "Kohei-Wada/dotfiles",
+  "path": "bin/update-nvim.sh",
+  "original_verdicts": [
+   "HANG",
+   "HANG"
+  ],
+  "original_signature": "hang:enter1:ECO>",
+  "latest_shared_verdict": "SLOW",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "slow"
+ },
+ {
+  "content_hash": "66c4c143a7ee89c5b925281752abedd42bc6e820",
+  "repo": "avivleemann/container-template",
+  "path": ".bashrc",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: /usr/local/bin/_activate_current_env.sh: No such file or directory",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "67b558cc59664a7137f6283c0f8c065862794eec",
+  "repo": "hbekel/magic",
+  "path": "magic",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "67dc22ec10ea5ed2d5e61cab0b676181c5a979d3",
+  "repo": "sheldritch/sheldritch",
+  "path": "core/args.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: unexpected token `newline', conditional binary operator expected @ `|| ((${#_ARGS_BOUNDS[@]} == 0))`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "6803aec9ec6d8eefda4f1a2a97099fdf7ea29ade",
+  "repo": "microsoft/shell-intune-samples",
+  "path": "macOS/Config/Rosetta2/installRosetta2.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO>",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.4s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "6825938acf4da7ed0b9a6cf8cd76b7cefa856805",
+  "repo": "binpash/pash",
+  "path": "evaluation/tests/topn.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "68ba2902020d47e94a7daa7ebf3d472eefdaf984",
+  "repo": "ZenterFlow/claude-code-plugin-template",
+  "path": "scripts/setup.sh",
+  "original_verdicts": [
+   "HANG",
+   "HANG",
+   "HANG"
+  ],
+  "original_signature": "hang:source:^Ucommand echo ECOSRC",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "6aa4ee1602194862fb8aa9becb4029812ba0a6d7",
+  "repo": "microsoft/shell-intune-samples",
+  "path": "macOS/Config/MDATP/runMDATPQuickScan.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO>",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-EXITED",
+  "classification": "upstream-exit",
+  "issue": null,
+  "note": "asset calls exit / exec on this environment; sourcing `exit` must end the interactive shell (GNU identical)"
+ },
+ {
+  "content_hash": "6af2ccdce6c49d0cae50077746aee4e5e489ba96",
+  "repo": "neonsoftware/cmake-bats",
+  "path": "doc/sample-project/test-integers.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `}' @ `}`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "6f05fbb6dfc4d8a6b2f5118d27a4f22ef22e66a2",
+  "repo": "shellspec/shellspec",
+  "path": "contrib/bugs.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:[------] N: cat not ignore set -e (zsh = around N.N.N)",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: SLOW"
+ },
+ {
+  "content_hash": "72f910ee981dd7d92b4edde35bee4d0b7f0517db",
+  "repo": "muthuishere/mcp-server-bash-sdk",
+  "path": "docs/spikes/spike-02-http-listener.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: python3: command not found",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "upstream-heavy-external",
+  "issue": null,
+  "note": "still runs >15s non-interactively: network fetch / clone / build / server or missing-tool loop; platform+upstream cost, not a semantic wedge"
+ },
+ {
+  "content_hash": "73ffed0013d6406f2f5db685b6dd63b8fc3b00ec",
+  "repo": "bivlked/amneziawg-installer",
+  "path": "install_amneziawg_en.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-EXITED",
+  "classification": "upstream-exit",
+  "issue": null,
+  "note": "asset calls exit / exec on this environment; sourcing `exit` must end the interactive shell (GNU identical)"
+ },
+ {
+  "content_hash": "748bdfa6e5f30bc1bbacaed778af6fe4b36d5500",
+  "repo": "kira-bruneau/nixos-config",
+  "path": "home/programs/bash/.bashrc",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO>",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "79becfc54ce0d76bf985d1e74215bb33cd82ae7d",
+  "repo": "cgsdev0/bash-stack",
+  "path": "core.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:<path>: line N: cd: null directory",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "7d5783e715c0f88ffb424a2f4716d39c31f1142c",
+  "repo": "GaelGosse/shell_function_n_shortcuts",
+  "path": ".shortcut",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `then' @ `if [[ $charge == \"Discharging\" ]] then`",
+  "latest_shared_verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+  "fresh_retest": "SYNTAX-STILL-REJECTED",
+  "classification": "new-engine-bug",
+  "issue": null,
+  "note": "D:/repo/rubash-wt-goldtri/target/goldtri/assets/7d5783e715c0: line 133: syntax error near unexpected token `then'"
+ },
+ {
+  "content_hash": "7d5d59d50fa8d24f77b8cd523f204df8a82c1b95",
+  "repo": "Soroushnk/Astro",
+  "path": "managed/namaeserver.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:Invalid option. Please try again.",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "7db915674a5cee4a86d00f9503b7114439f198ff",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/docker-machine.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "7fbb402c5db7679e13c9e244ef3caee567cbbeea",
+  "repo": "Kohei-Wada/dotfiles",
+  "path": ".claude/statusline.sh",
+  "original_verdicts": [
+   "HANG",
+   "HANG",
+   "HANG"
+  ],
+  "original_signature": "hang:source:command echo ECOSRC",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "83d77b9e15e269e8efdbbdad228a5a9c8c27644d",
+  "repo": "ZaleHack/phpexploit",
+  "path": "test/test-connected.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: uuidgen: command not found",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "83f511863ffe74251175ff1028bb25f3d81de97c",
+  "repo": "ohmyzsh/ohmyzsh",
+  "path": "tools/check_for_upgrade.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY",
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "/e/eco-harvest/tmp/work-83f511863ffe/asset.sh: line N: syntax error near unexpected token `{' @ `() {`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 @ line 36 (zsh script)"
+ },
+ {
+  "content_hash": "8487af5c40bc6d75fb4903657c7d34857da1063f",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/drush.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "882c03788523d9f21c16553bbb48558047c21498",
+  "repo": "pnotz17/artix",
+  "path": "git/ble.sh/memo/D1665.bashrc2",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:enter1:niu: out/ble.sh: No such file or directory",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "89a95f76abd91bfb18f2b9865e3518cc49e0538e",
+  "repo": "shellspec/shellspec",
+  "path": "contrib/pretty.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "89fb9e865c468cd0b0e945cdce76c487ebb8bbc4",
+  "repo": "NullArray/RootHelper",
+  "path": "roothelper.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:invalid option",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "8af33ff37015b2c6bd2c514ac588eb66466c06cf",
+  "repo": "alanhamlett/dotfiles",
+  "path": "bashrc",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "8b99971a606523ddd4c7ad28ee27677b81459b3f",
+  "repo": "akinomyoga/ble.sh",
+  "path": "lib/init-term.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY",
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected EOF while looking for matching `)' @ `((j1=(i1==3?6:`",
+  "latest_shared_verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+  "fresh_retest": "ALREADY-FIXED",
+  "classification": "already-fixed",
+  "issue": "fixed by fa87622b (rubash#435)",
+  "note": "fresh master a157656d `rubash -n` accepts; GNU -n accepted all along"
+ },
+ {
+  "content_hash": "8c22d02cf223cefa7a08d22bf6e9316ab875074b",
+  "repo": "MacRimi/ProxMenux",
+  "path": "scripts/menus/share_menu.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: translate: command not found",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "TTY-reader class (no engine wedge: completes non-interactively)"
+ },
+ {
+  "content_hash": "8d3d0cf00029639e685563f607bc98e449b8a1a1",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/pip.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "8e745b429343da3d3832e5c9a620fdc651085d32",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "lib/cli.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY",
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "/e/eco-harvest/tmp/work-8e745b429343/asset.bash: line N: syntax error near unexpected token `(' @ `plugin::@(disable|enable|load))`",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "bash -n rejects under BOTH engines (extglob-before-shopt strictness); GNU runtime rc=0, niu runtime rc=0"
+ },
+ {
+  "content_hash": "90d6bc81eaad053ea35cbc665596bbe7e7226d90",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/killall.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `--context | --older-than | --younger-than | --version | -${noargopts}@([Zoy]|V*))`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "91aa8683b376e8c8c0cb659d0348be18cfa53361",
+  "repo": "modernish/modernish",
+  "path": "share/doc/modernish/utils/mktoc.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: harden: command not found",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "91afb5153901669253d48764821f34c42aa600c9",
+  "repo": "klapptnot/dotf-old",
+  "path": ".config/bash/mirkop.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error: unexpected end of file from `{' command on line N @ `}`",
+  "latest_shared_verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+  "fresh_retest": "SYNTAX-STILL-REJECTED",
+  "classification": "new-engine-bug",
+  "issue": null,
+  "note": "D:/repo/rubash-wt-goldtri/target/goldtri/assets/91afb5153901: line 278: syntax error: unexpected end of file from `{' command on line 265"
+ },
+ {
+  "content_hash": "93b8c8d135e52e1fff0aa22a8f8233d8dc862700",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/luserdel.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `--help | --usage | -!(-*)[?]*)`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "98ad0249a3108a0bd2da2e19be652424b75c7299",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/rake.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "9b22449e5efaf5858e4856fd8316dc9e30d46617",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/ssh.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `!(*:*)/* | [.~]*) ;; # looks like a path`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "a07e14e8b4351a9dd08859df71a2e6675a4621e4",
+  "repo": "bats-core/bats-core",
+  "path": "libexec/bats-core/bats-gather-tests",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "SLOW",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "slow"
+ },
+ {
+  "content_hash": "a0b0c4ca1796712affa1c8b9f62e34df029c4c45",
+  "repo": "BashSupport/BashSupport",
+  "path": "testData/scripts/mtab.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: /lib/init/vars.sh: No such file or directory",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "a3990e1a3653180af37d6a30a9d5a4473765d15f",
+  "repo": "binpash/pash",
+  "path": "evaluation/tests/bigrams.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "a48ed0ba036717dfe2c20bd415f8b9009cf51113",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/perlcritic.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `--colo?(u)r-severity-* | --program-extensions | -[?HVs])`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "a6f8abc9dde15440bdd982ae82c597a32175f87c",
+  "repo": "bats-core/bats-core",
+  "path": "libexec/bats-core/bats-format-cat",
+  "original_verdicts": [
+   "HANG",
+   "HANG",
+   "HANG"
+  ],
+  "original_signature": "hang:source:^Ucommand echo ECOSRC",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "a740316324c55554610d38aece718eae2374b40b",
+  "repo": "freekmurze/dotfiles",
+  "path": "config/claude/statusline.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "aa5b29b498734fceb1a86d331536a9e27cbef51b",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/projects.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "ab327bcfd16cd78458560375662cfa76cbb1efa2",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/pydocstyle.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `--ignore | --add-select | --add-ignore | -!(-*)h)`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "ac3f3de2f5a6c369e7784cdd093922f720578cbd",
+  "repo": "wagoodman/bashful",
+  "path": "example/scripts/compile-something.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "upstream-heavy-external",
+  "issue": null,
+  "note": "still runs >15s non-interactively: network fetch / clone / build / server or missing-tool loop; platform+upstream cost, not a semantic wedge"
+ },
+ {
+  "content_hash": "acc4dbb040a36969c58b483e50ac22b39bff3f0b",
+  "repo": "CrackerCat/ZetaSploit",
+  "path": "uninstall.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: cat: banner/banner.txt: No such file or directory",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "upstream-heavy-external",
+  "issue": null,
+  "note": "still runs >15s non-interactively: network fetch / clone / build / server or missing-tool loop; platform+upstream cost, not a semantic wedge"
+ },
+ {
+  "content_hash": "ae02819bf6cbc72783cf41a3c1fa5105a85349b9",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/docker.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "ae55aaaaf74497c2e2c758740953079e41fcaeb9",
+  "repo": "MidnightCoding1/mForce",
+  "path": "modules/code_security.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:Finish with CTRL+D",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "b11cff734527d492b121cfd004cf35776f8a4dc0",
+  "repo": "hyperpolymath/valence-shell",
+  "path": "setup.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:[Y] Yes [N] No:",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "upstream-heavy-external",
+  "issue": null,
+  "note": "still runs >15s non-interactively: network fetch / clone / build / server or missing-tool loop; platform+upstream cost, not a semantic wedge"
+ },
+ {
+  "content_hash": "b4e3a68436c1792f030d5e49bb16e42c53dd5496",
+  "repo": "ersinkoc/dfmt",
+  "path": "hw.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "b53a4090938079886e7a23d3be046071f2ff1d71",
+  "repo": "zaventh/lintorama",
+  "path": ".claude/hooks/lintorama-stop.sh",
+  "original_verdicts": [
+   "HANG",
+   "HANG",
+   "HANG"
+  ],
+  "original_signature": "hang:source:command echo ECOSRC",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "b8030ba3c97e17f66875ae8dae5f38c7946cc1fd",
+  "repo": "binpash/pash",
+  "path": "evaluation/tests/ann-agg.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: cat: /evaluation/tests/input/1M.txt: No such file or directory",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "b875440eadfe98893a71b98dd21af2e146b7ac3b",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/lzip.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `--volume-size | --data-size | -${noargopts}@([bmsSB]|[hV]*))`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "b8b0cf6688176d62a11d318dfbd76e242b863b2c",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/growisofs.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `/?(r)dev/*)`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "b9bde77bddd4deb9af214737d889d509be430f56",
+  "repo": "GuidoFe/bash-cat-with-cat",
+  "path": "cat.sh",
+  "original_verdicts": [
+   "HANG",
+   "HANG",
+   "HANG"
+  ],
+  "original_signature": "hang:source:^Ucommand echo ECOSRC",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "bb7c22c797c8e73771502542f718adb8e9c6978c",
+  "repo": "akinomyoga/ble.sh",
+  "path": "lib/core-syntax.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY",
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `,' @ `((${#rematch2}>=2&&(_ble_syntax_attr[i+1]=CTX_CMDXC),`",
+  "latest_shared_verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+  "fresh_retest": "ALREADY-FIXED",
+  "classification": "already-fixed",
+  "issue": "fixed by fa87622b (rubash#435)",
+  "note": "fresh master a157656d `rubash -n` accepts; GNU -n accepted all along"
+ },
+ {
+  "content_hash": "bcd238337c99171a9e9b0795bd6c988537d07710",
+  "repo": "alanxz/dotfiles",
+  "path": ".bashrc",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:Administrator@X12-C:~#",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "bd957df56e0aafba2a877527f75df4263bea3d1d",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/mypy.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `--always-false | --@(dis|en)able-error-code | --find-occurrences | \\`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "bfc9f0c4a5e4f5ca9d880f73e8736fe7fee18ead",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/luseradd.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `--homephone | -${noargopts}@([culPp]|[?]*))`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "c0c2c640d35e94f51f69853a0a8bc1e27b18665e",
+  "repo": "binpash/pash",
+  "path": "evaluation/tests/wf.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "c1e83291558ceee99bf3607236a53ef98f5c4be3",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/pytest.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `--dist | --@(asyncio|record)-mode | --vcr-record?(-mode))`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "c54818d072aa75ad6c68fa758cbf8d8135f2ae9e",
+  "repo": "bivlked/amneziawg-installer",
+  "path": "install_amneziawg.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-EXITED",
+  "classification": "upstream-exit",
+  "issue": null,
+  "note": "asset calls exit / exec on this environment; sourcing `exit` must end the interactive shell (GNU identical)"
+ },
+ {
+  "content_hash": "c6709cabd93c8f1549696311c07bd11dd35e8e8d",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/lastlog.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `--before | --help | --time | -${noargopts}@([bt]|h*))`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "cceb7045d2d4e918ee9b08e78f8220b9d4adb009",
+  "repo": "SlimYAOSP/build",
+  "path": "envsetup.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:WARNING: Only bash and zsh are supported, use of other shell may lead to erroneous results",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "upstream-heavy-external",
+  "issue": null,
+  "note": "still runs >15s non-interactively: network fetch / clone / build / server or missing-tool loop; platform+upstream cost, not a semantic wedge"
+ },
+ {
+  "content_hash": "d2ac8e05435dd17629f2dbe1277c09e67b166b25",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/packer.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "d325949b4be5152a33058390f3de35642bb733e2",
+  "repo": "akinomyoga/ble.sh",
+  "path": "lib/keymap.vi.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY",
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `,' @ `index>eol&&(index=eol),`",
+  "latest_shared_verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+  "fresh_retest": "ALREADY-FIXED",
+  "classification": "already-fixed",
+  "issue": "fixed by fa87622b (rubash#435)",
+  "note": "fresh master a157656d `rubash -n` accepts; GNU -n accepted all along"
+ },
+ {
+  "content_hash": "d3f2ed7927052dfaf8632e12d89c89c17da635c3",
+  "repo": "h4l/json.bash",
+  "path": "hack/trap_bench.bash",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "d5aeef73ab77f25849ed395d44e60a363485c7ad",
+  "repo": "davewalker5/SpectrogramViewer",
+  "path": "scripts/make_venv.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: venv/bin/activate: No such file or directory",
+  "latest_shared_verdict": "SLOW",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "slow"
+ },
+ {
+  "content_hash": "d63453cd3eb8e0356638d8d82e65f2dbcc2e87f0",
+  "repo": "sm26449/webterm",
+  "path": "agent/shell-integration.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> ]N;B",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "d852d00fc60bf99ca8e28f31bcd3e7ce778d102b",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/oc.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "dcc1b853003982b6f5b21386d17da59d9745ffe6",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/gh.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "df47ce21ffaded571c1092bfb2611f70be060e1f",
+  "repo": "scop/bash-completion",
+  "path": "completions/README.md",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `http<path> @ `[bash-completion](https://github.com/scop/bash-completion) on demand.`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "e5d4488a75159ed92a00e655dec1be0c7b70c0cf",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/docker-compose.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "e72a0201c0afca307528a8826c1c9b4a71227380",
+  "repo": "denysdovhan/learnyoubash",
+  "path": "test/debugging/valid.bash",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO>",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "e77175a7ae80cb9c675d3af6be0332d2ddb1cf70",
+  "repo": "ethanbayliss/dotfiles",
+  "path": ".bashrc",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: line N: syntax error near unexpected token `&&'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "e9aec3635cb5beb7304dea5f341301d39d56d4b6",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/cvs.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY",
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "/e/eco-harvest/tmp/work-e9aec3635cb5/asset.bash: line N: syntax error near unexpected token `(' @ `-*@([aAbcelmnNosu]|t-))`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 @ line 192 extglob -*@()"
+ },
+ {
+  "content_hash": "ed59f1bf5bfcb6956afe5c5279fddfc0793a588e",
+  "repo": "scop/bash-completion",
+  "path": "completions-core/ssh-keygen.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `*\" -t dsa\"?( *))`",
+  "latest_shared_verdict": "GNU-ALSO-FAILS",
+  "fresh_retest": null,
+  "classification": "gnu-also-fails",
+  "issue": null,
+  "note": "error-gnu-also:GNU rc=2 (wt97b 4-way ladder)"
+ },
+ {
+  "content_hash": "ee4378d5e0e1fdb1ebb980b780771ccd6e585196",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/gem.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "f06e3726d7907e38a5414ee07902c295a9af2957",
+  "repo": "twoerner/myconfig",
+  "path": "bashrc",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: lsb_release: command not found",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "f10440d5a5cc3b982faf5032ca155eea5ef5bbda",
+  "repo": "bivlked/amneziawg-installer",
+  "path": "awg_common.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:ECO> source '<path>'",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: SLOW"
+ },
+ {
+  "content_hash": "f4cb220f9017352cd7bde8c8b57a4c40285e2faf",
+  "repo": "akinomyoga/ble.sh",
+  "path": "src/color.sh",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY",
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "<path> line N: syntax error near unexpected token `(' @ `x+=Range*(h2<60?h2:60)/60,`",
+  "latest_shared_verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+  "fresh_retest": "ALREADY-FIXED",
+  "classification": "already-fixed",
+  "issue": "fixed by fa87622b (rubash#435)",
+  "note": "fresh master a157656d `rubash -n` accepts; GNU -n accepted all along"
+ },
+ {
+  "content_hash": "f5a2368698eda243da2718cb08edbc6bc0a7fa5e",
+  "repo": "dreadatour/dotfiles",
+  "path": ".bash_profile",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:enter1:niu: <path>: No such file or directory",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "conpty-harness-stdin",
+  "issue": null,
+  "note": "blocks on the ConPTY TTY (stdin-reader/menu/terminal query); finishes in 0.2s non-interactive (stdin=DEVNULL); GNU interactive blocks identically"
+ },
+ {
+  "content_hash": "f69e8e9f3effca0e47beaa71732b36c1a2b7901c",
+  "repo": "kevinlekiller/reshade-steam-proton",
+  "path": "reshade-linux.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:aders’: No such file or directory",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "upstream-heavy-external",
+  "issue": null,
+  "note": "still runs >15s non-interactively: network fetch / clone / build / server or missing-tool loop; platform+upstream cost, not a semantic wedge"
+ },
+ {
+  "content_hash": "f6f74dba06206d8ab3922cfc80f5eb380892e11a",
+  "repo": "JustinChristensen/dotfiles",
+  "path": "darwin/.bash_profile",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:niu: <path> Drive/dotfiles/.bash_profile_keys: No such file or",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "f8224249a52aa296cf142b772493a77b79f4ac19",
+  "repo": "irrequietus/shellapi",
+  "path": "modules/odsel/odsel.shellapi.bash",
+  "original_verdicts": [
+   "SYNTAX-REJECT-RUBASH-ONLY"
+  ],
+  "original_signature": "rubash -n timed out (20s)",
+  "latest_shared_verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+  "fresh_retest": "SYNTAX-STILL-REJECTED",
+  "classification": "new-engine-bug",
+  "issue": null,
+  "note": "D:/repo/rubash-wt-goldtri/target/goldtri/assets/f8224249a52a: line 69: syntax error: unexpected end of file from `case' command on line 59"
+ },
+ {
+  "content_hash": "f861db300661eb3956e7d6c4d0704f253b3f9c0e",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/pip3.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "f962d0f75f7c8cea3e067b9c09f926c6638249c8",
+  "repo": "ohmybash/oh-my-bash",
+  "path": "completions/nvm.completion.sh",
+  "original_verdicts": [
+   "EXITED"
+  ],
+  "original_signature": "exit:?",
+  "latest_shared_verdict": "OK",
+  "fresh_retest": null,
+  "classification": "already-passed-later-run",
+  "issue": null,
+  "note": "ok"
+ },
+ {
+  "content_hash": "fb297bc274f88f8f3d72e453236a9f85a821adf5",
+  "repo": "sterrevangeest/dotfiles",
+  "path": ".bash_profile",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:Follow @igor_chubin for wttr.in updates“",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "PASSES-NOW",
+  "classification": "already-fixed",
+  "issue": null,
+  "note": "fresh master ConPTY: OK"
+ },
+ {
+  "content_hash": "fc0cdd12747b63f25a97e7a458829fb6c9afdcdf",
+  "repo": "Soroushnk/Astro",
+  "path": "managed/mtproto.sh",
+  "original_verdicts": [
+   "HANG"
+  ],
+  "original_signature": "hang:source:to get the server tag you should use telegram bot http<path>",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-HANG",
+  "classification": "upstream-heavy-external",
+  "issue": null,
+  "note": "still runs >15s non-interactively: network fetch / clone / build / server or missing-tool loop; platform+upstream cost, not a semantic wedge"
+ },
+ {
+  "content_hash": "fcb1ccd8f79a8bbd50bf96c51129039dea32de38",
+  "repo": "konethegreat/github-final-project",
+  "path": "tests/test-simple-interest.sh",
+  "original_verdicts": [
+   "HANG",
+   "HANG",
+   "HANG"
+  ],
+  "original_signature": "hang:source:/usr/bin/bash: simple-interest.sh: No such file or directory",
+  "latest_shared_verdict": "HANG",
+  "fresh_retest": "RUBASH-ONLY-EXITED",
+  "classification": "upstream-exit",
+  "issue": null,
+  "note": "asset calls exit / exec on this environment; sourcing `exit` must end the interactive shell (GNU identical)"
+ }
+]
