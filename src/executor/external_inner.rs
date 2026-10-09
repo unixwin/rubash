@@ -891,6 +891,12 @@ impl Executor {
             use std::os::unix::process::CommandExt;
             process.pre_exec(crate::builtins::kill::child_pre_exec_reset);
         }
+        // rubash#438: pin the buffered process-substitution pipe read ends at
+        // their /dev/fd/N numbers in the child (fork-exec dup2), so the
+        // literal argv word resolves through the OS /dev/fd layer like a
+        // GNU fork.
+        #[cfg(unix)]
+        crate::executor::dev_fd_operands::attach_unix_dev_fd_operands(&mut process, &dev_ops);
         let spawned = process.spawn();
         // Drop the Command NOW: std retains every `Stdio::from(..)` it was
         // given (the #144 shared capture-pipe write clones among them), so a

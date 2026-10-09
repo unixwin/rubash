@@ -55,3 +55,65 @@ fn coproc_input_move_marks_array_endpoint_closed() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "x=hi arr=-1 60\n");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
+
+#[test]
+fn coproc_child_inherits_function_table_for_debug_trap() {
+    // unixwin/rubash#441: GNU coproc forks, so the coprocess shell inherits
+    // the full function table. A DEBUG trap installed before the coproc
+    // (bash-preexec's `__bp_preexec_invoke_exec`) must resolve inside the
+    // child instead of falling through to a PATH lookup and reporting
+    // `command not found`. GNU Bash 5.2.37 (msys) oracle probe
+    // 2026-10-09: `PREEXEC: inside-coproc`, no diagnostics on stderr.
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(
+            "preexec() { echo \"PREEXEC: $1\" >&2; }; \
+             trap 'preexec \"$BASH_COMMAND\"' DEBUG; \
+             coproc C { preexec inside-coproc; echo coproc-ready; }; \
+             read -r out <&${C[0]}; \
+             echo \"got: $out\"",
+        )
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    // The child executes the body's DEBUG trap successfully (the parent's
+    // own DEBUG traps for the surrounding commands also log to stderr).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stdout, "got: coproc-ready\n", "stdout was: {stdout}");
+    assert!(
+        stderr.contains("PREEXEC: inside-coproc"),
+        "stderr was: {stderr}"
+    );
+    assert!(
+        !stderr.contains("command not found"),
+        "stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn coproc_function_snapshot_is_one_way_into_child() {
+    // The function table rides to the coprocess as a BASH_FUNC snapshot;
+    // the child sees it but the parent's table and exported set are
+    // untouched by the spawn (fork snapshot semantics).
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(
+            "parent_fn() { echo p; }; \
+             coproc C { parent_fn; }; \
+             read -r out <&${C[0]}; \
+             echo \"child: $out\"; \
+             declare -F parent_fn >/dev/null && echo parent-keeps-fn; \
+             export -p | grep -q 'BASH_FUNC_parent_fn' || echo no-parent-export",
+        )
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout, "child: p\nparent-keeps-fn\nno-parent-export\n",
+        "stdout was: {stdout}"
+    );
+}

@@ -2992,6 +2992,35 @@ impl Executor {
             return Some(self.shell_variable_value(name).unwrap_or_default());
         }
         let body = whole_word_braced_parameter_body(unquoted)?;
+        // Whole-word `${name:=word}` / `${name:-word}` / `${name=word}` /
+        // `${name-word}` / `${name:?word}` / `${name?word}`: the operator
+        // WORD is the expansion result, so it takes ONE expand_word pass —
+        // the same `${}` re-expansion the embedded walker performs — but
+        // through this helper the compound splitter sees the token as a
+        // whole-word parameter and keeps a quoted token's product glued.
+        // GNU `"${v:=x y}"` in `("${v:=x y}")` is wholly W_QUOTED: the
+        // default's space is data, storing ONE element `x y` (rubash#432);
+        // the generic walker left live IFS whitespace in the product and the
+        // re-quoted splitter split it into `x` + `y`. `+`/`:+` alternates
+        // keep their dedicated fanout path
+        // (braced_alternate_compound_element_fields): when their word is
+        // unused the VALUE side expands, with at-list per-word semantics
+        // (rubash#315). At-list names (`[@]`/`[*]`) and indirect (`!`) /
+        // length (`#`) bodies stay out of this arm for the same reason.
+        if let Some(body) = whole_word_braced_parameter_body(unquoted) {
+            if !body.starts_with('!') && !body.starts_with('#') {
+                let has_word_operator = [":-", ":=", ":?"].iter().any(|op| {
+                    super::expand_braced_ops::split_once_outside_subscript_str(body, op).is_some()
+                }) || ['-', '=', '?'].iter().any(|op| {
+                    super::expand_braced_ops::split_once_outside_subscript(body, *op)
+                        .is_some_and(|(var_name, _)| !var_name.ends_with(':'))
+                });
+                if has_word_operator {
+                    let name = body.replace("\\\"", "\"").replace("\\'", "'");
+                    return Some(self.expand_word(&format!("${{{name}}}")));
+                }
+            }
+        }
         let name = body.replace("\\\"", "\"").replace("\\'", "'");
         match self.array_element_parameter_value(&name) {
             Some(value) => Some(value),

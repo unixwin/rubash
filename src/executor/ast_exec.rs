@@ -217,6 +217,11 @@ impl Executor {
 
         while index < commands.len() {
             let command = &commands[index];
+            // rubash#439: the expansion-failure mark belongs to ONE command.
+            // Reset before each iteration so a previous command's expansion
+            // error never suppresses the ERR trap this command earns by
+            // failing (GNU run_error_trap is per execute_simple_command).
+            self.command_expansion_failed.set(false);
             // eval.c:178 + shell.c:183: current_command_number increments
             // once per reader-loop command list, BEFORE it executes; `\#`
             // in ${var@P} reads the counter (parse.y:6568-6574). This
@@ -774,10 +779,11 @@ impl Executor {
                     Err(ExecuteError::ExpansionFailure(code)) => {
                         self.exit_code = code;
                     }
-                    Err(ExecuteError::IoError(error)) if is_closed_output_io_error(&error) => {
-                        return Err(ExecuteError::IoError(error));
-                    }
                     Err(ExecuteError::IoError(error)) => {
+                        // rubash#440: a closed output (SIGPIPE analogue) is a
+                        // write error for this command — GNU's parent shell
+                        // ignores SIGPIPE, reports the failed write and keeps
+                        // running; it never aborts the surrounding list.
                         eprintln!(
                             "{}{}",
                             self.diagnostic_prefix(),
@@ -868,10 +874,11 @@ impl Executor {
                     Err(ExecuteError::ExpansionFailure(code)) => {
                         self.exit_code = code;
                     }
-                    Err(ExecuteError::IoError(error)) if is_closed_output_io_error(&error) => {
-                        return Err(ExecuteError::IoError(error));
-                    }
                     Err(ExecuteError::IoError(error)) => {
+                        // rubash#440: a closed output (SIGPIPE analogue) is a
+                        // write error for this command — GNU's parent shell
+                        // ignores SIGPIPE, reports the failed write and keeps
+                        // running; it never aborts the surrounding list.
                         eprintln!(
                             "{}{}",
                             self.diagnostic_prefix(),
@@ -933,10 +940,11 @@ impl Executor {
                         // command; the surrounding list continues.
                         self.exit_code = code;
                     }
-                    Err(ExecuteError::IoError(error)) if is_closed_output_io_error(&error) => {
-                        return Err(ExecuteError::IoError(error));
-                    }
                     Err(ExecuteError::IoError(error)) => {
+                        // rubash#440: a closed output (SIGPIPE analogue) is a
+                        // write error for this command — GNU's parent shell
+                        // ignores SIGPIPE, reports the failed write and keeps
+                        // running; it never aborts the surrounding list.
                         eprintln!(
                             "{}{}",
                             self.diagnostic_prefix(),
@@ -1011,10 +1019,11 @@ impl Executor {
                     Err(ExecuteError::ExpansionFailure(code)) => {
                         self.exit_code = code;
                     }
-                    Err(ExecuteError::IoError(error)) if is_closed_output_io_error(&error) => {
-                        return Err(ExecuteError::IoError(error));
-                    }
                     Err(ExecuteError::IoError(error)) => {
+                        // rubash#440: a closed output (SIGPIPE analogue) is a
+                        // write error for this command — GNU's parent shell
+                        // ignores SIGPIPE, reports the failed write and keeps
+                        // running; it never aborts the surrounding list.
                         eprintln!(
                             "{}{}",
                             self.diagnostic_prefix(),
@@ -1066,10 +1075,11 @@ impl Executor {
                 Err(ExecuteError::ExpansionFailure(code)) => {
                     self.exit_code = code;
                 }
-                Err(ExecuteError::IoError(error)) if is_closed_output_io_error(&error) => {
-                    return Err(ExecuteError::IoError(error));
-                }
                 Err(ExecuteError::IoError(error)) => {
+                    // rubash#440: a closed output (SIGPIPE analogue) is this
+                    // command's write failure — GNU's parent shell ignores
+                    // SIGPIPE, reports the failed write with status 1 and
+                    // keeps executing the list.
                     eprintln!(
                         "{}{}",
                         self.diagnostic_prefix(),
@@ -1114,10 +1124,11 @@ impl Executor {
                 Err(ExecuteError::ExpansionFailure(code)) => {
                     self.exit_code = code;
                 }
-                Err(ExecuteError::IoError(error)) if is_closed_output_io_error(&error) => {
-                    return Err(ExecuteError::IoError(error));
-                }
                 Err(ExecuteError::IoError(error)) => {
+                    // rubash#440: a closed output (SIGPIPE analogue) is this
+                    // command's write failure — GNU's parent shell ignores
+                    // SIGPIPE, reports the failed write with status 1 and
+                    // keeps executing the list.
                     eprintln!(
                         "{}{}",
                         self.diagnostic_prefix(),
@@ -1193,15 +1204,11 @@ impl Executor {
                         }
                     }
                 }
-                Err(ExecuteError::IoError(error)) if is_closed_output_io_error(&error) => {
-                    return Err(ExecuteError::IoError(error));
-                }
                 Err(ExecuteError::IoError(error)) => {
-                    // Bash treats a failed command redirection (and other
-                    // command-owned I/O failures) as the command's status 1.
-                    // It does not abort the surrounding list unless errexit
-                    // is active; propagating the raw I/O error here made a
-                    // script stop after `cmd >/missing/path`.
+                    // rubash#440: a closed output (SIGPIPE analogue) is this
+                    // command's write failure — GNU's parent shell ignores
+                    // SIGPIPE, reports the failed write with status 1 and
+                    // keeps executing the list; only errexit promotes it.
                     eprintln!(
                         "{}{}",
                         self.diagnostic_prefix(),

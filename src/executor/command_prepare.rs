@@ -344,6 +344,8 @@ impl Executor {
             // whole script.
             let status = if message == "readonly variable" { 2 } else { 1 };
             self.exit_code = status;
+            // rubash#439: expansion error, not a failed command — no ERR trap.
+            self.command_expansion_failed.set(true);
             return Err(ExecuteError::ExpansionFailure(status));
         }
         // Bash 5.3 (parser.h FUNSUB_CHAR) executes whitespace-led
@@ -363,6 +365,8 @@ impl Executor {
                 // source session-killer (wt90).
                 if self.expansion_error_is_interactive_discard() {
                     self.exit_code = 1;
+                    // rubash#439: expansion error, not a failed command.
+                    self.command_expansion_failed.set(true);
                     return Err(ExecuteError::ExpansionFailure(1));
                 }
                 // subst.c expand_wdesc_fatal → exp_jump_to_top_level
@@ -382,6 +386,9 @@ impl Executor {
                 // line still runs (probe 2026-09-02: `echo ${#:}; echo
                 // after` prints `after`; cf. t25 failglob). ExitCode(1)
                 // here made them abort the whole script at top level.
+                // rubash#439: expansion error, not a failed command — no
+                // ERR trap.
+                self.command_expansion_failed.set(true);
                 return Err(ExecuteError::ExpansionFailure(status));
             }
             return Err(ExecuteError::ExitCode(status));
@@ -453,6 +460,9 @@ impl Executor {
                     return Err(ExecuteError::ExitCode(code));
                 }
                 self.exit_code = 1;
+                // rubash#439: expansion error, not a failed command — no
+                // ERR trap.
+                self.command_expansion_failed.set(true);
                 return Err(ExecuteError::ExpansionFailure(1));
             }
             let expanded_value = assignment_result.value;
@@ -636,6 +646,8 @@ impl Executor {
             // (subst.c:10404-10410); the script keeps running either way.
             let status = if message == "readonly variable" { 2 } else { 1 };
             self.exit_code = status;
+            // rubash#439: expansion error, not a failed command — no ERR trap.
+            self.command_expansion_failed.set(true);
             return Err(ExecuteError::ExpansionFailure(status));
         }
         // Bash 5.3 (parser.h FUNSUB_CHAR) executes whitespace-led
@@ -651,6 +663,8 @@ impl Executor {
                 // selects the DISCARD-class error so the session survives.
                 if self.expansion_error_is_interactive_discard() {
                     self.exit_code = 1;
+                    // rubash#439: expansion error, not a failed command.
+                    self.command_expansion_failed.set(true);
                     return Err(ExecuteError::ExpansionFailure(1));
                 }
                 // Same FORCE_EOF mapping as execute_empty_words_command
@@ -666,6 +680,9 @@ impl Executor {
                 // GNU 5.2 non-fatal word-expansion errors (bad substitution,
                 // substring < 0): abandon this command list with status 1;
                 // the next line still runs (same semantics as t25 failglob).
+                // rubash#439: expansion error, not a failed command — no
+                // ERR trap.
+                self.command_expansion_failed.set(true);
                 return Err(ExecuteError::ExpansionFailure(status));
             }
             return Err(ExecuteError::ExitCode(status));
@@ -968,6 +985,8 @@ impl Executor {
         // expand_command_word path sets arithmetic_nonfatal_error; check it
         // here and skip the command with ExpansionFailure(1).
         if self.shell_state.arithmetic_nonfatal_error.take() {
+            // rubash#439: expansion error, not a failed command — no ERR trap.
+            self.command_expansion_failed.set(true);
             return Err(ExecuteError::ExpansionFailure(1));
         }
         variable_expanded.words = expanded_words
@@ -1017,6 +1036,9 @@ impl Executor {
                             // skips x, the next line prints). ExitCode(1) made
                             // it abort the whole script at top level
                             // (glob.tests line 67 truncated later output).
+                            // rubash#439: expansion error, not a failed
+                            // command — no ERR trap.
+                            self.command_expansion_failed.set(true);
                             return Err(ExecuteError::ExpansionFailure(1));
                         }
                     }

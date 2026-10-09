@@ -1470,9 +1470,14 @@ where
                     'S' => parsed.suffix = Some(value),
                     'X' => parsed.filterpat = Some(value),
                     'C' => parsed.command = Some(value),
-                    // complete.def:329-337: -F argument must be an identifier.
+                    // complete.def:329-337: -F argument must be a FUNCTION
+                    // name. GNU accepts dashed/dotted names (bash function
+                    // definitions are not restricted to valid_identifier;
+                    // e.g. `complete -F _dirs-complete dirs` from oh-my-bash),
+                    // so this uses the relaxed function-name rule, not the
+                    // variable-identifier rule.
                     'F' => {
-                        if !valid_identifier(&value) {
+                        if !valid_function_name(&value) {
                             writeln!(
                                 stderr,
                                 "{diagnostic_prefix}{name}: `{value}': not a valid identifier"
@@ -1528,6 +1533,18 @@ fn valid_identifier(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// bash function-name rule for `complete -F`/`compgen -F`: any non-empty name
+/// made of [A-Za-z0-9_.-]. Bash function definitions are words, not
+/// identifiers (parse.y accepts `_dirs-complete { ...; }` verbatim, and the
+/// oh-my-bash completion assets rely on dashed helper names), so the -F
+/// argument admits the superset that valid_identifier rejects.
+fn valid_function_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
 /// Result of parsing complete/compgen words (complete.def build_actions).

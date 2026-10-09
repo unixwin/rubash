@@ -3046,6 +3046,20 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             raw.pop();
             raw.push('\n');
         }
+        // rubash#434: a line delivered through a winpty/ConPTY bridge is an
+        // encoding of TYPED TEXT, not a stream of individual keystrokes — a
+        // literal `\1` typed by the user can arrive as the byte 0x01, which
+        // the dispatch below used to honor as console Ctrl-A (and 0x15 as
+        // Ctrl-U, the niubash#451 `hang:source:^U...` family). Normalize the
+        // cooked line BEFORE the edit dispatch: C0 bytes keep only the
+        // semantics that survive a cooked line (accept-line CR/NL, tab,
+        // backspace/DEL, C-c line discard, C-d EOF, C-v quoted-insert, and
+        // the ESC introducer — dropping ESC alone would leak the "[A" tails
+        // of arrow-key sequences into the buffer); cursor-motion and kill
+        // keys (C-a/C-e/C-b/C-f/C-k/C-u, C-r isearch, history C-p/C-n) are
+        // bridge artifacts here and are dropped instead of mutating the edit
+        // buffer. Raw bytes therefore never enter the command-line buffer.
+        let raw = normalize_bridge_line(&raw);
         match line_result {
             // bashline.c bash_readline: interactive EOF synthesizes the
             // `exit` command, whose builtin echoes "exit" (or "logout")
@@ -3402,6 +3416,71 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
 
     let status = executor.last_exit_code();
     finish_shell(executor, status, true)
+}
+
+/// C0 control bytes that survive normalization of a bridge-delivered
+/// interactive line (see the rubash#434 call site in
+/// [`run_interactive_stdin`]): accept-line (CR/NL), tab, backspace (BS/DEL),
+/// C-c (discard edit line), C-d (EOF), C-v (quoted insert) and ESC (the
+/// introducer of the CSI/SS3 arrow-key sequences the dispatch consumes as a
+/// unit). Everything else in 0x00-0x1F is dropped before it can act on the
+/// command-line buffer.
+const BRIDGE_LINE_KEPT_C0: &[char] = &['\n', '\r', '\t', '\x03', '\x04', '\x08', '\x16', '\x1b'];
+
+/// Drop the C0 control bytes that carry no cooked-line semantics from one
+/// interactive input line (rubash#434). Printable text, DEL (0x7f, already
+/// printable-range for the filter below) and the kept control set above pass
+/// through unchanged, so valid UTF-8 and raw-byte markers are untouched.
+///
+/// The line arrives through `bytes_to_shell_text`, which marker-tags the
+/// carrier bytes (0x0c/0x11/0x13 plus the whole 0x14..=0x1f block — 0x15
+/// among them) as the two-char raw-byte marker pair, so a naive
+/// `char < ' '` filter would let those bytes through and re-materialize
+/// them in every command they reach. The walk below therefore also decodes
+/// the marker pairs and drops the ones whose byte is a bridge artifact.
+fn normalize_bridge_line(raw: &str) -> String {
+    use crate::executor::markers::{
+        RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
+    };
+    let chars: Vec<char> = raw.chars().collect();
+    let mut output = String::with_capacity(raw.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c as u32 == RAW_BYTE_MARKER_ESCAPE {
+            match chars.get(i + 1) {
+                // doubled introducer: an escaped literal E000 — keep the pair
+                Some(&next) if next as u32 == RAW_BYTE_MARKER_ESCAPE => {
+                    output.push(c);
+                    output.push(next);
+                    i += 2;
+                }
+                // raw-byte marker pair: drop it when the carried byte is a
+                // bridge-artifact C0 byte, keep it otherwise
+                Some(&next)
+                    if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(next as u32)) =>
+                {
+                    let byte = (next as u32 - RAW_BYTE_MARKER_FIRST) as u8;
+                    let ch = char::from_u32(byte as u32).unwrap_or('\u{fffd}');
+                    if ch >= ' ' || BRIDGE_LINE_KEPT_C0.contains(&ch) {
+                        output.push(c);
+                        output.push(next);
+                    }
+                    i += 2;
+                }
+                _ => {
+                    output.push(c);
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if c >= ' ' || BRIDGE_LINE_KEPT_C0.contains(&c) {
+            output.push(c);
+        }
+        i += 1;
+    }
+    output
 }
 
 pub fn read_unbuffered_line(output: &mut String) -> io::Result<usize> {

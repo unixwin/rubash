@@ -69,6 +69,12 @@ pub(in crate::executor) struct DevOperandMaterialization {
     temps: Vec<PathBuf>,
     consume_fds: Vec<u32>,
     flushes: Vec<(PathBuf, DevOperandFlush)>,
+    /// Unix: parent-held pipe read ends to pin at their `/dev/fd/N` numbers
+    /// in the child between fork and exec (see materialize_dev_fd_operands).
+    /// Closed when the record drops, like GNU closing the parent's pipe end
+    /// once the forked child owns its copy.
+    #[cfg(unix)]
+    pub(in crate::executor) unix_fd_attach: Vec<(u32, std::os::fd::RawFd)>,
 }
 
 impl Drop for DevOperandMaterialization {
@@ -81,6 +87,50 @@ impl Drop for DevOperandMaterialization {
                 crate::fd::close_handle(*handle);
             }
         }
+        #[cfg(unix)]
+        for (_, source) in &self.unix_fd_attach {
+            crate::fd::close_handle(*source);
+        }
+    }
+}
+
+#[cfg(unix)]
+/// Pin every recorded `/dev/fd/N` pipe read end at its own descriptor number
+/// in the child between fork and exec (std Command pre_exec): the child then
+/// resolves the literal argv word through the OS /dev/fd layer exactly as a
+/// GNU-bash forked child does (execute_cmd.c hands argv to execve unchanged;
+/// the descriptor's existence is the whole contract). Runs in the child —
+/// dup2/close/fcntl only.
+pub(in crate::executor) fn attach_unix_dev_fd_operands(
+    process: &mut std::process::Command,
+    m: &DevOperandMaterialization,
+) {
+    if m.unix_fd_attach.is_empty() {
+        return;
+    }
+    use std::os::unix::process::CommandExt;
+    let attach = m.unix_fd_attach.clone();
+    unsafe {
+        process.pre_exec(move || {
+            for &(number, source) in attach.iter() {
+                let number = number as libc::c_int;
+                // A fresh pipe fd can land on the target number itself in
+                // the parent; dup2(fd, fd) is a no-op that does NOT clear
+                // FD_CLOEXEC, so exec would close the descriptor the argv
+                // word names — clear the flag explicitly instead.
+                if source == number {
+                    let flags = libc::fcntl(source, libc::F_GETFD);
+                    if flags < 0
+                        || libc::fcntl(source, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                } else if libc::dup2(source, number) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
     }
 }
 
@@ -239,9 +289,51 @@ impl Executor {
         stdout: DevOperandStdout,
     ) -> (Vec<String>, DevOperandMaterialization) {
         let mut m = DevOperandMaterialization::default();
-        // POSIX children resolve these names through their own /dev/fd
-        // emulation; only Windows children need the materialized endpoint.
         if !cfg!(windows) {
+            // POSIX children resolve the literal `/dev/fd/N` word through
+            // their own /dev/fd layer once descriptor N exists at exec time
+            // (GNU execute_cmd.c passes argv to execve unchanged). rubash's
+            // virtual fd table is not the child's descriptor table, though —
+            // a buffered substitution endpoint has NO real descriptor, which
+            // is why `diff <(echo a) <(echo a)` failed ENOENT (rubash#438).
+            // Back each virtual read operand with a real anonymous pipe
+            // carrying the endpoint's remaining bytes and pin the read end
+            // at fd N in the child (attach_unix_dev_fd_operands, called by
+            // the spawn paths with this record). File-backed endpoints keep
+            // the literal word: the OS resolves it natively.
+            #[cfg(unix)]
+            for arg in args {
+                let Some((_prefix, value)) = split_dev_operand(arg) else {
+                    continue;
+                };
+                let Some(fd) = dev_operand_fd(value) else {
+                    continue;
+                };
+                let Some(entry) = self.fd_table.entries.get(&fd).filter(|e| !e.closed) else {
+                    continue;
+                };
+                let buffered = match &entry.read {
+                    Some(FdReadEndpoint::Text(_) | FdReadEndpoint::ProcessSubstitution(_)) => self
+                        .fd_table
+                        .input_snapshot_bytes(fd)
+                        .map(|(data, offset)| data[offset..].to_vec())
+                        .unwrap_or_default(),
+                    _ => continue,
+                };
+                m.consume_fds.push(fd);
+                let Ok((read_end, write_end)) = crate::fd::create_capture_pipe() else {
+                    continue;
+                };
+                // The pipe kernel buffer is finite: feed the payload from a
+                // thread so a large substitution cannot block the shell on a
+                // reader that only exists after exec. An early child exit
+                // surfaces as EPIPE in the thread and is ignored.
+                std::thread::spawn(move || {
+                    let _ = crate::fd::write_all(write_end, &buffered);
+                    crate::fd::close_handle(write_end);
+                });
+                m.unix_fd_attach.push((fd, read_end));
+            }
             return (args.to_vec(), m);
         }
         let rewritten = args
