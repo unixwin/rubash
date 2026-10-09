@@ -132,6 +132,82 @@ fn escaped_extglob_introducer_is_syntax_error() {
     assert_eq!(stdout, "", "stdout: {stdout}");
 }
 
+/// The issue-title form, STANDALONE: a redirect with no command word.
+/// The gate is closed (same-line `shopt' never arms the parse gate and
+/// extglob is off by default), so the `(' strands out of the target word
+/// and yacc reports `syntax error near unexpected token `(''; rc=2 and
+/// NO literal `?(zz)out' file is created.
+#[test]
+fn standalone_redirect_target_is_syntax_error_without_literal_file() {
+    let dir = fixture("extglob-standalone");
+    let (stdout, stderr, code) = rubash_script(&dir, ">?(zz)out\necho NEVER\n");
+    assert_eq!(code, Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.contains("syntax error near unexpected token `('"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(stdout, "", "stdout: {stdout}");
+    assert!(!dir.join("?(zz)out").exists(), "no literal file may appear");
+}
+
+/// The canonical issue repro as one line: `echo hi >?(zz)out' — rc=2,
+/// the GNU diagnostic, no file, and nothing after the abort runs.
+#[test]
+fn canonical_issue_repro_rejects_without_creating_file() {
+    let dir = fixture("extglob-canonical");
+    let (stdout, stderr, code) = rubash_script(&dir, "echo hi >?(zz)out\necho NEVER\n");
+    assert_eq!(code, Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.contains("syntax error near unexpected token `('"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("`echo hi >?(zz)out'"),
+        "offending line echoed; stderr: {stderr}"
+    );
+    assert_eq!(stdout, "", "stdout: {stdout}");
+    assert!(!dir.join("?(zz)out").exists(), "no literal file may appear");
+}
+
+/// The rejection covers the whole redirect-operator family: `>>' and
+/// `2>' take the same WORD-operand grammar (parse.y:532-575), so their
+/// extglob targets strand the `(' identically.
+#[test]
+fn append_and_err_redirect_extglob_targets_reject() {
+    let dir = fixture("extglob-op-family");
+    for script in ["echo a >>?(zz)out", "echo a 2>?(zz)out"] {
+        let (stdout, stderr, code) = rubash_script(&dir, &format!("{script}\necho NEVER\n"));
+        assert_eq!(code, Some(2), "script: {script}; stderr: {stderr}");
+        assert!(
+            stderr.contains("syntax error near unexpected token `('"),
+            "script: {script}; stderr: {stderr}"
+        );
+        assert_eq!(stdout, "", "script: {script}; stdout: {stdout}");
+        assert!(
+            !dir.join("?(zz)out").exists(),
+            "script: {script}; no literal file may appear"
+        );
+    }
+}
+
+/// The INPUT side is NOT part of the rejection: `<(' is process
+/// substitution (parse.y reserved word, gram.y `procsub'), both with the
+/// gate off and on — `echo hi <(zz)' runs zz and reads the pipe
+/// (verified GNU: `zz: command not found' on stderr, `hi /dev/fd/63').
+#[test]
+fn input_side_process_substitution_still_works() {
+    for prologue in ["", "shopt -s extglob\n"] {
+        let dir = fixture("procsub-input-side");
+        let (stdout, stderr, code) = rubash_script(&dir, &format!("{prologue}echo hi <(zz)\n"));
+        assert_eq!(code, Some(0), "stderr: {stderr}");
+        assert!(stderr.contains("zz: command not found"), "stderr: {stderr}");
+        assert!(
+            stdout.contains("hi /dev/fd/"),
+            "stdout: {stdout}; stderr: {stderr}"
+        );
+    }
+}
+
 // -------------------------------------------------------------------------
 // Shape 2: interactive session survives a parse error
 // -------------------------------------------------------------------------
