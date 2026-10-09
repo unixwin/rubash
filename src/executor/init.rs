@@ -328,6 +328,7 @@ impl Executor {
             function_tempenv_names: Vec::new(),
             evalerror_pending: Cell::new(false),
             evalerror_line: Cell::new(None),
+            command_expansion_failed: Cell::new(false),
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),
             break_failure_status: Cell::new(None),

@@ -1085,6 +1085,16 @@ impl Executor {
             || self.suppress_errexit != 0
             || self.error_trap_running
             || self.host_internal_depth.get() > 0
+            // rubash#439: a word/assignment expansion error (GNU subst.c
+            // expand_wdesc_error -> exp_jump_to_top_level(DISCARD)) abandons
+            // the command BEFORE it executes, and the DISCARD jump bypasses
+            // the run_error_trap call sites in execute_cmd.c — so the trap
+            // never fires for the expansion failure itself (`trap 'echo E'
+            // ERR; x=${!bad}` must print only the diagnostic). A command
+            // substitution failure (`x=$(false)`) is NOT this class: the
+            // inner command ran and the assignment carries its status, so
+            // the ERR trap still fires there.
+            || self.command_expansion_failed.get()
             || (self.shell_state.function_depth > 0
                 && !crate::builtins::set::shell_option_enabled(
                     &self.shell_state.env_vars,

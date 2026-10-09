@@ -217,6 +217,11 @@ impl Executor {
 
         while index < commands.len() {
             let command = &commands[index];
+            // rubash#439: the expansion-failure mark belongs to ONE command.
+            // Reset before each iteration so a previous command's expansion
+            // error never suppresses the ERR trap this command earns by
+            // failing (GNU run_error_trap is per execute_simple_command).
+            self.command_expansion_failed.set(false);
             // eval.c:178 + shell.c:183: current_command_number increments
             // once per reader-loop command list, BEFORE it executes; `\#`
             // in ${var@P} reads the counter (parse.y:6568-6574). This

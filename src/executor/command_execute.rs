@@ -955,6 +955,8 @@ impl Executor {
         // session keeps reading, whatever the target dispatches to.
         if self.expansion_error_is_interactive_discard() {
             self.exit_code = 1;
+            // rubash#439: expansion error, not a failed command — no ERR trap.
+            self.command_expansion_failed.set(true);
             return Err(ExecuteError::ExpansionFailure(1));
         }
         let code = self.expansion_fatal_status();
@@ -1005,6 +1007,8 @@ impl Executor {
                 // the FORCE_EOF branch below is noninteractive only.
                 if self.expansion_error_is_interactive_discard() {
                     self.exit_code = 1;
+                    // rubash#439: expansion error, not a failed command.
+                    self.command_expansion_failed.set(true);
                     return Err(ExecuteError::ExpansionFailure(1));
                 }
                 // GNU expr.c:1190-1216 expr_streval: an unbound variable
@@ -1047,6 +1051,9 @@ impl Executor {
             }
             if was_fatal {
                 self.exit_code = 1;
+                // rubash#439: expansion error, not a failed command — no
+                // ERR trap.
+                self.command_expansion_failed.set(true);
                 return Err(ExecuteError::ExpansionFailure(1));
             }
             self.exit_code = 1;
@@ -1075,6 +1082,8 @@ impl Executor {
                 return Err(ExecuteError::ExitCode(code));
             }
             self.exit_code = 1;
+            // rubash#439: expansion error, not a failed command — no ERR trap.
+            self.command_expansion_failed.set(true);
             return Err(ExecuteError::ExpansionFailure(1));
         }
 
@@ -1087,6 +1096,8 @@ impl Executor {
             // `${var?msg}` / bad-substitution status, not the builtin-failure
             // status 1.
             self.exit_code = 2;
+            // rubash#439: expansion error, not a failed command — no ERR trap.
+            self.command_expansion_failed.set(true);
             return Err(ExecuteError::ExpansionFailure(2));
         }
         Ok(())

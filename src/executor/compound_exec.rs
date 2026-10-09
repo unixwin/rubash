@@ -1337,6 +1337,12 @@ impl Executor {
         // environment and must be restored like env_vars (niubash#100).
         // Same convention as command substitution's saved_dir handling.
         let saved_cwd = env::current_dir().ok();
+        // rubash#439: the body's word-expansion error mark dies with the
+        // forked child (GNU's DISCARD jump cannot cross the fork boundary) —
+        // the parent judges the subshell only by its exit STATUS, so
+        // `(x=${!bad})` still fires the parent's ERR trap.
+        let saved_expansion_failed = self.command_expansion_failed.get();
+        self.command_expansion_failed.set(false);
         crate::builtins::trap::reset_for_subshell(&mut self.shell_state.env_vars);
         self.shell_state.subshell_depth.set(saved_depth + 1);
         self.shell_state.loop_depth = 0;
@@ -1513,6 +1519,7 @@ impl Executor {
             Err(error) => {
                 self.restore_flat_subshell(saved_state.clone(), saved_cwd.clone());
                 self.fd_table = saved_fd_table.clone();
+                self.command_expansion_failed.set(saved_expansion_failed);
                 return Err(error);
             }
         };
@@ -1521,6 +1528,7 @@ impl Executor {
             Some(Err(error)) => {
                 self.restore_flat_subshell(saved_state.clone(), saved_cwd.clone());
                 self.fd_table = saved_fd_table.clone();
+                self.command_expansion_failed.set(saved_expansion_failed);
                 return Err(error);
             }
             None => status,
@@ -1528,6 +1536,7 @@ impl Executor {
 
         self.restore_flat_subshell(saved_state, saved_cwd);
         self.fd_table = saved_fd_table;
+        self.command_expansion_failed.set(saved_expansion_failed);
         let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
         self.exit_code = status;
         finish_result?;
