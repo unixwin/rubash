@@ -644,6 +644,15 @@ pub struct Executor {
     /// discarded; set lazily when the reader-level loop first observes
     /// `evalerror_pending`.
     evalerror_line: Cell<Option<usize>>,
+    /// rubash#439: a WORD/ASSIGNMENT expansion error aborted the current
+    /// simple command (GNU subst.c expand_wdesc_error ->
+    /// exp_jump_to_top_level(DISCARD)). GNU fires the ERR trap only for a
+    /// simple command that EXECUTED and failed (execute_cmd.c run_error_trap
+    /// callers sit below expansion); the DISCARD jump bypasses them, so the
+    /// trap never fires for the expansion failure itself. Set by the word/
+    /// assignment expansion error sites, reset at each execute_ast loop
+    /// iteration, consulted by maybe_run_error_trap.
+    pub(crate) command_expansion_failed: Cell<bool>,
     /// Nesting depth of `execute_ast_inner`: a nested list (function body,
     /// loop body, sourced text, ...) unwinds silently while an evalerror
     /// abort is pending; only the reader-level loop skips to the next
