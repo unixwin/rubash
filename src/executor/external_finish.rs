@@ -48,7 +48,11 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<Option<File>, ExecuteError> {
         let (target, clobber, append) = match (&cmd.redirect_out, &cmd.append) {
-            (Some(redirect), _) => (self.expand_redirect_target(redirect), redirect.clobber, false),
+            (Some(redirect), _) => (
+                self.expand_redirect_target(redirect),
+                redirect.clobber,
+                false,
+            ),
             (None, Some(append)) => (self.expand_redirect_target(append), true, true),
             (None, None) => return Ok(None),
         };
@@ -59,7 +63,9 @@ impl Executor {
         }
         let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
         if append {
-            return Ok(Some(OpenOptions::new().create(true).append(true).open(path)?));
+            return Ok(Some(
+                OpenOptions::new().create(true).append(true).open(path)?,
+            ));
         }
         Ok(Some(self.create_redirect_output(&target, clobber)?))
     }
