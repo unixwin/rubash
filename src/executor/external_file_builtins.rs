@@ -1082,7 +1082,11 @@ impl Executor {
     /// GNU cat.c's byte-copy loop. Identity options only (formatting needs
     /// whole-stream state).
     fn stream_cat_stdin_operand(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        use std::io::Read;
+        use std::io::{Read, Write};
+        // The output target is opened ONCE for the whole copy: `write_cat_output`
+        // recreates (truncates) it per call, so a per-8 KiB-chunk caller kept
+        // only the last chunk (niubash#198).
+        let mut sink = self.open_cat_output_sink(cmd)?;
         let mut stdin = std::io::stdin().lock();
         let mut buffer = [0_u8; 8192];
         loop {
@@ -1090,8 +1094,10 @@ impl Executor {
             if count == 0 {
                 break;
             }
-            let data = buffer[..count].to_vec();
-            self.write_cat_output(cmd, &data)?;
+            match sink.as_mut() {
+                Some(file) => file.write_all(&buffer[..count])?,
+                None => self.write_cat_output(cmd, &buffer[..count])?,
+            }
         }
         Ok(())
     }
@@ -1114,6 +1120,7 @@ impl Executor {
             self.exit_code = 0;
             return Ok(true);
         }
+        let mut sink = self.open_cat_output_sink(cmd)?;
         let mut stdin = std::io::stdin().lock();
         let mut buffer = [0_u8; 8192];
         loop {
@@ -1121,8 +1128,10 @@ impl Executor {
             if count == 0 {
                 break;
             }
-            let data = buffer[..count].to_vec();
-            self.write_cat_output(cmd, &data)?;
+            match sink.as_mut() {
+                Some(file) => file.write_all(&buffer[..count])?,
+                None => self.write_cat_output(cmd, &buffer[..count])?,
+            }
         }
         self.exit_code = 0;
         Ok(true)
