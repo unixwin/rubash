@@ -252,8 +252,18 @@ mod plat {
         Ok(())
     }
 
+    /// glibc spells the resource selector `__rlimit_resource_t` (= c_uint);
+    /// musl and the OpenHarmony libc (target_os = "linux", target_env =
+    /// "musl"/"ohos") do not define that typedef at all and take a plain
+    /// c_int. Alias it once so all three libcs compile from one body.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    type RlimitResource = libc::__rlimit_resource_t;
+
+    #[cfg(all(target_os = "linux", not(target_env = "gnu")))]
+    type RlimitResource = libc::c_int;
+
     #[cfg(target_os = "linux")]
-    fn resource(option: char) -> libc::__rlimit_resource_t {
+    fn resource(option: char) -> RlimitResource {
         match option {
             'R' => libc::RLIMIT_RTTIME,
             'c' => libc::RLIMIT_CORE,
@@ -290,7 +300,7 @@ mod plat {
     }
 
     #[cfg(target_os = "linux")]
-    fn rlimit_get(res: libc::__rlimit_resource_t) -> io::Result<(u64, u64)> {
+    fn rlimit_get(res: RlimitResource) -> io::Result<(u64, u64)> {
         let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
         if unsafe { libc::getrlimit(res, &mut limit) } < 0 {
             return Err(io::Error::last_os_error());
