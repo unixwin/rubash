@@ -179,6 +179,13 @@ impl Executor {
                     &self.shell_state.env_vars,
                 );
                 self.apply_child_environment(&mut process);
+                // rubash#438: /dev/fd/N operand words stay literal on Unix;
+                // pin the substitution pipe read ends at their numbers.
+                #[cfg(unix)]
+                crate::executor::dev_fd_operands::attach_unix_dev_fd_operands(
+                    &mut process,
+                    &dev_ops,
+                );
                 let mut child = process
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
@@ -950,6 +957,10 @@ impl Executor {
         } else {
             process.stderr(Stdio::piped());
         }
+        // rubash#438: /dev/fd/N operand words stay literal on Unix; pin the
+        // substitution pipe read ends at their numbers in the child.
+        #[cfg(unix)]
+        crate::executor::dev_fd_operands::attach_unix_dev_fd_operands(&mut process, &dev_ops);
         let mut spawned = process.spawn().ok()?;
         if let Some(input) = piped_stdin.as_deref() {
             if let Some(mut child_stdin) = spawned.stdin.take() {
