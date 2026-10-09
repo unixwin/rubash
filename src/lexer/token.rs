@@ -78,6 +78,16 @@ pub struct Token {
     /// line (the "here-document at line N" warning line), so the end line
     /// must travel separately. None for every other kind.
     pub heredoc_end_line: Option<usize>,
+    /// rubash#461: this token is one fragment of the still-open `=~` RHS
+    /// regexp word of a `[[ ]]` conditional (GNU PST_REGEXP, parse.y:5169).
+    /// GNU reads the whole RHS as ONE word (read_token_word absorbs `|` and
+    /// `(...)` groups verbatim, parse.y:5443-5461) and read_token's
+    /// `if (parser_state & PST_REGEXP) goto tokword' (parse.y:3663) means
+    /// reserved-word recognition NEVER happens inside it. Rubash splits that
+    /// word into several tokens (`|` operator, Keyword `case`/`if`/...), so
+    /// this flag lets the parser's compound-boundary scanners treat those
+    /// fragments as inert word data instead of grammar tokens.
+    pub regexp_rhs_fragment: bool,
 }
 
 impl Token {
@@ -95,6 +105,7 @@ impl Token {
             extglob_gate: true,
             compound_unclosed: false,
             heredoc_end_line: None,
+            regexp_rhs_fragment: false,
         }
     }
 
@@ -126,6 +137,7 @@ impl Token {
             extglob_gate: true,
             compound_unclosed: false,
             heredoc_end_line: None,
+            regexp_rhs_fragment: false,
         }
     }
 
@@ -147,6 +159,7 @@ impl Token {
             extglob_gate: true,
             compound_unclosed: false,
             heredoc_end_line: None,
+            regexp_rhs_fragment: false,
         }
     }
 }

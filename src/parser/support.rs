@@ -150,9 +150,14 @@ pub(super) fn set_body_line(body: &mut [CommandNode], line: usize) {
 }
 
 pub(super) fn is_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
-    tokens
-        .get(index)
-        .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == value)
+    tokens.get(index).is_some_and(|token| {
+        // rubash#461: a fragment of an open `=~' RHS regexp word is WORD
+        // DATA, never a reserved word — GNU read_token jumps straight to
+        // tokword under PST_REGEXP (parse.y:3663), so reserved-word
+        // recognition never happens inside the regex (`while [[ x =~
+        // x|case ]]; do' must not see a `case' keyword after the `|').
+        !token.regexp_rhs_fragment && token.kind == TokenKind::Keyword && token.value == value
+    })
 }
 
 /// Whether `token` IS the operator/terminator spelled `value` in the source —
@@ -370,6 +375,18 @@ pub(super) fn update_compound_boundary_stack(
     index: usize,
     stack: &mut Vec<&'static str>,
 ) {
+    // rubash#461: a fragment of an open `=~' RHS regexp word is one GNU
+    // word's interior (PST_REGEXP, parse.y:3663 goto tokword) — it can
+    // neither open a compound frame (`case' after the regex `|') nor
+    // close one (`done' as regex data), so the whole boundary grammar is
+    // inert for it.
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.regexp_rhs_fragment)
+    {
+        return;
+    }
+
     // Case-pattern region first: keywords inside `in ... )' are pattern
     // text (GNU PST_CASEPAT), never compound openers (rubash#308:
     // `(while|break)' inside a function body opened a phantom loop that
