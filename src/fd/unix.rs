@@ -37,7 +37,10 @@ pub enum ReadWait {
 /// a regular-file input disables `read -t` entirely.
 pub fn is_disk_file(h: HANDLE) -> bool {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    unsafe { libc::fstat(h, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFREG }
+    unsafe {
+        libc::fstat(h, &mut st) == 0
+            && (u32::from(st.st_mode) & u32::from(libc::S_IFMT)) == u32::from(libc::S_IFREG)
+    }
 }
 
 /// The filesystem path an open regular-file descriptor refers to, or
@@ -61,7 +64,10 @@ pub fn is_console_handle(h: HANDLE) -> bool {
 /// S_ISCHR — `test -c` (GNU test.c filetest).
 pub fn is_char_device_handle(h: HANDLE) -> bool {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    unsafe { libc::fstat(h, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFCHR }
+    unsafe {
+        libc::fstat(h, &mut st) == 0
+            && (u32::from(st.st_mode) & u32::from(libc::S_IFMT)) == u32::from(libc::S_IFCHR)
+    }
 }
 
 /// Bounded readability wait — the direct POSIX form of GNU
@@ -244,7 +250,10 @@ pub fn seek_end(h: HANDLE) -> std::io::Result<()> {
 /// Absolute seek — GNU read.def zsyncfd (builtins/read.def:940) parity,
 /// see windows_impl::seek_absolute.
 pub fn seek_absolute(h: HANDLE, pos: u64) -> std::io::Result<()> {
-    if unsafe { libc::lseek(h, pos as i64, libc::SEEK_SET) } < 0 {
+    // 32-bit unixes (armv7 android) have off_t = i32; saturate instead of
+    // truncating (matching zsyncfd's behavior for absurd offsets).
+    let offset = libc::off_t::try_from(pos).unwrap_or(libc::off_t::MAX);
+    if unsafe { libc::lseek(h, offset, libc::SEEK_SET) } < 0 {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
