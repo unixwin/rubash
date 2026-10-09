@@ -663,6 +663,89 @@ fn glued_brace_closer_is_word_text_not_group_closer() {
         && token.value != ")"));
 }
 
+/// rubash#465: a keyword-form function definition nested inside a folded
+/// brace group must count as a nested opener. GNU's grammar reads the body
+/// `{` at command position (parse.y:1056 function_def: FUNCTION WORD
+/// function_body) — not gated by reserved_word_acceptable — so
+/// `{ function i { :; } }` folds as ONE balanced group token. Without the
+/// `function NAME' chain the inner `{` was not counted while the body's
+/// `}' still closed the scan, and the fold ended one `}` early — the
+/// enclosing definition's closer was misattributed and a later nested
+/// `function` definition reported "unexpected end of file from `{'".
+#[test]
+fn nested_keyword_function_body_counts_as_group_opener() {
+    let tokens = tokenize("{ function i { :; } }\necho after\n");
+    let group = tokens
+        .iter()
+        .find(|token| {
+            token.kind == TokenKind::Keyword
+                && token.value.starts_with('{')
+                && token.value.ends_with('}')
+        })
+        .expect("folded group token");
+    // Both closing braces are INSIDE the fold: the group value must end at
+    // the outer `}', not the inner function body's.
+    assert!(
+        group.value.contains("} }"),
+        "group must span both closers, got {:?}",
+        group.value
+    );
+    assert!(tokens
+        .iter()
+        .any(|token| token.kind == TokenKind::Word && token.value == "after"));
+}
+
+/// rubash#465 end-to-end shape (mirkop.sh): a completed `&& { ... <<< ""; }`
+/// group (whose herestring operator blocks its own fold) followed by a
+/// keyword-form function whose body holds a nested keyword-form function.
+/// The later definition's fold must keep both `}` lines: the outer body
+/// token spans to the LAST `}`, leaving no stray top-level closer, and the
+/// trailing statement survives.
+#[test]
+fn herestring_group_then_nested_function_definitions_fold_balanced() {
+    let script = concat!(
+        "f() {\n",
+        "  [[ a == b ]] && {\n",
+        "    ((0)) && {\n",
+        "      g <<< \"\"\n",
+        "    }\n",
+        "  }\n",
+        "}\n",
+        "function h {\n",
+        "  function i {\n",
+        "    printf X\n",
+        "  }\n",
+        "}\n",
+    );
+    let tokens = tokenize(script);
+    // No group token may be left unclosed, and no standalone `}' closer may
+    // trail the folded h body: the fold must reach the outer `}`.
+    let folded = tokens
+        .iter()
+        .filter(|token| {
+            token.kind == TokenKind::Keyword
+                && token.value.starts_with('{')
+                && token.value.contains('\n')
+        })
+        .count();
+    assert!(folded >= 1, "h's multi-line body should fold: {tokens:?}");
+    let h_body = tokens
+        .iter()
+        .find(|token| {
+            token.kind == TokenKind::Keyword
+                && token.value.starts_with('{')
+                && token.value.contains("function i")
+        })
+        .expect("folded h body token");
+    assert!(
+        h_body.value.matches('}').count() >= 2
+            && h_body.value.trim_end().ends_with('}')
+            && h_body.value.contains("printf X"),
+        "h body fold must include the nested function and both closers, got {:?}",
+        h_body.value
+    );
+}
+
 #[test]
 fn unclosed_brace_group_tokens_keep_physical_lines_at_eof() {
     // The leftover logical line at end of input spans every physical line

@@ -675,10 +675,24 @@ impl<'a> Lexer<'a> {
                 scan.word_start = true;
                 scan.word_plain = true;
                 scan.close_word.clear();
+                // GNU function_def is FUNCTION WORD with no newline between;
+                // a line break drops any pending `function' chain.
+                scan.function_chain = 0;
             } else if c.is_whitespace() {
                 if !scan.word_start {
                     scan.prev_accepts_close =
                         scan.word_plain && brace_close_acceptable_word(&scan.close_word);
+                    // A completed plain word advances the `function NAME'
+                    // chain: `function' arms stage 1, the NAME word arms
+                    // stage 2. Any other completed word (or a quoted one)
+                    // resets it.
+                    if scan.close_word == "function" && scan.word_plain {
+                        scan.function_chain = 1;
+                    } else if scan.function_chain == 1 && scan.word_plain {
+                        scan.function_chain = 2;
+                    } else {
+                        scan.function_chain = 0;
+                    }
                 }
                 scan.word_start = true;
                 scan.word_plain = true;
@@ -689,6 +703,11 @@ impl<'a> Lexer<'a> {
                 if c == '_' || c == ']' || c.is_ascii_alphanumeric() {
                     scan.word_start = false;
                     scan.close_word.push(c);
+                    // Word content after the NAME (`function i x') leaves
+                    // the definition chain; stage 1 keeps waiting for it.
+                    if scan.function_chain == 2 {
+                        scan.function_chain = 0;
+                    }
                 } else {
                     match c {
                         ';' | '&' | '|' | '(' | ')' => {
@@ -696,6 +715,7 @@ impl<'a> Lexer<'a> {
                             scan.word_start = true;
                             scan.word_plain = true;
                             scan.close_word.clear();
+                            scan.function_chain = 0;
                         }
                         // Quotes, substitutions, backslash and the rest of
                         // the word's own characters keep the word in
@@ -754,7 +774,12 @@ impl<'a> Lexer<'a> {
                     // (syntax.h:30) — and must not raise the depth
                     // (rubash#222).
                     let standalone_opener = scan.word_start
-                        && scan.prev_accepts_close
+                        && (scan.prev_accepts_close
+                            // parse.y:1056 `function WORD function_body': the
+                            // body's `{' is read at command position, after a
+                            // WORD — reserved_word_acceptable does not gate it
+                            // (rubash#465).
+                            || scan.function_chain == 2)
                         && self
                             .peek()
                             .is_none_or(|next| "()<>;&| \t\n\r".contains(next));
@@ -764,6 +789,7 @@ impl<'a> Lexer<'a> {
                         scan.prev_accepts_close = true;
                         scan.word_start = true;
                         scan.word_plain = true;
+                        scan.function_chain = 0;
                     } else {
                         scan.word_start = false;
                         scan.word_plain = false;
@@ -1011,6 +1037,17 @@ struct SkipBraceScan {
     /// digits and `]' — enough to spell `fi' or `]]'), cleared whenever a
     /// word completes.
     close_word: String,
+    /// `function NAME` chain for the nested keyword-form definition inside a
+    /// scanned group: 0 = idle, 1 = the plain word `function' completed, 2 =
+    /// the definition NAME completed after it. GNU's grammar reads the
+    /// body's `{' as a compound_command at COMMAND position (parse.y:1056
+    /// function_def: FUNCTION WORD function_body) — NOT gated by
+    /// reserved_word_acceptable(last_read_token), which is false after the
+    /// WORD. Without this chain the inner `{' is not counted as a nested
+    /// opener while the body's `}' (after `;') still counts as a closer, so
+    /// `{ function i { :; } }' closed one `}' early and the enclosing
+    /// definition's close was misattributed (rubash#465, mirkop.sh).
+    function_chain: u8,
 }
 
 impl SkipBraceScan {
@@ -1033,6 +1070,7 @@ impl SkipBraceScan {
             word_start: true,
             word_plain: true,
             close_word: String::new(),
+            function_chain: 0,
         }
     }
 
@@ -1053,6 +1091,7 @@ impl SkipBraceScan {
             word_start: resume.word_start,
             word_plain: resume.word_plain,
             close_word: resume.close_word,
+            function_chain: resume.function_chain,
         }
     }
 
@@ -1074,6 +1113,7 @@ impl SkipBraceScan {
             word_start: self.word_start,
             word_plain: self.word_plain,
             close_word: self.close_word,
+            function_chain: self.function_chain,
         }
     }
 }

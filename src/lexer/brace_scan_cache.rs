@@ -82,6 +82,10 @@ pub(crate) struct BraceScanResume {
     pub(crate) word_start: bool,
     pub(crate) word_plain: bool,
     pub(crate) close_word: String,
+    /// `function NAME' definition chain of the same tracker (see
+    /// `SkipBraceScan::function_chain`): 0 idle, 1 `function' seen, 2 its
+    /// NAME seen — a following `{' opens a nested group (rubash#465).
+    pub(crate) function_chain: u8,
 }
 
 /// Outcome of `skip_brace` worth remembering for the `{` at some offset.
