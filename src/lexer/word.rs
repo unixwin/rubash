@@ -11,6 +11,29 @@ use super::scanner::Lexer;
 use super::token::{Token, TokenKind};
 use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 
+/// niubash#200: a raw ESC (U+001B) that reaches a word value as DATA — source
+/// bytes inside single/double quotes or an unquoted word, or a literal ESC
+/// character inside a `$'...'` span (only `\e`/`\c[`/`\033` get the
+/// raw-byte carrier; an already-raw byte is pushed verbatim by
+/// decode_ansi_c_quoted) — is byte-identical to QUOTED_WORD_PREFIX, the
+/// quoted-literal-tilde marker this lexer itself emits. Downstream consumers
+/// answer `strip_prefix(QUOTED_WORD_PREFIX)`, so a word-initial data ESC was
+/// silently eaten (`printf '%s' '<ESC>[31m'` lost the ESC; GNU bash keeps a
+/// raw ESC in every position of every quoting context). Tag a leading data
+/// ESC as the U+E000 raw-byte marker pair at the dequote boundary — the same
+/// carrier ANSI-C decoding already uses for 0x1B — so no marker consumer can
+/// claim it; the output boundary decodes it back to the ESC byte. A mid-word
+/// ESC is never claimed (strip_prefix only fires at position 0) and stays
+/// verbatim, matching GNU.
+fn tag_word_initial_raw_esc(mut value: String) -> String {
+    if value.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX) {
+        let tagged = crate::executor::substitution_metadata::encode_raw_byte_marker(0x1b);
+        // U+001B is one byte, and starts_with above pinned the first char.
+        value.replace_range(0..1, &tagged);
+    }
+    value
+}
+
 /// The raw->value dequote dispatch of finish_word_token (GNU read_token_word
 /// quote removal, parse.y:5305+), extracted verbatim so the executor's
 /// locale re-derivation (rubash#353) can reproduce EXACTLY the value the
@@ -81,6 +104,7 @@ pub(crate) fn word_value_from_raw(
     } else {
         remove_shell_quotes_with_posix(raw, posix)
     };
+    let value = tag_word_initial_raw_esc(value);
     let kind = if allow_keyword && is_keyword(raw) {
         TokenKind::Keyword
     // GNU parse.y calls assignment() on the raw token (general.c:480):
@@ -264,6 +288,7 @@ impl<'a> Lexer<'a> {
         } else {
             remove_shell_quotes_with_posix(raw, self.posix)
         };
+        let value = tag_word_initial_raw_esc(value);
         let kind = if allow_keyword && is_keyword(raw) {
             TokenKind::Keyword
         // GNU parse.y calls assignment() on the raw token (general.c:480):

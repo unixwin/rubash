@@ -265,7 +265,7 @@ impl<'a> Lexer<'a> {
 
     /// Track the GNU reader state that affects `{` handling:
     /// reserved-word acceptability (last two tokens) and PST_CASEPAT.
-    fn record_token(&mut self, token: &Token) {
+    fn record_token(&mut self, token: &mut Token) {
         let keyword_is = |v: &str| token.kind == TokenKind::Keyword && token.value == v;
         let word_is = |v: &str| token.kind == TokenKind::Word && token.value == v;
         let is_case_operand = matches!(
@@ -361,6 +361,7 @@ impl<'a> Lexer<'a> {
                 // it before read_token_word starts).
                 self.parse_state.cond_rhs_started = true;
                 self.parse_state.cond_rhs_paren_depth += cond_paren_delta(token);
+                token.regexp_rhs_fragment = true;
             } else if !token.leading_ws.is_empty() && self.parse_state.cond_rhs_paren_depth <= 0 {
                 // Whitespace at depth zero: the GNU RHS word ended before
                 // this token (parse.y:5212).
@@ -369,6 +370,14 @@ impl<'a> Lexer<'a> {
                 self.parse_state.cond_rhs_paren_depth = 0;
             } else {
                 self.parse_state.cond_rhs_paren_depth += cond_paren_delta(token);
+                // A fragment abutting the previous one (or continuing an
+                // open `(' group) is still inside the ONE GNU word:
+                // parse.y:3663 `if (parser_state & PST_REGEXP) goto
+                // tokword' — reserved-word recognition never happens
+                // inside it (rubash#461: `while [[ x =~ x|case ]]; do'
+                // must not open a phantom `case' frame that swallows the
+                // `do').
+                token.regexp_rhs_fragment = true;
             }
         }
         self.parse_state.cond_rhs_last_token_end = token_end;
@@ -1185,8 +1194,8 @@ fn is_simple_parameter_tail(value: &str) -> bool {
 impl<'a> Iterator for Lexer<'a> {
     type Item = Token;
     fn next(&mut self) -> Option<Self::Item> {
-        let token = self.next_token();
-        if let Some(token) = &token {
+        let mut token = self.next_token();
+        if let Some(token) = &mut token {
             // Eof is not a real GNU token: last_read_token stays the last
             // real token, which the next logical line's reserved-word
             // decisions must see (the `{` fold checks it).
