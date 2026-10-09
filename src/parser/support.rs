@@ -504,9 +504,16 @@ pub(super) fn command_boundary_keyword_allowed(tokens: &[Token], index: usize) -
     };
 
     if previous.kind == TokenKind::Keyword
-        && previous.value.starts_with('{')
-        && previous.value.ends_with('}')
-        && previous.value.len() >= 2
+        && ((previous.value.starts_with('{') && previous.value.ends_with('}'))
+            // A folded `(( ... ))' arithmetic group is GNU's ARITH_CMD
+            // token, which reserved_word_acceptable (parse.y:5899) also
+            // accepts as the predecessor of a reserved word — `if (( x
+            // == y )) then' / `while (( x )) do' carry no `;' terminator
+            // (rubash#460; the unfolded `))' closer is handled by
+            // compound_close_precedes below).
+            || (previous.value.starts_with("((")
+                && previous.value.ends_with("))")
+                && previous.value.len() >= 4))
     {
         return true;
     }
