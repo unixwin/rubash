@@ -1,6 +1,17 @@
 use super::*;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
+/// The RUBASH_TRACE_APPAE debug switch is fixed for the process lifetime,
+/// so read it once (same contract as trace_stdio_write's cached switch): a
+/// raw std::env::var_os per `${...}` walker tail took the std::env lock and
+/// scanned the environment on every parameter expansion in every loop
+/// (rubash#437 measured the same pattern at 122ns/call missing / 1.2us
+/// present on Windows).
+fn apfae_trace_enabled() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("RUBASH_TRACE_APPAE").is_some())
+}
+
 impl Executor {
     pub(in crate::executor) fn expand_parameter_word(&self, word: &str) -> String {
         // TODO(subst.c/parse.y): The `word` half of ${parameter:-word},
@@ -895,7 +906,7 @@ impl Executor {
         }
 
         if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
-            if std::env::var_os("RUBASH_TRACE_APPAE").is_some() {
+            if apfae_trace_enabled() {
                 eprintln!("[EQPWM-tail-pattern] name={name:?}");
             }
             return value;
@@ -905,13 +916,13 @@ impl Executor {
             name,
             matches!(context, SubstitutionQuoteContext::Unquoted),
         ) {
-            if std::env::var_os("RUBASH_TRACE_APPAE").is_some() {
+            if apfae_trace_enabled() {
                 eprintln!("[EQPWM-tail-special] name={name:?}");
             }
             return value;
         }
 
-        if std::env::var_os("RUBASH_TRACE_APPAE").is_some() {
+        if apfae_trace_enabled() {
             eprintln!("[EQPWM-tail-word] name={name:?}");
         }
         self.expand_word(word)
@@ -1005,6 +1016,17 @@ impl Executor {
         &mut self,
         word: &str,
     ) {
+        // Admission (rubash#117 whitelist discipline, same shape as the
+        // parameter_errors perf6 gate): both applied arms below split their
+        // `${...}` body on `=` / `:=`, so a word carrying no `=` anywhere
+        // can never fire one — the early-out only skips provably-inert
+        // work. Plain words (`payload line`, `-lt`, `2000`) and plain
+        // parameter expansions (`${a#alpha}`, `${a%%:*}`) reach this scan
+        // on EVERY command word / assignment RHS; one scan-and-quit beats
+        // the per-fragment quote-state walk that finds nothing.
+        if !word.contains('=') {
+            return;
+        }
         // Assignment alternates are quote-removed with the quote rules of
         // the region their `${...}` sits in: inside double quotes `\` only
         // escapes $, `, ", \, and newline, so `"${v=a\ b}"` assigns `a\ b`

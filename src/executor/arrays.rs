@@ -788,7 +788,7 @@ pub(super) fn append_array_value(
     // integer arrays; `arr+=(x y)` appends new elements.
     let scalar_append = !value.starts_with('(');
     let brace_expand = crate::builtins::set::shell_option_enabled(env_vars, "braceexpand");
-    if std::env::var_os("RUBASH_DBG_AAV").is_some() {
+    if crate::executor::assignment_expansion::dbg_aav_enabled() {
         eprintln!("[AAV] value={value:?}");
     }
     let tokens = array_assignment_tokens(value)

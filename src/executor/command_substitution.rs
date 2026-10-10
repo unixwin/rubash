@@ -484,6 +484,13 @@ fn layout_command(
     assign(&mut command.end_line, seed, *line);
 }
 
+/// The RUBASH_DBG_TRAP debug switch is fixed for the process lifetime, so
+/// read it once (same contract as trace_stdio_write's cached switch).
+fn dbg_trap_enabled() -> bool {
+    static DBG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DBG.get_or_init(|| std::env::var_os("RUBASH_DBG_TRAP").is_some())
+}
+
 impl Executor {
     /// Expands a command-substitution argument word. When the word was
     /// quoted in the source and starts with `~`, prefix the quote-protection
@@ -1285,7 +1292,7 @@ impl Executor {
         // the substitution's output into the stage's pipe. Give the body
         // its own thread-local capture and merge both buffers.
         let (captured, status) = crate::executor::shell_options::capture_stdout(|| {
-            if std::env::var_os("RUBASH_DBG_TRAP").is_some() {
+            if dbg_trap_enabled() {
                 eprintln!(
                     "[CS] body-pre trapEXIT={:?} reset={:?}",
                     subshell.shell_state.env_vars.get("__RUBASH_TRAP_EXIT"),
@@ -1303,7 +1310,7 @@ impl Executor {
                 );
                 subshell.execute_ast(&ast)
             };
-            if std::env::var_os("RUBASH_DBG_TRAP").is_some() {
+            if dbg_trap_enabled() {
                 eprintln!(
                     "[CS] body-post trapEXIT={:?} reset={:?}",
                     subshell.shell_state.env_vars.get("__RUBASH_TRAP_EXIT"),

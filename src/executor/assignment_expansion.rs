@@ -363,6 +363,16 @@ pub(in crate::executor) fn hoist_data_backslashes(value: &str, marker: &str) -> 
     out
 }
 
+/// The RUBASH_DBG_AAV debug switch is fixed for the process lifetime, so
+/// read it once (same contract as trace_stdio_write's cached switch in
+/// shell_options.rs): a raw std::env::var_os per assignment RHS took the
+/// std::env lock on every assignment in every loop (rubash#437 measured
+/// the same pattern at 122ns/call missing on Windows).
+pub(in crate::executor) fn dbg_aav_enabled() -> bool {
+    static DBG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DBG.get_or_init(|| std::env::var_os("RUBASH_DBG_AAV").is_some())
+}
+
 impl Executor {
     /// Assignment expansion with the parser-preserved verbatim RHS available.
     ///
@@ -468,10 +478,20 @@ impl Executor {
         // protected too (quotes.rs escape_decoded_ansi_c_quotes — GNU
         // CTLESC-quotes every decoded byte, so `v=$'a b'` stores three
         // characters, rubash#379); strip the pairs at this boundary so no
-        // scalar store keeps the carrier.
-        let stripped = expanded
-            .replace(crate::executor::markers::IFS_GLUE, "")
-            .replace(crate::executor::markers::ANSI_C_IFS_GUARD, "");
+        // scalar store keeps the carrier. cow_replace keeps the marker-free
+        // RHS (every plain `a=x` / `${a#p}` in a loop) at one scan and one
+        // final allocation instead of two intermediate copies.
+        let stripped = crate::executor::markers::cow_replace(
+            &expanded,
+            crate::executor::markers::IFS_GLUE_STR,
+            "",
+        );
+        let stripped = crate::executor::markers::cow_replace(
+            &stripped,
+            crate::executor::markers::ANSI_C_IFS_GUARD_STR,
+            "",
+        )
+        .into_owned();
         stripped
     }
 
@@ -883,7 +903,7 @@ impl Executor {
         }
         let apply_result = self.apply_parameter_assignment_expansions_in_word(value);
         if let Some(expanded) = self.expand_compound_positional_at_assignment(value, quoted) {
-            if std::env::var_os("RUBASH_DBG_AAV").is_some() {
+            if dbg_aav_enabled() {
                 eprintln!("[ECPAT] value={value:?} expanded={expanded:?}");
             }
             if compound_assignment {
@@ -892,7 +912,7 @@ impl Executor {
             return expanded;
         }
         if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(value) {
-            if std::env::var_os("RUBASH_DBG_AAV").is_some() {
+            if dbg_aav_enabled() {
                 eprintln!("[EUPCA] value={value:?} expanded={expanded:?}");
             }
             if compound_assignment {
@@ -1047,11 +1067,11 @@ impl Executor {
             // dequoting them into bare quote data that the re-split would
             // read back as syntax (assoc11.sub: ('"' dquote "'" squote)).
             let expanded_value = if compound_paren_value {
-                if std::env::var_os("RUBASH_DBG_AAV").is_some() {
+                if dbg_aav_enabled() {
                     eprintln!("[ECAPM] in={hoisted_value:?}");
                 }
                 let out = self.expand_compound_assignment_parameters_mut(&hoisted_value);
-                if std::env::var_os("RUBASH_DBG_AAV").is_some() {
+                if dbg_aav_enabled() {
                     eprintln!("[ECAPM] out={out:?}");
                 }
                 out
