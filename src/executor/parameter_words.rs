@@ -1005,6 +1005,17 @@ impl Executor {
         &mut self,
         word: &str,
     ) {
+        // Admission (rubash#117 whitelist discipline, same shape as the
+        // parameter_errors perf6 gate): both applied arms below split their
+        // `${...}` body on `=` / `:=`, so a word carrying no `=` anywhere
+        // can never fire one — the early-out only skips provably-inert
+        // work. Plain words (`payload line`, `-lt`, `2000`) and plain
+        // parameter expansions (`${a#alpha}`, `${a%%:*}`) reach this scan
+        // on EVERY command word / assignment RHS; one scan-and-quit beats
+        // the per-fragment quote-state walk that finds nothing.
+        if !word.contains('=') {
+            return;
+        }
         // Assignment alternates are quote-removed with the quote rules of
         // the region their `${...}` sits in: inside double quotes `\` only
         // escapes $, `, ", \, and newline, so `"${v=a\ b}"` assigns `a\ b`
