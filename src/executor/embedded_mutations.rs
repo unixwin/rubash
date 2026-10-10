@@ -2887,7 +2887,10 @@ fn command_substitution_uses_specialized_path(
             && !command_substitution_contains_here_string(source))
         || words.first().map(String::as_str) == Some("time")
         || executor
-            .command_substitution_cd_pwd_output(source)
+            // quiet: this is the ADMISSION probe — the real expansion re-runs
+            // command_substitution_cd_pwd_output inside the &self wrapper, and
+            // #491's cd diagnostic must print once (GNU), not once per probe.
+            .command_substitution_cd_pwd_output_quiet_probe(source)
             .is_some()
 }
 

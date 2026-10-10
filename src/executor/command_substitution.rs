@@ -1065,6 +1065,22 @@ impl Executor {
         &self,
         source: &str,
     ) -> Option<String> {
+        self.command_substitution_cd_pwd_output_impl(source, false)
+    }
+
+    /// `quiet` marks the ADMISSION probe (embedded_mutations.rs
+    /// command_substitution_uses_specialized_path): it must not emit the cd
+    /// diagnostic — the real expansion (command_substitution.rs inner walk)
+    /// re-runs this helper and prints it there, so `$(cd nope && pwd)`
+    /// reports `cd: nope: ...` exactly once like GNU.
+    pub(in crate::executor) fn command_substitution_cd_pwd_output_quiet_probe(
+        &self,
+        source: &str,
+    ) -> Option<String> {
+        self.command_substitution_cd_pwd_output_impl(source, true)
+    }
+
+    fn command_substitution_cd_pwd_output_impl(&self, source: &str, quiet: bool) -> Option<String> {
         let (left, right) =
             split_unquoted_and_and(source).or_else(|| split_unquoted_semicolon(source))?;
         let right_words = split_shell_words(right.trim());
@@ -1093,21 +1109,28 @@ impl Executor {
             // substitution child too (`echo "$(cd nope && pwd)"` prints
             // `cd: nope: No such file or directory` with the enclosing
             // script's line prefix and yields status 1); the single-handle
-            // shortcut must not swallow it (issue #485).
-            eprintln!(
-                "{}cd: {}: No such file or directory",
-                self.parser_diagnostic_prefix(),
-                target_display
-            );
+            // shortcut must not swallow it (issue #485). The admission probe
+            // (command_substitution_uses_specialized_path) runs this helper
+            // BEFORE the real expansion — it must stay quiet or the
+            // diagnostic prints twice where GNU prints it once.
+            if !quiet {
+                eprintln!(
+                    "{}cd: {}: No such file or directory",
+                    self.parser_diagnostic_prefix(),
+                    target_display
+                );
+            }
             self.last_command_substitution_status.set(Some(1));
             return Some(String::new());
         };
         if !is_dir {
-            eprintln!(
-                "{}cd: {}: Not a directory",
-                self.parser_diagnostic_prefix(),
-                target_display
-            );
+            if !quiet {
+                eprintln!(
+                    "{}cd: {}: Not a directory",
+                    self.parser_diagnostic_prefix(),
+                    target_display
+                );
+            }
             self.last_command_substitution_status.set(Some(1));
             return Some(String::new());
         }
