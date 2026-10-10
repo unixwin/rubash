@@ -20,7 +20,7 @@ Rubash 本身不是 shell 产品。它自带一个参考 CLI（供兼容性 harn
 
 **路径是一等公民，不是转换对象**：MSYS 的模型是*猜*哪些参数像路径然后改写——这就是为什么每个 AI agent 和脚本都得设置 `MSYS_NO_PATHCONV=1`，防止 `/flag` 被改成 `C:/Program Files/Git/flag`。Rubash 把模型反过来：Windows 路径是原生货币。POSIX 风格和 WSL 风格的路径都接受输入、解析成真实的 Windows 路径，原生 Windows 程序拿到的永远是合法的 Win32 路径——没有转换启发式、不需要 `MSYS_NO_PATHCONV`、进程边界零意外。
 
-**平台状态——跨平台、Windows 优先**：Windows 是主战场，拥有完整技术栈：单一自包含二进制直面 Windows 用户的 bash 痛点（无 POSIX 模拟层、无路径转换猜测、无需 MSYS_NO_PATHCONV、原生 Win32 路径为通货、为 bash 生态提供 MSYS2 兼容身份）。Linux 现已原生构建并运行（x86_64-unknown-linux-gnu）——真 getrlimit/chmod/faccessat/uname(2) 语义与信号投递，GNU 语料在 WSL 内对 Linux 二进制实测 19/24 字节一致且持续爬升（账本见 docs/LINUX-RUN-STATUS.md）。macOS 在 CI 编译全绿且 uname 臂 coreutils 正确。引擎语义模型刻意平台中立，账本随行。
+**平台状态——跨平台、Windows 优先**：Windows 是主战场，拥有完整技术栈：单一自包含二进制直面 Windows 用户的 bash 痛点（无 POSIX 模拟层、无路径转换猜测、无需 MSYS_NO_PATHCONV、原生 Win32 路径为通货、为 bash 生态提供 MSYS2 兼容身份）。Linux 现已原生构建并运行（x86_64-unknown-linux-gnu）——真 getrlimit/chmod/faccessat/uname(2) 语义与信号投递，GNU 语料在 WSL 内对 Linux 二进制实测 19/24 字节一致且持续爬升。macOS 在 CI 编译全绿且 uname 臂 coreutils 正确。引擎语义模型刻意平台中立，账本随行。
 
 ## 兼容性一览
 
@@ -120,7 +120,7 @@ cargo test --test cli_tests source_expands -- --nocapture
 
 ## 文档
 
-- [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md) — **唯一权威来源**，Rubash ↔ GNU Bash 兼容性状态
+- GitHub issue tracker — **唯一权威来源**，Rubash ↔ GNU Bash 兼容性状态（快照台账已于 2026-10-10 归档至 issue #477）
 - [`docs/PROVENANCE.md`](docs/PROVENANCE.md) — 来源声明：Rubash 与 GNU Bash 源码的关系，以及贡献者方法论规范
 - [`docs/builtins.md`](docs/builtins.md) — 内建命令清单和分发模型
 - [`docs/bashdb-debugging-rubash.md`](docs/bashdb-debugging-rubash.md) — bashdb fixture 设置和 smoke test

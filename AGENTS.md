@@ -247,8 +247,11 @@ root-cause compatibility fix, not a bashdb patch.
 
 ## Bash Test Suite
 
-Compatibility status is tracked in `docs/COMPATIBILITY-STATUS.md` — the single
-authoritative source; update it only after real reproduction.
+Compatibility status is tracked in the GitHub issue tracker — the single
+authoritative source; update it only after real reproduction. (The snapshot
+ledger `docs/COMPATIBILITY-STATUS.md` was deleted 2026-10-10; excerpted
+baselines are archived in issue #477. Re-measure with
+`scripts/true-baseline.sh` instead of trusting dated snapshots.)
 
 - **Upstream test files**: `third_party/bash/tests/<name>.tests`, run per-file
   with bounded timeouts; keep raw artifacts under
