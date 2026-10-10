@@ -40,8 +40,11 @@ it to whatever `uname.exe` happens to sit on PATH. `uname` and `arch` are
 engine builtins (full option parsing, coreutils/MSYS2 output shapes), and
 `OSTYPE`/`MACHTYPE`/`HOSTTYPE` follow the same persona.
 
-- **Default persona: MSYS2-compatible** (disclosed everywhere — this is a
-  compatibility mask, not a claim of being an MSYS2 port):
+- **Default persona: MSYS2-compatible** (Windows default; disclosed
+  everywhere — this is a compatibility mask, not a claim of being an MSYS2
+  port. Non-Windows builds always report the honest-native identity — the
+  MSYS persona exists to keep Windows inside the MSYS/Cygwin script
+  ecosystem and is unreachable elsewhere):
   - `uname -s` → `MSYS_NT-<ver>` — or `MINGW64_NT-` / `UCRT64_NT-` /
     `CLANG64_NT-` … when `MSYSTEM` is set, mapping the value the same way
     the MSYS2 runtime does;
@@ -152,7 +155,8 @@ The result: subshells and command substitutions pay zero process-creation cost, 
 
 ### Build from Source
 
-> Full functionality requires Windows today.
+> Cross-platform: Windows is the full-stack primary target; Linux builds and
+> runs natively; macOS compiles green in CI (see "Platform status" above).
 
 ```bash
 git clone https://github.com/unixwin/rubash.git

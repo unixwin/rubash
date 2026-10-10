@@ -77,7 +77,7 @@ POSIX `fork()` 没有 Win32 等价物。仿真层（MSYS2、Cygwin）在系统�
 
 ### 从源码构建
 
-> 完整功能当前需要 Windows。
+> 跨平台：Windows 是全栈主平台；Linux 原生构建并运行；macOS 在 CI 编译全绿（见上方「平台状态」）。
 
 ```bash
 git clone https://github.com/unixwin/rubash.git
