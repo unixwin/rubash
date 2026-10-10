@@ -8,6 +8,10 @@
 
 GNU Bash 5.3.0 兼容性大幅推进。83 套件 true-baseline 总差异从 3427 行降至 2072 行（−40%），零差套件从 31 增至 32。
 
+### 新增
+
+- 登录 shell 启动链（#487）：argv[0] 首字符 `-` 或 `-l`/`--login`（含 `-lc` 组合形态）置 login 标志后，Unix（`not(windows)` 门，覆盖 Linux 与 macOS）上登录 shell 依次 source /etc/profile → 首个存在的 ~/.bash_profile | ~/.bash_login | ~/.profile；非登录交互 shell 依次 source /etc/bash.bashrc（存在时）+ ~/.bashrc（--rcfile/--init-file 只替换个人 rc）；启动文件中 `exit` 终止 shell 且后续不执行（与 --rcfile 一致）。`--noprofile`/`--norc` 分别抑制对应分支。Windows 无真实登录概念：-l/--login 接受且行为与现状完全一致（不读任何链文件）。链顺序/fallback 以注入式存在性检查做单元测试；Linux/macOS 端到端由 CI 对应 job 验证。
+
 ### 修复
 
 - 命令替换的退出状态在展开期内即刻成为 `$?`（#485）：GNU 在父壳回收替换子进程时就把其状态写入 last_command_exit_value，同一命令行内后置的 `$?`（后续词、同词后缀片段、同一简单命令的后续赋值 RHS）都看得见，成功的替换同样覆盖（`echo "$(cd nope && pwd)" $?` 报 1、`false; echo "$(true) $?"` 报 0、`v="$(exit 3)$?"` 得 v=3 且 rc=3），命令自身执行后照常覆盖。此前 rubash 只把状态记进 `last_command_substitution_status` 单元、仅在空词/赋值收尾时提升，词展开路径上丢失该时序。修复：AST/function 替换与 `&self` 包装器三个回落点的父侧回收处直接写 `exit_code`（fork 模型保存/恢复中的 `saved_exit_code` 不再回退状态），整词引号 `"$( )"` 快路径发布同一状态；反引号嵌词从遗留 `&self` 展开器改道可变嵌入 walker（与 `$()` 词共用生产路径与同一批提升点）。`local` 屏蔽赋值状态、`set -e` 下替换赋值失败中止（rc=1）而词内替换失败不中止（echo 自身 rc=0）均保持 GNU 一致。

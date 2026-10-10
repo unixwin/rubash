@@ -222,6 +222,13 @@ impl Executor {
             // error never suppresses the ERR trap this command earns by
             // failing (GNU run_error_trap is per execute_simple_command).
             self.command_expansion_failed.set(false);
+            // issue #485: the comsub $? overlay (word_expansion_comsub_exit)
+            // belongs to ONE command's word expansion, exactly like GNU's
+            // last_command_exit_value write in subst.c command_substitute —
+            // the next command commits its own status, so clear the overlay
+            // here or `echo $(false) $?; true; echo $?` would still see the
+            // stale substitution status.
+            self.word_expansion_comsub_exit.set(None);
             // eval.c:178 + shell.c:183: current_command_number increments
             // once per reader-loop command list, BEFORE it executes; `\#`
             // in ${var@P} reads the counter (parse.y:6568-6574). This

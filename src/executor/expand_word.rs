@@ -458,7 +458,7 @@ impl Executor {
         }
 
         match word {
-            "$?" => Some(self.exit_code.to_string()),
+            "$?" => Some(self.dollar_question_status().to_string()),
             "$$" => Some(self.shell_pid_value().to_string()),
             "$!" => Some(self.last_background_pid_value()),
             "$@" => Some(self.shell_state.positional_params.join(" ")),

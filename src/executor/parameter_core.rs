@@ -376,6 +376,19 @@ impl Executor {
         self.expand_word(word)
     }
 
+    /// subst.c: `$?` reads last_command_exit_value, which command_substitute
+    /// overwrites with the substitution child's wait status as soon as the
+    /// substitution completes — so a `$?` word to the right of a substitution
+    /// in the same command observes the substitution's status, not the
+    /// previous command's (issue #485: `echo "$(cd nope && pwd)" $?` is 1).
+    /// The overlay lives only for the current word expansion; outside it this
+    /// is exactly exit_code.
+    pub(in crate::executor) fn dollar_question_status(&self) -> i32 {
+        self.word_expansion_comsub_exit
+            .get()
+            .unwrap_or(self.exit_code)
+    }
+
     pub(in crate::executor) fn expand_parameter_named_value(&self, name: &str) -> String {
         match name {
             "#" => return self.shell_state.positional_params.len().to_string(),
@@ -384,7 +397,7 @@ impl Executor {
             // the unbraced `$*` walker path applies. `@` stays space-joined.
             "@" => return self.shell_state.positional_params.join(" "),
             "*" => return self.positional_params_star_joined(),
-            "?" => return self.exit_code.to_string(),
+            "?" => return self.dollar_question_status().to_string(),
             "$" => return self.shell_pid_value().to_string(),
             "!" => return self.last_background_pid_value(),
             "-" => return self.shell_option_flags(),

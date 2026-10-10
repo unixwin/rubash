@@ -720,6 +720,15 @@ pub struct Executor {
     /// GNU dropping PF_ASSIGNRHS across a nested substitution boundary.
     pub(crate) inside_assignment_rhs: Cell<bool>,
     last_command_substitution_status: Cell<Option<i32>>,
+    /// subst.c command_substitute: after wait_for (pid) the parent records
+    /// the substitution child's status in last_command_exit_value, so `$?`
+    /// in a word to the RIGHT of a substitution in the SAME command's word
+    /// list observes it (`echo $(false) $?` prints 1). This overlay holds
+    /// that status for the in-flight word expansion only; it is cleared at
+    /// each command-node boundary (execute_ast_inner) so the next command
+    /// reads its own committed status again. None means no substitution
+    /// completed during this expansion — $? falls back to exit_code.
+    word_expansion_comsub_exit: Cell<Option<i32>>,
     /// GNU subst.c:7143 command_substitute forks sharing fd 0, so input the
     /// substitution body consumed must advance the caller's FUNCTION_STDIN
     /// cursor. The substitution runs on `&self`; stash the child's final

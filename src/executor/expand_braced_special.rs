@@ -12,7 +12,7 @@ impl Executor {
             // contexts; `@` stays space-joined.
             "@" => return Some(self.shell_state.positional_params.join(" ")),
             "*" => return Some(self.positional_params_star_joined()),
-            "?" => return Some(self.exit_code.to_string()),
+            "?" => return Some(self.dollar_question_status().to_string()),
             "$" => return Some(self.shell_pid_value().to_string()),
             "!" => return Some(self.last_background_pid_value()),
             "-" => return Some(self.shell_option_flags()),
@@ -160,7 +160,7 @@ impl Executor {
         // status first and indirects through the result (posixexp2: with
         // status 0 it resolves to the shell name).
         if indirect_name == "?" {
-            let target = self.exit_code.to_string();
+            let target = self.dollar_question_status().to_string();
             return Some(self.expand_parameter_named_value(&target));
         }
 

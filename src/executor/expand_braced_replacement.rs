@@ -23,7 +23,7 @@ thread_local! {
 fn patsub_special_parameter_value(exec: &Executor, var_name: &str) -> Option<String> {
     match var_name {
         "#" => Some(exec.shell_state.positional_params.len().to_string()),
-        "?" => Some(exec.exit_code.to_string()),
+        "?" => Some(exec.dollar_question_status().to_string()),
         "-" => Some(exec.shell_option_flags()),
         "$" => Some(exec.shell_pid_value().to_string()),
         "0" => Some(exec.script_name_value()),

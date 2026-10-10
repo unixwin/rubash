@@ -374,7 +374,7 @@ impl Executor {
             match chars.peek().copied() {
                 Some('?') => {
                     chars.next();
-                    output.push_str(&self.exit_code.to_string());
+                    output.push_str(&self.dollar_question_status().to_string());
                 }
                 Some('$') => {
                     chars.next();

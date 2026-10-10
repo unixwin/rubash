@@ -3207,6 +3207,39 @@ fn login_startup_options_are_accepted_before_command_string() {
 }
 
 #[test]
+fn login_flag_does_not_change_windows_startup_behavior() {
+    // rubash#487: the profile/rc chain is a Unix requirement (linux + macOS
+    // legs). On Windows
+    // -l/--login is accepted but must stay behaviorally identical to a
+    // plain invocation: a HOME containing .bash_profile/.bashrc must NOT
+    // be sourced, with or without the flag.
+    let home = std::env::temp_dir().join("rubash-487-nowinchain");
+    let _ = fs::remove_dir_all(&home);
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join(".bash_profile"), "echo PROFILE-SOURCED\n").unwrap();
+    fs::write(home.join(".bashrc"), "echo RC-SOURCED\n").unwrap();
+
+    let run = |extra: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+        cmd.env("HOME", &home);
+        cmd.args(extra);
+        cmd.arg("-c").arg("printf '%s\\n' body");
+        cmd.output().expect("run rubash")
+    };
+
+    for extra in [&[][..], &["-l"][..], &["--login"][..], &["-l", "-i"][..]] {
+        let output = run(extra);
+        assert!(output.status.success(), "args {extra:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "body\n");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).is_empty(),
+            "args {extra:?}: no startup file noise expected"
+        );
+    }
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
 fn cli_shell_flags_apply_before_command_string() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-u")
@@ -4040,4 +4073,78 @@ fn comsub_quoted_glob_star_stays_quoted_rubash_121() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output.status.success());
+}
+
+#[test]
+fn version_appends_build_metadata_after_the_gnu_block_rubash_488() {
+    // rubash#488: `--version` keeps the GNU block byte-identical (the
+    // rubash#154 MSYS persona banner plus the rubash#240 license block are
+    // ecosystem gates) and appends the build fingerprint — and on Windows
+    // the persona note — strictly after it. --version has a single print
+    // site, so a piped capture sees the same lines a terminal does.
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("--version")
+        .output()
+        .expect("run rubash --version");
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines[0].starts_with("GNU bash, version 5.3.0(1)-release ("),
+        "GNU banner line 1 changed: {:?}",
+        lines[0]
+    );
+    assert_eq!(
+        lines[1],
+        "Copyright (C) 2025 Free Software Foundation, Inc."
+    );
+    assert_eq!(
+        lines[2],
+        "License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>"
+    );
+    assert_eq!(lines[3], "");
+    assert_eq!(
+        lines[4],
+        "This is free software; you are free to change and redistribute it."
+    );
+    assert_eq!(
+        lines[5],
+        "There is NO WARRANTY, to the extent permitted by law."
+    );
+
+    // `build: <git-hash> (<profile>)`: a short hex hash (or "unknown" when
+    // the build ran without git) plus the cargo profile the binary carries.
+    let build_line = lines
+        .get(6)
+        .unwrap_or_else(|| panic!("missing build line after the GNU block: {stdout:?}"));
+    let rest = build_line
+        .strip_prefix("build: ")
+        .unwrap_or_else(|| panic!("not a `build:` line: {build_line:?}"));
+    let (hash, profile) = rest
+        .split_once(" (")
+        .unwrap_or_else(|| panic!("missing (<profile>) suffix: {build_line:?}"));
+    let profile = profile.strip_suffix(')').unwrap_or(profile);
+    let hash_ok =
+        hash == "unknown" || (hash.len() >= 7 && hash.chars().all(|ch| ch.is_ascii_hexdigit()));
+    assert!(hash_ok, "unexpected build hash {hash:?} in {build_line:?}");
+    let expected_profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    assert_eq!(profile, expected_profile, "build line: {build_line:?}");
+
+    // Windows binaries carry the persona note; non-Windows stay clean.
+    if cfg!(windows) {
+        assert_eq!(lines.len(), 8, "full --version output: {stdout:?}");
+        let note = lines[7];
+        assert!(note.starts_with("note: "), "note shape: {note:?}");
+        assert!(note.contains("native Windows build"), "{note:?}");
+        assert!(note.contains("without an MSYS runtime"), "{note:?}");
+        assert!(note.contains("compatibility persona"), "{note:?}");
+        assert!(note.contains("docs/platform-support.md"), "{note:?}");
+    } else {
+        assert_eq!(lines.len(), 7, "full --version output: {stdout:?}");
+    }
 }

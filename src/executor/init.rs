@@ -342,6 +342,7 @@ impl Executor {
             conditional_invert_pending: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
             last_command_substitution_status: Cell::new(None),
+            word_expansion_comsub_exit: Cell::new(None),
             comsub_stdin_writeback: Cell::new(None),
             pipeline_stdin_consumed: Cell::new(None),
             pipeline_stage_fds_pre_wired: std::cell::Cell::new(false),
