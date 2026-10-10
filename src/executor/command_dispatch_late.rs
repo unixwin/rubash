@@ -47,7 +47,18 @@ impl Executor {
             }
             index += 1;
         }
-        self.sync_fd_terminal_marks(Some(cmd));
+        // The fd-terminal marks (__RUBASH_FD_TERMINAL_<fd>, consumed ONLY by
+        // the `-t` operator arm in builtins/test.rs) are rebuilt by
+        // sync_fd_terminal_marks with a full env_vars retain + fd-table walk
+        // plus per-endpoint console probes. Every `while [ ... ]` condition
+        // paid that on every iteration even though nothing ever reads a
+        // mark; refresh them only when this expression can actually consult
+        // one (builtins/test.c binop table: `-t` is the only terminal probe;
+        // a `-t` in a string-comparison position merely triggers a harmless
+        // idempotent refresh).
+        if args.iter().any(|arg| arg == "-t") {
+            self.sync_fd_terminal_marks(Some(cmd));
+        }
         // GNU execute_cmd.c: test's diagnostics go to the shell's CURRENTLY
         // BOUND fd 2 (redir.c) — an enclosing `exec 2>/dev/null` contains
         // them (rubash#218/#222-era leak: the raw process stderr bypassed
