@@ -119,9 +119,16 @@ fn print_identity_disclosure() {
     if identity == "msys" {
         println!("  persona: msys (default; MSYS2-compatible)");
         println!("  switch:  export RUBASH_IDENTITY=native for the honest-native persona");
-    } else {
+    } else if cfg!(windows) {
         println!("  persona: native (honest-native; RUBASH_IDENTITY=native)");
         println!("  switch:  unset RUBASH_IDENTITY (or set any other value) to return to msys");
+    } else {
+        // Non-Windows builds are always native (identity.rs): the MSYS
+        // persona exists to keep Windows inside the MSYS/Cygwin script
+        // ecosystem and is unreachable here, so the disclosure must not
+        // advertise a switch back to it.
+        println!("  persona: native (honest-native; non-Windows builds are always native)");
+        println!("  switch:  n/a (RUBASH_IDENTITY only selects personas on Windows)");
     }
     println!("  query:   rubash --identity prints the persona and effective values");
 }
@@ -135,8 +142,10 @@ fn print_identity_report() {
         identity::persona_name(),
         if identity::current_identity() == identity::ShellIdentity::Msys {
             "default; MSYS2-compatible"
-        } else {
+        } else if cfg!(windows) {
             "RUBASH_IDENTITY=native; honest-native"
+        } else {
+            "non-Windows build; honest-native"
         }
     );
     println!("uname -s:    {}", identity::sysname());
@@ -146,7 +155,11 @@ fn print_identity_report() {
     println!("uname -o:    {}", identity::operating_system());
     println!("OSTYPE:      {}", identity::ostype());
     println!("MACHTYPE:    {}", identity::machtype());
-    println!("switch:     export RUBASH_IDENTITY=native (native) / unset it (msys default)");
+    if cfg!(windows) {
+        println!("switch:     export RUBASH_IDENTITY=native (native) / unset it (msys default)");
+    } else {
+        println!("switch:     n/a (RUBASH_IDENTITY only selects personas on Windows)");
+    }
 }
 
 fn apply_invocation_shell_mode(executor: &mut Executor, argv0: Option<&str>) {

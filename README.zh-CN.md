@@ -1,6 +1,6 @@
 # Rubash
 
-用 Rust 从零实现的可嵌入、跨平台 GNU Bash 兼容 shell 引擎。Windows 优先，同时提供原生 Linux 与 macOS 构建。
+用 Rust 从零实现的可嵌入 GNU Bash 兼容 shell 引擎。
 
 [English](README.md)
 
@@ -8,66 +8,76 @@
 [![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Rubash 以可嵌入的无头引擎形态交付——词法分析、解析器、展开引擎、执行器、内建命令——对齐 GNU Bash 5.3.0 的可观测行为。它本身不是 shell 产品：仓库自带参考 CLI，交互式 shell（如 niubash）嵌入引擎承担全部 bash 语义，行编辑、prompt、补全由宿主自己实现。
+## 什么是 Rubash
 
-<!-- TODO(golden-lane, ci490)：最后一条上游切片快照重录落地 CI 后，把本注释替换为头条行：
-**83/83 GNU goldens 全绿** —— 上游语料全量逐字节一致（台账：#477）。
-当前实测为 82/83，不得提前写。 -->
+Rubash 是用 Rust 对 GNU Bash 语义的从零重实现，以**可嵌入的无头引擎**形态交付——词法分析、解析器、展开引擎、执行器、内建命令，全部重写。目标是与 GNU Bash 5.3.0 逐字节兼容，原生运行在 Windows 上。
 
-## 证据
+Rubash 本身不是 shell 产品。它自带一个参考 CLI（供兼容性 harness 和工具链使用），而交互式 shell 构建于引擎**之上**：niubash 嵌入 Rubash 承担全部 bash 语义，自己只负责行编辑、prompt 渲染与补全。
 
-### 能 source 真实世界脚本
+**实测而非宣称**：兼容性用 GNU Bash 自己的 83 套上游测试语料验证——当前 82 套件逐字节一致，每一条残余差异行都经过逐行审计（台账见下）。
 
-这些都是引擎真实 source 过的目标。每个数字都是逐字节实测，每行都链到记录它的 issue。
+**原生的意义**：打着"Windows 上的 bash"旗号的方案（Git Bash、MSYS2）装的是移植版 bash，骑在 POSIX 模拟层（`msys-2.0.dll`）上——fork 模拟、路径翻译的怪癖会渗进每一个脚本。Rubash 没有这层：一个自包含二进制，直接对话 Win32。
 
-| 真实世界目标 | 实测结果 | Issue |
-| --- | --- | --- |
-| nvm.sh v0.40.x 全文 | 加载逐字节干净 | #130 #155 #162 #169 |
-| bash-it 全仓 | 221/221 组件加载；完整框架端到端加载 | #316 #161 |
-| oh-my-bash 全仓 + 主题矩阵 | 22 libs 加载、252/252 functions 环境一致、5 主题 PS1 逐字节一致 | #143 #148 #149 #160 |
-| bash-completion 2.18.0 | 452/452 矩阵；`bash -n` canary 逐字节一致 | #138 |
-| git-completion | 140/140 | #142 |
-| modernish capability suite | 166/166 rc-vector 一致 | #477 |
-| FFmpeg / OpenSSH / PHP / ltmain / cmake configure | `--help` 与错误路径输出逐字节一致 | #477 |
-| git 自家测试框架（t/test-lib.sh） | 在引擎下端到端运行 | #477 |
+**路径是一等公民，不是转换对象**：MSYS 的模型是*猜*哪些参数像路径然后改写——这就是为什么每个 AI agent 和脚本都得设置 `MSYS_NO_PATHCONV=1`，防止 `/flag` 被改成 `C:/Program Files/Git/flag`。Rubash 把模型反过来：Windows 路径是原生货币。POSIX 风格和 WSL 风格的路径都接受输入、解析成真实的 Windows 路径，原生 Windows 程序拿到的永远是合法的 Win32 路径——没有转换启发式、不需要 `MSYS_NO_PATHCONV`、进程边界零意外。
 
-以上结果钉为回归夹具（`tests/regression/`，24 个测试，含 GNU-golden 矩阵、套件切片快照、perf canary）随每次 push 进 CI，并有 C 源码行级审计（[`docs/SOURCE-AUDIT.md`](docs/SOURCE-AUDIT.md)，336 项行为清点）在套件撞上之前找缺口、关缺口。
+**平台状态——跨平台、Windows 优先**：Windows 是主战场，拥有完整技术栈：单一自包含二进制直面 Windows 用户的 bash 痛点（无 POSIX 模拟层、无路径转换猜测、无需 MSYS_NO_PATHCONV、原生 Win32 路径为通货、为 bash 生态提供 MSYS2 兼容身份）。Linux 现已原生构建并运行（x86_64-unknown-linux-gnu）——真 getrlimit/chmod/faccessat/uname(2) 语义与信号投递，GNU 语料在 WSL 内对 Linux 二进制实测 19/24 字节一致且持续爬升。macOS 在 CI 编译全绿且 uname 臂 coreutils 正确。引擎语义模型刻意平台中立，账本随行。
 
-### 对 GNU Bash 自家语料
-
-兼容性基线是 GNU Bash 5.3.0 的上游测试套件：83 个文件，true-baseline 实测——无上游脚本桩、逐套件 TMPDIR、前台超时，环境绑定差异逐行审计后归零。
+## 兼容性一览
 
 ```
-零差通过：      82 套件
-残余差异：       1 套件 —— nameref，1 行已审计（coproc 收割时序
-                 竞争，GNU 自身也会出现）
+GNU Bash 5.3.0 测试套件 — 83 个文件，true-baseline 实测
+（台账：2026-09-25 切片重跑，master 71c933eb——无 upstream 脚本桩、
+ niu 挂载 /bin/sh 夹具、逐套件 TMPDIR 隔离、前台进程组超时；
+ 环境绑定差异经逐行审计后归零计）
+
+  零差通过：      82 套件  █████████████████████████████░  99%
+  残余差异：       1 套件   ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1%
+  ────────────────────────────────────────────────────────────────
+  残余：          nameref 1（declare -r 可见 RO_PID——coproc 收割
+                 时序竞争，GNU 自身也会出现）
+  归零的环境差：  glob extglob test type ifs-posix read coproc
+                 nquote errors intl quotearray trap——NTFS 文件名/
+                 属性位、locale、宿主工具输出、/dev/tty、路径形式、
+                 coproc 收割时序
+  9 月 9 日为 3427 行 → −99%+
 ```
 
-9 月 9 日原始差异 3427 行，如今降幅超 99%。完整台账与清单归档于 [#477](https://github.com/unixwin/rubash/issues/477)；完全通过的套件名单在台账里，不占本 README。
+### 完全通过的套件（零差异，环境差除外）
 
-## 性能
+`alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub-posix` `comsub` `comsub2` `cond` `coproc` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `errors` `exp` `exportfunc` `extglob` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `glob` `globstar` `heredoc` `herestr` `histexp` `history` `ifs-posix` `ifs` `intl` `invert` `invocation` `iquote` `jobs` `lastpipe` `mapfile` `more-exp` `new-exp` `nquote` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posix2` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `procsub` `quote` `quotearray` `read` `redir` `rhs-exp` `rsh` `set-e` `set-x` `shopt` `strip` `test` `tilde` `tilde2` `trap` `type` `varenv` `vredir`
 
-数据来自 `scripts/run-perf-suite.sh`（探针收在 `benchmarks/`，对 GNU Bash 5.3.0 取中位墙钟）。逐探针数据见所链 issue。
+## 架构
 
-- 数组追加曾是 O(n²)。摊还扩容修复后，n=3000 的 `a+=(i)` 从 771 ms 降到 52 ms，14.8x 提速（#437）。
-- nvm.sh 解析：首轮基线是 GNU 的 852x（#241）；解析与增量读取两轮之后进入个位数倍（#241、#281）。
-- 近平价：命令替换 1.2x、外部进程 spawn 为 GNU 的 0.9-1.5x（#242）。
-- 解释器循环热路径（read 循环、展开、函数调用）仍落后 GNU。开口子的逐探针数字与攻坚队列在 #241、#242。
+```
+src/
+├── lexer/           词法分析器（引号、转义、heredoc、续行）
+├── parser/          递归下降（简单命令、管道、case、arith-for、[[ ]]）
+├── executor/        命令执行、内建命令、展开、glob、数组、trap
+├── builtins/        40+ 内建命令实现（declare、read、printf、kill、...）
+└── lib.rs           核心类型和错误处理
+```
 
-## 平台
+- **词法分析器**：Bash 风格引号、转义、注释、变量、命令替换、算术展开、here-doc/here-string token、常见重定向。
+- **解析器**：简单命令、管道、AND/OR 列表、函数、花括号/子 shell 组、`if`、`for`、算术 `for`、`while`、`until`、`case`、`select`、`[[ ... ]]`、`coproc`、`time` 前缀。
+- **执行器**：外部命令、管道、重定向、临时赋值、函数调用、`source`/`.`、`eval`、无 shebang 脚本回退、Windows/Git Bash 路径桥接。
+- **展开系统**：变量、位置参数、索引/关联数组、命令替换、算术展开、花括号展开、tilde 展开、路径名 glob、`${parameter...}` 操作符、大小写/替换变换。
+- **内建命令**：`alias`、`cd`、`declare`/`typeset`/`local`、`echo`、`eval`、`exec`、`export`/`readonly`、`getopts`、`hash`、`jobs`、`kill`、`let`、`mapfile`、`printf`、`pushd`/`popd`/`dirs`、`read`、`return`、`set`、`shopt`、`source`、`test`/`[`、`trap`、`type`、`ulimit`、`umask`、`unset`、`wait` 等。
 
-| 平台 | 现状 |
-| --- | --- |
-| Windows x64（主平台） | 完整技术栈，单一自包含二进制直接对话 Win32，为 bash 生态提供 MSYS2 兼容身份；GNU 回归 golden 与 canary 在 Windows runner 上运行 |
-| Linux `x86_64-unknown-linux-gnu` | 引擎与测试套件进 CI；发布 tarball；真 getrlimit/chmod/faccessat/uname(2) 语义与信号投递；GNU 语料在原生 Linux 二进制实测 19/24 逐字节一致（WSL 内测量） |
-| macOS `aarch64-apple-darwin` | 库测试在 macOS runner 上真实执行；cross-target check 全绿；uname 臂 coreutils 正确；发布 tarball |
-| Android `aarch64-linux-android`、`armv7-linux-androideabi` | CI 交叉编译 check 腿（当前仅 check，无 NDK 链接） |
+### 无 fork 的子壳语义
 
-引擎语义模型（进程内子壳、fd 表语义、进程边界）刻意平台中立，同一份台账随行。Windows 仍是主目标、拥有最完整技术栈；平台缺口在 [`docs/cross-platform-gap-ledger.md`](docs/cross-platform-gap-ledger.md) 跟踪。
+POSIX `fork()` 没有 Win32 等价物。仿真层（MSYS2、Cygwin）在系统调用层面硬造它——昂贵、脆弱，也正是它们最出名怪癖的来源。Rubash 改为在**语义**层面复刻 fork，分三层：
+
+1. **进程内子壳**。`( list )` 和 `$( )` 从不创建进程。`ShellState::clone` 产出子壳的变量、别名、函数、trap 和历史——即 fork 的内存侧语义——子壳结束时副本直接丢弃。
+2. **带 POSIX `dup` 语义的真实句柄 fd 表**。槽位持有原生 Windows `HANDLE`，而 `DuplicateHandle` 复制的句柄共享同一内核文件对象——因此共享同一文件偏移。这正是 POSIX "dup 共享 open file description" 的语义，落地前在 POC 中实证过。`fork_table()` 逐句柄复制整表，正如 `fork` 复制 fd 表而不复制文件对象。
+3. **真实进程只出现在真实进程边界**。外部命令与管道成员走 `CreateProcess` + `os_pipe`；后台作业与 coproc 拥有独立进程，作业控制基于 Job Objects，SIGCONT 通过 `ResumeThread` 投递。
+
+结果：子壳与命令替换的创建成本为零，而脚本可观测的一切——退出码、fd 继承、共享偏移、信号处置——都与 GNU Bash 一致。
 
 ## 快速开始
 
 ### 从源码构建
+
+> 跨平台：Windows 是全栈主平台；Linux 原生构建并运行；macOS 在 CI 编译全绿（见上方「平台状态」）。
 
 ```bash
 git clone https://github.com/unixwin/rubash.git
@@ -75,8 +85,6 @@ cd rubash
 cargo build
 target/debug/rubash --version
 ```
-
-完整技术栈当前在 Windows。引擎同样可在 Linux 与 macOS 构建运行（见[平台](#平台)）。
 
 ### 运行脚本
 
@@ -95,36 +103,35 @@ MSYS_NO_PATHCONV=1 wsl bash scripts/true-baseline.sh
 MSYS_NO_PATHCONV=1 wsl bash scripts/true-baseline.sh array
 ```
 
-引擎测试：`cargo test --lib`（完整矩阵见 [`docs/architecture.md`](docs/architecture.md)）。
+## 测试
 
-## 身份
+```bash
+# 单元 + 集成测试
+cargo test --lib
 
-`uname`、`arch`、`OSTYPE`、`MACHTYPE` 是引擎内建命令，背后是可选 persona：默认 MSYS2 兼容（处处披露：这是兼容面具，不是移植声明），`RUBASH_IDENTITY=native` 切换到诚实原生 Windows。`rubash --identity` 打印当前 persona 与全部生效值。完整语义：[`SKILL.md`](SKILL.md)（rubash#154）与 [`docs/platform-identity.md`](docs/platform-identity.md)。
+# bashdb 兼容性
+cargo test --test cli_tests bashdb_compat -- --nocapture
 
-## 常见问题
+# source 展开
+cargo test --test cli_tests source_expands -- --nocapture
+```
 
-### Rubash 需要 WSL 吗？
-
-不需要。Rubash 是单一原生二进制；Windows 上直接对话 Win32，没有 POSIX 模拟层，也不依赖 WSL。WSL 只出现在开发流程里——作为运行 GNU Bash 5.3.0 的测量 oracle。
-
-### 兼容性是实测的还是宣称的？
-
-实测：GNU Bash 5.3.0 自家 83 套上游语料，当前 82 套逐字节一致，每条残余差异行都逐行审计（见[证据](#证据)与 #477）。
-
-### 可以嵌入吗？
-
-可以。引擎以 Rust 库 crate 交付（词法、解析、展开、执行器、内建命令全部进程内），`rubash` CLI 只是参考二进制。niubash 嵌入它承担全部 bash 语义。
+引擎还可以端到端运行 [bashdb](https://github.com/Trepan-Debuggers/bashdb) 核心调试循环（list、step、next、where、continue、quit）。
 
 ## 文档
 
-- Issue tracker — **唯一权威来源**，Rubash ↔ GNU Bash 兼容性状态（测量台账归档于 [#477](https://github.com/unixwin/rubash/issues/477)）
+- GitHub issue tracker — **唯一权威来源**，Rubash ↔ GNU Bash 兼容性状态（快照台账已于 2026-10-10 归档至 issue #477）
 - [`docs/PROVENANCE.md`](docs/PROVENANCE.md) — 来源声明：Rubash 与 GNU Bash 源码的关系，以及贡献者方法论规范
-- [`docs/architecture.md`](docs/architecture.md) — 子系统、无 fork 子壳设计、引擎测试
-- [`docs/platform-identity.md`](docs/platform-identity.md) — persona 全表、argv/路径方言契约、原生与 MSYS 对比
-- [`docs/cross-platform-gap-ledger.md`](docs/cross-platform-gap-ledger.md) — 平台缺口台账
 - [`docs/builtins.md`](docs/builtins.md) — 内建命令清单和分发模型
-- [`docs/bash-upstream-tests.md`](docs/bash-upstream-tests.md) — 如何运行 GNU Bash 上游测试
 - [`docs/bashdb-debugging-rubash.md`](docs/bashdb-debugging-rubash.md) — bashdb fixture 设置和 smoke test
+- [`docs/bash-upstream-tests.md`](docs/bash-upstream-tests.md) — 如何运行 GNU Bash 上游测试
+
+## 开发原则
+
+- 按 Bash 语义的 root cause 修 Rubash 子系统，不按单条 expected output 打补丁。
+- bashdb 保持外部 clean 工具；临时 instrumentation 仅用于诊断。
+- 每个失败的 bashdb 命令都是发现和修复 Rubash 兼容性缺口的机会。
+- 兼容性基线为 GNU Bash 5.3.0（项目所有者编译，位于 `/usr/local/bin/bash`）。
 
 ## 来源与实现方式
 
@@ -146,4 +153,4 @@ MIT — 详见 [`LICENSE`](LICENSE)。
 
 ---
 
-*最后更新：2026-10-10*
+*最后更新：2026-09-23*

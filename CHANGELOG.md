@@ -6,17 +6,24 @@
 
 ## [Unreleased]
 
+暂无。
+
+## [1.4.0] - 2026-10-10
+
 GNU Bash 5.3.0 兼容性大幅推进。83 套件 true-baseline 总差异从 3427 行降至 2072 行（−40%），零差套件从 31 增至 32。
 
 ### 新增
 
-- 登录 shell 启动链（#487）：argv[0] 首字符 `-` 或 `-l`/`--login`（含 `-lc` 组合形态）置 login 标志后，Unix（`not(windows)` 门，覆盖 Linux 与 macOS）上登录 shell 依次 source /etc/profile → 首个存在的 ~/.bash_profile | ~/.bash_login | ~/.profile；非登录交互 shell 依次 source /etc/bash.bashrc（存在时）+ ~/.bashrc（--rcfile/--init-file 只替换个人 rc）；启动文件中 `exit` 终止 shell 且后续不执行（与 --rcfile 一致）。`--noprofile`/`--norc` 分别抑制对应分支。Windows 无真实登录概念：-l/--login 接受且行为与现状完全一致（不读任何链文件）。链顺序/fallback 以注入式存在性检查做单元测试；Linux/macOS 端到端由 CI 对应 job 验证。
+- **登录 shell 启动链**（#487，PR #489）：argv[0] 首字符 `-` 或 `-l`/`--login`（含 `-lc` 组合形态）置 login 标志后，Unix（`not(windows)` 门，覆盖 Linux 与 macOS）上登录 shell 依次 source /etc/profile → 首个存在的 ~/.bash_profile | ~/.bash_login | ~/.profile；非登录交互 shell 依次 source /etc/bash.bashrc（存在时）+ ~/.bashrc（--rcfile/--init-file 只替换个人 rc）；启动文件中 `exit` 终止 shell 且后续不执行（与 --rcfile 一致）。`--noprofile`/`--norc` 分别抑制对应分支。Windows 无真实登录概念：-l/--login 接受且行为与现状完全一致（不读任何链文件）。链顺序/fallback 以注入式存在性检查做单元测试；Linux/macOS 端到端由 CI 对应 job 验证。
+- **真 readline REPL**（#419 readline 腿，PR #482）：裸 `rubash.exe` 真控制台交互补齐 readline 行编辑——此前控制台分支 stdin 留在 cooked 行输入模式，编辑由 conhost 代管，shell 历史（↑/↓、C-p/C-n）、行内光标移动（C-a/C-e/←/→）与 C-r 反向搜索全部失效。新增 `RawConsole`（`src/console_readline.rs`）：提示符与接受行之间切 raw 模式，按键逐事件翻译成引擎编辑分派器已有的字符流，编辑行每键重绘（raw 模式下终端不再回显）；命令执行前恢复 cooked 模式，子进程仍见正常行纪律控制台。编辑分派器从读循环抽出为 `apply_edit_char`，cooked 字节流路径（#434 桥接语义不变）与 raw 控制台路径共享同一套绑定；PS1/PS2（含 `--rcfile`）渲染共用。补全（Tab）与 i-search 的 raw 态渲染为后续分层。
+- **`--version` 构建元数据**（#488，PR #490）：GNU license 块（保持逐字节不变）之后追加 `build: <git-hash> (<profile>)`——build.rs 编译期捕获 `git rev-parse --short HEAD`（git 不可用时回退 unknown，发布打包可 `RUBASH_BUILD_HASH` 钉值），profile 为 debug/release；Windows 附加一行 persona 说明：原生 Windows 构建、无 MSYS runtime，`*-pc-msys` MACHTYPE 不应读作 MSYS2/Cygwin bash 移植。
+- **GNU `cp` 移植**：-r/-n/-i/-v/-p/-u/-t、递归、缓冲 stderr；`/bin/echo` 与 `/usr/bin/echo` 路由到缓冲 builtin 通道。
+- **`history -d start-end` 范围删除**（GNU 5.3 特性）。
 
 ### 修复
 
-- 命令替换的退出状态在展开期内即刻成为 `$?`（#485）：GNU 在父壳回收替换子进程时就把其状态写入 last_command_exit_value，同一命令行内后置的 `$?`（后续词、同词后缀片段、同一简单命令的后续赋值 RHS）都看得见，成功的替换同样覆盖（`echo "$(cd nope && pwd)" $?` 报 1、`false; echo "$(true) $?"` 报 0、`v="$(exit 3)$?"` 得 v=3 且 rc=3），命令自身执行后照常覆盖。此前 rubash 只把状态记进 `last_command_substitution_status` 单元、仅在空词/赋值收尾时提升，词展开路径上丢失该时序。修复：AST/function 替换与 `&self` 包装器三个回落点的父侧回收处直接写 `exit_code`（fork 模型保存/恢复中的 `saved_exit_code` 不再回退状态），整词引号 `"$( )"` 快路径发布同一状态；反引号嵌词从遗留 `&self` 展开器改道可变嵌入 walker（与 `$()` 词共用生产路径与同一批提升点）。`local` 屏蔽赋值状态、`set -e` 下替换赋值失败中止（rc=1）而词内替换失败不中止（echo 自身 rc=0）均保持 GNU 一致。
-- 裸 `rubash.exe` 真控制台交互补齐 readline 行编辑（#419 后续）：此前控制台分支 stdin 留在 cooked 行输入模式，编辑由 conhost 代管——方向键驱动 conhost 自己的行缓冲，shell 历史（↑/↓、C-p/C-n）、行内光标移动（C-a/C-e/←/→）与 C-r 反向搜索全部失效。新增 `RawConsole`（`src/console_readline.rs`）：提示符与接受行之间切 raw 模式，按键逐事件翻译成引擎编辑分派器已有的字符流，编辑行每键重绘（raw 模式下终端不再回显）；命令执行前恢复 cooked 模式，子进程仍见正常行纪律控制台。编辑分派器从读循环抽出为 `apply_edit_char`，cooked 字节流路径（#434 桥接语义不变）与 raw 控制台路径共享同一套绑定。PS1/PS2（含 `--rcfile`）渲染已在上一个提交落地，本提交补齐 readline 编辑腿。补全（Tab）与 i-search 的 raw 态渲染为后续分层。
-- 函数定义与花括号组的同行 `#` 尾注释不再解析失败（#118）：`f() { # note`、`f() { echo x; } # note`、`{ echo x; } # note`、`function f { … } # note`、TAB/空注释等形态此前被 lexer 把注释切进花括号组 token（`{ # note`），parser 因 `function_command.rs` 的 `value.trim() == "{"` 判定失败而回落成 `syntax error near unexpected token `('`。`skip_brace` 现在汇报配对 `}` 是否命中以及组内顶层注释起点，scanner 只把注释之前的文本作为 token 并把位置回退到注释处；`brace_close_can_end_compact_group` 也把 `}` 之后的行内 `#` 视为组结束。另修正 `skip_brace` 的 `comment_start` 初值，`f() {#note` 仍按 GNU 报语法错误而非静默接受。
+- **命令替换的退出状态在展开期内即刻成为 `$?`**（#485，PR #491/#494）：GNU 在父壳回收替换子进程时就把其状态写入 last_command_exit_value，同一命令行内后置的 `$?`（后续词、同词后缀片段、同一简单命令的后续赋值 RHS）都看得见，成功的替换同样覆盖（`echo "$(cd nope && pwd)" $?` 报 1、`false; echo "$(true) $?"` 报 0、`v="$(exit 3)$?"` 得 v=3 且 rc=3），命令自身执行后照常覆盖。此前 rubash 只把状态记进 `last_command_substitution_status` 单元、仅在空词/赋值收尾时提升，词展开路径上丢失该时序。修复：AST/function 替换与 `&self` 包装器三个回落点的父侧回收处直接写 `exit_code`（fork 模型保存/恢复中的 `saved_exit_code` 不再回退状态），整词引号 `"$( )"` 快路径发布同一状态；反引号嵌词从遗留 `&self` 展开器改道可变嵌入 walker（与 `$()` 词共用生产路径与同一批提升点）。`local` 屏蔽赋值状态、`set -e` 下替换赋值失败中止（rc=1）而词内替换失败不中止（echo 自身 rc=0）均保持 GNU 一致。
+- **函数定义与花括号组的同行 `#` 尾注释不再解析失败**（#118）：`f() { # note`、`f() { echo x; } # note`、`{ echo x; } # note`、`function f { … } # note`、TAB/空注释等形态此前被 lexer 把注释切进花括号组 token（`{ # note`），parser 因 `function_command.rs` 的 `value.trim() == "{"` 判定失败而回落成 `syntax error near unexpected token `('`。`skip_brace` 现在汇报配对 `}` 是否命中以及组内顶层注释起点，scanner 只把注释之前的文本作为 token 并把位置回退到注释处；`brace_close_can_end_compact_group` 也把 `}` 之后的行内 `#` 视为组结束。另修正 `skip_brace` 的 `comment_start` 初值，`f() {#note` 仍按 GNU 报语法错误而非静默接受。
 - `set -u` 下算术展开不再把已赋值变量判为 unbound（#67）：nounset 扫描器去掉了无法识别错误 token 时的合成 "syntax error in expression" 回退，并跳过赋值左值（`for ((i=0; i<n; i++))` 的 init/update 不再报 `i` unbound）。
 - `set -u` 下算术展开的 unbound 错误与普通参数展开对齐：直接上下文中终止脚本，命令替换与管道段内只终止该子上下文（GNU expr.c expr_streval 的 FORCE_EOF 语义），并消除了随后把展开文本当命令执行的 `command not found` 级联。
 - 管道中未加引号变量作命令字现在按 IFS 分词（#68）：`v="echo hi there"; $v | cat` 以 `echo` 为命令名、`hi there` 为参数执行，管道任意段、子 shell 与进程替换内一致。
@@ -27,23 +34,56 @@ GNU Bash 5.3.0 兼容性大幅推进。83 套件 true-baseline 总差异从 3427
 - **trap 归零**（3→0）：ERR action $LINENO 绑失败命令行、SIGCHLD 通知排队重放、后台子进程剥离继承 trap 表、traced 函数 DEBUG 行号用 body_open_line。
 - **func 全族归零**（58→0）：POSIX funcname 规则、AST printer 移植、special-builtin 优先级。
 - **complete 全族归零**（115→0）：多操作数 compspec 注册（`complete -F f c1 c2` 双双生效）。
-- **history 改善**（190→127）：`history -d start-end` 范围删除（GNU 5.3 特性）、HISTIGNORE harness 修复、fc -s 语义对齐、命令替换内 fc/session 历史路由。
+- **history 改善**（190→127）：HISTIGNORE harness 修复、fc -s 语义对齐、命令替换内 fc/session 历史路由（`history -d start-end` 范围删除见新增）。
 - **globstar 改善**（182→101）：非相邻多个 `**` 重复发射修复、相邻 `**` 折叠后零深度目录尾斜杠。
 - **array/assoc 改善**（444+358→246+242）：复合赋值引号分组四层修复（解析器 RAW 合并、declare 操作数收集器、Word 臂原子复合、执行器逐字守卫）、元素赋值词边界、嵌套引号 patsub 逐元素替换。
-- **信号编号统一**：rubash 全表从 BSD/Cygwin 风格切换到 Linux 表（USR1=10、CHLD=17、RTMIN=34），与 GNU 5.3.0 WSL 契约一致；kill -l/trap -l 输出逐字节对齐。
 - **unicode 修复**：printf 和 ANSI-C 引号中 `\u`/`\U` 部分读取保留、精确十六进制位数要求。
 - **locale 子系统**：从 feat/locale-subsystem 合入，setlocale 警告、MB_STRLEN 长度。
-- **外部命令**：GNU cp 移植（-r/-n/-i/-v/-p/-u/-t、递归、缓冲 stderr）、/bin/echo 和 /usr/bin/echo 路由到缓冲 builtin 通道。
 - **comsub/pipeline**：pathname-expand 替换、管线 word list、assoc hash order 共享 join。
 - **assignment**：全单引号 RHS 为字面数据、元素赋值词永不分词、转义引号内下标为数据。
 - **nameref**：无值 nameref 接受有效目标赋值。
 - **SIGPIPE 语义**：管道上游写端遭遇 broken pipe 不再中止解释器，`yes | head` 等流式管线行为与 GNU 一致（#455）。
-- **输入规范化**：桥接层送达的交互式输入行在进入引擎前规范化 C0 控制字节（#458）。
-- **Android 目标**：aarch64/armv7 android 目标可针对 bionic 编译（#456）。
+- **输入规范化（粘贴语义）**：桥接层送达的交互式输入行在进入引擎前规范化 C0 控制字节（#458）——终端粘贴携带的 NUL/控制字节不再以未定义方式进入词法。
+- **source 边界的语法错误不再终止会话/脚本**（#451，PR #481）：sourced 文件的语法错误按普通失败中止剩余文本（GNU evalstring.c 语义）——交互会话报错后继续读下一条，非交互脚本继续执行后续命令；此前中止被误分类为 reader exit jump，交互 shell 在诊断后立即结束（ConPTY 下表现为 source 后首条命令永不执行），非交互脚本以 rc 2 中止。
+- **PS1 `\[`/`\]` 忽略标记在所有渲染路径剥离**（#431，PR #480）：oh-my-bash inretio / bash-it 主题形状下不再把标记渲染为字面文本或泄漏 raw `\x01`/`\x02` 字节；`${var@P}` 提示符变换同步剥离；真实 ESC 颜色序列与光标定位几何不受影响。
+- **赋值前缀 + 子 shell 的 GNU 形态**（审计语料 #452 集群1，PR #453）。
+- **`complete -F` 接受带连字符的函数名**（#427，PR #454）。
+- **复合体内 `]]` / `(( ))` 之后无终止符的 then/do 被接受**（#460，PR #475）。
+- **函数定义名含未引号 `$( )` 被接受**（#462，PR #476）。
+- **`=~` 正则词片段永远是词数据，不再被误判为保留字**（#461，PR #473）。
+- **嵌套 keyword-form 函数体计入组 opener 追踪，不再提前 EOF**（#465，PR #472）。
+- **词附着的多行进程替换体跨行 join**（#463，PR #483）。
+- **词首数据 raw ESC 字节（如单引号首字符）不再被吞**（niubash#200，PR #474）。
+- **ERR trap 不再对词/赋值展开错误触发**（PR #467）。
+- **Unix 上进程替换 fd 作为外部命令参数传递**（PR #468）。
+- **coproc 子进程继承父函数表快照，DEBUG trap 函数可解析**（#441，PR #469）。
+- **引号整词默认展开保持单一复合元素**（PR #466）。
+- 回归钉子（无用户可见行为变化）：sourced `exit N` 终止语义（PR #457）、函数定义花括号行 token 语义（PR #459）、#424 重定向目标拒绝与 procsub 输入侧（PR #464）。
+
+### 性能
+
+性能三连（#437/#281/#242）与 bats-core 热点（#375）推进：
+
+- **#281 增量 reader 收官**（PR #486，closes #281）：续行扫描 admission-gate + 物理行二分戳、零拷贝参数体视图、逐行 batch-tokenizer 停靠（GNU read_token 流式模型），以及 fold 完成趟的 opener-state checkpoint——fold 趟只需支付组自身文本，不再从字节 0 重新 lex 整个累积缓冲（nvm 形状 4281 次全量趟中 19 次大重扫的 270 KB 归零）。
+- **#437 热点**：算术循环 per-command boundary O(1) 化（数组追加与算术循环 micro-benchmark 报告的执行热点）。
+- **#242 执行器热路径（部分）**：named-event catch_flag 信号轮询、单遍 `${}` 算子索引 + 直接 simple-glob 匹配 + 算术快照容量、walker `${}` 臂 inline fragment 解析与模式快路径、allocation-free shopt 咨询、字面词快路径、comsub-scan O(n²) 修复等。
+- **#375 第一刀（部分）**：`$(cd X && pwd)` 命令替换路径解析单句柄化——一次 CreateFileW 同时取目录属性 + 物理路径（PR #484）；`$(cd && pwd)×5000` 878→779 ms（−11%），bats_debug_trap 形状 −8%，输出逐位等价。
+- **perf-suite**：专用基准 harness 与首个基线（24 probes，rubash vs WSL GNU 5.3.0）。
+
+### 平台
+
+- **Android 目标**：aarch64/armv7 android 目标可针对 bionic 编译（#456，`sa_restorer` 平台门修正）；kill/trap 信号表在 android 上同样编译 Linux 编号的 1..31 槽位（bionic 与 Linux 内核编号逐值一致）——此前 `kill -l 17` 在 android 上输出为空、`trap -l` 列出 bionic 不用的 BSD 名；RT 字面量块保持 glibc 契约的 Linux 专属（PR #492）。
+- **平台门全量审计**（PR #492）：src/ 下 511 处平台 cfg 盘点分类；确认无「漏 macOS 腿」同类问题，真 Linux 专属门（RT 34..64 字面量、`sa_restorer` 等）保留。
+- **OpenHarmony / musl**：`ulimit` 针对 musl 与 OpenHarmony libc 编译修复（PR #449）。
+- **信号编号统一**：rubash 全表从 BSD/Cygwin 风格切换到 Linux 表（USR1=10、CHLD=17、RTMIN=34），与 GNU 5.3.0 WSL 契约一致；kill -l/trap -l 输出逐字节对齐。
+
+### 构建
+
+- **crates.io 打包瘦身**：发布包不再携带 `tests/` 与 `third_party/`（参考源码与测试语料，仅本地开发/CI 需要），包内容 2053 个文件 / 15.6 MB → 400 个文件 / 8.9 MB，回到 crates.io 10 MiB 上限之内；`exclude` 同步移除失效的 `!third_party/bash/tests/*.right` 反规则。功能与构建不受影响（`cargo publish --dry-run` 验证通过）。
 
 ### 文档
 
-- 重写 README.md 和 README.zh-CN.md：数据驱动的兼容性展示、近期修复表、架构概览。
+- 重写 README.md 和 README.zh-CN.md：数据驱动的兼容性展示、近期修复表、架构概览；其后一次事实保持的风格微调（PR #495）。
 - 更新 COMPATIBILITY-STATUS.md：2026-09-11 全量 true-baseline 重跑结果、总体结论刷新。
 - 归档过时文档 7 个（gnu-bash-compatibility-implementation-plan、bash-implementation-inventory、bash-source-map、performance-debugging-process、typed-expansion-migration-checkpoint、source-layout、HANDOFF-20260829）。
 

@@ -4143,7 +4143,7 @@ fn version_appends_build_metadata_after_the_gnu_block_rubash_488() {
         assert!(note.contains("native Windows build"), "{note:?}");
         assert!(note.contains("without an MSYS runtime"), "{note:?}");
         assert!(note.contains("compatibility persona"), "{note:?}");
-        assert!(note.contains("docs/platform-support.md"), "{note:?}");
+        assert!(note.contains("README.md, Identity and"), "{note:?}");
     } else {
         assert_eq!(lines.len(), 7, "full --version output: {stdout:?}");
     }

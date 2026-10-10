@@ -101,6 +101,25 @@ jobs:
       - name: Run regression suite (goldens, snapshots, perf canaries)
         run: cargo test --test regression
 
+      # Re-record protocol runner leg (see tests/regression.rs module
+      # header): record the suite snapshots with THIS runner's engine and
+      # upload the bytes. When the comparison step above fails because the
+      # committed .snap files are stale, this artifact IS the replacement
+      # content — commit it with the behavior-fix reference per slice
+      # instead of hand-transcribing the truncated panic window.
+      - name: Record upstream-suite snapshots (golden-refresh artifact)
+        if: always()
+        shell: bash
+        run: RUBASH_REGRESSION_RECORD=1 cargo test --test regression upstream_suite_slice_snapshots
+
+      - name: Upload recorded snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-snapshots
+          path: tests/regression/snapshots/
+          if-no-files-found: error
+
   cross-target-check:
     name: Cross-target check (linux/darwin/android)
     runs-on: ubuntu-latest
