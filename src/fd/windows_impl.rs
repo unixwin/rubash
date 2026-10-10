@@ -93,6 +93,7 @@ extern "system" {
     fn GetHandleInformation(h: HANDLE, flags: *mut DWORD) -> BOOL;
     fn GetFileType(h: HANDLE) -> DWORD;
     fn GetFinalPathNameByHandleW(h: HANDLE, buf: *mut u16, len: DWORD, flags: DWORD) -> DWORD;
+    fn GetFileInformationByHandle(h: HANDLE, info: *mut BY_HANDLE_FILE_INFORMATION) -> BOOL;
     fn GetConsoleMode(h: HANDLE, mode: *mut DWORD) -> BOOL;
     fn WaitForSingleObject(h: HANDLE, ms: DWORD) -> DWORD;
     fn PeekNamedPipe(
@@ -103,6 +104,24 @@ extern "system" {
         avail: *mut DWORD,
         left: *mut DWORD,
     ) -> BOOL;
+}
+
+const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x0200_0000;
+const FILE_ATTRIBUTE_DIRECTORY: DWORD = 0x0000_0010;
+
+#[repr(C)]
+struct BY_HANDLE_FILE_INFORMATION {
+    dwFileAttributes: DWORD,
+    // FILETIME is two aligned DWORDs (a u64 field would misalign repr(C)).
+    ftCreationTime: [DWORD; 2],
+    ftLastAccessTime: [DWORD; 2],
+    ftLastWriteTime: [DWORD; 2],
+    dwVolumeSerialNumber: DWORD,
+    nFileSizeHigh: DWORD,
+    nFileSizeLow: DWORD,
+    nNumberOfLinks: DWORD,
+    nFileIndexHigh: DWORD,
+    nFileIndexLow: DWORD,
 }
 
 #[repr(C)]
@@ -1431,4 +1450,77 @@ mod tests {
 /// Take ownership of a pipe end as a raw HANDLE (coproc endpoints).
 pub fn into_handle(pipe: impl std::os::windows::io::IntoRawHandle) -> HANDLE {
     pipe.into_raw_handle() as HANDLE
+}
+
+/// Single-handle physical-path resolution for the `$(cd X && pwd)` command
+/// substitution fast path (rubash#375). `std::fs::canonicalize` +
+/// `Path::is_dir` pay two `CreateFileW` round trips per call (~120µs measured
+/// on NTFS under a DEBUG-trap loop); this opens the target ONCE with
+/// `FILE_FLAG_BACKUP_SEMANTICS` and reads both the directory attribute and
+/// the final (symlink-resolved, verbatim `\\?\`) path off that handle — the
+/// same two facts `canonicalize` + `is_dir` deliver.
+///
+/// Output parity with `fs::canonicalize`:
+///   - `GetFinalPathNameByHandleW` (flags 0 = FILE_NAME_NORMALIZED |
+///     VOLUME_NAME_DOS) yields the `\\?\C:\...` verbatim form canonicalize
+///     returns, with symlinks/reparse points resolved and 8.3 short names
+///     expanded to the on-disk long name.
+///   - A missing target fails `CreateFileW` exactly where `canonicalize`
+///     errors; an existing non-directory keeps the handle open fine (backup
+///     semantics) and reports `is_dir == false`, mirroring canonicalize-Ok +
+///     `is_dir() == false`.
+pub fn canonical_physical_dir(path: &std::path::Path) -> Option<(std::path::PathBuf, bool)> {
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0, // query attributes only; no access rights to conflict with locks
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            0,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle == 0 {
+        return None;
+    }
+    let mut info = BY_HANDLE_FILE_INFORMATION {
+        dwFileAttributes: 0,
+        ftCreationTime: [0; 2],
+        ftLastAccessTime: [0; 2],
+        ftLastWriteTime: [0; 2],
+        dwVolumeSerialNumber: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+        nNumberOfLinks: 0,
+        nFileIndexHigh: 0,
+        nFileIndexLow: 0,
+    };
+    let is_dir = unsafe { GetFileInformationByHandle(handle, &mut info) } != 0
+        && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    let mut buf: Vec<u16> = vec![0u16; 1024];
+    let n = loop {
+        let n =
+            unsafe { GetFinalPathNameByHandleW(handle, buf.as_mut_ptr(), buf.len() as DWORD, 0) };
+        if n > 0 && n as usize > buf.len() {
+            // Required size (excluding the NUL) — grow and retry.
+            buf.resize(n as usize + 1, 0);
+            continue;
+        }
+        break n;
+    };
+    unsafe { CloseHandle(handle) };
+    if n == 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    Some((
+        std::path::PathBuf::from(String::from_utf16_lossy(&buf)),
+        is_dir,
+    ))
 }
