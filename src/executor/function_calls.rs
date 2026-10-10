@@ -72,7 +72,11 @@ impl Executor {
         let name_quoted = name_raw != function.name
             && (name_raw.contains('\'') || name_raw.contains('"') || name_raw.contains('\\'));
         let procsubst_like = name_raw.starts_with("<(") || name_raw.starts_with(">(");
-        let invalid_identifier = function.name.contains('$') || name_quoted || procsubst_like;
+        // rubash#462: an unquoted backquote span is part of the name WORD the
+        // same way `$( ... )' is; GNU valid_function_word rejects the word
+        // (`` `echo f`': not a valid identifier').
+        let invalid_identifier =
+            function.name.contains('$') || name_quoted || procsubst_like || name_raw.contains('`');
         let posix_mode = self.posix_mode_enabled();
         let name_error_line = function.body_end_line.or(cmd.line);
         let name_error_prefix = |executor: &Self| {
