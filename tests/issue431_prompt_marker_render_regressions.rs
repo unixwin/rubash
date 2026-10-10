@@ -109,9 +109,12 @@ fn host_channel_expanded_prompt_is_marker_free() {
     assert!(!stream.contains(&0x02), "\\x02 leaked: {stream:?}");
 }
 
-/// `${PS1@P}` (GNU subst.c string_transform 'P') routes through the same
-/// strip: stdout is a terminal-bound channel, so neither the marker bytes
-/// nor literal `\[`/`\]` may appear — while the ESC payload survives.
+/// `${PS1@P}` (GNU subst.c string_transform 'P'): marker-free on this
+/// channel because decode_prompt_string drops a `\[`/`\]` pair inline when
+/// no line editor is active (the piped `-i` runs without emacs/vi), not
+/// because the transform strips bytes — a literal \x01 in the VALUE must
+/// survive ${var@P} (GNU exp.right:253), so the transform itself never
+/// filters. ESC payload survives; no literal `\[`/`\]` text either.
 #[test]
 fn prompt_transform_strips_ignore_markers() {
     let stream = run_stdin(
