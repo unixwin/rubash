@@ -1580,7 +1580,16 @@ fn trace_stdio_write(
     bytes: usize,
     write: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
-    if std::env::var_os("RUBASH_STDIO_TRACE").is_none() {
+    // The trace switch is a debug env var fixed for the process lifetime,
+    // so read it once. A raw getenv/std::env::var_os on every builtin
+    // write was a visible per-iteration cost in loops that run a builtin
+    // a few times per command (`while [ ... ]` -> execute_test_words ->
+    // write_buffered_builtin_output -> here): each call took the
+    // std::env lock and scanned the (potentially large) environment
+    // (rubash#437). OnceLock collapses it to one relaxed load.
+    static TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = *TRACE_ENABLED.get_or_init(|| std::env::var_os("RUBASH_STDIO_TRACE").is_some());
+    if !enabled {
         return write();
     }
 

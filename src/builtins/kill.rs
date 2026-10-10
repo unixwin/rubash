@@ -736,6 +736,19 @@ fn parse_signal_lines(content: &str) -> Vec<i32> {
 /// executor's signal poll without any filesystem traffic.
 static SELF_SIGNALS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
 
+/// Lock-free "at least one signal may be waiting" flag (rubash#437). The
+/// per-command boundary poll (`run_pending_signal_traps`) runs once per
+/// loop iteration; before this flag, `take_all_signals` took the
+/// SELF_SIGNALS mutex AND the kernel backend mutex (plus a pending()
+/// collect) on every poll even when nothing was pending — profiled as the
+/// single hottest self-time frame in a `while` arithmetic loop. Producers
+/// (queue_self_signal, and the kernel handler via kernel_signals::note
+/// hook) set it with Release; the drain reads it with Acquire and clears
+/// it only after both queues are empty, so a delivery that races the clear
+/// either lands before the clear (drained next poll) or re-sets the flag.
+#[cfg(unix)]
+static PENDING_ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Counts polls so the mailbox-file scan (for signals sent by OTHER
 /// processes) runs at a reduced interval instead of twice per command.
 /// Unix has no file mailbox: kernel deliveries drain through
@@ -747,8 +760,36 @@ static FILE_POLL_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// plus real kernel deliveries from the signal_hook backend.
 #[cfg(unix)]
 fn take_all_signals() -> Vec<i32> {
-    let mut signals = take_self_signals();
-    signals.extend(kernel_signals::drain());
+    // Lock-free fast path (rubash#437). Two independent producers feed the
+    // two queues, and either one being provably empty lets us skip its
+    // mutex entirely:
+    //   * SELF_SIGNALS  -> guarded by PENDING_ANY (set in queue_self_signal).
+    //   * kernel queue  -> a signal_hook handler is only installed for a
+    //     signal that is actually trapped, so when HANDLER_SET == 0 no
+    //     kernel delivery can be pending and the backend mutex + pending()
+    //     collect can be skipped. This is the steady state of a script
+    //     with no traps (the common loop case).
+    let self_pending = PENDING_ANY.load(std::sync::atomic::Ordering::Acquire);
+    let kernel_pending = kernel_signals::handler_any_installed();
+    if !self_pending && !kernel_pending {
+        return Vec::new();
+    }
+    let mut signals = if self_pending {
+        take_self_signals()
+    } else {
+        Vec::new()
+    };
+    if kernel_pending {
+        signals.extend(kernel_signals::drain());
+    }
+    // Clear only when both sources are provably empty again. A delivery
+    // that raced this drain either set PENDING_ANY or installed a handler
+    // (both Release stores), so re-reading here and clearing with Release
+    // cannot lose a wakeup: the racing store is either visible now (flag
+    // stays / self queue non-empty) or lands strictly after this clear.
+    if take_self_signals().is_empty() && !kernel_signals::handler_any_installed() {
+        PENDING_ANY.store(false, std::sync::atomic::Ordering::Release);
+    }
     signals
 }
 
@@ -757,6 +798,8 @@ fn queue_self_signal(signal: i32) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push(signal);
+    #[cfg(unix)]
+    PENDING_ANY.store(true, std::sync::atomic::Ordering::Release);
 }
 
 fn take_self_signals() -> Vec<i32> {
@@ -960,6 +1003,15 @@ pub fn requeue_pending_signals(signals: Vec<i32>) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     queue.splice(..0, signals);
+    // This is a SECOND producer of SELF_SIGNALS (the other is
+    // queue_self_signal), so it must set the same lock-free wakeup flag:
+    // the boundary poll's fast path (take_all_signals) skips the self queue
+    // when PENDING_ANY is clear, and a requeue that did not raise it would
+    // strand the re-queued signal forever. `wait`/observe_signals_while_blocked
+    // peek a delivery, put it back here, and rely on the NEXT command
+    // boundary to dispatch the trap (wait.def:174).
+    #[cfg(unix)]
+    PENDING_ANY.store(true, std::sync::atomic::Ordering::Release);
 }
 
 #[cfg(not(unix))]
@@ -1467,6 +1519,10 @@ mod kernel_signals {
     /// no sigaction traffic on the steady-state command path.
     static DISPOSITION_STATE: AtomicU64 = AtomicU64::new(0);
 
+    /// The six managed signals occupy state bits 0..=11 (two bits each, in
+    /// MANAGED order). All-zero means every one is at Default.
+    const MANAGED_STATE_MASK: u64 = (1u64 << (2 * MANAGED.len())) - 1;
+
     fn state_bits(sig: i32) -> u64 {
         let index = MANAGED
             .iter()
@@ -1548,10 +1604,20 @@ mod kernel_signals {
     /// table: a real action -> handler, `trap ''` -> SIG_IGN, no trap ->
     /// entry disposition (SIG_DFL, or SIG_IGN for entry-ignored signals and
     /// SIGQUIT -- sig.c:333 sets SIGQUIT to SIG_IGN for every shell).
+    #[derive(Clone, Copy)]
     pub(super) enum Disposition {
         Handler,
         Ignore,
         Default,
+    }
+
+    /// True when every managed signal currently sits at `Default` in the
+    /// recorded disposition state, so a reconcile whose wish-list is also
+    /// all-Default has nothing to do. Used by the boundary-poll fast path
+    /// (rubash#437) to skip the mutex + per-signal loop on the steady-state
+    /// command path. Reads the packed state word atomically; no lock.
+    pub(super) fn at_default_state() -> bool {
+        DISPOSITION_STATE.load(Ordering::Relaxed) & MANAGED_STATE_MASK == 0
     }
 
     pub(super) fn reconcile(dispositions: &[(i32, Disposition)]) {
@@ -1649,6 +1715,15 @@ mod kernel_signals {
         signals.pending().collect()
     }
 
+    /// True when at least one managed signal is routed to the signal_hook
+    /// handler, i.e. the kernel backend can have a pending delivery. A
+    /// lock-free atomic read: with no handler installed no kernel delivery
+    /// is possible, so the boundary poll (rubash#437) can skip the backend
+    /// mutex and `pending()` collect entirely on the untrapped path.
+    pub(super) fn handler_any_installed() -> bool {
+        HANDLER_SET.load(Ordering::Relaxed) != 0
+    }
+
     /// Fork-child disposition restore (rubash#229). GNU's forked
     /// disk-command child runs trap.c:1489 restore_original_signals
     /// between fork and exec (execute_cmd.c:4224): every trapped signal
@@ -1683,6 +1758,22 @@ mod kernel_signals {
     }
 }
 
+/// The six signals `kernel_signals` manages, paired with their trap-table
+/// short name and the literal `__RUBASH_TRAP_SIG*` env key. Static so the
+/// per-command-boundary reconcile never allocates a key string (rubash#437:
+/// the boundary poll runs once or more per loop iteration, and the old
+/// `format!("__RUBASH_TRAP_SIG{short}")` built six throwaway Strings each
+/// call — tens of thousands of allocations in a short arithmetic loop).
+#[cfg(unix)]
+const MANAGED_TRAP_KEYS: [(i32, &str, &str); 6] = [
+    (libc::SIGHUP as i32, "HUP", "__RUBASH_TRAP_SIGHUP"),
+    (libc::SIGINT as i32, "INT", "__RUBASH_TRAP_SIGINT"),
+    (libc::SIGQUIT as i32, "QUIT", "__RUBASH_TRAP_SIGQUIT"),
+    (libc::SIGTERM as i32, "TERM", "__RUBASH_TRAP_SIGTERM"),
+    (libc::SIGUSR1 as i32, "USR1", "__RUBASH_TRAP_SIGUSR1"),
+    (libc::SIGUSR2 as i32, "USR2", "__RUBASH_TRAP_SIGUSR2"),
+];
+
 /// Map the executor's trap table onto the kernel dispositions (unix arm of
 /// rubash#226). Mirrors GNU's per-signal rules: `trap 'action' SIG` installs
 /// the handler (sig.c:830, sa_flags=0), `trap '' SIG` sets SIG_IGN, no trap
@@ -1692,26 +1783,33 @@ mod kernel_signals {
 #[cfg(unix)]
 pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<String, String>) {
     use kernel_signals::Disposition;
-    // Single pass over the six trap keys (runs on the per-command boundary
-    // poll, so six HashMap gets + one reset-list scan is the whole cost —
-    // get_trap_action's per-call BTreeSet build would multiply that by six).
+    // Steady-state fast path (rubash#437). The overwhelming majority of
+    // boundary polls run with no managed signal trapped at all, so every
+    // disposition is Default and the kernel already holds Default. Detect
+    // that with six allocation-free `get`s — using the static key table so
+    // no `format!` runs — and skip the disposition array + mutex entirely.
+    // A non-empty reset list forces the slow path even when no key is
+    // present, because a reset entry can only exist while a key does; the
+    // reverse (key present, no reset) is the common trapped case and falls
+    // through anyway.
+    let no_reset = !env_vars.contains_key("__RUBASH_TRAP_RESET");
+    let mut any_armed = false;
+    for &(_, _, key) in MANAGED_TRAP_KEYS.iter() {
+        if env_vars.contains_key(key) {
+            any_armed = true;
+            break;
+        }
+    }
+    if !any_armed && no_reset && kernel_signals::at_default_state() {
+        return;
+    }
     let reset = env_vars
         .get("__RUBASH_TRAP_RESET")
         .map(|value| value.as_str())
         .unwrap_or("");
-    let dispositions: Vec<(i32, Disposition)> = [
-        libc::SIGHUP,
-        libc::SIGINT,
-        libc::SIGQUIT,
-        libc::SIGTERM,
-        libc::SIGUSR1,
-        libc::SIGUSR2,
-    ]
-    .iter()
-    .map(|&raw| {
-        let sig = raw as i32;
-        let short = signal_short_name(sig);
-        let want = match env_vars.get(&format!("__RUBASH_TRAP_SIG{short}")) {
+    let mut dispositions = [(0i32, Disposition::Default); 6];
+    for (slot, &(sig, short, key)) in dispositions.iter_mut().zip(MANAGED_TRAP_KEYS.iter()) {
+        let want = match env_vars.get(key) {
             // A real action and not reset-listed -> handler (trap.c
             // trap_builtin -> sig.c:830 set_signal_handler).
             Some(action) if !action.is_empty() && !reset_contains(reset, short) => {
@@ -1724,9 +1822,8 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
             Some(_) => Disposition::Ignore,
             None => Disposition::Default,
         };
-        (sig, want)
-    })
-    .collect();
+        *slot = (sig, want);
+    }
     kernel_signals::reconcile(&dispositions);
 }
 
@@ -1734,29 +1831,22 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
 /// signal_trap_name's SIG{name} form minus the SIG prefix.
 #[cfg(unix)]
 fn signal_short_name(signal: i32) -> &'static str {
-    const HUP: i32 = libc::SIGHUP as i32;
-    const INT: i32 = libc::SIGINT as i32;
-    const QUIT: i32 = libc::SIGQUIT as i32;
-    const TERM: i32 = libc::SIGTERM as i32;
-    const USR1: i32 = libc::SIGUSR1 as i32;
-    const USR2: i32 = libc::SIGUSR2 as i32;
-    match signal {
-        HUP => "HUP",
-        INT => "INT",
-        QUIT => "QUIT",
-        TERM => "TERM",
-        USR1 => "USR1",
-        USR2 => "USR2",
-        _ => "",
-    }
+    MANAGED_TRAP_KEYS
+        .iter()
+        .find(|&&(sig, _, _)| sig == signal)
+        .map(|&(_, short, _)| short)
+        .unwrap_or("")
 }
 
 #[cfg(unix)]
 fn reset_contains(reset: &str, short: &str) -> bool {
     // Reset entries carry the table's SIG-prefixed name (trap.rs
-    // normalize_signal keeps the SIG prefix, e.g. "SIGTERM").
-    let full = format!("SIG{short}");
-    reset.split(':').any(|entry| entry == full)
+    // normalize_signal keeps the SIG prefix, e.g. "SIGTERM"). Compare
+    // without allocating: iterate the colon-separated entries and match
+    // "SIG" + short by parts.
+    reset.split(':').any(|entry| {
+        entry.len() == short.len() + 3 && entry.starts_with("SIG") && entry[3..] == *short
+    })
 }
 
 /// Whether `sig` is currently caught by the kernel backend (unix arm). A

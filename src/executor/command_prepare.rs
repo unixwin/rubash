@@ -3053,6 +3053,14 @@ fn word_contains_brace_group(word: &str) -> bool {
     // renders literally and `declare a=("${x[@]}" "y")` must not be dequoted
     // by the raw re-expansion path. Skip each `$`-opened body through its
     // matching close, tracking nested opens.
+    //
+    // Fast reject (rubash#437): a brace group needs a literal `{`; without
+    // one there is nothing to find and the Vec<char> collection is wasted.
+    // (DATA_DOLLAR is multi-byte UTF-8, its bytes >= 0x80, so the byte test
+    // cannot produce a false negative for it either.)
+    if !word.as_bytes().contains(&b'{') {
+        return false;
+    }
     let chars: Vec<char> = word.chars().collect();
     let mut escaped = false;
     let mut open = false;
@@ -3407,6 +3415,16 @@ pub(in crate::executor) fn raw_word_is_quoted(raw: Option<&str>) -> bool {
     let Some(raw) = raw else {
         return false;
     };
+    // Fast reject (rubash#437): the answer can only be true when the word
+    // contains a quote byte or a `$`/backtick that could introduce a quoted
+    // span. Loop bodies are dominated by plain `$i`/`$((...))`/`[` words
+    // that hold none of those bytes, so a byte scan avoids collecting the
+    // whole word into a `Vec<char>` on every expansion. Multi-byte UTF-8
+    // bytes are all >= 0x80 and never equal an ASCII delimiter, so this is
+    // exact for any input.
+    if !raw.bytes().any(|b| matches!(b, b'\'' | b'"' | b'$' | b'`')) {
+        return false;
+    }
     let chars = raw.chars().collect::<Vec<_>>();
     let mut index = 0usize;
     while index < chars.len() {

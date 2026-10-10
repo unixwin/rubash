@@ -34,15 +34,27 @@ impl Executor {
         // membership pre-check — the same no-op gate perf11 used for the
         // other marker lists (env_helpers unmark_env_name) — runs on a
         // BORROW; the string is only materialized for a real rewrite.
-        let needs_rewrite = self
-            .shell_state
-            .env_vars
-            .get(EXPORTED_VARS)
-            .is_some_and(|exported| {
-                exported
-                    .split(DATA_DOLLAR)
-                    .any(|name| name.is_empty() || name == "_")
-            });
+        //
+        // rubash#437: the pre-check must not scan the whole list. On a
+        // real shell __RUBASH_EXPORTED_VARS holds ~170 export names
+        // (~4 KB), and bind_underscore runs once per command, so the old
+        // `.split(DATA_DOLLAR).any(|n| n.is_empty() || n == "_")` was a
+        // 4 KB scan per loop iteration (the top self-time frame in a
+        // `while` arithmetic loop). The rewritten encoding makes it O(1):
+        //   * `_` membership -> the structured attr map, answered by
+        //     is_marked (EXPORTED_VARS is one of the ten attribute keys;
+        //     VarAttrs::flag). This is the only disjunct that can be true
+        //     for a well-formed list.
+        //   * the `name.is_empty()` disjunct is unreachable: every writer
+        //     of the serialized list (VarTable::replace_attr_list,
+        //     string_append, string_remove, restore_attr_string) filters
+        //     empty names before joining on DATA_DOLLAR, so a split of a
+        //     stored list never yields an empty fragment. Dropping it
+        //     removes the residual O(n) `windows(2)` separator scan the
+        //     first rewrite of this guard left behind (still 4 KB per
+        //     command) — bind_lastarg's observable effect is only the `_`
+        //     unexport, which is_marked covers exactly.
+        let needs_rewrite = is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, "_");
         if needs_rewrite {
             let joined = self
                 .shell_state
@@ -181,6 +193,20 @@ impl Executor {
         {
             return false;
         }
+        // Every remaining term of the result below is conjoined with
+        // `field_split_would_change_word`, so a word that does not split at
+        // all (the common case: a plain `$i` or `$((...))` loop word whose
+        // expansion holds no IFS byte) yields false regardless of quoting.
+        // Compute it up front and bail before the four raw-word predicates
+        // each materialise the word as a `Vec<char>` (rubash#437).
+        let field_split_values = self.field_split_values(expanded);
+        let field_split_would_change_word = field_split_values.len() != 1
+            || field_split_values
+                .first()
+                .is_some_and(|field| field != expanded);
+        if !field_split_would_change_word {
+            return false;
+        }
         // A word wrapped in quotes (e.g. `"$(cmd) extra"`) keeps its spaces
         // together: quote removal happens after field splitting in Bash, so
         // quoted words must not be split even when they expand to whitespace.
@@ -225,12 +251,6 @@ impl Executor {
                 .map(|metadata| metadata.raw.as_str())
                 .or_else(|| cmd.words.get(index).map(String::as_str))
                 .is_some_and(raw_word_has_unquoted_parameter_expansion);
-
-        let field_split_values = self.field_split_values(expanded);
-        let field_split_would_change_word = field_split_values.len() != 1
-            || field_split_values
-                .first()
-                .is_some_and(|field| field != expanded);
 
         (unquoted_variable && !unquoted_dynamic_parameter && field_split_would_change_word)
             || (unquoted_embedded_parameter && field_split_would_change_word)
@@ -506,6 +526,13 @@ fn word_is_unquoted_indirect_name_list(word: &str) -> bool {
 }
 
 pub(in crate::executor) fn raw_word_has_unquoted_parameter_expansion(raw: &str) -> bool {
+    // Fast reject (rubash#437): a parameter expansion needs a literal `$`;
+    // without one the answer is false and the Vec<char> collection is pure
+    // overhead. Loop-heavy scripts expand plain `$i` words that are often
+    // already de-quoted to no `$` at all on this path.
+    if !raw.as_bytes().contains(&b'$') {
+        return false;
+    }
     let chars = raw.chars().collect::<Vec<_>>();
     let mut index = 0usize;
     while index < chars.len() {

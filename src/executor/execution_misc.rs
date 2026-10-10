@@ -583,6 +583,12 @@ pub(in crate::executor) fn contains_windows_forbidden_posix_filename_char(path: 
 }
 
 pub(in crate::executor) fn word_has_unquoted_command_substitution(word: &str) -> bool {
+    // Fast reject (rubash#437): command substitution requires a `$` or a
+    // backtick; without either the answer is false. Byte test (multi-byte
+    // UTF-8 bytes are >= 0x80, never $ or `) so this is exact.
+    if !word.bytes().any(|b| matches!(b, b'$' | b'`')) {
+        return false;
+    }
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
