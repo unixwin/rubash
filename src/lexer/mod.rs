@@ -33,6 +33,7 @@ use brace_scan_cache::BraceScanCache;
 pub(crate) use continuation::has_unclosed_command_substitution;
 pub(crate) use continuation::unclosed_command_substitution_depth;
 pub(crate) use continuation::unclosed_input_close_char_posix;
+pub(super) use continuation::word_ends_in_open_process_substitution;
 // perf9 (#292B third wave): the parked text scanners of the group driver's
 // candidate-line completeness battery (script_driver.rs GroupTextScans).
 pub(crate) use continuation::balanced_residuals_advance;
@@ -507,6 +508,13 @@ pub(crate) struct GroupScanFeeder {
     gate_comsub_parked: bool,
     gate_quotes_open: bool,
     gate_quotes_parked: bool,
+    /// rubash#463: the most recent push ended inside an open word-attached
+    /// process-substitution body — the procsub join held the logical line
+    /// open. `token_level_needs_more` reports this so the incremental group
+    /// reader (script/`-c` execution) keeps appending physical lines even
+    /// though the keyword stack and trailing-connector summary see nothing
+    /// pending; it clears when a logical line commits.
+    procsub_word_join_open: bool,
 }
 
 impl GroupScanFeeder {
@@ -558,6 +566,7 @@ impl GroupScanFeeder {
             gate_comsub_parked: false,
             gate_quotes_open: false,
             gate_quotes_parked: false,
+            procsub_word_join_open: false,
         }
     }
 
@@ -568,6 +577,12 @@ impl GroupScanFeeder {
     /// marker token before its separator, so its last significant token is
     /// the HereDocBody — never a connector — exactly like this formula.
     pub(crate) fn token_level_needs_more(&self) -> bool {
+        // rubash#463: an open word-attached procsub body holds the logical
+        // line open (the keyword stack cannot see it — the body's tokens are
+        // consumed by the word scanner of the still-unfinished word).
+        if self.procsub_word_join_open {
+            return true;
+        }
         if !self.keyword_stack.is_empty() {
             return true;
         }
@@ -1343,7 +1358,24 @@ impl GroupScanFeeder {
         // token checkpoint to resume.
         let dparen_open =
             self.logical_line.contains("((") && dparen_arith_group_open_at_end(&self.logical_line);
-        if (brace_group_open || param_expansion_open || dparen_open) && !funcheck && !has_heredoc {
+        // rubash#463: a word-attached process substitution whose `(...)` body
+        // spans physical lines (`echo outer<(` NL `echo inner` NL `)`) is ONE
+        // word in GNU (parse.y:5494-5524 read_token_word's shellexp arm +
+        // parse_matched_pair's newline-transparent LEX_GTLT body scan,
+        // parse.y:4147-4153): read_secondary_line keeps pulling until the
+        // matching `)` arrives. The last token of this pass is that word —
+        // its scan consumed the `<(`/`>(` introducer and broke at end of
+        // line inside the body — so ask its raw span whether the body is
+        // still open. The space-separated form (`cat <(` NL ...) needs no
+        // gate: its `(` is a standalone Keyword token and the parser's
+        // procsub target collection bridges the line separators already.
+        let procsub_word_open = line_tokens.last().is_some_and(|token| {
+            token.kind == TokenKind::Word && word_ends_in_open_process_substitution(&token.raw)
+        });
+        if (brace_group_open || param_expansion_open || dparen_open || procsub_word_open)
+            && !funcheck
+            && !has_heredoc
+        {
             // Reaching here proves quotes, command substitutions and
             // compound assignments are all closed: the join stands on the
             // token-level brace-group flag (and/or an open `${...}`, which
@@ -1361,6 +1393,15 @@ impl GroupScanFeeder {
                     self.boundary = Some((self.logical_line.len(), line_tokens, state));
                 }
             } else if param_expansion_open {
+            }
+            // rubash#463: the procsub join's pass ended INSIDE a word (the
+            // word broke at end of line), so the tail-resume checkpoint —
+            // which only trusts token-boundary ends — must not survive to
+            // the longer buffer's pass; a full re-lex is the only sound
+            // retry (same reasoning the dparen join documents above).
+            if procsub_word_open {
+                self.boundary = None;
+                self.procsub_word_join_open = true;
             }
             if brace_group_open || param_expansion_open {
                 self.brace_join_active = true;
@@ -1431,6 +1472,8 @@ impl GroupScanFeeder {
         // the same line-start state (see the comment at tokenize_plain).
         self.lexer_parse_state = line_lex_state;
         self.logical_line.clear();
+        // The open logical line committed: any held procsub join is closed.
+        self.procsub_word_join_open = false;
         self.param_open_cache = None;
         self.boundary = None;
         // Offsets restart for the next logical line: cache invalid. Every
