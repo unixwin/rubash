@@ -10,6 +10,7 @@ GNU Bash 5.3.0 兼容性大幅推进。83 套件 true-baseline 总差异从 3427
 
 ### 修复
 
+- 裸 `rubash.exe` 真控制台交互补齐 readline 行编辑（#419 后续）：此前控制台分支 stdin 留在 cooked 行输入模式，编辑由 conhost 代管——方向键驱动 conhost 自己的行缓冲，shell 历史（↑/↓、C-p/C-n）、行内光标移动（C-a/C-e/←/→）与 C-r 反向搜索全部失效。新增 `RawConsole`（`src/console_readline.rs`）：提示符与接受行之间切 raw 模式，按键逐事件翻译成引擎编辑分派器已有的字符流，编辑行每键重绘（raw 模式下终端不再回显）；命令执行前恢复 cooked 模式，子进程仍见正常行纪律控制台。编辑分派器从读循环抽出为 `apply_edit_char`，cooked 字节流路径（#434 桥接语义不变）与 raw 控制台路径共享同一套绑定。PS1/PS2（含 `--rcfile`）渲染已在上一个提交落地，本提交补齐 readline 编辑腿。补全（Tab）与 i-search 的 raw 态渲染为后续分层。
 - 函数定义与花括号组的同行 `#` 尾注释不再解析失败（#118）：`f() { # note`、`f() { echo x; } # note`、`{ echo x; } # note`、`function f { … } # note`、TAB/空注释等形态此前被 lexer 把注释切进花括号组 token（`{ # note`），parser 因 `function_command.rs` 的 `value.trim() == "{"` 判定失败而回落成 `syntax error near unexpected token `('`。`skip_brace` 现在汇报配对 `}` 是否命中以及组内顶层注释起点，scanner 只把注释之前的文本作为 token 并把位置回退到注释处；`brace_close_can_end_compact_group` 也把 `}` 之后的行内 `#` 视为组结束。另修正 `skip_brace` 的 `comment_start` 初值，`f() {#note` 仍按 GNU 报语法错误而非静默接受。
 - `set -u` 下算术展开不再把已赋值变量判为 unbound（#67）：nounset 扫描器去掉了无法识别错误 token 时的合成 "syntax error in expression" 回退，并跳过赋值左值（`for ((i=0; i<n; i++))` 的 init/update 不再报 `i` unbound）。
 - `set -u` 下算术展开的 unbound 错误与普通参数展开对齐：直接上下文中终止脚本，命令替换与管道段内只终止该子上下文（GNU expr.c expr_streval 的 FORCE_EOF 语义），并消除了随后把展开文本当命令执行的 `command not found` 级联。

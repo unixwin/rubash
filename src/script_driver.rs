@@ -2858,15 +2858,18 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
     let mut next_line = 1usize;
     let mut pending_start_line = 1usize;
 
-    // readline edit state: the line being edited, the cursor (byte offset),
-    // and where the buffer came from in the history list.
-    let mut buffer = String::new();
-    let mut cursor = 0usize;
-    let mut history_index: Option<usize> = None;
-    let mut saved_line = String::new();
-    let mut isearch: Option<ISearchState> = None;
-    let mut quoted_insert = false;
+    // readline edit state (see [`EditState`]).
+    let mut st = EditState::default();
     let mut eof = false;
+
+    // rubash#419 readline leg: a real Windows console edits in raw mode
+    // ([`crate::console_readline::RawConsole`]) so the keystrokes reach the
+    // dispatcher below one event at a time — the cooked console handed
+    // editing to conhost, whose line buffer has no knowledge of the shell's
+    // history or bindings. Everywhere else (pipes, redirected files,
+    // winpty/ConPTY bridges that present a pipe) this stays `None` and the
+    // cooked byte-stream path keeps the #434 normalization semantics.
+    let mut console = crate::console_readline::RawConsole::acquire().filter(|_| stdin_is_tty);
 
     // One accepted readline line -> accumulate into `pending` and run it
     // once the command is complete (same grouping as run_stdin_script).
@@ -3020,6 +3023,84 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
         // (prompt_expansion::strip_prompt_ignore_markers), covering every
         // render channel — this site included.
         eprint!("{rendered}");
+        // The redraw layer repaints the prompt's LAST line (a multi-line
+        // PS1 keeps its earlier lines on screen, like GNU's display does).
+        let prompt_tail: String = rendered.rsplit('\n').next().unwrap_or("").to_string();
+
+        if let Some(con) = console.as_mut() {
+            // The raw console readline loop (readline.c readline + the
+            // dispatch the cooked path shares): keys arrive one event at a
+            // time, each accepted edit redraws the line, Enter restores the
+            // console to cooked mode before the command runs so children
+            // see a line-discipline console (readline save_tty_state).
+            con.enable();
+            con.write(&crate::console_readline::redraw_line(
+                &prompt_tail,
+                &st.buffer,
+                st.cursor,
+            ));
+            let mut operate_next: Option<Option<usize>> = None;
+            let mut eof_now = false;
+            'console_read: loop {
+                let keys = match con.next_key() {
+                    Ok(Some(keys)) => keys,
+                    Ok(None) | Err(_) => {
+                        eof_now = true;
+                        break;
+                    }
+                };
+                for c in keys {
+                    match apply_edit_char(executor, &mut st, c) {
+                        EditOutcome::None => {
+                            let frame = crate::console_readline::redraw_line(
+                                &prompt_tail,
+                                &st.buffer,
+                                st.cursor,
+                            );
+                            con.write(&frame);
+                        }
+                        EditOutcome::Eof => {
+                            eof_now = true;
+                            break 'console_read;
+                        }
+                        EditOutcome::Accept {
+                            line,
+                            operate_and_get_next,
+                        } => {
+                            con.restore();
+                            // CRLF: raw mode turned the NL translation off,
+                            // so the accept needs both bytes.
+                            con.write("\r\n");
+                            accept_line!(&line);
+                            operate_next = operate_and_get_next;
+                            break 'console_read;
+                        }
+                    }
+                }
+            }
+            if eof_now {
+                con.restore();
+                // C-d on an empty buffer ends the session the same way the
+                // piped path's Ok(0) arm does: the synthesized `exit` (or
+                // `logout`) echoes to stderr first (builtins/exit.def:59-62).
+                if st.buffer.is_empty()
+                    && executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1")
+                {
+                    let login = executor.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
+                    eprintln!("{}", if login { "logout" } else { "exit" });
+                }
+                if !st.buffer.is_empty() {
+                    // readline treats EOF on a nonempty buffer as accept-line.
+                    let line = std::mem::take(&mut st.buffer);
+                    st.cursor = 0;
+                    accept_line!(&line);
+                }
+                eof = true;
+            } else if let Some(src_abs) = operate_next {
+                preload_operate_and_get_next(executor, &mut st, src_abs);
+            }
+            continue;
+        }
 
         let mut raw = String::new();
         let line_result = match executor.script_fd0_line(&mut raw) {
@@ -3078,318 +3159,28 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
         }
 
         let chars: Vec<char> = raw.chars().collect();
-        let mut i = 0usize;
-        while i < chars.len() && !eof {
-            let c = chars[i];
-            i += 1;
-
-            if quoted_insert {
-                buffer.insert(cursor, c);
-                cursor += c.len_utf8();
-                quoted_insert = false;
-                continue;
+        for &c in chars.iter() {
+            if eof {
+                break;
             }
-
-            if let Some(search) = isearch.as_mut() {
-                // readline/isearch.c rl_isearch_dispatch: printable bytes
-                // extend the search string; editing keys accept the current
-                // match and are then re-processed in normal mode; C-g aborts.
-                let entries_len = session_entries_len(executor);
-                match c {
-                    '\x07' | '\x1b' => {
-                        // abort: restore the pre-search line
-                        buffer = search.orig_buffer.clone();
-                        cursor = buffer.len();
-                        history_index = search.orig_index;
-                        isearch = None;
-                        continue;
-                    }
-                    '\x12' => {
-                        // repeat search further back
-                        let search_str = search.search.clone();
-                        if !search_str.is_empty() {
-                            if let Some(session) = executor.get_session_history() {
-                                let shell = session.borrow();
-                                let upper = search.match_index.unwrap_or(entries_len);
-                                if let Some(found) = shell.entries[..upper]
-                                    .iter()
-                                    .rposition(|e| e.contains(&search_str))
-                                {
-                                    search.match_index = Some(found);
-                                    buffer = shell.entries[found].clone();
-                                    cursor = buffer.len();
-                                    history_index = Some(found);
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    '\x7f' | '\x08' => {
-                        search.search.pop();
-                        let search_str = search.search.clone();
-                        if let Some(session) = executor.get_session_history() {
-                            let shell = session.borrow();
-                            let upper = search.match_index.map(|m| m + 1).unwrap_or(entries_len);
-                            if let Some(found) = shell.entries[..upper]
-                                .iter()
-                                .rposition(|e| e.contains(&search_str))
-                            {
-                                search.match_index = Some(found);
-                                buffer = shell.entries[found].clone();
-                                cursor = buffer.len();
-                                history_index = Some(found);
-                            }
-                        }
-                        continue;
-                    }
-                    c if c >= ' '
-                        || c == '\n'
-                        || c == '\r'
-                        || c == '\x0f'
-                        || c == '\x10'
-                        || c == '\x0e' =>
-                    {
-                        if c == '\n' || c == '\r' || c == '\x0f' || c == '\x10' || c == '\x0e' {
-                            // Accept the match (if any) and reprocess the
-                            // terminating key in normal mode.
-                            if let Some(m) = search.match_index {
-                                if let Some(session) = executor.get_session_history() {
-                                    if let Some(entry) = session.borrow().entries.get(m).cloned() {
-                                        buffer = entry;
-                                        cursor = buffer.len();
-                                        history_index = Some(m);
-                                    }
-                                }
-                            }
-                            isearch = None;
-                            // fall through to normal dispatch below
-                        } else {
-                            // extend the search string and re-search
-                            search.search.push(c);
-                            let search_str = search.search.clone();
-                            if let Some(session) = executor.get_session_history() {
-                                let shell = session.borrow();
-                                let upper =
-                                    search.match_index.map(|m| m + 1).unwrap_or(entries_len);
-                                if let Some(found) = shell.entries[..upper]
-                                    .iter()
-                                    .rposition(|e| e.contains(&search_str))
-                                {
-                                    search.match_index = Some(found);
-                                    buffer = shell.entries[found].clone();
-                                    cursor = buffer.len();
-                                    history_index = Some(found);
-                                }
-                            }
-                            continue;
-                        }
-                    }
-                    _ => {
-                        // other control chars end the search and reprocess
-                        if let Some(m) = search.match_index {
-                            if let Some(session) = executor.get_session_history() {
-                                if let Some(entry) = session.borrow().entries.get(m).cloned() {
-                                    buffer = entry;
-                                    cursor = buffer.len();
-                                    history_index = Some(m);
-                                }
-                            }
-                        }
-                        isearch = None;
-                    }
-                }
-            }
-
-            match c {
-                '\n' | '\r' => {
-                    let line = std::mem::take(&mut buffer);
-                    cursor = 0;
-                    history_index = None;
-                    saved_line.clear();
+            match apply_edit_char(executor, &mut st, c) {
+                EditOutcome::None => {}
+                EditOutcome::Eof => eof = true,
+                EditOutcome::Accept {
+                    line,
+                    operate_and_get_next,
+                } => {
                     accept_line!(&line);
-                }
-                '\x12' => {
-                    isearch = Some(ISearchState {
-                        search: String::new(),
-                        orig_buffer: buffer.clone(),
-                        orig_index: history_index,
-                        match_index: None,
-                    });
-                }
-                '\x0f' => {
-                    // rl_operate_and_get_next (readline/misc.c): accept the
-                    // line for execution, then preload the next readline with
-                    // the entry AFTER the accepted line — identified by its
-                    // absolute history number (where_history()+history_base+1),
-                    // so a HISTSIZE stifle dropping entries during the accepted
-                    // command's own add_history cannot shift the target.
-                    let src_abs = history_index.map(|p| session_history_base(executor) + p + 1);
-                    let line = std::mem::take(&mut buffer);
-                    cursor = 0;
-                    accept_line!(&line);
-                    match src_abs {
-                        Some(abs) => {
-                            let base = session_history_base(executor);
-                            let idx = abs.saturating_sub(base);
-                            let len = session_entries_len(executor);
-                            if idx < len {
-                                history_index = Some(idx);
-                                if let Some(session) = executor.get_session_history() {
-                                    buffer = session.borrow().entries[idx].clone();
-                                }
-                                cursor = buffer.len();
-                            } else {
-                                history_index = None;
-                                buffer.clear();
-                            }
-                        }
-                        None => {
-                            history_index = None;
-                            buffer.clear();
-                        }
+                    if let Some(src_abs) = operate_and_get_next {
+                        preload_operate_and_get_next(executor, &mut st, src_abs);
                     }
                 }
-                '\x10' => {
-                    // previous-history-line
-                    let len = session_entries_len(executor);
-                    if len > 0 {
-                        let idx = match history_index {
-                            None => {
-                                saved_line = buffer.clone();
-                                len - 1
-                            }
-                            Some(i0) => i0.saturating_sub(1),
-                        };
-                        history_index = Some(idx);
-                        if let Some(session) = executor.get_session_history() {
-                            buffer = session.borrow().entries[idx].clone();
-                        }
-                        cursor = buffer.len();
-                    }
-                }
-                '\x0e' => {
-                    // next-history-line
-                    let len = session_entries_len(executor);
-                    if let Some(i0) = history_index {
-                        if i0 + 1 < len {
-                            history_index = Some(i0 + 1);
-                            if let Some(session) = executor.get_session_history() {
-                                buffer = session.borrow().entries[i0 + 1].clone();
-                            }
-                        } else {
-                            history_index = None;
-                            buffer = saved_line.clone();
-                        }
-                        cursor = buffer.len();
-                    }
-                }
-                '\x01' => cursor = 0,
-                '\x05' => cursor = buffer.len(),
-                '\x02' => cursor = cursor.saturating_sub(1),
-                '\x06' => cursor = (cursor + 1).min(buffer.len()),
-                '\x0b' => buffer.truncate(cursor),
-                '\x15' => {
-                    buffer.drain(..cursor);
-                    cursor = 0;
-                }
-                '\x7f' | '\x08' => {
-                    if cursor > 0 {
-                        cursor -= 1;
-                        while !buffer.is_char_boundary(cursor) {
-                            cursor -= 1;
-                        }
-                        let mut end = cursor + 1;
-                        while !buffer.is_char_boundary(end) && end <= buffer.len() {
-                            end += 1;
-                        }
-                        buffer.drain(cursor..end.min(buffer.len()));
-                    }
-                }
-                '\x04' => {
-                    // C-d: EOF on an empty buffer, delete-char otherwise.
-                    if buffer.is_empty() && history_index.is_none() {
-                        eof = true;
-                    } else if cursor < buffer.len() {
-                        let mut end = cursor + 1;
-                        while !buffer.is_char_boundary(end) && end <= buffer.len() {
-                            end += 1;
-                        }
-                        buffer.drain(cursor..end.min(buffer.len()));
-                    }
-                }
-                '\x03' => {
-                    // SIGINT-style abort: discard the edit line.
-                    buffer.clear();
-                    cursor = 0;
-                    history_index = None;
-                    saved_line.clear();
-                }
-                '\x16' => quoted_insert = true,
-                '\x1b' => {
-                    // Escape sequences: consume the introducer plus the
-                    // sequence; only arrow keys get bindings here.
-                    if i < chars.len() {
-                        let introducer = chars[i];
-                        i += 1;
-                        if introducer == '[' || introducer == 'O' {
-                            if i < chars.len() {
-                                let final_byte = chars[i];
-                                i += 1;
-                                match final_byte {
-                                    'A' => {
-                                        let len = session_entries_len(executor);
-                                        if len > 0 {
-                                            let idx = match history_index {
-                                                None => {
-                                                    saved_line = buffer.clone();
-                                                    len - 1
-                                                }
-                                                Some(i0) => i0.saturating_sub(1),
-                                            };
-                                            history_index = Some(idx);
-                                            if let Some(session) = executor.get_session_history() {
-                                                buffer = session.borrow().entries[idx].clone();
-                                            }
-                                            cursor = buffer.len();
-                                        }
-                                    }
-                                    'B' => {
-                                        let len = session_entries_len(executor);
-                                        if let Some(i0) = history_index {
-                                            if i0 + 1 < len {
-                                                history_index = Some(i0 + 1);
-                                                if let Some(session) =
-                                                    executor.get_session_history()
-                                                {
-                                                    buffer =
-                                                        session.borrow().entries[i0 + 1].clone();
-                                                }
-                                            } else {
-                                                history_index = None;
-                                                buffer = saved_line.clone();
-                                            }
-                                            cursor = buffer.len();
-                                        }
-                                    }
-                                    'C' => cursor = (cursor + 1).min(buffer.len()),
-                                    'D' => cursor = cursor.saturating_sub(1),
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-                c if c >= ' ' => {
-                    buffer.insert(cursor, c);
-                    cursor += c.len_utf8();
-                }
-                _ => {}
             }
         }
 
-        if eof && !buffer.is_empty() {
+        if eof && !st.buffer.is_empty() {
             // readline treats EOF on a nonempty buffer as accept-line.
-            let line = std::mem::take(&mut buffer);
+            let line = std::mem::take(&mut st.buffer);
             accept_line!(&line);
         }
     }
@@ -3409,6 +3200,380 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
 
     let status = executor.last_exit_code();
     finish_shell(executor, status, true)
+}
+
+/// The readline edit state of the interactive reader: the line being
+/// edited, the cursor (byte offset), where the buffer came from in the
+/// history list, and the transient modes (reverse-i-search, quoted insert,
+/// the ESC-sequence introducer stages).
+#[derive(Default)]
+struct EditState {
+    buffer: String,
+    cursor: usize,
+    history_index: Option<usize>,
+    saved_line: String,
+    isearch: Option<ISearchState>,
+    quoted_insert: bool,
+    /// 0 = none, 1 = ESC seen, 2 = CSI (\x1b[) or SS3 (\x1bO) introducer
+    /// seen — the next char carries the final byte of the sequence. A
+    /// state machine rather than stream lookahead because the raw console
+    /// path feeds one key event at a time.
+    esc_stage: u8,
+}
+
+/// What one edit character did to the [`EditState`] (readline's
+/// dispatch model, factored out of the reader loop so the cooked-stream
+/// path and the raw console path share it).
+enum EditOutcome {
+    /// Editing continued; the caller repaints on the console path.
+    None,
+    /// The line was accepted: `line` is the buffer content (the state was
+    /// reset). `operate_and_get_next` is `Some(target)` for C-o — the
+    /// absolute history number identifying the entry AFTER the accepted
+    /// line, `None` when the accepted line was not a history line.
+    Accept {
+        line: String,
+        operate_and_get_next: Option<Option<usize>>,
+    },
+    /// C-d on an empty buffer: end the session.
+    Eof,
+}
+
+/// rl_operate_and_get_next's post-acceptance preload (readline/misc.c):
+/// put the entry AFTER the accepted line — identified by its absolute
+/// history number (where_history()+history_base+1), so a HISTSIZE stifle
+/// dropping entries during the accepted command's own add_history cannot
+/// shift the target — into the next readline buffer.
+fn preload_operate_and_get_next(executor: &Executor, st: &mut EditState, src_abs: Option<usize>) {
+    match src_abs {
+        Some(abs) => {
+            let base = session_history_base(executor);
+            let idx = abs.saturating_sub(base);
+            let len = session_entries_len(executor);
+            if idx < len {
+                st.history_index = Some(idx);
+                if let Some(session) = executor.get_session_history() {
+                    st.buffer = session.borrow().entries[idx].clone();
+                }
+                st.cursor = st.buffer.len();
+            } else {
+                st.history_index = None;
+                st.buffer.clear();
+            }
+        }
+        None => {
+            st.history_index = None;
+            st.buffer.clear();
+        }
+    }
+}
+
+fn history_step_previous(executor: &Executor, st: &mut EditState) {
+    let len = session_entries_len(executor);
+    if len == 0 {
+        return;
+    }
+    let idx = match st.history_index {
+        None => {
+            st.saved_line = st.buffer.clone();
+            len - 1
+        }
+        Some(i0) => i0.saturating_sub(1),
+    };
+    st.history_index = Some(idx);
+    if let Some(session) = executor.get_session_history() {
+        st.buffer = session.borrow().entries[idx].clone();
+    }
+    st.cursor = st.buffer.len();
+}
+
+fn history_step_next(executor: &Executor, st: &mut EditState) {
+    let len = session_entries_len(executor);
+    if let Some(i0) = st.history_index {
+        if i0 + 1 < len {
+            st.history_index = Some(i0 + 1);
+            if let Some(session) = executor.get_session_history() {
+                st.buffer = session.borrow().entries[i0 + 1].clone();
+            }
+        } else {
+            st.history_index = None;
+            st.buffer = st.saved_line.clone();
+        }
+        st.cursor = st.buffer.len();
+    }
+}
+
+fn delete_char_at(st: &mut EditState) {
+    if st.cursor < st.buffer.len() {
+        let mut end = st.cursor + 1;
+        while !st.buffer.is_char_boundary(end) && end <= st.buffer.len() {
+            end += 1;
+        }
+        st.buffer.drain(st.cursor..end.min(st.buffer.len()));
+    }
+}
+
+fn rubout_previous_char(st: &mut EditState) {
+    if st.cursor > 0 {
+        st.cursor -= 1;
+        while !st.buffer.is_char_boundary(st.cursor) {
+            st.cursor -= 1;
+        }
+        delete_char_at(st);
+    }
+}
+
+/// Apply one edit character to the readline state (the dispatcher the
+/// cooked byte-stream path and the raw console path share — see the
+/// per-arm GNU references inside).
+fn apply_edit_char(executor: &Executor, st: &mut EditState, c: char) -> EditOutcome {
+    if st.quoted_insert {
+        st.buffer.insert(st.cursor, c);
+        st.cursor += c.len_utf8();
+        st.quoted_insert = false;
+        return EditOutcome::None;
+    }
+
+    // readline/isearch.c rl_isearch_dispatch: printable bytes extend the
+    // search string; editing keys accept the current match and are then
+    // re-processed in normal mode; C-g (ESC/0x07) aborts.
+    if let Some(mut search) = st.isearch.take() {
+        let entries_len = session_entries_len(executor);
+        match c {
+            '\x07' | '\x1b' => {
+                // abort: restore the pre-search line
+                st.buffer = search.orig_buffer.clone();
+                st.cursor = st.buffer.len();
+                st.history_index = search.orig_index;
+                return EditOutcome::None;
+            }
+            '\x12' => {
+                // repeat search further back
+                let search_str = search.search.clone();
+                if !search_str.is_empty() {
+                    if let Some(session) = executor.get_session_history() {
+                        let shell = session.borrow();
+                        let upper = search.match_index.unwrap_or(entries_len);
+                        if let Some(found) = shell.entries[..upper]
+                            .iter()
+                            .rposition(|e| e.contains(&search_str))
+                        {
+                            search.match_index = Some(found);
+                            st.buffer = shell.entries[found].clone();
+                            st.cursor = st.buffer.len();
+                            st.history_index = Some(found);
+                        }
+                    }
+                }
+                st.isearch = Some(search);
+                return EditOutcome::None;
+            }
+            '\x7f' | '\x08' => {
+                search.search.pop();
+                let search_str = search.search.clone();
+                if let Some(session) = executor.get_session_history() {
+                    let shell = session.borrow();
+                    let upper = search.match_index.map(|m| m + 1).unwrap_or(entries_len);
+                    if let Some(found) = shell.entries[..upper]
+                        .iter()
+                        .rposition(|e| e.contains(&search_str))
+                    {
+                        search.match_index = Some(found);
+                        st.buffer = shell.entries[found].clone();
+                        st.cursor = st.buffer.len();
+                        st.history_index = Some(found);
+                    }
+                }
+                st.isearch = Some(search);
+                return EditOutcome::None;
+            }
+            c if c >= ' '
+                || c == '\n'
+                || c == '\r'
+                || c == '\x0f'
+                || c == '\x10'
+                || c == '\x0e' =>
+            {
+                if c == '\n' || c == '\r' || c == '\x0f' || c == '\x10' || c == '\x0e' {
+                    // Accept the match (if any) and reprocess the
+                    // terminating key in normal mode below.
+                    if let Some(m) = search.match_index {
+                        if let Some(session) = executor.get_session_history() {
+                            if let Some(entry) = session.borrow().entries.get(m).cloned() {
+                                st.buffer = entry;
+                                st.cursor = st.buffer.len();
+                                st.history_index = Some(m);
+                            }
+                        }
+                    }
+                    // fall through to normal dispatch
+                } else {
+                    // extend the search string and re-search
+                    search.search.push(c);
+                    let search_str = search.search.clone();
+                    if let Some(session) = executor.get_session_history() {
+                        let shell = session.borrow();
+                        let upper = search.match_index.map(|m| m + 1).unwrap_or(entries_len);
+                        if let Some(found) = shell.entries[..upper]
+                            .iter()
+                            .rposition(|e| e.contains(&search_str))
+                        {
+                            search.match_index = Some(found);
+                            st.buffer = shell.entries[found].clone();
+                            st.cursor = st.buffer.len();
+                            st.history_index = Some(found);
+                        }
+                    }
+                    st.isearch = Some(search);
+                    return EditOutcome::None;
+                }
+            }
+            _ => {
+                // other control chars end the search and reprocess
+                if let Some(m) = search.match_index {
+                    if let Some(session) = executor.get_session_history() {
+                        if let Some(entry) = session.borrow().entries.get(m).cloned() {
+                            st.buffer = entry;
+                            st.cursor = st.buffer.len();
+                            st.history_index = Some(m);
+                        }
+                    }
+                }
+                // fall through to normal dispatch
+            }
+        }
+    }
+
+    // ESC-sequence stages (see EditState::esc_stage).
+    match st.esc_stage {
+        1 => {
+            st.esc_stage = if c == '[' || c == 'O' { 2 } else { 0 };
+            return EditOutcome::None;
+        }
+        2 => {
+            st.esc_stage = 0;
+            match c {
+                'A' => history_step_previous(executor, st),
+                'B' => history_step_next(executor, st),
+                'C' => st.cursor = (st.cursor + 1).min(st.buffer.len()),
+                'D' => st.cursor = st.cursor.saturating_sub(1),
+                _ => {}
+            }
+            return EditOutcome::None;
+        }
+        _ => {}
+    }
+
+    match c {
+        '\n' | '\r' => {
+            let line = std::mem::take(&mut st.buffer);
+            st.cursor = 0;
+            st.history_index = None;
+            st.saved_line.clear();
+            st.esc_stage = 0;
+            EditOutcome::Accept {
+                line,
+                operate_and_get_next: None,
+            }
+        }
+        '\x12' => {
+            st.isearch = Some(ISearchState {
+                search: String::new(),
+                orig_buffer: st.buffer.clone(),
+                orig_index: st.history_index,
+                match_index: None,
+            });
+            EditOutcome::None
+        }
+        '\x0f' => {
+            // rl_operate_and_get_next (readline/misc.c): accept the line
+            // for execution, then preload the next readline with the entry
+            // AFTER the accepted line (the caller preloads after the
+            // command ran, when the history may have grown).
+            let src_abs = st
+                .history_index
+                .map(|p| session_history_base(executor) + p + 1);
+            let line = std::mem::take(&mut st.buffer);
+            st.cursor = 0;
+            st.esc_stage = 0;
+            EditOutcome::Accept {
+                line,
+                operate_and_get_next: Some(src_abs),
+            }
+        }
+        '\x10' => {
+            // previous-history-line
+            history_step_previous(executor, st);
+            EditOutcome::None
+        }
+        '\x0e' => {
+            // next-history-line
+            history_step_next(executor, st);
+            EditOutcome::None
+        }
+        '\x01' => {
+            st.cursor = 0;
+            EditOutcome::None
+        }
+        '\x05' => {
+            st.cursor = st.buffer.len();
+            EditOutcome::None
+        }
+        '\x02' => {
+            st.cursor = st.cursor.saturating_sub(1);
+            EditOutcome::None
+        }
+        '\x06' => {
+            st.cursor = (st.cursor + 1).min(st.buffer.len());
+            EditOutcome::None
+        }
+        '\x0b' => {
+            st.buffer.truncate(st.cursor);
+            EditOutcome::None
+        }
+        '\x15' => {
+            st.buffer.drain(..st.cursor);
+            st.cursor = 0;
+            EditOutcome::None
+        }
+        '\x7f' | '\x08' => {
+            rubout_previous_char(st);
+            EditOutcome::None
+        }
+        '\x04' => {
+            // C-d: EOF on an empty buffer, delete-char otherwise.
+            if st.buffer.is_empty() && st.history_index.is_none() {
+                EditOutcome::Eof
+            } else {
+                delete_char_at(st);
+                EditOutcome::None
+            }
+        }
+        '\x03' => {
+            // SIGINT-style abort: discard the edit line.
+            st.buffer.clear();
+            st.cursor = 0;
+            st.history_index = None;
+            st.saved_line.clear();
+            EditOutcome::None
+        }
+        '\x16' => {
+            st.quoted_insert = true;
+            EditOutcome::None
+        }
+        '\x1b' => {
+            // Escape sequences: stage the introducer; the final byte is
+            // dispatched when it arrives (only arrows bind here).
+            st.esc_stage = 1;
+            EditOutcome::None
+        }
+        c if c >= ' ' => {
+            st.buffer.insert(st.cursor, c);
+            st.cursor += c.len_utf8();
+            EditOutcome::None
+        }
+        _ => EditOutcome::None,
+    }
 }
 
 /// C0 control bytes that survive normalization of a bridge-delivered
