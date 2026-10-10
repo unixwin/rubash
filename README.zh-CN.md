@@ -116,7 +116,7 @@ cargo test --test cli_tests bashdb_compat -- --nocapture
 cargo test --test cli_tests source_expands -- --nocapture
 ```
 
-引擎还可以端到端运行 [bashdb](https://github.com/Trepan-Debuggers/bashdb) 核心调试闭环（list、step、next、where、continue、quit）。
+引擎还可以端到端运行 [bashdb](https://github.com/Trepan-Debuggers/bashdb) 核心调试循环（list、step、next、where、continue、quit）。
 
 ## 文档
 
@@ -131,7 +131,7 @@ cargo test --test cli_tests source_expands -- --nocapture
 - 按 Bash 语义的 root cause 修 Rubash 子系统，不按单条 expected output 打补丁。
 - bashdb 保持外部 clean 工具；临时 instrumentation 仅用于诊断。
 - 每个失败的 bashdb 命令都是发现和修复 Rubash 兼容性缺口的机会。
-- 兼容性基线为 GNU Bash 5.3.0（业主编译于 `/usr/local/bin/bash`）。
+- 兼容性基线为 GNU Bash 5.3.0（项目所有者编译，位于 `/usr/local/bin/bash`）。
 
 ## 来源与实现方式
 
@@ -147,7 +147,7 @@ MIT — 详见 [`LICENSE`](LICENSE)。
 
 ## 致谢
 
-- GNU Bash 团队 — 其可观测行为定义了我们兼容性目标的参考实现
+- GNU Bash 团队 — 参考实现，其可观测行为定义了我们的兼容性目标
 - Trepan-Debuggers/bashdb — 外部调试器和兼容性压力测试
 - Rust 社区 — 语言和工具链
 
