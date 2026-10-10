@@ -412,14 +412,24 @@ impl Executor {
         transform: ParameterTransform,
     ) -> String {
         if transform == ParameterTransform::Prompt {
-            // rubash#431: the `\[`/`\]` ignore markers are width-accounting
-            // delimiters only (readline display.c expand_prompt assembles the
-            // display without them) — the expansion result must not carry the
-            // bytes into stdout/`declare`/capture channels either.
-            return super::prompt_expansion::strip_prompt_ignore_markers(
-                &self.expand_prompt_parameters(
-                    &self.decode_prompt_string(strip_matching_quotes(value)),
-                ),
+            // GNU subst.c string_transform 'P' is decode_prompt_string and
+            // nothing else: the marker bytes a `\[`/`\]` decode to are
+            // dropped inline when no line editor is active
+            // (decode_prompt_string's no_line_editing branch), and bytes
+            // that were IN the value literally pass through verbatim —
+            // GNU 5.3.0 byte-evidence: upstream bash-tests exp8.sub:26
+            // `recho ${var@P}` for var=$'x\001y\177z' is recorded in
+            // exp.right:253 as `argv[1] = <x^Ay^?z>` (the \x01 survives;
+            // WSL GNU 5.3.0 and Git 5.2.37 %q probes agree: literal
+            // \x01/\x02 survive ${var@P}). The #480 strip over-reached
+            // here and ate the literal byte (`xy^?z`), which is exactly
+            // the semantic shift the exp suite snapshot pinned. The render
+            // channels (expand_prompt_string{,_mut}, the piped -i driver)
+            // keep their strip — a terminal-bound prompt must not carry
+            // the width-accounting bytes; a script-visible transform
+            // result must carry everything decode_prompt_string produced.
+            return self.expand_prompt_parameters(
+                &self.decode_prompt_string(strip_matching_quotes(value)),
             );
         }
         apply_parameter_transform(value, transform)

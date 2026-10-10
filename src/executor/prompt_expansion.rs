@@ -1134,11 +1134,15 @@ where
 /// markers (RL_PROMPT_START/END_IGNORE, rubash `markers::PROMPT_IGNORE_*`)
 /// are width-accounting delimiters only — the displayed prompt is assembled
 /// WITHOUT them, so no terminal-bound render path may carry the bytes (nor
-/// the literal `\[`/`\]` text they decode from). Every consumer that turns a
-/// PS1 into renderable text funnels through here (rubash#431): the piped
-/// `-i` driver, the host line-editor channel (`expand_prompt_string_mut`),
-/// and the `${var@P}` prompt transform. ESC and other real control bytes are
-/// untouched, so cursor-positioning and color geometry survive intact.
+/// the literal `\[`/`\]` text they decode from). The render consumers funneled
+/// through here (rubash#431) are the piped `-i` driver and the host
+/// line-editor channel (`expand_prompt_string{,_mut}`). The `${var@P}`
+/// transform deliberately does NOT funnel through here: a script-visible
+/// transform result must keep bytes that were literally in the value (GNU
+/// exp.right:253), and its `\[`/`\]` handling already lives inside
+/// decode_prompt_string's no_line_editing branch. ESC and other real control
+/// bytes are untouched by this strip, so cursor-positioning and color
+/// geometry survive intact.
 pub(in crate::executor) fn strip_prompt_ignore_markers(text: &str) -> String {
     text.chars()
         .filter(|ch| {
