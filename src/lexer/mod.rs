@@ -465,7 +465,16 @@ pub(crate) struct GroupScanFeeder {
     /// a fresh `Vec<char>` and re-scanned it on every `$`-bearing appended
     /// line (nvm.sh `-n`: the one giant logical line re-scanned ~419 MB).
     param_checkpoint: Option<ParamScanCheckpoint>,
-    boundary: Option<(usize, Vec<Token>, LexerBoundaryState)>,
+    boundary: Option<BoundaryCheckpoint>,
+    /// rubash#281 opener-state checkpoint over this open logical line: the
+    /// bare `{` group opener's byte offset, the prefix tokens lexed before
+    /// it, and the between-token lexer state as of before its emission.
+    /// Serves the fold pass (and any pass the boundary checkpoint cannot):
+    /// resuming from the opener reproduces the full re-lex byte for byte
+    /// while paying only the group's own text. Same invalidation discipline
+    /// as `boundary`: every non-append mutation of `logical_line` drops it,
+    /// as do posix/extglob gate flips; the line commit clears it.
+    opener: Option<BoundaryCheckpoint>,
     awaiting_bodies: Vec<AwaitingHeredocBody>,
     /// keyword-stack summary of `stdin_source_needs_more_posix` over the
     /// tokens emitted so far (committed lines + the open line's last pass).
@@ -554,6 +563,7 @@ impl GroupScanFeeder {
             param_open_cache: None,
             param_checkpoint: Some(ParamScanCheckpoint::initial()),
             boundary: None,
+            opener: None,
             awaiting_bodies: Vec::new(),
             keyword_stack: Vec::new(),
             last_significant: None,
@@ -1038,6 +1048,7 @@ impl GroupScanFeeder {
                         self.brace_cache.clear();
                         self.param_open_cache = None;
                         self.boundary = None;
+                        self.opener = None;
                         self.rebuild_comsub_mirror();
                         self.group_clean = false;
                         comsub_state_changed = true;
@@ -1101,6 +1112,7 @@ impl GroupScanFeeder {
             self.brace_cache.clear();
             self.param_open_cache = None;
             self.boundary = None;
+            self.opener = None;
             self.continued_line = true;
             self.brace_join_active = false;
             self.group_clean = false;
@@ -1179,6 +1191,7 @@ impl GroupScanFeeder {
             self.brace_cache.clear();
             self.param_open_cache = None;
             self.boundary = None;
+            self.opener = None;
             self.group_clean = false;
             self.rebuild_comsub_mirror();
         }
@@ -1196,6 +1209,7 @@ impl GroupScanFeeder {
         let mut line_lex_state = self.lexer_parse_state.clone();
         let boundary_taken = self.boundary.take();
         let boundary_was_some = boundary_taken.is_some();
+
         // rubash#281 resume gate. The blanket rule was "a `}` byte in the
         // appended line refuses the resume" — but the ONLY thing a `}` can
         // change in the already-checkpointed prefix is completing the
@@ -1245,8 +1259,20 @@ impl GroupScanFeeder {
                 }
             }
         };
-        let (mut line_tokens, pass_boundary) = tokenize_with_boundary(
+        // Only detach the opener checkpoint when a pass will actually
+        // consume it: a tail-resumed pass never revisits the opener (its
+        // resume offset is past it), so the stored checkpoint must survive
+        // until the fold pass. Detaching unconditionally used to drop it on
+        // the first inert appended line and push every fold pass back to
+        // the full re-lex.
+        let opener_taken = if resume_allowed && boundary_was_some {
+            None
+        } else {
+            self.opener.take()
+        };
+        let (mut line_tokens, pass_boundary, pass_opener, tail_resumed) = tokenize_with_boundary(
             boundary_taken,
+            opener_taken,
             resume_allowed,
             &self.logical_line,
             self.parse_posix,
@@ -1254,16 +1280,19 @@ impl GroupScanFeeder {
             &mut self.brace_cache,
         );
         // Summary fold BEFORE the join branch moves `line_tokens` into the
-        // next boundary checkpoint: a resumed pass extends the previous
-        // list (fold only the delta), a full re-lex restores the open
-        // line's start snapshot and refolds everything.
+        // next boundary checkpoint: a tail-resumed pass extends the previous
+        // list (fold only the delta); an opener-resumed pass or a full
+        // re-lex rewrites the list from the fold point / line start, so the
+        // summary refolds from the open line's start snapshot (the list is
+        // byte-identical to a fresh full pass in all three cases).
         let fold_chars = line_tokens.len() as u64;
-        self.fold_pass_tokens(&line_tokens, boundary_was_some && resume_allowed);
+        self.fold_pass_tokens(&line_tokens, tail_resumed);
         if let Some(updated) = line_posix_mode_change(&line_tokens) {
             if self.parse_posix != updated {
                 // The full pass would re-lex the whole line under the new
                 // mode; a resumed tail must not mix modes.
                 self.boundary = None;
+                self.opener = None;
             }
             self.parse_posix = updated;
         }
@@ -1279,6 +1308,7 @@ impl GroupScanFeeder {
                     if !parse_extended_glob() {
                         set_parse_extended_glob(true);
                         self.boundary = None;
+                        self.opener = None;
                         self.extglob_toggled = true;
                     }
                 }
@@ -1286,6 +1316,7 @@ impl GroupScanFeeder {
                     if parse_extended_glob() {
                         set_parse_extended_glob(false);
                         self.boundary = None;
+                        self.opener = None;
                         self.extglob_toggled = true;
                     }
                 }
@@ -1388,6 +1419,27 @@ impl GroupScanFeeder {
             // `pass_boundary` is Some: checkpoint its tokens + lexer state
             // so the next pass lexes only the appended tail. The token Vec
             // moves in (the join `return` discards it anyway).
+            if brace_group_open {
+                // rubash#281: a pass that emitted a bare `{` at a clean
+                // between-token boundary re-arms the opener checkpoint (a
+                // tail-resumed pass re-emits nothing before its offset and
+                // returns None — the stored opener's append-only prefix
+                // stays valid). The prefix tokens are the list's head up to
+                // the opener, exactly the bytes a fold-pass resume skips
+                // re-lexing. If the opener token cannot be located (a
+                // capture whose emission point was not the one this list
+                // shows), drop the checkpoint: the fold pass falls back to
+                // the full re-lex.
+                if let Some((brace_offset, state)) = pass_opener {
+                    let opener_index = line_tokens.iter().position(|token| {
+                        token.kind == TokenKind::Keyword
+                            && token.value == "{"
+                            && token.column == brace_offset
+                    });
+                    self.opener = opener_index
+                        .map(|index| (brace_offset, line_tokens[..index].to_vec(), state));
+                }
+            }
             if brace_group_open && !param_expansion_open {
                 if let Some(state) = pass_boundary {
                     self.boundary = Some((self.logical_line.len(), line_tokens, state));
@@ -1476,6 +1528,7 @@ impl GroupScanFeeder {
         self.procsub_word_join_open = false;
         self.param_open_cache = None;
         self.boundary = None;
+        self.opener = None;
         // Offsets restart for the next logical line: cache invalid. Every
         // residual checkpoint resets to the fresh-scan state (the empty
         // buffer's full scan is `Default`), so the next logical line's
@@ -1561,12 +1614,14 @@ impl GroupScanFeeder {
                 self.logical_line = rotated;
                 self.brace_cache.clear();
                 self.boundary = None;
+                self.opener = None;
                 // End of input: no further gate calls read these offsets,
                 // but keep the mirror honest anyway (rubash#292).
                 self.rebuild_comsub_mirror();
             }
-            let (mut line_tokens, _) = tokenize_with_boundary(
+            let (mut line_tokens, _, _, _) = tokenize_with_boundary(
                 self.boundary.take(),
+                self.opener.take(),
                 false,
                 &self.logical_line,
                 self.parse_posix,
@@ -2123,12 +2178,30 @@ fn shopt_extglob_change(args: &[Token]) -> Option<bool> {
     None
 }
 
+/// One checkpoint over an accumulating logical line: byte offset + the
+/// prefix tokens lexed before it + the between-token lexer state at it.
+type BoundaryCheckpoint = (usize, Vec<Token>, LexerBoundaryState);
+
+/// The pass result the feeder consumes: token list, the end-of-pass
+/// between-token checkpoint (when the pass ended between tokens), the
+/// bare-`{` opener snapshot (rubash#281, when the pass emitted one at a
+/// clean boundary), and whether the list came from a TAIL resume (the
+/// caller folds only the token delta in that case; an opener resume or a
+/// full pass rewrites the list from the fold point, so the summary refolds
+/// from the line-start snapshot).
+type TokenizePass = (
+    Vec<Token>,
+    Option<LexerBoundaryState>,
+    Option<(usize, LexerBoundaryState)>,
+    bool,
+);
+
 fn tokenize_plain(
     input: &str,
     posix: bool,
     parse_state: &mut LexerParseState,
     brace_cache: &mut BraceScanCache,
-) -> (Vec<Token>, Option<LexerBoundaryState>) {
+) -> TokenizePass {
     let mut lexer = Lexer::new_with_cache(input, posix, brace_cache);
     lexer.extended_glob = parse_extended_glob();
     // parse.y keeps a single parser_state for the whole input — resume the
@@ -2143,7 +2216,48 @@ fn tokenize_plain(
     }
     *parse_state = lexer.take_parse_state();
     let boundary = lexer.boundary_state();
-    (tokens, boundary)
+    let opener = lexer
+        .opener_snapshot
+        .take()
+        .map(|snapshot| (snapshot.brace_offset, snapshot.state));
+    (tokens, boundary, opener, false)
+}
+
+/// Run the lexer from `offset` with `state`, extending `tokens` (the
+/// checkpointed prefix the full pass would have lexed before `offset`).
+/// Shared by the boundary resume and the opener resume: both are the same
+/// deterministic-scanner argument (see `tokenize_with_boundary`'s docs).
+fn tokenize_resume_from(
+    mut tokens: Vec<Token>,
+    input: &str,
+    posix: bool,
+    brace_cache: &mut BraceScanCache,
+    offset: usize,
+    state: &LexerBoundaryState,
+    parse_state: &mut LexerParseState,
+    // True for the BOUNDARY tail resume (the list strictly extends the
+    // checkpointed prefix, so the caller folds only the token delta into
+    // the keyword-stack summary); false for the OPENER resume (the list is
+    // rewritten from the fold point, so the caller refolds the summary
+    // from the line-start snapshot — the list is byte-identical to a full
+    // pass either way).
+    tail_resume: bool,
+) -> TokenizePass {
+    let mut lexer = Lexer::new_resumed_at(input, posix, brace_cache, offset, state);
+    lexer.extended_glob = parse_extended_glob();
+    for token in &mut lexer {
+        if token.kind == TokenKind::Eof {
+            break;
+        }
+        tokens.push(token);
+    }
+    *parse_state = lexer.take_parse_state();
+    let boundary = lexer.boundary_state();
+    let opener = lexer
+        .opener_snapshot
+        .take()
+        .map(|snapshot| (snapshot.brace_offset, snapshot.state));
+    (tokens, boundary, opener, tail_resume)
 }
 
 /// rubash#281 complete-command-boundary resume: when a checkpoint from the
@@ -2168,36 +2282,66 @@ fn tokenize_plain(
 /// resume when the line carries one restores full re-lexing exactly on
 /// the fold passes (once per group close); false positives (`}` inside a
 /// comment or string) only cost the full pass.
+///
+/// rubash#281 opener-state resume: on a pass the boundary checkpoint
+/// cannot serve (every fold pass, and any pass whose boundary was dropped
+/// by a non-append mutation while the group stayed open), the OPENER
+/// checkpoint taken at the bare `{` emission serves instead: the stored
+/// prefix tokens plus a lex from the opener offset with the pre-`{` state
+/// reproduce the full pass byte for byte by the same deterministic-scanner
+/// argument — including the fold itself, which the re-visited `{` arm now
+/// completes over the group's whole (appended-to) text. Only the cost
+/// class changes: the re-lex starts at the opener instead of byte 0, so a
+/// group's fold pass pays the group's own text once instead of every byte
+/// accumulated before it.
 fn tokenize_with_boundary(
-    checkpoint: Option<(usize, Vec<Token>, LexerBoundaryState)>,
+    checkpoint: Option<BoundaryCheckpoint>,
+    opener: Option<BoundaryCheckpoint>,
     resume_allowed: bool,
     input: &str,
     posix: bool,
     parse_state: &mut LexerParseState,
     brace_cache: &mut BraceScanCache,
-) -> (Vec<Token>, Option<LexerBoundaryState>) {
+) -> TokenizePass {
     if resume_allowed {
-        if let Some((offset, mut tokens, state)) = checkpoint {
+        if let Some((offset, tokens, state)) = checkpoint {
             if offset <= input.len() {
-                let mut lexer = Lexer::new_resumed_at(input, posix, brace_cache, offset, &state);
-                lexer.extended_glob = parse_extended_glob();
-                for token in &mut lexer {
-                    if token.kind == TokenKind::Eof {
-                        break;
-                    }
-                    tokens.push(token);
-                }
-                *parse_state = lexer.take_parse_state();
-                return (tokens, lexer.boundary_state());
+                return tokenize_resume_from(
+                    tokens,
+                    input,
+                    posix,
+                    brace_cache,
+                    offset,
+                    &state,
+                    parse_state,
+                    true,
+                );
             }
         }
+    }
+    // Fold pass (resume refused), a pass whose boundary checkpoint was
+    // dropped by a non-append mutation, or an out-of-range offset: the
+    // opener checkpoint still serves when it exists (see the docs above).
+    if let Some((offset, tokens, state)) = opener {
+        if offset <= input.len() {
+            return tokenize_resume_from(
+                tokens,
+                input,
+                posix,
+                brace_cache,
+                offset,
+                &state,
+                parse_state,
+                false,
+            );
+        }
+    }
+    if resume_allowed {
         // resume was allowed but no checkpoint existed: full re-lex under
         // the ALLOWED stat (tail = whole input).
-        let result = tokenize_plain(input, posix, parse_state, brace_cache);
-        return result;
+        return tokenize_plain(input, posix, parse_state, brace_cache);
     }
-    let result = tokenize_plain(input, posix, parse_state, brace_cache);
-    result
+    tokenize_plain(input, posix, parse_state, brace_cache)
 }
 
 /// Detect top-level `set -o posix` / `set +o posix` commands in a tokenized
