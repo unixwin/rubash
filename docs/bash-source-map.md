@@ -1,5 +1,5 @@
 > **ARCHIVED** — This document is historical. Current compatibility status is in
-> [`COMPATIBILITY-STATUS.md`](COMPATIBILITY-STATUS.md). Last current: 2026-08-14.
+> [rubash README「Compatibility at a Glance」台账](../README.md#compatibility-at-a-glance) (snapshot archive: [issue #477](https://github.com/unixwin/rubash/issues/477)). Last current: 2026-08-14.
 > For the authoritative statement of Rubash's relationship to the GNU Bash
 > source (rewrite of semantics, not a code port), read
 > [`PROVENANCE.md`](PROVENANCE.md) first.

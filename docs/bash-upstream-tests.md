@@ -166,8 +166,7 @@ Current local baseline:
 
 This table is the `.right` expectation-file runner baseline. It is intentionally
 separate from the actual-output comparison against native Bash. The current
-authoritative actual-output status is maintained in
-`docs/COMPATIBILITY-STATUS.md`.
+authoritative actual-output status is maintained in the rubash README "Compatibility at a Glance" ledger (snapshot archive: issue #477; `docs/COMPATIBILITY-STATUS.md` was deleted 2026-10-10).
 
 The runner stays non-strict for ordinary compatibility differences in CI so it
 can serve as a progress signal, but timeout failures and invalid timeout

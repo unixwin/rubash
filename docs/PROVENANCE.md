@@ -25,9 +25,9 @@ never its source text.
 - The oracle is black-box differential testing: the harness in
   `scripts/true-baseline.sh` runs GNU Bash's own 83-suite upstream test
   corpus against GNU Bash 5.3.0 (WSL, owner-compiled) and Rubash, and
-  byte-compares stdout/stderr. See
-  [`COMPATIBILITY-STATUS.md`](COMPATIBILITY-STATUS.md) for the current
-  ledger and methodology history.
+  byte-compares stdout/stderr. See the rubash README "Compatibility at a Glance"
+  ledger (snapshot archive: issue #477) for the current ledger and
+  methodology history.
 - Day-to-day development uses the same discipline: probes are run against
   GNU Bash and Rubash implements the observed behavior. The ledger's
   per-suite diff audits attribute each residual difference to an observable
@@ -88,7 +88,7 @@ licensing questions, contact the maintainers.
 
 **兼容性如何定义与验证**：以 GNU Bash 5.3.0 的**可观测行为**为目标，通过黑盒
 差分测试验证——harness 用 GNU Bash 自己的 83 套官方语料对两个 shell 做 byte 级
-输出对比（见 [`COMPATIBILITY-STATUS.md`](COMPATIBILITY-STATUS.md)）。
+输出对比；现行台账见 rubash README「Compatibility at a Glance」及 issue #477 归档）。
 
 **vendored 源码的角色**：`third_party/bash` 子模块保持其原始 GPL-3.0-or-later
 许可证，仅用于**理解语义**和构建测试 oracle，已从发布包排除。代码注释与 commit

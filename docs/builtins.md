@@ -5,7 +5,7 @@
 > 白名单）、`src/executor/command_dispatch_primary.rs`、
 > `src/executor/command_dispatch_late.rs`，并与 GNU Bash 5.2（61 个 builtin）
 > 以及 winuxcmd（`unixwin-winuxcmd`，176 个外部命令）做重叠比对。
-> 与 GNU Bash 的**行为兼容性状态**见 `docs/COMPATIBILITY-STATUS.md`；本文件
+> 与 GNU Bash 的**行为兼容性状态**见 rubash README「Compatibility at a Glance」台账（快照归档见 issue #477）；本文件
 > 只回答"哪些命令是 builtin、哪些是 fast-path、为什么"。
 >
 > 本文件由 `src/executor/builtin_names.rs` 内的文档同步测试守护：
