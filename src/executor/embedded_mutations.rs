@@ -1844,6 +1844,9 @@ impl Executor {
         if command_substitution_uses_specialized_path(self, source, &words) {
             let output = self.expand_command_substitution_with_context(source, context);
             let status = self.last_command_substitution_status.get().unwrap_or(0);
+            // rubash#485: the &self wrapper cannot write exit_code; publish
+            // the reaped substitution's status here (see the AST tail).
+            self.exit_code = status;
             return SubstitutionOutput::readback(
                 crate::executor::substitution_metadata::shell_text_to_raw_bytes(&output),
                 status,
@@ -1874,6 +1877,7 @@ impl Executor {
         if is_specialized_command_substitution_word(&words) {
             let output = self.expand_command_substitution_with_context(source, context);
             let status = self.last_command_substitution_status.get().unwrap_or(0);
+            self.exit_code = status;
             return SubstitutionOutput::readback(
                 crate::executor::substitution_metadata::shell_text_to_raw_bytes(&output),
                 status,
@@ -1885,6 +1889,7 @@ impl Executor {
         }
         let output = self.expand_command_substitution_with_context(source, context);
         let status = self.last_command_substitution_status.get().unwrap_or(0);
+        self.exit_code = status;
         SubstitutionOutput::readback(
             crate::executor::substitution_metadata::shell_text_to_raw_bytes(&output),
             status,
@@ -1942,7 +1947,6 @@ impl Executor {
         // resources (cwd, OS env, exit code, captures) are handled
         // separately below.
         let saved_state = self.shell_state.clone_for_child_save();
-        let saved_exit_code = self.exit_code;
         let saved_dir = env::current_dir().ok();
         // The forked child owns its descriptor table: `exec 2>/dev/null`
         // inside the body (modernish fatal.sh line 37) must not silence the
@@ -2093,7 +2097,15 @@ impl Executor {
 
         self.restore_flat_subshell(saved_state, saved_dir);
         self.fd_table = saved_fd_table;
-        self.exit_code = saved_exit_code;
+        // rubash#485: GNU subst.c command_substitute reaps the substitution
+        // child in the parent and its exit status becomes the shell's
+        // last_command_exit_value BEFORE the enclosing command runs, so a
+        // later `$?` on the same command line (word list, later assignment
+        // RHS on the same simple command) sees the substitution's status:
+        // `echo "$(exit 3)" $?` -> " 3", and a SUCCESSFUL substitution
+        // clobbers it just the same (`false; echo "$(true) $?"` -> " 0").
+        // The enclosing command's own status then overwrites it when it runs.
+        self.exit_code = status;
         self.suppress_errexit = saved_suppress_errexit;
         self.last_command_substitution_status.set(Some(status));
 
@@ -2128,7 +2140,6 @@ impl Executor {
         // die with the substitution. Whole-state clone, not a field list.
         let saved_state = self.shell_state.clone_for_child_save();
         let saved_dir = env::current_dir().ok();
-        let saved_exit_code = self.exit_code;
         let saved_capture = self.stdout_capture.take();
         self.stdout_capture = Some(Vec::new());
         // GNU subst.c:7306-7313 command_substitute: the substitution child's
@@ -2230,7 +2241,10 @@ impl Executor {
             Err(_) => 1,
         };
         self.restore_flat_subshell(saved_state, saved_dir);
-        self.exit_code = saved_exit_code;
+        // Same rubash#485 reap contract as the AST substitution tail above:
+        // the substitution's status is the executor's $? the moment the
+        // child is reaped, before the enclosing command runs.
+        self.exit_code = status;
         self.suppress_errexit = saved_suppress_errexit;
         self.last_command_substitution_status.set(Some(status));
 
