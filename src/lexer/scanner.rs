@@ -73,6 +73,29 @@ pub(super) struct LexerBoundaryState {
     last_token_was_open_paren: bool,
 }
 
+/// rubash#281 opener-state checkpoint: the between-token state as of JUST
+/// BEFORE a bare `{` group opener was emitted as its own Keyword token
+/// (scanner.rs `{` arm, unclosed-group path). The pass that first emits the
+/// opener proves the prefix before it is final (the join only stands when
+/// quotes, command substitutions, compound assignments and parameter
+/// expansions are all closed — the same cleanliness the boundary checkpoint
+/// requires, decided at the `{` emission point by `boundary_state()`), so on
+/// the pass where the group's `}` arrives the fold can be reproduced by
+/// RESUMING from the opener offset with this state instead of re-lexing the
+/// whole accumulated buffer (the full re-lex this replaces re-scanned every
+/// already-emitted body token of the group; nvm.sh -n: 19 fold passes over
+/// 270 KB of the 445 KB total re-lexed bytes). The lexer is a deterministic
+/// scanner over (position, state, remaining text) — GNU's read_token model
+/// (parse.y:3557) — so prefix-tokens + resumed tail is byte-identical to the
+/// full pass by construction.
+#[derive(Clone)]
+pub(super) struct OpenerSnapshot {
+    /// Byte offset of the `{` in the logical line.
+    pub(super) brace_offset: usize,
+    /// Between-token state as of before the `{` was recorded.
+    pub(super) state: LexerBoundaryState,
+}
+
 impl<'a> Lexer<'a> {
     /// Snapshot the between-token state, or `None` when the lexer stopped
     /// inside an open construct (see the struct docs).
@@ -152,6 +175,12 @@ pub(super) struct Lexer<'a> {
     /// after an extglob operator with the parse-time gate closed; consumed
     /// by `finish_word_token` onto the produced token (rubash#131).
     pub(super) extglob_split_pending: bool,
+    /// rubash#281 opener-state checkpoint, captured at the FIRST bare `{`
+    /// group opener this pass emits (per-pass field: a fresh capture wins,
+    /// so a pass that re-lexes from the top re-arms it at the outermost
+    /// still-open opener). `None` when the pass emitted no bare `{` or the
+    /// emission point was not a clean between-token boundary.
+    pub(super) opener_snapshot: Option<OpenerSnapshot>,
     /// Set by `skip_word_inner` when the word ended with a compound-assignment
     /// list still open (rubash#413); consumed by `finish_word_token` onto the
     /// produced token so the parser reports parse_compound_assignment's
@@ -185,6 +214,7 @@ impl<'a> Lexer<'a> {
             last_token_was_open_paren: false,
             extglob_split_pending: false,
             compound_unclosed_pending: false,
+            opener_snapshot: None,
         }
     }
 
@@ -940,6 +970,22 @@ impl<'a> Lexer<'a> {
                 }
                 let scan = self.skip_brace();
                 if !scan.closed {
+                    // rubash#281: capture the between-token state as of
+                    // BEFORE this opener so the fold pass can resume here
+                    // instead of re-lexing the whole accumulated buffer.
+                    // Only a clean boundary qualifies (`boundary_state`
+                    // refuses open `(`/extglob-split states); the FIRST
+                    // capture per pass wins (the outermost still-open
+                    // opener of this pass — a fold pass resuming from an
+                    // earlier opener re-captures at that same opener).
+                    if self.opener_snapshot.is_none() {
+                        if let Some(state) = self.boundary_state() {
+                            self.opener_snapshot = Some(OpenerSnapshot {
+                                brace_offset: start,
+                                state,
+                            });
+                        }
+                    }
                     // GNU parse.y read_token: `{` is an ordinary word
                     // character (it is not in shell_break_chars,
                     // syntax.h:30); it becomes the reserved word '{' only
