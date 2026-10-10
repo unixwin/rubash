@@ -31,6 +31,9 @@ GNU Bash 5.3.0 兼容性大幅推进。83 套件 true-baseline 总差异从 3427
 - **comsub/pipeline**：pathname-expand 替换、管线 word list、assoc hash order 共享 join。
 - **assignment**：全单引号 RHS 为字面数据、元素赋值词永不分词、转义引号内下标为数据。
 - **nameref**：无值 nameref 接受有效目标赋值。
+- **SIGPIPE 语义**：管道上游写端遭遇 broken pipe 不再中止解释器，`yes | head` 等流式管线行为与 GNU 一致（#455）。
+- **输入规范化**：桥接层送达的交互式输入行在进入引擎前规范化 C0 控制字节（#458）。
+- **Android 目标**：aarch64/armv7 android 目标可针对 bionic 编译（#456）。
 
 ### 文档
 

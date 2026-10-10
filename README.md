@@ -28,7 +28,7 @@ the currency, MSYS2-compatible identity for the bash ecosystem). Linux now
 builds and runs natively (`x86_64-unknown-linux-gnu`) with real
 getrlimit/chmod/faccessat/uname(2) semantics and signal delivery — verified
 by running the same GNU suite corpus on the Linux binary inside WSL (19/24
-byte-identical and climbing; ledger in `docs/LINUX-RUN-STATUS.md`). macOS
+byte-identical and climbing). macOS
 compiles green in CI with coreutils-correct uname arms. The engine's
 semantic model (in-process subshells, fd-table semantics, process
 boundaries) is deliberately platform-neutral, so the same ledger travels.
@@ -100,7 +100,7 @@ timeout; environment-bound diffs counted as zero after audit)
 
 The same true-baseline method (script files, byte-level diff vs GNU 5.3.0)
 applied to dedicated evaluation suites and real-world corpora
-(full inventory + verdicts: `docs/CORPUS-COVERAGE.md`):
+(full inventory + verdicts archived in issue #477):
 
 | Surface | Result |
 | --- | --- |
@@ -195,7 +195,7 @@ The engine also runs the [bashdb](https://github.com/Trepan-Debuggers/bashdb) co
 
 ## Documentation
 
-- [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md) — **single source of truth** for Rubash ↔ GNU Bash compatibility status
+- GitHub issue tracker — **single source of truth** for Rubash ↔ GNU Bash compatibility status (snapshot ledgers archived 2026-10-10 in issue #477)
 - [`docs/PROVENANCE.md`](docs/PROVENANCE.md) — provenance statement: what Rubash is relative to GNU Bash, and contributor methodology rules
 - [`docs/builtins.md`](docs/builtins.md) — builtin inventory and dispatch model
 - [`docs/bashdb-debugging-rubash.md`](docs/bashdb-debugging-rubash.md) — bashdb fixture setup and smoke test
