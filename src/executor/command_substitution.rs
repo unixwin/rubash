@@ -1088,12 +1088,12 @@ impl Executor {
         };
         let target_display = target.clone();
         let target = shell_path_to_windows(&target, &self.shell_state.env_vars);
-        let Ok(path) = fs::canonicalize(target) else {
+        let Some((path, is_dir)) = canonical_physical_dir(&target) else {
             // GNU's cd builtin reports the failure from inside the
             // substitution child too (`echo "$(cd nope && pwd)"` prints
             // `cd: nope: No such file or directory` with the enclosing
-            // script's line prefix and yields status 1); the shortcut must
-            // not swallow it (issue #485).
+            // script's line prefix and yields status 1); the single-handle
+            // shortcut must not swallow it (issue #485).
             eprintln!(
                 "{}cd: {}: No such file or directory",
                 self.parser_diagnostic_prefix(),
@@ -1102,7 +1102,7 @@ impl Executor {
             self.last_command_substitution_status.set(Some(1));
             return Some(String::new());
         };
-        if !path.is_dir() {
+        if !is_dir {
             eprintln!(
                 "{}cd: {}: Not a directory",
                 self.parser_diagnostic_prefix(),
@@ -2222,4 +2222,22 @@ fn command_substitution_result_status(result: Result<(), ExecuteError>, exit_cod
         Err(ExecuteError::ExitCode(status)) | Err(ExecuteError::ExpansionFailure(status)) => status,
         Err(_) => 1,
     }
+}
+
+/// Physical-path resolution for the `$(cd X && pwd)` fast path: canonicalize
+/// plus a directory test. On Windows the two facts come off ONE handle open
+/// (crate::fd::canonical_physical_dir, rubash#375); `fs::canonicalize` +
+/// `Path::is_dir` pay two `CreateFileW` round trips per call (~120µs measured
+/// on NTFS under a DEBUG-trap loop — 95% of the whole fast path). POSIX
+/// canonicalize is a cheap getcwd walk there, so the std pair stays.
+#[cfg(windows)]
+fn canonical_physical_dir(target: &std::path::Path) -> Option<(std::path::PathBuf, bool)> {
+    crate::fd::windows_impl::canonical_physical_dir(target)
+}
+
+#[cfg(unix)]
+fn canonical_physical_dir(target: &std::path::Path) -> Option<(std::path::PathBuf, bool)> {
+    let path = fs::canonicalize(target).ok()?;
+    let is_dir = path.is_dir();
+    Some((path, is_dir))
 }

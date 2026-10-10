@@ -105,6 +105,20 @@ fn run_source_groups(
             let parse_error = executor.take_parse_error();
             if parse_error {
                 executor.set_exit_code(status);
+                // evalstring.c:585-601: a syntax error aborts the remaining
+                // sourced text as an ORDINARY failure — no jump_to_top_level.
+                // The recursive run_source_impl that diagnosed this abort
+                // recorded its ExitCode(2) as a reader exit jump (script_driver
+                // run_source_impl's execute_ast arm); consuming the parse-error
+                // flag here must consume that jump with it, or the caller
+                // (interactive accept_line's `exit_jump && !parse_error` gate,
+                // run_stdin_script's break) reads a reader-discard as a real
+                // `exit` and kills the session after the sourced file ends
+                // (rubash#451 class B: the shell died instead of prompting
+                // again). A real `exit` in an earlier group already returned
+                // Err out of run_source_groups, so a jump pending at this
+                // point can only be the parse abort's.
+                executor.take_exit_jump_pending();
                 return Ok(());
             }
             continue;
@@ -207,10 +221,15 @@ fn run_source_groups(
                 // GNU evalstring.c:585-606: a syntax error aborts the
                 // remaining file; `.` itself returns 2.
                 executor.set_exit_code(2);
+                executor.take_exit_jump_pending();
                 return Ok(());
             }
             Err(ExecuteError::ExitCode(code)) if parse_error => {
                 executor.set_exit_code(code);
+                // Same discard-not-exit classification as the incomplete
+                // branch above: the flagged jump is the parse abort's, not a
+                // real `exit` (that returns Err with parse_error clear).
+                executor.take_exit_jump_pending();
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -375,6 +394,10 @@ fn execute_source_with_args(
         // gate rather than catching every ExitCode.
         Err(ExecuteError::ExitCode(status)) if executor.take_parse_error() => {
             executor.set_exit_code(status);
+            // The flagged jump is the parse abort's reader-discard, not an
+            // exit-shell jump (see run_source_groups' arms above): consume it
+            // so the sourcing driver keeps reading (rubash#451 class B).
+            executor.take_exit_jump_pending();
             Ok(())
         }
         other => other,

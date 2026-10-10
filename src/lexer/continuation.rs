@@ -795,6 +795,117 @@ pub(crate) fn unclosed_input_close_char_posix(
     ))
 }
 
+/// rubash#463: True when the word token's scanned span `raw` ends inside an
+/// unclosed word-attached process substitution. GNU read_token_word's
+/// shellexp arm (parse.y:5494-5524) folds the `(...)` body of a `<(`/`>(`
+/// that directly follows word text into the SAME token, and the
+/// parse_matched_pair LEX_GTLT discipline (parse.y:4147-4153) reads
+/// newlines as ordinary body characters — so a body spanning physical lines
+/// keeps read_secondary_line pulling input until the matching `)` arrives.
+/// Only the span-final state matters: an earlier `<(`/`>(` that already
+/// closed cannot hold the word open, and a body-closing `)` followed by more
+/// word text re-arms nothing.
+///
+/// Quote/escape/backtick aware with nested-paren depth (`$( ... )` bodies
+/// contribute their own balanced parens, mirroring skip_cmd_subst's depth
+/// discipline). This is the JOIN GATE's oracle — the full re-lex of the
+/// joined logical line re-runs the real word scanner (skip_word_inner's
+/// `<(`/`>(` arm), so the gate only needs to answer "did the word scan hit
+/// end-of-line inside the body".
+pub(crate) fn word_ends_in_open_process_substitution(raw: &str) -> bool {
+    let chars: Vec<char> = raw.chars().collect();
+    let len = chars.len();
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    while index < len {
+        let ch = chars[index];
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == '\\' {
+                index += 2;
+                continue;
+            }
+            if ch == '"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' => index += 2,
+            '\'' => {
+                single = true;
+                index += 1;
+            }
+            '"' => {
+                double = true;
+                index += 1;
+            }
+            '`' => {
+                // Backtick unit: the body scan never sees its interior.
+                index += 1;
+                while index < len && chars[index] != '`' {
+                    if chars[index] == '\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            '<' | '>'
+                if chars.get(index + 1) == Some(&'(')
+                    && index > 0
+                    && !" \t\r\n|&;<>()".contains(chars[index - 1]) =>
+            {
+                // Word-attached introducer (GNU syntax.h:84 shellexp): scan
+                // the `(...)` body with the same quote/escape discipline.
+                let mut depth = 1usize;
+                let mut scan = index + 2;
+                let mut body_single = false;
+                let mut body_double = false;
+                while scan < len && depth > 0 {
+                    let body_ch = chars[scan];
+                    if body_single {
+                        if body_ch == '\'' {
+                            body_single = false;
+                        }
+                    } else if body_double {
+                        if body_ch == '\\' {
+                            scan += 1;
+                        } else if body_ch == '"' {
+                            body_double = false;
+                        }
+                    } else {
+                        match body_ch {
+                            '\\' => scan += 1,
+                            '\'' => body_single = true,
+                            '"' => body_double = true,
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                    }
+                    scan += 1;
+                }
+                if depth > 0 {
+                    return true;
+                }
+                index = scan;
+                continue;
+            }
+            _ => index += 1,
+        }
+    }
+    false
+}
+
 pub(super) fn has_unclosed_quotes(input: &str) -> bool {
     // TODO(parse.y): Bash reads parser input with full quoting state,
     // continuations, command substitutions, arithmetic contexts, and here-doc

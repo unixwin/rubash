@@ -1129,3 +1129,21 @@ where
     }
     u32::from_str_radix(&value, 8).ok()
 }
+
+/// readline display.c:437-463 (expand_prompt): the `\[`/`\]` prompt-ignore
+/// markers (RL_PROMPT_START/END_IGNORE, rubash `markers::PROMPT_IGNORE_*`)
+/// are width-accounting delimiters only — the displayed prompt is assembled
+/// WITHOUT them, so no terminal-bound render path may carry the bytes (nor
+/// the literal `\[`/`\]` text they decode from). Every consumer that turns a
+/// PS1 into renderable text funnels through here (rubash#431): the piped
+/// `-i` driver, the host line-editor channel (`expand_prompt_string_mut`),
+/// and the `${var@P}` prompt transform. ESC and other real control bytes are
+/// untouched, so cursor-positioning and color geometry survive intact.
+pub(in crate::executor) fn strip_prompt_ignore_markers(text: &str) -> String {
+    text.chars()
+        .filter(|ch| {
+            ch != &crate::executor::markers::PROMPT_IGNORE_START
+                && ch != &crate::executor::markers::PROMPT_IGNORE_END
+        })
+        .collect()
+}

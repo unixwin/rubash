@@ -12,7 +12,9 @@
 #![allow(unreachable_patterns)]
 #![allow(clashing_extern_declarations)]
 
+pub mod build_info;
 pub mod builtins;
+pub mod console_readline;
 pub mod executor;
 pub mod expand;
 #[cfg(any(windows, unix))]

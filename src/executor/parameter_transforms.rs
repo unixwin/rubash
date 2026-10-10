@@ -412,8 +412,14 @@ impl Executor {
         transform: ParameterTransform,
     ) -> String {
         if transform == ParameterTransform::Prompt {
-            return self.expand_prompt_parameters(
-                &self.decode_prompt_string(strip_matching_quotes(value)),
+            // rubash#431: the `\[`/`\]` ignore markers are width-accounting
+            // delimiters only (readline display.c expand_prompt assembles the
+            // display without them) — the expansion result must not carry the
+            // bytes into stdout/`declare`/capture channels either.
+            return super::prompt_expansion::strip_prompt_ignore_markers(
+                &self.expand_prompt_parameters(
+                    &self.decode_prompt_string(strip_matching_quotes(value)),
+                ),
             );
         }
         apply_parameter_transform(value, transform)

@@ -36,12 +36,20 @@ impl Executor {
     }
 
     pub fn expand_prompt_string(&self, value: &str) -> String {
-        self.expand_prompt_parameters(&self.decode_prompt_string(value))
+        // rubash#431: the ignore markers that `\[`/`\]` decode to are
+        // width-accounting delimiters, never terminal payload (see
+        // strip_prompt_ignore_markers) — every render channel gets the
+        // stripped form, not just the piped `-i` driver.
+        super::prompt_expansion::strip_prompt_ignore_markers(
+            &self.expand_prompt_parameters(&self.decode_prompt_string(value)),
+        )
     }
 
     pub fn expand_prompt_string_mut(&mut self, value: &str) -> String {
         let decoded = self.decode_prompt_string(value);
-        self.expand_embedded_parameters_mut(&decoded)
+        super::prompt_expansion::strip_prompt_ignore_markers(
+            &self.expand_embedded_parameters_mut(&decoded),
+        )
     }
 
     pub fn mark_parse_error(&mut self) {
