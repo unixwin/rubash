@@ -3008,10 +3008,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             .get_env(prompt_name)
             .unwrap_or_default()
             .to_string();
-        let rendered =
-            crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(
-                &executor.expand_prompt_string(&prompt_text),
-            );
+        let rendered = executor.expand_prompt_string(&prompt_text);
         // readline display.c:437-463 (expand_prompt): the \[ \] prompt
         // markers (RL_PROMPT_START/END_IGNORE) are width-accounting
         // delimiters only — the displayed prompt is assembled WITHOUT
@@ -3019,13 +3016,9 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
         // (byte-verified: WSL GNU bash 5.3.0 piped-`-i` prompt stderr
         // carries no marker bytes). Leaking them broke strict VT parsers
         // downstream (a pyte replay swallowed everything after \x01).
-        let rendered: String = rendered
-            .chars()
-            .filter(|ch| {
-                ch != &crate::executor::markers::PROMPT_IGNORE_START
-                    && ch != &crate::executor::markers::PROMPT_IGNORE_END
-            })
-            .collect();
+        // rubash#431: the strip now lives at the shared expansion boundary
+        // (prompt_expansion::strip_prompt_ignore_markers), covering every
+        // render channel — this site included.
         eprint!("{rendered}");
 
         let mut raw = String::new();
