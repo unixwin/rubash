@@ -27,26 +27,45 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         // W_ARRAYREF (in-band ARRAYREF_FLAG) is a no-op for test/[ — GNU
         // marks arrayref-shaped operands (execute_cmd.c:4366) but test.def
-        // never consults it; strip so operand text compares clean.
-        let mut args: Vec<String> = args
+        // never consults it; strip so operand text compares clean. The
+        // strip is borrow-only (GNU copies word->flags, it does not touch
+        // the text); the owned per-argument clone existed only so the `-v`
+        // rewrite could replace an operand in place, so rewrites are kept
+        // in a side table and resolved at use instead.
+        let stripped: Vec<&str> = args
             .iter()
-            .map(|arg| {
-                crate::builtins::arrayref::take_arrayref_flag(arg)
-                    .1
-                    .to_string()
-            })
+            .map(|arg| crate::builtins::arrayref::take_arrayref_flag(arg).1)
             .collect();
+        fn resolve<'a>(
+            stripped: &[&'a str],
+            overrides: &'a [(usize, String)],
+            index: usize,
+        ) -> &'a str {
+            overrides
+                .iter()
+                .find(|(position, _)| *position == index)
+                .map(|(_, value)| value.as_str())
+                .unwrap_or(stripped[index])
+        }
+        let mut overrides: Vec<(usize, String)> = Vec::new();
         let mut index = 0;
-        while index + 1 < args.len() {
-            if args[index] == "-v" {
-                match self.rewrite_operand_array_subscript(&args[index + 1]) {
-                    Ok(rewritten) => args[index + 1] = rewritten,
+        while index + 1 < stripped.len() {
+            if resolve(&stripped, &overrides, index) == "-v" {
+                match self.rewrite_operand_array_subscript(resolve(
+                    &stripped,
+                    &overrides,
+                    index + 1,
+                )) {
+                    Ok(rewritten) => overrides.push((index + 1, rewritten)),
                     Err(()) => return Ok(1),
                 }
                 index += 1;
             }
             index += 1;
         }
+        let args: Vec<&str> = (0..stripped.len())
+            .map(|index| resolve(&stripped, &overrides, index))
+            .collect();
         // The fd-terminal marks (__RUBASH_FD_TERMINAL_<fd>, consumed ONLY by
         // the `-t` operator arm in builtins/test.rs) are rebuilt by
         // sync_fd_terminal_marks with a full env_vars retain + fd-table walk
@@ -56,7 +75,7 @@ impl Executor {
         // one (builtins/test.c binop table: `-t` is the only terminal probe;
         // a `-t` in a string-comparison position merely triggers a harmless
         // idempotent refresh).
-        if args.iter().any(|arg| arg == "-t") {
+        if args.iter().any(|arg| *arg == "-t") {
             self.sync_fd_terminal_marks(Some(cmd));
         }
         // GNU execute_cmd.c: test's diagnostics go to the shell's CURRENTLY
@@ -70,7 +89,7 @@ impl Executor {
         // (modernish TESTERE.t probe).
         let mut stderr = Vec::new();
         let status = crate::builtins::test::execute_with_stderr(
-            args.iter().map(String::as_str),
+            args.iter().copied(),
             bracket,
             &self.shell_state.env_vars,
             &mut stderr,
