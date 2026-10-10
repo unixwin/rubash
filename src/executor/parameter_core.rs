@@ -360,6 +360,17 @@ impl Executor {
             if let Some(expanded) = self.expand_word_mut_typed_with_context(word, context) {
                 return expanded.materialize_lossy_at_boundary();
             }
+            // rubash#485: a word whose backtick substitutions are EMBEDDED
+            // (not whole-word) expands on the mutable walker. The legacy
+            // &self fallback cannot publish a substitution's exit status on
+            // completion, so a later $? in the same word (backtick form of
+            // `echo a$(exit 3)b $?`) never saw GNU's promotion (subst.c
+            // command_substitute sets last_command_exit_value when the parent
+            // reaps the substitution child). The mutable walker is already
+            // the production path for every $( )-bearing word (arm above);
+            // embedded backticks get the same routing and the same promotion
+            // sites.
+            return self.expand_embedded_parameters_mut_with_context(word, context);
         }
 
         self.expand_word(word)

@@ -1502,10 +1502,19 @@ impl Executor {
                         .is_some_and(command_substitution_spans_whole_word)
                 })
         }) {
-            return vec![self.expand_command_substitution_with_context(
+            let output = self.expand_command_substitution_with_context(
                 source,
                 SubstitutionQuoteContext::DoubleQuoted,
-            )];
+            );
+            // rubash#485: the &self wrapper leaves this substitution's
+            // reaped status in last_command_substitution_status; publish it
+            // to the executor's $? before the following words expand (GNU
+            // subst.c command_substitute sets last_command_exit_value when
+            // the parent reaps the substitution child, so the issue repro
+            // echo "$(cd nope && pwd)" $? prints 1, not 0).
+            let status = self.last_command_substitution_status.get().unwrap_or(0);
+            self.exit_code = status;
+            return vec![output];
         }
         // GNU subst.c param_expand (unbraced `$X`) nameref branch (the
         // find_variable_last_nameref + valid_array_reference cell case):
