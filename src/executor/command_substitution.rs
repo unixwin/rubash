@@ -605,6 +605,23 @@ impl Executor {
         *self.shell_state.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
         let result = self.expand_command_substitution_inner(source, context);
         self.shell_state.restore_interior(&saved_state);
+        // subst.c command_substitute: after wait_for (pid) in the parent, the
+        // substitution child's wait status is recorded in
+        // last_command_exit_value (the same rule the funsub form documents at
+        // subst.c:7120-7122). Words to the RIGHT of the substitution in the
+        // same command — `echo $(false) $?` — therefore observe it, each
+        // substitution overwriting the previous one left-to-right
+        // (`echo $(true) $(false) $?` prints 1, `echo $(false) $(true) $?`
+        // prints 0), and a SUCCEEDING substitution resets a failing previous
+        // status (`false; echo $(true) $?` prints 0). The overlay is only
+        // bookkeeping for $? reads: the command still runs afterwards and
+        // imposes its own exit status, so errexit semantics are unchanged
+        // (`set -e; echo "$(false)"; echo after` keeps running). The
+        // substitution cell itself stays set — the assignment paths read it
+        // as substitution_status after expansion
+        // (expand_assignment_value_result*).
+        self.word_expansion_comsub_exit
+            .set(self.last_command_substitution_status.get());
         result
     }
 
@@ -781,7 +798,14 @@ impl Executor {
 
         if words.first().map(String::as_str) == Some("echo") {
             let expanded_args = self.brace_expanded_substitution_args(&words, &word_parts);
-            return echo_command_substitution_output(&expanded_args);
+            let output = echo_command_substitution_output(&expanded_args);
+            // The body's command is echo and echo cannot fail here: pin the
+            // substitution status back to 0 even when an argument carried a
+            // nested substitution that left its own status in the cell
+            // (`$(echo $(false))` is status 0 — the body's final command
+            // succeeded), matching the other shortcuts that set the cell.
+            self.last_command_substitution_status.set(Some(0));
+            return output;
         }
 
         if words.first().map(String::as_str) == Some("printf") {
@@ -1062,12 +1086,28 @@ impl Executor {
         } else {
             self.home_value()
         };
+        let target_display = target.clone();
         let target = shell_path_to_windows(&target, &self.shell_state.env_vars);
         let Ok(path) = fs::canonicalize(target) else {
+            // GNU's cd builtin reports the failure from inside the
+            // substitution child too (`echo "$(cd nope && pwd)"` prints
+            // `cd: nope: No such file or directory` with the enclosing
+            // script's line prefix and yields status 1); the shortcut must
+            // not swallow it (issue #485).
+            eprintln!(
+                "{}cd: {}: No such file or directory",
+                self.parser_diagnostic_prefix(),
+                target_display
+            );
             self.last_command_substitution_status.set(Some(1));
             return Some(String::new());
         };
         if !path.is_dir() {
+            eprintln!(
+                "{}cd: {}: Not a directory",
+                self.parser_diagnostic_prefix(),
+                target_display
+            );
             self.last_command_substitution_status.set(Some(1));
             return Some(String::new());
         }
@@ -1422,6 +1462,9 @@ impl Executor {
             host_internal_depth: std::cell::Cell::new(self.host_internal_depth.get()),
             debug_trap_function_line: None,
             last_command_substitution_status: Cell::new(None),
+            // A forked comsub child starts with no in-flight parent word
+            // expansion (same rule as last_command_substitution_status above).
+            word_expansion_comsub_exit: Cell::new(None),
             comsub_stdin_writeback: Cell::new(None),
             pipeline_stdin_consumed: Cell::new(None),
             pipeline_stage_fds_pre_wired: std::cell::Cell::new(false),

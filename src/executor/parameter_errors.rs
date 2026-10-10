@@ -1876,7 +1876,7 @@ impl Executor {
             // GNU string_list_dollar_star: `*` joins with IFS[0]; `@` space.
             "@" => Some(self.shell_state.positional_params.join(" ")),
             "*" => Some(self.positional_params_star_joined()),
-            "?" => Some(self.exit_code.to_string()),
+            "?" => Some(self.dollar_question_status().to_string()),
             "$" => Some(self.shell_pid_value().to_string()),
             // `$!` is unset until the first background job (variables.c), so
             // `${!-ok 27}` substitutes `ok 27` and `${@-x}`/`${*-x}` with no

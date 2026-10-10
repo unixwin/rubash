@@ -2293,6 +2293,17 @@ impl Executor {
             quote_aware_case_word(&raw, |segment| self.expand_case_word(segment))
         };
         let word = tilde_expand::strip_assignment_quote_marker(&word);
+        // GNU: the case word's command substitution recorded its status in
+        // last_command_exit_value (subst.c command_substitute), and the case
+        // command itself commits no status until a clause body finishes — so
+        // $? inside the first body command still sees the substitution's
+        // status (issue #485: `case $(false) in "") echo $?;; esac` prints 1).
+        // Commit the word-expansion overlay to the real status here; the
+        // clause body's execute_ast_inner clears the overlay at its node
+        // boundary, which would otherwise lose it.
+        if let Some(status) = self.word_expansion_comsub_exit.take() {
+            self.exit_code = status;
+        }
         self.abandon_on_arithmetic_expansion_error()?;
         let nocasematch =
             crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "nocasematch");
