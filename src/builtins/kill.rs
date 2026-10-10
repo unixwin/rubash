@@ -30,10 +30,17 @@ use std::io::{self, Write};
 ///   the interleaved table stays in numeric order on every platform —
 ///   `kill -l` walks it in order and GNU's `signal_names[]` is indexed by
 ///   signal number, so ordering is part of the GNU-compatible surface.
+///   The Linux legs cover android too: bionic resolves the Linux kernel
+///   numbering (libc's android module pins SIGBUS=7, SIGUSR1=10,
+///   SIGSTKFLT=16, SIGPWR=30, SIGSYS=31, ...), so the 1..31 slots compile
+///   in there unchanged.
 /// * The Linux RT block pins the glibc contract 34..64 as literals:
 ///   `libc::SIGRTMIN` is a FUNCTION on glibc (linux_like libc, forwarding
 ///   to `__libc_current_sigrtmin()`), not a const, so it cannot populate a
-///   const table. `signal_table_tests::linux_realtime_block_matches_libc`
+///   const table. The block stays out of android: bionic's RT base is its
+///   own `__libc_current_sigrtmin()` (32, not glibc's 34), so the literal
+///   numbering would lie there.
+///   `signal_table_tests::linux_realtime_block_matches_libc`
 ///   guards the equality at runtime on every Linux CI run.
 #[cfg(not(unix))]
 const SIGNALS: &[(i32, &str, &str)] = &[
@@ -113,47 +120,47 @@ const SIGNALS: &[(i32, &str, &str)] = &[
     (libc::SIGILL as i32, "4", "ILL"),
     (libc::SIGTRAP as i32, "5", "TRAP"),
     (libc::SIGABRT as i32, "6", "ABRT"),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     (libc::SIGBUS as i32, "7", "BUS"),
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     (libc::SIGEMT as i32, "7", "EMT"),
     (libc::SIGFPE as i32, "8", "FPE"),
     (libc::SIGKILL as i32, "9", "KILL"),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     (libc::SIGUSR1 as i32, "10", "USR1"),
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     (libc::SIGBUS as i32, "10", "BUS"),
     (libc::SIGSEGV as i32, "11", "SEGV"),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     (libc::SIGUSR2 as i32, "12", "USR2"),
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     (libc::SIGSYS as i32, "12", "SYS"),
     (libc::SIGPIPE as i32, "13", "PIPE"),
     (libc::SIGALRM as i32, "14", "ALRM"),
     (libc::SIGTERM as i32, "15", "TERM"),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     (libc::SIGSTKFLT as i32, "16", "STKFLT"),
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     (libc::SIGURG as i32, "16", "URG"),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     (libc::SIGCHLD as i32, "17", "CHLD"),
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     (libc::SIGSTOP as i32, "17", "STOP"),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     (libc::SIGCONT as i32, "18", "CONT"),
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     (libc::SIGTSTP as i32, "18", "TSTP"),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     (libc::SIGSTOP as i32, "19", "STOP"),
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     (libc::SIGCONT as i32, "19", "CONT"),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     (libc::SIGTSTP as i32, "20", "TSTP"),
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     (libc::SIGCHLD as i32, "20", "CHLD"),
     (libc::SIGTTIN as i32, "21", "TTIN"),
     (libc::SIGTTOU as i32, "22", "TTOU"),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     (libc::SIGURG as i32, "23", "URG"),
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     (libc::SIGIO as i32, "23", "IO"),
@@ -162,15 +169,15 @@ const SIGNALS: &[(i32, &str, &str)] = &[
     (libc::SIGVTALRM as i32, "26", "VTALRM"),
     (libc::SIGPROF as i32, "27", "PROF"),
     (libc::SIGWINCH as i32, "28", "WINCH"),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     (libc::SIGIO as i32, "29", "IO"),
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     (libc::SIGINFO as i32, "29", "INFO"),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     (libc::SIGPWR as i32, "30", "PWR"),
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     (libc::SIGUSR1 as i32, "30", "USR1"),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     (libc::SIGSYS as i32, "31", "SYS"),
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     (libc::SIGUSR2 as i32, "31", "USR2"),

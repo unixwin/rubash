@@ -34,6 +34,14 @@ const EX_USAGE: i32 = 2;
 /// * `target_os = "linux"`: same Linux table (RTMIN..RTMAX arithmetic names
 ///   are GNU-generated at signames.c:92-139 and are Linux-only, matching
 ///   the `#if defined (SIGRTMIN)` guard there).
+/// * `target_os = "android"`: bionic resolves the Linux kernel numbering
+///   for 1..31 (libc's android module pins SIGBUS=7, SIGUSR1=10,
+///   SIGSTKFLT=16, SIGPWR=30, SIGSYS=31, ...), so those slots match the
+///   Linux table. The RT slots stay EMPTY: glibc's 34..64 literal contract
+///   does not hold there (bionic's `__libc_current_sigrtmin()` is 32, and
+///   libc exports no const), so — like GNU's `#if defined (SIGRTMIN)` arm —
+///   the arithmetic names compile out and in-range numeric specifiers are
+///   silently accepted with no name, exactly like the Linux 32/33 holes.
 /// * other unix (macos/freebsd): the BSD-family numbering where
 ///   7=EMT, 10=BUS, 12=SYS, 16=URG, 17=STOP, 18=TSTP, 19=CONT, 20=CHLD,
 ///   23=IO, 29=INFO, 30=USR1, 31=USR2 (libc resolves these per target; the
@@ -176,11 +184,87 @@ pub(crate) const SIGNALS: [&str; 64] = [
     "SIGRTMAX",
 ];
 
+/// Android (bionic) table: Linux kernel numbering for 1..31 (see the table
+/// doc above for the libc-crate anchors). RT slots stay empty — bionic's
+/// `__libc_current_sigrtmin()` is 32, so glibc's 34..64 arithmetic names
+/// would be lies there; empty slots keep `trap -l` and numeric specifiers
+/// GNU-shaped (silent accept, no name), and the 64-slot length keeps the
+/// `kill -l` NSIG range check identical to Linux. The unix tests
+/// (`positional_slots_match_libc`, `trap_table_agrees_with_kill_table`)
+/// pin these slots whenever an android test runner exists.
+#[cfg(all(unix, target_os = "android"))]
+pub(crate) const SIGNALS: [&str; 64] = [
+    "SIGHUP",
+    "SIGINT",
+    "SIGQUIT",
+    "SIGILL",
+    "SIGTRAP",
+    "SIGABRT",
+    "SIGBUS",
+    "SIGFPE",
+    "SIGKILL",
+    "SIGUSR1",
+    "SIGSEGV",
+    "SIGUSR2",
+    "SIGPIPE",
+    "SIGALRM",
+    "SIGTERM",
+    "SIGSTKFLT",
+    "SIGCHLD",
+    "SIGCONT",
+    "SIGSTOP",
+    "SIGTSTP",
+    "SIGTTIN",
+    "SIGTTOU",
+    "SIGURG",
+    "SIGXCPU",
+    "SIGXFSZ",
+    "SIGVTALRM",
+    "SIGPROF",
+    "SIGWINCH",
+    "SIGIO",
+    "SIGPWR",
+    "SIGSYS",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+];
+
 /// BSD-family table (macos/freebsd): positional names for signals 1..31 in
 /// the target's numbering (see the shared doc comment). Positional layout
 /// means no libc constants appear here; the tests pin each slot against
 /// libc::SIGxxx so CI fails on numbering drift.
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
 pub(crate) const SIGNALS: [&str; 31] = [
     "SIGHUP",
     "SIGINT",
