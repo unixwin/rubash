@@ -278,6 +278,56 @@ impl ShellInvocation {
     }
 }
 
+/// GNU shell.c:722 run_startup_files -> run_login_profile_files
+/// (shell.c:1836-1880): a login shell sources /etc/profile and then the
+/// FIRST EXISTING of ~/.bash_profile, ~/.bash_login, ~/.profile. A missing
+/// candidate is skipped silently (open_startup_file's failed fopen is not
+/// an error). `exists` is injected so the fallback order is unit-testable
+/// on every host.
+pub fn login_profile_files(home: &str, exists: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut files = Vec::new();
+    let system_profile = "/etc/profile";
+    if exists(system_profile) {
+        files.push(system_profile.to_string());
+    }
+    for name in [".bash_profile", ".bash_login", ".profile"] {
+        let candidate = format!("{home}/{name}");
+        if exists(&candidate) {
+            files.push(candidate);
+            break;
+        }
+    }
+    files
+}
+
+/// GNU shell.c:1863-1880 (the non-login interactive branch of
+/// run_startup_files): sources /etc/bash.bashrc (SYS_BASHRC, the Debian
+/// system rc) and then ~/.bashrc — or `rc_override` (--rcfile/--init-file)
+/// in place of the personal rc. `exists` is injected for host-independent
+/// tests. Login shells never take this branch: the profile chain replaces
+/// it entirely (shell.c:1833 `if (login_shell) ... else if (interactive)`).
+pub fn nonlogin_interactive_files(
+    home: &str,
+    rc_override: Option<&str>,
+    exists: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut files = Vec::new();
+    let system_rc = "/etc/bash.bashrc";
+    if exists(system_rc) {
+        files.push(system_rc.to_string());
+    }
+    match rc_override {
+        Some(rc) => files.push(rc.to_string()),
+        None => {
+            let personal = format!("{home}/.bashrc");
+            if exists(&personal) {
+                files.push(personal);
+            }
+        }
+    }
+    files
+}
+
 fn parse_post_c_option(
     args: &[String],
     index: usize,
@@ -525,5 +575,69 @@ mod tests {
             );
         }
         assert_eq!(parsed.script.as_deref(), Some("script.sh"));
+    }
+
+    #[test]
+    fn login_profile_chain_prefers_bash_profile_then_falls_back() {
+        // /etc/profile always leads (when present); the personal file is the
+        // FIRST existing of bash_profile > bash_login > profile, never all.
+        let set = |present: &[&str]| {
+            let owned: Vec<String> = present.iter().map(|p| p.to_string()).collect();
+            move |p: &str| owned.iter().any(|candidate| candidate == p)
+        };
+        let files = crate::invocation::login_profile_files(
+            "/home/u",
+            set(&[
+                "/etc/profile",
+                "/home/u/.bash_profile",
+                "/home/u/.bash_login",
+                "/home/u/.profile",
+            ]),
+        );
+        assert_eq!(files, vec!["/etc/profile", "/home/u/.bash_profile"]);
+
+        // Fallback order: bash_login when bash_profile is missing.
+        let files = crate::invocation::login_profile_files(
+            "/home/u",
+            set(&["/etc/profile", "/home/u/.bash_login", "/home/u/.profile"]),
+        );
+        assert_eq!(files, vec!["/etc/profile", "/home/u/.bash_login"]);
+
+        // Final fallback .profile; missing /etc/profile is silently skipped.
+        let files = crate::invocation::login_profile_files("/home/u", set(&["/home/u/.profile"]));
+        assert_eq!(files, vec!["/home/u/.profile"]);
+
+        // Nothing exists: the chain is empty, not an error.
+        assert!(crate::invocation::login_profile_files("/home/u", set(&[])).is_empty());
+    }
+
+    #[test]
+    fn nonlogin_interactive_chain_is_system_rc_then_personal_rc() {
+        let set = |present: &[&str]| {
+            let owned: Vec<String> = present.iter().map(|p| p.to_string()).collect();
+            move |p: &str| owned.iter().any(|candidate| candidate == p)
+        };
+        let files = crate::invocation::nonlogin_interactive_files(
+            "/home/u",
+            None,
+            set(&["/etc/bash.bashrc", "/home/u/.bashrc"]),
+        );
+        assert_eq!(files, vec!["/etc/bash.bashrc", "/home/u/.bashrc"]);
+
+        // A missing system rc is skipped; the personal rc still runs.
+        let files = crate::invocation::nonlogin_interactive_files(
+            "/home/u",
+            None,
+            set(&["/home/u/.bashrc"]),
+        );
+        assert_eq!(files, vec!["/home/u/.bashrc"]);
+
+        // --rcfile replaces ONLY the personal rc, not the system one.
+        let files = crate::invocation::nonlogin_interactive_files(
+            "/home/u",
+            Some("custom.rc"),
+            set(&["/etc/bash.bashrc"]),
+        );
+        assert_eq!(files, vec!["/etc/bash.bashrc", "custom.rc"]);
     }
 }

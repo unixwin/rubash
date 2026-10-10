@@ -3207,6 +3207,39 @@ fn login_startup_options_are_accepted_before_command_string() {
 }
 
 #[test]
+fn login_flag_does_not_change_windows_startup_behavior() {
+    // rubash#487: the profile/rc chain is a Unix requirement (linux + macOS
+    // legs). On Windows
+    // -l/--login is accepted but must stay behaviorally identical to a
+    // plain invocation: a HOME containing .bash_profile/.bashrc must NOT
+    // be sourced, with or without the flag.
+    let home = std::env::temp_dir().join("rubash-487-nowinchain");
+    let _ = fs::remove_dir_all(&home);
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join(".bash_profile"), "echo PROFILE-SOURCED\n").unwrap();
+    fs::write(home.join(".bashrc"), "echo RC-SOURCED\n").unwrap();
+
+    let run = |extra: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+        cmd.env("HOME", &home);
+        cmd.args(extra);
+        cmd.arg("-c").arg("printf '%s\\n' body");
+        cmd.output().expect("run rubash")
+    };
+
+    for extra in [&[][..], &["-l"][..], &["--login"][..], &["-l", "-i"][..]] {
+        let output = run(extra);
+        assert!(output.status.success(), "args {extra:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "body\n");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).is_empty(),
+            "args {extra:?}: no startup file noise expected"
+        );
+    }
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
 fn cli_shell_flags_apply_before_command_string() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-u")

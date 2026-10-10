@@ -326,6 +326,16 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 index += 1;
             }
             "--noprofile" | "--norc" => {
+                // shell.c:269-270 (--norc/--noprofile -> no_rc/no_profile):
+                // recorded so run_startup_files can honor the skips. On a
+                // login shell --norc does not inhibit the profile chain and
+                // --noprofile does not inhibit the rc chain (they gate
+                // different branches, shell.c:1833-1880).
+                if args[index] == "--noprofile" {
+                    executor.set_env("__RUBASH_NO_PROFILE", "1");
+                } else {
+                    executor.set_env("__RUBASH_NO_RC", "1");
+                }
                 index += 1;
             }
             "-O" | "+O" => {
@@ -686,8 +696,14 @@ fn parse_long_options(
                 // reads plain lines.
                 executor.set_env("__RUBASH_NO_EDITING", "1");
             }
-            // "debug" | "debugger" | "dump-po-strings" | "dump-strings" |
-            // "noprofile" | "norc": accepted, no Windows counterpart today.
+            // "debug" | "debugger" | "dump-po-strings" | "dump-strings":
+            // accepted, no Windows counterpart today.
+            "noprofile" => {
+                executor.set_env("__RUBASH_NO_PROFILE", "1");
+            }
+            "norc" => {
+                executor.set_env("__RUBASH_NO_RC", "1");
+            }
             _ => {}
         }
         index += 1;
@@ -884,6 +900,13 @@ fn run_command_string_with_init(
     if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
         apply_init_interactive_defaults(executor);
     }
+    // shell.c:722 run_startup_files runs before the rcfile/-c string
+    // (rubash#487): `bash -lc` reads the profile chain, `bash -ic` the rc
+    // chain; `exit` in a startup file terminates before the command runs.
+    let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
+    if let Some(status) = run_startup_files(executor, init_file) {
+        return finish_shell(executor, status, interactive);
+    }
     if let Some(init_file) = init_file {
         let status = run_init_file(executor, init_file);
         // rubash#297: `exit` in the rcfile terminates the shell before the
@@ -1036,6 +1059,12 @@ fn run_script_file_with_init(
     executor.remove_env("__RUBASH_ARGV0_AFTER_UNSET");
     executor.inherit_process_stdin();
     executor.set_positional_params(args.to_vec());
+    // shell.c:722 run_startup_files precedes the rcfile/script body
+    // (rubash#487): `bash -l script` reads the profile chain first.
+    let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
+    if let Some(status) = run_startup_files(executor, init_file) {
+        return finish_shell(executor, status, interactive);
+    }
     if let Some(init_file) = init_file {
         let status = run_init_file(executor, init_file);
         // rubash#297: `exit` in the rcfile terminates the shell before the
@@ -1121,6 +1150,12 @@ fn run_no_script_with_init(executor: &mut Executor, init_file: Option<&str>) -> 
     if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
         apply_init_interactive_defaults(executor);
     }
+    // shell.c:722 run_startup_files before the rcfile/reader (rubash#487):
+    // a bare login shell reads the profile chain, a non-login interactive
+    // shell reads the rc chain.
+    if let Some(status) = run_startup_files(executor, init_file) {
+        return finish_shell(executor, status, true);
+    }
     if let Some(init_file) = init_file {
         let status = run_init_file(executor, init_file);
         // GNU: `exit` in a sourced startup file terminates the shell —
@@ -1172,6 +1207,11 @@ fn run_stdin_script_with_init(executor: &mut Executor, init_file: Option<&str>) 
     if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
         apply_init_interactive_defaults(executor);
     }
+    // shell.c:722 run_startup_files before the rcfile/stdin reader
+    // (rubash#487), same branch structure as the no-script driver.
+    if let Some(status) = run_startup_files(executor, init_file) {
+        return finish_shell(executor, status, true);
+    }
     if let Some(init_file) = init_file {
         let status = run_init_file(executor, init_file);
         // rubash#297: `exit` in the rcfile terminates the shell before the
@@ -1220,6 +1260,69 @@ fn run_init_file(executor: &mut Executor, init_file: &str) -> i32 {
     let status = run_source(executor, &contents, false);
     executor.remove_env("__RUBASH_INTERACTIVE_FLAG_OFF");
     status
+}
+
+/// GNU shell.c:722 run_startup_files: the login/interactive startup chain.
+/// A login shell sources /etc/profile then the first existing personal
+/// profile (rubash#487); a non-login interactive shell sources
+/// /etc/bash.bashrc + ~/.bashrc (--rcfile replaces the personal rc). A
+/// login shell NEVER takes the rc branch (shell.c:1833 if/else), so
+/// `bash -lc` reads profiles only, and `bash -l -i` reads profiles only.
+///
+/// The chain is a Unix requirement (getty/ssh/chsh login shells must
+/// inherit the system environment; macOS shares the same
+/// /etc/profile → ~/.bash_profile chain, so the gate is `not(windows)` to
+/// cover the full release matrix). On Windows there is no real login
+/// concept, so -l/--login is accepted and the behavior stays exactly the
+/// pre-existing chain (no sourcing, no regression). `--noprofile` /
+/// `--norc` inhibit their respective branches.
+///
+/// Returns Some(exit_status) when a startup file executed `exit`
+/// (rubash#297: nothing after a startup-file exit runs) — the caller must
+/// return finish_shell immediately.
+fn run_startup_files(executor: &mut Executor, rc_override: Option<&str>) -> Option<i32> {
+    // Run once per process: the four *_with_init drivers are alternatives,
+    // but a respawned child re-entering a driver must not re-source.
+    if executor.get_env("__RUBASH_STARTUP_FILES_DONE").is_some() {
+        return None;
+    }
+    executor.set_env("__RUBASH_STARTUP_FILES_DONE", "1");
+    #[cfg(not(windows))]
+    {
+        let login = executor.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
+        let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
+        let no_profile = executor.get_env("__RUBASH_NO_PROFILE").as_deref() == Some("1");
+        let no_rc = executor.get_env("__RUBASH_NO_RC").as_deref() == Some("1");
+        let home = executor.get_env("HOME").unwrap_or_default();
+        if home.is_empty() {
+            return None;
+        }
+        let files = {
+            let exists = |path: &str| std::fs::metadata(executor.resolve_shell_path(path)).is_ok();
+            if login {
+                if no_profile {
+                    Vec::new()
+                } else {
+                    rubash::invocation::login_profile_files(&home, exists)
+                }
+            } else if interactive && !no_rc {
+                rubash::invocation::nonlogin_interactive_files(&home, rc_override, exists)
+            } else {
+                Vec::new()
+            }
+        };
+        for file in files {
+            let status = run_init_file(executor, &file);
+            if executor.take_exit_jump_pending() {
+                return Some(status);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = (executor, rc_override);
+    }
+    None
 }
 
 fn run_stdin_script(executor: &mut Executor) -> i32 {
@@ -1438,4 +1541,49 @@ fn internal_head_line_count(args: &[String]) -> Option<usize> {
         index += 1;
     }
     None
+}
+
+#[cfg(test)]
+mod login_shell_tests {
+    use super::*;
+
+    /// GNU shell.c set_shell_name (via get_name_for_error / login shell
+    /// conventions): an argv[0] whose basename starts with '-' marks a
+    /// login shell, independent of -l/--login (rubash#487).
+    fn login_marker_set(argv0: &str) -> bool {
+        // set_env mirrors __RUBASH_* markers into the process env and
+        // new_process_exit re-imports the process env, so a previous
+        // helper call would leak into this one — reset the ambient
+        // marker before each probe.
+        std::env::remove_var("__RUBASH_LOGIN_SHELL");
+        let mut executor = Executor::new_process_exit();
+        apply_invocation_shell_mode(&mut executor, Some(argv0));
+        executor.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1")
+    }
+
+    #[test]
+    fn argv0_leading_dash_marks_login_shell() {
+        assert!(login_marker_set("-rubash"));
+        assert!(login_marker_set("-bash"));
+        assert!(login_marker_set("-bash.exe"));
+        // A full path whose basename carries the marker still counts.
+        assert!(login_marker_set("/usr/bin/-bash"));
+        assert!(login_marker_set("D:\\bin\\-bash.exe"));
+        // A plain name never sets the marker.
+        assert!(!login_marker_set("bash"));
+        assert!(!login_marker_set("rubash.exe"));
+        assert!(!login_marker_set("/usr/bin/bash"));
+    }
+
+    #[test]
+    fn argv0_dash_basename_still_applies_name_modes() {
+        // `-rbash` keeps the restricted-shell derivation after the login
+        // marker is stripped (shell.c maybe_make_restricted).
+        let mut executor = Executor::new_process_exit();
+        apply_invocation_shell_mode(&mut executor, Some("-rbash"));
+        assert_eq!(
+            executor.get_env("__RUBASH_LOGIN_SHELL").as_deref(),
+            Some("1")
+        );
+    }
 }
