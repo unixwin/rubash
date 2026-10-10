@@ -1364,6 +1364,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
     }
 
     if ((token.kind == TokenKind::Word)
+        // rubash#462: GNU's lexer folds an unquoted expansion into the
+        // function-name WORD, and a word that IS only an expansion still
+        // lexes as its own token kind (`$x' -> Variable, `$( ... )' ->
+        // CommandSubst). function_def: WORD '(' ')' admits those, with the
+        // expanded name rejected at definition time (valid_function_word).
+        || (token.kind == TokenKind::Variable)
+        || (token.kind == TokenKind::CommandSubst)
         || (token.kind == TokenKind::Keyword && token.value == "function")
         || (token.kind == TokenKind::RedirectIn && matches!(token.value.as_str(), "<" | ">"))
         || (token.kind == TokenKind::Keyword && token.value == "!"))

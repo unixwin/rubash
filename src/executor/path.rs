@@ -4255,13 +4255,26 @@ mod tests {
         let dispatcher = root.join("usr").join("bin").join("winuxcmd.exe");
 
         // Shape class: only /mnt/X and /mnt/X/... are drive forms.
-        for drive_form in ["/mnt/c", "/mnt/c/Users", "/mnt/D", "/mnt/d/repo/x", "/mnt/z"] {
+        for drive_form in [
+            "/mnt/c",
+            "/mnt/c/Users",
+            "/mnt/D",
+            "/mnt/d/repo/x",
+            "/mnt/z",
+        ] {
             assert!(
                 windows_mnt_drive_argument(drive_form),
                 "{drive_form:?} is a /mnt drive form"
             );
         }
-        for ordinary in ["/mnt", "/mnt/", "/mnt/cfoo", "/mnt/123", "/mntx/c", "/usr/bin"] {
+        for ordinary in [
+            "/mnt",
+            "/mnt/",
+            "/mnt/cfoo",
+            "/mnt/123",
+            "/mntx/c",
+            "/usr/bin",
+        ] {
             assert!(
                 !windows_mnt_drive_argument(ordinary),
                 "{ordinary:?} is not a /mnt drive form"

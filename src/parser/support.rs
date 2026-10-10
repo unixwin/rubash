@@ -1029,9 +1029,78 @@ pub(super) fn is_function_name(name: &str) -> bool {
         return false;
     }
 
-    !name
+    !mask_expansion_spans(name)
         .chars()
         .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | ';' | '&' | '|'))
+}
+
+/// Mask the `$' family (command/parameter/arithmetic substitution) and
+/// backquote spans in a word VALUE before structural admission checks.
+/// GNU's lexer folds an unquoted `$( ... )' into the current WORD while
+/// scanning (parse.y:5513-5532 `$(' branch -> parse_comsub), so the bytes
+/// inside the span are the substitution's text, not word structure: the
+/// word `f$()g' is one WORD whose dequoted value happens to contain `('
+/// and `)' (rubash#462). What the span expands to is the executor's
+/// business (valid_function_word / W_HASDOLLAR at definition time); the
+/// parser only checks the word's own structure around the spans.
+pub(super) fn mask_expansion_spans(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let chars: Vec<char> = name.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '$' if i + 1 < chars.len() && chars[i + 1] == '(' => {
+                let mut depth = 0usize;
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '(' {
+                        depth += 1;
+                    } else if chars[i] == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            '$' if i + 1 < chars.len() && chars[i + 1] == '{' => {
+                let mut depth = 0usize;
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '{' {
+                        depth += 1;
+                    } else if chars[i] == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            '$' if i + 1 < chars.len() && chars[i + 1] == '[' => {
+                while i < chars.len() && chars[i] != ']' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            '`' => {
+                i += 1;
+                while i < chars.len() && chars[i] != '`' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            ch => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Same grammar class for the `function name { ... }' keyword form
@@ -1039,7 +1108,7 @@ pub(super) fn is_function_name(name: &str) -> bool {
 /// (rubash#244). See is_function_name for the executor-level split.
 pub(super) fn is_function_keyword_name(name: &str) -> bool {
     !name.is_empty()
-        && !name
+        && !mask_expansion_spans(name)
             .chars()
             .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | ';' | '&' | '|'))
 }
