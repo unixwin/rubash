@@ -670,6 +670,16 @@ fn parse_long_options(
                 println!();
                 println!("This is free software; you are free to change and redistribute it.");
                 println!("There is NO WARRANTY, to the extent permitted by law.");
+                // rubash#488: the build fingerprint (and the Windows persona
+                // note) are appended AFTER the GNU block — everything above
+                // stays byte-identical to the bash 5.3 contract the
+                // ecosystem and the upstream .right assets gate on, while
+                // the extra lines trace this binary to its commit and
+                // profile so a dev build cannot pose as the installed
+                // release. One print site: --version has no tty/interactive
+                // branch (the banner is not shown at startup), so piped and
+                // terminal output carry the same lines.
+                println!("{}", rubash::build_info::version_appendix());
                 return (index, Some(0));
             }
             "login" => {
