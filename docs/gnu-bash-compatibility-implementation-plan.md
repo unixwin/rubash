@@ -1,5 +1,5 @@
 > **ARCHIVED** — This document is historical. Current compatibility status is in
-> [`COMPATIBILITY-STATUS.md`](COMPATIBILITY-STATUS.md). Last current: 2026-08-22.
+> [rubash README「Compatibility at a Glance」台账](../README.md#compatibility-at-a-glance) (snapshot archive: [issue #477](https://github.com/unixwin/rubash/issues/477)). Last current: 2026-08-22.
 
 # GNU Bash Compatibility Implementation Plan
 
