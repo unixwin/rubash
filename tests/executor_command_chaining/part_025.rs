@@ -42,7 +42,10 @@ fn test_dirs_redirects_stderr() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    // #509: GNU dirs.def rejects the operand through EX_USAGE — status 2,
+    // not the plain builtin failure 1 this test used to pin (WSL GNU
+    // 5.3.0: `dirs bad` -> `dirs: bad: invalid option` + usage, rc 2).
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.contains("dirs: bad: invalid option"));
     assert!(error.contains("dirs: usage:"));
@@ -63,7 +66,8 @@ fn test_dirs_appends_stderr() {
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 1);
+    // #509: EX_USAGE (2), see the redirect twin above.
+    assert_eq!(executor.last_exit_code(), 2);
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.starts_with("before\n"));
     assert!(error.contains("dirs: bad: invalid option"));

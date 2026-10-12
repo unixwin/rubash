@@ -41,7 +41,12 @@ where
     }
 
     let arg = args[0];
-    if arg.starts_with('-') && !is_stack_index(arg) {
+    // GNU pushd.def validates the first operand through get_numeric_arg
+    // when it is ±-shaped: EITHER sign failing to parse is
+    // `%s: invalid number` + usage (builtins/common.c), not a directory
+    // operand — `pushd +q` must not fall through to the Dir arm (issue
+    // #509).
+    if (arg.starts_with('-') || arg.starts_with('+')) && !is_stack_index(arg) {
         writeln!(stderr, "{diagnostic_prefix}pushd: {arg}: invalid number")?;
         writeln!(stderr, "pushd: usage: pushd [-n] [+N | -N | dir]")?;
         return Ok(None);
@@ -80,7 +85,10 @@ where
 
     let arg = args[0];
     if !is_stack_index(arg) {
-        if arg.starts_with('-') {
+        // GNU popd.def: a ±-shaped non-number is get_numeric_arg's
+        // `%s: invalid number`; anything else in the operand position is
+        // `invalid argument` (both EX_USAGE — the caller returns 2).
+        if arg.starts_with('-') || arg.starts_with('+') {
             writeln!(stderr, "{diagnostic_prefix}popd: {arg}: invalid number")?;
         } else {
             writeln!(stderr, "{diagnostic_prefix}popd: {arg}: invalid argument")?;

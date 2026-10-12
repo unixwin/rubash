@@ -1,7 +1,6 @@
-use super::{DIR_STACK, EXECUTION_FAILURE, EXECUTION_SUCCESS};
+use super::DIR_STACK;
 use crate::executor::path::shell_path_to_windows;
 use std::collections::HashMap;
-use std::io::{self, Write};
 
 const SEP: char = crate::executor::markers::DIR_STACK_FIELD_SEP;
 
@@ -61,32 +60,6 @@ pub(crate) fn set_stack_value(env_vars: &mut HashMap<String, String>, index: usi
         stack[index] = value;
         save_stack(env_vars, &stack);
     }
-}
-
-pub(super) fn dirs_index_or_error<W, E>(
-    args: &[&str],
-    stack: &[String],
-    diagnostic_prefix: &str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> io::Result<Option<i32>>
-where
-    W: Write,
-    E: Write,
-{
-    let Some(arg) = args.first().copied().filter(|arg| is_stack_index(arg)) else {
-        return Ok(None);
-    };
-    let Some(index) = stack_index(arg, stack.len()) else {
-        writeln!(
-            stderr,
-            "{diagnostic_prefix}dirs: {}: directory stack index out of range",
-            arg.trim_start_matches(['+', '-'])
-        )?;
-        return Ok(Some(EXECUTION_FAILURE));
-    };
-    writeln!(stdout, "{}", stack[index])?;
-    Ok(Some(EXECUTION_SUCCESS))
 }
 
 pub(super) fn resolved_index(value: usize, from_right: bool, len: usize) -> Option<usize> {

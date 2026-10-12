@@ -10,14 +10,18 @@ pub(crate) use stack::{load_stack, save_stack, set_stack_value, stack_value, sta
 
 use parse::{parse_popd_operand, parse_pushd_operand, PopdOperand, PushdOperand};
 use stack::{
-    dirs_index_or_error, is_stack_index, logical_dir_exists, normalize_stack_dir, resolved_index,
-    set_pwd_from_stack, stack_index, strip_double_dash,
+    is_stack_index, logical_dir_exists, normalize_stack_dir, resolved_index, set_pwd_from_stack,
+    stack_index, strip_double_dash,
 };
 use std::collections::HashMap;
 use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
+/// GNU error.h EX_USAGE: a builtin's invalid number / usage error exits 2
+/// (builtins/common.c get_numeric_arg -> builtin_error("%s: invalid number")
+/// + return EX_USAGE). dirs/popd/pushd share that path for every ±N operand.
+const EX_USAGE: i32 = 2;
 pub(crate) const DIR_STACK: &str = "__RUBASH_DIR_STACK";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,59 +72,69 @@ where
                 save_stack(env_vars, &[]);
                 return Ok(EXECUTION_SUCCESS);
             }
-            if let Some(status) =
-                dirs_index_or_error(args, &stack, diagnostic_prefix, stdout, stderr)?
-            {
-                return Ok(status);
+            // GNU dirs.def walks the display flags off the front and they
+            // combine (`dirs -l -v` prints the numbered long form); the
+            // first remaining word is the optional ±N operand, anything
+            // else after the flags is rejected below. A ±-shaped word goes
+            // through get_numeric_arg (builtins/common.c): a non-number is
+            // `%s: invalid number` + usage, EX_USAGE — and dirs.def's
+            // caller turns EX_USAGE into exit status 2. `dirs -l +q` must
+            // NOT silently consume the operand (issue #509: it printed the
+            // stack and exited 0 where GNU exits 2).
+            let mut flag_end = 0;
+            let mut printable = false;
+            let mut numbered = false;
+            while let Some(arg) = args.get(flag_end).copied() {
+                match arg {
+                    // -l is consumed for validation parity; rubash's stack
+                    // always stores full paths, so the long form has no
+                    // separate rendering (GNU's ~-collapsing is the only
+                    // difference and rubash never collapses).
+                    "-l" | "-p" => printable = true,
+                    "-v" => numbered = true,
+                    _ => break,
+                }
+                flag_end += 1;
             }
-            if args.first().copied() == Some("-v") {
-                if let Some(index_arg) = args.get(1).copied().filter(|arg| is_stack_index(arg)) {
-                    let Some(index) = stack_index(index_arg, stack.len()) else {
+            let rest = &args[flag_end..];
+            if let Some(arg) = rest.first().copied() {
+                if arg.starts_with('+') || arg.starts_with('-') {
+                    if !is_stack_index(arg) {
+                        writeln!(stderr, "{diagnostic_prefix}dirs: {arg}: invalid number")?;
+                        writeln!(stderr, "dirs: usage: dirs [-clpv] [+N] [-N]")?;
+                        return Ok(EX_USAGE);
+                    }
+                    let Some(index) = stack_index(arg, stack.len()) else {
                         writeln!(
                             stderr,
                             "{diagnostic_prefix}dirs: {}: directory stack index out of range",
-                            index_arg.trim_start_matches(['+', '-'])
+                            arg.trim_start_matches(['+', '-'])
                         )?;
                         return Ok(EXECUTION_FAILURE);
                     };
-                    writeln!(stdout, "{index:2}  {}", stack[index])?;
+                    if numbered {
+                        writeln!(stdout, "{index:2}  {}", stack[index])?;
+                    } else {
+                        writeln!(stdout, "{}", stack[index])?;
+                    }
                     return Ok(EXECUTION_SUCCESS);
                 }
+                writeln!(stderr, "{diagnostic_prefix}dirs: {arg}: invalid option")?;
+                writeln!(stderr, "dirs: usage: dirs [-clpv] [+N] [-N]")?;
+                return Ok(EX_USAGE);
+            }
+            if numbered {
                 for (index, dir) in stack.iter().enumerate() {
                     writeln!(stdout, "{index:2}  {dir}")?;
                 }
-            } else if args.first().copied() == Some("-p") {
+            } else if printable {
                 for dir in &stack {
                     writeln!(stdout, "{dir}")?;
                 }
-            } else if args.first().copied() == Some("-l") {
-                writeln!(stdout, "{}", stack.join(" "))?;
-            } else if args.first().is_some_and(|arg| arg.starts_with('-')) {
-                writeln!(
-                    stderr,
-                    "{diagnostic_prefix}dirs: {}: invalid number",
-                    args[0]
-                )?;
-                writeln!(stderr, "dirs: usage: dirs [-clpv] [+N] [-N]")?;
-                return Ok(EXECUTION_FAILURE);
-            } else if !args.is_empty() {
-                writeln!(
-                    stderr,
-                    "{diagnostic_prefix}dirs: {}: invalid option",
-                    args[0]
-                )?;
-                writeln!(stderr, "dirs: usage: dirs [-clpv] [+N] [-N]")?;
-                return Ok(EXECUTION_FAILURE);
-            } else if stack.is_empty() {
-                writeln!(
-                    stdout,
-                    "{}",
-                    env_vars
-                        .get("PWD")
-                        .cloned()
-                        .unwrap_or_else(|| "/".to_string())
-                )?;
             } else {
+                // load_stack always exposes the cwd as element 0, so the
+                // plain (and -l) listing joins the stack; the old dead
+                // empty-stack arm only ever echoed $PWD.
                 writeln!(stdout, "{}", stack.join(" "))?;
             }
             Ok(EXECUTION_SUCCESS)
@@ -128,7 +142,10 @@ where
         StackBuiltin::Pushd => {
             let operand = parse_pushd_operand(&args, diagnostic_prefix, stderr)?;
             let Some(operand) = operand else {
-                return Ok(EXECUTION_FAILURE);
+                // The parse printed its usage diagnostic: GNU pushd.def
+                // returns get_numeric_arg's EX_USAGE (2), not a plain
+                // builtin failure (issue #509).
+                return Ok(EX_USAGE);
             };
 
             match operand {
@@ -196,7 +213,8 @@ where
         StackBuiltin::Popd => {
             let operand = parse_popd_operand(&args, diagnostic_prefix, stderr)?;
             let Some(operand) = operand else {
-                return Ok(EXECUTION_FAILURE);
+                // Same EX_USAGE contract as pushd above (issue #509).
+                return Ok(EX_USAGE);
             };
 
             match operand {
