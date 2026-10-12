@@ -284,6 +284,13 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
     // the command string (`bash -c -l 'echo hi'`) keep being parsed as
     // options below, so remember that a command string is still owed.
     let mut pending_command = false;
+    // shell.c parse_short_options: `-s` only marks read_from_stdin and the
+    // argv scan continues, so options AFTER `-s` (`bash -s -r`) still apply
+    // and non-option words become positional parameters ($1, $2, ...; $0
+    // stays the shell name). Running stdin immediately would swallow a
+    // trailing -r as a positional and drop the restriction.
+    let mut read_from_stdin = false;
+    let mut stdin_positionals: Vec<String> = Vec::new();
     while index < args.len() {
         match args[index].as_str() {
             "-o" | "+o" => {
@@ -382,8 +389,8 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 index += 1;
             }
             "-s" => {
-                executor.set_positional_params(args[index + 1..].to_vec());
-                return run_stdin_script_with_init(executor, init_file.as_deref());
+                read_from_stdin = true;
+                index += 1;
             }
             "--" | "-" => {
                 // GNU shell.c:905-911: a lone - or -- ends option parsing;
@@ -431,6 +438,14 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                     executor.set_env("__RUBASH_IS_C", "1");
                     return run_command_string_with_init(executor, script, init_file.as_deref());
                 }
+                // shell.c: a non-option word after `-s` is a positional
+                // parameter, never a script file — stdin stays the source and
+                // the argv scan keeps going so later options still apply.
+                if read_from_stdin {
+                    stdin_positionals.push(script.to_string());
+                    index += 1;
+                    continue;
+                }
                 if pretty_print {
                     // GNU shell.c:830-831: --pretty-print replaces execution
                     // with pretty_print_loop over the input file
@@ -457,6 +472,11 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
         // `bash -c` -> "bash: -c: option requires an argument", exit 2.
         eprintln!("bash: -c: option requires an argument");
         return 2;
+    }
+
+    if read_from_stdin {
+        executor.set_positional_params(std::mem::take(&mut stdin_positionals));
+        return run_stdin_script_with_init(executor, init_file.as_deref());
     }
 
     // shell.c:1830-1842 init_interactive: when -i is set, the shell
