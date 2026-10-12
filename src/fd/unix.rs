@@ -70,6 +70,80 @@ pub fn is_char_device_handle(h: HANDLE) -> bool {
     }
 }
 
+/// Guard that switches a tty input fd to per-character reads for the
+/// duration of a `read` builtin call — the termios form of GNU
+/// builtins/read.def ttfd_onechar (ICANON off): a single keystroke
+/// completes the read without a newline. `None` when `h` is not a tty.
+pub struct ConsoleOnecharGuard {
+    fd: HANDLE,
+    saved: libc::termios,
+}
+
+impl ConsoleOnecharGuard {
+    /// The tty driver is not echoing in this mode; consumed bytes go back to
+    /// the same terminal so `read -n1` looks like its line-mode form.
+    pub fn echo_byte(&self, byte: u8) {
+        if !is_console_handle(self.fd) {
+            return;
+        }
+        let _ = write_all(self.fd, &[byte]);
+    }
+}
+
+impl Drop for ConsoleOnecharGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(self.fd, libc::TCSADRAIN, &self.saved);
+        }
+    }
+}
+
+/// Silenced echo with canonical buffering kept — the read.def:603-621
+/// `ttfd_noecho` shape (`read -s` without -n/-d).
+pub fn enter_console_noecho_mode(h: HANDLE) -> Option<ConsoleOnecharGuard> {
+    if !is_console_handle(h) {
+        return None;
+    }
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    unsafe {
+        if libc::tcgetattr(h, &mut saved) != 0 {
+            return None;
+        }
+    }
+    let mut silenced = saved;
+    silenced.c_lflag &= !libc::ECHO;
+    unsafe {
+        if libc::tcsetattr(h, libc::TCSADRAIN, &silenced) != 0 {
+            return None;
+        }
+    }
+    Some(ConsoleOnecharGuard { fd: h, saved })
+}
+
+/// Enter per-character tty read mode. Returns `None` (and changes nothing)
+/// when `h` is not a tty.
+pub fn enter_console_onechar_mode(h: HANDLE) -> Option<ConsoleOnecharGuard> {
+    if !is_console_handle(h) {
+        return None;
+    }
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    unsafe {
+        if libc::tcgetattr(h, &mut saved) != 0 {
+            return None;
+        }
+    }
+    let mut raw = saved;
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+    raw.c_cc[libc::VMIN] = 1;
+    raw.c_cc[libc::VTIME] = 0;
+    unsafe {
+        if libc::tcsetattr(h, libc::TCSADRAIN, &raw) != 0 {
+            return None;
+        }
+    }
+    Some(ConsoleOnecharGuard { fd: h, saved })
+}
+
 /// Bounded readability wait — the direct POSIX form of GNU
 /// builtins/read.def's select() on fd 0 (`shtimer_select`). HUP/ERR/NVAL
 /// count as Ready: select() reports a broken/EOF fd as readable too.
