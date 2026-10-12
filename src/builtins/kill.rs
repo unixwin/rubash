@@ -270,6 +270,17 @@ pub const SIGCONT_NUMBER: i32 = libc::SIGCONT;
 #[cfg(not(unix))]
 pub const SIGCONT_NUMBER: i32 = 18;
 
+/// The platform's SIGQUIT number for dispatch paths that special-case the
+/// shell-policy ignore (sig.c:333 sets SIGQUIT to SIG_IGN in every shell,
+/// before the interactive-only SIGINT/SIGTERM installs). Linux: 3; Darwin/
+/// BSD also number it 3. The non-unix value keeps the Windows file-mailbox
+/// wire format's Linux numbering by contract (see SIGNALS above).
+#[cfg(unix)]
+pub const SIGQUIT_NUMBER: i32 = libc::SIGQUIT;
+/// Non-unix (Windows mailbox wire format, Linux numbering by contract).
+#[cfg(not(unix))]
+pub const SIGQUIT_NUMBER: i32 = 3;
+
 pub fn execute(args: &[String]) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();

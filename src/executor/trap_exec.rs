@@ -886,6 +886,15 @@ impl Executor {
                 if signal == crate::builtins::kill::SIGCHLD_NUMBER {
                     continue;
                 }
+                // sig.c:333 (initialize_shell_signals): every shell sets
+                // SIGQUIT to SIG_IGN for itself before the interactive-only
+                // SIGINT/SIGTERM installs, so an untrapped QUIT delivery is
+                // dropped, never a 128+SIGQUIT shell exit. Only a user trap
+                // overrides the ignore, and `trap - QUIT` returns to it
+                // (trap.c marks SIGQUIT SIG_SPECIAL for that reset).
+                if signal == crate::builtins::kill::SIGQUIT_NUMBER {
+                    continue;
+                }
                 return Err(ExecuteError::ExitCode(128 + signal));
             };
             if action.is_empty() {
@@ -1039,6 +1048,9 @@ impl Executor {
                 Some(action) if !action.is_empty() => trapped.push(signal),
                 Some(_) => {}
                 None if signal == crate::builtins::kill::SIGCHLD_NUMBER => {}
+                // sig.c:333: every shell ignores SIGQUIT for itself; an
+                // untrapped delivery while blocked is dropped, not fatal.
+                None if signal == crate::builtins::kill::SIGQUIT_NUMBER => {}
                 None => return Err(ExecuteError::ExitCode(128 + signal)),
             }
         }
