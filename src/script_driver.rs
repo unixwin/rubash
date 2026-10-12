@@ -2054,6 +2054,9 @@ fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> 
     }
     let tokens = tokenize_with_initial_posix(input, parse_posix);
     if crate::lexer::heredoc_overflow_line().is_some() {
+        if std::env::var_os("RUBASH_DBG_543").is_some() {
+            eprintln!("DBG543 consume at script_driver:2056 paren-verdict");
+        }
         return false;
     }
     let ast = crate::parser::parse_with_options(
@@ -2196,6 +2199,46 @@ pub fn run_source_with_line_offset(
         diagnostic_text,
         None,
     )
+}
+
+/// GNU parse.y:3105 push_heredoc: the 17th pending here-document in one
+/// parse level is fatal (report_syntax_error -> reset_parser ->
+/// exit_shell(EX_BADUSAGE), status 2). GNU parses and executes one complete
+/// command at a time, so the commands BEFORE the offending line already ran
+/// when the fatal fires: run that prefix first (the same prefix model as
+/// the delimiter-quote arm, rubash#351), then report and return 2. Nothing
+/// at or after the offending line runs.
+fn report_heredoc_overflow_fatal(
+    executor: &mut Executor,
+    input: &str,
+    interactive: bool,
+    line_offset: usize,
+    redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
+    line: usize,
+) -> i32 {
+    let source = input.trim_end_matches('\n');
+    let prefix = if line > 1 {
+        source.lines().take(line - 1).collect::<Vec<_>>().join("\n")
+    } else {
+        String::new()
+    };
+    if !prefix.trim().is_empty() {
+        let _ = run_source_with_line_offset(
+            executor,
+            &prefix,
+            interactive,
+            line_offset,
+            redirect_cmd,
+            diagnostic_text,
+        );
+    }
+    executor.mark_parse_error();
+    eprintln!(
+        "{}maximum here-document count exceeded",
+        executor.parser_diagnostic_prefix_for_line(line + line_offset)
+    );
+    2
 }
 
 fn run_source_impl(
@@ -2465,15 +2508,27 @@ fn run_source_impl(
     // A command with more than HEREDOC_MAX (16) here-documents is fatal in
     // GNU (parse.y push_heredoc -> report_syntax_error + exit_shell with
     // EX_BADUSAGE). The lexer only returns tokens, so it parks the condition
-    // for us: report it with the script-relative line and exit 2 without
-    // running anything.
+    // for us: run the complete commands before the offending line (GNU
+    // parses and executes one complete command at a time, so they already
+    // ran when push_heredoc fired — the same prefix model as the
+    // delimiter-quote arm above), then report with the script-relative line
+    // and exit 2; nothing at or after the offending line runs.
     if let Some(line) = crate::lexer::heredoc_overflow_line() {
-        executor.mark_parse_error();
-        eprintln!(
-            "{}maximum here-document count exceeded",
-            executor.parser_diagnostic_prefix_for_line(line + line_offset)
+        if std::env::var_os("RUBASH_DBG_543").is_some() {
+            eprintln!("DBG543 consume at script_driver post-parse line={}", line);
+        }
+        if std::env::var_os("RUBASH_DBG_543").is_some() {
+            eprintln!("DBG543 consume at script_driver pre-parse line={}", line);
+        }
+        return report_heredoc_overflow_fatal(
+            executor,
+            input,
+            interactive,
+            line_offset,
+            redirect_cmd,
+            diagnostic_text,
+            line,
         );
-        return 2;
     }
     if line_offset != 0 {
         for token in &mut tokens {
@@ -2494,6 +2549,23 @@ fn run_source_impl(
             source_line_offset: line_offset,
         },
     );
+    // Parse-level parking: a command substitution body is its own parse
+    // level (parse.y:4524 parse_command_substitution resets the pending
+    // counter at entry) and its tokenize parks the same overflow. GNU's
+    // push_heredoc is fatal inside the nested level too, before the body's
+    // own EOF diagnostics could matter — the node builder skipped the doomed
+    // body parse, so report the fatal instead of executing anything.
+    if let Some(line) = crate::lexer::heredoc_overflow_line() {
+        return report_heredoc_overflow_fatal(
+            executor,
+            input,
+            interactive,
+            line_offset,
+            redirect_cmd,
+            diagnostic_text,
+            line,
+        );
+    }
     if let Some(cmd) = redirect_cmd {
         if let Err(error) = executor.apply_inherited_command_output_redirects(cmd, &mut ast) {
             eprintln!("{error}");

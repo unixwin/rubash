@@ -260,6 +260,26 @@ impl Executor {
         }
     }
 
+    /// GNU variables.c:1393-1408 assign_random: a numeric bind to RANDOM
+    /// reseeds the generator (rseed = seed, last_random_value = 0); a
+    /// non-numeric value fails valid_number and leaves the state alone.
+    /// Applied on the declare/typeset/local bind path, whose assignment
+    /// operands bypass apply_shell_assignment's own seed (rubash#541).
+    pub(in crate::executor) fn apply_declare_random_seeds(&self, args: &[String]) {
+        for arg in args {
+            let Some((name, value)) = arg.split_once('=') else {
+                continue;
+            };
+            if name.ends_with('+') || name != "RANDOM" {
+                continue;
+            }
+            if let Ok(seed) = value.trim().parse::<i64>() {
+                self.shell_state.random_state.rseed.set(seed as u32);
+                self.shell_state.random_state.last_value.set(0);
+            }
+        }
+    }
+
     /// GNU variables.c initialize_dynamic_variables registers every dynamic
     /// parameter as a hash-table cell carrying a dynamic_value getter
     /// (INIT_DYNAMIC_VAR), so `declare -p NAME` renders the CURRENT dynamic
@@ -274,13 +294,22 @@ impl Executor {
         }
         let value = self.dynamic_parameter_value(name)?;
         let quoted = sh_double_quote_text(&value);
+        // mk_env_string/declare -p read the getter's CURRENT value through
+        // the cell's attributes: an exported dynamic variable renders
+        // `declare -ix …` (GNU: `export RANDOM=42; declare -p RANDOM` shows
+        // the next draw with -ix, rubash#541).
+        let exported = if is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, name) {
+            "x"
+        } else {
+            ""
+        };
         match name {
             "RANDOM" | "SECONDS" | "SRANDOM" | "BASHPID" => {
-                Some(format!("declare -i {name}={quoted}"))
+                Some(format!("declare -i{exported} {name}={quoted}"))
             }
-            "GROUPS" => Some(format!("declare -a {name}=([0]={quoted})")),
+            "GROUPS" => Some(format!("declare -a{exported} {name}=([0]={quoted})")),
             "EPOCHSECONDS" | "EPOCHREALTIME" | "LINENO" | "BASH_SUBSHELL" | "BASH_ARGV0"
-            | "BASH_COMMAND" => Some(format!("declare -- {name}={quoted}")),
+            | "BASH_COMMAND" => Some(format!("declare --{exported} {name}={quoted}")),
             _ => None,
         }
     }

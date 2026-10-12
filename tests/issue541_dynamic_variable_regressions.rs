@@ -77,6 +77,27 @@ fn declare_p_lists_dynamic_variables() {
 }
 
 #[test]
+fn declare_reads_advance_the_generator_like_gnu() {
+    // WSL GNU bash 5.3.0 (exp.tests 242-247 shape): the declare -p getter
+    // read advances the generator and `declare -i RANDOM=42` reseeds —
+    // `RANDOM=42; declare -p RANDOM >/dev/null; echo ${#RANDOM}` -> 5
+    // (draw 17772), `declare -i RANDOM=42; echo ${#RANDOM}` -> 5.
+    let (_, stdout, _) = run_c("RANDOM=42\ndeclare -p RANDOM >/dev/null\necho ${#RANDOM}\n");
+    assert_eq!(stdout, "5\n");
+    let (_, stdout, _) = run_c("RANDOM=42\ndeclare -p RANDOM >/dev/null\necho $RANDOM\n");
+    // the declare -p read consumed 17772; the next draw continues.
+    assert_eq!(stdout, "26794\n");
+    let (_, stdout, _) = run_c("declare -i RANDOM=42\necho ${#RANDOM}\n");
+    assert_eq!(stdout, "5\n");
+    let (_, stdout, _) = run_c("RANDOM=42\necho $RANDOM\necho $RANDOM\n");
+    assert_eq!(stdout, "17772\n26794\n");
+    // `export RANDOM=42` does NOT reseed (the sequence continues).
+    let (_, stdout, _) =
+        run_c("RANDOM=42\necho $RANDOM >/dev/null\nexport RANDOM=42\necho $RANDOM\n");
+    assert_eq!(stdout, "26794\n");
+}
+
+#[test]
 fn unset_funcname_is_not_rebuilt_by_function_entry() {
     // WSL GNU bash 5.3.0: `unset FUNCNAME; f(){ echo "[${FUNCNAME[0]}]"; }; f`
     // -> `[]` (the cell stays unbound; make_funcname_visible finds nothing).

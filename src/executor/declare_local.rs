@@ -901,15 +901,30 @@ impl Executor {
                         .insert("FUNCNAME".to_string(), storage);
                     saved
                 });
-                let dynamic_views: Vec<(String, String)> = args
-                    .iter()
-                    .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
-                    .filter_map(|arg| {
-                        let name = arg.split('=').next().unwrap_or(arg);
-                        self.dynamic_declaration_view(name)
-                            .map(|text| (name.to_string(), text))
-                    })
-                    .collect();
+                // GNU variables.c:1393-1408 assign_random: RANDOM is
+                // INIT_DYNAMIC_VAR with assign_random, so a declare/typeset
+                // bind reseeds the generator exactly like a plain
+                // `RANDOM=<n>` assignment (rubash#541's declare -p getter
+                // read exposed the missing seed as a shifted exp.tests
+                // ${#RANDOM} sequence).
+                self.apply_declare_random_seeds(&args);
+                // The views are consumed only by -p's dynamic render; a
+                // non-print declare must not draw (RANDOM's getter advances
+                // the generator on every read — GNU declare -p draws once,
+                // a plain declare draws never).
+                let print_requested = declare_args_request_print(&args);
+                let dynamic_views: Vec<(String, String)> = if print_requested {
+                    args.iter()
+                        .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
+                        .filter_map(|arg| {
+                            let name = arg.split('=').next().unwrap_or(arg);
+                            self.dynamic_declaration_view(name)
+                                .map(|text| (name.to_string(), text))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let status = crate::builtins::declare::execute_with_io_named_in_context(
                     command_name,
                     &args,
@@ -1259,15 +1274,30 @@ impl Executor {
                     0,
                 )
             } else {
-                let dynamic_views: Vec<(String, String)> = args
-                    .iter()
-                    .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
-                    .filter_map(|arg| {
-                        let name = arg.split('=').next().unwrap_or(arg);
-                        self.dynamic_declaration_view(name)
-                            .map(|text| (name.to_string(), text))
-                    })
-                    .collect();
+                // GNU variables.c:1393-1408 assign_random: RANDOM is
+                // INIT_DYNAMIC_VAR with assign_random, so a declare/typeset
+                // bind reseeds the generator exactly like a plain
+                // `RANDOM=<n>` assignment (rubash#541's declare -p getter
+                // read exposed the missing seed as a shifted exp.tests
+                // ${#RANDOM} sequence).
+                self.apply_declare_random_seeds(&args);
+                // The views are consumed only by -p's dynamic render; a
+                // non-print declare must not draw (RANDOM's getter advances
+                // the generator on every read — GNU declare -p draws once,
+                // a plain declare draws never).
+                let print_requested = declare_args_request_print(&args);
+                let dynamic_views: Vec<(String, String)> = if print_requested {
+                    args.iter()
+                        .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
+                        .filter_map(|arg| {
+                            let name = arg.split('=').next().unwrap_or(arg);
+                            self.dynamic_declaration_view(name)
+                                .map(|text| (name.to_string(), text))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let builtin_status = crate::builtins::declare::execute_with_io_named_in_context(
                     "local",
                     &args,
