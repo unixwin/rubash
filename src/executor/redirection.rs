@@ -853,7 +853,9 @@ impl Executor {
                             state.redirect_failed = true;
                             return Ok(true);
                         };
-                        if source_target == OutputTarget::Closed {
+                        if source_target == OutputTarget::Closed
+                            && !self.dup_source_fd_still_open(source_fd)
+                        {
                             self.write_bad_fd_redirect_diagnostic(
                                 state,
                                 &redirect.target_metadata.raw,
@@ -916,7 +918,9 @@ impl Executor {
                             state.redirect_failed = true;
                             return Ok(true);
                         };
-                        if source_target == OutputTarget::Closed {
+                        if source_target == OutputTarget::Closed
+                            && !self.dup_source_fd_still_open(source_fd)
+                        {
                             self.write_bad_fd_redirect_diagnostic(
                                 state,
                                 &redirect.target_metadata.raw,
@@ -1264,6 +1268,19 @@ impl Executor {
             }
         }
         Ok(())
+    }
+
+    /// Whether the virtual fd table still holds an OPEN entry for `fd`,
+    /// even one with no write endpoint. GNU's dup2 (redir.c:1153) succeeds
+    /// for any open descriptor — `exec 3< f; echo x >&3` dups fine and the
+    /// write fails later at sh_chkwrite (`echo: write error: Bad file
+    /// descriptor`, #551 C8) — while a closed/unopened fd fails the dup at
+    /// setup (`3: Bad file descriptor`).
+    fn dup_source_fd_still_open(&self, fd: u32) -> bool {
+        self.fd_table
+            .entries
+            .get(&fd)
+            .is_some_and(|entry| !entry.closed)
     }
 
     fn write_bad_output_fd_diagnostic(

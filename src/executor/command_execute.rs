@@ -554,6 +554,10 @@ impl Executor {
                     self.parser_diagnostic_prefix_for_line(aux_b)
                 );
                 self.errexit_active_at_diagnostic();
+            } else if shape == "bare" {
+                // PST_NOERROR shape (parse.y:3914 + 6724-6726): the messages
+                // above are the whole diagnostic — yyerror's tail is
+                // suppressed and nothing echoes.
             } else {
                 eprintln!(
                     "{}syntax error near `{aux_a}'",

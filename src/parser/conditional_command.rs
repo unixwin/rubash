@@ -143,6 +143,10 @@ enum CondOffending {
     VirtualNewline(usize),
     Eof,
     End,
+    /// parse_matched_pair's EOF inside the `=~` regex word: the specific
+    /// messages carry everything and PST_NOERROR suppresses the
+    /// report_syntax_error tail — messages only, no echo, no `from [[` line.
+    BareEof,
 }
 
 impl CondOffending {
@@ -181,6 +185,18 @@ impl CondFail {
             }
             return (spec, None);
         }
+        if matches!(self.offending, CondOffending::BareEof) {
+            // PST_NOERROR shape (parse.y:3914 + 6724-6726): parse_matched_
+            // pair already reported inside the word read, so yyerror prints
+            // nothing — the carried messages are the whole diagnostic.
+            let eof_line = last_line + 1;
+            let mut spec = format!("bare{sep}{open_line}{sep}{eof_line}");
+            for (line, msg) in &self.messages {
+                spec.push(sep);
+                spec.push_str(&format!("{line}\u{1}{msg}"));
+            }
+            return (spec, None);
+        }
         // Near shape: error_token_from_text (parse.y:6772) reports the
         // offending token text; when the offender is virtual (newline or
         // `]]`) it falls back to the last real token before it — `(x'
@@ -207,6 +223,12 @@ impl CondFail {
                 last_line,
                 last_line,
             ),
+            // Unreachable — BareEof encodes the `bare' shape above.
+            CondOffending::BareEof => (
+                walk_back_near_token(args, args.len().saturating_sub(1)),
+                last_line,
+                last_line,
+            ),
         };
         let mut spec = format!("near{sep}{near}{sep}{near_line}");
         for (line, msg) in &self.messages {
@@ -215,6 +237,40 @@ impl CondFail {
         }
         (spec, Some(echo_line))
     }
+}
+
+/// parse.y:5443-5460 read_token_word PST_REGEXP: the first unescaped `(' in
+/// the regex word opens parse_matched_pair (`(',`)') — when its group never
+/// closes, the scan dies at EOF. Returns the line that `(' sits on (the
+/// scan's start_lineno, parse.y:3901), or None when every unescaped group
+/// closes. A backslash escapes the next character (LEX_PASSNEXT,
+/// parse.y:3965-3984), so `\(` never opens a pair.
+fn unclosed_regex_paren_line(word: &str, base_line: usize) -> Option<usize> {
+    let mut depth = 0isize;
+    let mut open_line = base_line;
+    let mut line = base_line;
+    let mut escaped = false;
+    for ch in word.chars() {
+        if ch == '\n' {
+            line += 1;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '(' => {
+                if depth == 0 {
+                    open_line = line;
+                }
+                depth += 1;
+            }
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    (depth > 0).then_some(open_line)
 }
 
 /// error_token_from_text (parse.y:6772-6808): the reported token extends
@@ -470,7 +526,47 @@ fn cond_term(cursor: &mut CondCursor) -> Result<(), CondFail> {
                 _ => false,
             };
             if binop {
+                // parse.y:5163-5174: only `=~` sets PST_REGEXP (==/!= set
+                // PST_EXTPAT), and the parse.y:5443 `(`-folding arm is
+                // PST_REGEXP-only — gate the unclosed-paren shape on it.
+                let op_is_regex = match &tok {
+                    CondTok::Word => cursor.args[index.unwrap()].0 == "=~",
+                    _ => false,
+                };
                 let (tok, line, index, anchor) = cursor.next();
+                // parse.y:5443-5460 read_token_word under PST_REGEXP: an
+                // unquoted `(' in the regex word opens parse_matched_pair
+                // (`(',`)') which scans to EOF — its own EOF report names `)'
+                // at the `(' line (start_lineno, parse.y:3901-3912) and sets
+                // PST_NOERROR, so the cond parser's "unexpected argument to
+                // conditional binary operator" (parse.y:5223-5227, at the EOF
+                // line) is the LAST diagnostic and yyerror's
+                // report_syntax_error tail is suppressed (parse.y:6724-6726).
+                // `[[ a =~ (b ]]` prints exactly two lines and no
+                // offending-line echo (#551 C4, 2026-10-12 WSL GNU 5.3.0
+                // probes n6 / `[[ x =~ (unclosed`).
+                if op_is_regex && tok == CondTok::Word {
+                    let (value, raw, _, arg_line) = &cursor.args[index.unwrap()];
+                    if raw == value {
+                        if let Some(paren_line) = unclosed_regex_paren_line(value, *arg_line) {
+                            let eof_line = cursor.args.last().map(|a| a.3).unwrap_or(*arg_line) + 1;
+                            return Err(CondFail {
+                                messages: vec![
+                                    (
+                                        paren_line,
+                                        "unexpected EOF while looking for matching `)'".to_string(),
+                                    ),
+                                    (
+                                        eof_line,
+                                        "unexpected argument to conditional binary operator"
+                                            .to_string(),
+                                    ),
+                                ],
+                                offending: CondOffending::BareEof,
+                            });
+                        }
+                    }
+                }
                 if tok != CondTok::Word {
                     let text = cond_offending_text(cursor, &tok, index);
                     return Err(CondFail {

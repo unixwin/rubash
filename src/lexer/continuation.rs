@@ -284,15 +284,37 @@ fn squote_is_literal_in_posix_braced_dquote(stack: &[UnclosedDelim]) -> bool {
     false
 }
 
-/// Returns `(close_delimiter, open_line, eof_line, report_open, command)`.
-/// `command` marks a `( ...`/`{ ...; }` command-position construct (GNU's
-/// yyerror names it "from `(' command"), as opposed to `$(`/`$((`/quote
-/// matched pairs that take the "matching `X'" wording. `array_list` marks
-/// `name=(` constructs — GNU exits 1 rather than 2 for those.
-pub(crate) fn unclosed_input_close_char_posix(
-    input: &str,
-    posix: bool,
-) -> Option<(char, usize, usize, bool, bool, bool)> {
+/// The unclosed-delim verdict of [`unclosed_input_close_char_posix`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UnclosedInput {
+    /// Close delimiter of the innermost pending construct.
+    pub(crate) close: char,
+    /// Line the innermost construct opened on.
+    pub(crate) open_line: usize,
+    /// Line at EOF (last content line + 1).
+    pub(crate) eof_line: usize,
+    /// parse_matched_pair site (parse.y:3912): report the open line.
+    /// Otherwise the yyerror site (parse.y:6891) reports the EOF line.
+    pub(crate) report_open: bool,
+    /// `( ...`/`{ ...; }` command-position construct: GNU's yyerror names it
+    /// "from `(' command", as opposed to `$(`/`$((`/quote matched pairs that
+    /// take the "matching `X'" wording.
+    pub(crate) command: bool,
+    /// `name=(` constructs — GNU exits 1 rather than 2 for those. Any open
+    /// array list keeps that exit family even when the innermost unclosed
+    /// construct sits inside it (`v=(<(echo` still exits 1, 2026-10-12 WSL
+    /// GNU 5.3.0 probe).
+    pub(crate) array_list: bool,
+    /// Line the OUTERMOST pending construct opened on: GNU's incremental
+    /// reader runs the complete commands BEFORE that line and reports the
+    /// failed group once (the innermost construct's own diagnostic), so the
+    /// prefix cut must not re-run text inside the failed group (#551 C5).
+    pub(crate) outermost_line: usize,
+}
+
+/// Returns the innermost pending construct's verdict for `input`, or None
+/// when every matched-pair construct is closed.
+pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Option<UnclosedInput> {
     let chars: Vec<char> = input.chars().collect();
     let mut stack: Vec<UnclosedDelim> = Vec::new();
     let mut line = 1usize;
@@ -520,6 +542,14 @@ pub(crate) fn unclosed_input_close_char_posix(
                 c if c.is_alphanumeric() || c == '_' || (c == '=' && !cur_word.is_empty()) => {
                     cur_word.push(c)
                 }
+                // parse.y read_token's last_read_token==WORD rule: every other
+                // word character (`[`, `]`, `?`, `.`, `/`, ...) makes the
+                // token a WORD too, so a `(` right after it is the
+                // function-definition `(' — a parse error site, never a
+                // subshell continuation (`[ ( 1` waits for nothing, #551 C4).
+                // `(` itself stays excluded: the push arm below gates on the
+                // state BEFORE it (is_subshell needs the empty word).
+                _ if ch != '(' => cur_word.push(ch),
                 _ => {}
             }
         }
@@ -586,24 +616,40 @@ pub(crate) fn unclosed_input_close_char_posix(
                         // the `#if 0' dead arm at parser.h:83), so
                         // `${(M)x}' is a parameter brace whose first
                         // unquoted `}' closes (P_FIRSTCLOSE).
+                        //
+                        // parse.y:4126-4136 parse_matched_pair P_ARITH: inside
+                        // `$(( ))` a non-funsub `${` is ORDINARY arithmetic
+                        // text — no pair is pushed, so EOF names the
+                        // arithmetic `)' (`$((1+${${x` reports `)', not `}',
+                        // 2026-10-12 WSL GNU 5.3.0 probe, #551 C3). A funsub
+                        // still recurses (parse_dollar_word).
+                        let in_arith_pair = top.is_some_and(|d| {
+                            d.close == ')' && d.report_open && !d.array_list && !d.command
+                        });
                         let funsub = chars
                             .get(i + 2)
                             .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|'));
-                        stack.push(UnclosedDelim {
-                            close: '}',
-                            open_line: line,
-                            escapes: true,
-                            // `${param` is a parse_matched_pair: EOF names
-                            // the `${` line. The `${ ' funsub variant is a
-                            // command context and reports the EOF line.
-                            report_open: !funsub,
-                            funsub,
-                            command: false,
-                            term_ready: false,
-                            case_depth_at_push: 0,
-                            array_list: false,
-                            pattern_paren: false,
-                        });
+                        // Skip the push ONLY for a non-funsub `${` inside an
+                        // arithmetic pair; a funsub recurses even there
+                        // (parse.y:4134 FUNSUB_CHAR arm), and every `${`
+                        // outside arithmetic pushes as before.
+                        if !(in_arith_pair && !funsub) {
+                            stack.push(UnclosedDelim {
+                                close: '}',
+                                open_line: line,
+                                escapes: true,
+                                // `${param` is a parse_matched_pair: EOF names
+                                // the `${` line. The `${ ' funsub variant is a
+                                // command context and reports the EOF line.
+                                report_open: !funsub,
+                                funsub,
+                                command: false,
+                                term_ready: false,
+                                case_depth_at_push: 0,
+                                array_list: false,
+                                pattern_paren: false,
+                            });
+                        }
                         if funsub {
                             comment_start = true;
                             // P380FIX (captain diff): the funsub body is a
@@ -737,6 +783,13 @@ pub(crate) fn unclosed_input_close_char_posix(
                 // the body is command context where `(` is legal. An
                 // immediately adjacent `(` (`((x`) is the arithmetic
                 // construct's inner paren — a matched pair, not a command.
+                //
+                // A word-attached `<(`/`>(` (parse.y:5494-5524 read_token_word
+                // shellexp arm) opens parse_comsub for its body: EOF inside it
+                // takes the yyerror route — "matching `)'" at the EOF line,
+                // never the "from `(' command" wording (`v=(<(echo` reports
+                // the EOF line, #551 C6, 2026-10-12 WSL GNU 5.3.0 probe).
+                let procsub = i > 0 && matches!(chars[i - 1], '<' | '>');
                 stack.push(UnclosedDelim {
                     close: ')',
                     open_line: line,
@@ -744,9 +797,9 @@ pub(crate) fn unclosed_input_close_char_posix(
                     // `((x` arithmetic takes parse_matched_pair's
                     // start_lineno report like `$((` does; a real nested
                     // subshell reports the EOF line (yyerror).
-                    report_open: i > 0 && chars[i - 1] == '(',
+                    report_open: !procsub && i > 0 && chars[i - 1] == '(',
                     funsub: false,
-                    command: !(i > 0 && chars[i - 1] == '('),
+                    command: !procsub && !(i > 0 && chars[i - 1] == '('),
                     term_ready: false,
                     case_depth_at_push: case_depth,
                     array_list: false,
@@ -785,14 +838,15 @@ pub(crate) fn unclosed_input_close_char_posix(
     } else {
         line + 1
     };
-    Some((
-        d.close,
-        d.open_line,
+    Some(UnclosedInput {
+        close: d.close,
+        open_line: d.open_line,
         eof_line,
-        d.report_open,
-        d.command,
-        d.array_list,
-    ))
+        report_open: d.report_open,
+        command: d.command,
+        array_list: stack.iter().any(|d| d.array_list),
+        outermost_line: stack.first().map(|d| d.open_line).unwrap_or(d.open_line),
+    })
 }
 
 /// rubash#463: True when the word token's scanned span `raw` ends inside an
@@ -3601,6 +3655,49 @@ pub(crate) fn subscript_residuals_advance(
             index += 1;
             continue;
         }
+        // parse.y read_token_word: `${` opens parse_matched_pair
+        // (P_FIRSTCLOSE|P_DOLBRACE, parse.y:5513) whose scan consumes the
+        // whole braced parameter as WORD text — a `[` inside it never opens
+        // a subscript unless directly preceded by `$` (parse.y:4126
+        // LEX_WASDOL), so `echo ${a[` reports the braced `}' at EOF, not
+        // `]' (#551 C3). Mirror of the oracle walk's arm in
+        // skip::unclosed_array_subscript_walk: a CLOSED body is consumed
+        // atomically; an unterminated one BAILS the oracle to the generic
+        // close-char scan (answer None for this prefix) — the twin parks at
+        // the `${` because a longer buffer may close the body and flip the
+        // answer, exactly like the S1/S2 re-derivation points.
+        if ch == '{' && state.word.ends_with('$') {
+            let context = super::dolbrace::BraceContext {
+                outer_double_quote: false,
+                posix: false,
+                replacement_context: false,
+                initial_state: super::dolbrace::DolbraceState::Param,
+            };
+            match super::dolbrace::scan_braced_parameter_body_chars(&chars[index..], context) {
+                Some(scan) => {
+                    let consumed = 2 + scan.end;
+                    state.line += chars[index..index + consumed]
+                        .iter()
+                        .filter(|c| **c == '\n')
+                        .count();
+                    index += consumed;
+                    // The whole `${...}` is word material: no longer a pure
+                    // identifier, so a later `[` stays literal.
+                    state.word.clear();
+                    state.word.push('$');
+                    state.command_position = false;
+                    state.element_start = false;
+                    continue;
+                }
+                None => {
+                    let snapshot = state.clone();
+                    return Some(park.take().unwrap_or(SubscriptResidualPark {
+                        pos: index,
+                        snapshot,
+                    }));
+                }
+            }
+        }
         // `[` opens a subscript when the word prefix is a pure shell
         // identifier at command position (parse.y:5637), or we are at
         // element start inside a compound assignment (parse.y:5638,
@@ -4130,6 +4227,13 @@ pub(crate) fn close_char_residuals_advance(
                 {
                     state.cur_word.push(c)
                 }
+                // parse.y read_token's last_read_token==WORD rule: every other
+                // word character makes the token a WORD, so a `(` right after
+                // it is the function-definition `(' — never a subshell
+                // continuation. `(` itself stays excluded (the push arm gates
+                // on the state BEFORE it). Mirror of the one-shot scan's arm
+                // (#551 C4).
+                _ if ch != '(' => state.cur_word.push(ch),
                 _ => {}
             }
         }
@@ -4217,21 +4321,32 @@ pub(crate) fn close_char_residuals_advance(
                         let funsub = chars
                             .get(i + 2)
                             .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|'));
-                        state.stack.push(UnclosedDelim {
-                            close: '}',
-                            open_line: state.line,
-                            escapes: true,
-                            // `${param` is a parse_matched_pair: EOF names
-                            // the `${` line. The `${ ' funsub variant is a
-                            // command context and reports the EOF line.
-                            report_open: !funsub,
-                            funsub,
-                            command: false,
-                            term_ready: false,
-                            case_depth_at_push: 0,
-                            array_list: false,
-                            pattern_paren: false,
+                        // parse.y:4126-4136 parse_matched_pair P_ARITH: inside
+                        // `$(( ))` a non-funsub `${` is ordinary arithmetic
+                        // text — no pair pushed, EOF names the arith `)'
+                        // (#551 C3). Mirror of the one-shot scan's arm: skip
+                        // ONLY the non-funsub in-arith push; a funsub
+                        // recurses even there.
+                        let in_arith_pair = top.is_some_and(|d| {
+                            d.close == ')' && d.report_open && !d.array_list && !d.command
                         });
+                        if !(in_arith_pair && !funsub) {
+                            state.stack.push(UnclosedDelim {
+                                close: '}',
+                                open_line: state.line,
+                                escapes: true,
+                                // `${param` is a parse_matched_pair: EOF names
+                                // the `${` line. The `${ ' funsub variant is a
+                                // command context and reports the EOF line.
+                                report_open: !funsub,
+                                funsub,
+                                command: false,
+                                term_ready: false,
+                                case_depth_at_push: 0,
+                                array_list: false,
+                                pattern_paren: false,
+                            });
+                        }
                         if funsub {
                             state.comment_start = true;
                             // P380FIX (captain diff): mirror the one-shot
@@ -4367,6 +4482,11 @@ pub(crate) fn close_char_residuals_advance(
                 // the body is command context where `(` is legal. An
                 // immediately adjacent `(` (`((x`) is the arithmetic
                 // construct's inner paren — a matched pair, not a command.
+                //
+                // A word-attached `<(`/`>(` opens parse_comsub for its body:
+                // EOF inside it takes the yyerror route — "matching `)'" at
+                // the EOF line. Mirror of the one-shot scan's arm (#551 C6).
+                let procsub = i > 0 && matches!(chars[i - 1], '<' | '>');
                 state.stack.push(UnclosedDelim {
                     close: ')',
                     open_line: state.line,
@@ -4374,9 +4494,9 @@ pub(crate) fn close_char_residuals_advance(
                     // `((x` arithmetic takes parse_matched_pair's
                     // start_lineno report like `$((` does; a real nested
                     // subshell reports the EOF line (yyerror).
-                    report_open: i > 0 && chars[i - 1] == '(',
+                    report_open: !procsub && i > 0 && chars[i - 1] == '(',
                     funsub: false,
-                    command: !(i > 0 && chars[i - 1] == '('),
+                    command: !procsub && !(i > 0 && chars[i - 1] == '('),
                     term_ready: false,
                     case_depth_at_push: state.case_depth,
                     array_list: false,

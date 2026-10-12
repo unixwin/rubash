@@ -2033,14 +2033,13 @@ pub(crate) fn run_source_pre_lexed_with_line_offset(
 /// matched-pair verdicts the tokenizer does not model and are never
 /// overridden here.
 fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> bool {
-    let Some((close, open_line, _, _, command, _)) =
-        crate::lexer::unclosed_input_close_char_posix(input, parse_posix)
-    else {
+    let Some(unclosed) = crate::lexer::unclosed_input_close_char_posix(input, parse_posix) else {
         return false;
     };
-    if close != ')' || !command {
+    if unclosed.close != ')' || !unclosed.command {
         return false;
     }
+    let open_line = unclosed.open_line;
     // The router's higher-priority EOF families own the diagnostic before
     // any parser-marker event: an unclosed `[` subscript (parse.y:5635-5651
     // -> parse_matched_pair's `]' report, rubash#221/#390 q2) and a `((` whose
@@ -2248,7 +2247,7 @@ fn run_source_impl(
             executor.mark_parse_error();
             eprintln!(
                 "{}unexpected EOF while looking for matching `{quote}'",
-                executor.parser_diagnostic_prefix_for_line(open_line)
+                executor.parser_diagnostic_prefix_for_line(open_line + line_offset)
             );
             return 2;
         }
@@ -2324,7 +2323,7 @@ fn run_source_impl(
             executor.mark_parse_error();
             eprintln!(
                 "{}unexpected EOF while looking for matching `{closer}'",
-                executor.parser_diagnostic_prefix_for_line(open_line)
+                executor.parser_diagnostic_prefix_for_line(open_line + line_offset)
             );
             // GNU exits 1 when the subscript opened inside a compound array
             // assignment (parse_compound_assignment EOF family) and 2 for a
@@ -2338,9 +2337,13 @@ fn run_source_impl(
         }
         // GNU's incremental reader executes complete input lines before the
         // line where the unclosed construct opened; that line itself is part
-        // of the failed parse and runs nothing.
+        // of the failed parse and runs nothing. The cut uses the OUTERMOST
+        // pending construct's line: GNU's failed parse starts there, so a
+        // quote opened INSIDE a `${`-class construct must not split the group
+        // into a phantom second diagnostic (#551 C5 — GNU prints one
+        // diagnostic, the innermost construct's, at the quote's line).
         let unclosed = crate::lexer::unclosed_input_close_char_posix(input, parse_posix);
-        let cut_line = unclosed.map(|(_, open, _, _, _, _)| open);
+        let cut_line = unclosed.map(|unclosed| unclosed.outermost_line);
         let source = input.trim_end_matches('\n');
         let prefix = match cut_line {
             Some(open) if open > 1 => source.lines().take(open - 1).collect::<Vec<_>>().join("\n"),
@@ -2366,7 +2369,21 @@ fn run_source_impl(
         // matching `}'"); only an unrecognized residue falls back to the
         // generic end-of-file diagnostic.
         match unclosed {
-            Some((close, open_line, eof_line, report_open, command, array_list)) => {
+            Some(unclosed) => {
+                let (close, open_line, eof_line, report_open, command, array_list) = (
+                    unclosed.close,
+                    unclosed.open_line,
+                    unclosed.eof_line,
+                    unclosed.report_open,
+                    unclosed.command,
+                    unclosed.array_list,
+                );
+                // Read-stage scans number lines within the group text; the
+                // diagnostic prefix is global (the file/stdin position), so
+                // shift by the group's base offset (#551 C1: stdin line N
+                // must equal the file-driven number, second group included).
+                // The `input` probes below stay in group-local coordinates.
+                let (global_open, global_eof) = (open_line + line_offset, eof_line + line_offset);
                 // GNU parse.y yyerror (parse.y:6890-6901): an unterminated
                 // command-position `(` names the construct — "unexpected
                 // end of file from `(' command on line N" — while
@@ -2389,7 +2406,7 @@ fn run_source_impl(
                     if crate::lexer::dparen_arith_group_never_closes(input, open_line) {
                         eprintln!(
                             "{}unexpected EOF while looking for matching `)'",
-                            executor.parser_diagnostic_prefix_for_line(open_line)
+                            executor.parser_diagnostic_prefix_for_line(global_open)
                         );
                         executor.errexit_live_at_diagnostic();
                         return 2;
@@ -2405,7 +2422,7 @@ fn run_source_impl(
                     if crate::lexer::dparen_subshell_reparse_compound_eof(input, open_line) {
                         eprintln!(
                             "{}unexpected EOF while looking for matching `)'",
-                            executor.parser_diagnostic_prefix_for_line(open_line)
+                            executor.parser_diagnostic_prefix_for_line(global_open)
                         );
                         if executor.errexit_live_at_diagnostic() {
                             return 2;
@@ -2413,11 +2430,11 @@ fn run_source_impl(
                         return 1;
                     }
                     eprintln!(
-                        "{}syntax error: unexpected end of file from `(' command on line {open_line}",
-                        executor.parser_diagnostic_prefix_for_line(eof_line)
+                        "{}syntax error: unexpected end of file from `(' command on line {global_open}",
+                        executor.parser_diagnostic_prefix_for_line(global_eof)
                     );
                 } else {
-                    let reported = if report_open { open_line } else { eof_line };
+                    let reported = if report_open { global_open } else { global_eof };
                     eprintln!(
                         "{}unexpected EOF while looking for matching `{close}'",
                         executor.parser_diagnostic_prefix_for_line(reported)
@@ -2454,7 +2471,7 @@ fn run_source_impl(
         executor.mark_parse_error();
         eprintln!(
             "{}maximum here-document count exceeded",
-            executor.parser_diagnostic_prefix_for_line(line)
+            executor.parser_diagnostic_prefix_for_line(line + line_offset)
         );
         return 2;
     }

@@ -364,9 +364,16 @@ impl Executor {
                         }
                     }
                     let eval_posix = self.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-                    if let Some((close, open_line, eof_line, report_open, _command, array_list)) =
+                    if let Some(unclosed) =
                         crate::lexer::unclosed_input_close_char_posix(&source, eval_posix)
                     {
+                        let (close, open_line, eof_line, report_open, array_list) = (
+                            unclosed.close,
+                            unclosed.open_line,
+                            unclosed.eof_line,
+                            unclosed.report_open,
+                            unclosed.array_list,
+                        );
                         // GNU eval continues the caller's line numbering:
                         // eval-input line i sits at caller_line+i-1;
                         // quote/arithmetic constructs report their open line,
