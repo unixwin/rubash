@@ -9,10 +9,15 @@
 //! These are CONTRACT tests, not issue regressions: every assertion here is
 //! expected green on current master. Red means the native-core invariant was
 //! broken by a merge and the boundary doc
-//! (`docs/src/windows-path-contract.md`) is now lying.
+//! (`docs/windows-path-contract.md`) is now lying.
 //!
-//! Windows-only boundary: on POSIX platforms rubash links the platform libc
-//! by design, so every test is a no-op there.
+//! The contract's verification target IS the Windows-native behavior: the
+//! file is `#![cfg(windows)]`-gated as a whole. unix CI only verifies
+//! compilation (the file cfg-strips to an empty test binary there), not the
+//! cases — the cases need a Windows runner with the installed winuxcmd tree
+//! for the toolchain leg (it skips itself when WINUXCMD_HOME is absent).
+
+#![cfg(windows)]
 
 use std::path::Path;
 use std::process::Command;
@@ -170,15 +175,6 @@ fn import_dll_names_of(path: &Path) -> Result<Vec<String>, String> {
     PeImage::parse(&image)?.import_dll_names()
 }
 
-#[cfg(windows)]
-fn require_windows(test: &str) -> bool {
-    if !cfg!(windows) {
-        eprintln!("skipping {test}: not a Windows boundary");
-        return false;
-    }
-    true
-}
-
 fn winuxcmd_home() -> Option<String> {
     if let Ok(home) = std::env::var("WINUXCMD_HOME") {
         if !home.is_empty() && Path::new(&home).is_dir() {
@@ -192,9 +188,6 @@ fn winuxcmd_home() -> Option<String> {
 /// the binary is self-contained native code speaking Win32 directly.
 #[test]
 fn rubash_links_only_windows_system_dlls() {
-    if !require_windows("rubash_links_only_windows_system_dlls") {
-        return;
-    }
     let imports = import_dll_names_of(Path::new(env!("CARGO_BIN_EXE_rubash")))
         .expect("parse rubash.exe PE imports");
     assert!(
@@ -217,9 +210,6 @@ fn rubash_links_only_windows_system_dlls() {
 /// bytes.)
 #[test]
 fn rubash_does_not_import_msys_or_cygwin_runtime() {
-    if !require_windows("rubash_does_not_import_msys_or_cygwin_runtime") {
-        return;
-    }
     let imports = import_dll_names_of(Path::new(env!("CARGO_BIN_EXE_rubash")))
         .expect("parse rubash.exe PE imports");
     for name in &imports {
@@ -240,9 +230,6 @@ fn rubash_does_not_import_msys_or_cygwin_runtime() {
 /// MSYS tools would fail this.
 #[test]
 fn rubash_builtin_surface_runs_with_empty_posix_path() {
-    if !require_windows("rubash_builtin_surface_runs_with_empty_posix_path") {
-        return;
-    }
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .args(["-c", "echo pathless-$(uname -m)"])
         .env("PATH", "C:\\Windows\\System32")
@@ -273,9 +260,6 @@ fn rubash_builtin_surface_runs_with_empty_posix_path() {
 /// Win32 spellings for path-shaped state handed to native children.
 #[test]
 fn native_children_receive_win32_cwd_not_posix_persona() {
-    if !require_windows("native_children_receive_win32_cwd_not_posix_persona") {
-        return;
-    }
     let scratch = std::env::temp_dir().join(format!("rubash-bc-native-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let scratch_win = scratch.to_string_lossy().replace('\\', "/");
@@ -311,9 +295,6 @@ fn native_children_receive_win32_cwd_not_posix_persona() {
 /// rubash itself.
 #[test]
 fn winuxcmd_toolchain_imports_are_windows_native() {
-    if !require_windows("winuxcmd_toolchain_imports_are_windows_native") {
-        return;
-    }
     let Some(home) = winuxcmd_home() else {
         eprintln!(
             "skipping: winuxcmd installation not found (set WINUXCMD_HOME to audit \

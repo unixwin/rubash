@@ -18,7 +18,14 @@
 //! `find` start-path operands) and deliberately NOT pinned here.
 //!
 //! B② legs need the installed winuxcmd toolchain (WINUXCMD_HOME) and skip
-//! with a note elsewhere, e.g. CI. Windows-only otherwise.
+//! with a note elsewhere, e.g. CI.
+//!
+//! The contract's verification target IS the Windows-native behavior: the
+//! file is `#![cfg(windows)]`-gated as a whole. unix CI only verifies
+//! compilation (the file cfg-strips to an empty test binary there), not the
+//! cases — the cases need a Windows runner.
+
+#![cfg(windows)]
 
 use std::path::Path;
 use std::process::Command;

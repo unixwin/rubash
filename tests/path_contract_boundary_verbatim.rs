@@ -22,6 +22,13 @@
 //! Note for auditors: the deployed `opt/niugit/git.exe` LAUNCHER drops `"`
 //! bytes from argv (filed issue); the rubash-side fidelity this file pins
 //! is proven against children that decode argv correctly.
+//!
+//! The contract's verification target IS the Windows-native behavior: the
+//! file is `#![cfg(windows)]`-gated as a whole. unix CI only verifies
+//! compilation (the file cfg-strips to an empty test binary there), not the
+//! cases — the cases need a Windows runner.
+
+#![cfg(windows)]
 
 use std::path::Path;
 use std::process::Command;
