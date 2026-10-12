@@ -1121,10 +1121,15 @@ impl Executor {
         } else {
             let target = self.redirect_output_path_target(target);
             if redirect.append {
+                // GNU redir.c redirection_error (redir.c:149-176) carries the
+                // failed open's target word (`$FIX/b: No such file or
+                // directory`, issue #518); a bare OS error renders
+                // message-only and drops the word.
                 OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
+                    .map_err(|e| crate::posix_errors::path_error(&target, e))?;
             } else {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }

@@ -798,6 +798,27 @@ pub(crate) fn maybe_restore_debug_trap(env_vars: &mut HashMap<String, String>, a
     set_trap(env_vars, "DEBUG", &action);
 }
 
+/// GNU execute_cmd.c uw_maybe_set_error_trap: at function exit the saved ERR
+/// action is restored only when the body did not set a new one.
+pub(crate) fn maybe_restore_error_trap(env_vars: &mut HashMap<String, String>, action: String) {
+    if env_vars.contains_key(&trap_key("ERR")) {
+        return;
+    }
+    set_trap(env_vars, "ERR", &action);
+}
+
+/// GNU execute_cmd.c restore_default_signal(ERROR_TRAP) at function entry
+/// (execute_cmd.c:5279-5286): the inherited ERR trap is removed for the
+/// function body unless error_trace_mode (set -E) makes functions inherit
+/// it — so `trap -p ERR` inside the body reports nothing and the trap table
+/// matches the effective (non-inherited) state.
+pub(crate) fn clear_error_trap(env_vars: &mut HashMap<String, String>) {
+    env_vars.remove(&trap_key("ERR"));
+    let mut signals = trap_list(env_vars);
+    signals.remove("ERR");
+    store_trap_list(env_vars, signals);
+}
+
 /// GNU execute_cmd.c restore_default_signal(DEBUG_TRAP) at function entry:
 /// remove the inherited DEBUG trap for the function body.
 pub(crate) fn clear_debug_trap(env_vars: &mut HashMap<String, String>) {

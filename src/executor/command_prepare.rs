@@ -2812,11 +2812,30 @@ impl Executor {
                 Ok(materialized) => materialized,
                 Err(error) => return Some(Err(error)),
             };
+        // GNU applies one do_redirections list for every simple command
+        // (redir.c:246) — builtin, external or function alike — so the
+        // dup/file validation gate must run on the function fast path too.
+        // `f <&"${X[0]}"` with an anchored empty expansion reported the
+        // apply-layer fallback (`&<0x1d>: Invalid argument`) instead of the
+        // gate's `"${X[0]}": Bad file descriptor` (issue #518). Placement
+        // mirrors execute_materialized_command: before the tempenv applies,
+        // because redirect words expand against the caller's bindings.
+        let redirect_rejected = match self.reject_invalid_redirects(&materialized_cmd) {
+            Ok(rejected) => rejected,
+            Err(error) => return Some(Err(error)),
+        };
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
         let temporary_assignments =
             self.apply_temporary_assignments(&materialized_cmd.assignments, assignment_raws);
+        if redirect_rejected {
+            self.restore_temporary_assignments(temporary_assignments);
+            let finish_result = self.finish_process_substitutions(process_substitution_files);
+            let assignment_finish_result =
+                self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
+            return Some(finish_result.and(assignment_finish_result));
+        }
         // GNU variables.c push_context: the function-call tempenv becomes the
         // function's variable context — recorded so a posix special builtin's
         // merged tempenv inside the function (att_propagate,

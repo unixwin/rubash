@@ -587,10 +587,15 @@ impl Executor {
             return Ok(None);
         }
         let file = if redirect.append {
+            // The append open error must carry the target word like every
+            // other redirect diagnostic (redir.c:149-176 redirection_error,
+            // issue #518): a bare OS error renders message-only and drops
+            // `$FIX/b` from `$FIX/b: No such file or directory`.
             OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(shell_path_to_windows(target, &self.shell_state.env_vars))?
+                .open(shell_path_to_windows(target, &self.shell_state.env_vars))
+                .map_err(|e| crate::posix_errors::path_error(target, e))?
         } else {
             self.create_redirect_output(target, redirect.clobber)?
         };

@@ -702,9 +702,23 @@ impl Executor {
     /// suppressed (Bash does not re-enter the DEBUG trap while an action
     /// is running). `command_text` is the text of the command about to run,
     /// exposed to the trap action through BASH_COMMAND like Bash does.
-    pub(crate) fn run_debug_trap(&mut self, command_text: &str) -> Result<bool, ExecuteError> {
+    ///
+    /// Returns `Some(trap_status)` when the pending unit must be SKIPPED —
+    /// GNU's fire-site contract (execute_cmd.c:3057/3191/3532/3672/3924/
+    /// 4157/4510/5391): `debugging_mode && retval != EXECUTION_SUCCESS`,
+    /// i.e. only under extdebug and with ANY non-zero trap status. rubash's
+    /// old rule (status == 2 with no extdebug gate) failed both directions:
+    /// a status-1 trap under extdebug never skipped, and a status-2 trap
+    /// skipped without extdebug (issue #521). `$?` is preserved across the
+    /// firing (probe 2026-10-12: `trap 'false' DEBUG; true; echo $?` prints
+    /// 0); the action's status reaches the fire site through this return
+    /// value only.
+    pub(crate) fn run_debug_trap(
+        &mut self,
+        command_text: &str,
+    ) -> Result<Option<i32>, ExecuteError> {
         if self.debug_trap_running || self.host_internal_depth.get() > 0 {
-            return Ok(false);
+            return Ok(None);
         }
         self.debug_trap_running = true;
         // rubash#375: borrowing, allocation-free consult (GNU trap.c:1154
@@ -714,8 +728,9 @@ impl Executor {
             crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
         else {
             self.debug_trap_running = false;
-            return Ok(false);
+            return Ok(None);
         };
+        let saved_exit_code = self.exit_code;
         *self.shell_state.debug_trap_command.borrow_mut() = Some(command_text.to_string());
         let call_line = self
             .shell_state
@@ -753,11 +768,12 @@ impl Executor {
         *self.shell_state.debug_trap_command.borrow_mut() = None;
         self.debug_trap_running = false;
         result?;
-        let skip_command = self.exit_code == 2;
-        if skip_command {
-            self.exit_code = 0;
-        }
-        Ok(skip_command)
+        let trap_status = self.exit_code;
+        self.exit_code = saved_exit_code;
+        let extdebug =
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extdebug");
+        let skip_command = extdebug && trap_status != 0;
+        Ok(skip_command.then_some(trap_status))
     }
 
     /// Runs the RETURN trap action when a function (or sourced script)

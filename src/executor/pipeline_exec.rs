@@ -659,7 +659,21 @@ impl Executor {
                     && (stage.arithmetic_command.is_some() || stage.conditional_command.is_some()));
             if !stage_defers_debug && self.debug_trap_in_scope() {
                 let stage_text = crate::executor::command_text::bash_command_source_text(stage);
-                let _ = self.run_debug_trap(&stage_text)?;
+                // execute_cmd.c:4510 fires inside the forked element child; a
+                // non-zero trap status under debugging_mode skips the
+                // element's command — the child holds the pipe, produces no
+                // output and exits with the trap's status (probe i521d: both
+                // stages skipped under `trap 'false' DEBUG` → `pipe-R=1`;
+                // probe ka: the downstream stage's own fire still decides for
+                // itself, so it can proceed). Rubash models the element as a
+                // captured in-process stage: empty output + the trap status
+                // reproduces both, and the pipe chain stays intact (issue
+                // #521, huck#268's pipeline-stage fire site).
+                if let Some(skip_status) = self.run_debug_trap(&stage_text)? {
+                    statuses.push(skip_status);
+                    input = String::new();
+                    continue;
+                }
             }
             let preserve_compound_errexit = command_is_compound_pipeline_stage(stage)
                 || stage

@@ -527,7 +527,13 @@ impl Executor {
                 // inside the DEBUG trap action (dbg-support2.tests).
                 self.set_current_line(command);
                 let command_text = crate::executor::command_text::bash_command_source_text(command);
-                if self.run_debug_trap(&command_text)? {
+                if self.run_debug_trap(&command_text)?.is_some() {
+                    // execute_cmd.c:4510: execute_simple_command returns
+                    // EXECUTION_SUCCESS for the skipped unit, and
+                    // execute_command_internal commits that as
+                    // last_command_exit_value (probe m1: after `false`, a
+                    // skipped `echo hi` leaves $? = 0).
+                    self.exit_code = 0;
                     index += 1;
                     close_subshell_region_if_ended!(command);
                     continue;

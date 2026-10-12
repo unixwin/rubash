@@ -13,8 +13,20 @@ impl Executor {
         match name {
             "PIPESTATUS" => return self.pipestatus_values(),
             "FUNCNAME" => {
+                // GNU pushes the synthetic bottom "main" frame ONLY when the
+                // shell reads a script FILE (shell.c:1636-1648
+                // open_shell_script: array_push (funcname_a, "main"));
+                // `bash -s`/`bash -c` never enter open_shell_script, so the
+                // frame does not exist and caller's FUNCNAME[expr+1] lookup
+                // fails with EXECUTION_FAILURE (caller.def:108-121) —
+                // `caller 1` at g->f depth is empty with status 1, not a
+                // fabricated `main` line (issue #519). Same gating as the
+                // dynamic_stack_array_values view.
                 let mut stack = self.shell_state.function_name_stack.clone();
-                if !stack.is_empty() && stack.last().map(String::as_str) != Some("main") {
+                if self.has_script_main_frame()
+                    && !stack.is_empty()
+                    && stack.last().map(String::as_str) != Some("main")
+                {
                     stack.push("main".to_string());
                 }
                 return stack;

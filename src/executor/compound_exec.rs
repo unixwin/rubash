@@ -1132,11 +1132,16 @@ impl Executor {
                 executor.set_current_line_value(line);
             }
         };
-        if self.debug_trap_in_scope() && !arithmetic.init.trim().is_empty() {
+        // execute_cmd.c:3191-3199 (eval_arith_for_expr): a non-zero DEBUG
+        // status under debugging_mode makes the expression evaluate as 0
+        // with *okp = 1 — the evaluation is skipped, not failed.
+        let init_skipped = if self.debug_trap_in_scope() && !arithmetic.init.trim().is_empty() {
             restore_for_line(self);
-            self.run_debug_trap(&arithmetic.init)?;
-        }
-        if !arithmetic.init.trim().is_empty() && {
+            self.run_debug_trap(&arithmetic.init)?.is_some()
+        } else {
+            false
+        };
+        if !init_skipped && !arithmetic.init.trim().is_empty() && {
             // GNU execute_cmd.c:3201 (eval_arith_for_expr): if `set -x`
             // is on, print `(( expr ))` before evaluating each for-loop
             // expression (init, test, update).  Use the raw expression to
@@ -1162,9 +1167,15 @@ impl Executor {
             commands: body.to_vec(),
         };
         while !arithmetic_failed {
+            // execute_cmd.c:3191-3199: the skipped test evaluates as 0 —
+            // the loop exits like any failing test (probe k2/m-series).
+            let mut test_skipped = false;
             if self.debug_trap_in_scope() && !arithmetic.test.trim().is_empty() {
                 restore_for_line(self);
-                self.run_debug_trap(&arithmetic.test)?;
+                test_skipped = self.run_debug_trap(&arithmetic.test)?.is_some();
+            }
+            if test_skipped {
+                break;
             }
             if !arithmetic.test.trim().is_empty() {
                 let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_TEST);
@@ -1217,11 +1228,17 @@ impl Executor {
                 Err(error) => return Err(error),
             }
 
-            if self.debug_trap_in_scope() && !arithmetic.update.trim().is_empty() {
-                restore_for_line(self);
-                self.run_debug_trap(&arithmetic.update)?;
-            }
-            if !arithmetic.update.trim().is_empty() {
+            // execute_cmd.c:3191-3199: the skipped update evaluates as 0 —
+            // the index variable keeps its value, so the next test sees the
+            // unchanged index (probe k2: the body re-ran with the same `i`).
+            let update_skipped =
+                if self.debug_trap_in_scope() && !arithmetic.update.trim().is_empty() {
+                    restore_for_line(self);
+                    self.run_debug_trap(&arithmetic.update)?.is_some()
+                } else {
+                    false
+                };
+            if !update_skipped && !arithmetic.update.trim().is_empty() {
                 let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_UPDATE);
                 // GNU execute_cmd.c:3201: xtrace before update expression.
                 // Use raw expression to preserve original whitespace. The
@@ -2258,9 +2275,22 @@ impl Executor {
         // operators used by simple `case` clauses.
         // GNU execute_cmd.c:3679-3680 traces the case head (with the raw
         // unexpanded word, print_cmd.c:742) before pattern expansion.
+        // xtrace_print_case_command_head (print_cmd.c:742-749) prints
+        // case_command->word->word — the WORD_DESC text, which in GNU still
+        // carries the source quote characters ("$x" stays "$x"). rubash's
+        // equivalent text is word_metadata.raw; the lexer `.word` value is
+        // the quote-stripped transport form whose PARAM_NAME_END_MARKER
+        // boundary byte (0x13, where a deleted closing quote terminated an
+        // unbraced $name) must never reach the trace output.
         if self.xtrace_enabled() {
             let prefix = self.xtrace_prefix();
-            self.xtrace_write(format!("{prefix}case {} in\n", case_command.word).as_bytes());
+            let raw_word = if case_command.word_metadata.raw.is_empty() {
+                case_command.word.as_str()
+            } else {
+                case_command.word_metadata.raw.as_str()
+            };
+            let visible = crate::locale::decode_to_visible_text(raw_word);
+            self.xtrace_write(format!("{prefix}case {visible} in\n").as_bytes());
         }
         // GNU execute_cmd.c:3660-3668: the case head is printed
         // (print_case_command_head, print_cmd.c:731 -> `case WORD in `) and
@@ -2272,7 +2302,17 @@ impl Executor {
             } else {
                 case_command.word_metadata.raw.as_str()
             };
-            let _ = self.run_debug_trap(&format!("case {raw_word} in "))?;
+            // execute_cmd.c:3672-3676: under extdebug a non-zero DEBUG status
+            // skips the whole case — the word is never expanded, no clause
+            // runs, and the case command returns EXECUTION_SUCCESS (probe
+            // k9/m-issue: `R=0` after the skipped head).
+            if self
+                .run_debug_trap(&format!("case {raw_word} in "))?
+                .is_some()
+            {
+                self.exit_code = 0;
+                return Ok(());
+            }
         }
         // GNU execute_cmd.c:3695-3699: the case word is expanded by
         // expand_word_leave_quoted and then passed through dequote_string —

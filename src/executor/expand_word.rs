@@ -130,6 +130,26 @@ impl Executor {
         // operands do NOT (redir.c:396-397 heredoc_expand uses
         // expand_string_to_string — single string, no field list, no glob).
         let expanded = self.expand_redirect_operand_fields(redirect, expanded);
+        // The lexer's fully-quoted-word role marker (lexer/word.rs, the
+        // STORAGE_WORD_PREFIX sentinel for words that are wholly quoted and
+        // contain ${..}) is word-LEVEL role information — GNU's
+        // redirection_expand output is a field list and never carries a
+        // counterpart. Leaving it in the expanded operand corrupted dup-word
+        // classification (`<&"${X[0]}"` with X set-empty classified as a
+        // non-digit word instead of an anchored empty field) and leaked the
+        // 0x1d byte into diagnostics (issue #518). A user-typed 0x1d byte is
+        // pair-encoded at the lexer boundary, so a bare leading marker here
+        // is always the role sentinel, never data.
+        let expanded = match expanded.strip_prefix('&') {
+            Some(rest) => {
+                let rest = rest.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(rest);
+                format!("&{rest}")
+            }
+            None => expanded
+                .strip_prefix(STORAGE_WORD_PREFIX)
+                .map(str::to_string)
+                .unwrap_or(expanded),
+        };
         self.redirect_target_memo
             .borrow_mut()
             .insert(key, expanded.clone());
