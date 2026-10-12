@@ -358,7 +358,16 @@ where
     W: Write,
     E: Write,
 {
-    execute_with_io_named_in_context(command_name, args, variables, stdout, stderr, false, &[])
+    execute_with_io_named_in_context(
+        command_name,
+        args,
+        variables,
+        stdout,
+        stderr,
+        false,
+        &[],
+        &[],
+    )
 }
 
 /// GNU builtins/declare.def decides between the global-scope self-reference
@@ -374,6 +383,7 @@ pub(crate) fn execute_with_io_named_in_context<W, E>(
     stderr: &mut E,
     in_function: bool,
     frame_locals: &[String],
+    dynamic_views: &[(String, String)],
 ) -> io::Result<i32>
 where
     W: Write,
@@ -1104,6 +1114,7 @@ where
         options,
         plain,
         attr_status,
+        dynamic_views,
         stdout,
         stderr,
     )

@@ -633,6 +633,27 @@ impl Executor {
             return self.expand_embedded_parameters_mut_with_context(word, context);
         }
 
+        // The extquote decode (expand_brace_dollar / extract_dollar_brace_
+        // string's quoted state) runs BEFORE the bad-name gates — the same
+        // order expand_braced_parameter_word uses — but only where the
+        // fragment's effective quote state is QUOTED: a double-quoted word,
+        // a here-document body, or a command-substitution body (bash
+        // decodes `$'…'`-names there even unquoted, huck#8). A top-level
+        // or offset-position unquoted `${$'…'}` keeps the bad-substitution
+        // verdict (rubash#539).
+        let extquote_decodes_here = !matches!(context, SubstitutionQuoteContext::Unquoted)
+            || self
+                .shell_state
+                .env_vars
+                .contains_key("__RUBASH_COMSUB_BODY");
+        if extquote_decodes_here {
+            if let Some(resolved) =
+                crate::executor::expand_word::resolve_dollar_quoted_parameter_name(name)
+            {
+                let resolved_word = format!("${{{resolved}}}");
+                return self.expand_quoted_parameter_word_mut(&resolved_word, context);
+            }
+        }
         // GNU subst.c:10272-10288 (parameter_brace_expand): a quote
         // terminating the parameter name matches no operator arm and lands
         // on the `bad substitution` default. Mirror of the same check in

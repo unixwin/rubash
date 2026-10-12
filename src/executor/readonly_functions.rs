@@ -200,6 +200,12 @@ impl Executor {
     pub(in crate::executor) fn apply_child_environment(&self, process: &mut Command) {
         process.env_clear();
         for name in marked_env_names(&self.shell_state.env_vars, EXPORTED_VARS) {
+            // GNU variables.c make_env_array_from_var_list: array and
+            // associative variables never cross the child env boundary
+            // (ARRAY_EXPORT off), exported attribute or not (rubash#534).
+            if !is_exportable_env_name(&self.shell_state.env_vars, &name) {
+                continue;
+            }
             if let Some(value) = self.shell_state.env_vars.get(&name) {
                 if is_valid_process_env(&name, value) {
                     process.env(&name, self.child_env_value(&name, value));

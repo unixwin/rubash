@@ -13,6 +13,17 @@ impl Executor {
         match name {
             "PIPESTATUS" => return self.pipestatus_values(),
             "FUNCNAME" => {
+                // GNU variables.c:1812-1824 make_funcname_visible: `unset
+                // FUNCNAME` unbinds the cell and function entry never
+                // re-creates it (find_variable fails), so ${FUNCNAME[0]}
+                // stays empty for the rest of the shell (rubash#541).
+                if is_marked_var(
+                    &self.shell_state.env_vars,
+                    crate::executor::UNSET_DYNAMIC_VARS,
+                    "FUNCNAME",
+                ) {
+                    return Vec::new();
+                }
                 // GNU pushes the synthetic bottom "main" frame ONLY when the
                 // shell reads a script FILE (shell.c:1636-1648
                 // open_shell_script: array_push (funcname_a, "main"));

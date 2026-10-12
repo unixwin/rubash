@@ -20,6 +20,7 @@ pub(super) fn print_declare_names<W, E>(
     options: DeclareOptions,
     plain: bool,
     mut status: i32,
+    dynamic_views: &[(String, String)],
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -92,6 +93,16 @@ where
             }
         } else if attrs.has_scalar_attribute() || declared_unset.contains(&name) {
             print_unset_declaration(&name, attrs, stdout)?;
+        } else if let Some(rendered) = dynamic_views
+            .iter()
+            .find(|(view_name, _)| view_name.as_str() == name.as_str())
+            .map(|(_, text)| text.as_str())
+        {
+            // GNU variables.c initialize_dynamic_variables registers every
+            // dynamic parameter as a real cell, so `declare -p RANDOM`
+            // renders the current dynamic value instead of "not found"
+            // (rubash#541).
+            writeln!(stdout, "{rendered}")?;
         } else {
             writeln!(
                 stderr,

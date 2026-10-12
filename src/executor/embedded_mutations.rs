@@ -1054,6 +1054,15 @@ impl Executor {
                                     // retry below (`NOPE+1` is not a
                                     // command; probe 2026-10: `set -u;
                                     // echo "x=$((NOPE+1))"` executed it).
+                                } else if self.shell_state.arithmetic_nonfatal_error.get() {
+                                    // GNU param_expand failed the string
+                                    // before evalexp (rubash#533 bad
+                                    // substitution): the expansion is
+                                    // discarded — no command-substitution
+                                    // retry, no further diagnostic. The
+                                    // flag drives expand_command_words'
+                                    // ExpansionFailure(1) so the list is
+                                    // abandoned and the script continues.
                                 } else if (actual_fatal
                                     || crate::executor::arithmetic::arithmetic_expansion_is_fatal(
                                         &expression,

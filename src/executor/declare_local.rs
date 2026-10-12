@@ -901,6 +901,15 @@ impl Executor {
                         .insert("FUNCNAME".to_string(), storage);
                     saved
                 });
+                let dynamic_views: Vec<(String, String)> = args
+                    .iter()
+                    .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
+                    .filter_map(|arg| {
+                        let name = arg.split('=').next().unwrap_or(arg);
+                        self.dynamic_declaration_view(name)
+                            .map(|text| (name.to_string(), text))
+                    })
+                    .collect();
                 let status = crate::builtins::declare::execute_with_io_named_in_context(
                     command_name,
                     &args,
@@ -909,6 +918,7 @@ impl Executor {
                     &mut stderr,
                     self.shell_state.function_depth > 0,
                     &frame_locals,
+                    &dynamic_views,
                 )?;
                 if let Some(saved) = saved_funcname {
                     match saved {
@@ -969,15 +979,26 @@ impl Executor {
             );
             self.apply_posix_function_declare_unset_export(posix_function_export_unsets);
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport") {
-                // set -a (allexport): a typeset/declare assignment exports the
-                // variable (variables.c do_export / set -a semantics), even
-                // when the declare invocation itself carries no -x flag.
+                // set -a (allexport): a typeset/declare binding exports the
+                // variable (variables.c:3211 bind_variable marks every
+                // binding att_exported while mark_modified_vars is on), even
+                // when the declare invocation itself carries no -x flag —
+                // including a valueless `declare v` with no assignment word
+                // (rubash#538).
                 for arg in &args {
-                    if arg.contains('=') && !(arg.starts_with('-') || arg.starts_with('+')) {
-                        let (raw_name, _) = arg.split_once('=').unwrap_or((arg, ""));
-                        let (base, _) = assignment_name_and_append(raw_name);
-                        self.mark_exported(base);
+                    if arg.starts_with('-') || arg.starts_with('+') {
+                        continue;
                     }
+                    let (raw_name, has_value) = match arg.split_once('=') {
+                        Some((name, value)) => (name, Some(value)),
+                        None => (arg.as_str(), None),
+                    };
+                    let (base, _) = assignment_name_and_append(raw_name);
+                    let base = base.split('[').next().unwrap_or(base);
+                    if has_value.is_none() && !is_shell_name(base) {
+                        continue;
+                    }
+                    self.mark_exported(base);
                 }
             }
         }
@@ -1238,6 +1259,15 @@ impl Executor {
                     0,
                 )
             } else {
+                let dynamic_views: Vec<(String, String)> = args
+                    .iter()
+                    .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
+                    .filter_map(|arg| {
+                        let name = arg.split('=').next().unwrap_or(arg);
+                        self.dynamic_declaration_view(name)
+                            .map(|text| (name.to_string(), text))
+                    })
+                    .collect();
                 let builtin_status = crate::builtins::declare::execute_with_io_named_in_context(
                     "local",
                     &args,
@@ -1246,6 +1276,7 @@ impl Executor {
                     &mut stderr,
                     true,
                     &frame_locals,
+                    &dynamic_views,
                 )?;
                 let status = if local_blocked.is_empty() && print_missing.is_empty() {
                     builtin_status

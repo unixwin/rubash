@@ -1,4 +1,5 @@
 use super::dolbrace::{scan_braced_parameter_body_chars, BraceContext, DolbraceState};
+use super::skip::dollar_word_group_len;
 use super::token::{Token, TokenKind};
 
 /// Whether the just-tokenized logical line still awaits a `}' from a later
@@ -59,6 +60,10 @@ pub(crate) struct ParamScanState {
     escaped: bool,
     comment_start: bool,
     in_comment: bool,
+    /// Textual approximation of GNU's command-position test: true at scan
+    /// start and after `\n` `;` `&` `|`, false after any other non-blank
+    /// character. Gates only the `((` arithmetic-unit arm below.
+    command_position: bool,
 }
 
 impl Default for ParamScanState {
@@ -72,6 +77,7 @@ impl Default for ParamScanState {
             // comment (parse_comment), so comment state begins armed.
             comment_start: true,
             in_comment: false,
+            command_position: true,
         }
     }
 }
@@ -99,6 +105,7 @@ pub(crate) fn param_residuals_advance(
         escaped,
         comment_start,
         in_comment,
+        command_position,
     } = state;
     while index < chars.len() {
         let ch = chars[index];
@@ -106,6 +113,7 @@ pub(crate) fn param_residuals_advance(
             if ch == '\n' {
                 *in_comment = false;
                 *comment_start = true;
+                *command_position = true;
             }
             index += 1;
             continue;
@@ -118,6 +126,13 @@ pub(crate) fn param_residuals_advance(
         }
         if ch == '\n' && !*single && !*double && !*ansi_single {
             *comment_start = true;
+            *command_position = true;
+            index += 1;
+            continue;
+        }
+        if matches!(ch, ';' | '&' | '|') && !*single && !*double && !*ansi_single {
+            *comment_start = true;
+            *command_position = true;
             index += 1;
             continue;
         }
@@ -144,24 +159,28 @@ pub(crate) fn param_residuals_advance(
         if ch == '\\' && !*single {
             *escaped = true;
             *comment_start = false;
+            *command_position = false;
             index += 1;
             continue;
         }
         if ch == '\'' && !*double {
             *single = !*single;
             *comment_start = false;
+            *command_position = false;
             index += 1;
             continue;
         }
         if ch == '"' && !*single {
             *double = !*double;
             *comment_start = false;
+            *command_position = false;
             index += 1;
             continue;
         }
         if ch == '$' && !*single && !*double && chars.get(index + 1) == Some(&'\'') {
             *ansi_single = true;
             *comment_start = false;
+            *command_position = false;
             index += 2;
             continue;
         }
@@ -199,9 +218,53 @@ pub(crate) fn param_residuals_advance(
             };
             index += 2 + scan.end;
             *comment_start = false;
+            *command_position = false;
             continue;
         }
+        // Arithmetic bodies do not nest `${` (outside the `${|` funsub
+        // form): GNU's P_ARITH matched-pair scan treats a `$`-`{` inside
+        // `$(( ))`, `$[ ]` and a command-position `(( ))` as literal text,
+        // so the unit's own closer (`))` / `]`) ends it and an
+        // unterminated `${` inside cannot swallow that closer. Skip the
+        // whole closed unit here (its scan counts quotes and nested pairs,
+        // never `${`), so a `${` inside an arithmetic body neither parks
+        // this gate nor turns the line permanently incomplete; the closed
+        // unit leaves expansion-stage handling to own the resulting
+        // bad-substitution. An OPEN unit is left to the dparen/quote
+        // gates: step past the opener so this scan cannot park on the
+        // interior `${` (the construct is incomplete either way, and the
+        // dedicated routers name GNU's closer — `)` / `]` — at EOF).
+        if !*single && !*double && !*ansi_single {
+            let unit = if ch == '$' {
+                match chars.get(index + 1) {
+                    Some('(') if chars.get(index + 2) == Some(&'(') => Some((index + 1, '(', ')')),
+                    Some('[') => Some((index + 1, '[', ']')),
+                    _ => None,
+                }
+            } else if ch == '(' && *command_position && chars.get(index + 1) == Some(&'(') {
+                Some((index, '(', ')'))
+            } else {
+                None
+            };
+            if let Some((open, open_ch, close_ch)) = unit {
+                match dollar_word_group_len(chars, open, open_ch, close_ch) {
+                    Some(end) => {
+                        index = end;
+                        *command_position = false;
+                        *comment_start = false;
+                        continue;
+                    }
+                    None => {
+                        index = open + 2;
+                        *command_position = false;
+                        *comment_start = false;
+                        continue;
+                    }
+                }
+            }
+        }
         *comment_start = false;
+        *command_position = false;
         index += 1;
     }
     None
@@ -578,5 +641,37 @@ mod tests {
         assert_eq!(unquoted_brace_group_depth("{ # } still open"), 1);
         assert_eq!(unquoted_brace_group_depth("{\n# }\n}"), 0);
         assert_eq!(unquoted_brace_group_depth("{ echo hi; }"), 0);
+    }
+}
+
+#[cfg(test)]
+mod arith_unit_param_scan_tests {
+    use super::*;
+
+    fn parked(input: &str) -> bool {
+        let chars: Vec<char> = input.chars().collect();
+        let mut state = ParamScanState::default();
+        param_residuals_advance(&chars, 0, &mut state).is_some()
+    }
+
+    #[test]
+    fn dollar_brace_inside_arithmetic_body_does_not_park() {
+        // rubash#533: the P_ARITH body treats a `$`-`{` as literal text, so
+        // an unterminated `${` inside `$(( ))`/`$[ ]`/`(( ))` neither parks
+        // the join gate nor swallows the unit's own closer.
+        assert!(!parked("echo $((1+${x))"));
+        assert!(!parked("echo $[1+${x]"));
+        assert!(!parked("echo before\n((1+${x))"));
+        // The units themselves unclosed still park (the construct is
+        // incomplete and GNU keeps reading).
+        assert!(parked("echo $((1+${x"));
+        // Ordinary `${` scans stay live.
+        assert!(parked("echo ${x"));
+        assert!(!parked("echo $((1+2))"));
+        assert!(!parked("echo ${x:-$((1+2))}"));
+        // A `((` that closes without a `)` follower is the subshell
+        // reinterpretation: `${` nests normally there.
+        assert!(parked("((echo ${x)"));
+        assert!(!parked("((echo hi); cat"));
     }
 }

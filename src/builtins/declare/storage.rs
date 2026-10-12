@@ -138,6 +138,17 @@ pub(super) fn quote_declare_value(value: &str) -> String {
     // GNU's ansic_shouldquote tests the dequoted value; stored carrier
     // bytes (CTLESC protection pairs) are transport, not data, so decode
     // to visible text first or a quoted `']'` renders as $'\'\x11]'.
+    // Values carrying raw-byte marker pairs quote from the byte view
+    // instead (same contract as quote_array_element_value below):
+    // decoding to visible text would materialize the marker's Unicode
+    // scalar and ansic_quote would re-encode it as UTF-8 octal escapes —
+    // `$'\x81'` rendered as $'\302\201' where GNU strtrans.c ansic_quote
+    // escapes the single byte 0x81 as \201 (rubash#540).
+    let sentinel = char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+        .expect("raw-byte sentinel is a valid char");
+    if value.contains(sentinel) {
+        return crate::executor::ansic_quote(value);
+    }
     let visible = display_text(value);
     if gnu_ansic_shouldquote(&visible) {
         return gnu_ansic_quote(&visible);

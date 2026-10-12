@@ -95,6 +95,39 @@ impl Executor {
         }
         if !keep_temporary_assignments {
             self.restore_temporary_assignments(temporary_assignments);
+        } else if Self::attribute_builtin_absorbs_named_tempenv(cmd) {
+            // GNU setattr.def:590-614 set_var_attribute ("only called by
+            // readonly/export") + declare.def:1105: an attribute builtin
+            // absorbs from the temporary environment ONLY the variables its
+            // operands name — `FOO=val export BAR` leaves FOO unset while
+            // `FOO=val export FOO` persists; every other tempenv binding
+            // dies with the temporary environment (rubash#538). `export -f`
+            // operands name functions, not variables: nothing absorbs.
+            let keep = self.attribute_builtin_operand_names(cmd);
+            // GNU's absorption inherits the tempvar's attributes
+            // (setattr.def:604 `var->attributes |= tv->attributes &
+            // ~att_tempvar`) — assign_in_env marks every tempenv binding
+            // exported, so an ABSORBED assignment name keeps att_exported.
+            // The __RUBASH_EXPORTED_VARS marker snapshot therefore must not
+            // be restored (it predates the tempenv's export marks); the
+            // absorbed names are re-marked after the restore instead. Every
+            // other real variable entry not named by an operand is restored.
+            let absorbed: std::collections::HashSet<String> = cmd
+                .assignments
+                .iter()
+                .filter_map(|(name, _)| {
+                    let base = assignment_name_and_append(name).0.to_string();
+                    keep.contains(&base).then_some(base)
+                })
+                .collect();
+            let survivors: Vec<_> = temporary_assignments
+                .into_iter()
+                .filter(|(name, ..)| name != "__RUBASH_EXPORTED_VARS" && !keep.contains(name))
+                .collect();
+            self.restore_temporary_assignments(survivors);
+            for name in &absorbed {
+                self.mark_exported(name);
+            }
         } else if self.posix_mode_enabled() && self.shell_state.function_depth > 0 {
             // GNU execute_cmd.c:4892-4894 → variables.c:4662
             // merge_temporary_env → variables.c:4485 push_posix_temp_var:

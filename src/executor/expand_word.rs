@@ -8,7 +8,7 @@ use crate::executor::markers::STORAGE_WORD_PREFIX;
 /// here. The span may be the whole name (${$'x1'}) or the leading part of an
 /// operator form (${$'x1'%t}, ${$'x1'-fallback}). Returns the rewritten
 /// body, or None when the name is not a decodable dollar-quoted span.
-fn resolve_dollar_quoted_parameter_name(name: &str) -> Option<String> {
+pub(in crate::executor) fn resolve_dollar_quoted_parameter_name(name: &str) -> Option<String> {
     let chars: Vec<char> = name.chars().collect();
     if chars.len() < 3 || chars[0] != '$' || chars[1] != '\'' {
         return None;
@@ -32,7 +32,12 @@ fn resolve_dollar_quoted_parameter_name(name: &str) -> Option<String> {
         return None;
     }
     let decoded = crate::lexer::ansi::decode_ansi_c_quoted(&body);
-    if !is_shell_name(&decoded) {
+    // The decoded word re-dispatches parameter_brace_expand, whose
+    // valid_brace_expansion_word accepts shell names, positional digits and
+    // the special parameters (`${$'1'}` reads $1, `${$'#'}` reads $#) —
+    // the same class parameter_ops::is_parameter_error_name covers
+    // (rubash#539: `"${x:${$'1'}}"` offsets through $1).
+    if !crate::executor::parameter_ops::is_parameter_error_name(&decoded) {
         return None;
     }
     let rest: String = chars[index + 1..].iter().collect();
