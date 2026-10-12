@@ -329,6 +329,14 @@ pub(in crate::executor) fn whole_word_braced_parameter_body(word: &str) -> Optio
 /// (the caller falls through to the embedded walker, which already
 /// anchors each `$((` independently).
 pub(in crate::executor) fn whole_word_arithmetic_substitution_body(word: &str) -> Option<&str> {
+    // GNU parse.y:4976: the `$((` verdict precedes the span capture — a
+    // construct whose group closes before anything but `)` (e.g.
+    // `$((echo hi) 2>&1)`) is a command substitution, not arithmetic, and
+    // must decline here so the `$(`/embedded-walker fallbacks run it
+    // (issue #512).
+    if !crate::lexer::dollar_double_paren_is_arithmetic(word.get(1..)?) {
+        return None;
+    }
     let rest = word.strip_prefix("$((")?;
     let bytes = rest.as_bytes();
     // Same scan contract as the embedded walker's collector

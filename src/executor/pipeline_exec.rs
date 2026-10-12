@@ -2215,6 +2215,14 @@ impl Executor {
         // status 1 (rubash#525).
         let stage_redirect_rejected = self.reject_invalid_redirects(command)?;
         if stage_redirect_rejected.is_some() {
+            // The rejected stage already placed its diagnostic on the
+            // element's fd 1 (the pipe) via the capture above — GNU's
+            // forked child dies right after its own do_redirections failed
+            // (execute_cmd.c:5522). Mark the stage pre-wired so the
+            // driver's stream routing does not re-apply the same redirect
+            // list and print the diagnostic a second time (issue #514):
+            // the element is dead, its pipe bytes are final.
+            self.pipeline_stage_fds_pre_wired.set(true);
             let captured = crate::executor::shell_options::take_stdout_capture();
             crate::executor::shell_options::restore_stdout_capture(saved_capture);
             return Ok(Some((

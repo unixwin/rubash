@@ -191,14 +191,29 @@ impl Executor {
         if self.last_command_substitution_status.get() == Some(2)
             && self.last_command_substitution_parse_error.get()
         {
-            self.mark_parse_error();
-            eprintln!(
-                "{}syntax error in command substitution",
-                self.parser_diagnostic_prefix()
-            );
-            self.exit_code = 2;
-            self.last_command_substitution_status.set(None);
-            return Err(ExecuteError::ExitCode(2));
+            // A BACKTICK body's parse error killed only the substituted
+            // child (GNU subst.c string_locale -> parse_and_execute: the
+            // child reports `command substitution: line N: ...' at its own
+            // parse and exits 2). The substitution is empty, status 2
+            // becomes the command's status (an assignment keeps it in $?,
+            // GNU `x=\`case x in\`` -> $?=2), and the script continues —
+            // no `syntax error in command substitution' escalation, which
+            // is the read-time `$(`-body failure shape (issue #515).
+            if self
+                .last_command_substitution_parse_error_backtick
+                .replace(false)
+            {
+                self.last_command_substitution_parse_error.set(false);
+            } else {
+                self.mark_parse_error();
+                eprintln!(
+                    "{}syntax error in command substitution",
+                    self.parser_diagnostic_prefix()
+                );
+                self.exit_code = 2;
+                self.last_command_substitution_status.set(None);
+                return Err(ExecuteError::ExitCode(2));
+            }
         }
         let original_words_had_command_substitution = cmd
             .word_metadata
