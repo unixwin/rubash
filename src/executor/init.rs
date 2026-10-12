@@ -2,17 +2,27 @@ use super::*;
 use crate::shell::VariableStore;
 
 fn shell_pwd_display(path: &str) -> String {
-    #[cfg(windows)]
-    {
-        if crate::executor::path::shell_path_style_enabled() {
-            return path.to_string();
-        }
-        let bytes = path.as_bytes();
-        if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/' {
-            let drive = (bytes[0] as char).to_ascii_lowercase();
-            return format!("/{drive}/{}", &path[3..]);
-        }
+    // rubash#537: unconditional POSIX persona. The startup PWD (and the
+    // self-injected TMPDIR default below) previously kept the native
+    // `D:/…` spelling whenever a host exported WINUXSH_SHELL_PATH_STYLE —
+    // which niu/winuxsh do for their whole lifetime — so every flagship
+    // session ran with a drive-form $PWD and nvm.sh's nvm_find_up
+    // death-looped on it (GNU bash on MSYS never reports `D:/…`).
+    shell_pwd_display_impl(path)
+}
+
+#[cfg(windows)]
+fn shell_pwd_display_impl(path: &str) -> String {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/' {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        return format!("/{drive}/{}", &path[3..]);
     }
+    path.to_string()
+}
+
+#[cfg(not(windows))]
+fn shell_pwd_display_impl(path: &str) -> String {
     path.to_string()
 }
 /// Process-global flag: this process is a respawned internal `rubash -c`

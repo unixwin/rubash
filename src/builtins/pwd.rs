@@ -97,10 +97,8 @@ fn current_directory(mode: Mode, env_vars: &HashMap<String, String>) -> io::Resu
     }
 
     // GNU pwd.def (physical mode) prints get_working_directory — one
-    // canonical shell-absolute form. Route the Windows physical path
-    // through the same style gate cd uses (shell_pwd_display_path): the
-    // default (style unset) renders /<drive>/..., a host that exported
-    // WINUXSH_SHELL_PATH_STYLE keeps the native D:/ spelling.
+    // canonical shell-absolute form: the POSIX /<drive>/... spelling
+    // (rubash#537), the same form cd's bindpwd and the startup PWD use.
     Ok(Some(crate::executor::path::shell_pwd_display_path(
         &shell_display_path(&physical),
     )))
@@ -119,19 +117,13 @@ fn logical_pwd_if_current(physical: &Path, env_vars: &HashMap<String, String>) -
     let current_physical = physical.canonicalize().ok()?;
 
     if logical_physical == current_physical {
-        // GNU pwd.def (logical mode) echoes $PWD verbatim. The native
-        // slash-drive rewrite only applies when the host selected the
-        // shell-native path style (executor/path.rs shell_path_style_
-        // enabled); the default keeps the POSIX /<drive>/... spelling so
-        // PWD, `pwd` and `cd`'s bindpwd value stay one canonical form
-        // across the whole session (GNU cd.def:136-175 bindpwd -> pwd.def
-        // prints that single stored value).
-        let logical = logical.replace('\\', "/");
-        if crate::executor::path::shell_path_style_enabled() {
-            Some(windows_slash_drive_display_to_native(&logical).unwrap_or(logical))
-        } else {
-            Some(logical)
-        }
+        // GNU pwd.def (logical mode) echoes $PWD verbatim, and the value
+        // stays in the ONE canonical POSIX /<drive>/… form the startup PWD
+        // and cd's bindpwd use (rubash#537: the msys persona has no
+        // native-spelling mode — a drive-form PWD death-loops nvm.sh's
+        // nvm_find_up, whose ${path_%/*} walk only terminates on ""/"."
+        // /a found file).
+        Some(logical.replace('\\', "/"))
     } else {
         None
     }
@@ -139,24 +131,6 @@ fn logical_pwd_if_current(physical: &Path, env_vars: &HashMap<String, String>) -
 
 fn shell_display_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
-}
-
-fn windows_slash_drive_display_to_native(path: &str) -> Option<String> {
-    if !cfg!(windows) {
-        return None;
-    }
-
-    let bytes = path.as_bytes();
-    if bytes.len() == 2 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() {
-        let drive = (bytes[1] as char).to_ascii_uppercase();
-        return Some(format!("{drive}:/"));
-    }
-    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[2] == b'/' && bytes[1].is_ascii_alphabetic() {
-        let drive = (bytes[1] as char).to_ascii_uppercase();
-        return Some(format!("{drive}:{}", &path[2..]));
-    }
-
-    None
 }
 
 #[cfg(test)]
@@ -194,8 +168,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn physical_mode_reports_physical_cwd() {
-        // Physical mode prints get_working_directory through the same style
-        // gate cd uses (GNU pwd.def): default POSIX /<drive>/... form.
+        // Physical mode prints get_working_directory in the one canonical
+        // POSIX /<drive>/... form (GNU pwd.def, rubash#537).
         let old_pwd = env::var_os("PWD");
         env::set_var("PWD", "/usr");
         let expected = crate::executor::path::shell_pwd_display_path(&shell_display_path(
@@ -244,15 +218,13 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn logical_mode_reports_posix_drive_pwd_by_default() {
-        // GNU pwd.def echoes $PWD verbatim. The default (no host path-style
-        // variable) keeps the POSIX /<drive>/... spelling so PWD, `pwd` and
-        // cd's bindpwd value stay one canonical form; hosts that exported
-        // WINUXSH_SHELL_PATH_STYLE see the native D:/ spelling instead.
+    fn logical_mode_reports_posix_drive_pwd() {
+        // GNU pwd.def echoes $PWD verbatim, in the ONE canonical POSIX
+        // /<drive>/... spelling shared with the startup PWD and cd's
+        // bindpwd value (rubash#537: no host path-style variable changes
+        // this — the native D:/ spelling is retired from the engine).
         let old_pwd = env::var_os("PWD");
-        let old_style = env::var_os("__RUBASH_PATH_STYLE");
         let current = env::current_dir().unwrap();
-        env::remove_var("__RUBASH_PATH_STYLE");
         env::set_var("PWD", host_path_to_slash_drive(&current));
 
         let (_, stdout, _) = run(&[]);
@@ -261,10 +233,6 @@ mod tests {
         match old_pwd {
             Some(value) => env::set_var("PWD", value),
             None => env::remove_var("PWD"),
-        }
-        match old_style {
-            Some(value) => env::set_var("__RUBASH_PATH_STYLE", value),
-            None => env::remove_var("__RUBASH_PATH_STYLE"),
         }
     }
 

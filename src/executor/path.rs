@@ -985,18 +985,6 @@ pub fn shell_wrapped_command(
     None
 }
 
-/// Whether the host requested shell-native (Windows-style) PWD display.
-///
-/// Reads the neutral `__RUBASH_PATH_STYLE` first; `WINUXSH_SHELL_PATH_STYLE`
-/// is kept as a compatibility fallback for hosts that still export the
-/// pre-rename name (remove the fallback once niu stops setting it).
-pub fn shell_path_style_enabled() -> bool {
-    cfg!(windows)
-        && ["__RUBASH_PATH_STYLE", "WINUXSH_SHELL_PATH_STYLE"]
-            .into_iter()
-            .any(|name| std::env::var_os(name).is_some())
-}
-
 fn is_winuxcmd_dispatcher(path: &Path) -> bool {
     cfg!(windows)
         && path
@@ -4776,29 +4764,17 @@ mod tests {
     }
 }
 
-/// The canonical PWD display form: `D:/…` when the host enabled the
-/// shell-native path style (`shell_path_style_enabled`, e.g. WINUXSH
-/// exporting WINUXSH_SHELL_PATH_STYLE), otherwise the POSIX `/<drive>/…`
-/// spelling that matches the startup PWD and GNU's single canonical form
-/// (builtins/cd.def:136-175 bindpwd stores one value; pwd.def echoes it).
-/// A `D:/…/D:/…` doubled-drive artifact is collapsed in native mode.
+/// The canonical PWD display form: always the POSIX `/<drive>/…` spelling
+/// (`/d/…`) on Windows, exactly what GNU Bash on MSYS reports for `$PWD` /
+/// `pwd` / cd's bindpwd value (builtins/cd.def:136-175 bindpwd stores one
+/// value; pwd.def echoes it) — there is no host switch that makes msys
+/// bash report `D:/…` (rubash#537). The drive form is not a display
+/// variant: it is shell semantics scripts consume (`nvm.sh` nvm_find_up's
+/// `${path_%/*}` walk never shortens `X:` and death-loops; bashdb's
+/// _Dbg_is_file classifies by a leading `/`), so the pre-#537
+/// WINUXSH_SHELL_PATH_STYLE native-spelling escape hatch is retired.
 pub fn shell_pwd_display_path(path: &str) -> String {
     let value = path.replace('\\', "/");
-    if shell_path_style_enabled() {
-        if value.len() >= 5
-            && value.as_bytes()[1] == b':'
-            && value.as_bytes()[2] == b'/'
-            && value.as_bytes()[3].to_ascii_lowercase() == value.as_bytes()[0].to_ascii_lowercase()
-            && value.as_bytes()[4] == b'/'
-        {
-            return format!("{}{}", &value[..3], &value[5..]);
-        }
-        return if value.is_empty() {
-            "/".to_string()
-        } else {
-            value
-        };
-    }
     if cfg!(windows)
         && value.len() >= 3
         && value.as_bytes()[1] == b':'

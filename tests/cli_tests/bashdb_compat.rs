@@ -239,7 +239,7 @@ fn windows_drive_absolute_tail_after_components_is_not_a_drive_designator() {
     // make `[[ -f <joined> ]]` true and let doubled
     // `D:/repo/…/D:/repo/…/file` paths appear in bashdb output, which the
     // info-files/continue tests reject. Frame filenames are now canonical
-    // `/d/…` (shell_path_style_enabled default), so the join is never
+    // `/d/…` (unconditionally, rubash#537), so the join is never
     // constructed; the plain absolute path still resolves.
     let file_path = Path::new("target").join("rubash-cli-drive-tail.txt");
     fs::create_dir_all("target").unwrap();

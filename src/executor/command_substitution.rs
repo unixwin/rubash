@@ -996,8 +996,16 @@ impl Executor {
 
         if words.first().map(String::as_str) == Some("pwd") {
             if words.get(1).map(String::as_str) == Some("-P") {
+                // rubash#537: the raw process cwd is a Windows path; the
+                // builtin renders get_working_directory in the one
+                // canonical POSIX form — the fast path must agree with it
+                // (pwd.def routes -P through the same display).
                 return std::env::current_dir()
-                    .map(|path| path.to_string_lossy().replace('\\', "/"))
+                    .map(|path| {
+                        crate::executor::path::shell_pwd_display_path(
+                            &path.to_string_lossy().replace('\\', "/"),
+                        )
+                    })
                     .unwrap_or_default();
             }
             return self
@@ -1143,8 +1151,15 @@ impl Executor {
         }
 
         self.last_command_substitution_status.set(Some(0));
+        // rubash#537: the physical directory renders in the same canonical
+        // POSIX form the cd builtin binds into $PWD (bindpwd) — a raw
+        // Windows path here would make `$(cd X && pwd)` disagree with the
+        // very cd it embeds. The `//?/` extended-length prefix is stripped
+        // BEFORE canonicalization so its `C:/…` tail lands in the same
+        // /c/… domain.
         let display = path.to_string_lossy().replace('\\', "/");
-        Some(display.strip_prefix("//?/").unwrap_or(&display).to_string())
+        let display = display.strip_prefix("//?/").unwrap_or(&display);
+        Some(crate::executor::path::shell_pwd_display_path(display).to_string())
     }
 
     fn command_list_substitution_output_typed(

@@ -23,7 +23,7 @@
 | 目标变量 | 遗留别名 | 语义 |
 |---|---|---|
 | NIU_SHELL_ROOT | WINUXSH_ROOT, RUBASH_ROOT | 支撑 `/` 逻辑根的原生目录（bin/,usr/bin/,etc/,tmp/,var/）|
-| NIU_SHELL_PATH_STYLE=host\|slash-drive | WINUXSH_SHELL_PATH_STYLE | PWD 显示拼写 |
+| NIU_SHELL_PATH_STYLE=host\|slash-drive | WINUXSH_SHELL_PATH_STYLE | **引擎侧已退役（#537，2026-10-12）**：`$PWD`/`pwd`/cd 绑定值恒为 POSIX `/d/…` 形态（msys persona；盘符形态 PWD 使 nvm.sh `nvm_find_up` 死循环）。变量保留为宿主自渲染 prompt 的提示，引擎不读取。|
 | NIU_DISPATCHER | WINUXCMD, WINUXCMD_PATH | WinuxCmd 命令 dispatcher 可执行文件 |
 | NIU_SHELL | WINUXSH_SHELL（bash shim 转发目标）| shim/引擎指向 |
 

@@ -191,15 +191,12 @@ where
     let pwd_value = match mode {
         // GNU builtins/cd.def:136-175 bindpwd stores ONE canonical logical
         // PWD string that `pwd` then echoes verbatim (pwd.def). Rubash's
-        // canonical form is selected by shell_path_style_enabled
-        // (executor/path.rs): the default (style unset) is the POSIX
-        // /<drive>/... spelling the startup PWD already uses, so the
-        // logical destination must pass through the same style gate as
-        // the physical value. Without it a session mixes "/d/..."
-        // (startup) with "D:/..." (after the first cd), and downstream
-        // tools that classify paths by a leading '/' (bashdb
-        // _Dbg_is_file's absolute-name branch) misroute. Hosts that
-        // exported WINUXSH_SHELL_PATH_STYLE keep the native display.
+        // canonical form is the POSIX /<drive>/... spelling (rubash#537:
+        // the msys persona has no native-spelling mode — a drive-form PWD
+        // death-loops nvm.sh's nvm_find_up, and bashdb's _Dbg_is_file
+        // classifies absolute names by a leading '/'), so both the logical
+        // and the physical value render through shell_pwd_display_path and
+        // a session can never mix "/d/..." with "D:/...".
         Mode::Logical => shell_pwd_display_path(&new_pwd_display),
         Mode::Physical => shell_pwd_display_path(&new_pwd.to_string_lossy()),
     };

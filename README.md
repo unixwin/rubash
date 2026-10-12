@@ -121,7 +121,7 @@ applied to dedicated evaluation suites and real-world corpora
 | **bash-completion** | 452/452 matrix; `bash -n` canary byte-identical |
 | **git-completion** | 140/140 |
 | **oh-my-bash** | 22 libs load, **252/252 functions** environment parity, PS1 byte-identical (5 themes) |
-| **nvm.sh** (v0.40.x loader) | loads byte-clean; own test slice engine-caused failures fixed |
+| **nvm.sh** (v0.40.x loader) | loads byte-clean incl. empty-`NVM_DIR` auto-use on Windows native (`$PWD` POSIX persona, #537); own test slice engine-caused failures fixed |
 | **FFmpeg / OpenSSH / PHP / ltmain / cmake configure scripts** | `--help`/error-path output **byte-identical** |
 | **git's own test framework** (t/test-lib.sh) | runs end-to-end under the engine |
 | **GNU 83-suite on Linux native binary** | 19/24 byte-identical (WSL-internal measurement) |
