@@ -41,6 +41,7 @@ pub fn execute(args: &[String], env_vars: &HashMap<String, String>) -> io::Resul
         &mut stderr,
         Stdio::inherit(),
         Stdio::inherit(),
+        Stdio::inherit(),
     )
 }
 
@@ -53,12 +54,13 @@ pub(crate) fn execute_with_io<W, E>(
     env_vars: &HashMap<String, String>,
     stdout: &mut W,
     stderr: &mut E,
+    child_stdin: Stdio,
 ) -> io::Result<i32>
 where
     W: Write,
     E: Write,
 {
-    execute_impl(args, env_vars, stdout, stderr, None)
+    execute_impl(args, env_vars, stdout, stderr, None, child_stdin)
 }
 
 pub(crate) fn execute_with_child_stdio<W, E>(
@@ -68,6 +70,7 @@ pub(crate) fn execute_with_child_stdio<W, E>(
     stderr: &mut E,
     child_stdout: Stdio,
     child_stderr: Stdio,
+    child_stdin: Stdio,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -79,6 +82,7 @@ where
         stdout,
         stderr,
         Some((child_stdout, child_stderr)),
+        child_stdin,
     )
 }
 
@@ -88,6 +92,7 @@ fn execute_impl<W, E>(
     stdout: &mut W,
     stderr: &mut E,
     child_stdio: Option<(Stdio, Stdio)>,
+    child_stdin: Stdio,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -204,9 +209,18 @@ where
                 clean_env,
                 child_stdout,
                 child_stderr,
+                child_stdin,
                 stderr,
             ),
-            None => run_external_exec(&program, operands, env_vars, clean_env, stdout, stderr),
+            None => run_external_exec(
+                &program,
+                operands,
+                env_vars,
+                clean_env,
+                child_stdin,
+                stdout,
+                stderr,
+            ),
         };
     }
 
@@ -291,6 +305,7 @@ fn run_external_exec<W, E>(
     operands: &[String],
     env_vars: &HashMap<String, String>,
     clean_env: bool,
+    child_stdin: Stdio,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -300,6 +315,13 @@ where
 {
     let mut process = external_exec_process(program, operands, env_vars, clean_env);
     process.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // std's Command::output() defaults stdin to Stdio::null() when .stdin()
+    // is never called — a capture-path `$(exec cat)` then reads EOF on a
+    // descriptor GNU keeps open (subst.c command_substitute only dup2's fd
+    // 1 for the capture pipe), which is exactly rubash#575. The channel is
+    // therefore explicit here, resolved by the caller from fd-table
+    // endpoint 0.
+    process.stdin(child_stdin);
 
     match process.output() {
         Ok(output) => {
@@ -329,6 +351,7 @@ fn run_external_exec_with_stdio<E>(
     clean_env: bool,
     child_stdout: Stdio,
     child_stderr: Stdio,
+    child_stdin: Stdio,
     stderr: &mut E,
 ) -> io::Result<i32>
 where
@@ -336,6 +359,11 @@ where
 {
     let mut process = external_exec_process(program, operands, env_vars, clean_env);
     process.stdout(child_stdout).stderr(child_stderr);
+    // Explicit for symmetry with run_external_exec: `.status()` would
+    // inherit by default, but every spawn site of the exec builtin must
+    // state its child-stdin source (fd-table endpoint 0 resolution),
+    // never the std default (rubash#575).
+    process.stdin(child_stdin);
 
     match process.status() {
         Ok(status) => Ok(crate::executor::wait_status::process_exit_status(&status)),

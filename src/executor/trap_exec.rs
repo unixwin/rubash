@@ -1622,6 +1622,10 @@ impl Executor {
                 &self.shell_state.env_vars,
                 &mut stdout,
                 &mut stderr,
+                // No spawn happens on this path (a bare `exec` with
+                // redirects only reports option diagnostics); inherit is
+                // the no-op value.
+                Stdio::inherit(),
             )?;
             // GNU exec.def reports option errors through builtin_error,
             // which carries the script:line context prefix
@@ -1651,6 +1655,44 @@ impl Executor {
             return Ok(1);
         }
 
+        // GNU redir.c do_redirection_internal applies the command's fd-0
+        // input redirections (`exec cat < f`, here-strings, heredocs,
+        // `<&N` dups) BEFORE execve, and subst.c command_substitute keeps
+        // the shell's fd 0 open inside command substitutions — the exec'd
+        // image reads exactly the descriptor the shell carried. rubash#575:
+        // the exec builtin's spawn sites never set a child stdin, and std's
+        // Command::output() defaults stdin to Stdio::null(), so a
+        // `$(exec cat)` read EOF where WSL bash 5.3.0 reads the outer
+        // stdin. Bind the node's input redirects for the spawn's duration —
+        // the same primitives with_command_input_redirects uses for
+        // compound bodies — resolve the child handle from the bound state
+        // (see exec_inherited_stdin), then unwind the shell's fd 0.
+        if let Some(message) = self.compound_stdin_open_failure(cmd) {
+            let mut stderr = Vec::new();
+            writeln!(&mut stderr, "{message}")?;
+            self.write_redirected_command_stderr(cmd, &stderr)?;
+            self.exit_code = 1;
+            return Ok(1);
+        }
+        // `<&N` dups and numbered input redirects are real descriptor
+        // operations on the spawn's fd table (the numbered path already
+        // applies them for compounds; open_compound_numbered_input_redirects
+        // deliberately covers fd-0 dups).
+        let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
+        let guard = self.bind_command_fd0_input(cmd)?;
+        let status = self.execute_exec_spawn(cmd);
+        if let Some(guard) = guard {
+            self.restore_command_fd0_input(guard);
+        }
+        self.restore_compound_numbered_input_redirects(saved_numbered);
+        status
+    }
+
+    /// The spawn arms of execute_exec, run with the command's fd-0 input
+    /// redirects already bound (see the guard in execute_exec). Every arm
+    /// passes the child stdin resolved by exec_inherited_stdin explicitly —
+    /// none of the spawn helpers may rely on std's defaults.
+    fn execute_exec_spawn(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_redirect_target(redirect);
             // GNU redir.c:832-838: `exec cmd >&WORD` with a non-numeric
@@ -1680,6 +1722,7 @@ impl Executor {
                     &mut child_diag,
                     child_stdout,
                     child_stderr,
+                    self.exec_inherited_stdin()?,
                 )?;
                 self.finish_dev_fd_operands(dev_ops);
                 return Ok(status);
@@ -1701,6 +1744,7 @@ impl Executor {
                 &mut std::io::stderr().lock(),
                 child_stdout,
                 Stdio::inherit(),
+                self.exec_inherited_stdin()?,
             )?;
             self.finish_dev_fd_operands(dev_ops);
             return Ok(status);
@@ -1728,6 +1772,7 @@ impl Executor {
                 &mut std::io::stderr().lock(),
                 child_stdout,
                 Stdio::inherit(),
+                self.exec_inherited_stdin()?,
             )?;
             self.finish_dev_fd_operands(dev_ops);
             return Ok(status);
@@ -1760,6 +1805,7 @@ impl Executor {
                     &self.shell_state.env_vars,
                     &mut crate::executor::GlobalStdout,
                     &mut file,
+                    self.exec_inherited_stdin()?,
                 )?
             } else {
                 crate::builtins::exec::execute_with_child_stdio(
@@ -1769,6 +1815,7 @@ impl Executor {
                     &mut file,
                     Stdio::inherit(),
                     child_stderr,
+                    self.exec_inherited_stdin()?,
                 )?
             };
             self.finish_dev_fd_operands(dev_ops);
@@ -1799,6 +1846,7 @@ impl Executor {
                     &self.shell_state.env_vars,
                     &mut crate::executor::GlobalStdout,
                     &mut file,
+                    self.exec_inherited_stdin()?,
                 )?
             } else {
                 crate::builtins::exec::execute_with_child_stdio(
@@ -1808,6 +1856,7 @@ impl Executor {
                     &mut file,
                     Stdio::inherit(),
                     child_stderr,
+                    self.exec_inherited_stdin()?,
                 )?
             };
             self.finish_dev_fd_operands(dev_ops);
@@ -1844,6 +1893,7 @@ impl Executor {
                     &self.shell_state.env_vars,
                     &mut crate::executor::GlobalStdout,
                     &mut crate::executor::GlobalStdout,
+                    self.exec_inherited_stdin()?,
                 )?
             } else {
                 crate::builtins::exec::execute_with_io(
@@ -1851,6 +1901,7 @@ impl Executor {
                     &self.shell_state.env_vars,
                     &mut crate::executor::GlobalStdout,
                     &mut std::io::stderr().lock(),
+                    self.exec_inherited_stdin()?,
                 )?
             }
         } else {
@@ -1870,6 +1921,7 @@ impl Executor {
                 &mut std::io::stderr().lock(),
                 child_stdout,
                 child_stderr,
+                self.exec_inherited_stdin()?,
             )?
         };
         self.finish_dev_fd_operands(dev_ops);
@@ -1885,6 +1937,69 @@ impl Executor {
     /// fd 1's endpoint, sharing its open file description).
     fn exec_inherited_stdio(&self, fd: u32) -> Result<Stdio, ExecuteError> {
         self.exec_stdio_for_endpoint(fd, 0)
+    }
+
+    /// Resolve the concrete child stdin for an `exec`'d program from the
+    /// fd table's endpoint 0 — the read-side twin of
+    /// exec_inherited_stdio(1)/(2). GNU exec.def exec_builtin ->
+    /// shell_execve replaces the shell image in place, so the exec'd
+    /// program keeps fd 0 exactly as do_redirections bound it (redir.c),
+    /// and subst.c command_substitute dups ONLY fd 1 for the capture pipe,
+    /// leaving fd 0 inherited — a `$(exec cat)` therefore reads the outer
+    /// stdin (WSL bash 5.3.0 matrix: pipe, file and read-then-exec shapes
+    /// all feed the child; rubash#575). std's Command::output() defaults
+    /// stdin to Stdio::null() unless .stdin() is set, so this channel must
+    /// be resolved and passed explicitly at every exec spawn site.
+    fn exec_inherited_stdin(&self) -> Result<Stdio, ExecuteError> {
+        // FUNCTION_STDIN stages bound virtual text (command_input_scope's
+        // bind_command_fd0_input, pipeline staging); the unread remainder
+        // is what the exec'd image would read off fd 0. background_stdio
+        // materializes it the same way for async subshells.
+        if let Some(remaining) = self.function_stdin_remaining() {
+            let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(&remaining);
+            let file = self.materialize_exec_stdin_bytes(&bytes)?;
+            return Ok(file.map(Stdio::from).unwrap_or(Stdio::null()));
+        }
+        match self.fd_table.read_endpoint(0) {
+            Some(FdReadEndpoint::File(file))
+            | Some(FdReadEndpoint::CoprocStdout { fd: file, .. }) => {
+                let dup = crate::fd::duplicate_handle_inheritable(file.handle)?;
+                Ok(Stdio::from(crate::fd::handle_to_file(dup)))
+            }
+            // Virtual descriptors have no OS handle: materialize the unread
+            // remainder on a temp file — the shared-open-file-description
+            // shape GNU's dup2 hands the image.
+            Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
+                match self.fd_table.input_snapshot_bytes(0) {
+                    Some((data, offset)) => {
+                        let file =
+                            self.materialize_exec_stdin_bytes(&data[offset.min(data.len())..])?;
+                        Ok(file.map(Stdio::from).unwrap_or(Stdio::null()))
+                    }
+                    None => Ok(Stdio::null()),
+                }
+            }
+            Some(FdReadEndpoint::InheritedProcessStdin) => Ok(Stdio::inherit()),
+            // fd 0 closed (`exec 0<&-`): the closest spawnable state to
+            // GNU's inherited-but-unreadable descriptor.
+            None if self.fd_table.has_entry(0) => Ok(Stdio::null()),
+            None => Ok(Stdio::inherit()),
+        }
+    }
+
+    /// Write `bytes` to a fresh temp file and open it for the child.
+    /// process_substitution_temp_path names are unique per call. An empty
+    /// payload spawns nothing — Stdio::null() yields the same EOF.
+    fn materialize_exec_stdin_bytes(
+        &self,
+        bytes: &[u8],
+    ) -> Result<Option<std::fs::File>, ExecuteError> {
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let path = self.process_substitution_temp_path()?;
+        std::fs::write(&path, bytes).map_err(ExecuteError::IoError)?;
+        Ok(std::fs::File::open(&path).ok())
     }
 
     fn exec_stdio_for_endpoint(&self, fd: u32, depth: u32) -> Result<Stdio, ExecuteError> {

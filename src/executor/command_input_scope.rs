@@ -5,13 +5,22 @@ use crate::executor::markers::DATA_DOLLAR;
 
 /// Saved descriptor state for a numbered fd opened by a compound command's
 /// input redirection (see open_compound_numbered_input_redirects).
-struct SavedNumberedFd {
+pub(in crate::executor) struct SavedNumberedFd {
     fd: u32,
     entry: Option<FdEntry>,
     fd_stdin: Option<String>,
     fd_stdin_offset: Option<String>,
     fd_dynamic: Option<String>,
     fd_closed: Option<String>,
+}
+
+/// Saved fd-0 state for a command-scoped input binding: the fd-table slot
+/// snapshot plus the FUNCTION_STDIN text-channel pair it may have replaced
+/// (see bind_command_fd0_input).
+pub(in crate::executor) struct CommandFd0InputGuard {
+    saved_fd0_entry: Option<FdEntry>,
+    saved_function_stdin: Option<String>,
+    saved_function_stdin_offset: Option<String>,
 }
 
 /// Saved descriptor state for an fd rebound by a compound command's
@@ -104,56 +113,85 @@ impl Executor {
         // child inheritance — so bind fd 0 to the handle instead of
         // slurping the text mirror. Non-file sources (pipes, procsubs,
         // heredocs, here-strings, /dev-aliases) keep the mirror below.
-        if let Some(file) = self.compound_fd0_regular_file(cmd) {
-            let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
-            self.fd_table
-                .open_input(0, FdReadEndpoint::File(file), false);
-            let result = execute(self);
-            match saved_fd0_entry {
-                Some(entry) => {
-                    self.fd_table.entries.insert(0, entry);
-                }
-                None => {
-                    self.fd_table.entries.remove(&0);
-                }
-            }
-            return result;
-        }
-        let Some(input) = self.command_input_redirect(cmd) else {
+        let Some(guard) = self.bind_command_fd0_input(cmd)? else {
             return execute(self);
         };
+        let result = execute(self);
+        self.restore_command_fd0_input(guard);
+        result
+    }
 
-        let old_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
-        let old_function_stdin_offset = self
+    /// The binding half of with_command_input_redirects_inner: a
+    /// regular-file `< file` opens a real FileFd on fd slot 0 (GNU's
+    /// shared-offset descriptor, redir.c do_redirection_internal), any
+    /// other input source — here-string, heredoc, procsub text, /dev/fd
+    /// alias — stages its expanded text on FUNCTION_STDIN with the slot
+    /// snapshotted. Returns None when the command carries no fd-0 input
+    /// binding at all (nothing to restore). Used by the compound wrapper
+    /// and by the exec builtin, whose spawn must see the node's input
+    /// redirections already dup2'd onto fd 0 (GNU redir.c applies them
+    /// before execve — rubash#575).
+    pub(in crate::executor) fn bind_command_fd0_input(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<Option<CommandFd0InputGuard>, ExecuteError> {
+        if let Some(file) = self.compound_fd0_regular_file(cmd) {
+            // Snapshot the FUNCTION_STDIN pair too: restore_command_fd0_input
+            // is unconditional, and this branch never rewrites the text
+            // channel — the guard must put back exactly what it found.
+            let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+            let saved_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
+            let saved_function_stdin_offset = self
+                .shell_state
+                .env_vars
+                .get(FUNCTION_STDIN_OFFSET)
+                .cloned();
+            self.fd_table
+                .open_input(0, FdReadEndpoint::File(file), false);
+            return Ok(Some(CommandFd0InputGuard {
+                saved_fd0_entry,
+                saved_function_stdin,
+                saved_function_stdin_offset,
+            }));
+        }
+        let Some(input) = self.command_input_redirect(cmd) else {
+            return Ok(None);
+        };
+        let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+        let saved_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
+        let saved_function_stdin_offset = self
             .shell_state
             .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .cloned();
-        // GNU do_redirection_internal (redir.c:767-955, RX_UNDOABLE) saves
-        // fd 0 before a compound's `<` and restores it at scope end — even
-        // undoing a permanent `exec 0<g` inside the body. Snapshot the slot
-        // so async-spawn stdin materialization (and any fd-0 mutation the
-        // body performs) unwinds with the compound.
-        let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
         self.shell_state
             .env_vars
             .insert(FUNCTION_STDIN.to_string(), input);
         self.shell_state
             .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        Ok(Some(CommandFd0InputGuard {
+            saved_fd0_entry,
+            saved_function_stdin,
+            saved_function_stdin_offset,
+        }))
+    }
 
-        let result = execute(self);
+    /// The unwind half of bind_command_fd0_input. GNU redir.c
+    /// do_redirection_internal (RX_UNDOABLE) restores fd 0 at scope end —
+    /// even undoing a permanent `exec 0<g` inside the body.
+    pub(in crate::executor) fn restore_command_fd0_input(&mut self, guard: CommandFd0InputGuard) {
         restore_optional_env_var(
             &mut self.shell_state.env_vars,
             FUNCTION_STDIN,
-            old_function_stdin,
+            guard.saved_function_stdin,
         );
         restore_optional_env_var(
             &mut self.shell_state.env_vars,
             FUNCTION_STDIN_OFFSET,
-            old_function_stdin_offset,
+            guard.saved_function_stdin_offset,
         );
-        match saved_fd0_entry {
+        match guard.saved_fd0_entry {
             Some(entry) => {
                 self.fd_table.entries.insert(0, entry);
             }
@@ -161,7 +199,6 @@ impl Executor {
                 self.fd_table.entries.remove(&0);
             }
         }
-        result
     }
 
     /// Opens the numbered input redirections of a compound command in the
@@ -170,7 +207,7 @@ impl Executor {
     /// do_redirection_internal:767); procsub targets feed
     /// FdReadEndpoint-backed text exactly like the persistent fd-var path
     /// (trap_exec.rs execute_dynamic_fd_var_redirect).
-    fn open_compound_numbered_input_redirects(
+    pub(in crate::executor) fn open_compound_numbered_input_redirects(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Vec<SavedNumberedFd>, ExecuteError> {
@@ -304,7 +341,10 @@ impl Executor {
         Ok(saved)
     }
 
-    fn restore_compound_numbered_input_redirects(&mut self, saved: Vec<SavedNumberedFd>) {
+    pub(in crate::executor) fn restore_compound_numbered_input_redirects(
+        &mut self,
+        saved: Vec<SavedNumberedFd>,
+    ) {
         for saved in saved {
             match saved.entry {
                 Some(entry) => {
@@ -976,6 +1016,15 @@ impl Executor {
         }
         let target = self.expand_redirect_target(redirect);
         if super::execution_misc::is_closed_redirect_target(&target) {
+            return None;
+        }
+        // `<&N` / `<&N-` dups are descriptor operations, not path opens —
+        // their source validity is enforced by validate_builtin_dup_source
+        // (builtins) and open_compound_numbered_input_redirects's dup_entry
+        // (compounds); probing "&N" as a file here would fail every dup
+        // form with a bogus ENOENT (rubash#575: `exec cat <&0` inside a
+        // command substitution must run, not abort).
+        if super::execution_misc::redirect_target_fd_and_move(&target).is_some() {
             return None;
         }
         if super::execution_misc::dev_stdio_redirect_fd(&target).is_some() {
