@@ -2215,6 +2215,7 @@ fn report_heredoc_overflow_fatal(
     line_offset: usize,
     redirect_cmd: Option<&CommandNode>,
     diagnostic_text: Option<&str>,
+    parse_posix: bool,
     line: usize,
 ) -> i32 {
     let source = input.trim_end_matches('\n');
@@ -2223,7 +2224,16 @@ fn report_heredoc_overflow_fatal(
     } else {
         String::new()
     };
-    if !prefix.trim().is_empty() {
+    // GNU's reader runs only COMPLETE commands before the fatal. When the
+    // offending here-documents sit inside a still-open construct — a `$(` or
+    // a brace group whose body carries them — the construct's first line
+    // never completed, so the prefix would be that incomplete line and
+    // re-running it standalone only emits a phantom second diagnostic ahead
+    // of the fatal. Skip prefixes that fail the same unclosed-construct gate
+    // the delimiter arm uses (its complements are all complete commands).
+    let prefix_complete = prefix.trim().is_empty()
+        || !crate::lexer::has_unclosed_input_syntax_posix(&prefix, parse_posix);
+    if prefix_complete && !prefix.trim().is_empty() {
         let _ = run_source_with_line_offset(
             executor,
             &prefix,
@@ -2438,7 +2448,7 @@ fn run_source_impl(
                     // (parse.y:3726-3733) → parse_arith_cmd, whose
                     // parse_matched_pair(`(',`)',P_ARITH) scan (parse.y:4970)
                     // hitting EOF with the paren count still open reports
-                    // `unexpected EOF while looking for matching `)'' at the
+                    // `unexpected EOF while looking for matching `) ['' at the
                     // line the group opened (parse.y:3908-3915, start_lineno)
                     // with exit 2 (`error yacc_EOF' forces EX_BADUSAGE only
                     // when the status is still 0 — parse.y:484-490). Probes:
@@ -2448,7 +2458,7 @@ fn run_source_impl(
                     // branch's wording.
                     if crate::lexer::dparen_arith_group_never_closes(input, open_line) {
                         eprintln!(
-                            "{}unexpected EOF while looking for matching `)'",
+                            "{}unexpected EOF while looking for matching `) ['",
                             executor.parser_diagnostic_prefix_for_line(global_open)
                         );
                         executor.errexit_live_at_diagnostic();
@@ -2464,7 +2474,7 @@ fn run_source_impl(
                     // status). error.c:324-327 forces 2 under live errexit.
                     if crate::lexer::dparen_subshell_reparse_compound_eof(input, open_line) {
                         eprintln!(
-                            "{}unexpected EOF while looking for matching `)'",
+                            "{}unexpected EOF while looking for matching `) ['",
                             executor.parser_diagnostic_prefix_for_line(global_open)
                         );
                         if executor.errexit_live_at_diagnostic() {
@@ -2514,12 +2524,6 @@ fn run_source_impl(
     // delimiter-quote arm above), then report with the script-relative line
     // and exit 2; nothing at or after the offending line runs.
     if let Some(line) = crate::lexer::heredoc_overflow_line() {
-        if std::env::var_os("RUBASH_DBG_543").is_some() {
-            eprintln!("DBG543 consume at script_driver post-parse line={}", line);
-        }
-        if std::env::var_os("RUBASH_DBG_543").is_some() {
-            eprintln!("DBG543 consume at script_driver pre-parse line={}", line);
-        }
         return report_heredoc_overflow_fatal(
             executor,
             input,
@@ -2527,6 +2531,7 @@ fn run_source_impl(
             line_offset,
             redirect_cmd,
             diagnostic_text,
+            parse_posix,
             line,
         );
     }
@@ -2563,6 +2568,7 @@ fn run_source_impl(
             line_offset,
             redirect_cmd,
             diagnostic_text,
+            parse_posix,
             line,
         );
     }
