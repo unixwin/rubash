@@ -1222,6 +1222,22 @@ impl Executor {
                         crate::posix_errors::message(&error)
                     );
                     self.exit_code = 1;
+                    // A compound's own failed redirection (the wrapper's
+                    // open() -> ExecuteError::IoError) is THIS level's
+                    // failure, not a body-inherited aggregate: GNU fires
+                    // the ERR trap for it (redir12.sub:
+                    // `trap 'echo got error ERR' ERR;
+                    // while ...; done </dev/null > unwritable-file`
+                    // prints "got error ERR", redir.right). The #507
+                    // pass-through exemption only covers the body's
+                    // inherited status — without this fire the gated
+                    // ERR site below skipped the trap and the redir
+                    // snapshot lost its "got error ERR" byte (PR #553
+                    // follow-up). maybe_run_error_trap's own gates keep
+                    // the &&/||, ! and errtrace exclusions.
+                    if command_status_produced_by_body(command) {
+                        self.maybe_run_error_trap(command)?;
+                    }
                     if self.errexit_enabled()
                         && self.errexit_is_active()
                         && self.suppress_errexit == 0
