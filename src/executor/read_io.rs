@@ -321,22 +321,40 @@ impl Executor {
 
         // Persistent fd 0 owns the shared cursor. The legacy mirror can be
         // present for external setup, but must not reset a shell read to offset 0.
-        // A FILE binding is a real open file description (`done < file` /
-        // `exec 0<file`): GNU builtin_read reads one descriptor (read.def:294),
-        // so EOF on the file is final — falling through to the FUNCTION_STDIN
-        // mirror would serve the enclosing pipeline stage's stdin as the
-        // file's trailing record and leave that mirror consumed
-        // (niubash#276: `while read; done < f` then `read` saw a false EOF).
-        if matches!(
-            self.fd_table.read_endpoint(0),
-            Some(FdReadEndpoint::File(_))
-        ) {
+        // A FILE binding from an explicit stdin redirection is a real open
+        // file description (`done < file` / `exec 0<file`): GNU builtin_read
+        // reads one descriptor (read.def:294), so EOF on the file is final —
+        // falling through to the FUNCTION_STDIN mirror would serve the
+        // enclosing pipeline stage's stdin as the file's trailing record and
+        // leave that mirror consumed (niubash#276: `while read; done < f`
+        // then `read` saw a false EOF).
+        // EXCEPTION — the null device on fd 0 is not a user binding: async
+        // materialization parks the /dev/null default there, and the staged
+        // FUNCTION_STDIN mirror IS the compound's own input in that state
+        // (redir.tests redir5-adjacent heredoc loop: EOF on NUL must fall
+        // through to the mirror or the loop's first read reports EOF and
+        // never runs). NUL carries no records, so this cannot reintroduce
+        // the #276 contamination — there is no file record to steal.
+        let fd0_file_is_null = match self.fd_table.read_endpoint(0) {
+            Some(FdReadEndpoint::File(ref file)) => {
+                crate::executor::is_null_device(&file.path.to_string_lossy())
+            }
+            _ => false,
+        };
+        if !fd0_file_is_null
+            && matches!(
+                self.fd_table.read_endpoint(0),
+                Some(FdReadEndpoint::File(_))
+            )
+        {
             return self.read_virtual_fd_stdin(0, silent, delimiter, char_limit, exact_char_limit);
         }
-        if matches!(
-            self.fd_table.read_endpoint(0),
-            Some(FdReadEndpoint::Text(_) | FdReadEndpoint::ProcessSubstitution(_))
-        ) {
+        if fd0_file_is_null
+            || matches!(
+                self.fd_table.read_endpoint(0),
+                Some(FdReadEndpoint::Text(_) | FdReadEndpoint::ProcessSubstitution(_))
+            )
+        {
             if let Some(line) =
                 self.read_virtual_fd_stdin(0, silent, delimiter, char_limit, exact_char_limit)
             {
