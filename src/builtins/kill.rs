@@ -270,6 +270,17 @@ pub const SIGCONT_NUMBER: i32 = libc::SIGCONT;
 #[cfg(not(unix))]
 pub const SIGCONT_NUMBER: i32 = 18;
 
+/// The platform's SIGQUIT number for dispatch paths that special-case the
+/// shell-policy ignore (sig.c:333 sets SIGQUIT to SIG_IGN in every shell,
+/// before the interactive-only SIGINT/SIGTERM installs). Linux: 3; Darwin/
+/// BSD also number it 3. The non-unix value keeps the Windows file-mailbox
+/// wire format's Linux numbering by contract (see SIGNALS above).
+#[cfg(unix)]
+pub const SIGQUIT_NUMBER: i32 = libc::SIGQUIT;
+/// Non-unix (Windows mailbox wire format, Linux numbering by contract).
+#[cfg(not(unix))]
+pub const SIGQUIT_NUMBER: i32 = 3;
+
 pub fn execute(args: &[String]) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
@@ -524,6 +535,51 @@ pub fn signal_number_for_spec(value: &str) -> Option<i32> {
 /// resolves to strsignal(3) ("Terminated", "Killed", "User defined signal
 /// 1", ...). glibc's strsignal uses per-thread storage, so calling it from
 /// the shell's main thread is safe.
+/// GNU jobs.c:1955 j_strsignal prints strsignal(signal) in the job-death
+/// notice (`Killed` for SIGKILL, jobs.c:1993 WTERMSIG). The invariant
+/// Linux/MSVC signal numbers map to the glibc strsignal wording the WSL
+/// GNU 5.3.0 oracle prints (probe 2026-10-12: `kill -9 $p` notices show
+/// `Killed`, `-1` `Hangup`, `-6` `Aborted`, `-8` `Floating point
+/// exception`, `-10`/`-12` `User defined signal N`, `-14` `Alarm clock`).
+/// The numeric fallback mirrors j_strsignal's own `_("Signal %d")` tail.
+fn signal_death_description_fallback(signal: i32) -> String {
+    let text = match signal {
+        1 => "Hangup",
+        2 => "Interrupt",
+        3 => "Quit",
+        4 => "Illegal instruction",
+        5 => "Trace/breakpoint trap",
+        6 => "Aborted",
+        7 => "Bus error",
+        8 => "Floating point exception",
+        9 => "Killed",
+        10 => "User defined signal 1",
+        11 => "Segmentation fault",
+        12 => "User defined signal 2",
+        13 => "Broken pipe",
+        14 => "Alarm clock",
+        15 => "Terminated",
+        16 => "Stack fault",
+        17 => "Child exited",
+        18 => "Continued",
+        19 => "Stopped (signal)",
+        20 => "Stopped",
+        21 => "Stopped (tty input)",
+        22 => "Stopped (tty output)",
+        23 => "Urgent I/O condition",
+        24 => "CPU time limit exceeded",
+        25 => "File size limit exceeded",
+        26 => "Virtual timer expired",
+        27 => "Profiling timer expired",
+        28 => "Window changed",
+        29 => "I/O possible",
+        30 => "Power failure",
+        31 => "Bad system call",
+        _ => return format!("Signal {signal}"),
+    };
+    text.to_string()
+}
+
 pub fn signal_death_description(signal: i32) -> String {
     #[cfg(unix)]
     {
@@ -534,7 +590,7 @@ pub fn signal_death_description(signal: i32) -> String {
                 .into_owned();
         }
     }
-    format!("Signal {signal}")
+    signal_death_description_fallback(signal)
 }
 
 pub fn translate_signal(value: &str) -> Option<&'static str> {

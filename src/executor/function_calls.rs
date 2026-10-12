@@ -472,6 +472,18 @@ impl Executor {
         if saved_debug_action.is_some() && !function_traced {
             crate::builtins::trap::clear_debug_trap(&mut self.shell_state.env_vars);
         }
+        // GNU execute_cmd.c:5279-5286: error_trace_mode (set -E) is what makes
+        // functions inherit the ERR trap; without it restore_default_signal
+        // removes the inherited ERR action for the body, so `trap -p ERR`
+        // inside the function reports an empty context (issue #520) — the
+        // display now matches the effective non-inherited state.
+        let errtrace =
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errtrace");
+        let saved_err_action =
+            crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "ERR");
+        if saved_err_action.is_some() && !errtrace {
+            crate::builtins::trap::clear_error_trap(&mut self.shell_state.env_vars);
+        }
         let definition_line = self
             .shell_state
             .function_definition_locations
@@ -492,7 +504,11 @@ impl Executor {
                 .get(name)
                 .and_then(|location| location.body_open_line))
             .or(definition_line);
-        if function_traced {
+        // GNU execute_cmd.c:5387-5391: the entry fire's DebugDecision — a
+        // non-zero trap status under debugging_mode skips the body entirely
+        // (no RETURN trap either, probe m2: `FN=0` with the body's echo
+        // absent); the function call's status is EXECUTION_SUCCESS.
+        let debug_entry_skip = if function_traced {
             if let Some(line) = body_open_line {
                 self.set_current_line_value(line);
             }
@@ -512,8 +528,10 @@ impl Executor {
                 .unwrap_or_else(|| {
                     crate::executor::command_text::bash_command_source_text(call_cmd)
                 });
-            self.run_debug_trap(&command_text)?;
-        }
+            self.run_debug_trap(&command_text)?.is_some()
+        } else {
+            false
+        };
         // GNU execute_function (execute_cmd.c:5269+) applies the call's
         // redirections to real descriptors for the body's duration
         // (redir.c do_redirections, undone on return), so `f 3>&1` makes a
@@ -566,17 +584,26 @@ impl Executor {
         } else {
             None
         };
-        let result = self.with_compound_output_redirects(call_cmd, |executor| {
-            let body_run = |executor: &mut Executor| {
-                executor.with_ambient_line(body_open_line, |executor| {
-                    executor.execute_ast_inner(&body_ast.commands)
-                })
-            };
-            match &definition_numbered_only {
-                Some(definition) => executor.with_numbered_fd_bindings(definition, body_run),
-                None => body_run(executor),
-            }
-        });
+        // execute_cmd.c:5391: the skipped body keeps the call's success
+        // status — no body execution, no RETURN trap (both live inside the
+        // `debugging_mode == 0 || result == EXECUTION_SUCCESS` branch). The
+        // unwind restores below run for the skip path too, like
+        // run_unwind_frame does in GNU.
+        let result = if debug_entry_skip {
+            Ok(())
+        } else {
+            self.with_compound_output_redirects(call_cmd, |executor| {
+                let body_run = |executor: &mut Executor| {
+                    executor.with_ambient_line(body_open_line, |executor| {
+                        executor.execute_ast_inner(&body_ast.commands)
+                    })
+                };
+                match &definition_numbered_only {
+                    Some(definition) => executor.with_numbered_fd_bindings(definition, body_run),
+                    None => body_run(executor),
+                }
+            })
+        };
         if body_unstreamed {
             self.resume_alias_streamed(saved_alias_streamed);
         }
@@ -593,6 +620,16 @@ impl Executor {
         if let Some(action) = saved_debug_action {
             if !function_traced {
                 crate::builtins::trap::maybe_restore_debug_trap(
+                    &mut self.shell_state.env_vars,
+                    action,
+                );
+            }
+        }
+        // GNU execute_cmd.c uw_maybe_set_error_trap: the saved ERR action
+        // comes back when the body did not set its own.
+        if let Some(action) = saved_err_action {
+            if !errtrace {
+                crate::builtins::trap::maybe_restore_error_trap(
                     &mut self.shell_state.env_vars,
                     action,
                 );

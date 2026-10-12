@@ -319,7 +319,7 @@ impl Executor {
     /// frame: probe 2026-09-27 — `bash -c 't2; ...'` → FUNCNAME=(t2),
     /// BASH_SOURCE=(bash), BASH_LINENO=(2), all empty at top level;
     /// `printf 'f\n' | bash -s` → FUNCNAME=(f), BASH_SOURCE=().
-    fn has_script_main_frame(&self) -> bool {
+    pub(in crate::executor) fn has_script_main_frame(&self) -> bool {
         self.shell_state
             .env_vars
             .contains_key("__RUBASH_SCRIPT_NAME")

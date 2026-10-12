@@ -57,10 +57,19 @@ impl Executor {
             self.set_current_line_value(line);
         }
         if self.debug_trap_in_scope() {
-            let _ = self.run_debug_trap(&format!(
-                "select {} in {}",
-                select_command.variable, words_text
-            ))?;
+            // execute_cmd.c:3528-3536: a non-zero trap status under
+            // debugging_mode returns EXECUTION_SUCCESS — the select command
+            // never expands its word list nor runs.
+            if self
+                .run_debug_trap(&format!(
+                    "select {} in {}",
+                    select_command.variable, words_text
+                ))?
+                .is_some()
+            {
+                self.exit_code = 0;
+                return Ok(());
+            }
         }
         if self.xtrace_enabled() {
             let prefix = self.xtrace_prefix();

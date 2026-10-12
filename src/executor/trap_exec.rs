@@ -364,9 +364,16 @@ impl Executor {
                         }
                     }
                     let eval_posix = self.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-                    if let Some((close, open_line, eof_line, report_open, _command, array_list)) =
+                    if let Some(unclosed) =
                         crate::lexer::unclosed_input_close_char_posix(&source, eval_posix)
                     {
+                        let (close, open_line, eof_line, report_open, array_list) = (
+                            unclosed.close,
+                            unclosed.open_line,
+                            unclosed.eof_line,
+                            unclosed.report_open,
+                            unclosed.array_list,
+                        );
                         // GNU eval continues the caller's line numbering:
                         // eval-input line i sits at caller_line+i-1;
                         // quote/arithmetic constructs report their open line,
@@ -628,6 +635,22 @@ impl Executor {
         }
 
         self.exit_code = exit_status;
+        // GNU trap.c:1128 run_exit_trap saves the exiting status in
+        // trap_saved_exit_value before the action runs; a bare `exit`
+        // inside the EXIT action exits with that saved status
+        // (builtins/common.c get_exitstat, interp 1602). The exit path
+        // wipes the function/source nesting before the trap fires
+        // (execute_cmd.c:6090), and a bare `exit` inside a FUNCTION called
+        // by the EXIT action still exits with the saved status (GNU probes
+        // 2026-10-12: entry $? 5, `false` then bare `exit` -> 5, both at
+        // the action's own level and inside a called function) — so the
+        // context guard is open at every depth here, unlike ERR/RETURN
+        // (where a called function's bare exit uses the current $?
+        // instead; the C-level nesting bookkeeping behind the difference
+        // is not settled by the vendored source, so this cell is pinned
+        // behaviorally).
+        let prev_saved_exit = std::mem::replace(&mut self.trap_saved_exit_value, Some(exit_status));
+        let prev_saved_context = std::mem::replace(&mut self.trap_saved_exit_context, usize::MAX);
         // A trap action is fresh parser input (parse.y alias_expand_token
         // applies at its read); expand at stream level and mark the batch
         // so executor-level expansion does not fire a second time.
@@ -659,6 +682,8 @@ impl Executor {
         let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
+        self.trap_saved_exit_value = prev_saved_exit;
+        self.trap_saved_exit_context = prev_saved_context;
         match result {
             Ok(()) => {
                 self.exit_code = exit_status;
@@ -677,9 +702,23 @@ impl Executor {
     /// suppressed (Bash does not re-enter the DEBUG trap while an action
     /// is running). `command_text` is the text of the command about to run,
     /// exposed to the trap action through BASH_COMMAND like Bash does.
-    pub(crate) fn run_debug_trap(&mut self, command_text: &str) -> Result<bool, ExecuteError> {
+    ///
+    /// Returns `Some(trap_status)` when the pending unit must be SKIPPED —
+    /// GNU's fire-site contract (execute_cmd.c:3057/3191/3532/3672/3924/
+    /// 4157/4510/5391): `debugging_mode && retval != EXECUTION_SUCCESS`,
+    /// i.e. only under extdebug and with ANY non-zero trap status. rubash's
+    /// old rule (status == 2 with no extdebug gate) failed both directions:
+    /// a status-1 trap under extdebug never skipped, and a status-2 trap
+    /// skipped without extdebug (issue #521). `$?` is preserved across the
+    /// firing (probe 2026-10-12: `trap 'false' DEBUG; true; echo $?` prints
+    /// 0); the action's status reaches the fire site through this return
+    /// value only.
+    pub(crate) fn run_debug_trap(
+        &mut self,
+        command_text: &str,
+    ) -> Result<Option<i32>, ExecuteError> {
         if self.debug_trap_running || self.host_internal_depth.get() > 0 {
-            return Ok(false);
+            return Ok(None);
         }
         self.debug_trap_running = true;
         // rubash#375: borrowing, allocation-free consult (GNU trap.c:1154
@@ -689,17 +728,31 @@ impl Executor {
             crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
         else {
             self.debug_trap_running = false;
-            return Ok(false);
+            return Ok(None);
         };
+        let saved_exit_code = self.exit_code;
         *self.shell_state.debug_trap_command.borrow_mut() = Some(command_text.to_string());
         let call_line = self
             .shell_state
             .env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok());
+        // rubash#375: parse the action once per distinct spliced text (GNU
+        // parses at trap invocation, trap.c read_trap_action); per-firing
+        // tokenize+parse of a stable action is dead work. The AST is taken
+        // out of the cache cell, re-stamped and executed, then put back —
+        // no clone on the per-firing path.
         let action = self.comsub_body_alias_splice(action);
-        let tokens = crate::lexer::tokenize(&action);
-        let mut ast = crate::parser::parse(&tokens);
+        let mut ast = {
+            let taken = self.debug_trap_action_cache.borrow_mut().take();
+            match taken {
+                Some((key, cached_ast)) if key == action => cached_ast,
+                _ => {
+                    let tokens = crate::lexer::tokenize(&action);
+                    crate::parser::parse(&tokens)
+                }
+            }
+        };
         if let Some(call_line) = call_line {
             for command in &mut ast.commands {
                 command.line = Some(call_line);
@@ -707,15 +760,20 @@ impl Executor {
         }
         let saved_alias_streamed = self.mark_alias_streamed();
         let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        // Cache the (re-stamped) AST under its spliced text for the next
+        // firing; the stamps are unconditionally overwritten by every
+        // firing's `command.line` walk above, so reuse is exact.
+        *self.debug_trap_action_cache.borrow_mut() = Some((action, ast));
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = None;
         self.debug_trap_running = false;
         result?;
-        let skip_command = self.exit_code == 2;
-        if skip_command {
-            self.exit_code = 0;
-        }
-        Ok(skip_command)
+        let trap_status = self.exit_code;
+        self.exit_code = saved_exit_code;
+        let extdebug =
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extdebug");
+        let skip_command = extdebug && trap_status != 0;
+        Ok(skip_command.then_some(trap_status))
     }
 
     /// Runs the RETURN trap action when a function (or sourced script)
@@ -731,6 +789,14 @@ impl Executor {
             self.return_trap_running = false;
             return Ok(());
         };
+        // GNU trap.c:367: the RETURN fire saves the pre-trap $? for a bare
+        // `exit`/`return` inside the action (interp 1602).
+        let prev_saved_exit =
+            std::mem::replace(&mut self.trap_saved_exit_value, Some(self.exit_code));
+        let prev_saved_context = std::mem::replace(
+            &mut self.trap_saved_exit_context,
+            self.shell_state.function_depth + self.source_nest_depth,
+        );
         let tokens = crate::lexer::tokenize(&action);
         let mut ast = crate::parser::parse(&tokens);
         // GNU trap.c:_run_trap_internal:1196 only sets SEVAL_RESETLINE for
@@ -750,6 +816,8 @@ impl Executor {
             }
         }
         let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        self.trap_saved_exit_value = prev_saved_exit;
+        self.trap_saved_exit_context = prev_saved_context;
         self.return_trap_running = false;
         result
     }
@@ -884,6 +952,15 @@ impl Executor {
                 // (crate::builtins::kill::SIGCHLD_NUMBER resolves libc on
                 // unix; non-unix keeps the mailbox wire-format 17).
                 if signal == crate::builtins::kill::SIGCHLD_NUMBER {
+                    continue;
+                }
+                // sig.c:333 (initialize_shell_signals): every shell sets
+                // SIGQUIT to SIG_IGN for itself before the interactive-only
+                // SIGINT/SIGTERM installs, so an untrapped QUIT delivery is
+                // dropped, never a 128+SIGQUIT shell exit. Only a user trap
+                // overrides the ignore, and `trap - QUIT` returns to it
+                // (trap.c marks SIGQUIT SIG_SPECIAL for that reset).
+                if signal == crate::builtins::kill::SIGQUIT_NUMBER {
                     continue;
                 }
                 return Err(ExecuteError::ExitCode(128 + signal));
@@ -1039,6 +1116,9 @@ impl Executor {
                 Some(action) if !action.is_empty() => trapped.push(signal),
                 Some(_) => {}
                 None if signal == crate::builtins::kill::SIGCHLD_NUMBER => {}
+                // sig.c:333: every shell ignores SIGQUIT for itself; an
+                // untrapped delivery while blocked is dropped, not fatal.
+                None if signal == crate::builtins::kill::SIGQUIT_NUMBER => {}
                 None => return Err(ExecuteError::ExitCode(128 + signal)),
             }
         }
@@ -1113,6 +1193,17 @@ impl Executor {
         }
         self.error_trap_running = true;
         let saved_exit = self.exit_code;
+        // GNU trap.c:367 _run_trap_internal saves last_command_exit_value in
+        // trap_saved_exit_value before running the action (the failing
+        // command's status here); trap.c:383 records funcnest + sourcenest
+        // as trap_return_context. A bare `exit` inside the action resolves
+        // to the saved value (builtins/common.c get_exitstat, POSIX interp
+        // 1602) — commands inside the action cannot change it.
+        let prev_saved_exit = std::mem::replace(&mut self.trap_saved_exit_value, Some(saved_exit));
+        let prev_saved_context = std::mem::replace(
+            &mut self.trap_saved_exit_context,
+            self.shell_state.function_depth + self.source_nest_depth,
+        );
         let saved_trap_command = self.shell_state.debug_trap_command.borrow().clone();
         // GNU get_bash_command (variables.c:1558) reads
         // the_printed_command_except_trap — the last command printed
@@ -1148,11 +1239,31 @@ impl Executor {
             }
         }
         let saved_alias_streamed = self.mark_alias_streamed();
-        let _ = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
         self.error_trap_running = false;
+        self.trap_saved_exit_value = prev_saved_exit;
+        self.trap_saved_exit_context = prev_saved_context;
+        // GNU builtins/exit.def (exit_or_logout): an `exit` inside ANY trap
+        // action unwinds to the top level immediately (the EXITBLTIN jump) —
+        // the unwind passes THROUGH run_error_trap, and the shell
+        // terminates with that status instead of returning to the
+        // interrupted flow (execute_cmd.c:5537 honors the jump by ending
+        // execution with last_command_exit_value; eval.c reader_loop ends
+        // the run). The discarded execute_ast result used to swallow that
+        // unwind, so `trap 'echo ETRAP; exit 42' ERR; false; echo never`
+        // printed ETRAP + never and exited 0; GNU prints ETRAP and exits 42
+        // (rubash#524). A bare `exit` exits with the trap-time $?, which
+        // GNU resolves from trap_saved_exit_value (builtins/common.c
+        // get_exitstat; probe: GNU exits 1). Only the exit unwind
+        // propagates — other action-level states keep the historical
+        // swallow here.
+        let exit_unwind = matches!(result, Err(ExecuteError::ExitCode(_)));
         self.exit_code = saved_exit;
+        if exit_unwind {
+            return result;
+        }
         Ok(())
     }
 

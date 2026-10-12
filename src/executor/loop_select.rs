@@ -107,9 +107,18 @@ impl Executor {
             // Bash fires the DEBUG trap for the `for` command once per
             // iteration (execute_cmd.c execute_for_command), but only where
             // the trap is in scope (functions without functrace do not
-            // inherit it, execute_cmd.c:5270).
+            // inherit it, execute_cmd.c:5270). execute_cmd.c:3053-3059: a
+            // non-zero trap status under debugging_mode runs `continue` —
+            // this iteration's body is skipped, the loop proceeds to the
+            // next word (probe m3: `B1` skipped, `B2` still ran), and a skip
+            // on the final iteration leaves the for command's status at the
+            // trap's status (probe k1: `FOR=1`).
             if self.debug_trap_in_scope() {
-                let _ = self.run_debug_trap(&for_text)?;
+                if let Some(skip_status) = self.run_debug_trap(&for_text)? {
+                    self.exit_code = skip_status;
+                    ran_body = true;
+                    continue;
+                }
             }
             ran_body = true;
             // GNU execute_cmd.c:3066-3079: the loop variable is resolved with

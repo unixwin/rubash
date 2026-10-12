@@ -325,6 +325,18 @@ impl Executor {
         if command_has_no_effect(cmd) {
             return Ok(());
         }
+        // GNU applies a null command's redirections too (execute_cmd.c
+        // execute_null_command -> do_redirections), so `> $nope` under set
+        // -u reports the unbound redirect word and ends the script — the
+        // same fatal redirect-word class as a commanded target (rubash#535;
+        // GNU probe: `set -u; > $nope` exits 1, no next line). The walker
+        // has reported the diagnostic and set the status.
+        if let Some(rejection) = self.reject_invalid_redirects(cmd)? {
+            if rejection == super::redirection::RedirectRejection::FatalNounset {
+                self.finish_heredoc_expansion_error(cmd, Self::FATAL_PARAMETER_EXPANSION_STATUS)?;
+            }
+            return Ok(());
+        }
         if let Some((name, message)) = self.parameter_assignment_error(cmd) {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_redirected_command_stderr(cmd, line.as_bytes())?;
@@ -2834,11 +2846,39 @@ impl Executor {
                 Ok(materialized) => materialized,
                 Err(error) => return Some(Err(error)),
             };
+        // GNU applies one do_redirections list for every simple command
+        // (redir.c:246) — builtin, external or function alike — so the
+        // dup/file validation gate must run on the function fast path too.
+        // `f <&"${X[0]}"` with an anchored empty expansion reported the
+        // apply-layer fallback (`&<0x1d>: Invalid argument`) instead of the
+        // gate's `"${X[0]}": Bad file descriptor` (issue #518). Placement
+        // mirrors execute_materialized_command: before the tempenv applies,
+        // because redirect words expand against the caller's bindings.
+        let redirect_rejection = match self.reject_invalid_redirects(&materialized_cmd) {
+            Ok(rejection) => rejection,
+            Err(error) => return Some(Err(error)),
+        };
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
         let (temporary_assignments, assignments_failed) =
             self.apply_temporary_assignments(&materialized_cmd.assignments, assignment_raws);
+        if let Some(rejection) = redirect_rejection {
+            if rejection == super::redirection::RedirectRejection::FatalNounset {
+                // Same classification as execute_materialized_command
+                // (rubash#535): an unbound variable in a function call's
+                // redirect word is a fatal expansion error.
+                self.finish_heredoc_expansion_error(
+                    &materialized_cmd,
+                    Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                );
+            }
+            self.restore_temporary_assignments(temporary_assignments);
+            let finish_result = self.finish_process_substitutions(process_substitution_files);
+            let assignment_finish_result =
+                self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
+            return Some(finish_result.and(assignment_finish_result));
+        }
         // POSIX-mode notes item 36 (GNU 5.3 cell matrix): a failed readonly
         // tempenv assignment before a FUNCTION skips the function and
         // abandons the rest of the command list with status 1 (subshell
@@ -2850,8 +2890,12 @@ impl Executor {
             // Restore the partial tempenv binds before unwinding — the
             // skip-and-abandon contract keeps the shell (or the enclosing
             // subshell boundary) alive, and an unbalanced tempenv mark would
-            // corrupt every later restore.
+            // corrupt every later restore. The process-substitution carriers
+            // are finished best-effort, same as the rejection arm above.
             self.restore_temporary_assignments(temporary_assignments);
+            let _ = self.finish_process_substitutions(process_substitution_files);
+            let _ =
+                self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
             return Some(Err(ExecuteError::ExpansionFailure(1)));
         }
         // GNU variables.c push_context: the function-call tempenv becomes the

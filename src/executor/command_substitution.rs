@@ -1080,36 +1080,12 @@ impl Executor {
         &self,
         source: &str,
     ) -> Option<String> {
-        self.command_substitution_cd_pwd_output_impl(source, false)
+        self.command_substitution_cd_pwd_output_impl(source)
     }
 
-    /// `quiet` marks the ADMISSION probe (embedded_mutations.rs
-    /// command_substitution_uses_specialized_path): it must not emit the cd
-    /// diagnostic — the real expansion (command_substitution.rs inner walk)
-    /// re-runs this helper and prints it there, so `$(cd nope && pwd)`
-    /// reports `cd: nope: ...` exactly once like GNU.
-    pub(in crate::executor) fn command_substitution_cd_pwd_output_quiet_probe(
-        &self,
-        source: &str,
-    ) -> Option<String> {
-        self.command_substitution_cd_pwd_output_impl(source, true)
-    }
-
-    fn command_substitution_cd_pwd_output_impl(&self, source: &str, quiet: bool) -> Option<String> {
-        let (left, right) =
-            split_unquoted_and_and(source).or_else(|| split_unquoted_semicolon(source))?;
-        let right_words = split_shell_words(right.trim());
-        if !matches!(right_words.as_slice(), [cmd] if cmd == "pwd")
-            && !matches!(right_words.as_slice(), [cmd, option] if cmd == "pwd" && option == "-P")
-        {
-            return None;
-        }
-
-        let left_words = split_shell_words(left.trim());
-        if left_words.first().map(String::as_str) != Some("cd") || left_words.len() > 2 {
-            return None;
-        }
-        let target = if let Some(word) = left_words.get(1) {
+    fn command_substitution_cd_pwd_output_impl(&self, source: &str) -> Option<String> {
+        let (left, right) = command_substitution_cd_pwd_shape(source)?;
+        let target = if let Some(word) = split_shell_words(left.trim()).get(1) {
             // GNU subst.c expands the cd target with expand_string (parameter,
             // tilde) but not pathname expansion: `cd` takes a single directory,
             // so a glob pattern would be a literal path, not a match list.
@@ -1124,28 +1100,21 @@ impl Executor {
             // substitution child too (`echo "$(cd nope && pwd)"` prints
             // `cd: nope: No such file or directory` with the enclosing
             // script's line prefix and yields status 1); the single-handle
-            // shortcut must not swallow it (issue #485). The admission probe
-            // (command_substitution_uses_specialized_path) runs this helper
-            // BEFORE the real expansion — it must stay quiet or the
-            // diagnostic prints twice where GNU prints it once.
-            if !quiet {
-                eprintln!(
-                    "{}cd: {}: No such file or directory",
-                    self.parser_diagnostic_prefix(),
-                    target_display
-                );
-            }
+            // shortcut must not swallow it (issue #485).
+            eprintln!(
+                "{}cd: {}: No such file or directory",
+                self.parser_diagnostic_prefix(),
+                target_display
+            );
             self.last_command_substitution_status.set(Some(1));
             return Some(String::new());
         };
         if !is_dir {
-            if !quiet {
-                eprintln!(
-                    "{}cd: {}: Not a directory",
-                    self.parser_diagnostic_prefix(),
-                    target_display
-                );
-            }
+            eprintln!(
+                "{}cd: {}: Not a directory",
+                self.parser_diagnostic_prefix(),
+                target_display
+            );
             self.last_command_substitution_status.set(Some(1));
             return Some(String::new());
         }
@@ -1494,10 +1463,14 @@ impl Executor {
             suppress_errexit: self.suppress_errexit,
             command_builtin_depth: self.command_builtin_depth,
             debug_trap_running: false,
+            debug_trap_action_cache: std::cell::RefCell::new(None),
             line_env_os_value: std::cell::RefCell::new(None),
             return_trap_running: false,
             signal_trap_running: false,
             error_trap_running: false,
+            trap_saved_exit_value: None,
+            trap_saved_exit_context: 0,
+            source_nest_depth: 0,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             // jobs.c:4607-4612: a comsub child (startup_state 2 +
             // SUBSHELL_COMSUB) never prints job-status notices, so the
@@ -2285,4 +2258,40 @@ fn canonical_physical_dir(target: &std::path::Path) -> Option<(std::path::PathBu
     let path = fs::canonicalize(target).ok()?;
     let is_dir = path.is_dir();
     Some((path, is_dir))
+}
+
+/// The `$(cd X && pwd)` / `$(cd X; pwd[-P])` fast-path SHAPE gate (one source
+/// of truth shared by the real expansion
+/// (`Executor::command_substitution_cd_pwd_output_impl`) and the admission
+/// probe (embedded_mutations.rs `command_substitution_uses_specialized_path`).
+///
+/// rubash#375 second cut: the admission probe used to run the FULL helper
+/// (`command_substitution_cd_pwd_output_quiet_probe`) — expand_word on the
+/// target, `shell_path_to_windows`, the single-handle
+/// `canonical_physical_dir` round trip (CreateFileW +
+/// GetFileInformationByHandle + GetFinalPathNameByHandleW) — and threw the
+/// result away; the real expansion then paid the whole round trip a second
+/// time. Admission never needed any of that: the helper returns `Some` for
+/// EVERY body passing this shape gate (the missing-target and not-a-directory
+/// arms both return `Some(String::new())` with status 1), so "would the
+/// helper claim this body" is decidable from the word shape alone. The probe
+/// also used to expand the cd target and mutate
+/// `last_command_substitution_status` before the real pass — side effects GNU
+/// does not have (subst.c expands the cd target exactly once, at cd
+/// execution); shape-only admission removes the duplicate expansion and the
+/// premature status write as well.
+pub(in crate::executor) fn command_substitution_cd_pwd_shape(source: &str) -> Option<(&str, &str)> {
+    let (left, right) =
+        split_unquoted_and_and(source).or_else(|| split_unquoted_semicolon(source))?;
+    let right_words = split_shell_words(right.trim());
+    if !matches!(right_words.as_slice(), [cmd] if cmd == "pwd")
+        && !matches!(right_words.as_slice(), [cmd, option] if cmd == "pwd" && option == "-P")
+    {
+        return None;
+    }
+    let left_words = split_shell_words(left.trim());
+    if left_words.first().map(String::as_str) != Some("cd") || left_words.len() > 2 {
+        return None;
+    }
+    Some((left, right))
 }

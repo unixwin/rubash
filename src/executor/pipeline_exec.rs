@@ -659,7 +659,21 @@ impl Executor {
                     && (stage.arithmetic_command.is_some() || stage.conditional_command.is_some()));
             if !stage_defers_debug && self.debug_trap_in_scope() {
                 let stage_text = crate::executor::command_text::bash_command_source_text(stage);
-                let _ = self.run_debug_trap(&stage_text)?;
+                // execute_cmd.c:4510 fires inside the forked element child; a
+                // non-zero trap status under debugging_mode skips the
+                // element's command — the child holds the pipe, produces no
+                // output and exits with the trap's status (probe i521d: both
+                // stages skipped under `trap 'false' DEBUG` → `pipe-R=1`;
+                // probe ka: the downstream stage's own fire still decides for
+                // itself, so it can proceed). Rubash models the element as a
+                // captured in-process stage: empty output + the trap status
+                // reproduces both, and the pipe chain stays intact (issue
+                // #521, huck#268's pipeline-stage fire site).
+                if let Some(skip_status) = self.run_debug_trap(&stage_text)? {
+                    statuses.push(skip_status);
+                    input = String::new();
+                    continue;
+                }
             }
             let preserve_compound_errexit = command_is_compound_pipeline_stage(stage)
                 || stage
@@ -2190,6 +2204,25 @@ impl Executor {
         // builtin path uses; with the stdout capture active, a 2>&1-routed
         // diagnostic lands in this stage's stdout (the pipe) like GNU's.
         let saved_capture = crate::executor::shell_options::begin_stdout_capture();
+        // GNU applies the element's redirections before the command runs
+        // (redir.c do_redirections in the forked element), so an invalid or
+        // unopenable INPUT redirect aborts the element with its diagnostic —
+        // the same ordered validation the top-level dispatch runs
+        // (execute_materialized_command). The inline stage arms below skip
+        // that dispatch, so `true | read x <$(echo a b) | cat` used to reach
+        // the external spawner with no diagnostic and a 127 status where GNU
+        // reports `$(echo a b): ambiguous redirect` and the stage dies with
+        // status 1 (rubash#525).
+        let stage_redirect_rejected = self.reject_invalid_redirects(command)?;
+        if stage_redirect_rejected.is_some() {
+            let captured = crate::executor::shell_options::take_stdout_capture();
+            crate::executor::shell_options::restore_stdout_capture(saved_capture);
+            return Ok(Some((
+                crate::executor::substitution_metadata::bytes_to_shell_text(&captured),
+                String::new(),
+                1,
+            )));
+        }
         if self.command_output_redirect_fails(command)? {
             let captured = crate::executor::shell_options::take_stdout_capture();
             crate::executor::shell_options::restore_stdout_capture(saved_capture);
@@ -2256,7 +2289,32 @@ impl Executor {
                 None => command.redirect_in.is_some(),
             };
         if stage_fd0_file_redirect {
-            return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+            // GNU runs every element in a forked subshell and applies the
+            // element's redirections there before dispatch — a BUILTIN
+            // element with an fd-0 file redirect runs as the builtin with
+            // its stdin on the file, not as an external child (a pipeline
+            // `read x < f` is still the read builtin; routing it to the
+            // external spawner reported `read: command not found` with
+            // status 127 where GNU runs the builtin, rubash#525). External
+            // programs keep the spawner route below.
+            let first_raw = command
+                .word_metadata
+                .first()
+                .map(|metadata| metadata.raw.as_str());
+            let builtin_stage = command
+                .words
+                .first()
+                .and_then(|name| {
+                    self.expand_command_word(command, 0, name, first_raw)
+                        .into_iter()
+                        .next()
+                })
+                .is_some_and(|expanded| {
+                    crate::executor::builtin_names::is_shell_builtin_name(&expanded)
+                });
+            if !builtin_stage {
+                return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+            }
         }
 
         match name {

@@ -1298,39 +1298,49 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                     semicolons += 1;
                 }
             }
-            let expr_raw: String = {
-                let slice = &tokens[open..close];
-                if slice.is_empty() {
-                    String::new()
-                } else {
-                    let mut parts = Vec::with_capacity(slice.len());
-                    for (idx, t) in slice.iter().enumerate() {
-                        if idx == 0 {
-                            parts.push(t.raw.clone());
-                        } else {
-                            let prev = &slice[idx - 1];
-                            let prev_end = prev.column + prev.raw.len();
-                            if t.column > prev_end {
-                                parts.push(" ".to_string());
-                            }
-                            parts.push(t.raw.clone());
-                        }
-                    }
-                    parts.concat()
-                }
+            // GNU parse.y report_syntax_error echoes the offending text
+            // VERBATIM (`((i=0; i<3))', arith_for_command error path) — no
+            // space normalization, no trim (issue #522). Rebuild from the
+            // token stream: each token's leading_ws is the whitespace that
+            // preceded it in the source, so leading_ws+raw walks reproduce
+            // the original characters between `((` and `))` byte-for-byte.
+            let opener_start = if open >= 2 && tokens[open - 2].value == "(" {
+                open - 2
+            } else {
+                open - 1
             };
+            let mut source = String::new();
+            if let Some(opener) = tokens.get(opener_start) {
+                source.push_str(&opener.raw);
+            }
+            // The closer may be one `))` token or two `)` tokens
+            // (make_cmd.c accepts both spellings); the verbatim echo ends at
+            // the second paren either way.
+            let source_end = if tokens.get(close).is_some_and(|t| t.value == ")") {
+                close + 1
+            } else {
+                close
+            };
+            for token in tokens.iter().take(source_end + 1).skip(opener_start + 1) {
+                source.push_str(&token.leading_ws);
+                source.push_str(&token.raw);
+            }
             let error_msg = if semicolons < 2 {
                 "syntax error: arithmetic expression required".to_string()
             } else {
                 "syntax error: `;' unexpected".to_string()
             };
+            // GNU error.c:300-316 parser_error cites the offending line; the
+            // error node's line drives the `line N:` prefix at the report
+            // site (report_command_parse_error).
+            state.current_cmd.line = Some(tokens[i].position);
+            state.current_cmd.logical_line = Some(tokens[i].logical_line);
             state
                 .current_cmd
                 .insert_assignment("__RUBASH_PARSE_ERROR__".to_string(), error_msg);
-            state.current_cmd.insert_assignment(
-                "__RUBASH_PARSE_SOURCE__".to_string(),
-                format!("(( {} ))", expr_raw.trim()),
-            );
+            state
+                .current_cmd
+                .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
             state
                 .ast
                 .commands

@@ -89,7 +89,8 @@ impl Executor {
                     .create(true)
                     .read(true)
                     .write(true)
-                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
+                    .map_err(|e| crate::posix_errors::path_error(&target, e))?;
             } else {
                 self.probe_input_redirect(&target)?;
             }
@@ -133,6 +134,12 @@ impl Executor {
             }
             if redirect.fd_var.is_some() {
             } else if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
+                // GNU redir.c redirection_error (redir.c:149-176) carries the
+                // failed open's target word in the diagnostic
+                // (`$FIX/b: No such file or directory`) — the append open's
+                // error needs the same path_error shaping as the truncating
+                // open, or the renderer's message-only text drops the word
+                // (issue #518 background/append repro).
                 self.open_output_fd_append(&target).or_else(|_| {
                     if is_null_device(&target) {
                         self.create_redirect_output(&target, true)
@@ -141,6 +148,7 @@ impl Executor {
                             .create(true)
                             .append(true)
                             .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))
                     }
                 })?;
             }
@@ -176,7 +184,8 @@ impl Executor {
                 OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
+                    .map_err(|e| crate::posix_errors::path_error(&target, e))?;
             }
         }
 

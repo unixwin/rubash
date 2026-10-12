@@ -501,6 +501,12 @@ where
     let mut assign_names = Vec::new();
     let mut drop_nameref_attrs: Vec<String> = Vec::new();
     let mut attr_status = EXECUTION_SUCCESS;
+    // GNU drops the -n when the same command requests an array shape: the
+    // nameref attribute is lifted out of the set mask and cleared whenever
+    // the variable is or becomes an array (declare.def:962-981), so the
+    // attribute marks and the assignment routing must run with the nameref
+    // bit off.
+    let mut nameref_marks = nameref;
     let arrays = marked_vars(variables, ARRAY_VARS);
     let assocs = marked_vars(variables, ASSOC_VARS);
     let namerefs = marked_vars(variables, NAMEREF_VARS);
@@ -630,10 +636,15 @@ where
             }
             // declare.def:854-862: converting an existing non-nameref variable
             // to a nameref without an assignment fails when its current value
-            // is not a valid nameref value.
+            // is not a valid nameref value. An array/assoc variable is exempt:
+            // declare.def:841 reports it as a conflicting array instead (an
+            // empty array cell is not an invalid nameref value), so the guard
+            // below must be the one to fire.
             if !append
                 && value.is_empty()
                 && !namerefs.contains(lhs)
+                && !arrays.contains(lhs)
+                && !assocs.contains(lhs)
                 && variables.get(lhs).is_some_and(|current| {
                     // A compound/array-storage cell is not a nameref value at
                     // all -- GNU reaches the array-rejection diagnostic for
@@ -695,6 +706,61 @@ where
                 attr_status = EXECUTION_FAILURE;
                 continue;
             }
+            // GNU drops the -n when the same command requests an array shape:
+            // nameref and array/assoc are mutually exclusive and the shape
+            // wins (declare.def:962-981 clears the lifted nameref bit when
+            // the variable is or becomes an array). At global scope the drop
+            // is silent; at function scope the operand still creates its
+            // plain local array, but the command reports the conflict once
+            // (declare.def:841 fires after the local was materialized).
+            if array || assoc {
+                if in_function {
+                    writeln!(
+                        stderr,
+                        "{}{command_name}: {}: reference variable cannot be an array",
+                        diagnostic_prefix(variables),
+                        lhs
+                    )?;
+                    attr_status = EXECUTION_FAILURE;
+                }
+                nameref_marks = false;
+            }
+        }
+        // On a readonly variable only the export, local, nameref, trace and
+        // readonly attribute bits may be touched (variables.h:126-128
+        // valid/invalid_readonly_attrs): requesting any of the integer,
+        // array, assoc or case-mapping attributes in either direction is
+        // refused per name (declare.def:893), and an assignment on the same
+        // word suppresses every attribute the command would otherwise apply
+        // (declare.def:881 skips the operand after the failed assignment).
+        // The refusal is all-or-nothing: a mixed request like -ix on a
+        // readonly variable applies nothing. -p is display-only and never
+        // reaches this gate.
+        if !print && readonly_vars.contains(lhs) {
+            let invalid_attrs = integer
+                || array
+                || assoc
+                || uppercase
+                || lowercase
+                || capcase
+                || unset_integer
+                || unset_array
+                || unset_assoc
+                || unset_uppercase
+                || unset_lowercase
+                || unset_capcase;
+            let assignment_with_valid_attrs =
+                name.contains('=') && (export || trace || unset_export || unset_trace);
+            if invalid_attrs || assignment_with_valid_attrs {
+                writeln!(
+                    stderr,
+                    "{}{command_name}: {}: readonly variable",
+                    diagnostic_prefix(variables),
+                    lhs
+                )?;
+                attr_status = EXECUTION_FAILURE;
+                continue;
+            }
         }
         if !valid_declare_name(name) {
             if print && !name.contains('=') {
@@ -746,6 +812,14 @@ where
                 )?;
                 unmark_typed(variables, NAMEREF_VARS, var_name);
                 variables.remove(var_name);
+            } else if nameref {
+                // The command itself toggles -n while declaring the shape:
+                // the shape wins and applies to the nameref itself — no
+                // chain-follow (declare.def:206 reserves the transform for
+                // commands that leave -n/+n alone), the nameref attribute is
+                // dropped, and the old cell survives as element 0
+                // (declare.def:962 convert_var_to_array keeps the value).
+                unmark_typed(variables, NAMEREF_VARS, var_name);
             } else if declare_nameref_chain(variables, var_name).is_some() {
                 // GNU declare.def:197-216 declare_transform_name + 764-806:
                 // without a subscript the -a/-A flag and the compound
@@ -927,7 +1001,7 @@ where
         &attr_names,
         variables,
         frame_locals,
-        nameref,
+        nameref_marks,
         in_function,
         array,
         assoc,
@@ -957,7 +1031,7 @@ where
         uppercase,
         lowercase,
         capcase,
-        nameref,
+        nameref: nameref_marks,
         readonly,
         unset_export,
         unset_array,

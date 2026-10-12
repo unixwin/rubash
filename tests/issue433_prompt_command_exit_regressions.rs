@@ -45,14 +45,23 @@ struct Session {
 /// Drives one piped-`-i` interactive session: `rubash -i --norc` with the
 /// given lines on stdin (stdin closed after them, the GNU probe shape).
 fn run_interactive(lines: &str) -> Session {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+    run_interactive_env(lines, &[])
+}
+
+/// Same, with extra environment variables (the PC probes pass
+/// PROMPT_COMMAND through the environment, the way a real shell does).
+fn run_interactive_env(lines: &str, vars: &[(&str, &str)]) -> Session {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    command
         .arg("-i")
         .arg("--norc")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn rubash -i");
+        .stderr(Stdio::piped());
+    for (name, value) in vars {
+        command.env(name, value);
+    }
+    let mut child = command.spawn().expect("spawn rubash -i");
     child
         .stdin
         .as_mut()
@@ -162,4 +171,41 @@ fn pc_parse_error_discards_and_survives() {
         session.stdout,
         session.stderr
     );
+}
+
+// ---------------------------------------------------------------------------
+// The #433 residual ledger row (handover #479: "PC parse-error rc=2 vs
+// GNU 0"): when the session ENDS after a PC parse error — stdin EOF with
+// no reader-level parse error anywhere — the final rc is GNU's 0, not the
+// reader's 2. Pinned against WSL GNU bash 5.3.0
+// (`printf '' | PROMPT_COMMAND='…' bash --norc -i; echo $?` → 0 in every
+// shape below; rubash current master already agrees — these tests lock
+// the ledger shut).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pc_parse_error_then_eof_ends_with_gnu_rc_zero() {
+    // EOF right at the first prompt: the PC parse error fires once, the
+    // reader ends at EOF, rc 0.
+    let session = run_interactive_env("", &[("PROMPT_COMMAND", "if {")]);
+    assert_eq!(
+        session.code,
+        Some(0),
+        "a trailing PC parse error must not turn into a reader rc 2: {:?}",
+        session.stderr
+    );
+}
+
+#[test]
+fn pc_parse_error_mid_session_then_eof_rc_zero() {
+    let session = run_interactive_env("true\n", &[("PROMPT_COMMAND", "echo )")]);
+    assert_eq!(session.code, Some(0), "stderr: {}", session.stderr);
+}
+
+#[test]
+fn pc_exit_in_pc_text_still_wins_over_the_eof_rc() {
+    // The other side of the ledger: PC='exit 7' at the only prompt ends
+    // the shell with 7 (the jump status), not the EOF rc.
+    let session = run_interactive_env("exit 7\n", &[("PROMPT_COMMAND", "if {")]);
+    assert_eq!(session.code, Some(7), "stderr: {}", session.stderr);
 }

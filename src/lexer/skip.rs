@@ -2138,6 +2138,85 @@ fn unclosed_array_subscript_walk(
                 index += 2;
                 continue;
             }
+            '$' if chars.get(index + 1) == Some(&'{') => {
+                // GNU parse.y:3877 read_token_word: the `${` construct's body
+                // is consumed by parse_matched_pair ('{', '}') at the word
+                // level — a `[` inside is parameter-body text and never opens
+                // the P_ARRAYSUB subscript hunt (parse.y:5635 runs only for a
+                // bare-word subscript). The `{` arm below used to reset the
+                // command position mid-word, so `echo ${x[}` opened a
+                // subscript hunt at `x[` and died at PARSE time with
+                // `unexpected EOF while looking for matching `]'' where GNU
+                // parses the word fine and defers the malformed body to the
+                // expansion, which reports `${x[}: bad substitution`
+                // (rubash#532). An UNCLOSED `${` falls out of the skip with
+                // the subscript hunt untouched: the generic close-char scan
+                // then owns the `}` EOF, exactly like `echo ${x`.
+                let mut depth = 1usize;
+                let mut scan = index + 2;
+                let mut scan_single = false;
+                let mut scan_double = false;
+                let mut scan_ansi = false;
+                let mut scan_escaped = false;
+                while scan < chars.len() {
+                    let c = chars[scan];
+                    if c == '\n' {
+                        line += 1;
+                    }
+                    if scan_escaped {
+                        scan_escaped = false;
+                        scan += 1;
+                        continue;
+                    }
+                    if scan_ansi {
+                        if c == '\\' {
+                            scan_escaped = true;
+                        } else if c == '\'' {
+                            scan_ansi = false;
+                        }
+                        scan += 1;
+                        continue;
+                    }
+                    if scan_single {
+                        if c == '\'' {
+                            scan_single = false;
+                        }
+                        scan += 1;
+                        continue;
+                    }
+                    if scan_double {
+                        if c == '\\' {
+                            scan_escaped = true;
+                        } else if c == '"' {
+                            scan_double = false;
+                        }
+                        scan += 1;
+                        continue;
+                    }
+                    match c {
+                        '\\' => scan_escaped = true,
+                        '\'' => scan_single = true,
+                        '"' => scan_double = true,
+                        '$' if chars.get(scan + 1) == Some(&'\'') => {
+                            scan_ansi = true;
+                            scan += 1;
+                        }
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                scan += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    scan += 1;
+                }
+                index = scan;
+                word.clear();
+                continue;
+            }
             _ => {}
         }
         if ch.is_whitespace() {
@@ -2330,6 +2409,42 @@ fn unclosed_array_subscript_walk(
             word.clear();
             index += 1;
             continue;
+        }
+        // parse.y read_token_word: `${` opens parse_matched_pair
+        // (P_FIRSTCLOSE|P_DOLBRACE, parse.y:5513) whose scan consumes the
+        // whole braced parameter as WORD text — a `[` inside it never opens a
+        // subscript array-sub command unless directly preceded by `$`
+        // (parse.y:4126-4136 P_DOLBRACE arm), so `echo ${a[` reports the
+        // braced `}' at EOF, not `]' (2026-10-12 WSL GNU 5.3.0 probe, #551
+        // C3). Unterminated: the braced `}' owns the EOF — bail out to the
+        // generic close-char scan. The LEX_WASDOL rule only asks for the
+        // IMMEDIATELY preceding char (`$((1+${a[0` counts even with
+        // arithmetic text in the word), hence ends_with.
+        if ch == '{' && word.ends_with('$') {
+            let context = super::dolbrace::BraceContext {
+                outer_double_quote: false,
+                posix: false,
+                replacement_context: false,
+                initial_state: super::dolbrace::DolbraceState::Param,
+            };
+            match super::dolbrace::scan_braced_parameter_body_chars(&chars[index..], context) {
+                Some(scan) => {
+                    let consumed = 2 + scan.end;
+                    line += chars[index..index + consumed]
+                        .iter()
+                        .filter(|c| **c == '\n')
+                        .count();
+                    index += consumed;
+                    // The whole `${...}` is word material: the word is no
+                    // longer a pure identifier, so a later `[` stays literal.
+                    word.clear();
+                    word.push('$');
+                    command_position = false;
+                    element_start = false;
+                    continue;
+                }
+                None => return None,
+            }
         }
         if matches!(ch, ';' | '&' | '|' | '{' | '}') {
             command_position = true;

@@ -126,6 +126,10 @@ impl Executor {
                 self.exit_code = self.execute_identity_tool(cmd, "arch");
                 Ok(())
             }
+            "stty" => {
+                self.exit_code = self.execute_console_mode_tool(cmd);
+                Ok(())
+            }
             _ => self.execute_external(cmd),
         }
     }

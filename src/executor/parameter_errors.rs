@@ -642,6 +642,59 @@ impl Executor {
         }
         None
     }
+    /// True when the `${...}` body is a malformed subscripted reference:
+    /// an empty subscript (`x[]`) or a subscript immediately followed by
+    /// another (`a[0][1]`). Only bodies whose pre-bracket head is a shell
+    /// name (or the all-digit positional spelling, which GNU
+    /// valid_array_reference rejects as a base) participate; other `[`
+    /// occurrences belong to operator tails and patterns and keep their own
+    /// rules. See the call site for the GNU anchor.
+    fn malformed_braced_reference(inner: &str) -> bool {
+        let body = inner.strip_prefix('!').unwrap_or(inner);
+        let body = body.strip_prefix('#').unwrap_or(body);
+        let Some(open) = body.find('[') else {
+            return false;
+        };
+        let head = &body[..open];
+        if head.is_empty() {
+            return false;
+        }
+        let head_is_name = is_shell_name(head);
+        let head_is_digits = head.bytes().all(|b| b.is_ascii_digit());
+        if !head_is_name && !head_is_digits {
+            return false;
+        }
+        // Find the bracket matching the opening one (subscripts nest via
+        // `$((x[0]))`-style arithmetic), then inspect the shape.
+        let bytes = body.as_bytes();
+        let mut depth = 0usize;
+        let mut close = None;
+        for (index, &byte) in bytes.iter().enumerate().skip(open) {
+            if byte == b'[' {
+                depth += 1;
+            } else if byte == b']' {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+        }
+        let Some(close) = close else {
+            // An UNCLOSED subscript bracket (`${x[}`): the body parses
+            // (the `${`...`}` pair is what the word level matches,
+            // parse.y:3877) and GNU defers the malformed reference to the
+            // expansion — `${x[}: bad substitution`, status 1, the command
+            // dies and the script continues (rubash#532; WSL 5.3.0 probe:
+            // `echo BEFORE; echo ${x[}; echo AFTER` runs BEFORE only, rc 1).
+            return true;
+        };
+        if body[open + 1..close].is_empty() {
+            return true;
+        }
+        body[close + 1..].starts_with('[')
+    }
+
     /// Validates the remainder of a `${#...}` expansion when it does not
     /// start with a shell name: `#` is then the `$#` parameter itself and
     /// the text must be an operator applied to it. Operators with an empty
@@ -893,6 +946,20 @@ impl Executor {
                 ));
             };
             let inner = &after_start[..end];
+            // GNU subst.c:10053 parameter_brace_expand -> valid_brace_expansion_word
+            // (subst.c:7583): the reference must be all digits, a special
+            // parameter, a valid identifier, or ONE well-formed non-empty
+            // array subscript (valid_array_reference, arrayfunc.c:885). An
+            // empty subscript (`${x[]}`) or a second subscript
+            // (`${a[0][1]}`) is a bad substitution reported with the whole
+            // `${...}` text (subst.c:10278) — the read path used to expand
+            // both silently empty (rubash#536). The check runs first
+            // because GNU validates the reference before the operator
+            // dispatch, and it covers the indirect/length prefixes (`${!x[]}`,
+            // `${#x[]}`) whose reference obeys the same rule.
+            if Self::malformed_braced_reference(inner) {
+                return Some((format!("${{{inner}}}"), "bad substitution".to_string(), 1));
+            }
             // GNU rejects a parameter expansion nested inside another
             // parameter expansion inside an array subscript. Reject it
             // before the mutable whole-word expander can recurse indefinitely;
@@ -953,14 +1020,45 @@ impl Executor {
                 // name whose value is a valid identifier expands normally -
                 // even when the target itself is unset (GNU probe:
                 // x=validname with validname unset expands empty).
+                //
+                // "Unset" here means NO variable ENTRY: the nameref walk
+                // find_variable_last_nameref (variables.c:2051) reports no
+                // entry for an absent name and for a nameref chain that
+                // stops on an empty cell (or cycles / exceeds depth) — both
+                // keep the fatal (subst.c:7913 fires it exactly when the
+                // walk found nothing and the body is a plain identifier).
+                // A declared-unset non-nameref entry (bare `declare x` /
+                // `local x`, the att_invisible port) IS found, so
+                // parameter_brace_find_indir yields an unset value and the
+                // whole expansion is empty — WSL 5.3.0:
+                // `declare x; echo "[${!x}]"` prints `[]` and the script
+                // continues (rubash#529).
                 if !indirect.is_empty() && is_shell_name(indirect) {
+                    let source_found = match self.nameref_resolution(indirect) {
+                        NamerefResolution::Target(_) => true,
+                        NamerefResolution::NotNameref => {
+                            self.shell_state.env_vars.contains_key(indirect)
+                                || is_marked_var(
+                                    &self.shell_state.env_vars,
+                                    DECLARED_UNSET_VARS,
+                                    indirect,
+                                )
+                        }
+                        NamerefResolution::Unresolved
+                        | NamerefResolution::Circular
+                        | NamerefResolution::MaxDepth => false,
+                    };
                     match self.shell_state.env_vars.get(indirect) {
-                        None => {
+                        None if !source_found => {
                             return Some((
                                 indirect.to_string(),
                                 "invalid indirect expansion".to_string(),
                                 1,
                             ));
+                        }
+                        None => {
+                            // Declared-unset entry: the expansion is empty,
+                            // never a diagnostic (rubash#529).
                         }
                         Some(value) => {
                             if !Self::is_valid_indirect_target(value) {
@@ -1482,27 +1580,63 @@ impl Executor {
             let resolved = self
                 .resolved_variable_name(base)
                 .unwrap_or_else(|| base.to_string());
-            let Some(target) = self.shell_state.env_vars.get(&resolved).cloned() else {
-                return None;
-            };
-            if target.ends_with("[@]") || target.ends_with("[*]") {
-                return None;
-            }
-            let bound = if let Some((tbase, tsub)) = parse_array_subscript(&target) {
-                if tsub == "@" || tsub == "*" {
-                    true
-                } else if self.is_assoc_parameter_array(&tbase) {
-                    let key = self.assoc_subscript_key(&tsub);
-                    self.parameter_array_storage(&tbase)
-                        .and_then(|storage| assoc_value_at(&storage, &key))
-                        .is_some()
-                } else {
-                    !self.nounset_indexed_element_absent(&tbase, &tsub)
+            // GNU subst.c:7883-7920 parameter_brace_expand_indir + the
+            // caller's unbound check at subst.c:10164-10175 — three ordered
+            // outcomes for the indirection SOURCE:
+            // 1. entry absent (find_variable_last_nameref == 0):
+            //    "invalid indirect expansion" fires BEFORE any nounset
+            //    check — defer to that scan (return None here);
+            // 2. entry exists but declared-unset (bare declare/local):
+            //    no indir error, the NULL value leaves the whole expansion
+            //    unset, and the caller's err_unboundvar(name) reports the
+            //    full `!base` under nounset (WSL 5.3.0: `set -u; declare x;
+            //    echo ${!x}` -> `!x: unbound variable`, rubash#529);
+            // 3. entry has a value: an invalid target value raises
+            //    "invalid variable name" INSIDE parameter_brace_expand_indir
+            //    (subst.c:7955-7961) before the caller's unbound check —
+            //    defer to that scan too (WSL 5.3.0: `set -u; x=; ${!x}` and
+            //    `set -u; x=1bad; ${!x}` both report the VALUE, not `!x`).
+            match self.shell_state.env_vars.get(&resolved).cloned() {
+                None => {
+                    // Outcome 2 only for a declared-unset NON-nameref entry:
+                    // a never-set name or an empty-cell / circular nameref
+                    // keeps outcome 1 ("invalid indirect expansion" before
+                    // any nounset check — variables.c:2070 returns NULL for
+                    // an empty-cell nameref even though the entry exists).
+                    let plain_entry = matches!(
+                        self.nameref_resolution(&resolved),
+                        NamerefResolution::NotNameref
+                    ) && is_marked_var(
+                        &self.shell_state.env_vars,
+                        DECLARED_UNSET_VARS,
+                        &resolved,
+                    );
+                    return plain_entry.then(|| format!("!{base}"));
                 }
-            } else {
-                self.nounset_variable_bound(&target)
-            };
-            return (!bound).then(|| format!("!{base}"));
+                Some(target) => {
+                    if target.ends_with("[@]") || target.ends_with("[*]") {
+                        return None;
+                    }
+                    if !Self::is_valid_indirect_target(&target) {
+                        return None;
+                    }
+                    let bound = if let Some((tbase, tsub)) = parse_array_subscript(&target) {
+                        if tsub == "@" || tsub == "*" {
+                            true
+                        } else if self.is_assoc_parameter_array(&tbase) {
+                            let key = self.assoc_subscript_key(&tsub);
+                            self.parameter_array_storage(&tbase)
+                                .and_then(|storage| assoc_value_at(&storage, &key))
+                                .is_some()
+                        } else {
+                            !self.nounset_indexed_element_absent(&tbase, &tsub)
+                        }
+                    } else {
+                        self.nounset_variable_bound(&target)
+                    };
+                    return (!bound).then(|| format!("!{base}"));
+                }
+            }
         }
 
         // GNU subst.c:9807 parameter_brace_expand: the parameter reference

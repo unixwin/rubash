@@ -2886,11 +2886,14 @@ fn command_substitution_uses_specialized_path(
         || (words.iter().any(|word| word == "|")
             && !command_substitution_contains_here_string(source))
         || words.first().map(String::as_str) == Some("time")
-        || executor
-            // quiet: this is the ADMISSION probe — the real expansion re-runs
-            // command_substitution_cd_pwd_output inside the &self wrapper, and
-            // #491's cd diagnostic must print once (GNU), not once per probe.
-            .command_substitution_cd_pwd_output_quiet_probe(source)
+        // rubash#375 second cut: shape-only cd/pwd admission. The helper
+        // returns Some for every body passing its shape gate (both failure
+        // arms yield Some(String::new())), so the old full probe — a whole
+        // expand_word + CreateFileW/GetFinalPathNameByHandleW round trip whose
+        // result was discarded before the real expansion paid it again — is
+        // equivalent to the shared shape predicate. See
+        // command_substitution_cd_pwd_shape for the pinned equivalence.
+        || crate::executor::command_substitution::command_substitution_cd_pwd_shape(source)
             .is_some()
 }
 

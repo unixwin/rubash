@@ -4,8 +4,8 @@ use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::NamerefResolution;
 use crate::executor::{
     assoc_hash_ordered_entries, assoc_hash_ordered_values, assoc_keys, assoc_nbuckets,
-    dense_view_element, eval_conditional_arith_value_with_writes, IndexedSubscript,
-    SubscriptSource, DECLARED_UNSET_VARS, NAMEREF_VARS,
+    dense_view_element, eval_conditional_arith_value_categorized_with_writes_and_state,
+    IndexedSubscript, SubscriptSource, DECLARED_UNSET_VARS, NAMEREF_VARS,
 };
 
 impl Executor {
@@ -13,8 +13,20 @@ impl Executor {
         match name {
             "PIPESTATUS" => return self.pipestatus_values(),
             "FUNCNAME" => {
+                // GNU pushes the synthetic bottom "main" frame ONLY when the
+                // shell reads a script FILE (shell.c:1636-1648
+                // open_shell_script: array_push (funcname_a, "main"));
+                // `bash -s`/`bash -c` never enter open_shell_script, so the
+                // frame does not exist and caller's FUNCNAME[expr+1] lookup
+                // fails with EXECUTION_FAILURE (caller.def:108-121) —
+                // `caller 1` at g->f depth is empty with status 1, not a
+                // fabricated `main` line (issue #519). Same gating as the
+                // dynamic_stack_array_values view.
                 let mut stack = self.shell_state.function_name_stack.clone();
-                if !stack.is_empty() && stack.last().map(String::as_str) != Some("main") {
+                if self.has_script_main_frame()
+                    && !stack.is_empty()
+                    && stack.last().map(String::as_str) != Some("main")
+                {
                     stack.push("main".to_string());
                 }
                 return stack;
@@ -201,12 +213,13 @@ impl Executor {
                 // `$name` expansion — `${a[$((RANDOM%3))]}` advances the
                 // same RNG state as `$((RANDOM%3))` (rubash#299).
                 let dynamic_values = self.arith_dynamic_context();
-                let (result, writes) = eval_conditional_arith_value_with_writes(
-                    &expr,
-                    &overlaid,
-                    Some(&self.shell_state.random_state),
-                    Some(&dynamic_values),
-                );
+                let (result, writes, actual_category) =
+                    eval_conditional_arith_value_categorized_with_writes_and_state(
+                        &expr,
+                        &overlaid,
+                        Some(&self.shell_state.random_state),
+                        Some(&dynamic_values),
+                    );
                 if !writes.is_empty() {
                     crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES.with(|w| {
                         w.borrow_mut().extend(writes);
@@ -223,7 +236,46 @@ impl Executor {
                         }
                         resolved
                     }
-                    None => return None,
+                    // GNU evalexp raises the arithmetic expansion error for a
+                    // failing subscript expression (`${a[$((1/0))]}` reports
+                    // `1/0: division by 0 (error token is "0")` and abandons
+                    // the command, subst.c array_variable_part -> expr.c
+                    // evalerror); the read used to return empty silently
+                    // (rubash#536). Mirror the embedded-walker rails: latch
+                    // the category and let command_execute's
+                    // abort_on_expansion_errors discard the command.
+                    None => {
+                        self.shell_state
+                            .arithmetic_last_error_category
+                            .set(actual_category);
+                        let actual_fatal = self
+                            .shell_state
+                            .arithmetic_last_error_category
+                            .take()
+                            .is_some();
+                        if !actual_fatal
+                            && !crate::executor::arithmetic::arithmetic_expansion_is_fatal(&expr)
+                        {
+                            self.shell_state.arithmetic_nonfatal_error.set(true);
+                        } else {
+                            self.shell_state.arithmetic_fatal_error.set(true);
+                        }
+                        if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                            let message =
+                                crate::executor::arithmetic::arithmetic_error_message(
+                                    &expr,
+                                    true,
+                                    &self.shell_state.env_vars,
+                                )
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "{expr}: arithmetic syntax error in expression (error token is \"{expr}\")"
+                                    )
+                                });
+                            eprintln!("{}{message}", self.diagnostic_prefix());
+                        }
+                        return None;
+                    }
                 }
             }
         } else {
