@@ -2820,8 +2820,8 @@ impl Executor {
         // gate's `"${X[0]}": Bad file descriptor` (issue #518). Placement
         // mirrors execute_materialized_command: before the tempenv applies,
         // because redirect words expand against the caller's bindings.
-        let redirect_rejected = match self.reject_invalid_redirects(&materialized_cmd) {
-            Ok(rejected) => rejected,
+        let redirect_rejection = match self.reject_invalid_redirects(&materialized_cmd) {
+            Ok(rejection) => rejection,
             Err(error) => return Some(Err(error)),
         };
         let assignment_raws = (materialized_cmd.assignment_raws.len()
@@ -2829,7 +2829,16 @@ impl Executor {
         .then(|| materialized_cmd.assignment_raws.as_slice());
         let temporary_assignments =
             self.apply_temporary_assignments(&materialized_cmd.assignments, assignment_raws);
-        if redirect_rejected {
+        if let Some(rejection) = redirect_rejection {
+            if rejection == super::redirection::RedirectRejection::FatalNounset {
+                // Same classification as execute_materialized_command
+                // (rubash#535): an unbound variable in a function call's
+                // redirect word is a fatal expansion error.
+                self.finish_heredoc_expansion_error(
+                    &materialized_cmd,
+                    Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                );
+            }
             self.restore_temporary_assignments(temporary_assignments);
             let finish_result = self.finish_process_substitutions(process_substitution_files);
             let assignment_finish_result =
