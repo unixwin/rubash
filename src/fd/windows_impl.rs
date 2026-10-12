@@ -29,6 +29,7 @@ use std::os::windows::ffi::OsStrExt;
 pub type HANDLE = isize; // isize so FdEntry/FdTable are Send+Sync
 pub type BOOL = i32;
 pub type DWORD = u32;
+pub type WORD = u16;
 
 const INVALID_HANDLE_VALUE: HANDLE = -1;
 const GENERIC_READ: DWORD = 0x8000_0000;
@@ -637,6 +638,97 @@ pub fn is_char_device_handle(h: HANDLE) -> bool {
     (unsafe { GetFileType(h) }) == FILE_TYPE_CHAR
 }
 
+const ENABLE_LINE_INPUT: DWORD = 0x0002;
+const ENABLE_ECHO_INPUT: DWORD = 0x0004;
+
+/// Guard that switches a console input handle to per-character reads for the
+/// duration of a `read` builtin call. cooked mode (ENABLE_LINE_INPUT) makes
+/// every ReadFile wait for Enter, so `read -n1` cannot see a single
+/// keystroke and `read -t 0.05` cannot time out between keys. GNU
+/// builtins/read.def:570-590 switches the tty to one-char (or cbreak, when
+/// -s) mode for the same reason and restores it when the builtin exits.
+/// `None` when `h` is not a console — pipes and files need no mode change.
+pub struct ConsoleOnecharGuard {
+    handle: HANDLE,
+    saved_mode: DWORD,
+}
+
+impl ConsoleOnecharGuard {
+    /// Console output handle the read consumed bytes are echoed to. ENABLE_
+    /// ECHO_INPUT only applies in line mode, so the onechar guard owns the
+    /// echo (read.def ttfd_onechar keeps ECHO on through the tty driver).
+    pub fn echo_byte(&self, byte: u8) {
+        let out = process_std_handle(1);
+        if out == INVALID_HANDLE_VALUE || out == 0 {
+            return;
+        }
+        if !is_console_handle(out) {
+            return;
+        }
+        let _ = write_all(out, &[byte]);
+    }
+}
+
+impl Drop for ConsoleOnecharGuard {
+    fn drop(&mut self) {
+        extern "system" {
+            fn SetConsoleMode(h: HANDLE, mode: DWORD) -> BOOL;
+        }
+        unsafe {
+            SetConsoleMode(self.handle, self.saved_mode);
+        }
+    }
+}
+
+/// Silenced echo with canonical buffering kept — the read.def:603-621
+/// `ttfd_noecho` shape (`read -s` without -n/-d): the line discipline still
+/// assembles lines, it just does not paint the typed characters.
+pub fn enter_console_noecho_mode(h: HANDLE) -> Option<ConsoleOnecharGuard> {
+    extern "system" {
+        fn SetConsoleMode(h: HANDLE, mode: DWORD) -> BOOL;
+    }
+    if !is_console_handle(h) {
+        return None;
+    }
+    let mut mode: DWORD = 0;
+    if unsafe { GetConsoleMode(h, &mut mode) } == 0 {
+        return None;
+    }
+    let saved = mode;
+    let silenced = mode & !ENABLE_ECHO_INPUT;
+    if unsafe { SetConsoleMode(h, silenced) } == 0 {
+        return None;
+    }
+    Some(ConsoleOnecharGuard {
+        handle: h,
+        saved_mode: saved,
+    })
+}
+
+/// Enter per-character console read mode. Returns `None` (and changes
+/// nothing) when `h` is not a console handle.
+pub fn enter_console_onechar_mode(h: HANDLE) -> Option<ConsoleOnecharGuard> {
+    extern "system" {
+        fn SetConsoleMode(h: HANDLE, mode: DWORD) -> BOOL;
+    }
+    if !is_console_handle(h) {
+        return None;
+    }
+    let mut mode: DWORD = 0;
+    if unsafe { GetConsoleMode(h, &mut mode) } == 0 {
+        return None;
+    }
+    let saved = mode;
+    let raw = mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+    if unsafe { SetConsoleMode(h, raw) } == 0 {
+        return None;
+    }
+    Some(ConsoleOnecharGuard {
+        handle: h,
+        saved_mode: saved,
+    })
+}
+
 /// Bounded wait for a spawned child — the Windows stand-in for GNU's
 /// interruptible waitpid (jobs.c:3064 wait_for returns early when a caught
 /// signal arrives; trap.c:545 trap_handler records it). WAIT_OBJECT_0 means
@@ -669,10 +761,71 @@ pub fn wait_child_slice(
 /// Regular files are always readable (select reports them ready). Pipes
 /// are not waitable objects, so poll PeekNamedPipe — a failed peek means
 /// the pipe broke, which select would also report as readable (EOF).
-/// Console input handles (CONIN$, `read < /dev/tty`) are waitable.
+///
+/// Console input records (wincon INPUT_RECORD): only a key-down record
+/// feeds a ReadFile on the input handle.
+#[repr(C)]
+struct KeyEventRecord {
+    key_down: BOOL,
+    repeat_count: WORD,
+    virtual_key_code: WORD,
+    virtual_scan_code: WORD,
+    unicode_char: u16,
+    control_key_state: DWORD,
+}
+
+#[repr(C)]
+struct InputRecord {
+    event_type: WORD,
+    _pad: WORD,
+    key: KeyEventRecord,
+}
+
+const KEY_EVENT: WORD = 0x0001;
+
+/// Bounded wait until `h` has readable input — the Windows port of GNU
+/// builtins/read.def's select()-backed read_timeout (`shtimer_select`).
+/// Regular files are always readable (select reports them ready). Pipes
+/// are not waitable objects, so poll PeekNamedPipe — a failed peek means
+/// the pipe broke, which select would also report as readable (EOF).
+///
+/// Console input handles are polled through PeekConsoleInputW instead of
+/// WaitForSingleObject or GetNumberOfConsoleInputEvents: a ConPTY-backed
+/// console can stay SIGNALED with no pending key, and its queue can hold
+/// records ReadFile never consumes (focus/mouse events), so both waits
+/// report Ready forever and a `read -t` deadline never fires (niubash#280)
+/// — the following ReadFile then blocks indefinitely. A key-down record is
+/// exactly the event a cooked read consumes.
 pub fn wait_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
     match unsafe { GetFileType(h) } {
         FILE_TYPE_CHAR => {
+            if is_console_handle(h) {
+                extern "system" {
+                    fn PeekConsoleInputW(
+                        h: HANDLE,
+                        record: *mut InputRecord,
+                        length: DWORD,
+                        read: *mut DWORD,
+                    ) -> BOOL;
+                }
+                let deadline = std::time::Instant::now() + timeout;
+                loop {
+                    let mut record: InputRecord = unsafe { std::mem::zeroed() };
+                    let mut read: DWORD = 0;
+                    let ok = unsafe { PeekConsoleInputW(h, &mut record, 1, &mut read) };
+                    if ok != 0
+                        && read > 0
+                        && record.event_type == KEY_EVENT
+                        && record.key.key_down != 0
+                    {
+                        return ReadWait::Ready;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return ReadWait::Timeout;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
             let ms = timeout.as_millis().min(DWORD::MAX as u128 - 1) as DWORD;
             match unsafe { WaitForSingleObject(h, ms) } {
                 WAIT_OBJECT_0 => ReadWait::Ready,

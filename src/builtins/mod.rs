@@ -32,6 +32,7 @@ pub mod shift;
 pub mod shopt;
 pub mod sleep;
 pub mod source;
+pub mod stty;
 #[cfg(windows)]
 pub mod sudo;
 pub mod suspend;

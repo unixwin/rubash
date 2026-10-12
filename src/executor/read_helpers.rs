@@ -300,13 +300,54 @@ pub(in crate::executor) fn read_delimiter_char(word: &str) -> char {
 }
 
 /// The delimiter needle inside buffered shell text: raw bytes live in text
-/// as marker pairs, so a >=0x80 delimiter matches its encoded pair.
+/// as marker pairs, so a >=0x80 delimiter matches its encoded pair. Carrier
+/// bytes (0x0c, 0x11, 0x13, 0x14..=0x1f) are stored the same way once the
+/// record has been normalized by `tag_read_carrier_text`, so `-d $'\x1b'`
+/// matches the tagged record too.
 pub(in crate::executor) fn read_delimiter_needle(delimiter: char) -> String {
-    if delimiter as u32 >= 0x80 {
-        substitution_metadata::bytes_to_shell_text(&[delimiter as u8])
+    let code = delimiter as u32;
+    if code >= 0x80 || crate::lexer::ansi::is_assignment_carrier_byte(code) {
+        substitution_metadata::bytes_to_shell_text(&[code as u8])
     } else {
         delimiter.to_string()
     }
+}
+
+/// True when `text` holds the delimiter in either transport form: the
+/// tagged marker pair (normalized records) or the literal char (raw mirror
+/// texts such as FUNCTION_STDIN, which stores raw pipe bytes).
+pub(in crate::executor) fn record_contains_delimiter(text: &str, delimiter: char) -> bool {
+    text.contains(&read_delimiter_needle(delimiter)) || text.contains(delimiter)
+}
+
+/// Normalize a served `read` record into the shell's storage domain: every
+/// ASCII byte the assignment walkers use as an internal carrier
+/// (lexer/ansi.rs is_assignment_carrier_byte) travels as the E000 raw-byte
+/// marker pair, exactly like `bytes_to_shell_text` (file/coproc inputs) and
+/// `push_ansi_c_byte` ($'...' words) already do. Without this, a record
+/// served from the byte transports (process stdin, the FUNCTION_STDIN
+/// mirror) carries 0x1b/0x0c as literal chars that collide with the lexer's
+/// marker system (QUOTED_WORD_PREFIX is 0x1b): declare -p drops them as
+/// markers and pattern comparison against $'\x1b' never matches. Idempotent:
+/// pair chars are >= 0xE000 and pass through untouched.
+pub(in crate::executor) fn tag_read_carrier_text(input: &str) -> String {
+    let needs_tagging = input.chars().any(|ch| {
+        let code = ch as u32;
+        code < 0x80 && crate::lexer::ansi::is_assignment_carrier_byte(code)
+    });
+    if !needs_tagging {
+        return input.to_string();
+    }
+    let mut output = String::with_capacity(input.len());
+    for ch in input.chars() {
+        let code = ch as u32;
+        if code < 0x80 && crate::lexer::ansi::is_assignment_carrier_byte(code) {
+            output.push_str(&substitution_metadata::encode_raw_byte_marker(code as u8));
+        } else {
+            output.push(ch);
+        }
+    }
+    output
 }
 
 /// True when a decoded stdin unit is the delimiter byte (GNU read.def
@@ -330,12 +371,14 @@ pub(in crate::executor) fn stdin_unit_is_delimiter(unit: &StdinUnit, delimiter: 
 }
 
 pub(in crate::executor) fn read_stdin_until(
+    deadline: Option<std::time::Instant>,
+    silent: bool,
     delimiter: char,
     char_limit: Option<usize>,
     exact_char_limit: bool,
-) -> std::io::Result<(usize, String, bool)> {
+) -> std::io::Result<(usize, String, bool, bool)> {
     if char_limit == Some(0) {
-        return Ok((0, String::new(), false));
+        return Ok((0, String::new(), false, false));
     }
 
     // GNU builtins/read.def reads fd 0 through zread (lib/sh/zread.c) — one
@@ -346,13 +389,63 @@ pub(in crate::executor) fn read_stdin_until(
     // descriptor already at EOF. Read the raw OS handle directly so the
     // shared file offset advances only by what was actually consumed.
     let stdin_handle = crate::fd::process_std_handle(0);
+    // read.def:570-590: a -n/-d read from a tty runs in one-char mode and
+    // restores the terminal when the builtin exits — a console in cooked
+    // line mode would hold every keystroke until Enter, breaking both the
+    // -n record shape and the -t deadline. The mode gate:
+    // read.def:570-590 switches the tty to one-char mode only for -n/-N
+    // counts or a non-newline delimiter; a plain newline-terminated read
+    // stays in canonical mode, and -s alone only silences the echo
+    // (read.def:603-621 ttfd_noecho).
+    let onechar = if char_limit.is_some() || delimiter != '\n' {
+        crate::fd::enter_console_onechar_mode(stdin_handle)
+    } else if silent {
+        crate::fd::enter_console_noecho_mode(stdin_handle)
+    } else {
+        None
+    };
+    // Echo ownership follows the mode guard: on a console the onechar mode
+    // silenced the driver's echo, so a non-silent read re-emits each
+    // consumed unit itself (read.def ttfd_onechar keeps ECHO on).
+    let manual_echo = onechar.is_some() && !silent;
+    let echo_unit = |unit: &StdinUnit| {
+        if let Some(guard) = onechar.as_ref() {
+            match unit {
+                StdinUnit::Char(ch) => {
+                    let mut buf = [0u8; 4];
+                    for byte in ch.encode_utf8(&mut buf).as_bytes() {
+                        guard.echo_byte(*byte);
+                    }
+                }
+                StdinUnit::RawByte { text } => {
+                    for byte in substitution_metadata::shell_text_to_raw_bytes(text) {
+                        guard.echo_byte(byte);
+                    }
+                }
+            }
+        }
+    };
     let mut output = String::new();
     let mut read = 0;
     let mut decoder = StdinCharDecoder::new();
     let mut units = 0usize;
     let mut eof = false;
+    let mut timed_out = false;
     loop {
         if !decoder.has_queued() {
+            // read.def check_read_timeout (read.def:659) runs at the top of
+            // every read-loop iteration: wait out the remaining deadline for
+            // the handle to become readable before the blocking read.
+            if let Some(deadline) = deadline {
+                let now = std::time::Instant::now();
+                if now >= deadline
+                    || crate::fd::wait_readable(stdin_handle, deadline - now)
+                        == crate::fd::ReadWait::Timeout
+                {
+                    timed_out = true;
+                    break;
+                }
+            }
             match crate::fd::read_some(stdin_handle, 1)? {
                 buf if buf.is_empty() => {
                     eof = true;
@@ -368,21 +461,20 @@ pub(in crate::executor) fn read_stdin_until(
             continue;
         };
         let is_cr = matches!(unit, StdinUnit::Char('\r'));
+        if manual_echo {
+            echo_unit(&unit);
+        }
+        if !exact_char_limit && stdin_unit_is_delimiter(&unit, delimiter) {
+            break;
+        }
         match unit {
-            unit => {
-                if !exact_char_limit && stdin_unit_is_delimiter(&unit, delimiter) {
-                    break;
-                }
-                match unit {
-                    StdinUnit::Char(ch) => {
-                        output.push(ch);
-                        units += 1;
-                    }
-                    StdinUnit::RawByte { text } => {
-                        output.push_str(&text);
-                        units += 1;
-                    }
-                }
+            StdinUnit::Char(ch) => {
+                output.push(ch);
+                units += 1;
+            }
+            StdinUnit::RawByte { text } => {
+                output.push_str(&text);
+                units += 1;
             }
         }
         if char_limit.is_some_and(|limit| units >= limit) {
@@ -396,15 +488,31 @@ pub(in crate::executor) fn read_stdin_until(
         decoder.flush(&mut output);
     }
     // Third element: read.def:949 eof — the handle closed before the
-    // delimiter (a char-limit break or timeout is not EOF).
+    // delimiter (a char-limit break or timeout is not EOF). Fourth element:
+    // read.def:553 — the deadline expired; the caller maps it to
+    // 128+SIGALRM while still assigning the partial record.
     Ok((
         read,
         trim_read_input(output, delimiter, char_limit, exact_char_limit),
         eof,
+        timed_out,
     ))
 }
 
 pub(in crate::executor) fn trim_read_input(
+    mut input: String,
+    delimiter: char,
+    char_limit: Option<usize>,
+    exact_char_limit: bool,
+) -> String {
+    // Trimming and limit math below run on the literal-char form (the
+    // delimiter needle handles both transports); the storage-domain tagging
+    // is the last step so every served record leaves this fn normalized.
+    let trimmed = trim_read_input_literal(input, delimiter, char_limit, exact_char_limit);
+    tag_read_carrier_text(&trimmed)
+}
+
+fn trim_read_input_literal(
     mut input: String,
     delimiter: char,
     char_limit: Option<usize>,

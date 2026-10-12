@@ -255,6 +255,19 @@ impl Executor {
         output.status
     }
 
+    /// `stty` console-mode builtin (niubash#282): same buffered-output
+    /// routing as the identity tools, so redirections apply.
+    pub(in crate::executor) fn execute_console_mode_tool(&mut self, cmd: &CommandNode) -> i32 {
+        let output = crate::builtins::stty::execute_stty(&cmd.words[1..]);
+        if self
+            .write_buffered_builtin_output(cmd, &output.stdout, &output.stderr)
+            .is_err()
+        {
+            return 1;
+        }
+        output.status
+    }
+
     pub(in crate::executor) fn execute_cd(
         &mut self,
         cmd: &CommandNode,
