@@ -2335,6 +2335,48 @@ fn run_source_impl(
             }
             return if inside_compassign { 1 } else { 2 };
         }
+        // rubash#543: an unterminated `$[` legacy-arithmetic construct is the
+        // parse_matched_pair grouping scan opened by read_token_word's
+        // shellexp arm (parse.y:5494-5527 `parse_matched_pair ('[', ']',
+        // P_ARITH)`); EOF reports `unexpected EOF while looking for matching
+        // `X'' at the innermost failed scan's opener (parse.y:3901-3912) and
+        // exits 2. The verdict shapes (WSL GNU 5.2.21/5.3.0 probes,
+        // 2026-10-12): unquoted hunt -> `]'; a quote/backtick recursion
+        // inside names ITSELF (a5: `echo $[\n'q` -> `'` line 2); a hunt
+        // bounded by a double-quoted span names the DQUOTE at the span's
+        // line (q2/w1-w4: `echo "$[1+2"` -> `"'`); reported ahead of the
+        // generic close-char path because the hunt owns the EOF even when a
+        // `${` is also unclosed (`echo ${x[$[1}` -> `]', not `}').
+        if let Some(eof) = crate::lexer::unclosed_dollar_bracket_eof(input) {
+            let source = input.trim_end_matches('\n');
+            let prefix = if eof.construct_line > 1 {
+                source
+                    .lines()
+                    .take(eof.construct_line - 1)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                String::new()
+            };
+            if !prefix.trim().is_empty() {
+                let _ = run_source_with_line_offset(
+                    executor,
+                    &prefix,
+                    interactive,
+                    line_offset,
+                    redirect_cmd,
+                    diagnostic_text,
+                );
+            }
+            executor.mark_parse_error();
+            eprintln!(
+                "{}unexpected EOF while looking for matching `{closure}'",
+                executor.parser_diagnostic_prefix_for_line(eof.report_line + line_offset),
+                closure = eof.closer
+            );
+            executor.errexit_live_at_diagnostic();
+            return 2;
+        }
         // GNU's incremental reader executes complete input lines before the
         // line where the unclosed construct opened; that line itself is part
         // of the failed parse and runs nothing. The cut uses the OUTERMOST

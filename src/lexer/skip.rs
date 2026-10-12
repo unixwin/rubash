@@ -3472,3 +3472,905 @@ pub(crate) fn dollar_word_group_len(
     }
     None
 }
+
+// ===========================================================================
+// rubash#543: unterminated `$[` dollar-bracket (legacy arithmetic) EOF
+// detection.
+//
+// GNU anchor: parse.y:5494-5527 read_token_word's shellexp arm — a `$` whose
+// peek is `[` hands the bracket body to parse_matched_pair
+// (`cd, '[', ']', P_ARITH`, parse.y:5527), a GROUPING scan (open != close)
+// that reads across lines until the matching `]`. EOF inside it reports
+// `unexpected EOF while looking for matching `]'` at the scan's start line
+// (parse.y:3901-3912, start_lineno) and exits 2. Verified 2026-10-12 against
+// WSL GNU Bash 5.2.21/5.3.0 (both identical):
+//
+//   `echo $[1+2`                      -> `]'` line 1, rc 2 (audited cell)
+//   `echo one\necho $[1+2\n...`       -> `one` runs, `]'` at the `$[` line
+//   `echo $[\n'q`                     -> the quote recursion reports `'` at
+//                                        the QUOTE's line (parse.y:4040-4051
+//                                        shellquote arm inside a grouping
+//                                        scan); same for `"` and backticks
+//   `echo $[a[1`                      -> EVERY `[` counts (parse.y:3979
+//                                        generic `ch == open` increment), so
+//                                        the outer hunt owns the EOF
+//   `echo ${x[$[1}`                   -> the hunt, opened via parse_dollar_
+//                                        word from the P_DOLBRACE scan
+//                                        (parse.y:4131 LEX_WASDOL arm), owns
+//                                        the EOF — `]'`, NOT the `}' report
+//   `echo $(echo $[1+2`               -> `]'` at the `$[` line inside the
+//                                        command substitution
+//   `echo "$[1+2"`                    -> the hunt is bounded by the dquote
+//                                        span; at the span's closing quote a
+//                                        still-open hunt reports the DQUOTE
+//                                        (`"'`) — w1-w4 probes (` ]`, `"]`,
+//                                        ` x ] y`, `; echo done` all keep
+//                                        `"'`)
+//   `echo "$[`"`                      -> a backtick inside the span reports
+//                                        itself (parse.y:4157 open=='"'
+//                                        backtick arm)
+//   `echo $(( $[1` / `(( x = $[1`     -> `)'`: the `$((`/`((` arithmetic scan
+//                                        is the innermost grouping at EOF;
+//                                        the existing dparen family owns it
+//   `cat <<E\n$[1+2\nE`               -> body is raw text (make_cmd.c:512);
+//                                        no parse error
+//   `echo "\$[1+2"` / `echo '$[1+2'`  -> escaped/quoted `$` is literal data
+// ===========================================================================
+
+/// The `$[`-hunt EOF verdict: the closer named in the diagnostic, the line it
+/// reports (parse_matched_pair's start_lineno — the opener of the innermost
+/// failed scan), and the line the OUTER construct opened on (the prefix of
+/// complete commands GNU executes before dying stops there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DollarBracketEof {
+    pub closer: char,
+    pub report_line: usize,
+    pub construct_line: usize,
+}
+
+/// Outcome of a nested context scan (dquote span / `${` body / `$( ` body /
+/// bracket hunt). `Report` propagates verbatim — the innermost failed scan
+/// wins. `Defer` means THIS context hit EOF with nothing of ours open: an
+/// existing rubash diagnostic family (quotes / comsub / close-char / dparen)
+/// already reports the GNU-matching verdict for that shape, so the caller
+/// must answer None.
+#[derive(Clone, Copy, Debug)]
+enum DbScan {
+    /// The context closed on its own delimiter; scanning continues after it.
+    Closed,
+    /// The context ran off the input with none of our constructs open.
+    Defer,
+    /// An innermost `$[`-family scan failed: report it.
+    Report(DollarBracketEof),
+}
+
+/// A `$[` hunt opened at `hunt_line` (parse_matched_pair '[', ']' P_ARITH,
+/// parse.y:5527 → 3901-3912). `i` sits just past the `$[`. Every `[`
+/// increments and every `]` decrements (parse.y:3974-3980: `ch == close`
+/// decrements, `ch == open` increments — the generic counting is not
+/// LEX_WASDOL-gated, which is why `echo $[a[1` reports `]'`); quotes and
+/// backticks recurse as units (parse.y:4040-4051) and report THEMSELVES at
+/// their own line when they hit EOF (a5 probe: `echo $[\n'q` -> `'` line 2);
+/// `$(`/`${` recurse via parse_dollar_word (parse.y:4166) — an unclosed one
+/// inside the hunt is the innermost failed scan and defers to its own
+/// rubash family (GNU names `)`/`}' there).
+fn db_scan_bracket_hunt(
+    chars: &[char],
+    mut i: usize,
+    mut line: usize,
+    hunt_line: usize,
+    root_line: usize,
+) -> (DbScan, usize, usize) {
+    let mut depth = 1usize;
+    let mut escaped = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if ch == '\n' {
+            line += 1;
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                // Quote recursion (parse.y:4040-4051): its own EOF names the
+                // quote at its start_lineno (a5: line 2 `'').
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '\'');
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(mut report) => {
+                        // The prefix cut stops at the chain's ROOT construct
+                        // line, not the quote's own line (a5: `echo $[\n'q`
+                        // runs no prefix and reports `'` at line 2 only).
+                        report.construct_line = root_line;
+                        return (DbScan::Report(report), i, line);
+                    }
+                }
+            }
+            '"' => {
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '"');
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(mut report) => {
+                        report.construct_line = root_line;
+                        return (DbScan::Report(report), i, line);
+                    }
+                }
+            }
+            '`' => {
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '`');
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(mut report) => {
+                        report.construct_line = root_line;
+                        return (DbScan::Report(report), i, line);
+                    }
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                // parse_dollar_word (parse.y:4173): `$(` recurses as a real
+                // command substitution. If IT uncloses with no inner hunt of
+                // ours open, the comsub family owns the verdict (GNU names
+                // `)' there) — Defer.
+                let (event, next, next_line) = db_scan_comsub_body(chars, i + 2, line, root_line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                // parse_dollar_word (parse.y:4177-4184): `${` recurses (the
+                // FUNSUB peek is irrelevant for EOF verdicts here — both
+                // spellings keep a `}'-terminated body).
+                let (event, next, next_line) = db_scan_dolbrace_body(chars, i + 2, line, root_line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'[') => {
+                // parse.y:4185-4186: a nested `$[` recurses as its own
+                // matched pair; its verdict propagates (innermost wins).
+                let (event, next, next_line) =
+                    db_scan_bracket_hunt(chars, i + 2, line, line, root_line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+            }
+            '[' => {
+                depth += 1;
+                i += 1;
+            }
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (DbScan::Closed, i + 1, line);
+                }
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    (
+        DbScan::Report(DollarBracketEof {
+            closer: ']',
+            report_line: hunt_line,
+            construct_line: root_line,
+        }),
+        i,
+        line,
+    )
+}
+
+/// A quote/backtick unit inside a grouping scan: runs to the matching
+/// delimiter (escapes honored; backslash-newline is a continuation,
+/// parse.y:3946). EOF names the unit itself at its open line (parse.y:4047
+/// recursion + 3901-3912 start_lineno report).
+fn db_scan_quote_unit(
+    chars: &[char],
+    open: usize,
+    mut line: usize,
+    quote: char,
+) -> (DbScan, usize, usize) {
+    let mut i = open + 1;
+    let mut escaped = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            if ch == '\n' {
+                // parse.y:3946-3951: an escaped newline vanishes but was
+                // still a physical line.
+                line += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if ch == '\n' {
+            line += 1;
+            i += 1;
+            continue;
+        }
+        if ch == quote {
+            return (DbScan::Closed, i + 1, line);
+        }
+        i += 1;
+    }
+    (
+        DbScan::Report(DollarBracketEof {
+            closer: quote,
+            report_line: line_of_char(chars, open),
+            construct_line: line_of_char(chars, open),
+        }),
+        i,
+        line,
+    )
+}
+
+/// A `${` body scan (P_FIRSTCLOSE|P_DOLBRACE): runs to the matching `}`.
+/// A `$[` hunt opened inside (parse.y:4131 LEX_WASDOL arm) OWNS the EOF even
+/// past the body's `}` is gone — `echo ${x[$[1}` reports `]'` (H probe), and
+/// so does `echo ${x:$[1` where the `}` never came. With no hunt open, an
+/// unclosed body defers to the close-char family (`echo ${x` -> `}'`).
+fn db_scan_dolbrace_body(
+    chars: &[char],
+    mut i: usize,
+    mut line: usize,
+    root_line: usize,
+) -> (DbScan, usize, usize) {
+    let mut depth = 1usize;
+    let mut escaped = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if ch == '\n' {
+            line += 1;
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => {
+                let quote = ch;
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, quote);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(mut report) => {
+                        report.construct_line = root_line;
+                        return (DbScan::Report(report), i, line);
+                    }
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'[') => {
+                // The hunt owns everything from here (H probe).
+                let (event, next, next_line) =
+                    db_scan_bracket_hunt(chars, i + 2, line, line, root_line);
+                return match event {
+                    DbScan::Closed => (DbScan::Closed, next, next_line),
+                    DbScan::Defer => (DbScan::Defer, i, line),
+                    DbScan::Report(report) => (DbScan::Report(report), i, line),
+                };
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                let (event, next, next_line) = db_scan_comsub_body(chars, i + 2, line, root_line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                let (event, next, next_line) = db_scan_dolbrace_body(chars, i + 2, line, root_line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'\'') => {
+                // $'...' ANSI-C unit inside the body: quote semantics.
+                let (event, next, next_line) = db_scan_quote_unit(chars, i + 1, line, '\'');
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (DbScan::Closed, i + 1, line);
+                }
+                i += 1;
+            }
+            '{' => {
+                depth += 1;
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    (DbScan::Defer, i, line)
+}
+
+/// A `$( ` command-substitution body scan. The body is a command context
+/// (heredocs, comments), but for the `$[`-family verdict the only states that
+/// matter are: a `$[` hunt opened inside (it owns the EOF — t4 probe:
+/// `echo $(echo $[1+2` -> `]'` at the `$[` line) or the body ran off the
+/// input with no hunt (the comsub family's `)'` report owns it — Defer).
+fn db_scan_comsub_body(
+    chars: &[char],
+    mut i: usize,
+    mut line: usize,
+    root_line: usize,
+) -> (DbScan, usize, usize) {
+    let mut depth = 1usize;
+    let mut escaped = false;
+    let mut comment_start = true;
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            comment_start = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if ch == '\n' {
+            line += 1;
+            comment_start = true;
+            i += 1;
+            continue;
+        }
+        if ch == '#' && comment_start {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>') {
+            comment_start = true;
+        } else {
+            comment_start = false;
+        }
+        // Top-level heredoc inside the body: the body is raw text.
+        if ch == '<' && chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') {
+            let (next, _closure) =
+                super::heredoc_scan::skip_heredoc_in_chars_with_closure(chars, i);
+            if next > i {
+                line += chars[i..next].iter().filter(|c| **c == '\n').count();
+                i = next;
+                comment_start = true;
+                continue;
+            }
+        }
+        if ch == '<' && chars.get(i + 1) == Some(&'<') && chars.get(i + 2) == Some(&'<') {
+            i += 3;
+            comment_start = false;
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => {
+                let quote = ch;
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, quote);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(mut report) => {
+                        report.construct_line = root_line;
+                        return (DbScan::Report(report), i, line);
+                    }
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'[') => {
+                let (event, next, next_line) =
+                    db_scan_bracket_hunt(chars, i + 2, line, line, root_line);
+                return match event {
+                    DbScan::Closed => (DbScan::Closed, next, next_line),
+                    DbScan::Defer => (DbScan::Defer, i, line),
+                    DbScan::Report(report) => (DbScan::Report(report), i, line),
+                };
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                if chars.get(i + 2) == Some(&'(') {
+                    // `$((` arithmetic command: its own scan owns any EOF
+                    // (`)' — a1); skip opaquely when it balances.
+                    match db_skip_dparen_span(chars, i + 2, line) {
+                        Some((next, next_line)) => {
+                            i = next;
+                            line = next_line;
+                            continue;
+                        }
+                        None => return (DbScan::Defer, i, line),
+                    }
+                }
+                let (event, next, next_line) = db_scan_comsub_body(chars, i + 2, line, root_line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                let (event, next, next_line) = db_scan_dolbrace_body(chars, i + 2, line, root_line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'\'') => {
+                let (event, next, next_line) = db_scan_quote_unit(chars, i + 1, line, '\'');
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    DbScan::Defer => return (DbScan::Defer, i, line),
+                    DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                }
+            }
+            '(' => {
+                depth += 1;
+                i += 1;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (DbScan::Closed, i + 1, line);
+                }
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    (DbScan::Defer, i, line)
+}
+
+/// A double-quoted span: the whole span is consumed by read_token_word's
+/// shellquote arm (parse.y:5419-5437), but a `$[` hunt opened INSIDE it is
+/// bounded by the span's closing quote — at that quote a still-open hunt
+/// reports the DQUOTE at the span's line (q2/w1-w4 probes: `echo "$[1+2"`
+/// and every trailing shape name `"'; q12 `"$[x[0]"` too). An unclosed
+/// backtick inside reports itself (q13/a7: parse.y:4157 open=='"' arm). A
+/// `'` inside a dquote is DATA (bash dquote rules) — no quote recursion. If
+/// the span itself never closes, the quote family owns the verdict: Defer.
+/// The fourth member carries the pending span-hunt state to the caller when
+/// the span CLOSED with the hunt still open.
+fn db_scan_dquote_span(
+    chars: &[char],
+    open: usize,
+    mut line: usize,
+) -> (DbScan, usize, usize, Option<(usize, usize)>) {
+    let mut i = open + 1;
+    let mut escaped = false;
+    let mut hunt: Option<(usize, usize)> = None; // (index past `$[`, depth)
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if ch == '\n' {
+            line += 1;
+            i += 1;
+            continue;
+        }
+        if ch == '`' {
+            // parse.y:4157: backticks inside a dquote span recurse as units;
+            // EOF names the backtick (q13).
+            let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '`');
+            match event {
+                DbScan::Closed => {
+                    i = next;
+                    line = next_line;
+                    continue;
+                }
+                DbScan::Defer => return (DbScan::Defer, i, line, None),
+                DbScan::Report(report) => {
+                    return (DbScan::Report(report), i, line, None);
+                }
+            }
+        }
+        // The span's closing quote ends the span (and any open hunt inside
+        // it — w1-w4: the hunt is bounded by the span).
+        if ch == '"' {
+            return (DbScan::Closed, i + 1, line, hunt);
+        }
+        if ch == '$' && chars.get(i + 1) == Some(&'[') {
+            if hunt.is_none() {
+                hunt = Some((i + 2, 1usize));
+                i += 2;
+                continue;
+            }
+            // Nested `$[` inside an open span hunt: the `[`/`]` pair is
+            // counted as ordinary hunt depth below; treat the `$` as data.
+            i += 1;
+            continue;
+        }
+        if let Some((_, depth)) = hunt.as_mut() {
+            if ch == '[' {
+                *depth += 1;
+            } else if ch == ']' {
+                *depth -= 1;
+                if *depth == 0 {
+                    hunt = None;
+                }
+            }
+        }
+        i += 1;
+    }
+    // EOF: the span itself is unclosed — the quote family owns the verdict
+    // (its `"'` report matches GNU for `echo "$[1+2`).
+    (DbScan::Defer, i, line, None)
+}
+
+/// Opaque `$(( ... ))` arithmetic-command span: quotes and backticks are
+/// units, parens count, `$`-constructs are plain data (their EOF belongs to
+/// the dparen family — a1/a3: `echo $(( $[1` names `)'). Returns the index
+/// just past the closing `))` or None when the span never closes.
+fn db_skip_dparen_span(chars: &[char], open: usize, mut line: usize) -> Option<(usize, usize)> {
+    // `open` sits at the FIRST `(` of `((`; consume both.
+    let mut i = open + 2;
+    let mut depth = 2usize;
+    let mut escaped = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if ch == '\n' {
+            line += 1;
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => {
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, ch);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    _ => return None,
+                }
+            }
+            '(' => {
+                depth += 1;
+                i += 1;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((i + 1, line));
+                }
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// True when `chars[from..]` holds an unterminated `'`/`"`/backtick (quote
+/// parity walk with escapes). Used to decide whether a dquote-span hunt
+/// report should yield to a LATER unclosed quote (q6: `echo "$[1+2" "` names
+/// `]'` — the trailing unclosed dquote wins there; the quote family already
+/// owns that input, so the detector must answer None).
+fn db_tail_has_unclosed_quote(chars: &[char], from: usize) -> bool {
+    let mut single = false;
+    let mut double = false;
+    let mut backtick = false;
+    let mut escaped = false;
+    for &ch in &chars[from..] {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if backtick || double => escaped = true,
+            '\\' => {}
+            '\'' if !double && !backtick => single = !single,
+            '"' if !single && !backtick => double = !double,
+            '`' if !single => backtick = !backtick,
+            _ => {}
+        }
+    }
+    single || double || backtick
+}
+
+/// Line (1-based) of the char at `index` — only used for construct-line
+/// bookkeeping of openers this scan saw (cheap; error path only).
+fn line_of_char(chars: &[char], index: usize) -> usize {
+    chars[..index.min(chars.len())]
+        .iter()
+        .filter(|c| **c == '\n')
+        .count()
+        + 1
+}
+
+/// The rubash#543 detector: find the first unterminated `$[` construct and
+/// return its GNU EOF verdict. Returns None whenever an existing diagnostic
+/// family owns the input (unclosed quote at top level, unclosed comsub or
+/// `${` with no `$[` hunt inside, unclosed `$((`/`((`, heredoc-introduced
+/// inputs keep their raw-text bodies).
+pub fn unclosed_dollar_bracket_eof(input: &str) -> Option<DollarBracketEof> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0usize;
+    let mut line = 1usize;
+    let mut escaped = false;
+    let mut comment_start = true;
+    while i < chars.len() {
+        let ch = chars[i];
+        if escaped {
+            escaped = false;
+            comment_start = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if ch == '\n' {
+            line += 1;
+            comment_start = true;
+            i += 1;
+            continue;
+        }
+        if ch == '#' && comment_start {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>') {
+            comment_start = true;
+        } else {
+            comment_start = false;
+        }
+        // Heredoc bodies are raw text (make_cmd.c:512) — a `$[` inside never
+        // opens a hunt (a8).
+        if ch == '<' && chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') {
+            if let Some((next, _found)) = super::heredoc_scan::skip_heredoc_top_level(&chars, i) {
+                line += chars[i..next].iter().filter(|c| **c == '\n').count();
+                i = next;
+                comment_start = true;
+                continue;
+            }
+        }
+        if ch == '<' && chars.get(i + 1) == Some(&'<') && chars.get(i + 2) == Some(&'<') {
+            i += 3;
+            comment_start = false;
+            continue;
+        }
+        // `[[ ...]]` conditional bodies and `(( ...))` arithmetic commands
+        // have their own rubash diagnostic families; a `$[` there either
+        // stays literal-data to this detector or defers to those families
+        // (a1/a3: `$(( $[1` / `(( x = $[1` name `)' from the dparen family).
+        if ch == '[' && chars.get(i + 1) == Some(&'[') {
+            let mut scan = i + 2;
+            while scan + 1 < chars.len() {
+                if chars[scan] == ']' && chars[scan + 1] == ']' {
+                    break;
+                }
+                if chars[scan] == '\n' {
+                    line += 1;
+                }
+                scan += 1;
+            }
+            i = (scan + 2).min(chars.len());
+            comment_start = false;
+            continue;
+        }
+        if ch == '(' && chars.get(i + 1) == Some(&'(') {
+            return None;
+        }
+        match ch {
+            '\'' => {
+                let (event, next, next_line) = db_scan_quote_unit(&chars, i, line, '\'');
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    // An unclosed top-level quote owns the input (quote
+                    // family); a Report from a bare quote unit cannot happen
+                    // (db_scan_quote_unit reports exactly when unclosed).
+                    _ => return None,
+                }
+            }
+            '"' => {
+                let (event, next, next_line, hunt_open) = db_scan_dquote_span(&chars, i, line);
+                match event {
+                    DbScan::Closed => {
+                        // A hunt left open at the span's closing quote
+                        // reports the DQUOTE at the span's line — unless a
+                        // LATER unclosed quote exists (q6 yields to `]').
+                        if hunt_open.is_some() {
+                            if db_tail_has_unclosed_quote(&chars, next) {
+                                return None;
+                            }
+                            let span_line = line_of_char(&chars, i);
+                            return Some(DollarBracketEof {
+                                closer: '"',
+                                report_line: span_line,
+                                construct_line: span_line,
+                            });
+                        }
+                        i = next;
+                        line = next_line;
+                    }
+                    _ => return None,
+                }
+            }
+            '`' => {
+                let (event, next, next_line) = db_scan_quote_unit(&chars, i, line, '`');
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    _ => return None,
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'\'') => {
+                let (event, next, next_line) = db_scan_quote_unit(&chars, i + 1, line, '\'');
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    _ => return None,
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                if chars.get(i + 2) == Some(&'(') {
+                    // `$((` arithmetic command: the dparen family owns its
+                    // EOF (`)' — a1); opaque here.
+                    return None;
+                }
+                let (event, next, next_line) = db_scan_comsub_body(&chars, i + 2, line, line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    // An inner `$[` hunt owns the EOF even inside a comsub
+                    // whose `)` never came (t4 probe) or that already closed;
+                    // a Defer (comsub itself unclosed, no hunt) leaves the
+                    // verdict to the comsub family.
+                    DbScan::Report(report) => return Some(report),
+                    _ => return None,
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                let (event, next, next_line) = db_scan_dolbrace_body(&chars, i + 2, line, line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    // The hunt owns the EOF past a missing `}` too
+                    // (`echo ${x:$[1`); without a hunt the close-char
+                    // family's `}' verdict stands.
+                    DbScan::Report(report) => return Some(report),
+                    _ => return None,
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'[') => {
+                let (event, next, next_line) =
+                    db_scan_bracket_hunt(&chars, i + 2, line, line, line);
+                match event {
+                    DbScan::Closed => {
+                        i = next;
+                        line = next_line;
+                    }
+                    // The hunt's own EOF is Report{']', hunt_line}; a quote/
+                    // backtick recursion inside reports ITSELF (a5/q11).
+                    DbScan::Report(report) => return Some(report),
+                    _ => return None,
+                }
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    None
+}

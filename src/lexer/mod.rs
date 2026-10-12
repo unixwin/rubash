@@ -1920,6 +1920,16 @@ pub fn has_unclosed_input_syntax_posix(input: &str, posix: bool) -> bool {
         // `ddd=(aaa` array lists and `( cmd` subshells continue on the
         // next line (GNU parse.y reads until the matching close).
         || unclosed_input_close_char_posix(input, posix).is_some()
+        // rubash#543: an unterminated `$[` legacy-arithmetic construct keeps
+        // the reader open exactly like `${`/`$(` (parse.y:5494-5527 shellexp
+        // arm -> parse_matched_pair '[', ']' P_ARITH).
+        || skip::unclosed_dollar_bracket_eof(input).is_some()
+}
+
+/// rubash#543: unterminated `$[` (legacy arithmetic) verdict — see
+/// `skip::unclosed_dollar_bracket_eof` for the GNU anchors.
+pub fn unclosed_dollar_bracket_eof(input: &str) -> Option<skip::DollarBracketEof> {
+    skip::unclosed_dollar_bracket_eof(input)
 }
 
 /// parse.y:5379-5384 read_token_word: a backslash before the newline is

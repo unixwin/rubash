@@ -482,6 +482,37 @@ where
     }
 
     let had_name_args = !names.is_empty();
+    // GNU builtins/declare.def:222 declare_invalid_opts (bash 5.3): `-a'
+    // together with `-A' — combined (`-aA', `+aA') or separate (`-a -A') —
+    // is a usage error reported by naming `-a' as the invalid option, with
+    // EX_BADUSAGE and NO usage text, and no variable is created
+    // (`declare -aA x; declare -p x` -> "x: not found"). The same check
+    // rejects an attribute set AND unset on one command line: `-A +A' names
+    // `-A', `-a +a' names `-a'. The display path returns before the check
+    // in GNU (declare.def:330-406 -> 408), so `-paA' stays a pure display,
+    // and with no name operands declare returns before it too (`declare
+    // -aA` alone is rc 0). 5.2 accepted `-aA' and failed later at the
+    // assignment ("cannot convert associative to indexed array"); 5.3 made
+    // the combination a usage error — rubash follows 5.3.
+    if !print && !names.is_empty() {
+        let conflict: Option<char> = if assoc && unset_assoc {
+            Some('A')
+        } else if array && unset_array {
+            Some('a')
+        } else if assoc && array {
+            Some('a')
+        } else {
+            None
+        };
+        if let Some(option) = conflict {
+            writeln!(
+                stderr,
+                "{}{command_name}: -{option}: invalid option",
+                diagnostic_prefix(variables)
+            )?;
+            return Ok(EX_USAGE);
+        }
+    }
     // GNU declare.def: an operand name[subscript] without = declares or
     // re-declares the array; the subscript is only a size hint and is
     // discarded ("declare -a b[256]" declares b, and "declare -p b" prints
