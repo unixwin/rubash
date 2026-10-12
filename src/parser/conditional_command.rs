@@ -727,6 +727,14 @@ type CondArg = (String, String, String, usize);
 fn collect_conditional_args(tokens: &[Token], mut index: usize, end: usize) -> Vec<CondArg> {
     let mut args: Vec<CondArg> = Vec::new();
     let mut pending_newline = false;
+    // parse.y:5166 cond_term: after a `=~' binop the RHS is read as ONE
+    // word under PST_REGEXP (parse.y:5443 read_token_word absorbs its
+    // `(...)' groups through parse_matched_pair) — a folded `((...))'
+    // token there is that single word, NOT a cond group. `=' / `==' /
+    // `!=' (PST_EXTPAT) keep the expansion: GNU's word reader only joins
+    // a `(' after a PATTERN_CHAR (parse.y:5464-5466), so a leading-`('
+    // RHS reaches cond_term as the `(' token and errors.
+    let mut regexp_rhs_pending = false;
     while index <= end {
         if tokens[index].line_break {
             // A physical newline is a `\n' token in GNU's cond reader —
@@ -741,6 +749,20 @@ fn collect_conditional_args(tokens: &[Token], mut index: usize, end: usize) -> V
             push_cond_arg(&mut args, &tokens[index], &mut pending_newline);
             break;
         }
+        if is_folded_arithmetic_token(&tokens[index]) {
+            let regexp_rhs = regexp_rhs_pending;
+            regexp_rhs_pending = false;
+            if regexp_rhs {
+                push_cond_arg(&mut args, &tokens[index], &mut pending_newline);
+            } else {
+                args.extend(folded_arithmetic_cond_args(
+                    &tokens[index],
+                    &mut pending_newline,
+                ));
+            }
+            index += 1;
+            continue;
+        }
         if let Some((word, next_i)) = collect_compound_word_value(tokens, index) {
             let raw = if next_i == index + 1 {
                 tokens[index].raw.clone()
@@ -752,12 +774,13 @@ fn collect_conditional_args(tokens: &[Token], mut index: usize, end: usize) -> V
                 ws.push('\n');
             }
             pending_newline = false;
-            args.push((
-                strip_conditional_quote_markers(&word),
-                raw,
-                ws,
-                tokens[index].position,
-            ));
+            let value = strip_conditional_quote_markers(&word);
+            // merge_pattern_rhs_fragments' operator predicate: a `=~'
+            // whose own predecessor is not a structural token opens a
+            // single-word regexp RHS (parse.y:5166 PST_REGEXP).
+            regexp_rhs_pending =
+                value == "=~" && !args.last().is_some_and(|prev| is_cond_structure(prev));
+            args.push((value, raw, ws, tokens[index].position));
             index = next_i;
             continue;
         }
@@ -765,6 +788,114 @@ fn collect_conditional_args(tokens: &[Token], mut index: usize, end: usize) -> V
         index += 1;
     }
     args
+}
+
+/// The structural tokens that disqualify a preceding `=~' from opening a
+/// regexp RHS (merge_pattern_rhs_fragments' exclusion list).
+fn is_cond_structure(arg: &CondArg) -> bool {
+    matches!(arg.0.as_str(), "(" | ")" | "!" | "&&" | "||")
+}
+
+/// A lexer-folded arithmetic command: the unquoted `((...))` Keyword the
+/// lexer emits at a command-position `((` (balanced by construction).
+fn is_folded_arithmetic_token(token: &Token) -> bool {
+    token.kind == TokenKind::Keyword
+        && token.raw == token.value
+        && token.value.starts_with("((")
+        && token.value.ends_with("))")
+        && token.value.len() >= 4
+}
+
+/// Re-split a folded `((...))' token into the cond-group token population
+/// GNU's reader produces inside a conditional.
+///
+/// GNU anchor: read_token delivers `(' as the grouping token inside `[[ ]]'
+/// — the arithmetic-command special case is gated on
+/// `(parser_state & (PST_CASEPAT|PST_CONDCMD)) == 0' (parse.y:3780) — so
+/// `[[ ((x == 0)) ]]' parses as cond_term group(group(binary))
+/// (parse.y:5094-5110). Every completed term ends with
+/// `(void)cond_skip_newlines ()' (parse.y:5108 group close, 5140 unary,
+/// 5243 binary rhs), which is why a newline before the next operand, `||',
+/// or `]]' is invisible after a CLOSED GROUP while a bare word's binop
+/// slot (raw read_token, parse.y:5179) errors on it — rubash#505's
+/// multi-line `|| ((${#_ARGS_BOUNDS[@]} == 0))' continuation. rubash's
+/// lexer folds the balanced `((...))' into one Keyword token regardless of
+/// the conditional; modeling it as a single WORD operand surfaced the
+/// continuation newline in the binop slot. Expanding restores GNU's token
+/// population: the group opens, the inner words bind as operands, and the
+/// group close runs the newline-skipping lookahead.
+fn folded_arithmetic_cond_args(token: &Token, pending_newline: &mut bool) -> Vec<CondArg> {
+    // Strip the outer parens the reader would have delivered as `('
+    // tokens; what remains re-lexes to the group body (which still opens
+    // with its own `(' for the nested group).
+    let raw = token.raw.as_str();
+    let inner_text = &raw[1..raw.len().saturating_sub(1)];
+    // rubash#131: the fold's re-lex must run under the gate of the pass
+    // that produced it — GNU decides extglob word-splits at read time
+    // (parse.y:5466).
+    let saved_extglob = crate::lexer::parse_extended_glob();
+    crate::lexer::set_parse_extended_glob(token.extglob_gate);
+    let inner_tokens = crate::lexer::tokenize(inner_text);
+    crate::lexer::set_parse_extended_glob(saved_extglob);
+
+    // The whitespace that preceded the whole fold in the source (and any
+    // pending `\n' marker) belongs to the `(' the reader delivered first.
+    let mut prefix = token.leading_ws.clone();
+    if *pending_newline && !prefix.contains('\n') {
+        prefix.push('\n');
+    }
+    *pending_newline = false;
+
+    let mut out: Vec<CondArg> = Vec::new();
+    let mut pending_inner = false;
+    let mut first_pushed = true;
+    for inner in &inner_tokens {
+        if inner.line_break {
+            // A multi-line `(( ... ))' fold: the inner newline is a `\n'
+            // token between the group's tokens, same model as the outer
+            // collection.
+            pending_inner = true;
+            continue;
+        }
+        if is_folded_arithmetic_token(inner) {
+            // `[[ (( ((x)) )) ]]' — nested folds re-enter the same
+            // expansion.
+            let mut nested = folded_arithmetic_cond_args(inner, &mut pending_inner);
+            if first_pushed {
+                if let Some(first) = nested.first_mut() {
+                    let mut combined = prefix.clone();
+                    combined.push_str(&first.2);
+                    first.2 = combined;
+                }
+                first_pushed = false;
+            }
+            out.extend(nested);
+            continue;
+        }
+        let mut ws = inner.leading_ws.clone();
+        if pending_inner && !ws.contains('\n') {
+            ws.push('\n');
+        }
+        pending_inner = false;
+        if first_pushed {
+            let mut combined = prefix.clone();
+            combined.push_str(&ws);
+            ws = combined;
+            first_pushed = false;
+        }
+        // Inner token columns are 1-based within `inner_text', which sits
+        // one byte into `raw` — map through raw's newlines for the
+        // physical line GNU's reader would report.
+        let at = (inner.column + 1).min(raw.len());
+        let line = token.position + raw[..at].matches('\n').count();
+        out.push((
+            strip_conditional_quote_markers(&inner.value),
+            inner.raw.clone(),
+            ws,
+            line,
+        ));
+    }
+    out
 }
 
 fn push_cond_arg(args: &mut Vec<CondArg>, token: &Token, pending_newline: &mut bool) {

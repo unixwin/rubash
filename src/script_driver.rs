@@ -2846,6 +2846,14 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
     let stdin_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
     executor.set_env(READ_STDIN_MARKER, "1");
     executor.inherit_process_stdin();
+    // readline initialization order (bashline.c:451 initialize_readline,
+    // first invoked from bind.def:131 on a `bind` command or from the
+    // prompt reader, y.tab.c:4024): the inputrc file ($INPUTRC, else
+    // ~/.inputrc) is read ONCE per process — after the rcfile, whose
+    // `bind` commands run first — so its key bindings and
+    // `set NAME VALUE` variables are in force before any prompt-time
+    // code (rubash#431 residual: the inputrc read surface).
+    executor.initialize_readline();
     // The first primary-prompt read initializes readline
     // (parse.y:1665 yy_readline_get -> bashline.c:524), which is where GNU
     // binds LINES/COLUMNS for an interactive shell without a controlling
