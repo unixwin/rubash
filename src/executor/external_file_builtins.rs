@@ -879,7 +879,16 @@ impl Executor {
             // stdin once — shared file offset).
             let mut stdin_remaining: Option<Vec<u8>> = None;
             for word in operands {
-                let target = self.expand_word(word);
+                // cmd.words are the already-expanded argv: the simple-command
+                // executor ran each word through expand_command_words once
+                // (execute_cmd.c execute_disk_command -> expand_words), which
+                // performs quote removal — a single-quoted/escaped operand
+                // like '$FIX/c' or \$FIX/c arrives with its quotes gone and a
+                // LIVE-looking `$`. Re-running expand_word here is a second
+                // expansion pass that re-scans that literal text and silently
+                // opens a different file (issue #511). Use the argv as-is;
+                // same rule as external_sed (rubash#177).
+                let target = word.as_str();
                 if target == "-" {
                     if stdin_remaining.is_none() {
                         // rubash#415 (CI coproc.tests hang): GNU cat streams
