@@ -63,7 +63,9 @@ Evidence: the alias heredoc probe now matches GNU on stdout, stderr, and exit st
 > Date: 2026-08-12
 
 > Status refresh: 2026-08-29. The authoritative compatibility status is
-> maintained in `docs/COMPATIBILITY-STATUS.md`; the 2026-08-22 attribution
+> maintained in the rubash README "Compatibility at a Glance" ledger and the
+> issue #477 snapshot archive (`docs/COMPATIBILITY-STATUS.md` was deleted
+> 2026-10-10); the 2026-08-22 attribution
 > checkpoint has been retired.
 > Do not interpret the historical `.right` runner total as real-output parity.
 > Scope: issue #20-#26 compatibility suites, local reruns, and implementation ownership.

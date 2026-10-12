@@ -8,7 +8,7 @@
 >
 > 2026-08-14 续接基线：当前以 `docs/issue-suite-diff-analysis.md` 的
 > `Continuation Checkpoint` 和 `target/issue-suites/results/` 最新 raw 结果为准。
-> 2026-08-29 起兼容性状态以 `docs/COMPATIBILITY-STATUS.md` 为唯一权威来源，
+> 2026-08-29 起兼容性状态曾以 `docs/COMPATIBILITY-STATUS.md` 为唯一权威来源；该文件已于 2026-10-10 删除，现以 rubash README「Compatibility at a Glance」台账及 issue #477 归档为权威来源，
 > 2026-08-22 账本与归因文档已退役。`.right` 上游
 > runner 的 `87/87` 仍是独立的期望文件基线，不代表真实输出已 83/83。当前第一
 > 执行族为 GNU Bash `redir/vredir` 动态 fd、设备路径、fd 生命周期和

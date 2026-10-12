@@ -18,14 +18,24 @@ pub fn home_value(env_vars: &HashMap<String, String>) -> String {
         return home.clone();
     }
     // USERPROFILE is a Windows-only fallback; it is not a shell variable
-    // that can be unset, so the env::var fallback is safe here.
-    if let Some(home) = env_vars.get("USERPROFILE").filter(|v| !v.is_empty()) {
-        return home.clone();
+    // that can be unset, so the env::var fallback is safe there. Unix
+    // never consults it (a stray USERPROFILE exported by cross-platform
+    // tooling must not hijack `~`), and returns the same empty default it
+    // always did when HOME is unset (audit/windows-hardcode).
+    #[cfg(windows)]
+    {
+        if let Some(home) = env_vars.get("USERPROFILE").filter(|v| !v.is_empty()) {
+            return home.clone();
+        }
+        std::env::var("USERPROFILE")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default()
     }
-    std::env::var("USERPROFILE")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default()
+    #[cfg(not(windows))]
+    {
+        String::new()
+    }
 }
 
 pub fn expand_word_prefix(word: &str, env_vars: &HashMap<String, String>) -> Option<String> {

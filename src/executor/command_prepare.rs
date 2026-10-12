@@ -989,13 +989,21 @@ impl Executor {
             self.command_expansion_failed.set(true);
             return Err(ExecuteError::ExpansionFailure(1));
         }
-        variable_expanded.words = expanded_words
-            .iter()
-            .map(|(word, _)| materialize_expanded_command_word(word))
-            .collect();
+        // The pre-glob materialization below feeds ONLY the test/[ branch:
+        // the general branch re-derives every word inside its own loop (the
+        // NoMatch / suppress_glob arms), so the extra per-word String copy
+        // is dead weight for every non-test command in every loop (GNU's
+        // expand_word_list_internal materializes once, at the consumption
+        // point).
+        let is_test_cmd = cmd.words.first().is_some_and(|w| w == "[[" || w == "[");
+        if is_test_cmd {
+            variable_expanded.words = expanded_words
+                .iter()
+                .map(|(word, _)| materialize_expanded_command_word(word))
+                .collect();
+        }
         variable_expanded.word_kinds = Vec::new();
 
-        let is_test_cmd = cmd.words.first().is_some_and(|w| w == "[[" || w == "[");
         if !is_test_cmd {
             let mut words = Vec::new();
             for (word, suppress_glob) in expanded_words {
@@ -1012,7 +1020,20 @@ impl Executor {
                         word
                     }
                 };
+                // Same identity argument as materialize_expanded_command_word's
+                // own fast path: a word with no carrier-family byte (DATA_SQUOTE
+                // among them) and no comsub payload prefix materializes to
+                // itself, and the DATA_SQUOTE restore is then a no-op — move
+                // the expanded word instead of copying it twice more. Literal
+                // words take this on every loop iteration.
+                let plain_materializes_to_self = !arrayref_marked
+                    && !crate::executor::markers::contains_word_marker_bytes(word_text)
+                    && !word_text.contains(crate::executor::markers::COMSUB_PAYLOAD_PREFIX);
                 if suppress_glob {
+                    if plain_materializes_to_self {
+                        words.push(remark(word));
+                        continue;
+                    }
                     let materialized = materialize_expanded_command_word(word_text)
                         .replace(crate::executor::markers::DATA_SQUOTE, "'");
                     words.push(remark(materialized));
@@ -1023,10 +1044,16 @@ impl Executor {
                                 remark(value.replace(crate::executor::markers::DATA_SQUOTE, "'"))
                             }))
                         }
-                        PathnameExpansion::NoMatch => words.push(remark(
-                            materialize_expanded_command_word(word_text)
-                                .replace(crate::executor::markers::DATA_SQUOTE, "'"),
-                        )),
+                        PathnameExpansion::NoMatch => {
+                            if plain_materializes_to_self {
+                                words.push(remark(word));
+                                continue;
+                            }
+                            words.push(remark(
+                                materialize_expanded_command_word(word_text)
+                                    .replace(crate::executor::markers::DATA_SQUOTE, "'"),
+                            ));
+                        }
                         PathnameExpansion::Fail(pattern) => {
                             self.report_failglob(&pattern);
                             // GNU failglob is a fatal word-expansion error:

@@ -12,10 +12,32 @@
 //!    upstream suite slices (`third_party/bash/tests/<suite>.tests`) run
 //!    under TODAY's rubash. These are NOT GNU output — they pin the
 //!    current engine so that any future semantic change that shifts a
-//!    slice fails CI and forces a conscious re-record
-//!    (`RUBASH_REGRESSION_RECORD=1 cargo test --test regression`).
-//!    They are Windows-only (the prebuilt helper binaries under
-//!    tests/gnu-compat/helpers-win are PE executables).
+//!    slice fails CI and forces a conscious re-record. They are
+//!    Windows-only (the prebuilt helper binaries under
+//!    tests/gnu-compat/helpers-win are PE executables) and run in the
+//!    SAME airtight environment as the goldens (see `run_suite_snapshot`):
+//!    a snapshot byte that depends on an ambient variable is a
+//!    machine-dependent byte, and machine-dependent bytes are how a
+//!    green-local/red-CI (or green-CI/red-local) baseline happens.
+//!
+//!    RE-RECORD PROTOCOL (the anti-baseline-red rule): re-record only
+//!    with
+//!
+//!    ```text
+//!    RUBASH_REGRESSION_RECORD=1 cargo test --test regression upstream_suite_slice_snapshots
+//!    ```
+//!
+//!    and the recording commit message MUST name the engine change that
+//!    shifted the bytes (issue or PR reference, per slice). A snapshot
+//!    diff IS a semantic change; "update golden" with no behavior
+//!    reference is exactly how this job burned down in 2026-10 (the
+//!    `${var@P}` marker-strip fix in #431/#480 shifted exp without a
+//!    re-record and every subsequent PR inherited the red). On CI the
+//!    "Record upstream-suite snapshots" workflow step records with the
+//!    same code and uploads the bytes as the `regression-snapshots`
+//!    artifact — that artifact is the runner-true replacement for stale
+//!    committed snapshots; prefer it over transcribing the truncated
+//!    40-line panic window by hand.
 //!
 //! Every fixture runs in its own empty temp directory with a minimal PATH
 //! (rubash emulates cat/mkdir/grep/sed when they are absent), a bounded
@@ -460,13 +482,40 @@ fn run_suite_snapshot(suite: &str) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
     cmd.arg(format!("{suite}.tests"))
         .current_dir(&dir)
-        .env_remove("OLDPWD")
-        .env_remove("BASH_ENV")
-        .env_remove("WINUXSH_ROOT")
+        // Airtight environment — same contract as run_rubash_in above.
+        // The snapshot path originally kept the ambient env because the
+        // first recording happened to be made with it, and that choice
+        // made the bytes machine-dependent: exp.tests:416 runs
+        // `${THIS_SH} -c ...`, so any machine that exports THIS_SH (a
+        // shell-managed env) recorded extra argv lines a clean runner
+        // never produces — and shell option variables (BASHOPTS,
+        // SHELLOPTS, POSIXLY_CORRECT classes) are exactly the inputs the
+        // alias-expansion machinery keys on. Drop everything user/tool
+        // shaped and pass machine infrastructure + the explicit PATH, so
+        // a local run, the CI runner and any future image see the same
+        // suite world (see the re-record protocol in the module header).
+        .env_clear()
         .env("PATH", &path)
+        .env("HOME", &dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if cfg!(windows) {
+        for name in [
+            "SystemRoot",
+            "SystemDrive",
+            "WINDIR",
+            "COMSPEC",
+            "PATHEXT",
+            "OS",
+            "TEMP",
+            "TMP",
+        ] {
+            if let Ok(value) = std::env::var(name) {
+                cmd.env(name, value);
+            }
+        }
+    }
     let mut child = cmd.spawn().expect("spawn rubash for suite");
     let out = wait_bounded(&mut child, Duration::from_secs(120));
 

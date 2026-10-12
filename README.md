@@ -18,7 +18,7 @@ Rubash itself is not a shell product. It ships with a reference CLI used by the 
 
 **Why native matters**: shells billed as "bash on Windows" (Git Bash, MSYS2) ship a ported bash that rides on a POSIX emulation layer (`msys-2.0.dll`), with fork emulation and path translation that leak quirks into every script. Rubash has no such layer — one self-contained binary speaking Win32 directly.
 
-**Paths are first-class, one dialect per child**: the MSYS model *guesses* which arguments look like paths and rewrites them — which is why every AI agent and script has to set `MSYS_NO_PATHCONV=1` to stop `/flags` from becoming `C:/Program Files/Git/flags`. Rubash inverts the model with a per-child dialect contract (the same line GNU draws: `shell_execve` hands `execve` the raw word bytes and never rewrites argv). A child that owns a POSIX layer — anything resolved out of a WinuxCmd installation, or through the `winuxcmd` dispatcher — receives its argv **verbatim**, exactly as typed, and resolves `/d/...`, `/tmp`, `/dev/*` itself. A native Windows program instead receives real Win32 spellings for path-shaped operands, translated **uniformly** (never half of one argv translated and half left POSIX), so a native tool always gets a valid Win32 path for every operand, including not-yet-existing targets it is about to create. For emergency rollback the pre-Option-B translation behavior is available by exporting `__RUBASH_ARGV_DIALECT=legacy`.
+**Paths are first-class, one dialect per child**: the MSYS model *guesses* which arguments look like paths and rewrites them — which is why every AI agent and script has to set `MSYS_NO_PATHCONV=1` to stop `/flags` from becoming `C:/Program Files/Git/flags`. Rubash inverts the model with a per-child dialect contract (the same line GNU draws: `shell_execve` hands `execve` the raw word bytes and never rewrites argv). A child that owns a POSIX layer — anything resolved out of a WinuxCmd installation, or through the `winuxcmd` dispatcher — receives its argv **verbatim** and resolves `/d/...`, `/tmp`, `/dev/*` itself. A native Windows program instead receives real Win32 spellings for path-shaped operands, translated **uniformly** (never half of one argv translated and half left POSIX), so a native tool always gets a valid Win32 path for every operand, including not-yet-existing targets it is about to create. For emergency rollback the pre-Option-B translation behavior is available by exporting `__RUBASH_ARGV_DIALECT=legacy`.
 
 **Platform status — cross-platform, Windows-first**: Windows is the primary
 target and the platform with the full stack: one self-contained binary
@@ -40,8 +40,11 @@ it to whatever `uname.exe` happens to sit on PATH. `uname` and `arch` are
 engine builtins (full option parsing, coreutils/MSYS2 output shapes), and
 `OSTYPE`/`MACHTYPE`/`HOSTTYPE` follow the same persona.
 
-- **Default persona: MSYS2-compatible** (disclosed everywhere — this is a
-  compatibility mask, not a claim of being an MSYS2 port):
+- **Default persona: MSYS2-compatible** (Windows default; disclosed
+  everywhere — this is a compatibility mask, not a claim of being an MSYS2
+  port. Non-Windows builds always report the honest-native identity — the
+  MSYS persona exists to keep Windows inside the MSYS/Cygwin script
+  ecosystem and is unreachable elsewhere):
   - `uname -s` → `MSYS_NT-<ver>` — or `MINGW64_NT-` / `UCRT64_NT-` /
     `CLANG64_NT-` … when `MSYSTEM` is set, mapping the value the same way
     the MSYS2 runtime does;
@@ -152,7 +155,8 @@ The result: subshells and command substitutions pay zero process-creation cost, 
 
 ### Build from Source
 
-> Full functionality requires Windows today.
+> Cross-platform: Windows is the full-stack primary target; Linux builds and
+> runs natively; macOS compiles green in CI (see "Platform status" above).
 
 ```bash
 git clone https://github.com/unixwin/rubash.git

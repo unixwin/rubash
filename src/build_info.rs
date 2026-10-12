@@ -40,7 +40,8 @@ pub fn version_appendix() -> String {
     if cfg!(windows) {
         appendix.push_str(
             "\nnote: native Windows build without an MSYS runtime; MSYS identifiers \
-             are a compatibility persona only (see docs/platform-support.md)",
+             are a compatibility persona only (see README.md, Identity and \
+             Compatibility)",
         );
     }
     appendix
@@ -103,7 +104,7 @@ mod tests {
         assert!(note.contains("native Windows build"), "{note:?}");
         assert!(note.contains("without an MSYS runtime"), "{note:?}");
         assert!(note.contains("compatibility persona"), "{note:?}");
-        assert!(note.contains("docs/platform-support.md"), "{note:?}");
+        assert!(note.contains("README.md, Identity and"), "{note:?}");
         assert_eq!(
             appendix.lines().count(),
             2,
