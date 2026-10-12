@@ -1292,13 +1292,28 @@ impl Executor {
             // BEFORE the errexit jump at execute_command_internal
             // (execute_cmd.c:624): `set -e; trap 'echo E' ERR; false`
             // prints E and exits 1.
-            self.maybe_run_error_trap(command)?;
+            //
+            // A pass-through compound (issue #507) is skipped: the body's
+            // inner commands already had their ERR look in the nested walk,
+            // and an exempt inner failure (`false && true` arm) must not
+            // fire ERR a second time at the aggregate (GNU 5.3.0:
+            // `trap 'echo E' ERR; if true; then false && true; fi; echo R`
+            // prints only R).
+            if !command_status_produced_by_body(command) {
+                self.maybe_run_error_trap(command)?;
+            }
 
             // GNU execute_cmd.c:1004-1018 (simple command errexit): after a
             // simple command finishes, if errexit is active and the command's
             // exit status is non-zero, jump_to_top_level (ERREXIT) exits the
             // shell.
-            if self.errexit_enabled()
+            //
+            // The same pass-through compounds (issue #507) are exempt here:
+            // `set -e; if true; then false && true; fi; echo R` must print R
+            // with rc 0 — the if's nonzero aggregate is inherited from the
+            // exempt arm, not this command's own failure.
+            if !command_status_produced_by_body(command)
+                && self.errexit_enabled()
                 && self.errexit_is_active()
                 && self.suppress_errexit == 0
                 && self.exit_code != 0
@@ -1392,4 +1407,41 @@ impl Executor {
 
 pub(in crate::executor) fn is_closed_output_io_error(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::BrokenPipe || error.raw_os_error() == Some(232)
+}
+
+/// True for a compound whose body runs IN THIS PROCESS through the same
+/// walker — `if`/`elif`/`else`, `while`/`until`, `for` (word and arithmetic),
+/// `case`, `select` — so the body's aggregate status passes through it.
+///
+/// Issue #507: the walker below is also the nested walk a body runs under,
+/// and every inner command already had its own errexit/ERR adjudication
+/// there. A non-exempt inner failure unwinds as `ExecuteError::ExitCode`
+/// before the compound ever returns (`set -e; if true; then false; fi` exits
+/// via the inner `false`), so a nonzero aggregate that survives to the
+/// compound level was produced by an EXEMPT inner failure — a `&&`/`||`
+/// short-circuit arm or a `!` pipeline (POSIX XCU 2.14: -e is ignored for
+/// "any command of an AND-OR list other than the last" and for `!`
+/// pipelines). Re-adjudicating that inherited status here killed the shell
+/// after `set -e; if true; then false && true; fi` where GNU prints `R` and
+/// exits 0 — GNU's execute_if_command (execute_cmd.c:5200 family) hands the
+/// body's status up without an errexit check of its own: one adjudication
+/// per failure, at the site that produced it.
+///
+/// Deliberately NOT pass-through — the aggregate is a fresh status this
+/// level owns, and the errexit/ERR checks stay live for them:
+/// - `subshell_command` — GNU forks it; nothing adjudicated inside the
+///   child, so the parent sees the wait status fresh (`set -e; (false &&
+///   true)` exits 1; execute_command's post-compound errexit check owns it).
+/// - `conditional_command` (`[[ ]]`) and `arithmetic_command` (`(( ))`) —
+///   these ARE the innermost failing command (`set -e; [[ 1 = 2 ]]` exits 1).
+/// - a function call — the call's status belongs to the call (`f() { false
+///   && true; }; f` exits 1).
+/// - a compound's own failed redirection — the wrapper's failure, not an
+///   inherited one (`set -e; { :; } > /nonexistent/x` exits 1).
+fn command_status_produced_by_body(command: &CommandNode) -> bool {
+    command.if_command.is_some()
+        || command.loop_command.is_some()
+        || command.for_command.is_some()
+        || command.case_command.is_some()
+        || command.select_command.is_some()
 }
