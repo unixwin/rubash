@@ -1445,6 +1445,17 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
             None,
             None,
         );
+        // GNU evalstring.c parse_and_execute leaves the group's status in
+        // last_command_exit_value for the reader to exit with — the
+        // run_source* conversion returns it, but the read-time parse-error
+        // fast paths (an unclosed `"`/`'`/`${`/`$(` reports
+        // `unexpected EOF while looking for matching ...` and returns 2)
+        // never touch executor state. Committing here keeps that 2 (and
+        // every other group status) observable as the shell's exit status
+        // instead of the stale pre-error status — rubash#508: a stdin
+        // script's syntax error must exit 2 like the identical file-driven
+        // run, whose driver returns the group status directly.
+        executor.set_last_exit_code(status);
         let parse_error = executor.take_parse_error();
         pending.clear();
         if parse_error
@@ -1469,6 +1480,8 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
             None,
             None,
         );
+        // Same group-status commit as the loop body above (rubash#508).
+        executor.set_last_exit_code(status);
         let parse_error = executor.take_parse_error();
         if parse_error
             || executor.take_exit_jump_pending()
