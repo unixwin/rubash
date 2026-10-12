@@ -1117,23 +1117,21 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 // (rubash#332). A line break or end of input right after the
                 // shifted `(' is GNU's virtual `newline' token.
                 let shifted_function_head = lone_word_function_head_candidate(&state.current_cmd);
-                let offender = if shifted_function_head {
+                // GNU names the virtual `newline' token when the shift
+                // fails at end of input or a line break (`eval 'echo (''
+                // probe p14), the next token's own text otherwise (`echo
+                // (hi' -> `hi', p21).
+                let (offender, name_override) = if shifted_function_head {
                     match tokens.get(*i + 1) {
-                        Some(next)
-                            if !(next.kind == TokenKind::Keyword && next.value == ")")
-                                && next.kind != TokenKind::Eof =>
-                        {
-                            *i + 1
+                        None => (*i, Some("newline")),
+                        Some(next) if next.kind == TokenKind::Eof => (*i, Some("newline")),
+                        Some(next) if next.kind == TokenKind::Keyword && next.value == ")" => {
+                            (*i, None)
                         }
-                        _ => *i,
+                        Some(next) => (*i + 1, next.line_break.then_some("newline")),
                     }
                 } else {
-                    *i
-                };
-                let name_override = match tokens.get(offender) {
-                    Some(next) if next.line_break || next.kind == TokenKind::Eof => Some("newline"),
-                    None => Some("newline"),
-                    _ => None,
+                    (*i, None)
                 };
                 super::parse_loop::push_unexpected_token_error_named(
                     state,

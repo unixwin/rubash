@@ -458,6 +458,10 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
     // rubash#380: previous significant char fed to the case word machine
     // (the `esac` previous-token witness, parse.y:3181/3183).
     let mut prev_sig: Option<char> = None;
+    // Same comment rule as copy_dollar_paren_body_raw (parse.y:3630-3643,
+    // issue #513): a boundary `#` comment runs to end of line and its `)`
+    // never closes the body; the copy still carries the bytes.
+    let mut token_boundary = true;
     let mut idx = 0usize;
     while idx < rest.len() {
         let ch = rest[idx..].chars().next().unwrap();
@@ -471,6 +475,21 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 idx += escaped.len_utf8();
                 word.push('\u{1}');
             }
+            token_boundary = false;
+            continue;
+        }
+        if ch == '#' && token_boundary {
+            while let Some(comment) = rest[idx..].chars().next() {
+                out.push(comment);
+                idx += comment.len_utf8();
+                if comment == '\n' {
+                    break;
+                }
+            }
+            word.clear();
+            word_boundary = true;
+            current_word_boundary = true;
+            token_boundary = true;
             continue;
         }
         // `case WORD in' chain tracker lookahead (rubash#276/#284): the
@@ -501,29 +520,37 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 idx += copy_ansi_c_single_quoted_raw_cursor(out, &rest[idx..]);
                 word.clear();
                 word_boundary = false;
+                token_boundary = false;
             }
             '$' if rest.as_bytes().get(idx) == Some(&b'(') => {
                 idx += 1;
                 out.push('(');
                 depth += 1;
+                token_boundary = false;
             }
             '\'' => {
                 idx += copy_single_quoted_raw_cursor(out, &rest[idx..]);
                 word.clear();
                 word_boundary = false;
+                token_boundary = false;
             }
             '"' => {
                 idx += copy_double_quoted_raw_cursor(out, &rest[idx..]);
                 word.clear();
                 word_boundary = false;
+                token_boundary = false;
             }
             '`' => {
                 let rem = copy_backtick_body_cursor(out, &rest[idx..]);
                 idx = rest.len() - rem.len();
                 word.clear();
                 word_boundary = false;
+                token_boundary = false;
             }
-            '(' if case_depth == 0 => depth += 1,
+            '(' if case_depth == 0 => {
+                depth += 1;
+                token_boundary = true;
+            }
             ')' if case_depth == 0 => {
                 // Plain subtraction like the original: an unbalanced `)`
                 // underflows/wraps identically (never observed on real
@@ -532,9 +559,12 @@ fn copy_dollar_paren_body_raw_cursor<'a>(out: &mut String, rest: &'a str) -> &'a
                 if depth == 0 {
                     return &rest[idx..];
                 }
+                token_boundary = true;
             }
             _ => {}
         }
+        token_boundary =
+            ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
     }
     &rest[idx..]
 }
@@ -1406,6 +1436,12 @@ fn copy_dollar_paren_body_raw(
     // rubash#380: previous significant char fed to the case word machine
     // (the `esac` previous-token witness, parse.y:3181/3183).
     let mut prev_sig: Option<char> = None;
+    // GNU read_token (parse.y:3630-3643): `#` opens a comment only at a
+    // token boundary — after whitespace, a separator, or the body start.
+    // The comment runs to end of line; its text never participates in
+    // token recognition, so a `)` inside it does not close the body
+    // (issue #513). The verbatim copy still carries the comment bytes.
+    let mut token_boundary = true;
     while let Some(ch) = chars.next() {
         out.push(ch);
         if ch == '\\' {
@@ -1416,6 +1452,20 @@ fn copy_dollar_paren_body_raw(
                 out.push(escaped);
                 word.push('\u{1}');
             }
+            token_boundary = false;
+            continue;
+        }
+        if ch == '#' && token_boundary {
+            while let Some(comment) = chars.next() {
+                out.push(comment);
+                if comment == '\n' {
+                    break;
+                }
+            }
+            word.clear();
+            word_boundary = true;
+            current_word_boundary = true;
+            token_boundary = true;
             continue;
         }
         // The machine only needs the char after `ch` (the `;;`/`;&`
@@ -1445,36 +1495,47 @@ fn copy_dollar_paren_body_raw(
                 copy_ansi_c_single_quoted_raw(out, chars);
                 word.clear();
                 word_boundary = false;
+                token_boundary = false;
             }
             '$' if chars.peek() == Some(&'(') => {
                 chars.next();
                 out.push('(');
                 depth += 1;
+                token_boundary = false;
             }
             '\'' => {
                 copy_single_quoted_raw(out, chars);
                 word.clear();
                 word_boundary = false;
+                token_boundary = false;
             }
             '"' => {
                 copy_double_quoted_raw(out, chars);
                 word.clear();
                 word_boundary = false;
+                token_boundary = false;
             }
             '`' => {
                 copy_backtick_raw(out, chars);
                 word.clear();
                 word_boundary = false;
+                token_boundary = false;
             }
-            '(' if case_depth == 0 => depth += 1,
+            '(' if case_depth == 0 => {
+                depth += 1;
+                token_boundary = true;
+            }
             ')' if case_depth == 0 => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     break;
                 }
+                token_boundary = true;
             }
             _ => {}
         }
+        token_boundary =
+            ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
     }
 }
 

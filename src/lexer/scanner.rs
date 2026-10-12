@@ -862,7 +862,16 @@ impl<'a> Lexer<'a> {
                 }
                 Some('(') => {
                     self.advance();
-                    if self.peek() == Some('(') {
+                    // GNU parse.y:4976: `$((` is arithmetic only when the
+                    // group opened by the second `(` closes right before a
+                    // `)`; otherwise the construct is a command substitution
+                    // whose body starts at that second `(` (`$((echo hi)
+                    // 2>&1)` runs `(echo hi) 2>&1`), so the `$(` opener the
+                    // advance() above consumed closes at its own matching
+                    // `)` — not at a `))` pair (issue #512).
+                    if self.peek() == Some('(')
+                        && crate::lexer::dollar_double_paren_is_arithmetic(&self.input[start + 1..])
+                    {
                         self.advance();
                         self.skip_arith_paren();
                     } else {
