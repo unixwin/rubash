@@ -346,6 +346,13 @@ kills WSL-side test runs, and inflated PASS claims from wrong baselines.
 
 ## WinuxCmd / Winuxsh Tooling Issues
 
+> Path forms at every boundary (shell semantics / tool operands / sub-command
+> lookup / native-child argv), the verbatim guarantees, and when agents must
+> use `D:/` forms are pinned in
+> [`docs/windows-path-contract.md`](docs/windows-path-contract.md) with a
+> contract test suite (`tests/path_contract_boundary_*.rs`) — read it before
+> writing path-shaped probes; the agent-driving rules live in its §5.
+
 WinuxCmd (`D:/repo/unixwin-winuxcmd`, C++ toolchain providing GNU-compatible
 external commands: `sed`, `cp`, `grep`, `awk`, `ls`, ...) and Winuxsh
 (`D:/repo/unixwin-winuxsh`, the Rust shell shim that is `$0` in these sessions)
