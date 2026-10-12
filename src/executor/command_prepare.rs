@@ -559,7 +559,15 @@ impl Executor {
                 // script continues on the next line with status 1.
                 // ExpansionFailure carries exactly that contract at top level
                 // (ast_exec.rs skips the remaining same-line commands).
+                // POSIX-mode notes item 35: a non-interactive POSIX shell
+                // additionally EXITS with status 1 (oracle: top-level
+                // `ro=2` on a readonly ro ends the GNU posix script where
+                // the default mode prints the diagnostic and continues;
+                // subshells exit 1 in both modes via the DISCARD path).
                 self.exit_code = 1;
+                if self.posix_assignment_failure_is_fatal() {
+                    return Err(ExecuteError::ExitCode(1));
+                }
                 return Err(ExecuteError::ExpansionFailure(1));
             }
             // GNU variables.c make_variable_value: an integer-attribute
@@ -2794,7 +2802,13 @@ impl Executor {
         let function_name = cmd
             .words
             .first()
-            .and_then(|word| self.function_name_for_command_word(word))?;
+            .and_then(|word| self.function_name_for_command_word(word))
+            // Bash posix-mode notes (item 19): in POSIX mode a function whose
+            // name contains a slash is never executed — the word falls
+            // through to the PATH search (`a/b` -> command not found, 127)
+            // even though the definition stays accepted. Default mode keeps
+            // the function-first lookup.
+            .filter(|name| !(self.posix_mode_enabled() && name.contains('/')))?;
         let (materialized_cmd, process_substitution_files) =
             match self.command_with_process_substitution_files(cmd) {
                 Ok(materialized) => materialized,
@@ -2803,8 +2817,16 @@ impl Executor {
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
-        let temporary_assignments =
+        let (temporary_assignments, assignments_failed) =
             self.apply_temporary_assignments(&materialized_cmd.assignments, assignment_raws);
+        // POSIX-mode notes item 36: an assignment error before the command
+        // word exits the non-interactive POSIX shell, and the command (here a
+        // function invocation, `ro=3 f`) never runs — same gate as the
+        // execute_materialized_command path.
+        if assignments_failed && self.posix_assignment_failure_is_fatal() {
+            self.exit_code = 1;
+            return Some(Err(ExecuteError::ExitCode(1)));
+        }
         // GNU variables.c push_context: the function-call tempenv becomes the
         // function's variable context — recorded so a posix special builtin's
         // merged tempenv inside the function (att_propagate,

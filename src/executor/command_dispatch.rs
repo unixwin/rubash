@@ -31,10 +31,31 @@ impl Executor {
         let assignment_raws = (cmd.assignment_raws.len() == cmd.assignments.len())
             .then(|| cmd.assignment_raws.as_slice());
         let temporary_assignments = if standalone_assignments {
-            self.apply_permanent_assignments(&cmd.assignments, assignment_raws);
+            // GNU subst.c expand_word_error + execute_cmd.c: a failed
+            // assignment with no command word aborts the command list in
+            // every mode (the DISCARD jump); POSIX mode additionally EXITS
+            // the non-interactive shell (bash_variable_assignment_error,
+            // posix-mode notes item 35 — `ro=2` where ro is readonly).
+            let applied = self.apply_permanent_assignments(&cmd.assignments, assignment_raws);
+            if !applied && self.posix_assignment_failure_is_fatal() {
+                self.exit_code = 1;
+                return Err(ExecuteError::ExitCode(1));
+            }
             Vec::new()
         } else {
-            self.apply_temporary_assignments(&cmd.assignments, assignment_raws)
+            let (applied, assignments_failed) =
+                self.apply_temporary_assignments(&cmd.assignments, assignment_raws);
+            // POSIX-mode notes item 36: an assignment error before the command
+            // word exits the non-interactive POSIX shell and the command never
+            // runs. GNU 5.3 raises the jump for every command class (special
+            // builtin, ordinary builtin, external — oracle probes `ro=3 true`,
+            // `ro=5 :`, `ro=4 ls` all exit rc=1 without running the command);
+            // the default mode keeps the historical apply-and-continue.
+            if assignments_failed && self.posix_assignment_failure_is_fatal() {
+                self.exit_code = 1;
+                return Err(ExecuteError::ExitCode(1));
+            }
+            applied
         };
         if self.xtrace_enabled() && cmd.arithmetic_command.is_none() {
             // GNU dispatches `(( ))` to execute_arith_command, whose own

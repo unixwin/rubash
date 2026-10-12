@@ -169,7 +169,7 @@ pub(super) fn diagnostic_prefix() -> String {
     "rubash: ".to_string()
 }
 
-pub(super) fn split_assignment(arg: &str) -> (&str, bool, Option<&str>) {
+pub(crate) fn split_assignment(arg: &str) -> (&str, bool, Option<&str>) {
     match arg.find('=') {
         Some(index) => {
             let name = &arg[..index];
@@ -182,7 +182,7 @@ pub(super) fn split_assignment(arg: &str) -> (&str, bool, Option<&str>) {
     }
 }
 
-pub(super) fn valid_identifier(name: &str) -> bool {
+pub(crate) fn valid_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;

@@ -86,6 +86,44 @@ impl Executor {
         aborted
     }
 
+    /// The file-redirect ambiguity gate with the POSIX-mode notes item 10
+    /// rule: a non-interactive POSIX shell does not field-split redirect
+    /// operands, so whitespace in the expanded target that came from the
+    /// (suppressed) split is literal filename data — `f="two words";
+    /// echo hi > $f` opens the single file `two words` (oracle probe E,
+    /// rc=0) instead of reporting AMBIGUOUS_REDIRECT. Pathname expansion is
+    /// already suppressed by the same mode gate (`posix_noglob`), and brace
+    /// alternatives stay ambiguous: they are a multi-field word list from
+    /// brace expansion, not a field split (`> a{b,c}` still fails).
+    pub(in crate::executor) fn redirect_operand_ambiguous(
+        &self,
+        redirect: &crate::parser::Redirect,
+        raw: &str,
+        target: &str,
+    ) -> bool {
+        if !target.chars().any(char::is_whitespace) {
+            return redirect_target_is_ambiguous(raw, target);
+        }
+        let posix_nosplit = self.posix_mode_enabled()
+            && !self
+                .shell_state
+                .env_vars
+                .contains_key("__RUBASH_INTERACTIVE");
+        if posix_nosplit {
+            let branched = self.is_brace_expand_enabled()
+                && super::command_prepare::expand_braces_with_optional_raw(
+                    &redirect.target,
+                    Some(raw),
+                )
+                .len()
+                    > 1;
+            if !branched {
+                return false;
+            }
+        }
+        redirect_target_is_ambiguous(raw, target)
+    }
+
     pub(crate) fn expand_redirect_target(&self, redirect: &crate::parser::Redirect) -> String {
         // GNU redir.c:298 redirection_expand → expand_words_no_vars →
         // subst.c:11349-11378 (`expand_word_internal`, cases '<'/'>'): a

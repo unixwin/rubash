@@ -132,6 +132,32 @@ impl Executor {
             &mut stderr,
         )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        // GNU execute_cmd.c:4886-4888: a special builtin whose status exceeds
+        // EX_SHERRBASE has it converted (EX_USAGE 258 -> EX_BADUSAGE 2) and
+        // sets special_builtin_failed, so a POSIX non-interactive shell exits
+        // on `trap USR1` (the usage failure the posix reset-by-name rule
+        // raises). Mirrors the execute_set/unset wrappers. The direct/late
+        // dispatch arms for `trap` do not consult the flag, so this wrapper
+        // applies the execute_cmd.c:1004-1017 gate itself.
+        if status > 256 {
+            self.special_builtin_failed.set(true);
+            let converted = match status {
+                258..=259 => 2, // EX_USAGE, EX_BADSYNTAX -> EX_BADUSAGE
+                _ => 1,         // EX_UTILERROR etc. -> EXECUTION_FAILURE
+            };
+            if self.posix_mode_enabled()
+                && self
+                    .shell_state
+                    .env_vars
+                    .get("__RUBASH_INTERACTIVE")
+                    .map(String::as_str)
+                    != Some("1")
+            {
+                self.exit_code = converted;
+                return Err(ExecuteError::ExitCode(converted));
+            }
+            return Ok(converted);
+        }
         Ok(status)
     }
 

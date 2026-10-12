@@ -22,11 +22,13 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        let posix = self.posix_mode_enabled();
         let status = crate::builtins::alias::alias_with_io(
             &cmd.words[1..],
             &mut self.shell_state.aliases,
             &mut stdout,
             &mut stderr,
+            posix,
         )?;
         self.record_alias_definition_lines(&cmd.words[1..], cmd.line);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;

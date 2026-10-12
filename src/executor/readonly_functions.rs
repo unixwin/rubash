@@ -64,6 +64,14 @@ impl Executor {
         } else {
             status
         };
+        // GNU execute_cmd.c:1004-1017 with the sh_invalidid/err_readonly
+        // assignment class: in POSIX mode a non-interactive shell exits when
+        // the special builtin readonly fails on an assignment (`readonly
+        // 9bad=1`, `readonly ro3=2` on an existing readonly — oracle probes
+        // both exit rc=1). Same dispatch-gate flag the export wrapper arms.
+        if status != 0 && self.special_assignment_operand_failure(&args) {
+            self.special_builtin_failed.set(true);
+        }
         if status == 0 {
             self.sync_setattr_typed_assignments(cmd.words[1..].iter().map(String::as_str));
         }

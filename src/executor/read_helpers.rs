@@ -8,7 +8,7 @@ pub(in crate::executor) struct TimeCommandMetrics {
 }
 
 impl TimeCommandMetrics {
-    fn from_start(started: std::time::Instant) -> Self {
+    pub(in crate::executor) fn from_start(started: std::time::Instant) -> Self {
         Self {
             real: started.elapsed(),
             user: std::time::Duration::ZERO,
@@ -21,21 +21,32 @@ pub(in crate::executor) fn time_command_started() -> std::time::Instant {
     std::time::Instant::now()
 }
 
-pub(in crate::executor) fn print_posix_time(metrics: TimeCommandMetrics) {
-    eprintln!("real {}", format_time_seconds(metrics.real, Some(2), false));
-    eprintln!("user {}", format_time_seconds(metrics.user, Some(2), false));
-    eprintln!("sys {}", format_time_seconds(metrics.sys, Some(2), false));
-}
-
 pub(in crate::executor) fn print_time(
     env_vars: &HashMap<String, String>,
     posix_format: bool,
     started: std::time::Instant,
 ) {
     let metrics = TimeCommandMetrics::from_start(started);
+    if let Some(report) = format_time_report(env_vars, posix_format, metrics) {
+        eprintln!("{report}");
+    }
+}
+
+/// The composed `time` report (no trailing newline), or None when the active
+/// format produces nothing. An invalid TIMEFORMAT still reports its
+/// diagnostic on the raw stderr — the caller never sees it.
+pub(in crate::executor) fn format_time_report(
+    env_vars: &HashMap<String, String>,
+    posix_format: bool,
+    metrics: TimeCommandMetrics,
+) -> Option<String> {
     if posix_format {
-        print_posix_time(metrics);
-        return;
+        return Some(format!(
+            "real {}\nuser {}\nsys {}",
+            format_time_seconds(metrics.real, Some(2), false),
+            format_time_seconds(metrics.user, Some(2), false),
+            format_time_seconds(metrics.sys, Some(2), false),
+        ));
     }
 
     // GNU execute_cmd.c:1245: without `time -p` the default format is
@@ -49,15 +60,18 @@ pub(in crate::executor) fn print_time(
         .unwrap_or("\\nreal\\t%3lR\\nuser\\t%3lU\\nsys\\t%3lS");
 
     if format.is_empty() {
-        return;
+        return None;
     }
 
     match expand_time_format(format, metrics) {
-        Ok(output) => eprintln!("{output}"),
-        Err(invalid) => eprintln!(
-            "{}TIMEFORMAT: `{invalid}': invalid format character",
-            crate::builtins::set::builtin_error_prefix(env_vars)
-        ),
+        Ok(output) => Some(output),
+        Err(invalid) => {
+            eprintln!(
+                "{}TIMEFORMAT: `{invalid}': invalid format character",
+                crate::builtins::set::builtin_error_prefix(env_vars)
+            );
+            None
+        }
     }
 }
 
