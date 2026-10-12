@@ -104,11 +104,19 @@ fn quoted_assignment_rhs_keeps_procsub_text() {
 /// `line2=<(echo hi)` stores `/dev/fd/63`).
 #[test]
 fn literal_assignment_procsub_still_substitutes() {
+    // The #364 point stands: a literal `var=<(cmd)` SUBSTITUTES — the
+    // variable holds the `/dev/fd/N` word form, not the literal text.
+    // rubash#545 cell 2 adds GNU's lifetime: the fd closes with the
+    // assignment command, so the later `cat` fails ENOENT and `rc:` is 1
+    // (WSL GNU 5.3.0(1) probe 2026-10-12).
     let (stdout, stderr, code) = rubash(r#"line2=<(printf hi); cat "$line2"; echo "rc:$?""#);
     assert!(!stderr.contains("command not found"), "stderr: {stderr}");
-    assert!(stdout.contains("hi"), "stdout: {stdout}");
-    assert!(stdout.contains("rc:0"), "stdout: {stdout}");
-    assert!(code.is_some_and(|c| c != 2));
+    assert!(
+        stderr.contains("/dev/fd/") && stderr.contains("No such file or directory"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(stdout, "rc:1\n", "stdout: {stdout}");
+    assert_eq!(code, Some(0));
 }
 
 /// Command-argument position was never affected (control, GNU E).

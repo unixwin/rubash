@@ -1033,15 +1033,23 @@ fn process_substitution_external_redirect_preserves_printf_raw_bytes() {
 
 #[test]
 fn assignment_process_substitution_preserves_printf_raw_bytes() {
+    // rubash#545 cell 2: the raw bytes still travel through the live fd
+    // WITHIN the creating command (`cat <(printf '\377')` above), but the
+    // assignment-carried `/dev/fd/N` is dead for the later `cat` — GNU
+    // 5.3.0(1) probe 2026-10-12: ENOENT, rc 1, nothing on stdout.
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
         .arg(r#"x=<(printf '\377'); cat "$x""#)
         .output()
         .expect("run assignment process substitution raw byte probe");
 
-    assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, [0xff]);
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, []);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("No such file or directory"),
+        "stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

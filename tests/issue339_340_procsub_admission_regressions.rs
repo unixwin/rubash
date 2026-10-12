@@ -48,15 +48,21 @@ fn rubash(script: &str) -> (String, String, Option<i32>) {
 }
 
 /// #339 repro A: array assignment with a procsub element parses and the
-/// element materializes (GNU: `cat: /dev/fd/63: No such file or directory`
-/// because the fd is already closed; rubash's temp-file procsub keeps the
-/// bytes readable — the #355 path-form/lifecycle class, not parse).
+/// element materializes. rubash#545 cell 2 aligns the lifetime with GNU:
+/// the stored `/dev/fd/N` string names a fd that closed with the creating
+/// command, so the later `cat` fails ENOENT (WSL GNU 5.3.0(1) probe
+/// 2026-10-12: `cat: /dev/fd/63: No such file or directory`, rc 1).
 #[test]
 fn procsub_array_assignment_parses_and_materializes() {
     let (stdout, stderr, code) = rubash("a=(<(echo e))\ncat \"${a[0]}\"");
     assert!(!stderr.contains("syntax error"), "stderr: {stderr}");
     assert_ne!(code, Some(2));
-    assert_eq!(stdout, "e\n");
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.contains("/dev/fd/") && stderr.contains("No such file or directory"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(code, Some(1));
 }
 
 /// #339 guard: a bare `<` inside a compound assignment is still the

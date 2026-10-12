@@ -642,6 +642,7 @@ impl Executor {
             .and_then(|operand| operand.strip_suffix(')'))
             .map(|source| (true, source));
         let (is_output, source) = output.or(input)?;
+        let _ = is_output;
         let word = if is_output {
             let path = self.empty_process_substitution_temp().ok()?;
             let word = self.process_substitution_output_fd_word(&path);
@@ -653,12 +654,17 @@ impl Executor {
             self.process_substitution_fd_word(&output_bytes)
         };
         self.xtrace_conditional_term(op, &word, None);
+        // WSL GNU 5.3.0(1) matrix (script-file probes, 2026-10-12 — the
+        // ad-hoc nested-quoting channel gives polluted answers there, the
+        // file channel is authoritative): a LIVE /dev/fd/N operand answers
+        // TRUE for -e -p -r -w -L -h -O -G on BOTH substitution sides (the
+        // fd is a readable-writable end of a pipe reached through a magic
+        // symlink owned by this user), and FALSE for -f -d -x -s -b -c -S
+        // -u -g -k -N (probe3/probe5: `-f <(:)`=1, `-s <(printf hello)`=1,
+        // `-L <(:)`=0, `-r >(:)`=0).
         Some(match op {
-            "-a" | "-e" | "-p" => true,
-            "-r" => !is_output,
-            "-w" => is_output,
-            "-f" | "-d" | "-h" | "-L" | "-s" | "-S" | "-b" | "-c" | "-u" | "-g" | "-k" | "-O"
-            | "-G" | "-N" => false,
+            "-a" | "-e" | "-p" | "-r" | "-w" | "-L" | "-h" | "-O" | "-G" => true,
+            "-f" | "-d" | "-x" | "-s" | "-S" | "-b" | "-c" | "-u" | "-g" | "-k" | "-N" => false,
             _ => return None,
         })
     }

@@ -509,9 +509,12 @@ fn test_conditional_file_unary_checks_process_substitution_operands() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
+    // rubash#545 cell 3: the operands are realized, and the verdict matrix
+    // is the WSL GNU 5.3.0(1) one (script-file probes, 2026-10-12): a live
+    // /dev/fd/N answers -e/-p/-r/-w TRUE on both sides, -f/-s FALSE.
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "in_exists:0\nin_pipe:0\nin_read:0\nin_write:1\nin_file:1\nin_size:1\nout_exists:0\nout_pipe:0\nout_write:0\nout_read:1\n"
+        "in_exists:0\nin_pipe:0\nin_read:0\nin_write:0\nin_file:1\nin_size:1\nout_exists:0\nout_pipe:0\nout_write:0\nout_read:0\n"
     );
     let _ = fs::remove_file(output_path);
 }

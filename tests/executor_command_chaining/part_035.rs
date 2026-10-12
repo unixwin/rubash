@@ -230,7 +230,11 @@ fn test_jobs_unknown_jobspec_reports_failure() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    // rubash#549 cell 1: GNU 5.3.0 keeps the jobs builtin's status at 0
+    // even when a jobspec fails (probe 2026-10-12: `jobs %1` with no jobs
+    // prints `jobs: %1: no such job` and returns 0; every listing shape
+    // does).
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.contains("jobs: %1: no such job"));
     let _ = fs::remove_file(error_path);

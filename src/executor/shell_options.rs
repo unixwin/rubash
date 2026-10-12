@@ -42,7 +42,21 @@ impl Executor {
         // (niubash#118: `< /dev/stdin` used to open CONIN$ and block on the
         // console even when fd 0 was a pipeline).
         if let Some(fd) = dev_stdio_redirect_fd(target) {
-            return self.open_fd_read_endpoint(fd, target);
+            // rubash#545 (cell 2): a CLOSED /dev/fd/N falls through to the
+            // literal open, whose failure reports ENOENT — GNU's errno for
+            // a dangling /proc/self/fd magic symlink (redir.c
+            // redirection_error; the output side has the same fall-through,
+            // command_input_scope.rs). A command-scoped process substitution
+            // fd dies with its creating command, so `< $p` with a stored
+            // `/dev/fd/63` fails `No such file or directory` like GNU.
+            if self
+                .fd_table
+                .entries
+                .get(&fd)
+                .is_some_and(|entry| !entry.closed)
+            {
+                return self.open_fd_read_endpoint(fd, target);
+            }
         }
         // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): synthetic /proc files
         // serve as a pre-filled pipe converted to a File; reads hit EOF at

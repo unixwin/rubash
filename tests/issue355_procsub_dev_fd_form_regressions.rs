@@ -129,12 +129,21 @@ fn multiple_words_count_down_from_63() {
 }
 
 #[test]
-fn dev_fd_word_reopens_through_fd_table() {
-    // A variable-carried /dev/fd/N reopens through the virtual fd table
-    // (GNU keeps the pipe; rubash keeps the endpoint).
+fn dev_fd_word_is_dead_after_the_creating_command() {
+    // rubash#545 cell 2 (adjudication reversing the old reopen behavior):
+    // GNU closes a command's process-substitution fd when the command
+    // finishes, so a variable-carried `/dev/fd/N` is a dead path for every
+    // later command (WSL GNU 5.3.0(1) probe 2026-10-12:
+    // `x=<(printf hi); cat "$x"` -> `cat: /dev/fd/63: No such file or
+    // directory`, rc 1). Within the CREATING command the fd stays live
+    // (`diff <(a) <(b)` and `cat <(x)` still work).
     let (stdout, stderr, code) = rubash_stdin("p=<(echo hi)\nwc -c < $p\n");
-    assert_eq!(code, Some(0), "stderr: {stderr}");
-    assert!(stdout.starts_with("3"), "stdout: {stdout}");
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert_eq!(stdout, "", "stdout: {stdout}");
+    assert!(
+        stderr.contains("/dev/fd/") && stderr.contains("No such file or directory"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
