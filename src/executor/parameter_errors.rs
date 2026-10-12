@@ -953,14 +953,44 @@ impl Executor {
                 // name whose value is a valid identifier expands normally -
                 // even when the target itself is unset (GNU probe:
                 // x=validname with validname unset expands empty).
+                //
+                // "Unset" here means NO variable ENTRY (subst.c:7913
+                // `valid_identifier (name) && v == 0` with v =
+                // find_variable_last_nameref, variables.c:2051): the walk
+                // returns NULL for an absent name and for a nameref chain
+                // that stops on an empty cell (or cycles / exceeds depth) —
+                // both keep the fatal. A declared-unset non-nameref entry
+                // (bare `declare x` / `local x`, the att_invisible port) IS
+                // found, so parameter_brace_find_indir yields a NULL value
+                // and the whole expansion is empty — WSL 5.3.0:
+                // `declare x; echo "[${!x}]"` prints `[]` and the script
+                // continues (rubash#529).
                 if !indirect.is_empty() && is_shell_name(indirect) {
+                    let source_found = match self.nameref_resolution(indirect) {
+                        NamerefResolution::Target(_) => true,
+                        NamerefResolution::NotNameref => {
+                            self.shell_state.env_vars.contains_key(indirect)
+                                || is_marked_var(
+                                    &self.shell_state.env_vars,
+                                    DECLARED_UNSET_VARS,
+                                    indirect,
+                                )
+                        }
+                        NamerefResolution::Unresolved
+                        | NamerefResolution::Circular
+                        | NamerefResolution::MaxDepth => false,
+                    };
                     match self.shell_state.env_vars.get(indirect) {
-                        None => {
+                        None if !source_found => {
                             return Some((
                                 indirect.to_string(),
                                 "invalid indirect expansion".to_string(),
                                 1,
                             ));
+                        }
+                        None => {
+                            // Declared-unset entry: the expansion is empty,
+                            // never a diagnostic (rubash#529).
                         }
                         Some(value) => {
                             if !Self::is_valid_indirect_target(value) {
@@ -1482,27 +1512,63 @@ impl Executor {
             let resolved = self
                 .resolved_variable_name(base)
                 .unwrap_or_else(|| base.to_string());
-            let Some(target) = self.shell_state.env_vars.get(&resolved).cloned() else {
-                return None;
-            };
-            if target.ends_with("[@]") || target.ends_with("[*]") {
-                return None;
-            }
-            let bound = if let Some((tbase, tsub)) = parse_array_subscript(&target) {
-                if tsub == "@" || tsub == "*" {
-                    true
-                } else if self.is_assoc_parameter_array(&tbase) {
-                    let key = self.assoc_subscript_key(&tsub);
-                    self.parameter_array_storage(&tbase)
-                        .and_then(|storage| assoc_value_at(&storage, &key))
-                        .is_some()
-                } else {
-                    !self.nounset_indexed_element_absent(&tbase, &tsub)
+            // GNU subst.c:7883-7920 parameter_brace_expand_indir + the
+            // caller's unbound check at subst.c:10164-10175 — three ordered
+            // outcomes for the indirection SOURCE:
+            // 1. entry absent (find_variable_last_nameref == 0):
+            //    "invalid indirect expansion" fires BEFORE any nounset
+            //    check — defer to that scan (return None here);
+            // 2. entry exists but declared-unset (bare declare/local):
+            //    no indir error, the NULL value leaves the whole expansion
+            //    unset, and the caller's err_unboundvar(name) reports the
+            //    full `!base` under nounset (WSL 5.3.0: `set -u; declare x;
+            //    echo ${!x}` -> `!x: unbound variable`, rubash#529);
+            // 3. entry has a value: an invalid target value raises
+            //    "invalid variable name" INSIDE parameter_brace_expand_indir
+            //    (subst.c:7955-7961) before the caller's unbound check —
+            //    defer to that scan too (WSL 5.3.0: `set -u; x=; ${!x}` and
+            //    `set -u; x=1bad; ${!x}` both report the VALUE, not `!x`).
+            match self.shell_state.env_vars.get(&resolved).cloned() {
+                None => {
+                    // Outcome 2 only for a declared-unset NON-nameref entry:
+                    // a never-set name or an empty-cell / circular nameref
+                    // keeps outcome 1 ("invalid indirect expansion" before
+                    // any nounset check — variables.c:2070 returns NULL for
+                    // an empty-cell nameref even though the entry exists).
+                    let plain_entry = matches!(
+                        self.nameref_resolution(&resolved),
+                        NamerefResolution::NotNameref
+                    ) && is_marked_var(
+                        &self.shell_state.env_vars,
+                        DECLARED_UNSET_VARS,
+                        &resolved,
+                    );
+                    return plain_entry.then(|| format!("!{base}"));
                 }
-            } else {
-                self.nounset_variable_bound(&target)
-            };
-            return (!bound).then(|| format!("!{base}"));
+                Some(target) => {
+                    if target.ends_with("[@]") || target.ends_with("[*]") {
+                        return None;
+                    }
+                    if !Self::is_valid_indirect_target(&target) {
+                        return None;
+                    }
+                    let bound = if let Some((tbase, tsub)) = parse_array_subscript(&target) {
+                        if tsub == "@" || tsub == "*" {
+                            true
+                        } else if self.is_assoc_parameter_array(&tbase) {
+                            let key = self.assoc_subscript_key(&tsub);
+                            self.parameter_array_storage(&tbase)
+                                .and_then(|storage| assoc_value_at(&storage, &key))
+                                .is_some()
+                        } else {
+                            !self.nounset_indexed_element_absent(&tbase, &tsub)
+                        }
+                    } else {
+                        self.nounset_variable_bound(&target)
+                    };
+                    return (!bound).then(|| format!("!{base}"));
+                }
+            }
         }
 
         // GNU subst.c:9807 parameter_brace_expand: the parameter reference
