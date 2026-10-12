@@ -64,7 +64,7 @@ batches, see the addendum below). Before this PR the implemented count was
 | `${!#}` / `${!?}` | 13 | identical (`[]` + "parameter not set" in posix; `one`/`bash` in default) |
 | `false; a=$(true) b=$(false); $?` | 16 | identical (`S1=1`) |
 | `x=5 :` / `y=6 true` | 41 | identical (`COLON=[5]`, `TRUE=[]`) |
-| `readonly ro=1; ro=2` | 35, 36, 72 | **fixed** 35: bare `ro=2` (no command word) exits status 1 in posix at top level like GNU — rubash was already fatal inside subshells in both modes; `ro=3 cmd` (item 36) now exits too, command not run; 72 was already implemented (`unset -v ro` exits) |
+| `readonly ro=1; ro=2` | 35, 36, 72 | **fixed** 35+36: bare `ro=2` exits status 1 in posix; `ro=2 <special>` exits; `ro=2 <builtin/external/function>` skips the command and abandons the command list (GNU cell matrix, ksh93 emulation); default mode unchanged (runs the command); 72 was already implemented (`unset -v ro` exits) |
 | `readonly i; for i in 1 2` | 37 | **fixed**: posix exits status 1 at the loop-variable bind; default mode fails the `for` command (rc=1, body never runs) and continues, like GNU |
 | `. ./missing.sh` | 38 | both exit rc=1 in posix; both continue in default |
 | `eval 'if ('` | 39 | both exit rc=2 in posix (wording differs: GNU "unexpected end of file from `('"; rubash "unexpected token") |
@@ -195,12 +195,45 @@ evidence. Items marked **fixed** link to this PR's commits.
    fails rc=1 silently, rubash also fails rc=1 but prints "invalid signal
    specification" (the `-s SIGNAME` shape is byte-identical).
 
+## Third-pass addendum (goldens gate: the errors.snap re-record)
+
+The PR's first push redid the `upstream_suite_slice_snapshots` goldens gate:
+`errors` (and locally also `comsub`/`heredoc`/`nquote`) diverged.
+
+- **errors — intended GNU alignment, golden re-recorded.** The snapshot's
+  `-o posix` child-run sections had been recorded from the pre-audit engine
+  that never exits on assignment errors; every diverging line is a posix-run
+  continuation line. Verified per-construct against real GNU with unbuffered
+  per-process probes, the recorded behavior was NOT GNU-aligned: GNU posix
+  exits on bare assignment statements and failed assignments before SPECIAL
+  builtins, and for ordinary builtins/externals/functions it SKIPS the
+  command, abandons the rest of the command list (status 1) and continues —
+  the ksh93 emulation GNU's own errors7.sub comment describes. The earlier
+  second-pass reading ("every command class exits") was an artifact of
+  stdout pipe buffering over jump-exits; the cell matrix was re-taken with
+  stderr-only probes. The implementation was corrected to that table
+  (special → `ExecuteError`; other classes → restore the partial tempenv
+  binds, then `ExpansionFailure(1)` — which also fixed a tempenv-mark leak
+  the goldens gate exposed), plus the `${v:=val}`-on-readonly
+  parameter-expansion arm (GNU posix: fatal; default: status-2 discard —
+  rubash default already matched). errors.snap was re-recorded
+  (RUBASH_REGRESSION_RECORD=1, the module-header protocol): the new recording
+  keeps every default-run byte and changes only the posix-run lines, which
+  now match `bash -o posix` byte-for-byte on errors4.sub and errors7.sub.
+- **comsub / heredoc / nquote — not this PR.** With the PR's src/ replaced
+  by pure `origin/master` (505e33dc) the same three suites still fail in
+  this environment, while CI is green on master: a local recording/submodule
+  or environment divergence on the master side, reported for triage.
+
 ## Second-pass addendum (this session)
 
 The first pass landed items 19, 47, 52, 56, 58, 67, 68, 69. This pass:
 
 - **fixed 35, 36, 37, 40, 10, 6** (the assignment-error fatality family, the
-  redirect no-split gate, and the `time` stream) and completed 68: the trap
+  redirect no-split gate, and the `time` stream; item 36's cell semantics
+  were then corrected by the third pass below — the "every command class
+  exits" reading in the first recording of this pass was a stdout
+  pipe-buffering artifact) and completed 68: the trap
   reset-by-name usage path now returns GNU's RAW internal `EX_USAGE` (258) so
   the `execute_trap` wrapper's `> EX_SHERRBASE` gate actually arms
   `special_builtin_failed` and converts to the user-visible 2 (the first

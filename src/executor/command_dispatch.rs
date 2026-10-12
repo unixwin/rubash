@@ -45,15 +45,33 @@ impl Executor {
         } else {
             let (applied, assignments_failed) =
                 self.apply_temporary_assignments(&cmd.assignments, assignment_raws);
-            // POSIX-mode notes item 36: an assignment error before the command
-            // word exits the non-interactive POSIX shell and the command never
-            // runs. GNU 5.3 raises the jump for every command class (special
-            // builtin, ordinary builtin, external — oracle probes `ro=3 true`,
-            // `ro=5 :`, `ro=4 ls` all exit rc=1 without running the command);
-            // the default mode keeps the historical apply-and-continue.
+            // POSIX-mode notes item 36, GNU 5.3 verified cell-by-cell with
+            // unbuffered per-process probes (the early "every command class
+            // exits" reading was a stdout pipe-buffering artifact — GNU's
+            // jump-exit does not flush it): a failed readonly tempenv
+            // assignment before a SPECIAL builtin exits the shell (status 1,
+            // `ro=2 :` — no further statement runs), while before an
+            // ordinary builtin, external or function the command is SKIPPED
+            // and the rest of the command list is abandoned with status 1
+            // (ksh93 emulation — GNU errors7.sub: `x=8 echo` runs nothing,
+            // `after non-special builtin: 1`; subshell forms exit the
+            // subshell with 1 and the parent continues). ExpansionFailure(1)
+            // is exactly that skip-and-abandon contract; the default mode
+            // keeps the historical apply-and-run.
             if assignments_failed && self.posix_assignment_failure_is_fatal() {
                 self.exit_code = 1;
-                return Err(ExecuteError::ExitCode(1));
+                let special = cmd
+                    .words
+                    .first()
+                    .is_some_and(|word| is_posix_special_builtin(word));
+                // Restore the partial tempenv binds before unwinding: the
+                // skip-and-abandon path keeps the shell running, and an
+                // unbalanced tempenv mark would corrupt every later restore.
+                self.restore_temporary_assignments(applied);
+                if special {
+                    return Err(ExecuteError::ExitCode(1));
+                }
+                return Err(ExecuteError::ExpansionFailure(1));
             }
             applied
         };

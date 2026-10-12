@@ -10,15 +10,8 @@ TEST
 1
 2
 after readonly assignment
-after for readonly assignment
-after posix for readonly variable
-after posix select readonly variable
 1
 2
-after readonly assignment
-after for readonly assignment
-after posix for readonly variable
-after posix select readonly variable
 0
 
 after 1: 1
@@ -54,13 +47,8 @@ after special builtin: 0
 after assignment error: 1
 after assignment statement error: 1
 variable assignment error
-after no such command: 127
-echo builtin
-after non-special builtin: 0
-after special builtin: 0
-after assignment error: 1
-after assignment statement error: 1
-variable assignment error
+after no such command: 1
+after non-special builtin: 1
 ok 1
 ok 2
 ok 3
@@ -91,10 +79,6 @@ after exit: 1
 after shift: 1
 after break: 1
 after continue: 1
-after: 1
-after: 1
-after: 1
-after: 1
 after: 1
 after: 1
 after: 1

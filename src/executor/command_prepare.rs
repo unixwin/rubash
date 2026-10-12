@@ -344,6 +344,16 @@ impl Executor {
             // whole script.
             let status = if message == "readonly variable" { 2 } else { 1 };
             self.exit_code = status;
+            // POSIX-mode notes item 36, parameter-expansion assignment arm:
+            // `: ${v:=val}` against a readonly v before the special builtin
+            // exits the non-interactive POSIX shell (GNU probe: subshell form
+            // exits 1, nothing after runs; default keeps the DISCARD
+            // contract — subshell exits with the status, script continues).
+            // Only the readonly class is oracle-covered here; the positional
+            // arm keeps the historical status-1 discard.
+            if status == 2 && self.posix_assignment_failure_is_fatal() {
+                return Err(ExecuteError::ExitCode(1));
+            }
             // rubash#439: expansion error, not a failed command — no ERR trap.
             self.command_expansion_failed.set(true);
             return Err(ExecuteError::ExpansionFailure(status));
@@ -654,6 +664,16 @@ impl Executor {
             // (subst.c:10404-10410); the script keeps running either way.
             let status = if message == "readonly variable" { 2 } else { 1 };
             self.exit_code = status;
+            // POSIX-mode notes item 36, parameter-expansion assignment arm:
+            // `: ${v:=val}` against a readonly v before the special builtin
+            // exits the non-interactive POSIX shell (GNU probe: subshell form
+            // exits 1, nothing after runs; default keeps the DISCARD
+            // contract — subshell exits with the status, script continues).
+            // Only the readonly class is oracle-covered here; the positional
+            // arm keeps the historical status-1 discard.
+            if status == 2 && self.posix_assignment_failure_is_fatal() {
+                return Err(ExecuteError::ExitCode(1));
+            }
             // rubash#439: expansion error, not a failed command — no ERR trap.
             self.command_expansion_failed.set(true);
             return Err(ExecuteError::ExpansionFailure(status));
@@ -2819,13 +2839,20 @@ impl Executor {
         .then(|| materialized_cmd.assignment_raws.as_slice());
         let (temporary_assignments, assignments_failed) =
             self.apply_temporary_assignments(&materialized_cmd.assignments, assignment_raws);
-        // POSIX-mode notes item 36: an assignment error before the command
-        // word exits the non-interactive POSIX shell, and the command (here a
-        // function invocation, `ro=3 f`) never runs — same gate as the
-        // execute_materialized_command path.
+        // POSIX-mode notes item 36 (GNU 5.3 cell matrix): a failed readonly
+        // tempenv assignment before a FUNCTION skips the function and
+        // abandons the rest of the command list with status 1 (subshell
+        // forms exit the subshell with 1, the parent continues) — same
+        // skip-and-abandon contract as the execute_materialized_command
+        // path; only a SPECIAL builtin command word would exit the shell.
         if assignments_failed && self.posix_assignment_failure_is_fatal() {
             self.exit_code = 1;
-            return Some(Err(ExecuteError::ExitCode(1)));
+            // Restore the partial tempenv binds before unwinding — the
+            // skip-and-abandon contract keeps the shell (or the enclosing
+            // subshell boundary) alive, and an unbalanced tempenv mark would
+            // corrupt every later restore.
+            self.restore_temporary_assignments(temporary_assignments);
+            return Some(Err(ExecuteError::ExpansionFailure(1)));
         }
         // GNU variables.c push_context: the function-call tempenv becomes the
         // function's variable context — recorded so a posix special builtin's
