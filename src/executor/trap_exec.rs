@@ -697,9 +697,22 @@ impl Executor {
             .env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok());
+        // rubash#375: parse the action once per distinct spliced text (GNU
+        // parses at trap invocation, trap.c read_trap_action); per-firing
+        // tokenize+parse of a stable action is dead work. The AST is taken
+        // out of the cache cell, re-stamped and executed, then put back —
+        // no clone on the per-firing path.
         let action = self.comsub_body_alias_splice(action);
-        let tokens = crate::lexer::tokenize(&action);
-        let mut ast = crate::parser::parse(&tokens);
+        let mut ast = {
+            let taken = self.debug_trap_action_cache.borrow_mut().take();
+            match taken {
+                Some((key, cached_ast)) if key == action => cached_ast,
+                _ => {
+                    let tokens = crate::lexer::tokenize(&action);
+                    crate::parser::parse(&tokens)
+                }
+            }
+        };
         if let Some(call_line) = call_line {
             for command in &mut ast.commands {
                 command.line = Some(call_line);
@@ -707,6 +720,10 @@ impl Executor {
         }
         let saved_alias_streamed = self.mark_alias_streamed();
         let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        // Cache the (re-stamped) AST under its spliced text for the next
+        // firing; the stamps are unconditionally overwritten by every
+        // firing's `command.line` walk above, so reuse is exact.
+        *self.debug_trap_action_cache.borrow_mut() = Some((action, ast));
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = None;
         self.debug_trap_running = false;

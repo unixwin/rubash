@@ -508,6 +508,18 @@ pub struct Executor {
     /// `command eval '( '` must not exit the shell.
     command_builtin_depth: usize,
     debug_trap_running: bool,
+    /// rubash#375: parse-once cache for the DEBUG trap action. GNU parses a
+    /// trap action once at `trap` invocation (trap.c read_trap_action) and
+    /// runs the cached parse per firing; re-tokenizing + re-parsing the same
+    /// action text on every firing (measured 12.5µs x 6002 firings in the
+    /// bats_debug_trap lane) is dead work. Key = the alias-spliced action
+    /// text (the exact bytes tokenize sees), value = the parsed AST. During
+    /// a firing the AST is TAKEN out of the cell (the per-firing
+    /// `command.line` stamp mutates it), executed, and put back — a stable
+    /// action text pays zero clones and zero parses per firing. Any change
+    /// to the spliced text (trap re-set, alias-table change feeding the
+    /// splice) misses and re-parses.
+    debug_trap_action_cache: std::cell::RefCell<Option<(String, crate::parser::Ast)>>,
     return_trap_running: bool,
     signal_trap_running: bool,
     /// The last value written to the OS environment's

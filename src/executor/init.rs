@@ -315,6 +315,7 @@ impl Executor {
             suppress_errexit: 0,
             command_builtin_depth: 0,
             debug_trap_running: false,
+            debug_trap_action_cache: std::cell::RefCell::new(None),
             line_env_os_value: std::cell::RefCell::new(None),
             return_trap_running: false,
             signal_trap_running: false,
