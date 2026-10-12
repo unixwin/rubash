@@ -121,7 +121,18 @@ impl Executor {
         let mut no_more_flags = false;
         let mut failed = false;
         for word in &cmd.words[1..] {
-            let expanded = self.expand_word(word);
+            // cmd.words are the already-expanded argv: the simple-command
+            // executor ran each word through expand_command_words once
+            // (execute_cmd.c execute_disk_command -> expand_words), which
+            // performs quote removal — a single-quoted/escaped operand like
+            // '$FIX/d' or \$FIX/d arrives with its quotes gone and a
+            // LIVE-looking `$`. Re-running expand_word here is a second
+            // expansion pass that re-scans that literal text and silently
+            // creates a different path (issue #555, sibling of #511/#177).
+            // Use the argv as-is; glob expansion already happened once at
+            // dispatch. Same rule as external_sed (rubash#177) and
+            // external_cat (rubash#511).
+            let expanded = word.as_str();
             if !no_more_flags && !mode_value_pending && expanded == "--" {
                 no_more_flags = true;
                 continue;
@@ -184,9 +195,12 @@ impl Executor {
         let mut index = 1;
         while let Some(word) = cmd.words.get(index) {
             index += 1;
-            let expanded = self.expand_word(word);
+            // argv as-is — no second expand_word pass (issue #555, see
+            // external_mkdir): option/operand classification runs on the
+            // same final text getopt would see in the real touch.exe.
+            let expanded = word.as_str();
             if no_more_options || !expanded.starts_with('-') || expanded == "-" {
-                operands.push(expanded);
+                operands.push(expanded.to_owned());
                 continue;
             }
             if expanded == "--" {
@@ -307,9 +321,12 @@ impl Executor {
         let mut words = cmd.words[1..].iter();
 
         while let Some(word) = words.next() {
-            let expanded = self.expand_word(word);
+            // argv as-is — no second expand_word pass (issue #555, see
+            // external_mkdir): option/operand classification runs on the
+            // same final text getopt would see in the real cp.exe.
+            let expanded = word.as_str();
             if no_more_flags {
-                operands.push(expanded);
+                operands.push(expanded.to_owned());
                 continue;
             }
             if expanded == "--" {
@@ -317,7 +334,7 @@ impl Executor {
                 continue;
             }
             if expanded == "-" || !expanded.starts_with('-') {
-                operands.push(expanded);
+                operands.push(expanded.to_owned());
                 continue;
             }
             if let Some(rest) = expanded.strip_prefix("--") {
@@ -337,8 +354,9 @@ impl Executor {
                     "force" | "link" | "symbolic-link" | "parents" | "backup"
                     | "no-dereference" | "no-preserve" | "suffix" | "context" => {}
                     "target-directory" | "target-dir" => {
-                        target_dir =
-                            value.or_else(|| words.next().map(|next| self.expand_word(next)));
+                        // The -t/--target-directory value is argv too: take
+                        // it as-is (issue #555).
+                        target_dir = value.or_else(|| words.next().map(|next| next.clone()));
                     }
                     "help" => {
                         let _ = writeln!(stderr, "{}", cp_usage_text());
@@ -369,7 +387,8 @@ impl Executor {
                     'u' => update_only = true,
                     'f' | 'l' | 's' | 'd' | 'P' | 'Z' => {}
                     't' => {
-                        target_dir = words.next().map(|next| self.expand_word(next));
+                        // The -t value is argv too: take it as-is (issue #555).
+                        target_dir = words.next().map(|next| next.clone());
                         break;
                     }
                     'S' => {
@@ -737,8 +756,11 @@ impl Executor {
         let mut status = 0;
         let mut stderr = Vec::new();
         for path in cmd.words.iter().skip(1).filter(|arg| !arg.starts_with('-')) {
-            let expanded = self.expand_word(path);
-            let target = shell_path_to_windows(&expanded, &self.shell_state.env_vars);
+            // argv as-is — no second expand_word pass (issue #555, see
+            // external_mkdir): a quoted '$FIX/r' must fail on the literal
+            // name, never remove the expanded neighbor.
+            let expanded = path.as_str();
+            let target = shell_path_to_windows(expanded, &self.shell_state.env_vars);
             let result = if target.is_dir() {
                 fs::remove_dir_all(&target)
             } else {
@@ -770,8 +792,11 @@ impl Executor {
 
     fn external_rmdir(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
         for path in &cmd.words[1..] {
+            // argv as-is — no second expand_word pass (issue #555, see
+            // external_mkdir): a quoted '$FIX/rd' must never remove the
+            // expanded neighbor.
             let _ = fs::remove_dir(shell_path_to_windows(
-                &self.expand_word(path),
+                path.as_str(),
                 &self.shell_state.env_vars,
             ));
         }
