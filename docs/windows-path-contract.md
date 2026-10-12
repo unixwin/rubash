@@ -49,7 +49,7 @@ argv 字节**；路径形态的取舍按"子进程自己有没有 POSIX 层"分�
 
 ### L2 工具参数层
 
-- touch/ls/env/timeout/xargs/rm/cat：显式 `/c/...` 操作数可用（verbatim 直通后由工具解析）。`/mnt/c/...` 工具侧同样可解析（WinuxCmd 1.1.5 实测），但引擎当前按 #444 对 `/mnt/X` 做**全类预翻译**（carve-out，见 [rubash#568](https://github.com/unixwin/rubash/issues/568) 的裁决待办）。
+- touch/ls/env/timeout/xargs/rm/cat：显式 `/c/...` 操作数可用（verbatim 直通后由工具解析）。~~`/mnt/c/...` 工具侧同样可解析（WinuxCmd 1.1.5 实测）~~ **更正（rubash#568 裁决，2026-10-12）：该结论是测量污染**——Git Bash 直打 `ls /mnt/c/...` rc=0 来自 MSYS 运行时 spawn 前转换（bash 传给原生子进程的 argv 已是 `C:\Windows`），测的是 Git Bash 不是工具链；PowerShell 同进程并排（无 POSIX 层）`/d/repo` ✅、`/cygdrive/d/repo` ✅、`/mnt/c/Windows` ❌ ENOENT，`touch /mnt/c/...` rc=1 未落盘；源码 `normalize_api_operand_w`（native_path.cppm:101）只有 /cygdrive 折叠 + 单字母 `/X/` 分支，v1.1.2..v1.1.6 零 /mnt 提交。因此引擎按 #444 对 `/mnt/X` 做**全类预翻译**是必要行为；未来若撤翻译，前置条件是 WinuxCmd 先落地 /mnt arm（先 probe 后迁移）。
 - **已知边缘（violation，[WinuxCmd#1170](https://github.com/unixwin/WinuxCmd/issues/1170)）**：`find` 的**起点操作数**不认 `/c/...`、`/d/...`（`D:/` 与相对起点正常；`-exec` 子命令查找不受影响）。契约测试里 find 单元因此用 `.` 相对起点，注释指向该 issue。
 - **已知边缘（violation，[niu-git#7](https://github.com/unixwin/niu-git/issues/7)）**：`opt/niugit/git.exe` 启动器重建命令行时**丢弃 argv 中的 `"`**、破坏尾部 `\`（`commit -m` 消息字节损坏）。真 git（`mingw64/bin/git.exe`）与 rubash 侧均保真，损坏在 stub。git 的 `-C /d/...`、rev spec（`origin/feat/x`、`HEAD~1..HEAD`、`-- rev`）均零转换可用。
 
@@ -99,5 +99,5 @@ env/timeout/xargs 的子命令、find 的 `-exec` 子命令：按 PATH 解析，
 
 - 分支：`docs/boundary-contract-audit`（对 origin/master `eb062957`）。
 - 契约测试：`tests/path_contract_boundary_{native_core,posix_forms,verbatim}.rs`，15 用例全绿。
-- 违规台账：rubash#566（cd /c 裸盘根）、WinuxCmd#1170（find POSIX 起点）、niu-git#7（stub 双引号）、rubash#568（/mnt/c 契约矛盾：master --lib Windows 恒红，#444 漏改兄弟测试且前提被工具链演进消解）。
+- 违规台账：rubash#566（cd /c 裸盘根）、WinuxCmd#1170（find POSIX 起点）、niu-git#7（stub 双引号）、rubash#568（/mnt/c 契约矛盾：master --lib Windows 恒红，#444 漏改 verbatim 测试；裁决（2026-10-12）：#444 前提成立，"工具链已自解析 /mnt" 系 Git Bash argv 转换污染——已修 verbatim 测试、保留全类翻译）。
 - 非边界类旁证（记录在案，未开票）：`rmdir` wrapper 对失败操作恒返回 0（`external_rmdir` `let _ =` + 硬编码 `exit_code = 0`，GNU 应报错 rc=1）；`mkdir` wrapper 缺父目录时自动补齐父链（GNU 裸 mkdir 应 ENOENT）。两者都是语义差异而非路径形态违规，留给语义车道。

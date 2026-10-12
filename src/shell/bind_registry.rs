@@ -55,7 +55,7 @@ pub struct BindEntry {
 }
 
 /// Process-global binding registry (readline's keymap world).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BindRegistry {
     pub entries: Vec<BindEntry>,
     /// Bumped on every mutation so an embedding host can notice that its
@@ -65,9 +65,70 @@ pub struct BindRegistry {
     /// (or future `bind` set-variable support). Hosts that own an editor
     /// consult it at keymap-build time.
     pub editing_mode: Option<String>,
+    /// The readline variable table `bind -v`/`-V` dumps (name → value, in
+    /// [`crate::builtins::bind::READLINE_VARIABLE_DEFAULTS`] order) and
+    /// that `set NAME VALUE` lines in inputrc files / `bind 'set …'`
+    /// arguments update. GNU keeps this table in readline; hosts that
+    /// implement a variable's behavior read it from here (the same data
+    /// plane as the keymap mirror).
+    pub variables: Vec<(String, String)>,
+    /// bashline.c:278 `bash_readline_initialized`: initialize_readline
+    /// (bashline.c:451 — the inputrc read among the rest) runs once per
+    /// process, on the first `bind` invocation (bind.def:131) or the
+    /// first prompt read (y.tab.c:4024). Whichever comes first wins; the
+    /// inputrc must not be read twice.
+    pub readline_initialized: bool,
+}
+
+impl Default for BindRegistry {
+    fn default() -> Self {
+        BindRegistry {
+            entries: Vec::new(),
+            generation: 0,
+            editing_mode: None,
+            variables: crate::builtins::bind::READLINE_VARIABLE_DEFAULTS
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+            readline_initialized: false,
+        }
+    }
 }
 
 impl BindRegistry {
+    /// Apply one `set NAME VALUE` against the variable table
+    /// (readline bind.c rl_variable_bind). Returns the outcome the caller
+    /// reports: ``readline: NAME: unknown variable name`` for
+    /// [`SetVariableOutcome::UnknownVariable`], ``readline: NAME: could
+    /// not set value to `VALUE'`` for
+    /// [`SetVariableOutcome::CouldNotSetValue`] (both GNU probes; the
+    /// command keeps running either way).
+    pub fn set_readline_variable(
+        &mut self,
+        name: &str,
+        value: &str,
+    ) -> crate::builtins::bind::SetVariableOutcome {
+        let (outcome, editing_mode) =
+            crate::builtins::bind::apply_readline_variable(&mut self.variables, name, value);
+        if outcome == crate::builtins::bind::SetVariableOutcome::Applied {
+            if let Some((mode_name, mode_value)) = editing_mode {
+                if mode_name == "editing-mode" {
+                    self.editing_mode = Some(mode_value.to_string());
+                }
+            }
+            self.generation += 1;
+        }
+        outcome
+    }
+
+    /// Current value of one readline variable (`bind -v` world).
+    pub fn variable_value(&self, name: &str) -> Option<&str> {
+        self.variables
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, value)| value.as_str())
+    }
+
     /// Insert or replace the binding for `(keyseq, keymap)`. GNU's
     /// rl_generic_bind replaces any previous binding of the same sequence.
     pub fn register(&mut self, entry: BindEntry) {
