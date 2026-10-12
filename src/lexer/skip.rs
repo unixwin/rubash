@@ -2599,10 +2599,22 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
+    // GNU read_token (parse.y:3630-3643, word-initial test :3937-3940): `#`
+    // introduces a comment only at a token boundary — after start of input,
+    // whitespace, or a separator (`;&|()<>`). Without this, quote and paren
+    // characters inside comment text corrupt the quote state and the paren
+    // stack: `eval ': || $( : # "\n)'` (modernish lib/modernish/adj/fatal.sh
+    // FTL_CSCMTQUOT, rubash#282) dies on a fabricated "unexpected EOF while
+    // looking for matching `)'" because the in-comment `"' swallowed the
+    // newline and the closing `)'.
+    let mut token_boundary = true;
     while index < chars.len() {
         let ch = chars[index];
         if escaped {
             escaped = false;
+            // A backslash-quoted character is word text (read_token_word:
+            // `\;#' keeps `#' mid-word), so it never ends a token.
+            token_boundary = false;
             index += 1;
             continue;
         }
@@ -2627,6 +2639,18 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
             '\'' => single = true,
             '"' => double = true,
             '\n' => line += 1,
+            '#' if token_boundary => {
+                // parse.y read_token -> parse_comment: a word-initial `#'
+                // comments out the rest of the physical line. Comment text —
+                // quotes and parens included — is discarded; the terminating
+                // newline is left for the main loop so the line counter stays
+                // GNU-exact.
+                while index + 1 < chars.len() && chars[index + 1] != '\n' {
+                    index += 1;
+                }
+                index += 1;
+                continue;
+            }
             '`' => {
                 // Old-style comsub: skip its balanced body.
                 index += 1;
@@ -2663,6 +2687,8 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
             }
             _ => {}
         }
+        token_boundary =
+            ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         index += 1;
     }
     let &(open_idx, open_line, open_kind) = stack.last()?;
@@ -2775,6 +2801,12 @@ fn token_after_paren(chars: &[char], open_idx: usize) -> String {
     }
     if chars[i] == '(' {
         return "(".to_string();
+    }
+    if chars[i] == '#' {
+        // A `#' here is word-initial (parse.y:3937-3940): it comments out the
+        // rest of the line, so the next token the grammar sees is the
+        // newline / end of string.
+        return "newline".to_string();
     }
     let start = i;
     while i < chars.len()
