@@ -954,15 +954,16 @@ impl Executor {
                 // even when the target itself is unset (GNU probe:
                 // x=validname with validname unset expands empty).
                 //
-                // "Unset" here means NO variable ENTRY (subst.c:7913
-                // `valid_identifier (name) && v == 0` with v =
-                // find_variable_last_nameref, variables.c:2051): the walk
-                // returns NULL for an absent name and for a nameref chain
-                // that stops on an empty cell (or cycles / exceeds depth) —
-                // both keep the fatal. A declared-unset non-nameref entry
-                // (bare `declare x` / `local x`, the att_invisible port) IS
-                // found, so parameter_brace_find_indir yields a NULL value
-                // and the whole expansion is empty — WSL 5.3.0:
+                // "Unset" here means NO variable ENTRY: the nameref walk
+                // find_variable_last_nameref (variables.c:2051) reports no
+                // entry for an absent name and for a nameref chain that
+                // stops on an empty cell (or cycles / exceeds depth) — both
+                // keep the fatal (subst.c:7913 fires it exactly when the
+                // walk found nothing and the body is a plain identifier).
+                // A declared-unset non-nameref entry (bare `declare x` /
+                // `local x`, the att_invisible port) IS found, so
+                // parameter_brace_find_indir yields an unset value and the
+                // whole expansion is empty — WSL 5.3.0:
                 // `declare x; echo "[${!x}]"` prints `[]` and the script
                 // continues (rubash#529).
                 if !indirect.is_empty() && is_shell_name(indirect) {

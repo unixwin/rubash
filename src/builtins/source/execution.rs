@@ -312,6 +312,11 @@ fn execute_source_with_args(
     if !functrace {
         executor.set_source_debug_suppressed(true);
     }
+    // GNU execute_cmd.c:5080: the source builtin holds sourcenest for its
+    // whole execution — the sourced body AND the RETURN trap action at
+    // evalfile.c:395 both run one nesting level deeper than the sourcer.
+    // The depth feeds the trap bare-exit context check (rubash#524).
+    executor.push_source_nest();
     let result = run_source_groups(executor, source, redirect_cmd);
 
     if source_name.is_some() {
@@ -358,9 +363,17 @@ fn execute_source_with_args(
     // inside the functrace-off fn3, while the top-level tests:98 exit
     // still reports `return lineno: 98 main`). The DEBUG suppression above
     // stays active through the trap action itself, matching GNU's
-    // unwind-protect ordering.
-    if executor.return_trap_in_scope() {
-        executor.run_return_trap()?;
+    // unwind-protect ordering. The source nesting level is still held
+    // while the trap action runs; it drops right after (the early-return
+    // shape keeps the decrement on every path).
+    let return_trap_result = if executor.return_trap_in_scope() {
+        Some(executor.run_return_trap())
+    } else {
+        None
+    };
+    executor.pop_source_nest();
+    if let Some(return_trap_result) = return_trap_result {
+        return_trap_result?;
     }
     executor.set_source_debug_suppressed(old_source_debug_suppressed);
 

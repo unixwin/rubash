@@ -843,6 +843,18 @@ impl Executor {
         self.shell_state.env_vars.values_map()
     }
 
+    /// GNU execute_cmd.c:5080 — the source builtin holds sourcenest for its
+    /// whole execution (sourced body plus the evalfile.c:395 RETURN trap
+    /// action). The depth feeds the trap bare-exit context check
+    /// (rubash#524).
+    pub(crate) fn push_source_nest(&mut self) {
+        self.source_nest_depth += 1;
+    }
+
+    pub(crate) fn pop_source_nest(&mut self) {
+        self.source_nest_depth -= 1;
+    }
+
     /// The full variable table (values + structured attributes) for
     /// in-crate consumers that query attributes.
     pub(crate) fn env_vars_table(&self) -> &crate::shell::var_table::VarTable {

@@ -523,6 +523,20 @@ pub struct Executor {
     /// to re-enter while it is set — an ERR trap action that itself fails
     /// must not recursively re-trigger the ERR trap (niubash #121).
     error_trap_running: bool,
+    /// GNU trap.c:124 trap_saved_exit_value — the shell status snapshot
+    /// _run_trap_internal (trap.c:367) takes before running a trap action.
+    /// get_exitstat (builtins/common.c:519, POSIX interp 1602) resolves a
+    /// bare `exit` inside a trap action to this value when the exit runs at
+    /// the trap's own function/source nesting level (the level recorded at
+    /// fire time, trap.c:383) and the immediate trap is not DEBUG —
+    /// commands inside the action cannot change the bare-exit status.
+    /// None outside trap actions. rubash#524.
+    trap_saved_exit_value: Option<i32>,
+    /// GNU trap.c:383 trap_return_context — the function + source nesting
+    /// depth at the moment the current trap action was fired.
+    trap_saved_exit_context: usize,
+    /// GNU execute_cmd.c:330 sourcenest — active `.`/source frames.
+    source_nest_depth: usize,
     /// Child-death notifications that arrived while the SIGCHLD trap action
     /// was already running (a re-entrant reap drops them otherwise; bash
     /// re-runs the trap once per pending notification — trap.tests expects

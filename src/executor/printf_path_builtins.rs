@@ -92,9 +92,36 @@ impl Executor {
             let login = self.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
             writeln!(stderr, "{}", if login { "logout" } else { "exit" })?;
         }
+        let args: Vec<&str> = cmd.words[1..].iter().map(String::as_str).collect();
+        // GNU builtins/common.c:519 get_exitstat (POSIX interp 1602): a bare
+        // `exit` inside a trap action exits with trap_saved_exit_value
+        // (trap.c:367) — the $? saved BEFORE the trap ran; commands inside
+        // the action cannot change it. The guard is the trap's recorded
+        // function/source nesting level (trap.c:383): for ERR/RETURN the
+        // exit must run at that level (inside a called function it is the
+        // current $? instead — GNU probes 2026-10-12), while usize::MAX
+        // marks the EXIT trap whose guard is open at every depth (see
+        // run_exit_trap_for_status_with_output_redirects). Outside a trap
+        // action it is the current $? (last_command_exit_value).
+        let last_status = if args.is_empty() {
+            let trap_context = self.trap_saved_exit_value.is_some()
+                && !self.debug_trap_running
+                && (self.trap_saved_exit_context == usize::MAX
+                    || (self.shell_state.function_depth + self.source_nest_depth
+                        == self.trap_saved_exit_context));
+            if trap_context {
+                crate::builtins::exit::normalize_status(
+                    self.trap_saved_exit_value.unwrap_or(self.exit_code),
+                )
+            } else {
+                crate::builtins::exit::normalize_status(self.exit_code)
+            }
+        } else {
+            self.exit_code
+        };
         let action = crate::builtins::exit::execute_with_io(
             cmd.words[1..].iter().map(String::as_str),
-            self.exit_code,
+            last_status,
             &mut stdout,
             &mut stderr,
         )?;

@@ -1498,6 +1498,9 @@ impl Executor {
             return_trap_running: false,
             signal_trap_running: false,
             error_trap_running: false,
+            trap_saved_exit_value: None,
+            trap_saved_exit_context: 0,
+            source_nest_depth: 0,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             // jobs.c:4607-4612: a comsub child (startup_state 2 +
             // SUBSHELL_COMSUB) never prints job-status notices, so the
