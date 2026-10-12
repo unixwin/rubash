@@ -38,6 +38,11 @@ ALLOWLIST=$(cat <<'EOF'
 # bind.rs: `d` is a delimiter byte parsed from the spec (always ASCII quote);
 # the error message only echoes it.
 src/builtins/bind.rs::no closing.*d as char
+# bind.rs: `delimiter: Some(d as char)` — same `d` as above: isolate_sequence
+# only accepts b'"' (0x22) / b'\'' (0x27), so the widened byte is ASCII by
+# construction (never a UTF-8 continuation); the value is echoed in
+# diagnostics and compared for equality (BindSpecError::delimiter).
+src/builtins/bind.rs::delimiter: Some\(d as char\)
 # bind.rs: `upper & 0x1f` is <= 0x1F by construction — a C0 control char,
 # never a UTF-8 continuation byte (bind -x \C-x keyspec lowering).
 src/builtins/bind.rs::\(upper as u8 & 0x1f\) as char
