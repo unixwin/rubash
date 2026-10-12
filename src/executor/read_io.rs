@@ -2,6 +2,28 @@ use super::*;
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::substitution_metadata::bytes_to_shell_text;
 
+/// Re-emit a consumed stdin unit to the terminal while a one-char console
+/// read is active (the driver's own echo is off in that mode; read.def
+/// ttfd_onechar keeps ECHO on through the tty).
+fn echo_stdin_unit(guard: &Option<crate::fd::ConsoleOnecharGuard>, unit: &StdinUnit) {
+    let Some(guard) = guard.as_ref() else {
+        return;
+    };
+    match unit {
+        StdinUnit::Char(ch) => {
+            let mut buf = [0u8; 4];
+            for byte in ch.encode_utf8(&mut buf).as_bytes() {
+                guard.echo_byte(*byte);
+            }
+        }
+        StdinUnit::RawByte { text } => {
+            for byte in crate::executor::substitution_metadata::shell_text_to_raw_bytes(text) {
+                guard.echo_byte(byte);
+            }
+        }
+    }
+}
+
 impl Executor {
     pub(in crate::executor) fn finish_read_error(
         &mut self,
@@ -18,11 +40,13 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         read_fd: Option<u32>,
+        silent: bool,
         mut line: String,
     ) -> String {
         while line.ends_with('\\') {
             line.pop();
-            let Some(next) = self.read_input_for_command(cmd, read_fd, '\n', None, false) else {
+            let Some(next) = self.read_input_for_command(cmd, read_fd, silent, '\n', None, false)
+            else {
                 break;
             };
             line.push_str(&next);
@@ -51,6 +75,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         read_fd: Option<u32>,
+        silent: bool,
         delimiter: char,
         char_limit: Option<usize>,
         exact_char_limit: bool,
@@ -76,7 +101,7 @@ impl Executor {
         if read_fd.is_none() {
             if cmd.heredoc_body.is_some() {
                 let input = self.expand_heredoc_body_mut_from_carrier(&cmd.heredoc_body);
-                self.read_eof_no_delimiter |= !input.contains(&read_delimiter_needle(delimiter));
+                self.read_eof_no_delimiter |= !record_contains_delimiter(&input, delimiter);
                 return Some(trim_read_input(
                     input,
                     delimiter,
@@ -86,7 +111,7 @@ impl Executor {
             }
             if let Some(heredoc) = &cmd.heredoc {
                 let input = self.expand_heredoc_body_mut(heredoc);
-                self.read_eof_no_delimiter |= !input.contains(&read_delimiter_needle(delimiter));
+                self.read_eof_no_delimiter |= !record_contains_delimiter(&input, delimiter);
                 return Some(trim_read_input(
                     input,
                     delimiter,
@@ -105,7 +130,7 @@ impl Executor {
             if let Some(output) =
                 self.read_coproc_stdout(fd, delimiter, char_limit, exact_char_limit)
             {
-                self.read_eof_no_delimiter |= !output.contains(&read_delimiter_needle(delimiter));
+                self.read_eof_no_delimiter |= !record_contains_delimiter(&output, delimiter);
                 return Some(trim_read_input(
                     output,
                     delimiter,
@@ -113,8 +138,24 @@ impl Executor {
                     exact_char_limit,
                 ));
             }
+            // A dup of fd 0 (`exec 8<&0; read -u 8`) shares fd 0's open file
+            // description (redir.c dup via fd_table dup_entry), so once the
+            // descriptor reads as the inherited process stdin it is served
+            // from the SAME transports as an fd 0 read — GNU builtin_read
+            // reads one descriptor and the `-u N` shape must not be a weaker
+            // read than `read` (niubash#279: the inherited-stdin endpoint
+            // returned None here and the console keystroke never reached
+            // any reader).
+            if fd != 0
+                && matches!(
+                    self.fd_table.read_endpoint(fd),
+                    Some(FdReadEndpoint::InheritedProcessStdin)
+                )
+            {
+                return self.read_dup_of_stdin(silent, delimiter, char_limit, exact_char_limit);
+            }
             return self
-                .read_virtual_fd_stdin(fd, delimiter, char_limit, exact_char_limit)
+                .read_virtual_fd_stdin(fd, silent, delimiter, char_limit, exact_char_limit)
                 .or_else(|| {
                     self.read_heredoc_fd_input(cmd, fd, delimiter, char_limit, exact_char_limit)
                 });
@@ -133,8 +174,7 @@ impl Executor {
                 .and_then(|target| target.strip_suffix(')'))
             {
                 if let Some(output) = self.process_substitution_output(source) {
-                    self.read_eof_no_delimiter |=
-                        !output.contains(&read_delimiter_needle(delimiter));
+                    self.read_eof_no_delimiter |= !record_contains_delimiter(&output, delimiter);
                     return Some(trim_read_input(
                         output,
                         delimiter,
@@ -152,14 +192,35 @@ impl Executor {
                 // reading N's endpoint reads the dup.
                 let fd = fd.strip_suffix('-').unwrap_or(fd);
                 if let Ok(fd) = fd.parse::<u32>() {
+                    // `<&8` after `exec 8<&0` — a dup of the process stdin
+                    // reads from the same transports as fd 0 itself
+                    // (niubash#279: the console keystroke must reach the
+                    // dup descriptor's reader, not collapse to EOF).
+                    if fd != 0
+                        && matches!(
+                            self.fd_table.read_endpoint(fd),
+                            Some(FdReadEndpoint::InheritedProcessStdin)
+                        )
+                    {
+                        return self.read_dup_of_stdin(
+                            silent,
+                            delimiter,
+                            char_limit,
+                            exact_char_limit,
+                        );
+                    }
                     if let Some(output) =
                         self.read_coproc_stdout(fd, delimiter, char_limit, exact_char_limit)
                     {
                         return Some(output);
                     }
-                    if let Some(line) =
-                        self.read_virtual_fd_stdin(fd, delimiter, char_limit, exact_char_limit)
-                    {
+                    if let Some(line) = self.read_virtual_fd_stdin(
+                        fd,
+                        silent,
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                    ) {
                         return Some(line);
                     }
                     return self.read_heredoc_fd_input(
@@ -202,7 +263,8 @@ impl Executor {
                 let saved = self.fd_table.entries.get(&0).cloned();
                 self.fd_table
                     .open_input(0, FdReadEndpoint::File(file), false);
-                let line = self.read_virtual_fd_stdin(0, delimiter, char_limit, exact_char_limit);
+                let line =
+                    self.read_virtual_fd_stdin(0, silent, delimiter, char_limit, exact_char_limit);
                 match saved {
                     Some(entry) => {
                         self.fd_table.entries.insert(0, entry);
@@ -233,7 +295,7 @@ impl Executor {
             if input.is_empty() {
                 return None;
             }
-            self.read_eof_no_delimiter |= !input.contains(&read_delimiter_needle(delimiter));
+            self.read_eof_no_delimiter |= !record_contains_delimiter(&input, delimiter);
             return Some(trim_read_input(
                 input,
                 delimiter,
@@ -247,7 +309,7 @@ impl Executor {
         // does not advance the shared fd cursor.
         if cmd.here_string.is_some() {
             if let Some(line) = self.stdin_string_for_command_mut(cmd) {
-                self.read_eof_no_delimiter |= !line.contains(&read_delimiter_needle(delimiter));
+                self.read_eof_no_delimiter |= !record_contains_delimiter(&line, delimiter);
                 return Some(trim_read_input(
                     line,
                     delimiter,
@@ -259,16 +321,42 @@ impl Executor {
 
         // Persistent fd 0 owns the shared cursor. The legacy mirror can be
         // present for external setup, but must not reset a shell read to offset 0.
-        if matches!(
-            self.fd_table.read_endpoint(0),
-            Some(
-                FdReadEndpoint::Text(_)
-                    | FdReadEndpoint::ProcessSubstitution(_)
-                    | FdReadEndpoint::File(_)
+        // A FILE binding from an explicit stdin redirection is a real open
+        // file description (`done < file` / `exec 0<file`): GNU builtin_read
+        // reads one descriptor (read.def:294), so EOF on the file is final —
+        // falling through to the FUNCTION_STDIN mirror would serve the
+        // enclosing pipeline stage's stdin as the file's trailing record and
+        // leave that mirror consumed (niubash#276: `while read; done < f`
+        // then `read` saw a false EOF).
+        // EXCEPTION — the null device on fd 0 is not a user binding: async
+        // materialization parks the /dev/null default there, and the staged
+        // FUNCTION_STDIN mirror IS the compound's own input in that state
+        // (redir.tests redir5-adjacent heredoc loop: EOF on NUL must fall
+        // through to the mirror or the loop's first read reports EOF and
+        // never runs). NUL carries no records, so this cannot reintroduce
+        // the #276 contamination — there is no file record to steal.
+        let fd0_file_is_null = match self.fd_table.read_endpoint(0) {
+            Some(FdReadEndpoint::File(ref file)) => {
+                crate::executor::is_null_device(&file.path.to_string_lossy())
+            }
+            _ => false,
+        };
+        if !fd0_file_is_null
+            && matches!(
+                self.fd_table.read_endpoint(0),
+                Some(FdReadEndpoint::File(_))
             )
-        ) {
+        {
+            return self.read_virtual_fd_stdin(0, silent, delimiter, char_limit, exact_char_limit);
+        }
+        if fd0_file_is_null
+            || matches!(
+                self.fd_table.read_endpoint(0),
+                Some(FdReadEndpoint::Text(_) | FdReadEndpoint::ProcessSubstitution(_))
+            )
+        {
             if let Some(line) =
-                self.read_virtual_fd_stdin(0, delimiter, char_limit, exact_char_limit)
+                self.read_virtual_fd_stdin(0, silent, delimiter, char_limit, exact_char_limit)
             {
                 return Some(line);
             }
@@ -280,7 +368,9 @@ impl Executor {
             return self.read_function_stdin(delimiter, char_limit, exact_char_limit);
         }
 
-        if let Some(line) = self.read_virtual_fd_stdin(0, delimiter, char_limit, exact_char_limit) {
+        if let Some(line) =
+            self.read_virtual_fd_stdin(0, silent, delimiter, char_limit, exact_char_limit)
+        {
             return Some(line);
         }
 
@@ -305,7 +395,50 @@ impl Executor {
         }
 
         self.read_function_stdin(delimiter, char_limit, exact_char_limit)
-            .or_else(|| self.read_inherited_process_stdin(delimiter, char_limit, exact_char_limit))
+            .or_else(|| {
+                self.read_inherited_process_stdin(silent, delimiter, char_limit, exact_char_limit)
+            })
+    }
+
+    /// Transports for a descriptor that is a dup of the process stdin
+    /// (`exec 8<&0` then `read -u 8` / `read <&8`): POSIX dup shares fd 0's
+    /// open file description, so the copy is served exactly like an fd 0
+    /// read — the stage mirror, the flag-armed inherited-stdin reader, and
+    /// finally the raw byte-wise handle reader (read_stdin_until). The
+    /// fd0-bound-early guard does not apply: the dup keeps its own reference
+    /// to the process stdin object even after fd 0 is rebound (niubash#279).
+    fn read_dup_of_stdin(
+        &mut self,
+        silent: bool,
+        delimiter: char,
+        char_limit: Option<usize>,
+        exact_char_limit: bool,
+    ) -> Option<String> {
+        if let Some(line) = self.read_function_stdin(delimiter, char_limit, exact_char_limit) {
+            return Some(line);
+        }
+        if let Some(line) =
+            self.read_inherited_process_stdin(silent, delimiter, char_limit, exact_char_limit)
+        {
+            return Some(line);
+        }
+        match read_stdin_until(
+            self.read_deadline,
+            silent,
+            delimiter,
+            char_limit,
+            exact_char_limit,
+        ) {
+            // EOF with nothing consumed: no record to serve — the caller's
+            // EOF handling (read.def:762-768) decides the status.
+            Ok((0, _, false, false)) => None,
+            Ok((_, line, stdin_eof, timed_out)) => {
+                self.read_eof_no_delimiter |= stdin_eof;
+                self.read_timed_out |= timed_out;
+                Some(line)
+            }
+            Err(_) => None,
+        }
     }
 
     fn read_coproc_stdout(
@@ -336,6 +469,10 @@ impl Executor {
         let mut bytes = Vec::new();
         let mut consumed_chars = 0usize;
         let mut ended = false;
+        // read.def:731-738: a record that is just the delimiter is served
+        // (empty line, GNU rc 0) — tracked so the empty check below cannot
+        // conflate it with EOF (niubash#275).
+        let mut delimiter_found = false;
 
         // Bash keeps the coprocess descriptor open across read builtin calls.
         // Read only one logical input record (or the requested character
@@ -354,6 +491,7 @@ impl Executor {
                 Ok(buf) => {
                     bytes.push(buf[0]);
                     if buf[0] == delimiter as u8 && !exact_char_limit {
+                        delimiter_found = true;
                         break;
                     }
                     if let Some(limit) = char_limit {
@@ -385,7 +523,9 @@ impl Executor {
             // separate so wait can still consume the child's final status.
             self.fd_table.close_input(fd);
         }
-        if bytes.is_empty() {
+        // EOF before any byte: no record. A delimiter-only record (empty
+        // line) IS a record — served as the empty string (niubash#275).
+        if bytes.is_empty() && !delimiter_found {
             return None;
         }
         Some(trim_read_input(
@@ -478,6 +618,7 @@ impl Executor {
     pub(in crate::executor) fn read_virtual_fd_stdin(
         &mut self,
         fd: u32,
+        silent: bool,
         delimiter: char,
         char_limit: Option<usize>,
         exact_char_limit: bool,
@@ -516,7 +657,12 @@ impl Executor {
             self.fd_table.read_endpoint(fd),
             Some(FdReadEndpoint::InheritedProcessStdin)
         ) {
-            return self.read_inherited_process_stdin(delimiter, char_limit, exact_char_limit);
+            return self.read_inherited_process_stdin(
+                silent,
+                delimiter,
+                char_limit,
+                exact_char_limit,
+            );
         }
         None
     }
@@ -562,13 +708,26 @@ impl Executor {
             let mut took_any = false;
             let mut delimiter_found = false;
             let mut limit_reached = false;
+            // The mirror stores RAW stream bytes, so a carrier delimiter
+            // (e.g. `-d $'\x1b'`) appears as its literal char here, while
+            // the normalized needle is the marker pair — match both and
+            // advance by the form that matched.
             let delimiter_needle = read_delimiter_needle(delimiter);
+            let delimiter_literal_len = delimiter.len_utf8();
             for (index, ch) in slice.char_indices() {
-                if !exact_char_limit && slice[index..].starts_with(&delimiter_needle) {
-                    consumed = index + delimiter_needle.len();
-                    took_any = true;
-                    delimiter_found = true;
-                    break;
+                if !exact_char_limit {
+                    if slice[index..].starts_with(&delimiter_needle) {
+                        consumed = index + delimiter_needle.len();
+                        took_any = true;
+                        delimiter_found = true;
+                        break;
+                    }
+                    if slice[index..].starts_with(delimiter) {
+                        consumed = index + delimiter_literal_len;
+                        took_any = true;
+                        delimiter_found = true;
+                        break;
+                    }
                 }
 
                 output.push(ch);
@@ -602,6 +761,7 @@ impl Executor {
 
     pub(in crate::executor) fn read_inherited_process_stdin(
         &mut self,
+        silent: bool,
         delimiter: char,
         char_limit: Option<usize>,
         exact_char_limit: bool,
@@ -626,10 +786,23 @@ impl Executor {
         // redir.tests) would inherit an already-drained descriptor. Read the
         // raw OS handle byte-wise so only the consumed bytes move the offset.
         let stdin_handle = crate::fd::process_std_handle(0);
+        // read.def:570-590: a -n/-d read from a tty runs in one-char mode —
+        // a console in cooked line mode holds every keystroke until Enter —
+        // while a plain newline-terminated read stays canonical and -s only
+        // silences the echo (read.def:603-621).
+        let onechar = if char_limit.is_some() || delimiter != '\n' {
+            crate::fd::enter_console_onechar_mode(stdin_handle)
+        } else if silent {
+            crate::fd::enter_console_noecho_mode(stdin_handle)
+        } else {
+            None
+        };
+        let manual_echo = onechar.is_some() && !silent;
         let mut output = String::new();
         let mut decoder = StdinCharDecoder::new();
         let mut units = 0usize;
         let mut eof = false;
+        let mut delimiter_found = false;
         loop {
             if !decoder.has_queued() {
                 if self.read_wait_timed_out(stdin_handle) {
@@ -645,7 +818,11 @@ impl Executor {
             let Some(unit) = decoder.next_unit() else {
                 continue;
             };
+            if manual_echo {
+                echo_stdin_unit(&onechar, &unit);
+            }
             if !exact_char_limit && stdin_unit_is_delimiter(&unit, delimiter) {
+                delimiter_found = true;
                 break;
             }
             match unit {
@@ -665,7 +842,12 @@ impl Executor {
         if eof {
             decoder.flush(&mut output);
         }
-        if output.is_empty() {
+        // read.def:731-738: a record that is just the delimiter (`printf
+        // '\n' | read v` — GNU rc 0, v empty) is a SERVED record, not EOF.
+        // Only EOF with nothing consumed yields None here (read.def:762-768
+        // break with eof=1); conflating the two made the empty line fail the
+        // builtin and swallow the following record (niubash#275).
+        if output.is_empty() && !delimiter_found {
             return None;
         }
         // read.def:949 eof: the handle closed before the delimiter.

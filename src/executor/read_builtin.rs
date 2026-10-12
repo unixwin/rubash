@@ -2080,6 +2080,17 @@ impl Executor {
             }
         }
 
+        // read.def -s: silent input. The combined-option arms above consume
+        // the letters without tracking them, so derive the flag from the
+        // option words themselves — every form carrying `s` (-s, -sn4,
+        // -rsa, -ersa, ...) arms it, and a `--`-escaped name never can.
+        let silent = cmd
+            .words
+            .iter()
+            .skip(1)
+            .take_while(|word| word.as_str() != "--")
+            .any(|word| word.starts_with('-') && word.contains('s'));
+
         if timeout_zero {
             let status = self.read_timeout_zero_status(cmd, read_fd);
             if let Some(name) = array_name {
@@ -2153,6 +2164,7 @@ impl Executor {
             let line = match self.read_input_for_command(
                 cmd,
                 read_fd,
+                silent,
                 delimiter,
                 char_limit,
                 exact_char_limit,
@@ -2233,12 +2245,17 @@ impl Executor {
             }
 
             self.arm_read_deadline(cmd, read_fd, timeout_secs);
-            let status = if let Some(line) =
-                self.read_input_for_command(cmd, read_fd, delimiter, char_limit, exact_char_limit)
-            {
+            let status = if let Some(line) = self.read_input_for_command(
+                cmd,
+                read_fd,
+                silent,
+                delimiter,
+                char_limit,
+                exact_char_limit,
+            ) {
                 let line = if !raw && delimiter == '\n' && char_limit.is_none() && !exact_char_limit
                 {
-                    self.continue_read_line_after_backslash(cmd, read_fd, line)
+                    self.continue_read_line_after_backslash(cmd, read_fd, silent, line)
                 } else {
                     line
                 };
@@ -2348,8 +2365,14 @@ impl Executor {
                     0
                 }
             } else {
-                match read_stdin_until(delimiter, char_limit, exact_char_limit) {
-                    Ok((0, _, _)) => {
+                match read_stdin_until(
+                    self.read_deadline,
+                    silent,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                ) {
+                    Ok((0, _, false, false)) => {
                         let assign_status = self.assign_read_scalar_names(
                             &scalar_names,
                             initial_text.as_deref().unwrap_or(""),
@@ -2364,14 +2387,18 @@ impl Executor {
                             0
                         }
                     }
-                    Ok((_, line, stdin_eof)) => {
+                    Ok((_, line, stdin_eof, timed_out)) => {
+                        // read.def:553: the deadline expired — the partial
+                        // record is still assigned and the status becomes
+                        // 128+SIGALRM via take_read_timed_out below.
+                        self.read_timed_out |= timed_out;
                         self.read_eof_no_delimiter |= stdin_eof;
                         let line = if !raw
                             && delimiter == '\n'
                             && char_limit.is_none()
                             && !exact_char_limit
                         {
-                            self.continue_read_line_after_backslash(cmd, read_fd, line)
+                            self.continue_read_line_after_backslash(cmd, read_fd, silent, line)
                         } else {
                             line
                         };
@@ -2528,9 +2555,10 @@ impl Executor {
         // GNU read.def polls fd 0 with select(): a non-terminal inherited
         // stdin (regular file, /dev/null, a pipe at EOF) is always readable,
         // so `-t 0` succeeds. Only a live terminal with no pending input
-        // fails the poll.
+        // fails the poll — the timeout exit is uniformly 128+SIGALRM
+        // (read.def:553), not a plain failure.
         if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            1
+            142
         } else {
             0
         }
