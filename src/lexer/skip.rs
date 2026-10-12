@@ -2690,7 +2690,11 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
         let inside_comsub = stack
             .iter()
             .any(|&(enc_idx, _, kind)| enc_idx < idx && kind == OpenerKind::Comsub);
-        let token = token_after_paren(&chars, idx);
+        let token = if inside_comsub {
+            token_after_paren(&chars, idx)
+        } else {
+            main_level_paren_token_name(&chars, idx)
+        };
         return if inside_comsub {
             Some((
                 UnclosedComsubShape::ComsubBodyTokenError { line, token },
@@ -2786,6 +2790,47 @@ fn token_after_paren(chars: &[char], open_idx: usize) -> String {
         i += 1;
     }
     chars[start..i].iter().collect()
+}
+
+/// The yacc token a TOP-LEVEL invalid-position `(` names. The grammar
+/// shifts a `(` after EXACTLY ONE ordinary word as a function-definition
+/// candidate and fails on the NEXT token (`echo (` -> `newline`,
+/// `echo (hi` -> `hi`); two or more words, a redirection or an assignment
+/// prefix have no `(` production at all, so the error names the `(` itself
+/// (`echo x (y`, `x=1 (a`, the #516 F181 pattern word — GNU probes p14 /
+/// p16 / p21 and the q-series).
+fn main_level_paren_token_name(chars: &[char], idx: usize) -> String {
+    let mut words = 0usize;
+    let mut saw_redirect = false;
+    let mut saw_equals = false;
+    let mut in_word = false;
+    let mut i = idx;
+    while i > 0 {
+        i -= 1;
+        match chars[i] {
+            '\n' | ';' | '&' | '|' | '(' => break,
+            '<' | '>' => {
+                saw_redirect = true;
+                in_word = false;
+            }
+            ' ' | '\t' | '\r' => in_word = false,
+            '=' => {
+                saw_equals = true;
+                in_word = false;
+            }
+            _ => {
+                if !in_word {
+                    words += 1;
+                }
+                in_word = true;
+            }
+        }
+    }
+    if words == 1 && !saw_redirect && !saw_equals {
+        token_after_paren(chars, idx)
+    } else {
+        "(".to_string()
+    }
 }
 
 /// Quote/backslash-aware balanced-paren scan for an extglob pattern group
@@ -3421,6 +3466,84 @@ fn paren_group_close(chars: &[char], from: usize) -> Option<usize> {
 /// (parse.y parse_dollar_word → parse_matched_pair with the pair's own
 /// open/close). Returns the index just past the closer, or None when it
 /// never closes. Quote/escape aware like the P_ARITH walker.
+/// GNU parse.y:4976 (parse_arith_cmd via parse_matched_pair): a `$(("`
+/// construct is an arithmetic expansion only when the parenthesis group
+/// opened by the second `(` closes and the character immediately after the
+/// close is `)`; anything else (`$((echo hi) 2>&1)`) makes the whole
+/// construct a command substitution whose body begins at that second `(`.
+/// `open` is the text starting at the two-character `((` opener — the
+/// character rules are the ones dparen_lexically_arithmetic proven against
+/// rubash#413: backslash escapes, quote spans and backtick spans are
+/// opaque, `$(`/`${`/`$[` units are consumed whole by dollar_word_group_len
+/// (parse.y:4138-4186 parse_dollar_word), every other unquoted paren
+/// shifts the depth. An unclosed group is never arithmetic.
+pub(crate) fn dollar_double_paren_is_arithmetic(open: &str) -> bool {
+    let chars: Vec<char> = open.chars().collect();
+    if chars.first() != Some(&'(') || chars.get(1) != Some(&'(') {
+        return false;
+    }
+    let mut depth = 1usize;
+    let mut scan = 2usize;
+    while scan < chars.len() {
+        match chars[scan] {
+            '\\' => scan += 1,
+            '\'' => {
+                scan += 1;
+                while scan < chars.len() && chars[scan] != '\'' {
+                    scan += 1;
+                }
+            }
+            '"' => {
+                scan += 1;
+                while scan < chars.len() {
+                    if chars[scan] == '\\' {
+                        scan += 2;
+                        continue;
+                    }
+                    if chars[scan] == '"' {
+                        break;
+                    }
+                    scan += 1;
+                }
+            }
+            '`' => {
+                scan += 1;
+                while scan < chars.len() {
+                    if chars[scan] == '\\' {
+                        scan += 2;
+                        continue;
+                    }
+                    if chars[scan] == '`' {
+                        break;
+                    }
+                    scan += 1;
+                }
+            }
+            '$' if matches!(chars.get(scan + 1), Some('(' | '{' | '[')) => {
+                let (open_ch, close_ch) = match chars[scan + 1] {
+                    '(' => ('(', ')'),
+                    '{' => ('{', '}'),
+                    _ => ('[', ']'),
+                };
+                match dollar_word_group_len(&chars, scan + 1, open_ch, close_ch) {
+                    Some(end) => scan = end,
+                    None => return false,
+                }
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return chars.get(scan + 1) == Some(&')');
+                }
+            }
+            _ => {}
+        }
+        scan += 1;
+    }
+    false
+}
+
 pub(crate) fn dollar_word_group_len(
     chars: &[char],
     open: usize,

@@ -1620,7 +1620,21 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let source = &self.comsub_body_alias_splice_extracted(source);
+        let alias_spliced = self.comsub_body_alias_splice_extracted(source);
+        // GNU's parse_and_execute reads the backtick body as a LINE — the
+        // body is newline-terminated at its parse (subst.c string_locale),
+        // so a 1-line unterminated `case x in` body reports its EOF on the
+        // NEXT line (`command substitution: line 2: ... on line 1`, issue
+        // #515). A `$(` body keeps the verbatim text (the outer parse owns
+        // its EOF shape).
+        let newline_terminated;
+        let source: &str = if self.backtick_body_diagnostic.get() && !alias_spliced.ends_with('\n')
+        {
+            newline_terminated = format!("{alias_spliced}\n");
+            &newline_terminated
+        } else {
+            &alias_spliced
+        };
         let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
@@ -1925,7 +1939,21 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let source = &self.comsub_body_alias_splice_extracted(source);
+        let alias_spliced = self.comsub_body_alias_splice_extracted(source);
+        // GNU's parse_and_execute reads the backtick body as a LINE — the
+        // body is newline-terminated at its parse (subst.c string_locale),
+        // so a 1-line unterminated `case x in` body reports its EOF on the
+        // NEXT line (`command substitution: line 2: ... on line 1`, issue
+        // #515). A `$(` body keeps the verbatim text (the outer parse owns
+        // its EOF shape).
+        let newline_terminated;
+        let source: &str = if self.backtick_body_diagnostic.get() && !alias_spliced.ends_with('\n')
+        {
+            newline_terminated = format!("{alias_spliced}\n");
+            &newline_terminated
+        } else {
+            &alias_spliced
+        };
         let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
@@ -2092,7 +2120,7 @@ impl Executor {
         // never runs). The body ran in place, so its parse_error latch is
         // already ours — propagate it to the abort flag the commands loop checks.
         if self.parse_error_occurred {
-            self.last_command_substitution_parse_error.set(true);
+            self.latch_command_substitution_parse_error();
         }
 
         self.restore_flat_subshell(saved_state, saved_dir);

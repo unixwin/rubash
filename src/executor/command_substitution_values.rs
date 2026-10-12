@@ -1071,7 +1071,13 @@ impl Executor {
         // parse_matched_pair) — no print_comsub canonicalization — so their
         // diagnostics number the raw body lines under the same (S - 1) base
         // as `$()` bodies (probes b1/b2, rubash#201).
-        Some(super::command_substitution::with_comsub_raw_text(|| {
+        // The ambient backtick window lasts through the expansion: the
+        // body's parse and diagnostics render as GNU's parse_and_execute
+        // child (whom "command substitution", subst.c:7413), and a body
+        // parse error latches the backtick companion so the enclosing
+        // command recovers (issue #515).
+        let saved_backtick_context = self.backtick_body_diagnostic.replace(true);
+        let output = super::command_substitution::with_comsub_raw_text(|| {
             self.expand_command_substitution_mut_typed_with_context(
                 &source,
                 if quoted {
@@ -1080,7 +1086,9 @@ impl Executor {
                     SubstitutionQuoteContext::Unquoted
                 },
             )
-        }))
+        });
+        self.backtick_body_diagnostic.set(saved_backtick_context);
+        Some(output)
     }
 
     pub(in crate::executor) fn expand_backtick_substitution(&self, word: &str) -> Option<String> {
@@ -1092,15 +1100,16 @@ impl Executor {
         }
         let source =
             decode_backtick_substitution_source(word.strip_prefix('`')?.strip_suffix('`')?);
-        Some(
-            super::command_substitution::with_comsub_raw_text(|| {
-                self.expand_command_substitution_readback_with_context(
-                    &source,
-                    SubstitutionQuoteContext::Unquoted,
-                )
-            })
-            .text_lossy(),
-        )
+        // Same ambient backtick window as the typed path (issue #515).
+        let saved_backtick_context = self.backtick_body_diagnostic.replace(true);
+        let expanded = super::command_substitution::with_comsub_raw_text(|| {
+            self.expand_command_substitution_readback_with_context(
+                &source,
+                SubstitutionQuoteContext::Unquoted,
+            )
+        });
+        self.backtick_body_diagnostic.set(saved_backtick_context);
+        Some(expanded.text_lossy())
     }
 
     pub(in crate::executor) fn expand_dirstack_tilde(&self, word: &str) -> Option<String> {

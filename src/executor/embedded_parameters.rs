@@ -569,15 +569,37 @@ impl Executor {
                     let mut escaped = false;
                     let mut case_depth = 0usize;
                     let mut word = String::new();
+                    // GNU read_token (parse.y:3630-3643): `#` opens a comment
+                    // only at a token boundary — after whitespace, a
+                    // separator, or the body start. The comment runs to end
+                    // of line and its text never reaches token recognition,
+                    // so a `)` inside it does not close the substitution
+                    // (issue #513); the body copy still carries the bytes.
+                    let mut token_boundary = true;
                     while let Some(source_ch) = chars.next() {
                         if escaped {
                             source.push(source_ch);
                             escaped = false;
+                            token_boundary = false;
                             continue;
                         }
                         if source_ch == '\\' && !single {
                             source.push(source_ch);
                             escaped = true;
+                            token_boundary = false;
+                            continue;
+                        }
+                        if source_ch == '#' && !single && !double && token_boundary {
+                            source.push(source_ch);
+                            while let Some(comment_ch) = chars.peek().copied() {
+                                if comment_ch == '\n' {
+                                    break;
+                                }
+                                source.push(comment_ch);
+                                chars.next();
+                            }
+                            word.clear();
+                            token_boundary = true;
                             continue;
                         }
                         update_command_substitution_case_depth(
@@ -611,6 +633,10 @@ impl Executor {
                                 source.push(source_ch);
                             }
                             _ => source.push(source_ch),
+                        }
+                        if !single && !double {
+                            token_boundary = source_ch.is_whitespace()
+                                || matches!(source_ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
                         }
                     }
                     let value =

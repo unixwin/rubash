@@ -2390,6 +2390,40 @@ fn run_source_impl(
                 // `$(`/`$((`/array/quote matched pairs keep the "matching
                 // `X'" wording.
                 if close == ')' && command {
+                    // Issue #516 (F181 class): a `(` that follows word
+                    // text — any second word, a redirect or an assignment
+                    // prefix before it — is a yacc token error at the
+                    // paren itself (`syntax error near unexpected token
+                    // `X'' + the offending source line, exit 2), never a
+                    // command-position compound open that swallows the
+                    // rest of the input to EOF. GNU probes p14/p16/p21 and
+                    // the q-series pin the naming rules the lexer's shape
+                    // scan carries.
+                    if let Some((
+                        crate::lexer::UnclosedComsubShape::MainLevelTokenError { line, token },
+                        _paren_open,
+                    )) = crate::lexer::unclosed_comsub_eof_shape(input)
+                    {
+                        let report = line + line_offset;
+                        let prefix = executor.parser_diagnostic_prefix_for_line(report);
+                        eprintln!("{prefix}syntax error near unexpected token `{token}'");
+                        // error.c print_offending_line is non-interactive
+                        // only (parse.y:6865) — the same gate the parser's
+                        // source echoes use.
+                        if !executor
+                            .shell_state()
+                            .env_vars
+                            .contains_key("__RUBASH_INTERACTIVE")
+                        {
+                            let offending = input
+                                .lines()
+                                .nth(line.saturating_sub(1))
+                                .unwrap_or_default();
+                            eprintln!("{prefix}`{offending}'");
+                        }
+                        executor.errexit_live_at_diagnostic();
+                        return 2;
+                    }
                     // rubash#390 q1: a `((` at command position is NOT a
                     // plain subshell — read_token hands it to parse_dparen
                     // (parse.y:3726-3733) → parse_arith_cmd, whose

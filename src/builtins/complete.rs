@@ -1130,6 +1130,30 @@ fn path_completion_candidates(
     kind: PathCompletionKind,
     env_vars: &HashMap<String, String>,
 ) -> Vec<String> {
+    // Programmable-completion words reach the builtin with their quotes
+    // already removed, so a quoted tilde-slash arrives as the literal `~/`
+    // — and GNU still completes it: pcomplete.c tilde-expands the
+    // completion word for the directory lookup while the returned names
+    // keep the user's `~/` spelling (`compgen -d -- "~/"` lists
+    // `~/.cache`-style entries, issue #523). Resolve the listing against
+    // $HOME and rewrite the physical prefix back to `~`.
+    if word.starts_with("~/") {
+        if let Some(home) = env_vars.get("HOME").filter(|home| !home.is_empty()) {
+            let expanded = format!("{home}{}", &word[1..]);
+            let rewritten = path_completion_candidates(&expanded, kind, env_vars)
+                .into_iter()
+                .map(|candidate| {
+                    candidate
+                        .strip_prefix(home.as_str())
+                        .map(|rest| format!("~{rest}"))
+                        .unwrap_or(candidate)
+                })
+                .collect::<Vec<_>>();
+            if !rewritten.is_empty() {
+                return rewritten;
+            }
+        }
+    }
     let (search_dir, display_prefix) = path_completion_base(word);
     let Ok(entries) = shell_directory_entries(search_dir, env_vars) else {
         return Vec::new();
