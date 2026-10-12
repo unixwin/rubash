@@ -749,23 +749,16 @@ pub(crate) fn seed_startup_traps(env_vars: &mut HashMap<String, String>) {
             add_orig_ignored_signal(env_vars, signal);
         }
     }
-    // WSL's init leaves SIGRTMIN ignored for every child process, so the
-    // GNU 5.3.0 contract baseline lists "trap -- '' SIGRTMIN" in every
-    // fresh shell (both 5.2.21 and 5.3.0 under WSL show it, including
-    // `bash -c 'trap'`). Seed that inherited ignore when no trap table
-    // entry arrived. SIGRTMIN exists only where the SIGNALS table has it
-    // (signames.c:97 `#if defined (SIGRTMIN)`): Windows keeps the WSL
-    // wire-format contract and Linux has RT signals; Darwin/BSD compile
-    // the block out so no phantom SIGRTMIN trap appears in `trap` output
-    // there (GNU bash on Darwin has no SIGRTMIN).
-    #[cfg(any(not(unix), target_os = "linux"))]
-    if env_vars.get(&trap_key("SIGRTMIN")).is_none() {
-        env_vars.insert(trap_key("SIGRTMIN"), String::new());
-        let mut signals = trap_list(env_vars);
-        signals.insert("SIGRTMIN".to_string());
-        store_trap_list(env_vars, signals);
-        add_orig_ignored_signal(env_vars, "SIGRTMIN");
-    }
+    // rubash#546 (cell 1): a fresh shell lists NOTHING for signals the
+    // SHELL ignores on its own behalf. The old hard-seed here planted
+    // `trap -- '' SIGRTMIN` in every fresh shell on the premise that WSL's
+    // init leaves SIGRTMIN ignored for every child — a premise today's
+    // GNU 5.3.0 oracle falsifies (`bash -c 'trap'` prints an empty table
+    // across -c/-i/--norc/POSIXLY_CORRECT probes, 2026-10-12). GNU lists a
+    // signal only when it was ignored BEFORE startup — an inherited SIG_IGN
+    // disposition (probe: a parent `trap '' RTMIN` makes the child list
+    // `trap -- '' SIGRTMIN`) — and that path is served by the
+    // TRAP_ORIG_IGNORES / per-signal-"" transports above, not by a seed.
 }
 
 /// A script executed through the same-shell ENOEXEC path runs in a fresh

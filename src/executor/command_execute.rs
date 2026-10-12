@@ -4,6 +4,24 @@ use crate::executor::markers::{PARSE_ERROR_FIELD_SEP, STORAGE_WORD_PREFIX};
 impl Executor {
     /// Execute an AST
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        // rubash#545 (cell 2): the command owns every input-procsub fd its
+        // words materialize — expansion registers them into the scoped vec
+        // and the close below runs at the command's very end, giving the
+        // `/dev/fd/N` word form GNU's per-command lifetime (GNU closes a
+        // command's process-substitution fds when the command finishes;
+        // `a=(<(echo p9)); cat "${a[0]}"` then reports `No such file`).
+        let procsub_fd_base = self.command_scoped_procsub_input_fds.len();
+        let result = self.execute_command_with_procsub_scope(cmd, procsub_fd_base);
+        self.close_command_scoped_procsub_input_fds_from(procsub_fd_base);
+        result
+    }
+
+    fn execute_command_with_procsub_scope(
+        &mut self,
+        cmd: &CommandNode,
+        procsub_fd_base: usize,
+    ) -> Result<(), ExecuteError> {
+        let _ = procsub_fd_base;
         use super::exec_profile::{ensure_init, PhaseTimer, P_COUNT, P_TOTAL};
         ensure_init();
         let _t_total = PhaseTimer::new(&P_TOTAL);

@@ -756,6 +756,19 @@ impl Executor {
         Ok(())
     }
 
+    /// rubash#545 (cell 3): run the `>(...)` bodies queued by `[[ ]]`
+    /// operand realization — each reads its temp carrier as stdin, the way
+    /// the simple-command finish path executes output process
+    /// substitutions.
+    pub(in crate::executor) fn finish_conditional_output_procsubs(
+        &mut self,
+    ) -> Result<(), ExecuteError> {
+        for (path, source) in std::mem::take(&mut self.conditional_output_procsubs) {
+            self.execute_output_process_substitution(&OutputProcessSubstitution { path, source })?;
+        }
+        Ok(())
+    }
+
     pub(in crate::executor) fn finish_assignment_output_process_substitutions_for_command(
         &mut self,
         cmd: &CommandNode,
@@ -963,17 +976,35 @@ impl Executor {
 
     /// The word form of a materialized input process substitution:
     /// `/dev/fd/N` per GNU subst.c:6362, with the payload registered under
-    /// that fd (see register_process_substitution_fd).
-    fn process_substitution_fd_word(&mut self, output: &[u8]) -> String {
+    /// that fd (see register_process_substitution_fd). rubash#545 (cell
+    /// 2): the fd is command-scoped — execute_materialized_command closes
+    /// every fd recorded here when the creating command finishes, matching
+    /// GNU's reap (`a=(<(echo p9)); cat "${a[0]}"` reports `No such file`).
+    pub(in crate::executor) fn process_substitution_fd_word(&mut self, output: &[u8]) -> String {
         let fd = self.register_process_substitution_fd(output);
+        self.command_scoped_procsub_input_fds.push(fd);
         format!("/dev/fd/{fd}")
+    }
+
+    /// rubash#545 (cell 2): close the input-procsub word fds the command
+    /// created (every fd recorded at or after `base`). GNU closes a
+    /// command's process-substitution fds and reaps its processes when the
+    /// command ends (subst.c process_substitute bookkeeping), so a stored
+    /// `/dev/fd/N` string names a dead path afterwards.
+    pub(in crate::executor) fn close_command_scoped_procsub_input_fds_from(&mut self, base: usize) {
+        for fd in self.command_scoped_procsub_input_fds.drain(base..) {
+            self.fd_table.entries.remove(&fd);
+        }
     }
 
     /// The word form of a materialized output process substitution
     /// (`>(cmd)`): `/dev/fd/N` naming an fd whose write side feeds the
     /// substitution's temp carrier (the finish path reads the temp by
     /// path and runs the body with it as stdin).
-    fn process_substitution_output_fd_word(&mut self, temp: &PathBuf) -> String {
+    pub(in crate::executor) fn process_substitution_output_fd_word(
+        &mut self,
+        temp: &PathBuf,
+    ) -> String {
         let mut fd = 63u32;
         while fd > 3 && !self.fd_table_fd_free(fd) {
             fd -= 1;

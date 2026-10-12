@@ -311,8 +311,19 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                     executor.set_shell_option(option, enabled);
                     index += 2;
                 } else {
-                    eprintln!("rubash: {}: option requires an argument", args[index]);
-                    return 2;
+                    // rubash#547: a `-o'/`+o` with NO option argument is the
+                    // list form, not a usage error. Empirical GNU 5.3.0
+                    // (2026-10-12, WSL): `bash -o` prints the set -o table
+                    // (`name\tstate`, rc 0) and `bash +o` prints the
+                    // `set +o name` / `set -o name` recreate list (rc 0) —
+                    // the same output as `set -o` / `set +o` with no
+                    // operand (options.c print_all_shell_options) — then
+                    // startup continues normally.
+                    let recreate = args[index] == "+o";
+                    let mut stdout = io::stdout();
+                    let _ = executor.print_shell_options_listing(recreate, &mut stdout);
+                    let _ = stdout.flush();
+                    index += 1;
                 }
             }
             "-i" => {

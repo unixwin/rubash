@@ -731,7 +731,20 @@ impl Executor {
             return Ok(None);
         };
         let saved_exit_code = self.exit_code;
-        *self.shell_state.debug_trap_command.borrow_mut() = Some(command_text.to_string());
+        // rubash#546 (cell 2): GNU get_bash_command (variables.c:1558) reads
+        // the_printed_command_except_trap, which the printer only refreshes
+        // while NO trap action is executing. Inside an ERR/DEBUG/signal/
+        // RETURN action the value stays frozen at whatever the trap fired
+        // with — the ERR action's entry DEBUG reports the FAILED command
+        // (`false`), never the action's own first command (probe
+        // 2026-10-12: `trap 'echo DEBUG: $BASH_COMMAND' DEBUG;
+        // trap 'echo ACT; false' ERR; false` GNU prints `DEBUG: false` for
+        // every in-action firing, not `DEBUG: echo ACT`).
+        let update_bash_command =
+            !(self.error_trap_running || self.signal_trap_running || self.return_trap_running);
+        if update_bash_command {
+            *self.shell_state.debug_trap_command.borrow_mut() = Some(command_text.to_string());
+        }
         let call_line = self
             .shell_state
             .env_vars
@@ -765,7 +778,12 @@ impl Executor {
         // firing's `command.line` walk above, so reuse is exact.
         *self.debug_trap_action_cache.borrow_mut() = Some((action, ast));
         self.resume_alias_streamed(saved_alias_streamed);
-        *self.shell_state.debug_trap_command.borrow_mut() = None;
+        // rubash#546 (cell 2): when the firing happened inside a trap
+        // action the frozen BASH_COMMAND belongs to the enclosing action —
+        // leave it exactly as it was found.
+        if update_bash_command {
+            *self.shell_state.debug_trap_command.borrow_mut() = None;
+        }
         self.debug_trap_running = false;
         result?;
         let trap_status = self.exit_code;

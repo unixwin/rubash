@@ -1827,16 +1827,25 @@ fn escaped_ifs_space_in_parameter_assignment_stays_one_field() {
 
 #[test]
 fn subshell_trap_listing_keeps_parent_table_entries() {
+    // rubash#546 cell 1: a dev-shell parent can carry the cross-process
+    // inherited-ignore marker (__RUBASH_TRAP_ORIG_IGN); GNU lists an
+    // inherited ignore, so strip it to pin the fresh-shell contract the
+    // ticket adjudicates.
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .env_remove("__RUBASH_TRAP_ORIG_IGN")
+        .env_remove("__RUBASH_TRAP_SIGRTMIN")
         .arg("-c")
         .arg("trap 'echo bad' TERM; trap '' HUP; (trap)")
         .output()
         .expect("run rubash");
 
     assert!(output.status.success());
+    // rubash#546 cell 1: the shell's own SIGRTMIN ignore is not a trap and
+    // never reaches the listing (fresh GNU `trap` is empty); only the
+    // parent entries the subshell inherits appear.
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "trap -- '' SIGHUP\ntrap -- 'echo bad' SIGTERM\ntrap -- '' SIGRTMIN\n"
+        "trap -- '' SIGHUP\ntrap -- 'echo bad' SIGTERM\n"
     );
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }

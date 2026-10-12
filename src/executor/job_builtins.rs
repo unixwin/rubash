@@ -995,9 +995,27 @@ impl Executor {
             self.ordered_background_jobs()
         } else {
             let mut selected = Vec::new();
-            let mut status = 0;
             for job in requested_jobs {
-                if let Some(pid) = self.resolve_background_job(job) {
+                // rubash#549 (cell 1): GNU jobs.def's bad-spec path is
+                // lenient. An operand without the leading `%' draws
+                // `warning: N: job specification requires leading `%'` and
+                // is then resolved AS IF the `%' were there (probe
+                // 2026-10-12, GNU 5.3.0: `sleep 5 & jobs 1` warns and lists
+                // job 1; `jobs 5`/`jobs 1x` warn then report `N: no such
+                // job`). Every listing failure — bare or `%N` — leaves the
+                // builtin's status at 0 (`jobs %5`, `jobs 1 %2` probes all
+                // return 0); only a usage error exits 2.
+                let (spec, report) = if job.starts_with('%') {
+                    (job.clone(), job.clone())
+                } else {
+                    writeln!(
+                        stderr,
+                        "{}jobs: warning: {job}: job specification requires leading `%'",
+                        self.diagnostic_prefix()
+                    )?;
+                    (format!("%{job}"), job.clone())
+                };
+                if let Some(pid) = self.resolve_background_job(&spec) {
                     if let Some(job_id) = self.shell_state.job_table.pid_to_job.get(&pid).copied() {
                         if let Some(entry) = self.shell_state.job_table.jobs.get(&job_id) {
                             selected.push((
@@ -1010,17 +1028,16 @@ impl Executor {
                 } else {
                     writeln!(
                         stderr,
-                        "{}jobs: {job}: no such job",
+                        "{}jobs: {report}: no such job",
                         self.diagnostic_prefix()
                     )?;
-                    status = 1;
                 }
             }
             let output = self.render_background_jobs(options, selected);
             // jobs.c:2231 list_one_job: explicit jobspec listing is followed
             // by cleanup_dead_jobs — a listed dead job leaves the table.
             self.shell_state.job_table.cleanup_dead_jobs();
-            return Ok((output, status));
+            return Ok((output, 0));
         };
         let output = self.render_background_jobs(options, jobs);
         // jobs.def:137-141 JSTATE_ANY (plain `jobs`, `-l`, `-p`, `-n`): after

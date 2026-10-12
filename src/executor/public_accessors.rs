@@ -200,6 +200,24 @@ impl Executor {
         &self.shell_state
     }
 
+    /// rubash#547: the startup `-o`/`+o` list form (`bash -o` with no
+    /// option argument). GNU shell.c routes the argument-less case to the
+    /// same listing `set -o` / `set +o` prints (options.c
+    /// print_all_shell_options): `-o` renders the `name\tstate` table,
+    /// `+o` the `set +o name` / `set -o name` recreate list.
+    pub fn print_shell_options_listing<W: std::io::Write>(
+        &self,
+        recreate: bool,
+        stdout: &mut W,
+    ) -> std::io::Result<()> {
+        crate::builtins::set::print_shell_options(
+            &self.shell_state.env_vars,
+            recreate,
+            crate::builtins::set::SET_O_PRINT_WIDTH,
+            stdout,
+        )
+    }
+
     pub fn shell_state_mut(&mut self) -> &mut crate::shell::ShellState {
         &mut self.shell_state
     }

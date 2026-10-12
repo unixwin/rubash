@@ -302,8 +302,15 @@ impl Executor {
         // reach `2>f`.
         let saved_stdout = self.fd_table.entries.get(&1).cloned();
         let saved_stderr = self.fd_table.entries.get(&2).cloned();
+        // rubash#545 (cells 2+3): the `[[ ]]` command owns any input-procsub
+        // fds realized for its operands and any `>(...)` bodies queued
+        // during evaluation — close/run them at the command's end, the same
+        // lifetime execute_materialized_command gives simple commands.
+        let procsub_fd_base = self.command_scoped_procsub_input_fds.len();
         self.bind_conditional_stdio_redirects(cmd)?;
         self.exit_code = self.execute_conditional_command(conditional_command);
+        self.finish_conditional_output_procsubs()?;
+        self.close_command_scoped_procsub_input_fds_from(procsub_fd_base);
         for (fd, saved) in [(1u32, saved_stdout), (2, saved_stderr)] {
             match saved {
                 Some(entry) => {

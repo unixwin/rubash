@@ -82,11 +82,15 @@ where
     }
     let args = &args[index..];
 
+    // rubash#549 (cell 2): GNU bash 5.3 turned `alias -p NAME` into a pure
+    // whole-table listing — the NAME operands are ignored entirely (probe
+    // 2026-10-12: `alias zz1=: zz2=:; alias -p zz1` prints exactly the
+    // zz1/zz2 pair, rc 0; the old rubash path printed the table AND then
+    // the named line, duplicating zz1). `alias NAME` without -p still
+    // prints just the named alias.
     if args.is_empty() || pflag {
         print_aliases(aliases, stdout)?;
-        if args.is_empty() {
-            return Ok(EXECUTION_SUCCESS);
-        }
+        return Ok(EXECUTION_SUCCESS);
     }
 
     let mut status = EXECUTION_SUCCESS;

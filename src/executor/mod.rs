@@ -499,6 +499,19 @@ pub struct Executor {
     background_children: HashMap<u32, crate::fd::SpawnedChild>,
     coproc_stderr_forwarders: HashMap<u32, std::thread::JoinHandle<Result<(), std::io::Error>>>,
     assignment_output_process_substitutions: HashMap<String, String>,
+    /// rubash#545 (cell 2): `/dev/fd/N` input-procsub word fds created by
+    /// the command CURRENTLY executing. GNU closes a process substitution's
+    /// fd (and reaps its process) when the creating command finishes
+    /// (subst.c), so an array element or variable carrying the `/dev/fd/N`
+    /// STRING holds a dead path afterwards. execute_materialized_command
+    /// snapshots this vec's length at entry and closes the delta at the
+    /// command's end.
+    command_scoped_procsub_input_fds: Vec<u32>,
+    /// rubash#545 (cell 3): `>(...)` operands realized for a `[[ ]]`
+    /// command. The body runs at the command's end, reading the temp
+    /// carrier (the same finish the simple-command path gives output
+    /// process substitutions).
+    conditional_output_procsubs: Vec<(std::path::PathBuf, String)>,
     pending_scalar_assignment: bool,
     suppress_errexit: usize,
     /// GNU execute_cmd.c:273 `executing_command_builtin`: set while a

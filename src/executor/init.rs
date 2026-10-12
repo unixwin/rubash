@@ -311,6 +311,8 @@ impl Executor {
             background_children: HashMap::new(),
             coproc_stderr_forwarders: HashMap::new(),
             assignment_output_process_substitutions: HashMap::new(),
+            command_scoped_procsub_input_fds: Vec::new(),
+            conditional_output_procsubs: Vec::new(),
             pending_scalar_assignment: false,
             suppress_errexit: 0,
             command_builtin_depth: 0,
