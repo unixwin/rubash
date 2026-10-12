@@ -753,7 +753,19 @@ fn command_substitution_node(
         crate::lexer::set_parse_extended_glob(true);
     }
     let tokens = crate::lexer::tokenize(&source);
-    let commands = parse(&tokens).commands;
+    // The body is its own parse level (parse.y:4524 resets the pending
+    // counter at entry) but the HEREDOC_MAX cap still applies within it
+    // (parse.y:3105 push_heredoc): a 17th pending heredoc parked the fatal
+    // in the lexer and truncated the token stream. Skip the doomed body
+    // parse — its truncation would only add a misleading unclosed-delimiter
+    // diagnostic — and leave the condition parked for the driver, which
+    // reports `maximum here-document count exceeded` and exits 2 before
+    // anything executes.
+    let commands = if crate::lexer::heredoc_overflow_pending() {
+        Vec::new()
+    } else {
+        parse(&tokens).commands
+    };
     if backtick {
         crate::lexer::set_parse_extended_glob(saved_gate);
     }

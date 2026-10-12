@@ -88,8 +88,25 @@ pub fn heredoc_overflow_line() -> Option<usize> {
     use std::sync::atomic::Ordering;
     match HEREDOC_OVERFLOW_LINE.swap(0, Ordering::SeqCst) {
         0 => None,
-        line => Some(line),
+        line => {
+            if std::env::var_os("RUBASH_DBG_543").is_some() {
+                eprintln!(
+                    "DBG543 consume line={line}\n{}",
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
+            Some(line)
+        }
     }
+}
+
+/// Non-consuming read of the parked here-document overflow, for callers
+/// that must react without clearing the condition the driver still has to
+/// report (GNU parse.y:3105 push_heredoc is fatal inside a command
+/// substitution's own parse level too — parse.y:4524 resets the pending
+/// counter at entry, the cap still applies within it).
+pub(crate) fn heredoc_overflow_pending() -> bool {
+    HEREDOC_OVERFLOW_LINE.load(std::sync::atomic::Ordering::SeqCst) != 0
 }
 
 /// Parse-time `extended_glob` (rubash#131).
@@ -1559,6 +1576,14 @@ impl GroupScanFeeder {
         // its script-relative line and stop tokenizing. `main` converts the
         // recorded flag into the EX_BADUSAGE exit status.
         if delimiters.len() > 16 {
+            if std::env::var_os("RUBASH_DBG_543").is_some() {
+                eprintln!(
+                    "DBG543 park at logical_start_line={} delims={} in_comsub={}",
+                    self.logical_start_line,
+                    delimiters.len(),
+                    self.in_comsub
+                );
+            }
             crate::lexer::record_heredoc_overflow(self.logical_start_line);
             self.overflowed = true;
             return;

@@ -156,7 +156,14 @@ impl Executor {
                         self.diagnostic_prefix(),
                         for_command.variable
                     );
+                    // POSIX-mode notes item 37: assigning to a readonly
+                    // loop variable exits the non-interactive POSIX shell
+                    // (status 1); the default mode fails the `for` command
+                    // with status 1 and keeps running.
                     self.exit_code = 1;
+                    if self.posix_assignment_failure_is_fatal() {
+                        return Err(ExecuteError::ExitCode(1));
+                    }
                     return Ok(());
                 }
                 self.shell_state
@@ -164,8 +171,14 @@ impl Executor {
                     .insert(for_command.variable.clone(), value.clone());
                 for_command.variable.clone()
             } else {
+                // POSIX-mode notes item 37: a failed loop-variable bind
+                // (readonly violation) exits the non-interactive POSIX shell
+                // (status 1); default mode fails the command only.
                 if !self.apply_shell_assignment(&for_command.variable, value.clone()) {
                     self.exit_code = 1;
+                    if self.posix_assignment_failure_is_fatal() {
+                        return Err(ExecuteError::ExitCode(1));
+                    }
                     return Ok(());
                 }
                 match self.nameref_resolution(&for_command.variable) {

@@ -8,7 +8,7 @@ use crate::executor::markers::STORAGE_WORD_PREFIX;
 /// here. The span may be the whole name (${$'x1'}) or the leading part of an
 /// operator form (${$'x1'%t}, ${$'x1'-fallback}). Returns the rewritten
 /// body, or None when the name is not a decodable dollar-quoted span.
-fn resolve_dollar_quoted_parameter_name(name: &str) -> Option<String> {
+pub(in crate::executor) fn resolve_dollar_quoted_parameter_name(name: &str) -> Option<String> {
     let chars: Vec<char> = name.chars().collect();
     if chars.len() < 3 || chars[0] != '$' || chars[1] != '\'' {
         return None;
@@ -32,7 +32,12 @@ fn resolve_dollar_quoted_parameter_name(name: &str) -> Option<String> {
         return None;
     }
     let decoded = crate::lexer::ansi::decode_ansi_c_quoted(&body);
-    if !is_shell_name(&decoded) {
+    // The decoded word re-dispatches parameter_brace_expand, whose
+    // valid_brace_expansion_word accepts shell names, positional digits and
+    // the special parameters (`${$'1'}` reads $1, `${$'#'}` reads $#) —
+    // the same class parameter_ops::is_parameter_error_name covers
+    // (rubash#539: `"${x:${$'1'}}"` offsets through $1).
+    if !crate::executor::parameter_ops::is_parameter_error_name(&decoded) {
         return None;
     }
     let rest: String = chars[index + 1..].iter().collect();
@@ -84,6 +89,44 @@ impl Executor {
         let aborted = self.shell_state.redirect_failglob_error.replace(false);
         self.shell_state.redirect_failglob_seen.set(false);
         aborted
+    }
+
+    /// The file-redirect ambiguity gate with the POSIX-mode notes item 10
+    /// rule: a non-interactive POSIX shell does not field-split redirect
+    /// operands, so whitespace in the expanded target that came from the
+    /// (suppressed) split is literal filename data — `f="two words";
+    /// echo hi > $f` opens the single file `two words` (oracle probe E,
+    /// rc=0) instead of reporting AMBIGUOUS_REDIRECT. Pathname expansion is
+    /// already suppressed by the same mode gate (`posix_noglob`), and brace
+    /// alternatives stay ambiguous: they are a multi-field word list from
+    /// brace expansion, not a field split (`> a{b,c}` still fails).
+    pub(in crate::executor) fn redirect_operand_ambiguous(
+        &self,
+        redirect: &crate::parser::Redirect,
+        raw: &str,
+        target: &str,
+    ) -> bool {
+        if !target.chars().any(char::is_whitespace) {
+            return redirect_target_is_ambiguous(raw, target);
+        }
+        let posix_nosplit = self.posix_mode_enabled()
+            && !self
+                .shell_state
+                .env_vars
+                .contains_key("__RUBASH_INTERACTIVE");
+        if posix_nosplit {
+            let branched = self.is_brace_expand_enabled()
+                && super::command_prepare::expand_braces_with_optional_raw(
+                    &redirect.target,
+                    Some(raw),
+                )
+                .len()
+                    > 1;
+            if !branched {
+                return false;
+            }
+        }
+        redirect_target_is_ambiguous(raw, target)
     }
 
     pub(crate) fn expand_redirect_target(&self, redirect: &crate::parser::Redirect) -> String {

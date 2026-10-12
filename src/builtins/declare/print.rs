@@ -20,6 +20,7 @@ pub(super) fn print_declare_names<W, E>(
     options: DeclareOptions,
     plain: bool,
     mut status: i32,
+    dynamic_views: &[(String, String)],
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -83,7 +84,17 @@ where
             nameref: namerefs.contains(&name),
             trace: variables.is_marked(super::TRACE_VARS, &name),
         };
-        if let Some(value) = variables.get(&name) {
+        // A dynamic variable's cell is whatever the last bind stored; GNU's
+        // declare -p reads the dynamic_value getter, so the CURRENT dynamic
+        // value replaces any stored shadow bytes (GNU: `export RANDOM=42;
+        // declare -p RANDOM` prints the next draw with -ix, rubash#541).
+        if let Some(rendered) = dynamic_views
+            .iter()
+            .find(|(view_name, _)| view_name.as_str() == name.as_str())
+            .map(|(_, text)| text)
+        {
+            writeln!(stdout, "{rendered}")?;
+        } else if let Some(value) = variables.get(&name) {
             let nbuckets = crate::executor::assoc_nbuckets(variables, &name);
             if plain {
                 print_plain_declaration(&name, value, attrs, nbuckets, stdout)?;

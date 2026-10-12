@@ -729,6 +729,16 @@ impl Executor {
         &self,
         cmd: &CommandNode,
     ) -> Option<(String, String, i32)> {
+        // GNU execute_arith_command owns the whole expansion verdict for an
+        // arithmetic command: expand_arith_string (param_expand) reports
+        // `<body>: bad substitution` for an unterminated `${` in the body
+        // (rubash#533) and expr.c raises nounset itself, so the generic
+        // word pre-scan — which models read_token_word's `${` pairing —
+        // must not re-judge arithmetic body text where a `$`-`{` is
+        // literal (parse.y parse_matched_pair P_ARITH).
+        if cmd.arithmetic_command.is_some() {
+            return None;
+        }
         // rubash#319: GNU expands a command's words left-to-right
         // (subst.c:11229 expand_word_internal drives each word through
         // expand_word_list_internal order), and inside a word every
@@ -932,11 +942,25 @@ impl Executor {
             }
         }
         let mut rest = word;
-        while let Some(start) = if quote_aware {
-            next_quoted_parameter_expansion_start(rest)
-        } else {
-            rest.find("${")
-        } {
+        loop {
+            // P_ARITH units are opaque to this scan (rubash#533): GNU reads
+            // a `$((...))`/`$[...]` body through parse_matched_pair (P_ARITH)
+            // where a `$`-`{` is literal text, so a `${` inside belongs to
+            // the arithmetic string, never to a parameter expansion of this
+            // word. An unterminated unit consumes the rest of the word; the
+            // arithmetic expansion family owns that diagnostic.
+            if let Some(len) = Self::arithmetic_unit_prefix_span(rest) {
+                rest = &rest[len..];
+                continue;
+            }
+            let start = if quote_aware {
+                next_quoted_parameter_expansion_start(rest)
+            } else {
+                rest.find("${")
+            };
+            let Some(start) = start else {
+                break;
+            };
             let after_start = &rest[start + 2..];
             let Some(end) = matching_parameter_brace(after_start) else {
                 return Some((
@@ -1254,6 +1278,116 @@ impl Executor {
             rest = &after_start[end + 1..];
         }
         None
+    }
+
+    /// Byte length of the balanced `open`/`close` group whose opener sits at
+    /// `text[0]` (quote-aware), opener excluded from the count; `None` when
+    /// the group never closes.
+    fn balanced_group_span(text: &str, open: char, close: char) -> Option<usize> {
+        let mut depth = 1usize;
+        let mut single = false;
+        let mut double = false;
+        let mut escaped = false;
+        for (offset, ch) in text.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if single {
+                if ch == '\'' {
+                    single = false;
+                }
+                continue;
+            }
+            if double {
+                if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    double = false;
+                }
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '\'' => single = true,
+                '"' => double = true,
+                c if c == open => depth += 1,
+                c if c == close => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(offset + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Leading P_ARITH unit span (`$((...))` / `$[...]`), quote-aware with
+    /// balanced delimiters. `None` when the word does not start with an
+    /// arithmetic unit; `Some(len)` covers the whole unit, and an
+    /// unterminated unit covers the rest of the word.
+    fn arithmetic_unit_prefix_span(word: &str) -> Option<usize> {
+        let (open, close, body) = if word.starts_with("$((") {
+            ('(', ')', 3)
+        } else if word.starts_with("$[") {
+            ('[', ']', 2)
+        } else if word.starts_with("((") {
+            // A command-position `((` word is parse_dparen's arithmetic
+            // command when the inner group closes directly before `)` (GNU
+            // accepts the arithmetic reading only then) or when the group
+            // never closes at all (the arith reading is still pending at
+            // EOF); the nested-subshell reinterpretation keeps `${` live.
+            if let Some(span) = Self::balanced_group_span(&word[2..], '(', ')') {
+                if word[2 + span..].starts_with(')') {
+                    return Some(2 + span + 1);
+                }
+                return None;
+            }
+            return Some(word.len());
+        } else {
+            return None;
+        };
+        let mut depth = 1usize;
+        let mut single = false;
+        let mut double = false;
+        let mut escaped = false;
+        for (offset, ch) in word[body..].char_indices() {
+            let index = body + offset;
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if single {
+                if ch == '\'' {
+                    single = false;
+                }
+                continue;
+            }
+            if double {
+                if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    double = false;
+                }
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '\'' => single = true,
+                '"' => double = true,
+                c if c == open => depth += 1,
+                c if c == close => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(index + ch.len_utf8());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(word.len())
     }
 
     /// rubash#319 companion to `nounset_unbound_parameter`: the same

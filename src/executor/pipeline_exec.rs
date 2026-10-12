@@ -780,7 +780,7 @@ impl Executor {
         self.write_pipeline_output(final_command, &input, true)?;
         if let Some(prefix) = &time_prefix {
             if let Some(started) = time_prefix_started {
-                print_time(&self.shell_state.env_vars, prefix.posix_format, started);
+                self.print_time_shell(prefix.posix_format, started);
             }
         }
         let mut status = self.pipeline_exit_status(&statuses);
@@ -2372,6 +2372,11 @@ impl Executor {
                     &mut output,
                     &mut stderr,
                 )?;
+                // The POSIX reset-by-name usage failure returns GNU's raw
+                // internal EX_USAGE (258) for the execute_trap wrapper's
+                // special_builtin_failed gate; a pipeline stage surfaces the
+                // user-visible conversion instead (execute_cmd.c:4886-4888).
+                let status = if status > 256 { 2 } else { status };
                 Ok(Some((
                     crate::executor::substitution_metadata::bytes_to_shell_text(&output),
                     crate::executor::substitution_metadata::bytes_to_shell_text(&stderr),

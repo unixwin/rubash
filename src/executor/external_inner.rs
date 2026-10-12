@@ -249,6 +249,13 @@ impl Executor {
         let mut env_vars = HashMap::new();
         if !config.ignore_environment {
             for name in marked_env_names(&self.shell_state.env_vars, EXPORTED_VARS) {
+                // GNU variables.c make_env_array_from_var_list: array and
+                // associative variables never cross the child env boundary
+                // (rubash#534) — `env`'s internal emulation mirrors the
+                // real spawn path.
+                if !is_exportable_env_name(&self.shell_state.env_vars, &name) {
+                    continue;
+                }
                 if let Some(value) = self.shell_state.env_vars.get(&name) {
                     env_vars.insert(name, value.clone());
                 }

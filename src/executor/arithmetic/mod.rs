@@ -176,6 +176,22 @@ mod literal_subscript_tests {
     }
 }
 
+/// Whether the arithmetic expression still carries a `${` whose brace never
+/// closes (quote-aware): GNU's param_expand pass over the arithmetic string
+/// answers `bad substitution` for it (subst.c bad_substitution label,
+/// rubash#533).
+pub(crate) fn expression_has_unterminated_parameter_brace(expression: &str) -> bool {
+    let mut rest = expression;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        match crate::executor::parameter_ops::matching_parameter_brace(after) {
+            Some(end) => rest = &after[end + 1..],
+            None => return true,
+        }
+    }
+    false
+}
+
 impl Executor {
     /// Snapshot the arithmetic error flags so a subshell boundary (command
     /// substitution, pipeline element) can restore them afterwards; errors
@@ -665,6 +681,20 @@ impl Executor {
         // not EXP_EXPANDED, so the assoc subscript scan stays flag-0
         // (expr.c:1171).
 
+        // GNU expand_string_dollar_arith runs the arithmetic string through
+        // expand_arith_string (param_expand) before evalexp: an unterminated
+        // `${` there is the bad_substitution verdict — `<string>: bad
+        // substitution`, status 1, the expansion discarded
+        // (expand_wdesc_error) while the script continues (rubash#533).
+        if expression_has_unterminated_parameter_brace(expression) {
+            self.shell_state.arithmetic_nonfatal_error.set(true);
+            if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                eprintln!("{}{expression}: bad substitution", self.diagnostic_prefix());
+                use std::io::Write;
+                let _ = std::io::stderr().flush();
+            }
+            return None;
+        }
         let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression, false);
         let expanded = self.expand_arithmetic_expression_mut(&with_assoc_keys);
         let expression = normalize_arithmetic_quotes(&expanded);

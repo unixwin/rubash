@@ -436,7 +436,7 @@ impl Executor {
                 // Multi-field split or zero-field expansion: both are the
                 // redirection_expand NULL condition (redir.c:325-333); an
                 // anchored quoted-null single empty field is NOT.
-                if redirect_target_is_ambiguous(&redirect.target_metadata.raw, &target)
+                if self.redirect_operand_ambiguous(redirect, &redirect.target_metadata.raw, &target)
                     || !raw_word_has_quoted_span(raw_word)
                 {
                     return self
@@ -450,7 +450,7 @@ impl Executor {
                     .reject_redirect_at(cmd, index, ": No such file or directory")
                     .map(|_| Some(RedirectRejection::Command));
             }
-            if redirect_target_is_ambiguous(&redirect.target_metadata.raw, &target) {
+            if self.redirect_operand_ambiguous(redirect, &redirect.target_metadata.raw, &target) {
                 return self
                     .reject_redirect_at(cmd, index, &format!("{raw_word}: ambiguous redirect"))
                     .map(|_| Some(RedirectRejection::Command));

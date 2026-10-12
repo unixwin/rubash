@@ -276,6 +276,26 @@ impl Executor {
         // evalexp after expand_arith_string. The parser's joined `expression`
         // loses that whitespace (`x ++ = 7 ` keeps the blank before `))` in
         // every GNU diagnostic), so the raw slice is the faithful eval input.
+        // GNU execute_arith_command (execute_cmd.c:3937) runs the string
+        // through expand_arith_string (param_expand) before evalexp: an
+        // unterminated `${` in it is the bad_substitution verdict —
+        // `<string>: bad substitution`, status 1, the command discarded
+        // while the script continues (rubash#533).
+        let eval_input_expr = raw_expression.unwrap_or(expression);
+        if crate::executor::arithmetic::expression_has_unterminated_parameter_brace(eval_input_expr)
+        {
+            // No nonfatal marker here: the `(( ))` command itself reports
+            // status 1 and the reader continues (GNU expand_wdesc_error
+            // DISCARD at execute_cmd.c:3937's expansion step); a marker
+            // would leak into the NEXT command's expansion and discard it.
+            if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                eprintln!(
+                    "{}{eval_input_expr}: bad substitution",
+                    self.diagnostic_prefix()
+                );
+            }
+            return 1;
+        }
         let eval_result = self.eval_arithmetic_command_value(raw_expression.unwrap_or(expression));
         // An invalid nameref-cell assignment inside `((` fails the command
         // with status 1 even though the expression itself evaluated.

@@ -119,6 +119,21 @@ pub(in crate::executor) fn env_derived_dynamic_parameter_value(
 /// GROUPS word list — stub returning a single "0" (a real port would walk
 /// the process group set, GNU variables.c:1886 get_groupset). Shared by
 /// the Executor accessors and the arithmetic dynamic context.
+/// shquote.c sh_double_quote: wrap in `"` and backslash-escape `\`, `"`,
+/// `` ` `` and `$` — the declare -p renderer for dynamic variable values.
+fn sh_double_quote_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '"' | '`' | '$') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
+
 pub(in crate::executor) fn groups_words() -> Vec<String> {
     vec!["0".to_string()]
 }
@@ -242,6 +257,60 @@ impl Executor {
                 .positional_params
                 .join(&separator.to_string()),
             None => self.shell_state.positional_params.concat(),
+        }
+    }
+
+    /// GNU variables.c:1393-1408 assign_random: a numeric bind to RANDOM
+    /// reseeds the generator (rseed = seed, last_random_value = 0); a
+    /// non-numeric value fails valid_number and leaves the state alone.
+    /// Applied on the declare/typeset/local bind path, whose assignment
+    /// operands bypass apply_shell_assignment's own seed (rubash#541).
+    pub(in crate::executor) fn apply_declare_random_seeds(&self, args: &[String]) {
+        for arg in args {
+            let Some((name, value)) = arg.split_once('=') else {
+                continue;
+            };
+            if name.ends_with('+') || name != "RANDOM" {
+                continue;
+            }
+            if let Ok(seed) = value.trim().parse::<i64>() {
+                self.shell_state.random_state.rseed.set(seed as u32);
+                self.shell_state.random_state.last_value.set(0);
+            }
+        }
+    }
+
+    /// GNU variables.c initialize_dynamic_variables registers every dynamic
+    /// parameter as a hash-table cell carrying a dynamic_value getter
+    /// (INIT_DYNAMIC_VAR), so `declare -p NAME` renders the CURRENT dynamic
+    /// value with the cell's attributes — `declare -i RANDOM="…"`,
+    /// `declare -- LINENO="…"`, `declare -a GROUPS=([0]="0")` — re-evaluated
+    /// at display time (rubash#541). None when the name is not a registered
+    /// dynamic variable or was `unset` (variables.c:3839 unbind_variable
+    /// removes the cell for the rest of the shell's lifetime).
+    pub(in crate::executor) fn dynamic_declaration_view(&self, name: &str) -> Option<String> {
+        if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+            return None;
+        }
+        let value = self.dynamic_parameter_value(name)?;
+        let quoted = sh_double_quote_text(&value);
+        // mk_env_string/declare -p read the getter's CURRENT value through
+        // the cell's attributes: an exported dynamic variable renders
+        // `declare -ix …` (GNU: `export RANDOM=42; declare -p RANDOM` shows
+        // the next draw with -ix, rubash#541).
+        let exported = if is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, name) {
+            "x"
+        } else {
+            ""
+        };
+        match name {
+            "RANDOM" | "SECONDS" | "SRANDOM" | "BASHPID" => {
+                Some(format!("declare -i{exported} {name}={quoted}"))
+            }
+            "GROUPS" => Some(format!("declare -a{exported} {name}=([0]={quoted})")),
+            "EPOCHSECONDS" | "EPOCHREALTIME" | "LINENO" | "BASH_SUBSHELL" | "BASH_ARGV0"
+            | "BASH_COMMAND" => Some(format!("declare --{exported} {name}={quoted}")),
+            _ => None,
         }
     }
 
@@ -375,8 +444,12 @@ impl Executor {
             "FUNCNAME" => {
                 // Same att_invisibility as the storage arm
                 // (variables.c:1812 make_funcname_visible): outside any
-                // function the whole array reads as unset.
-                if self.shell_state.function_depth == 0 {
+                // function the whole array reads as unset. `unset FUNCNAME`
+                // unbinds the cell and function entry never re-creates it
+                // (rubash#541).
+                if self.shell_state.function_depth == 0
+                    || is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "FUNCNAME")
+                {
                     Vec::new()
                 } else {
                     let mut stack = self.shell_state.function_name_stack.clone();
@@ -455,8 +528,11 @@ impl Executor {
                 // Same att_invisibility as the scalar read above
                 // (variables.c:1812 make_funcname_visible): outside any
                 // function the whole array reads as unset, including the
-                // evalfile.c:257 "source" frame at the top level.
-                if self.shell_state.function_depth == 0 {
+                // evalfile.c:257 "source" frame at the top level. `unset
+                // FUNCNAME` unbinds the cell permanently (rubash#541).
+                if self.shell_state.function_depth == 0
+                    || is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "FUNCNAME")
+                {
                     return Some(String::new());
                 }
                 let mut stack = self.shell_state.function_name_stack.clone();

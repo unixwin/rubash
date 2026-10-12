@@ -498,6 +498,24 @@ impl Executor {
                             }
                         }
                         let expression = self.expand_arithmetic_special_parameters(&expression);
+                        // GNU expands the arithmetic string as a parameter
+                        // expression before evalexp (subst.c param_expand):
+                        // an unterminated `${` inside it is the
+                        // bad_substitution verdict — `<string>: bad
+                        // substitution`, status 1, the command discarded
+                        // (expand_wdesc_error) while the script continues.
+                        if crate::executor::arithmetic::expression_has_unterminated_parameter_brace(
+                            &expression,
+                        ) {
+                            self.shell_state.arithmetic_nonfatal_error.set(true);
+                            if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                                eprintln!(
+                                    "{}{expression}: bad substitution",
+                                    self.diagnostic_prefix()
+                                );
+                            }
+                            continue;
+                        }
                         // GNU evalexp applies the writes of an arithmetic
                         // expansion against the live environment; this
                         // `&self` walk captures them into the deferred
@@ -673,6 +691,22 @@ impl Executor {
                     }
                     if closed {
                         let expression = self.expand_arithmetic_special_parameters(&expression);
+                        // Same unterminated-`${` verdict as the `$((` arm
+                        // above: the arithmetic string is parameter-expanded
+                        // before evaluation, and GNU's param_expand reports
+                        // `<string>: bad substitution` with status 1.
+                        if crate::executor::arithmetic::expression_has_unterminated_parameter_brace(
+                            &expression,
+                        ) {
+                            self.shell_state.arithmetic_nonfatal_error.set(true);
+                            if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                                eprintln!(
+                                    "{}{expression}: bad substitution",
+                                    self.diagnostic_prefix()
+                                );
+                            }
+                            continue;
+                        }
                         if let Some(value) =
                             eval_conditional_arith_value(&expression, &self.shell_state.env_vars)
                         {

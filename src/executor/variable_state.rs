@@ -502,6 +502,57 @@ impl Executor {
                 && (is_posix_special_builtin(command) || command == "source"))
     }
 
+    /// Whether this command is an attribute builtin whose GNU flow absorbs
+    /// from the temporary environment only its NAMED operands (rubash#538).
+    pub(in crate::executor) fn attribute_builtin_absorbs_named_tempenv(cmd: &CommandNode) -> bool {
+        let Some(command) = cmd.words.first().map(String::as_str) else {
+            return false;
+        };
+        if matches!(command, "export" | "readonly") {
+            // `export -f`/`readonly -f` operands name functions, not
+            // variables: set_var_attribute is never called for them, so
+            // nothing absorbs.
+            !cmd.words[1..]
+                .iter()
+                .take_while(|w| w.starts_with('-') && w.len() > 1)
+                .any(|w| w.contains('f'))
+        } else {
+            (command == "declare" || command == "typeset")
+                && Self::declare_applies_persistent_attribute(cmd)
+        }
+    }
+
+    /// The variable names an attribute builtin's operands name (the set
+    /// GNU set_var_attribute absorbs from the temporary environment,
+    /// setattr.def:590-614). Nameref-resolved targets resolve through the
+    /// same cell validation apply_export_arg performs.
+    pub(in crate::executor) fn attribute_builtin_operand_names(
+        &self,
+        cmd: &CommandNode,
+    ) -> std::collections::HashSet<String> {
+        let mut keep = std::collections::HashSet::new();
+        for word in cmd.words.iter().skip(1) {
+            let name = word.split('=').next().unwrap_or(word);
+            let name = name.strip_suffix('+').unwrap_or(name);
+            let mut chars = name.chars();
+            let valid = match chars.next() {
+                Some(first) if first == '_' || first.is_ascii_alphabetic() => {
+                    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+                }
+                _ => false,
+            };
+            if !valid {
+                continue;
+            }
+            let resolved = match self.nameref_resolution(name) {
+                NamerefResolution::Target(target) => target,
+                _ => name.to_string(),
+            };
+            keep.insert(resolved);
+        }
+        keep
+    }
+
     // GNU declare.def:1045-1086: a variable found in the temporary environment
     // is converted into a real variable (keeping its value, dropping the
     // tempenv attribute) only when the declare applies the export or readonly

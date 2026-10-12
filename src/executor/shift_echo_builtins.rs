@@ -55,6 +55,28 @@ impl Executor {
         Ok(())
     }
 
+    /// The `time` keyword's report with the POSIX-mode notes item 6 stream
+    /// rule: GNU print_time_info (execute_cmd.c:1552) writes the timing to
+    /// the shell's CURRENTLY BOUND stderr — `{ time ...; } 2>file` captures
+    /// it — so a POSIX shell routes the report through the executor's fd-2
+    /// endpoint (xtrace_write) instead of the raw process stream. The
+    /// default mode keeps the historical raw write.
+    pub(in crate::executor) fn print_time_shell(
+        &mut self,
+        posix_format: bool,
+        started: std::time::Instant,
+    ) {
+        if !self.posix_mode_enabled() {
+            print_time(&self.shell_state.env_vars, posix_format, started);
+            return;
+        }
+        let metrics = TimeCommandMetrics::from_start(started);
+        if let Some(report) = format_time_report(&self.shell_state.env_vars, posix_format, metrics)
+        {
+            self.xtrace_write(format!("{report}\n").as_bytes());
+        }
+    }
+
     pub(in crate::executor) fn execute_time_command_node(
         &mut self,
         cmd: &CommandNode,
@@ -73,11 +95,7 @@ impl Executor {
         }
         if index >= cmd.words.len() {
             let started = time_command_started();
-            print_time(
-                &self.shell_state.env_vars,
-                cmd.words.iter().skip(1).any(|word| word == "-p"),
-                started,
-            );
+            self.print_time_shell(cmd.words.iter().skip(1).any(|word| word == "-p"), started);
             self.exit_code = 0;
             return Ok(());
         }
@@ -89,11 +107,7 @@ impl Executor {
         }
         let started = time_command_started();
         self.execute_command(&timed)?;
-        print_time(
-            &self.shell_state.env_vars,
-            cmd.words.iter().skip(1).any(|word| word == "-p"),
-            started,
-        );
+        self.print_time_shell(cmd.words.iter().skip(1).any(|word| word == "-p"), started);
         if inverted {
             self.exit_code = invert_exit_status(self.exit_code);
         }

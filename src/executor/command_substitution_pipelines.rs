@@ -519,6 +519,10 @@ impl Executor {
 
         let started = time_command_started();
         let output = self.timed_command_substitution_inner(&words[index..])?;
+        // &self context: the executor's stderr endpoint needs &mut, so this
+        // site keeps the raw stream write. A command substitution binds only
+        // stdout — its stderr IS the shell's stderr in practice — so the
+        // item-6 posix routing has no observable difference to close here.
         print_time(
             &self.shell_state.env_vars,
             words

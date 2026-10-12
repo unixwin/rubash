@@ -50,6 +50,15 @@ impl Executor {
         } else {
             status
         };
+        // GNU execute_cmd.c:1004-1017 with the sh_invalidid/err_readonly
+        // assignment class: in POSIX mode a non-interactive shell exits when
+        // the special builtin export fails on an ASSIGNMENT (`export 9bad=1`,
+        // `export ro=2` with ro readonly — oracle g40 probes both exit rc=1),
+        // while `export -f nofn` ("not a function") only fails the builtin.
+        // The flag rides the same dispatch gate set/unset/trap use.
+        if status != 0 && self.special_assignment_operand_failure(&args) {
+            self.special_builtin_failed.set(true);
+        }
         if status == 0 {
             self.sync_setattr_typed_assignments(cmd.words[1..].iter().map(String::as_str));
             // Check for locale environment changes (LC_ALL, LC_CTYPE, LANG)
@@ -70,6 +79,35 @@ impl Executor {
         }
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
+    }
+
+    /// Whether any export/readonly operand is an assignment-class failure the
+    /// POSIX fatality rule (posix-mode notes item 40) keys on: an invalid
+    /// identifier (`sh_invalidid`) or an assignment to a readonly variable
+    /// (`err_readonly`). Mirrors setattr/apply.rs's per-operand checks — the
+    /// shared setattr status alone cannot distinguish them from `export -f`
+    /// failures ("not a function" / "cannot export"), which GNU does NOT
+    /// treat as fatal. Only consulted when the builtin actually failed, so
+    /// the nameref-cell quirk (`export ref` on an invalid cell reports
+    /// SUCCESS) stays non-fatal like GNU.
+    pub(in crate::executor) fn special_assignment_operand_failure(&self, args: &[String]) -> bool {
+        for arg in args {
+            if arg.starts_with('-') && arg != "-" {
+                continue;
+            }
+            if arg == "--" {
+                continue;
+            }
+            let (name, _append, value) = crate::builtins::setattr::value::split_assignment(arg);
+            let base = name.split('[').next().unwrap_or(name);
+            if !crate::builtins::setattr::value::valid_identifier(base) {
+                return true;
+            }
+            if value.is_some() && is_marked_var(&self.shell_state.env_vars, READONLY_VARS, base) {
+                return true;
+            }
+        }
+        false
     }
 
     /// export/readonly mutate only the legacy env_vars map, but parameter

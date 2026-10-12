@@ -765,6 +765,7 @@ impl Executor {
         let exported = marked_env_names(&self.shell_state.env_vars, EXPORTED_VARS);
         let mut child = exported
             .iter()
+            .filter(|name| is_exportable_env_name(&self.shell_state.env_vars, name))
             .filter_map(|name| {
                 self.shell_state
                     .env_vars

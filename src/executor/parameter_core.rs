@@ -295,6 +295,14 @@ impl Executor {
             if self.shell_state.arithmetic_nounset_error.get() {
                 return String::new();
             }
+            // GNU param_expand failed the arithmetic string before evalexp
+            // (rubash#533 bad substitution): the expansion is discarded —
+            // no command-substitution retry. The nonfatal marker drives
+            // expand_command_words' ExpansionFailure(1) so the command list
+            // is abandoned and the reader continues.
+            if self.shell_state.arithmetic_nonfatal_error.get() {
+                return String::new();
+            }
             // GNU subst.c retries unrecognized arithmetic syntax as command substitution.
             // Keep the parenthesized command source so nested subshell delimiters
             // are balanced during the fallback parse.
@@ -664,6 +672,20 @@ impl Executor {
             return None;
         }
 
+        // GNU verify_substring_values hands the RAW operand text to evalexp:
+        // a single-quoted span is a string operand, never a number (expr.c
+        // readtok fails it as "operand expected"), and unlike the
+        // double-quoted `${x:1:"2"}` form the quotes are not stripped
+        // (rubash#539: `${x:1:'2'}` is an arithmetic error, never `bc`).
+        if let Some(span) = single_quoted_operand_span(offset_str) {
+            self.report_single_quoted_substring_operand(var_name, &span);
+            return Some((var_name, 0, Some(0)));
+        }
+        if let Some(span) = single_quoted_operand_span(length_str) {
+            self.report_single_quoted_substring_operand(var_name, &span);
+            return Some((var_name, 0, Some(0)));
+        }
+
         let offset = if offset_str.is_empty() {
             0
         } else {
@@ -803,11 +825,101 @@ impl Executor {
             let _ = std::io::stderr().flush();
         }
     }
+
+    /// GNU verify_substring_values → evalexp on the raw single-quoted
+    /// operand: expr.c readtok fails a quoted span as a string operand —
+    /// `<var>: <span>: arithmetic syntax error: operand expected (error
+    /// token is "<span>")` — with the varname from this_command_name
+    /// (parameter_brace_substring), no trailing blank in the token
+    /// (rubash#539).
+    fn report_single_quoted_substring_operand(&self, var_name: &str, span: &str) {
+        self.shell_state.arithmetic_fatal_error.set(true);
+        if !self.shell_state.arithmetic_expansion_error.replace(true) {
+            self.write_diagnostic_fd2(
+                format!(
+                    "{}{}: {}: arithmetic syntax error: operand expected (error token is \"{}\")\n",
+                    self.diagnostic_prefix(),
+                    var_name,
+                    span,
+                    span
+                )
+                .as_bytes(),
+            );
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
+        }
+    }
 }
 
 /// Splits a slice rest (`offset[:length]`) on the first *top-level* colon,
 /// skipping `:` inside nested `${...}` groups: `${v:${w:-4}}` must split on
 /// the colon after `v`, not on the `:` inside `${w:-4}`.
+/// The first single-quoted span in a substring offset/length operand that
+/// is NOT part of a nested substitution: quotes inside `${...}`/`$(...)`/
+/// backtick spans belong to the nested expansion, `$'...'` is ANSI-C
+/// quoting (never an operand quote), and `\` escapes its successor.
+/// Returns the span text including its quotes (the GNU error token).
+fn single_quoted_operand_span(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'`' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'`' {
+                    if bytes[index] == b'\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            b'$' if bytes.get(index + 1) == Some(&b'\'') => index += 2,
+            b'$' if bytes.get(index + 1) == Some(&b'{') => {
+                let after = &text[index + 2..];
+                match crate::executor::parameter_ops::matching_parameter_brace(after) {
+                    Some(end) => index = index + 2 + end + 1,
+                    None => index += 2,
+                }
+            }
+            b'$' if bytes.get(index + 1) == Some(&b'(') => {
+                let mut depth = 0usize;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                index += 1;
+                                break;
+                            }
+                        }
+                        b'\'' => {
+                            index += 1;
+                            while index < bytes.len() && bytes[index] != b'\'' {
+                                index += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+            }
+            b'\'' => {
+                let mut end = index + 1;
+                while end < bytes.len() && bytes[end] != b'\'' {
+                    end += 1;
+                }
+                let span_end = (end + 1).min(text.len());
+                return Some(text[index..span_end].to_string());
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
 fn split_top_level_colon(input: &str) -> (&str, &str, bool) {
     // GNU subst.c skip_to_delim (subst.c:2198-2300) finds the offset/length
     // separator colon with full shell-syntax awareness. In arithmetic context
