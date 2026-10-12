@@ -30,6 +30,7 @@ pub mod posix_errors;
 pub mod proc_vfs;
 pub mod script_driver;
 pub mod shell;
+pub mod token_str;
 
 // Re-export commonly used types
 #[cfg(windows)]

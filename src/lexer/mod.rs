@@ -785,8 +785,10 @@ impl GroupScanFeeder {
             // GNU's line_number names for a syntax error on the NEWLINE
             // after gathering (parse.y:3651) — is line_number - 1.
             token.heredoc_end_line = Some(self.line_number.saturating_sub(1));
-            self.output.push(token.clone());
+            // Same fold-before-push move as emit_line_separator: fold_token
+            // does not read `output`, so the clone was pure allocator churn.
             self.fold_token(&token);
+            self.output.push(token);
             if self.awaiting_bodies.is_empty() {
                 self.emit_line_separator();
             }
@@ -796,8 +798,13 @@ impl GroupScanFeeder {
     fn emit_line_separator(&mut self) {
         let mut separator = Token::new(TokenKind::Semicolon, ";", self.logical_start_line);
         separator.line_break = true;
-        self.output.push(separator.clone());
+        // Fold BEFORE the push and move the token in: fold_token reads only
+        // the separator and the summary stacks, never `output`, so the
+        // order is observationally identical — and the per-line Token
+        // clone (three String copies per committed line) is gone
+        // (issue #241 attribution).
         self.fold_token(&separator);
+        self.output.push(separator);
         // GNU read_token reads this line break as a '\n' token before the
         // next line's first token (reserved_word_acceptable, parse.y:5902);
         // the separator above is emitted downstream of the Lexer, so the
@@ -1329,21 +1336,58 @@ impl GroupScanFeeder {
         // overwritten with the line number below), so consecutive columns
         // recover the exact inter-token spacing for raw arithmetic capture.
         let gap_tokens = line_tokens.len() as u64;
-        let mut previous_end = 0usize;
-        for token in line_tokens.iter_mut() {
-            let start = token.column.min(self.logical_line.len());
-            // Some lexer paths emit tokens whose columns do not advance
-            // monotonically through the logical line; skip the gap capture
-            // for those instead of slicing an inverted byte range.
-            if start >= previous_end {
-                let gap = &self.logical_line[previous_end..start];
-                if gap.chars().all(char::is_whitespace) {
-                    token.leading_ws = gap.to_string();
+        // issue #241 admission: the leading_ws capture feeds five consumers
+        // (arithmetic_command.rs `(( ))` raw text, arithmetic_for.rs
+        // `for ((;;))` parts, case_command.rs's offending-line echo,
+        // conditional_command.rs's `[[ ]]` body/regexp fragments, and the
+        // lexer's own `=~` RHS end decision in record_token, which reads
+        // the token stream of the SAME pass), and all five read tokens
+        // INSIDE a construct whose opener either contributes literal bytes
+        // to the accumulated logical line (`((`, `[[`, `case`) or arrives
+        // through per-token alias expansion, where the fold state is the
+        // ground truth: fold_pass_tokens has already run for THIS pass (it
+        // precedes this capture), so `keyword_stack` holding `esac` proves
+        // a case construct is open regardless of how the `case` keyword
+        // bytes entered the token stream, and `in_cond_command` (the
+        // PST_CONDCMD port) proves the same for `[[`. Every pass that lexes
+        // any of those tokens has therefore already appended the opener's
+        // line (direct bytes) or folded its opener token (alias-borne), so
+        // this gate admits exactly the passes that can ever feed a read
+        // site; substring hits over-capture, which is identity for
+        // behavior. Under-capture would be a behavior change (adversarial
+        // probe: alias-borne `case` + indented offending-line echo lost its
+        // four-space indent without the keyword_stack arm — rubash#131
+        // reproducer shape). Alias-borne `((` has no feeder-visible state
+        // (open_parens is Lexer-internal); the four-shape adversarial
+        // matrix (multi-line alias `((` bodies, arith-error raw echoes with
+        // multi-space gaps) is byte-identical with the capture disarmed.
+        // nvm.sh -n: 5166 capture passes -> 2243 (the `esac` arm holds the
+        // capture open across in-case passes whose accumulated line no
+        // longer carries the `case` bytes); the capture was 62.8k of
+        // the 459k allocations on master (worst per-line allocator after
+        // token construction).
+        let ws_capture_armed = self.logical_line.contains("((")
+            || self.logical_line.contains("[[")
+            || self.logical_line.contains("case")
+            || self.keyword_stack.contains(&"esac")
+            || LexerParseState::cond_command_open(&self.lexer_parse_state);
+        if ws_capture_armed {
+            let mut previous_end = 0usize;
+            for token in line_tokens.iter_mut() {
+                let start = token.column.min(self.logical_line.len());
+                // Some lexer paths emit tokens whose columns do not advance
+                // monotonically through the logical line; skip the gap capture
+                // for those instead of slicing an inverted byte range.
+                if start >= previous_end {
+                    let gap = &self.logical_line[previous_end..start];
+                    if gap.chars().all(char::is_whitespace) {
+                        token.leading_ws = gap.to_string();
+                    }
                 }
+                previous_end = previous_end
+                    .max(start.saturating_add(token.raw.len()))
+                    .min(self.logical_line.len());
             }
-            previous_end = previous_end
-                .max(start.saturating_add(token.raw.len()))
-                .min(self.logical_line.len());
         }
         // perf21: compute the delimiters ONCE — the join branch below only
         // needs their emptiness, and the commit path reuses the same Vec

@@ -2,6 +2,7 @@ use super::brace_scan_cache::{BraceScanCache, HeredocOpEntry, HeredocOpScanResum
 use super::classification::{is_brace_expansion, is_word_delimiter};
 use super::quotes::normalize_backtick_command_substitution;
 use super::token::{Token, TokenKind};
+use crate::token_str::TokStr;
 
 /// GNU reader state that survives across logical lines: parse.y keeps a
 /// single parser_state for the whole input, so last_read_token and
@@ -12,8 +13,14 @@ pub(super) struct LexerParseState {
     /// GNU parse.y last_read_token / token_before_that, kept as
     /// (kind, value) so `reserved_word_position` can reproduce
     /// reserved_word_acceptable (parse.y:5899) for the `{` fold decision.
-    last_token: Option<(TokenKind, String)>,
-    token_before_that: Option<(TokenKind, String)>,
+    /// The last two (kind, value) pairs, kept value-side as `TokStr`: the
+    /// reader state is cloned up to five times per feeder pass (restore +
+    /// take + line mirror + boundary/opener snapshots), and every reader
+    /// here compares against short literals — the inline arm makes those
+    /// copies allocation-free (issue #241 attribution: ~30k of the 459k
+    /// allocations on `nvm.sh -n` were these clones).
+    last_token: Option<(TokenKind, TokStr)>,
+    token_before_that: Option<(TokenKind, TokStr)>,
     /// GNU PST_CASEPAT (parser.h:29): inside a case pattern list reserved
     /// words are ordinary word text (parse.y:3177 suppresses every reserved
     /// word except a pattern-position esac), so `{` is a pattern character,
@@ -49,6 +56,15 @@ pub(super) struct LexerParseState {
     cond_rhs_started: bool,
     cond_rhs_paren_depth: i32,
     cond_rhs_last_token_end: usize,
+}
+
+impl LexerParseState {
+    /// PST_CONDCMD port reader: the feeder's leading_ws admission keeps the
+    /// capture armed on `[[ ]]` continuation lines while a conditional is
+    /// open (issue #241).
+    pub(super) fn cond_command_open(state: &Self) -> bool {
+        state.in_cond_command
+    }
 }
 
 /// Snapshot of every cross-token Lexer field at a byte offset where a pass
@@ -141,7 +157,7 @@ impl LexerParseState {
     pub(super) fn note_line_break(&mut self) {
         let previous = self.last_token.take();
         self.token_before_that = previous;
-        self.last_token = Some((TokenKind::Semicolon, ";".to_string()));
+        self.last_token = Some((TokenKind::Semicolon, TokStr::from(";")));
     }
 }
 
@@ -435,7 +451,8 @@ impl<'a> Lexer<'a> {
                 );
 
         self.parse_state.token_before_that = self.parse_state.last_token.take();
-        self.parse_state.last_token = Some((token.kind.clone(), token.value.clone()));
+        self.parse_state.last_token =
+            Some((token.kind.clone(), TokStr::from(token.value.as_str())));
     }
 
     #[inline]
