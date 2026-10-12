@@ -642,6 +642,53 @@ impl Executor {
         }
         None
     }
+    /// True when the `${...}` body is a malformed subscripted reference:
+    /// an empty subscript (`x[]`) or a subscript immediately followed by
+    /// another (`a[0][1]`). Only bodies whose pre-bracket head is a shell
+    /// name (or the all-digit positional spelling, which GNU
+    /// valid_array_reference rejects as a base) participate; other `[`
+    /// occurrences belong to operator tails and patterns and keep their own
+    /// rules. See the call site for the GNU anchor.
+    fn malformed_braced_reference(inner: &str) -> bool {
+        let body = inner.strip_prefix('!').unwrap_or(inner);
+        let body = body.strip_prefix('#').unwrap_or(body);
+        let Some(open) = body.find('[') else {
+            return false;
+        };
+        let head = &body[..open];
+        if head.is_empty() {
+            return false;
+        }
+        let head_is_name = is_shell_name(head);
+        let head_is_digits = head.bytes().all(|b| b.is_ascii_digit());
+        if !head_is_name && !head_is_digits {
+            return false;
+        }
+        // Find the bracket matching the opening one (subscripts nest via
+        // `$((x[0]))`-style arithmetic), then inspect the shape.
+        let bytes = body.as_bytes();
+        let mut depth = 0usize;
+        let mut close = None;
+        for (index, &byte) in bytes.iter().enumerate().skip(open) {
+            if byte == b'[' {
+                depth += 1;
+            } else if byte == b']' {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+        }
+        let Some(close) = close else {
+            return false;
+        };
+        if body[open + 1..close].is_empty() {
+            return true;
+        }
+        body[close + 1..].starts_with('[')
+    }
+
     /// Validates the remainder of a `${#...}` expansion when it does not
     /// start with a shell name: `#` is then the `$#` parameter itself and
     /// the text must be an operator applied to it. Operators with an empty
@@ -893,6 +940,20 @@ impl Executor {
                 ));
             };
             let inner = &after_start[..end];
+            // GNU subst.c:10053 parameter_brace_expand -> valid_brace_expansion_word
+            // (subst.c:7583): the reference must be all digits, a special
+            // parameter, a valid identifier, or ONE well-formed non-empty
+            // array subscript (valid_array_reference, arrayfunc.c:885). An
+            // empty subscript (`${x[]}`) or a second subscript
+            // (`${a[0][1]}`) is a bad substitution reported with the whole
+            // `${...}` text (subst.c:10278) — the read path used to expand
+            // both silently empty (rubash#536). The check runs first
+            // because GNU validates the reference before the operator
+            // dispatch, and it covers the indirect/length prefixes (`${!x[]}`,
+            // `${#x[]}`) whose reference obeys the same rule.
+            if Self::malformed_braced_reference(inner) {
+                return Some((format!("${{{inner}}}"), "bad substitution".to_string(), 1));
+            }
             // GNU rejects a parameter expansion nested inside another
             // parameter expansion inside an array subscript. Reject it
             // before the mutable whole-word expander can recurse indefinitely;

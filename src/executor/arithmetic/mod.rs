@@ -1264,8 +1264,32 @@ pub(crate) fn eval_conditional_arith_value_with_writes(
     random_state: Option<&RandomGen>,
     dynamic_values: Option<&super::dynamic_arrays::ArithDynamicContext>,
 ) -> (Option<i128>, Vec<(String, String)>) {
+    let (result, writes, _category) =
+        eval_conditional_arith_value_categorized_with_writes_and_state(
+            value,
+            env_vars,
+            random_state,
+            dynamic_values,
+        );
+    (result, writes)
+}
+
+/// `eval_conditional_arith_value_with_writes` that also reports the error
+/// category from the actual evaluation (with the caller's dynamic state),
+/// so a failure site can classify fatality without re-evaluating in a
+/// fresh environment (rubash#536: `${a[$((1/0))]}`).
+pub(crate) fn eval_conditional_arith_value_categorized_with_writes_and_state(
+    value: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+    random_state: Option<&RandomGen>,
+    dynamic_values: Option<&super::dynamic_arrays::ArithDynamicContext>,
+) -> (
+    Option<i128>,
+    Vec<(String, String)>,
+    Option<ArithmeticErrorCategory>,
+) {
     let mut cloned = env_vars.clone();
-    let (result, _category) =
+    let (result, category) =
         eval_mutable_arith_value_with_random(value, &mut cloned, random_state, dynamic_values);
     let writes = cloned
         .iter()
@@ -1273,7 +1297,7 @@ pub(crate) fn eval_conditional_arith_value_with_writes(
         .filter(|(name, new_value)| env_vars.get(name.as_str()) != Some(new_value))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
-    (result, writes)
+    (result, writes, category)
 }
 
 /// Like `eval_conditional_arith_value`, but also reports the error category
