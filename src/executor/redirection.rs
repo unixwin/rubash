@@ -427,6 +427,34 @@ impl Executor {
                         .map(|_| true);
                 }
             }
+            // GNU applies `< word`'s open BEFORE the command runs
+            // (redir.c do_redirections from execute_simple_command): a
+            // failed open reports `{target}: {errno text}` through the
+            // already-applied fd 2 and the command never executes —
+            // in-process stdin resolution must not fall back to another
+            // source on the unopenable target (rubash#525: a pipeline
+            // member's `{ cat < /nonexistent; }` used to read the upstream
+            // pipe and exit 0 silently). Plain Input opens have no side
+            // effects, so the probe is validation-pure.
+            if redirect.kind == crate::parser::RedirectKind::Input
+                && !is_null_device(&target)
+                && dev_stdio_redirect_fd(&target).is_none()
+                && !target.starts_with("<(")
+                && redirect_target_fd(&target).is_none()
+            {
+                let path = crate::executor::path::windows_operand_file_path(
+                    shell_path_to_windows(&target, &self.shell_state.env_vars),
+                    &self.shell_state.env_vars,
+                );
+                if let Err(error) = std::fs::File::open(&path) {
+                    // posix_errors::path_error already renders the
+                    // `{target}: {errno text}` shape (same convention the
+                    // ReadWrite probe above consumes).
+                    let message = crate::posix_errors::path_error(&target, error);
+                    let text = crate::posix_errors::message(&message);
+                    return self.reject_redirect_at(cmd, index, &text).map(|_| true);
+                }
+            }
             // Checks passed — record this entry's ordered fd effect for
             // later dups in the same list: a plain file open binds its
             // redirector, an fd-alias name (redir.c /dev/fd resolution)
