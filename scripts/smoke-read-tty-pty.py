@@ -171,6 +171,110 @@ def leg_key_without_enter(exe):
         s.close()
 
 
+def leg_silent_read_no_echo(exe):
+    """#282 leg 2: -s silences the console echo - the typed key never lands
+    on screen; the result line contains it exactly once (the output)."""
+    s = Session(exe, "silent")
+    try:
+        s.wait_prompt()
+        s.send('IFS= read -rsn1 k; echo "SIL#K RC=$? K=[$k]"; echo "MARK#ER done"\r')
+        time.sleep(0.3)
+        s.proc.write("@")
+        out = s.result("SIL#K RC=")
+        assert out == "0 K=[@]", f"silent read: {out!r}"
+        s.result("MARK#ER done")
+        occurrences = s.text().count("@")
+        assert occurrences == 1, (
+            f"read -s echoed the key: '@' appears {occurrences} times"
+        )
+        return out
+    finally:
+        s.close()
+
+
+def console_mode_available(s):
+    """Console-mode APIs need a real conhost console. A winpty-style bridge
+    (pywinpty's legacy backend) serves stdin as a plain character device,
+    where GetConsoleMode fails and stty honestly reports the GNU
+    non-terminal diagnostic - the legs then SKIP (真机待验)."""
+    s.wait_prompt()
+    s.send('stty size\r')
+    time.sleep(0.6)
+    return "Inappropriate ioctl" not in s.text()
+
+
+def leg_stty_size(exe):
+    """#282 leg 3: stty size prints 'rows cols' from the console."""
+    s = Session(exe, "size")
+    try:
+        if not console_mode_available(s):
+            return "SKIP (no console-mode API under this pty; verify on a real console)"
+        s.wait_prompt()
+        s.send('stty size; echo "SIZE#RC=$?"\r')
+        # the size line '30 100' precedes the marker line
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            for line in s.text().splitlines():
+                parts = line.strip().split()
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    if "stty" not in line and "echo" not in line:
+                        out = s.result("SIZE#RC=")
+                        assert out == "0", f"stty size rc: {out!r}"
+                        return line.strip()
+            time.sleep(0.05)
+        raise AssertionError(f"no size line; screen:\n{s.text()}")
+    finally:
+        s.close()
+
+
+def leg_stty_raw_read(exe):
+    """#282 leg 4: stty raw -echo persists; a plain read then returns per
+    character with no Enter (raw cleared the line discipline), and stty
+    sane restores the canonical session."""
+    s = Session(exe, "raw")
+    try:
+        if not console_mode_available(s):
+            return "SKIP (no console-mode API under this pty; verify on a real console)"
+        s.wait_prompt()
+        s.send("stty raw -echo\r")
+        time.sleep(0.3)
+        s.send('IFS= read k; echo "RAW#RD K=[$k]"; stty sane; echo "SA#NE=$?"\r', gap=0.3)
+        time.sleep(0.3)
+        s.proc.write("w")
+        out = s.result("RAW#RD K=")
+        assert out == "[w]", f"stty raw read: {out!r}"
+        sane = s.result("SA#NE=")
+        assert sane == "0", f"stty sane rc: {sane!r}"
+        return f"{out} sane={sane}"
+    finally:
+        s.close()
+
+
+def leg_line_read_stays_canonical(exe):
+    """#280/#282 companion: a plain newline-terminated read keeps the
+    canonical line discipline - the full line arrives after Enter."""
+    s = Session(exe, "canonical")
+    try:
+        s.wait_prompt()
+        s.send('IFS= read k; echo "LIN#RD K=[$k]"\r')
+        time.sleep(0.3)
+        s.proc.write("hello")
+        time.sleep(0.3)
+        # not returned yet: the line needs Enter
+        raised = False
+        try:
+            s.result("LIN#RD K=", timeout=1)
+        except TimeoutError:
+            raised = True
+        assert raised, "plain read returned before Enter (canonical lost)"
+        s.proc.write("\r")
+        out = s.result("LIN#RD K=")
+        assert out == "[hello]", f"canonical read: {out!r}"
+        return out
+    finally:
+        s.close()
+
+
 def main():
     exe = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / "target/debug/rubash.exe"
     legs = [
@@ -179,6 +283,10 @@ def main():
         ("fractional-timeout", leg_fractional_timeout),
         ("integer-timeout", leg_integer_timeout),
         ("key-without-enter", leg_key_without_enter),
+        ("silent-read-no-echo", leg_silent_read_no_echo),
+        ("stty-size", leg_stty_size),
+        ("stty-raw-read", leg_stty_raw_read),
+        ("line-read-stays-canonical", leg_line_read_stays_canonical),
     ]
     failures = []
     for name, leg in legs:
@@ -186,8 +294,8 @@ def main():
             print(f"PASS {name}: {leg(exe)}")
         except (AssertionError, TimeoutError) as err:
             failures.append(name)
-            first = str(err).splitlines()[0]
-            print(f"FAIL {name}: {first}")
+            detail = str(err).splitlines()[0][:300]
+            print(f"FAIL {name}: {detail}")
     if failures:
         print(f"FAILED: {', '.join(failures)}")
         return 1

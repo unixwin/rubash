@@ -6,7 +6,7 @@ use super::*;
 /// fast paths must consult this so `$(uname -s)` runs the engine
 /// builtin instead of whatever external happens to sit on PATH.
 pub(in crate::executor) fn is_hidden_late_builtin(word: &str) -> bool {
-    matches!(word, "uname" | "arch")
+    matches!(word, "uname" | "arch" | "stty")
 }
 
 impl Executor {
@@ -328,6 +328,10 @@ impl Executor {
             }
             "arch" => {
                 self.exit_code = self.execute_identity_tool(cmd, "arch");
+                Ok(())
+            }
+            "stty" => {
+                self.exit_code = self.execute_console_mode_tool(cmd);
                 Ok(())
             }
             _ => self.execute_external(cmd),

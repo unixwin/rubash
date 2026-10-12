@@ -680,6 +680,31 @@ impl Drop for ConsoleOnecharGuard {
     }
 }
 
+/// Silenced echo with canonical buffering kept — the read.def:603-621
+/// `ttfd_noecho` shape (`read -s` without -n/-d): the line discipline still
+/// assembles lines, it just does not paint the typed characters.
+pub fn enter_console_noecho_mode(h: HANDLE) -> Option<ConsoleOnecharGuard> {
+    extern "system" {
+        fn SetConsoleMode(h: HANDLE, mode: DWORD) -> BOOL;
+    }
+    if !is_console_handle(h) {
+        return None;
+    }
+    let mut mode: DWORD = 0;
+    if unsafe { GetConsoleMode(h, &mut mode) } == 0 {
+        return None;
+    }
+    let saved = mode;
+    let silenced = mode & !ENABLE_ECHO_INPUT;
+    if unsafe { SetConsoleMode(h, silenced) } == 0 {
+        return None;
+    }
+    Some(ConsoleOnecharGuard {
+        handle: h,
+        saved_mode: saved,
+    })
+}
+
 /// Enter per-character console read mode. Returns `None` (and changes
 /// nothing) when `h` is not a console handle.
 pub fn enter_console_onechar_mode(h: HANDLE) -> Option<ConsoleOnecharGuard> {

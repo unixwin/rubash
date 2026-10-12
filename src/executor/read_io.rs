@@ -146,10 +146,12 @@ impl Executor {
             // read than `read` (niubash#279: the inherited-stdin endpoint
             // returned None here and the console keystroke never reached
             // any reader).
-            if matches!(
-                self.fd_table.read_endpoint(fd),
-                Some(FdReadEndpoint::InheritedProcessStdin)
-            ) {
+            if fd != 0
+                && matches!(
+                    self.fd_table.read_endpoint(fd),
+                    Some(FdReadEndpoint::InheritedProcessStdin)
+                )
+            {
                 return self.read_dup_of_stdin(silent, delimiter, char_limit, exact_char_limit);
             }
             return self
@@ -194,10 +196,12 @@ impl Executor {
                     // reads from the same transports as fd 0 itself
                     // (niubash#279: the console keystroke must reach the
                     // dup descriptor's reader, not collapse to EOF).
-                    if matches!(
-                        self.fd_table.read_endpoint(fd),
-                        Some(FdReadEndpoint::InheritedProcessStdin)
-                    ) {
+                    if fd != 0
+                        && matches!(
+                            self.fd_table.read_endpoint(fd),
+                            Some(FdReadEndpoint::InheritedProcessStdin)
+                        )
+                    {
                         return self.read_dup_of_stdin(
                             silent,
                             delimiter,
@@ -765,8 +769,16 @@ impl Executor {
         // raw OS handle byte-wise so only the consumed bytes move the offset.
         let stdin_handle = crate::fd::process_std_handle(0);
         // read.def:570-590: a -n/-d read from a tty runs in one-char mode —
-        // a console in cooked line mode holds every keystroke until Enter.
-        let onechar = crate::fd::enter_console_onechar_mode(stdin_handle);
+        // a console in cooked line mode holds every keystroke until Enter —
+        // while a plain newline-terminated read stays canonical and -s only
+        // silences the echo (read.def:603-621).
+        let onechar = if char_limit.is_some() || delimiter != '\n' {
+            crate::fd::enter_console_onechar_mode(stdin_handle)
+        } else if silent {
+            crate::fd::enter_console_noecho_mode(stdin_handle)
+        } else {
+            None
+        };
         let manual_echo = onechar.is_some() && !silent;
         let mut output = String::new();
         let mut decoder = StdinCharDecoder::new();

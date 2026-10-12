@@ -392,14 +392,24 @@ pub(in crate::executor) fn read_stdin_until(
     // read.def:570-590: a -n/-d read from a tty runs in one-char mode and
     // restores the terminal when the builtin exits — a console in cooked
     // line mode would hold every keystroke until Enter, breaking both the
-    // -n record shape and the -t deadline.
-    let _onechar = crate::fd::enter_console_onechar_mode(stdin_handle);
+    // -n record shape and the -t deadline. The mode gate:
+    // read.def:570-590 switches the tty to one-char mode only for -n/-N
+    // counts or a non-newline delimiter; a plain newline-terminated read
+    // stays in canonical mode, and -s alone only silences the echo
+    // (read.def:603-621 ttfd_noecho).
+    let onechar = if char_limit.is_some() || delimiter != '\n' {
+        crate::fd::enter_console_onechar_mode(stdin_handle)
+    } else if silent {
+        crate::fd::enter_console_noecho_mode(stdin_handle)
+    } else {
+        None
+    };
     // Echo ownership follows the mode guard: on a console the onechar mode
     // silenced the driver's echo, so a non-silent read re-emits each
     // consumed unit itself (read.def ttfd_onechar keeps ECHO on).
-    let manual_echo = _onechar.is_some() && !silent;
+    let manual_echo = onechar.is_some() && !silent;
     let echo_unit = |unit: &StdinUnit| {
-        if let Some(guard) = _onechar.as_ref() {
+        if let Some(guard) = onechar.as_ref() {
             match unit {
                 StdinUnit::Char(ch) => {
                     let mut buf = [0u8; 4];

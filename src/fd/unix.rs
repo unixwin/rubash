@@ -98,6 +98,28 @@ impl Drop for ConsoleOnecharGuard {
     }
 }
 
+/// Silenced echo with canonical buffering kept — the read.def:603-621
+/// `ttfd_noecho` shape (`read -s` without -n/-d).
+pub fn enter_console_noecho_mode(h: HANDLE) -> Option<ConsoleOnecharGuard> {
+    if !is_console_handle(h) {
+        return None;
+    }
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    unsafe {
+        if libc::tcgetattr(h, &mut saved) != 0 {
+            return None;
+        }
+    }
+    let mut silenced = saved;
+    silenced.c_lflag &= !libc::ECHO;
+    unsafe {
+        if libc::tcsetattr(h, libc::TCSADRAIN, &silenced) != 0 {
+            return None;
+        }
+    }
+    Some(ConsoleOnecharGuard { fd: h, saved })
+}
+
 /// Enter per-character tty read mode. Returns `None` (and changes nothing)
 /// when `h` is not a tty.
 pub fn enter_console_onechar_mode(h: HANDLE) -> Option<ConsoleOnecharGuard> {
