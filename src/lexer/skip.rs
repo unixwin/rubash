@@ -2680,6 +2680,24 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
     // (`echo (` -> `newline', `echo ((` -> `(', `echo (hi` -> `hi'). This
     // check precedes the arithmetic exemption: `echo ((` is this class
     // (GNU probe p16), while `(( `/`$(( ` in command position are not.
+    // A command-position `((` dparen root parses its body as ARITHMETIC
+    // (parse.y:3726-3733 read_token → parse_dparen → parse_arith_cmd), so
+    // every nested `(` in that body is arithmetic grouping — never a yacc
+    // token error. An unterminated body reports the P_ARITH EOF wording
+    // through the generic close-char scan exactly like the bare `((1+2`
+    // root; classifying an inner `1+(` as a token error broke the q1
+    // family (`((1+(2` printed `unexpected token `2'' instead of
+    // `unexpected EOF while looking for matching `)'', issue #516
+    // follow-up). `echo ((` has no command-position root and keeps the
+    // token-error class.
+    if let Some(&(root_idx, _, root_kind)) = stack.first() {
+        if root_kind == OpenerKind::Plain
+            && opens_in_command_position(&chars, root_idx)
+            && chars.get(root_idx + 1) == Some(&'(')
+        {
+            return None;
+        }
+    }
     let invalid = stack
         .iter()
         .find(|&&(idx, _, kind)| {
@@ -3526,7 +3544,17 @@ pub(crate) fn dollar_double_paren_is_arithmetic(open: &str) -> bool {
                     _ => ('[', ']'),
                 };
                 match dollar_word_group_len(&chars, scan + 1, open_ch, close_ch) {
-                    Some(end) => scan = end,
+                    // `end` is already PAST the group's closer — resume on
+                    // it directly; the loop-bottom `scan += 1` would skip
+                    // one character too many (a `${name}` hugging the
+                    // closing `))` made the walk swallow the first `)` of
+                    // the pair and misread the construct as non-arithmetic
+                    // — `$((10#${OMB_VERSINFO[0]}))` fell to the command
+                    // substitution fallback, issue #512 follow-up).
+                    Some(end) => {
+                        scan = end;
+                        continue;
+                    }
                     None => return false,
                 }
             }
