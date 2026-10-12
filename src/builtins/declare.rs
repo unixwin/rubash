@@ -696,6 +696,42 @@ where
                 continue;
             }
         }
+        // On a readonly variable only the export, local, nameref, trace and
+        // readonly attribute bits may be touched (variables.h:126-128
+        // valid/invalid_readonly_attrs): requesting any of the integer,
+        // array, assoc or case-mapping attributes in either direction is
+        // refused per name (declare.def:893), and an assignment on the same
+        // word suppresses every attribute the command would otherwise apply
+        // (declare.def:881 skips the operand after the failed assignment).
+        // The refusal is all-or-nothing: a mixed request like -ix on a
+        // readonly variable applies nothing. -p is display-only and never
+        // reaches this gate.
+        if !print && readonly_vars.contains(lhs) {
+            let invalid_attrs = integer
+                || array
+                || assoc
+                || uppercase
+                || lowercase
+                || capcase
+                || unset_integer
+                || unset_array
+                || unset_assoc
+                || unset_uppercase
+                || unset_lowercase
+                || unset_capcase;
+            let assignment_with_valid_attrs =
+                name.contains('=') && (export || trace || unset_export || unset_trace);
+            if invalid_attrs || assignment_with_valid_attrs {
+                writeln!(
+                    stderr,
+                    "{}{command_name}: {}: readonly variable",
+                    diagnostic_prefix(variables),
+                    lhs
+                )?;
+                attr_status = EXECUTION_FAILURE;
+                continue;
+            }
+        }
         if !valid_declare_name(name) {
             if print && !name.contains('=') {
                 // GNU declare.def: -p is display-only; the identifier check
