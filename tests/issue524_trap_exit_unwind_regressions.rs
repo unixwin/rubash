@@ -67,6 +67,31 @@ fn err_trap_exit_inside_function_terminates() {
     assert_eq!(code, Some(42));
 }
 
+/// #524 wave2a site: the failing command inside a COMPOUND brace group is
+/// an ERR trap firing point like any top-level command, so the action's
+/// `exit 9` terminates with 9 and the group's tail never runs (GNU probe:
+/// `trap 'echo E; exit 9' ERR; { false; }; echo not-reached` prints E and
+/// exits 9).
+#[test]
+fn err_trap_exit_inside_brace_group_terminates() {
+    let (stdout, _, code) = rubash("trap 'echo E; exit 9' ERR; { false; }; echo not-reached");
+    assert_eq!(stdout, "E\n");
+    assert_eq!(code, Some(9));
+    let (stdout, _, code) = rubash("trap 'echo E; exit 9' ERR\n{ false; }\necho not-reached");
+    assert_eq!(stdout, "E\n");
+    assert_eq!(code, Some(9));
+}
+
+/// #524 boundary kept: a failing command in a subshell member of the ERR
+/// site — the subshell contains the failure but the action's exit still
+/// terminates the parent shell with its own status.
+#[test]
+fn err_trap_exit_after_subshell_failure_terminates() {
+    let (stdout, _, code) = rubash("trap 'echo E; exit 9' ERR\n( false )\necho not-reached");
+    assert_eq!(stdout, "E\n");
+    assert_eq!(code, Some(9));
+}
+
 /// #524: a bare `exit` at the ERR action's own level inside a FUNCTION
 /// called by the action uses the current $? (the nesting guard excludes
 /// the interp-1602 saved value there; GNU probe: entry $? 1, `echo E`
