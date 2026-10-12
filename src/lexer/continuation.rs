@@ -3575,6 +3575,93 @@ pub(crate) fn subscript_residuals_advance(
                 index += 2;
                 continue;
             }
+            '$' if chars.get(index + 1) == Some(&'{') => {
+                // Mirror of the skip.rs oracle's `${` arm (rubash#532): the
+                // construct's body is word-level text (parse.y:3877
+                // parse_matched_pair ('{', '}')) — a `[` inside never opens
+                // the subscript hunt. An UNCLOSED body parks at the `${`
+                // (a longer buffer may close it and reveal a later `[`);
+                // the oracle consumed it to the buffer end and returned no
+                // report, so the committed state matches that prefix.
+                let mut depth = 1usize;
+                let mut scan = index + 2;
+                let mut scan_single = false;
+                let mut scan_double = false;
+                let mut scan_ansi = false;
+                let mut scan_escaped = false;
+                let mut closed = false;
+                // The park snapshot must be the state AT the `${` (before
+                // this arm's line-count mutations) — the re-derivation on a
+                // longer buffer re-counts the body's newlines.
+                let park_snapshot = park.is_none().then(|| state.clone());
+                while scan < chars.len() {
+                    let c = chars[scan];
+                    if c == '\n' {
+                        state.line += 1;
+                    }
+                    if scan_escaped {
+                        scan_escaped = false;
+                        scan += 1;
+                        continue;
+                    }
+                    if scan_ansi {
+                        if c == '\\' {
+                            scan_escaped = true;
+                        } else if c == '\'' {
+                            scan_ansi = false;
+                        }
+                        scan += 1;
+                        continue;
+                    }
+                    if scan_single {
+                        if c == '\'' {
+                            scan_single = false;
+                        }
+                        scan += 1;
+                        continue;
+                    }
+                    if scan_double {
+                        if c == '\\' {
+                            scan_escaped = true;
+                        } else if c == '"' {
+                            scan_double = false;
+                        }
+                        scan += 1;
+                        continue;
+                    }
+                    match c {
+                        '\\' => scan_escaped = true,
+                        '\'' => scan_single = true,
+                        '"' => scan_double = true,
+                        '$' if chars.get(scan + 1) == Some(&'\'') => {
+                            scan_ansi = true;
+                            scan += 1;
+                        }
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                closed = true;
+                                scan += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    scan += 1;
+                }
+                if !closed {
+                    if let Some(snapshot) = park_snapshot {
+                        park = Some(SubscriptResidualPark {
+                            pos: index,
+                            snapshot,
+                        });
+                    }
+                }
+                index = scan;
+                state.word.clear();
+                continue;
+            }
             _ => {}
         }
         if ch.is_whitespace() {

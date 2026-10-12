@@ -681,7 +681,13 @@ impl Executor {
             }
         }
         let Some(close) = close else {
-            return false;
+            // An UNCLOSED subscript bracket (`${x[}`): the body parses
+            // (the `${`...`}` pair is what the word level matches,
+            // parse.y:3877) and GNU defers the malformed reference to the
+            // expansion — `${x[}: bad substitution`, status 1, the command
+            // dies and the script continues (rubash#532; WSL 5.3.0 probe:
+            // `echo BEFORE; echo ${x[}; echo AFTER` runs BEFORE only, rc 1).
+            return true;
         };
         if body[open + 1..close].is_empty() {
             return true;
