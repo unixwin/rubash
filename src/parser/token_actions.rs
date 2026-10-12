@@ -1132,6 +1132,25 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 };
                 let name_override = match tokens.get(offender) {
                     Some(next) if next.line_break || next.kind == TokenKind::Eof => Some("newline"),
+                    // rubash#565: the shifted `(' is the token stream's LAST
+                    // token (or only an Eof sentinel follows). The lexer
+                    // emits no terminator for a script's final line, but
+                    // GNU's reader still hands yacc the physical line's
+                    // NEWLINE token — the function_def production shifted
+                    // the `(' expecting `)' and rejects THAT token:
+                    // `syntax error near unexpected token `newline'' with
+                    // print_offending_line of the `(' line (parse.y:1054 via
+                    // read_token's parse.y:3774-3790 classification; WSL GNU
+                    // 5.3.0 probes: `[ (` NL, `f (` NL, `echo (` NL and
+                    // `bash -c '[ ('` all name `newline`, never `(').
+                    _ if shifted_function_head
+                        && offender == *i
+                        && tokens
+                            .get(*i + 1)
+                            .is_none_or(|next| next.kind == TokenKind::Eof) =>
+                    {
+                        Some("newline")
+                    }
                     None => Some("newline"),
                     _ => None,
                 };

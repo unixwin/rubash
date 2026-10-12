@@ -2015,13 +2015,25 @@ fn shell_path_to_windows_inner(path: &str, env_vars: &HashMap<String, String>) -
         }
     }
 
+    // rubash#566: the BARE drive root `/c` (no trailing slash, no further
+    // component) is the same drive-form operand as `/c/` — boundary
+    // contract B① accepts both spellings (`/c/...`, `/c/`, `/c/.`, `/D`
+    // case-insensitive). The old `len() >= 3 && bytes[2] == b'/'` gate let
+    // the two-letter spelling slip past this arm into the shell-root
+    // mapping, where `map_logical_path` resolved it to <root>/c → ENOENT
+    // (`cd /c` failed while `cd /c/` worked; a root that happens to carry
+    // a `d/` directory made `cd /d` "work" by accident). Map the bare form
+    // to the drive root exactly like its slashed sibling.
     if cfg!(windows)
-        && normalized.len() >= 3
+        && normalized.len() >= 2
         && normalized.as_bytes()[0] == b'/'
-        && normalized.as_bytes()[2] == b'/'
         && normalized.as_bytes()[1].is_ascii_alphabetic()
+        && (normalized.len() == 2 || normalized.as_bytes()[2] == b'/')
     {
         let drive = normalized.as_bytes()[1] as char;
+        if normalized.len() == 2 {
+            return PathBuf::from(format!("{}:\\", drive.to_ascii_uppercase()));
+        }
         return PathBuf::from(
             format!("{}:\\{}", drive.to_ascii_uppercase(), &normalized[3..]).replace('/', "\\"),
         );
@@ -2494,10 +2506,13 @@ fn map_logical_path(normalized: &str, root: &Path) -> Option<PathBuf> {
     if !normalized.starts_with('/') || normalized.starts_with("//") {
         return None;
     }
-    if normalized.len() >= 3
+    // Drive forms (`/c/...`, and the bare `/c` root — rubash#566) name real
+    // Windows volumes, never children of the shell root; keep them out of
+    // the root-relative mapping.
+    if normalized.len() >= 2
         && normalized.as_bytes()[0] == b'/'
-        && normalized.as_bytes()[2] == b'/'
         && normalized.as_bytes()[1].is_ascii_alphabetic()
+        && (normalized.len() == 2 || normalized.as_bytes()[2] == b'/')
     {
         return None;
     }
