@@ -4470,9 +4470,15 @@ mod tests {
         legacy.insert("__RUBASH_ARGV_DIALECT".to_string(), "legacy".to_string());
         let dispatcher = root.join("usr").join("bin").join("winuxcmd.exe");
 
+        // /mnt/c is deliberately NOT in this list: it never belonged to
+        // this test's boundary (windows_virtual_system_root_argument
+        // ("/mnt/c") == false, see the shape-class test below) and no
+        // WinuxCmd release resolves /mnt forms in its native layer (the
+        // issue-568 claim was Git Bash argv-conversion pollution; see the
+        // 2026-10-12 adjudication). The /mnt contract is owned exclusively
+        // by the #444 pin in windows_mnt_drive_argument_translates_for_every_child.
         for verbatim in [
             "/c/Windows",
-            "/mnt/c",
             "/cygdrive/d/x",
             "/",
             "/dev/null",
