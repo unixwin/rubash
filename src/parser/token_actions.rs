@@ -1117,43 +1117,35 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 // (rubash#332). A line break or end of input right after the
                 // shifted `(' is GNU's virtual `newline' token.
                 let shifted_function_head = lone_word_function_head_candidate(&state.current_cmd);
-                let offender = if shifted_function_head {
+                // GNU names the virtual `newline' token when the shift
+                // fails at end of input or a line break (`eval 'echo (''
+                // probe p14), the next token's own text otherwise (`echo
+                // (hi' -> `hi', p21).
+                let (offender, name_override) = if shifted_function_head {
                     match tokens.get(*i + 1) {
-                        Some(next)
-                            if !(next.kind == TokenKind::Keyword && next.value == ")")
-                                && next.kind != TokenKind::Eof =>
-                        {
-                            *i + 1
+                        None => (*i, Some("newline")),
+                        Some(next) if next.kind == TokenKind::Eof => (*i, Some("newline")),
+                        Some(next) if next.kind == TokenKind::Keyword && next.value == ")" => {
+                            (*i, None)
                         }
-                        _ => *i,
+                        Some(next) => (*i + 1, next.line_break.then_some("newline")),
                     }
                 } else {
-                    *i
+                    (*i, None)
                 };
-                let name_override = match tokens.get(offender) {
-                    Some(next) if next.line_break || next.kind == TokenKind::Eof => Some("newline"),
-                    // rubash#565: the shifted `(' is the token stream's LAST
-                    // token (or only an Eof sentinel follows). The lexer
-                    // emits no terminator for a script's final line, but
-                    // GNU's reader still hands yacc the physical line's
-                    // NEWLINE token — the function_def production shifted
-                    // the `(' expecting `)' and rejects THAT token:
-                    // `syntax error near unexpected token `newline'' with
-                    // print_offending_line of the `(' line (parse.y:1054 via
-                    // read_token's parse.y:3774-3790 classification; WSL GNU
-                    // 5.3.0 probes: `[ (` NL, `f (` NL, `echo (` NL and
-                    // `bash -c '[ ('` all name `newline`, never `(').
-                    _ if shifted_function_head
-                        && offender == *i
-                        && tokens
-                            .get(*i + 1)
-                            .is_none_or(|next| next.kind == TokenKind::Eof) =>
-                    {
-                        Some("newline")
-                    }
-                    None => Some("newline"),
-                    _ => None,
-                };
+                // rubash#565 (merged with the #563 C4b tuple classifier): the
+                // shifted `(' is the token stream's LAST token (or only an Eof
+                // sentinel follows). The lexer emits no terminator for a
+                // script's final line, but GNU's reader still hands yacc the
+                // physical line's NEWLINE token — the function_def production
+                // shifted the `(' expecting `)' and rejects THAT token:
+                // `syntax error near unexpected token `newline'' with
+                // print_offending_line of the `(' line (parse.y:1054 via
+                // read_token's parse.y:3774-3790 classification; WSL GNU
+                // 5.3.0 probes: `[ (` NL, `f (` NL, `echo (` NL and
+                // `bash -c '[ ('` all name `newline`, never `('). The
+                // `None'/Eof arms of the classifier above are that
+                // classification.
                 super::parse_loop::push_unexpected_token_error_named(
                     state,
                     tokens,

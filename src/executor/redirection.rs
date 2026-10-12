@@ -900,6 +900,35 @@ impl Executor {
                 | crate::parser::RedirectKind::ClobberOutput => {
                     let fd = redirect_fd_or_default(redirect, 1);
                     let target = self.expand_redirect_target(redirect);
+                    // redir.c:298-333 redirection_expand: a zero-field
+                    // unquoted expansion (unset `>$v`) or a multi-field one
+                    // is AMBIGUOUS_REDIRECT reporting the RAW word; an
+                    // anchored quoted null (`> ""`) is one empty field and
+                    // fails the open itself. This arm owns the check for the
+                    // apply-time paths (pipeline stage stream routing runs
+                    // the ordered walk after the preflight; issue #514 —
+                    // without it the empty target fell through to
+                    // open("") ENOENT and the stage failure also unwound
+                    // the whole pipeline instead of dying alone).
+                    if target.is_empty() && !raw_word_has_quoted_span(&redirect.target_metadata.raw)
+                    {
+                        self.write_ambiguous_redirect_diagnostic(
+                            state,
+                            &redirect.target_metadata.raw,
+                        )?;
+                        self.exit_code = 1;
+                        state.redirect_failed = true;
+                        return Ok(true);
+                    }
+                    if redirect_target_is_ambiguous(&redirect.target_metadata.raw, &target) {
+                        self.write_ambiguous_redirect_diagnostic(
+                            state,
+                            &redirect.target_metadata.raw,
+                        )?;
+                        self.exit_code = 1;
+                        state.redirect_failed = true;
+                        return Ok(true);
+                    }
                     // subst.c:12663-12668 failglob: the diagnostic already
                     // printed at the expansion; this routing pass must not
                     // open the failed target either — follow the established

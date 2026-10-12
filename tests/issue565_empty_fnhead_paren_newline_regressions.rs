@@ -148,20 +148,21 @@ fn c4b_neighbours_keep_their_offenders() {
     );
     assert_eq!(code, Some(2));
 
-    // `x=1 (` is the rubash#452 boundary, not a GNU cell: the adjudication
-    // accepts assignment-prefix + subshell (GNU 5.3.0 rejects the shape),
-    // so the reader joins the line waiting for `)'; at clean EOF the
-    // global-open diagnostic is the adjudication-consistent outcome —
-    // `unexpected end of file from `(' command on line 1` reported at the
-    // EOF line (script_driver parse.y:6892-6901 route), rc 2. The #565
-    // naming fix must NOT reach this shape (no shifted function head —
-    // the assignment prefix committed simple_command).
+    // `x=1 (`: the assignment prefix committed simple_command — no shifted
+    // function head, so the #565 naming fix must NOT reach this shape. The
+    // pre-merge #452 adjudication joined the line waiting for `)' and
+    // reported `unexpected end of file from `(' command on line 1`; the
+    // master-side #516 re-adjudication (GNU p14/p16/p21 + the q-series)
+    // instead rejects the paren itself — `syntax error near unexpected
+    // token `('` + print_offending_line, rc 2. This merge carries the
+    // trunk decision (suite-parity rule: fresh master and this branch
+    // agree cell by cell).
     let (stderr, code) = rubash_stdin("x=1 (\n");
     assert!(
-        stderr.contains("syntax error: unexpected end of file from `(' command on line 1"),
+        stderr.contains("syntax error near unexpected token `('"),
         "stderr: {stderr}"
     );
-    assert!(stderr.contains("line 2:"), "stderr: {stderr}");
+    assert!(stderr.contains("`x=1 ('"), "stderr: {stderr}");
     assert_eq!(code, Some(2));
 }
 

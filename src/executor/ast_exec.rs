@@ -283,8 +283,19 @@ impl Executor {
             // execute_command never reached (case patterns, compound
             // commands).
             if self.last_command_substitution_parse_error.get() {
-                self.mark_parse_error();
-                return Err(ExecuteError::ExitCode(2));
+                // A BACKTICK body's parse error is contained in the
+                // substituted child (GNU subst.c parse_and_execute; issue
+                // #515) — clear the latch and keep reading; the `$(`-body
+                // read-time failure still stops the list.
+                if self
+                    .last_command_substitution_parse_error_backtick
+                    .replace(false)
+                {
+                    self.last_command_substitution_parse_error.set(false);
+                } else {
+                    self.mark_parse_error();
+                    return Err(ExecuteError::ExitCode(2));
+                }
             }
             // GNU expr.c evalerror -> jump_to_top_level (DISCARD): while an
             // evalerror abort is pending, a nested command list unwinds
@@ -1367,10 +1378,18 @@ impl Executor {
             }
         }
         // Same abort as the loop-top check, for a substitution parse error
-        // raised by the final command in the list.
+        // raised by the final command in the list. Backtick-origin errors
+        // stay contained (issue #515).
         if self.last_command_substitution_parse_error.get() {
-            self.mark_parse_error();
-            return Err(ExecuteError::ExitCode(2));
+            if self
+                .last_command_substitution_parse_error_backtick
+                .replace(false)
+            {
+                self.last_command_substitution_parse_error.set(false);
+            } else {
+                self.mark_parse_error();
+                return Err(ExecuteError::ExitCode(2));
+            }
         }
         self.run_pending_signal_traps()?;
         Ok(())

@@ -56,6 +56,22 @@ impl Executor {
         self.parse_error_occurred = true;
     }
 
+    /// Latch a command-substitution body parse error. When the failing
+    /// body is an old-style backtick substitution (ambient
+    /// `backtick_body_diagnostic`), the companion backtick latch records
+    /// the origin: GNU parses a backtick body in the substituted child at
+    /// execution time (subst.c string_locale -> parse_and_execute), so the
+    /// error kills only the child — substitution empty, status 2, script
+    /// continues (issue #515) — while a `$(`-body error is a read-time
+    /// failure of the enclosing command and stays fatal.
+    pub(in crate::executor) fn latch_command_substitution_parse_error(&self) {
+        self.last_command_substitution_parse_error.set(true);
+        if self.backtick_body_diagnostic.get() {
+            self.last_command_substitution_parse_error_backtick
+                .set(true);
+        }
+    }
+
     /// GNU parse.y:6865/6886 (report_syntax_error): the offending-input-line
     /// echo (`print_offending_line', parse.y:6814) runs only `if (interactive
     /// == 0)'. An interactive shell prints the two `parser_error' diagnostic
@@ -99,6 +115,34 @@ impl Executor {
     /// parsed to an error node can report GNU's `syntax error near ...`
     /// lines without executing the broken ast.
     pub(in crate::executor) fn report_command_parse_error(&self, cmd: &crate::parser::CommandNode) {
+        // The compound-EOF shape (parse.y yyerror EOF path, printed by the
+        // execute_command arm for top-level nodes): a node carrying the
+        // EOF_COMPOUND marker reports `syntax error: unexpected end of
+        // file from `X' command on line N' — the plain-marker arm below
+        // would misrender it as the near shape. Under the ambient backtick
+        // window the prefix is GNU's parse_and_execute child name (issue
+        // #515); otherwise the enclosing script's.
+        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__") {
+            let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+            let compound_name = fields.next().unwrap_or("(");
+            let _open_line = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            let eof_line = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            let prefix = if self.backtick_body_diagnostic.get() {
+                self.comsub_eof_diagnostic(eof_line)
+            } else {
+                self.parser_diagnostic_prefix_for_line(eof_line)
+            };
+            eprintln!(
+                "{prefix}syntax error: unexpected end of file from `{compound_name}' command on line {_open_line}"
+            );
+            return;
+        }
         let message = cmd
             .get_assignment("__RUBASH_PARSE_ERROR__")
             .map(String::as_str)
@@ -110,7 +154,13 @@ impl Executor {
         // CURRENT_LINE is the LAST line read, not the failure line
         // (rubash#390: `while :; do case x in\nesac) ...` reports the
         // `esac)' line, not the `done' line).
+        // A BACKTICK body's report renders under GNU's parse_and_execute
+        // child name (subst.c:7413 passes "command substitution" as whom;
+        // error.c:300-316 prefixes `name: command substitution: line N: `)
+        // — the enclosing script's prefix is the `$(`-body shape, where the
+        // outer parse owns the diagnostic (issue #515).
         let prefix = match cmd.line {
+            Some(line) if self.backtick_body_diagnostic.get() => self.comsub_eof_diagnostic(line),
             Some(line) => self.parser_diagnostic_prefix_for_line(line),
             None => self.parser_diagnostic_prefix(),
         };

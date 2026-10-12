@@ -24,6 +24,14 @@ pub(super) fn parse_for_command(
         return None;
     }
 
+    // A single `(' after the reserved word is not a loop variable: GNU's
+    // for grammar expects a NAME (or the arith-for `((' handled above) and
+    // reports `syntax error near unexpected token `('` at the paren (issue
+    // #516 `for()'). Returning None drops `for' to the word path, where the
+    // parser's word-followed-by-`(' gate owns the near-token error.
+    if is_keyword(tokens, start + 1, "(") {
+        return None;
+    }
     let variable_token = tokens.get(start + 1)?;
     // GNU keeps the loop variable name as the raw word text — quote removal
     // does not apply to the name position (`for f\1 in ...` reports

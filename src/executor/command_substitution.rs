@@ -1146,7 +1146,17 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let source = &self.comsub_body_alias_splice_extracted(source);
+        let alias_spliced = self.comsub_body_alias_splice_extracted(source);
+        // Newline-terminated backtick body reader — see the run_ast path
+        // (issue #515).
+        let newline_terminated;
+        let source: &str = if self.backtick_body_diagnostic.get() && !alias_spliced.ends_with('\n')
+        {
+            newline_terminated = format!("{alias_spliced}\n");
+            &newline_terminated
+        } else {
+            &alias_spliced
+        };
         let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
@@ -1164,7 +1174,7 @@ impl Executor {
             if let Some(command) = ast.commands.iter().find_map(command_parse_error_node) {
                 self.report_command_parse_error(command);
             }
-            self.last_command_substitution_parse_error.set(true);
+            self.latch_command_substitution_parse_error();
             self.last_command_substitution_status.set(Some(2));
             return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
         }
@@ -1309,7 +1319,7 @@ impl Executor {
             // early command_has_parse_error screen, so propagate the child's
             // parse_error latch onto the parent's abort flag here.
             if subshell.parse_error_occurred {
-                self.last_command_substitution_parse_error.set(true);
+                self.latch_command_substitution_parse_error();
             }
             let mut status = command_substitution_result_status(result, subshell.exit_code);
             // Bash runs EXIT in the command-substitution child, so an
@@ -1490,6 +1500,8 @@ impl Executor {
             comsub_leading_newlines: Cell::new(0),
             current_shell_substitution_exit: Cell::new(self.current_shell_substitution_exit.get()),
             last_command_substitution_parse_error: Cell::new(false),
+            last_command_substitution_parse_error_backtick: Cell::new(false),
+            backtick_body_diagnostic: Cell::new(false),
             parser_error_errexited: Cell::new(false),
             last_command_inverted: Cell::new(false),
             exit_jump_pending: Cell::new(false),
@@ -1575,7 +1587,7 @@ impl Executor {
             if let Some(command) = ast.commands.iter().find_map(command_parse_error_node) {
                 self.report_command_parse_error(command);
             }
-            self.last_command_substitution_parse_error.set(true);
+            self.latch_command_substitution_parse_error();
             self.last_command_substitution_status.set(Some(2));
             return String::new();
         }
@@ -1620,7 +1632,7 @@ impl Executor {
             (result, Some(output))
         };
         if subshell.parse_error_occurred {
-            self.last_command_substitution_parse_error.set(true);
+            self.latch_command_substitution_parse_error();
         }
         let status = command_substitution_result_status(result, subshell.exit_code);
         if let Some(saved_dir) = saved_dir {

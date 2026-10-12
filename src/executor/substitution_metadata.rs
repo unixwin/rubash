@@ -770,10 +770,17 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
             // case word machine (the `esac` previous-token witness,
             // parse.y:3181/3183).
             let mut inner_prev_sig: Option<char> = None;
+            // GNU read_token (parse.y:3630-3643): `#` opens a comment only
+            // at a token boundary — after whitespace, a separator, or the
+            // body start. The comment runs to end of line and its text
+            // never reaches token recognition, so a `)` inside it does not
+            // close the span (issue #513).
+            let mut inner_token_boundary = true;
             while cursor < chars.len() {
                 let (_, inner) = chars[cursor];
                 if inner == '\\' && !inner_single {
                     cursor += 2;
+                    inner_token_boundary = false;
                     continue;
                 }
                 if backtick && inner == char::from(96) && !inner_single && !inner_double {
@@ -786,6 +793,16 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                     break;
                 }
                 if dollar_paren {
+                    if inner == '#' && !inner_single && !inner_double && inner_token_boundary {
+                        while cursor < chars.len() && chars[cursor].1 != '\n' {
+                            cursor += 1;
+                        }
+                        inner_word.clear();
+                        inner_word_boundary = true;
+                        inner_current_word_boundary = true;
+                        inner_token_boundary = true;
+                        continue;
+                    }
                     crate::executor::embedded_mutations::update_command_substitution_case_depth_region(
                         inner,
                         inner_single,
@@ -851,6 +868,7 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                     {
                         depth += 1;
                         cursor += 2;
+                        inner_token_boundary = false;
                         continue;
                     }
                     // GNU parse.y:3952-3956 parse_matched_pair: a `)` closes
@@ -877,6 +895,12 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                             index = cursor + 1;
                             break;
                         }
+                    }
+                    // The boundary tracks what the live body tokenizer sees:
+                    // quote-delimited bytes are word text.
+                    if !inner_single && !inner_double {
+                        inner_token_boundary = inner.is_whitespace()
+                            || matches!(inner, ';' | '&' | '|' | '(' | ')' | '<' | '>');
                     }
                 }
                 cursor += 1;

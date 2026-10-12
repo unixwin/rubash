@@ -1348,6 +1348,19 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             return Some(i + 1);
         }
 
+        // GNU parse.y: the `for' grammar has no single-paren production
+        // after the reserved word (the arith-for opener needs `((' and is
+        // handled above), so `for()' and `for (' shift-fail at the `(':
+        // `syntax error near unexpected token `('` + source echo at that
+        // token (issue #516) — never an unterminated-`for' EOF report.
+        if tokens
+            .get(i + 1)
+            .is_some_and(|next| next.kind == TokenKind::Keyword && next.value == "(")
+        {
+            push_unexpected_token_error(state, tokens, i + 1);
+            return Some(i + 2);
+        }
+
         // No `done` in the remaining stream: input either ended inside
         // the `for` body ("from `for' command on line N") or a foreign
         // closer aborted it ("near unexpected token `X'").
@@ -1873,6 +1886,15 @@ fn push_parse_error_until(
 /// "delimited by end-of-file" warnings during the parse (make_cmd.c:626), so
 /// the details are carried to the executor on the error node.
 fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: usize) -> usize {
+    // A `(` entered with a live prefix — assignments (`x=1 (a`) or a
+    // redirection — is NOT a command-position compound: GNU's yacc shift
+    // fails at the `(' itself when the group never closes (`syntax error
+    // near unexpected token `('` + source echo, q-series probes, issue
+    // #516), while a command-position `(` keeps the EOF report below.
+    if !command_is_empty(&state.current_cmd) {
+        push_unexpected_token_error(state, tokens, start);
+        return start + 1;
+    }
     let paren_line = tokens.get(start).map(|token| token.position).unwrap_or(1);
     // rubash#413: GNU's parser dies at the FIRST offending event inside the
     // unclosed `(`, not at EOF. Two such events precede the pure-EOF report

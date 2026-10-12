@@ -794,6 +794,22 @@ pub struct Executor {
     /// after word expansion so the enclosing context unwinds.
     current_shell_substitution_exit: Cell<Option<i32>>,
     last_command_substitution_parse_error: Cell<bool>,
+    /// The comsub body whose parse error is currently latched was an
+    /// old-style backtick substitution. GNU parses a backtick body at
+    /// execution time inside the substituted child (subst.c string_locale ->
+    /// parse_and_execute), so its syntax error kills only the child: the
+    /// substitution yields empty, status 2 becomes the command's status,
+    /// and the script continues (issue #515; `echo \`case x in\`` prints
+    /// the `command substitution: line N:` diagnostic and rc 0). The
+    /// `$(`-body fatal (read-time failure of the enclosing command) checks
+    /// this flag before its escalation/abort sites.
+    last_command_substitution_parse_error_backtick: Cell<bool>,
+    /// A backtick body is being expanded RIGHT NOW — its inner
+    /// parse/diagnostic layer must render as GNU's parse_and_execute
+    /// child: `command substitution: line N:` prefix
+    /// (error.c get_name_for_error with yy_input_name()=="command
+    /// substitution") and a newline-terminated body reader.
+    backtick_body_diagnostic: Cell<bool>,
     /// GNU error.c:324-327 (parser_error): when exit_immediately_on_error
     /// is set at diagnostic time the shell prints only the FIRST line of a
     /// syntax-error report and immediately exit_shell(2)s — the offending
