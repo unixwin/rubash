@@ -903,6 +903,24 @@ impl Executor {
                 }
             }
         }
+        // The unnumbered `<<< word` form keeps its body in here_string (the
+        // numbered/carrier form above already covers heredoc_redirects): the
+        // body expands as a word when the here-string applies, so an
+        // unbound variable reports and the command dies (rubash#535: `cat
+        // <<< $nope` used to expand silently to an empty string). GNU
+        // probes 2026-10-12: `<<< "$nope"` under set -u still REPORTS (the
+        // double-quoted body expands parameters), while `<<< '$nope'` stays
+        // the literal text with no diagnostic — so only the single-quoted
+        // and ANSI-C forms skip the scan.
+        if let Some(word) = &cmd.here_string {
+            let trimmed = word.trim_start();
+            let no_expansion = trimmed.starts_with('\'') || trimmed.starts_with("$'");
+            if !no_expansion {
+                if let Some(error) = self.parameter_expansion_error_in_word(word) {
+                    return Some(error);
+                }
+            }
+        }
         None
     }
 
@@ -938,7 +956,7 @@ impl Executor {
     /// expanded only at dispatch and predicts as external (contained):
     /// a false-contained only keeps a script running that GNU would have
     /// killed, while a false-fatal would kill one GNU keeps running.
-    fn finish_heredoc_expansion_error(
+    pub(in crate::executor) fn finish_heredoc_expansion_error(
         &mut self,
         cmd: &CommandNode,
         status: i32,
@@ -976,8 +994,12 @@ impl Executor {
     /// a builtin or function (main-shell redirects, execute_cmd.c:5606)
     /// rather than a forked external child (execute_cmd.c:5884+).
     fn heredoc_error_command_runs_in_main_shell(&mut self, cmd: &CommandNode) -> bool {
+        // A NULL command (`> $nope`, no words) applies its redirections in
+        // the main shell (execute_cmd.c execute_null_command runs
+        // do_redirections directly) — the fatal jump is not contained
+        // (rubash#535: GNU `set -u; > $nope` ends the script).
         let Some(first) = cmd.words.first() else {
-            return false;
+            return true;
         };
         // Expansion of the first word can run substitutions with side
         // effects; only classify the literal-word forms where expansion is

@@ -27,7 +27,20 @@ impl Executor {
         // (`a=9 echo >&$(echo $a)` sees the outer a, not 9). Expanding here —
         // before apply_temporary_assignments — seeds the redirect-target memo
         // with the correct pre-binding values; the apply sites reuse them.
-        let redirect_rejected = self.reject_invalid_redirects(cmd)?;
+        let redirect_rejection = self.reject_invalid_redirects(cmd)?;
+        let mut skip_command = redirect_rejection.is_some();
+        if redirect_rejection == Some(super::redirection::RedirectRejection::FatalNounset) {
+            // rubash#535: an unbound variable in a redirect word is a fatal
+            // word expansion error classified by where do_redirections runs
+            // (finish_heredoc_expansion_error — the same main-shell/child
+            // split the heredoc bodies use): a builtin/function target ends
+            // the noninteractive script, an external target contains the
+            // jump in the forked child. The diagnostic and status 1 are
+            // already in place from the walker.
+            self.finish_heredoc_expansion_error(cmd, Self::FATAL_PARAMETER_EXPANSION_STATUS)?;
+            skip_command = true;
+        }
+        let redirect_rejected = skip_command;
         let assignment_raws = (cmd.assignment_raws.len() == cmd.assignments.len())
             .then(|| cmd.assignment_raws.as_slice());
         let temporary_assignments = if standalone_assignments {

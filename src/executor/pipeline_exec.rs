@@ -2200,7 +2200,7 @@ impl Executor {
         // reports `$(echo a b): ambiguous redirect` and the stage dies with
         // status 1 (rubash#525).
         let stage_redirect_rejected = self.reject_invalid_redirects(command)?;
-        if stage_redirect_rejected {
+        if stage_redirect_rejected.is_some() {
             let captured = crate::executor::shell_options::take_stdout_capture();
             crate::executor::shell_options::restore_stdout_capture(saved_capture);
             return Ok(Some((

@@ -325,6 +325,18 @@ impl Executor {
         if command_has_no_effect(cmd) {
             return Ok(());
         }
+        // GNU applies a null command's redirections too (execute_cmd.c
+        // execute_null_command -> do_redirections), so `> $nope` under set
+        // -u reports the unbound redirect word and ends the script — the
+        // same fatal redirect-word class as a commanded target (rubash#535;
+        // GNU probe: `set -u; > $nope` exits 1, no next line). The walker
+        // has reported the diagnostic and set the status.
+        if let Some(rejection) = self.reject_invalid_redirects(cmd)? {
+            if rejection == super::redirection::RedirectRejection::FatalNounset {
+                self.finish_heredoc_expansion_error(cmd, Self::FATAL_PARAMETER_EXPANSION_STATUS)?;
+            }
+            return Ok(());
+        }
         if let Some((name, message)) = self.parameter_assignment_error(cmd) {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_redirected_command_stderr(cmd, line.as_bytes())?;

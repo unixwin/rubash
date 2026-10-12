@@ -6,6 +6,22 @@
 
 use super::*;
 
+/// How a redirect-list rejection classifies, decided by the walker and
+/// consumed by the dispatch sites (rubash#535).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::executor) enum RedirectRejection {
+    /// A dup/ambiguous/open failure: the command is abandoned with status 1
+    /// (GNU redirection_error), the script keeps running.
+    Command,
+    /// An unbound variable in a redirect word: a fatal word expansion error
+    /// whose containment follows the target dispatch — the main shell for
+    /// builtin/function targets (the noninteractive script ends with the
+    /// mode's fatal status), a forked child for external targets (the
+    /// script keeps running). The diagnostic is already reported and the
+    /// status already set when the walker returns this.
+    FatalNounset,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::executor) enum OutputTarget {
     Stdout,
@@ -116,7 +132,7 @@ impl Executor {
     pub(in crate::executor) fn reject_invalid_redirects(
         &mut self,
         cmd: &CommandNode,
-    ) -> Result<bool, ExecuteError> {
+    ) -> Result<Option<RedirectRejection>, ExecuteError> {
         // Semantic identity of a redirect for this scan (the same key the
         // expand_redirect_target memo uses): the ordered `redirects` list
         // plus the legacy mirror fields may carry THE SAME source redirect
@@ -162,6 +178,36 @@ impl Executor {
         for (index, redirect) in candidates.iter().enumerate() {
             if matches!(redirect.kind, crate::parser::RedirectKind::HereString) {
                 continue;
+            }
+            // GNU redir.c:298 redirection_expand -> expand_words_no_vars:
+            // the redirect word's expansion carries the nounset check, and
+            // it fires when THAT redirect applies — before its own open and
+            // before any later redirect (so the diagnostic routes through
+            // the fd 2 bindings applied so far, like issue #250). The
+            // report names the BARE variable (`nope: unbound variable`,
+            // err_unboundvar without the sigil). The error is a fatal word
+            // expansion error whose containment follows where
+            // do_redirections runs — the main shell for builtin/function
+            // targets, a forked child for external ones — so the walker
+            // reports here and hands the fatal class back to the caller
+            // (rubash#535).
+            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset")
+                && !matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+                )
+            {
+                if let Some(name) = self.nounset_unbound_parameter(&redirect.target_metadata.raw) {
+                    let mut stderr = Vec::new();
+                    writeln!(
+                        &mut stderr,
+                        "{}{name}: unbound variable",
+                        self.diagnostic_prefix()
+                    )?;
+                    self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
+                    self.exit_code = 1;
+                    return Ok(Some(RedirectRejection::FatalNounset));
+                }
             }
             let target = self.expand_redirect_target(redirect);
             // GNU subst.c:12663-12668: failglob inside redirection_expand
@@ -241,7 +287,7 @@ impl Executor {
                             // the same two-line diagnostic as the move undo.
                             return self
                                 .reject_with_dup_bad_fd(cmd, index, fd, true, raw_word, redirector)
-                                .map(|_| true);
+                                .map(|_| Some(RedirectRejection::Command));
                         }
                         continue;
                     }
@@ -254,7 +300,7 @@ impl Executor {
                     {
                         return self
                             .reject_redirect_at(cmd, index, &format!("{name}: ambiguous redirect"))
-                            .map(|_| true);
+                            .map(|_| Some(RedirectRejection::Command));
                     }
                     continue;
                 }
@@ -279,7 +325,7 @@ impl Executor {
                 {
                     return self
                         .reject_redirect_at(cmd, index, &format!("{raw_word}: ambiguous redirect"))
-                        .map(|_| true);
+                        .map(|_| Some(RedirectRejection::Command));
                 }
                 // A dup-kind target WITHOUT the `&` marker is rubash's own
                 // materialized form — command_with_process_substitution_
@@ -296,7 +342,7 @@ impl Executor {
                     if !dup_source_fd_open(&self.fd_table, fd, &opened) {
                         return self
                             .reject_with_dup_bad_fd(cmd, index, fd, move_fd, raw_word, redirector)
-                            .map(|_| true);
+                            .map(|_| Some(RedirectRejection::Command));
                     }
                     // The dup itself succeeds (GNU dup2 at redir.c:1153);
                     // the command-scoped application sites own the binding
@@ -313,7 +359,7 @@ impl Executor {
                 if expanded_word.is_empty() && !raw_word_has_quoted_span(raw_word) {
                     return self
                         .reject_redirect_at(cmd, index, &format!("{raw_word}: ambiguous redirect"))
-                        .map(|_| true);
+                        .map(|_| Some(RedirectRejection::Command));
                 }
                 if expanded_word == "-" {
                     continue; // `>&$x` with x=- → close (redir.c:798-803)
@@ -333,7 +379,7 @@ impl Executor {
                                     .reject_with_dup_bad_fd(
                                         cmd, index, fd, false, raw_word, redirector,
                                     )
-                                    .map(|_| true);
+                                    .map(|_| Some(RedirectRejection::Command));
                             }
                             opened.insert(redirector, true);
                         }
@@ -348,7 +394,7 @@ impl Executor {
                                     index,
                                     &format!("{name}: Bad file descriptor"),
                                 )
-                                .map(|_| true);
+                                .map(|_| Some(RedirectRejection::Command));
                         }
                     }
                     continue;
@@ -379,7 +425,7 @@ impl Executor {
                             index,
                             &format!("{diagnostic_word}: ambiguous redirect"),
                         )
-                        .map(|_| true);
+                        .map(|_| Some(RedirectRejection::Command));
                 }
                 // r_err_and_out falls through to the file-open class with
                 // the stripped word as filename.
@@ -395,19 +441,19 @@ impl Executor {
                 {
                     return self
                         .reject_redirect_at(cmd, index, &format!("{raw_word}: ambiguous redirect"))
-                        .map(|_| true);
+                        .map(|_| Some(RedirectRejection::Command));
                 }
                 // One anchored empty field: the open itself fails —
                 // open("") → ENOENT on every flag combination, so the
                 // diagnostic is deterministic without touching the disk.
                 return self
                     .reject_redirect_at(cmd, index, ": No such file or directory")
-                    .map(|_| true);
+                    .map(|_| Some(RedirectRejection::Command));
             }
             if redirect_target_is_ambiguous(&redirect.target_metadata.raw, &target) {
                 return self
                     .reject_redirect_at(cmd, index, &format!("{raw_word}: ambiguous redirect"))
-                    .map(|_| true);
+                    .map(|_| Some(RedirectRejection::Command));
             }
             // `<> word` opens O_RDWR|O_CREAT (make_cmd.c:682) — creating
             // the missing file is part of the redirection, not a consumer
@@ -424,7 +470,7 @@ impl Executor {
                     let text = crate::posix_errors::message(&message);
                     return self
                         .reject_redirect_at(cmd, index, &format!("{target}: {text}"))
-                        .map(|_| true);
+                        .map(|_| Some(RedirectRejection::Command));
                 }
             }
             // GNU applies `< word`'s open BEFORE the command runs
@@ -452,7 +498,9 @@ impl Executor {
                     // ReadWrite probe above consumes).
                     let message = crate::posix_errors::path_error(&target, error);
                     let text = crate::posix_errors::message(&message);
-                    return self.reject_redirect_at(cmd, index, &text).map(|_| true);
+                    return self
+                        .reject_redirect_at(cmd, index, &text)
+                        .map(|_| Some(RedirectRejection::Command));
                 }
             }
             // Checks passed — record this entry's ordered fd effect for
@@ -469,7 +517,7 @@ impl Executor {
             }
         }
 
-        Ok(false)
+        Ok(None)
     }
 
     /// The dup bad-fd rejection. GNU `>&7-`/`<&7-` with fd 7 closed fails
