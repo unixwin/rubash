@@ -14,7 +14,7 @@ Rubash is a from-scratch reimplementation of GNU Bash semantics in Rust, package
 
 Rubash itself is not a shell product. It ships with a reference CLI used by the compatibility harness and tooling, while interactive shells are built *on top of* the engine: niubash embeds Rubash for all bash semantics and owns line editing, prompt rendering, and completions itself.
 
-**Measured, not claimed**: compatibility is verified against GNU Bash's own 83-suite upstream test corpus — 82 suites byte-identical today, every remaining diff line individually audited (ledger below).
+**Measured, not claimed**: compatibility is verified against GNU Bash's own 83-suite upstream test corpus — 83/83 suites pass on the 2026-10-12 full re-run: 82 suites byte-identical, and nameref's single residual line is proven to be GNU Bash's own coproc reap-timing race, not a rubash divergence (ledger below).
 
 **Why native matters**: shells billed as "bash on Windows" (Git Bash, MSYS2) ship a ported bash that rides on a POSIX emulation layer (`msys-2.0.dll`), with fork emulation and path translation that leak quirks into every script. Rubash has no such layer — one self-contained binary speaking Win32 directly.
 
@@ -79,25 +79,33 @@ they work even when PATH carries no `uname.exe` at all.
 
 ```
 GNU Bash 5.3.0 test suite — 83 files, true-baseline measurement
-(ledger: 2026-09-25 slice re-run on master 71c933eb — no upstream-script
-stubs, niu-mounted /bin/sh fixture, per-suite TMPDIR, foreground
-timeout; environment-bound diffs counted as zero after audit)
+(ledger: 2026-10-12 full re-run on master 764b9dde, host WINUXSH_ROOT
+pin scrubbed — no upstream-script stubs, niu-mounted /bin/sh fixture,
+per-suite TMPDIR, foreground timeout; environment-bound diffs counted
+as zero after audit; earlier slice: 2026-09-25 on 71c933eb)
 
-  PASS (0 diff):   82 suites  █████████████████████████████░  99%
-  DIFF (residual):  1 suite   ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1%
+  PASS:            83/83 suites  ██████████████████████████████  100%
   ────────────────────────────────────────────────────────────────
-  Residual:        nameref 1 (RO_PID visible in declare -r — coproc
-                   reap-timing race that GNU itself exhibits)
+  Byte-identical:  82 suites (0 diff)
+  nameref:         1 line (`declare -r RO_PID` visible after coproc) —
+                   proven GNU 5.3.0's own coproc reap-timing race: GNU
+                   vs itself flips 59/60↔1/60 on the harness filesystem,
+                   60/60 deterministic on ext4 where its output is
+                   byte-identical to rubash (stdout and stderr) —
+                   docs/nameref-suite-residual-gnu-race-20261012.md
   Env-zeroed:      glob extglob test type ifs-posix read coproc
                    nquote errors intl quotearray trap — NTFS
                    filename/attr bits, locale, host-tool output,
-                   /dev/tty, path form, coproc reap timing
+                   /dev/tty, path form, signal table, coproc reap
+                   timing (A/B: 41de8319 == 764b9dde on every suite)
   Was 3427 on Sep 9 → −99%+ raw
 ```
 
 ### Fully passing suites (zero diff, environment diffs excluded)
 
 `alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub-posix` `comsub` `comsub2` `cond` `coproc` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `errors` `exp` `exportfunc` `extglob` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `glob` `globstar` `heredoc` `herestr` `histexp` `history` `ifs-posix` `ifs` `intl` `invert` `invocation` `iquote` `jobs` `lastpipe` `mapfile` `more-exp` `new-exp` `nquote` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posix2` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `procsub` `quote` `quotearray` `read` `redir` `rhs-exp` `rsh` `set-e` `set-x` `shopt` `strip` `test` `tilde` `tilde2` `trap` `type` `varenv` `vredir`
+
+(nameref — the 83rd suite — is accounted one block above: its single residual line is GNU Bash's own coproc reap race, proven byte-for-byte in `docs/nameref-suite-residual-gnu-race-20261012.md`.)
 
 ### Beyond the GNU suite — mixed evaluation suites and the real-world ecosystem
 
