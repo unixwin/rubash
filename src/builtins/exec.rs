@@ -415,9 +415,17 @@ fn full_pathname_word(program: &std::path::Path) -> String {
 }
 
 fn apply_exported_environment(process: &mut Command, env_vars: &HashMap<String, String>) {
+    // GNU variables.c make_env_array_from_var_list: array and associative
+    // variables never cross the child env boundary (rubash#534) — `exec
+    // printenv A` must not see a storage-encoded array either.
+    let arrays = marked_vars(env_vars, "__RUBASH_ARRAY_VARS");
+    let assocs = marked_vars(env_vars, "__RUBASH_ASSOC_VARS");
     let mut names = marked_vars(env_vars, EXPORTED_VARS);
     names.sort();
     for name in names {
+        if arrays.iter().any(|n| n == &name) || assocs.iter().any(|n| n == &name) {
+            continue;
+        }
         if let Some(value) = env_vars.get(&name) {
             process.env(&name, value);
         }
@@ -442,6 +450,15 @@ where
     }
 
     let exported = marked_vars(env_vars, EXPORTED_VARS);
+    // GNU variables.c make_env_array_from_var_list: array and associative
+    // variables never cross the child env boundary (rubash#534) — the
+    // internal printenv emulation must mirror the real spawn path.
+    let arrays = marked_vars(env_vars, "__RUBASH_ARRAY_VARS");
+    let assocs = marked_vars(env_vars, "__RUBASH_ASSOC_VARS");
+    let exported: Vec<String> = exported
+        .into_iter()
+        .filter(|name| !arrays.iter().any(|n| n == name) && !assocs.iter().any(|n| n == name))
+        .collect();
     if names.is_empty() {
         let mut exported = exported;
         exported.sort();

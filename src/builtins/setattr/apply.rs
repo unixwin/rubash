@@ -9,7 +9,9 @@ use super::value::{
     array_attribute_assignment_value, diagnostic_prefix, readonly_error_subject, split_assignment,
     valid_identifier,
 };
-use super::{ExportMode, EXECUTION_FAILURE, EXECUTION_SUCCESS, READONLY_VARS};
+use super::{
+    ExportMode, ARRAY_VARS, ASSOC_VARS, EXECUTION_FAILURE, EXECUTION_SUCCESS, READONLY_VARS,
+};
 
 pub(super) fn apply_export_arg<W>(
     arg: &str,
@@ -84,13 +86,21 @@ where
                     )
                 });
             env_vars.insert(name.to_string(), value.clone());
-            env::set_var(name, value);
-            mark_exported(env_vars, name);
             if assoc && has_assign {
                 mark_assoc(env_vars, name, converted);
             } else if (array && has_assign) || bound_array {
                 mark_array(env_vars, name);
             }
+            // GNU variables.c make_env_array_from_var_list: array and
+            // associative variables never cross the child env boundary
+            // (ARRAY_EXPORT off), so `export A` / `export -a A=(x y)` on an
+            // array keeps the exported attribute (declare -p shows -a -x)
+            // while the storage-encoded value stays out of the process env
+            // (rubash#534: printenv A must print nothing).
+            if !env_vars.is_marked(ARRAY_VARS, name) && !env_vars.is_marked(ASSOC_VARS, name) {
+                env::set_var(name, value);
+            }
+            mark_exported(env_vars, name);
         }
         ExportMode::Unset => {
             env::remove_var(name);
@@ -194,12 +204,17 @@ where
             )
         });
     env_vars.insert(name.to_string(), value.clone());
-    env::set_var(name, value);
-    mark_readonly(env_vars, name);
     if assoc && has_assign {
         mark_assoc(env_vars, name, converted);
     } else if (array && has_assign) || bound_array {
         mark_array(env_vars, name);
     }
+    // Same array-export contract as apply_export_arg above (GNU variables.c
+    // make_env_array_from_var_list, rubash#534): a readonly array keeps the
+    // attribute but its storage value never enters the process env.
+    if !env_vars.is_marked(ARRAY_VARS, name) && !env_vars.is_marked(ASSOC_VARS, name) {
+        env::set_var(name, value);
+    }
+    mark_readonly(env_vars, name);
     Ok(EXECUTION_SUCCESS)
 }

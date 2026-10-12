@@ -983,11 +983,7 @@ impl Executor {
             }
             self.execute_command(&time_command.command)?;
         }
-        print_time(
-            &self.shell_state.env_vars,
-            time_command.posix_format,
-            started,
-        );
+        self.print_time_shell(time_command.posix_format, started);
         if time_command.inverted {
             self.exit_code = invert_exit_status(self.exit_code);
         }
@@ -1036,8 +1032,7 @@ impl Executor {
         } else {
             Ok(())
         };
-        print_time(
-            &self.shell_state.env_vars,
+        self.print_time_shell(
             time_prefix_parts(&cmd.words).is_some_and(|parts| parts.posix_format),
             started,
         );
@@ -1089,7 +1084,7 @@ impl Executor {
             return Ok(None);
         };
 
-        print_time(&self.shell_state.env_vars, prefix.posix_format, started);
+        self.print_time_shell(prefix.posix_format, started);
         if prefix.inverted {
             self.exit_code = invert_exit_status(self.exit_code);
         }

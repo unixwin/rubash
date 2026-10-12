@@ -19,6 +19,13 @@ pub(crate) const TRAP_ORIG_IGNORES: &str = "__RUBASH_TRAP_ORIG_IGN";
 /// parent's traps; the reset set records which entries may not fire.
 const TRAP_RESET: &str = "__RUBASH_TRAP_RESET";
 const EX_USAGE: i32 = 2;
+/// GNU's internal EX_USAGE (builtins/common.h): what trap.def returns before
+/// execute_cmd.c:4886-4888 converts it for `$?`. It exceeds EX_SHERRBASE,
+/// which is exactly what the execute_trap wrapper's special_builtin_failed
+/// gate keys on, so the POSIX reset-by-name usage failure surfaces THIS raw
+/// status and the wrapper converts it back to the user-visible 2 in every
+/// non-exiting mode.
+const EX_USAGE_INTERNAL: i32 = 258;
 /// Positional signal-name table: entry i-1 is signal i's name (GNU's
 /// `signal_names[]` is indexed by signal number — support/signames.c:69
 /// initialize_signames, generated per target by support/mksignames.c from
@@ -411,7 +418,21 @@ where
         //   REVERT (non-posix) = *first_arg && (*first_arg != '-' || first_arg[1])
         //                         && signal_object_p && list->next == 0
         //   else: list = list->next; if list == 0: builtin_usage; return EX_USAGE
+        // POSIX mode only takes the first_signal branch: the reset spec must
+        // be all digits ("trap 15"), so `trap USR1` falls to the else branch
+        // and returns EX_USAGE (bash posix-mode notes: use `trap -` to
+        // reset). The EX_USAGE of a special builtin also exits the
+        // non-interactive POSIX shell — the execute_trap wrapper marks
+        // special_builtin_failed for that, so return GNU's RAW internal
+        // status here (> EX_SHERRBASE is what execute_cmd.c:4886-4888 keys
+        // the special-builtin failure on); the wrapper converts it back to
+        // the user-visible 2 in every non-exiting mode.
+        let digits_only = !action.is_empty() && action.bytes().all(|b| b.is_ascii_digit());
         if let Some(signal) = normalize_signal(action) {
+            if !digits_only && crate::builtins::set::shell_option_enabled(env_vars, "posix") {
+                print_usage(stderr)?;
+                return Ok(EX_USAGE_INTERNAL);
+            }
             remove_trap(env_vars, signal);
             #[cfg(unix)]
             crate::builtins::kill::reconcile_kernel_trap_dispositions(env_vars);
@@ -842,6 +863,7 @@ where
     // DEBUG_TRAP == NSIG, ERROR_TRAP == NSIG+1, RETURN_TRAP == NSIG+2), so
     // an unselected listing prints EXIT first, then every set signal trap in
     // numeric order, then DEBUG/ERROR/RETURN.
+    let posix = crate::builtins::set::shell_option_enabled(env_vars, "posix");
     let signals: Vec<String> = match selected {
         Some(signals) => signals.to_vec(),
         None => canonical_trap_order()
@@ -862,11 +884,36 @@ where
                 }
                 writeln!(stdout, "{action}")?;
             } else {
-                writeln!(stdout, "trap -- {} {}", shell_quote(action), signal)?;
+                writeln!(
+                    stdout,
+                    "trap -- {} {}",
+                    shell_quote(action),
+                    display_signal_name(&signal, posix)
+                )?;
             }
+        } else if posix && selected.is_some() {
+            // GNU trap.def display_traps (POSIX_MODE): an explicitly selected
+            // signal with no trap still lists as `trap -- - NAME` (bash
+            // posix-mode notes: `trap -p` shows signals whose disposition is
+            // SIG_DFL, not only trapped ones). The unselected listing keeps
+            // printing trapped signals only, and the default (non-posix)
+            // display never grows entries.
+            writeln!(stdout, "trap -- - {}", display_signal_name(&signal, posix))?;
         }
     }
     Ok(())
+}
+
+/// The signal name `trap -p` prints for `signal`. POSIX mode strips the
+/// `SIG` prefix (bash posix-mode notes: `trap` displays signal names
+/// without the leading SIG); the default mode keeps the stored SIGx
+/// spelling. EXIT/DEBUG/ERR/RETURN carry no prefix and pass through.
+fn display_signal_name(signal: &str, posix: bool) -> &str {
+    if posix {
+        signal.strip_prefix("SIG").unwrap_or(signal)
+    } else {
+        signal
+    }
 }
 
 /// Trap-table iteration order matching GNU trap.c display_traps: EXIT
@@ -971,6 +1018,53 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Bash posix-mode notes item 68: the reset spec must be all digits, so
+    /// `trap USR1` is a usage violation. The POSIX path returns GNU's RAW
+    /// internal EX_USAGE (258) — the execute_trap wrapper keys
+    /// special_builtin_failed on > EX_SHERRBASE and converts it to the
+    /// user-visible 2; the default mode keeps the historical reset-by-name
+    /// (it removes the USR1 trap and succeeds).
+    #[test]
+    fn posix_reset_by_name_returns_internal_usage() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert("__RUBASH_SETOPT_posix".to_string(), "1".to_string());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let status =
+            execute_with_io(&["USR1".to_string()], &mut env_vars, &mut out, &mut err).unwrap();
+        assert_eq!(status, EX_USAGE_INTERNAL);
+        assert!(String::from_utf8(err).unwrap().contains("usage: trap"));
+
+        let mut env_vars = HashMap::new();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let status =
+            execute_with_io(&["USR1".to_string()], &mut env_vars, &mut out, &mut err).unwrap();
+        assert_eq!(status, 0);
+
+        // The all-digit reset form keeps working in POSIX mode.
+        let mut env_vars = HashMap::new();
+        env_vars.insert("__RUBASH_SETOPT_posix".to_string(), "1".to_string());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let status =
+            execute_with_io(&["15".to_string()], &mut env_vars, &mut out, &mut err).unwrap();
+        assert_eq!(status, 0);
+    }
+
+    /// Bash posix-mode notes item 67: `trap` displays signal names without
+    /// the leading SIG; the default mode keeps the stored SIGx spelling and
+    /// pseudo-signals (EXIT/ERR) pass through either way.
+    #[test]
+    fn posix_trap_display_strips_the_sig_prefix() {
+        assert_eq!(display_signal_name("SIGUSR1", true), "USR1");
+        assert_eq!(display_signal_name("SIGUSR1", false), "SIGUSR1");
+        assert_eq!(display_signal_name("EXIT", true), "EXIT");
+        assert_eq!(display_signal_name("ERR", false), "ERR");
+    }
+
     /// The trap table and the kill builtin's table must name the same signal
     /// for the same number on every platform (GNU has ONE signal_names[]
     /// serving trap.c:236 decode_signal and builtins/kill.def). Any cfg

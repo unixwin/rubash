@@ -356,6 +356,16 @@ impl Executor {
             // whole script.
             let status = if message == "readonly variable" { 2 } else { 1 };
             self.exit_code = status;
+            // POSIX-mode notes item 36, parameter-expansion assignment arm:
+            // `: ${v:=val}` against a readonly v before the special builtin
+            // exits the non-interactive POSIX shell (GNU probe: subshell form
+            // exits 1, nothing after runs; default keeps the DISCARD
+            // contract — subshell exits with the status, script continues).
+            // Only the readonly class is oracle-covered here; the positional
+            // arm keeps the historical status-1 discard.
+            if status == 2 && self.posix_assignment_failure_is_fatal() {
+                return Err(ExecuteError::ExitCode(1));
+            }
             // rubash#439: expansion error, not a failed command — no ERR trap.
             self.command_expansion_failed.set(true);
             return Err(ExecuteError::ExpansionFailure(status));
@@ -571,7 +581,15 @@ impl Executor {
                 // script continues on the next line with status 1.
                 // ExpansionFailure carries exactly that contract at top level
                 // (ast_exec.rs skips the remaining same-line commands).
+                // POSIX-mode notes item 35: a non-interactive POSIX shell
+                // additionally EXITS with status 1 (oracle: top-level
+                // `ro=2` on a readonly ro ends the GNU posix script where
+                // the default mode prints the diagnostic and continues;
+                // subshells exit 1 in both modes via the DISCARD path).
                 self.exit_code = 1;
+                if self.posix_assignment_failure_is_fatal() {
+                    return Err(ExecuteError::ExitCode(1));
+                }
                 return Err(ExecuteError::ExpansionFailure(1));
             }
             // GNU variables.c make_variable_value: an integer-attribute
@@ -658,6 +676,16 @@ impl Executor {
             // (subst.c:10404-10410); the script keeps running either way.
             let status = if message == "readonly variable" { 2 } else { 1 };
             self.exit_code = status;
+            // POSIX-mode notes item 36, parameter-expansion assignment arm:
+            // `: ${v:=val}` against a readonly v before the special builtin
+            // exits the non-interactive POSIX shell (GNU probe: subshell form
+            // exits 1, nothing after runs; default keeps the DISCARD
+            // contract — subshell exits with the status, script continues).
+            // Only the readonly class is oracle-covered here; the positional
+            // arm keeps the historical status-1 discard.
+            if status == 2 && self.posix_assignment_failure_is_fatal() {
+                return Err(ExecuteError::ExitCode(1));
+            }
             // rubash#439: expansion error, not a failed command — no ERR trap.
             self.command_expansion_failed.set(true);
             return Err(ExecuteError::ExpansionFailure(status));
@@ -2806,7 +2834,13 @@ impl Executor {
         let function_name = cmd
             .words
             .first()
-            .and_then(|word| self.function_name_for_command_word(word))?;
+            .and_then(|word| self.function_name_for_command_word(word))
+            // Bash posix-mode notes (item 19): in POSIX mode a function whose
+            // name contains a slash is never executed — the word falls
+            // through to the PATH search (`a/b` -> command not found, 127)
+            // even though the definition stays accepted. Default mode keeps
+            // the function-first lookup.
+            .filter(|name| !(self.posix_mode_enabled() && name.contains('/')))?;
         let (materialized_cmd, process_substitution_files) =
             match self.command_with_process_substitution_files(cmd) {
                 Ok(materialized) => materialized,
@@ -2827,7 +2861,7 @@ impl Executor {
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
-        let temporary_assignments =
+        let (temporary_assignments, assignments_failed) =
             self.apply_temporary_assignments(&materialized_cmd.assignments, assignment_raws);
         if let Some(rejection) = redirect_rejection {
             if rejection == super::redirection::RedirectRejection::FatalNounset {
@@ -2844,6 +2878,25 @@ impl Executor {
             let assignment_finish_result =
                 self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
             return Some(finish_result.and(assignment_finish_result));
+        }
+        // POSIX-mode notes item 36 (GNU 5.3 cell matrix): a failed readonly
+        // tempenv assignment before a FUNCTION skips the function and
+        // abandons the rest of the command list with status 1 (subshell
+        // forms exit the subshell with 1, the parent continues) — same
+        // skip-and-abandon contract as the execute_materialized_command
+        // path; only a SPECIAL builtin command word would exit the shell.
+        if assignments_failed && self.posix_assignment_failure_is_fatal() {
+            self.exit_code = 1;
+            // Restore the partial tempenv binds before unwinding — the
+            // skip-and-abandon contract keeps the shell (or the enclosing
+            // subshell boundary) alive, and an unbalanced tempenv mark would
+            // corrupt every later restore. The process-substitution carriers
+            // are finished best-effort, same as the rejection arm above.
+            self.restore_temporary_assignments(temporary_assignments);
+            let _ = self.finish_process_substitutions(process_substitution_files);
+            let _ =
+                self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
+            return Some(Err(ExecuteError::ExpansionFailure(1)));
         }
         // GNU variables.c push_context: the function-call tempenv becomes the
         // function's variable context — recorded so a posix special builtin's

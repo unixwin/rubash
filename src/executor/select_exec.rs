@@ -193,6 +193,12 @@ impl Executor {
             // nameref11.sub `select r in /` on `declare -n r`).
             if !self.apply_shell_assignment(&select_command.variable, selected.clone()) {
                 self.exit_code = 1;
+                // POSIX-mode notes item 37 covers select alongside for: a
+                // readonly select variable exits the non-interactive POSIX
+                // shell (status 1); default mode fails the command only.
+                if self.posix_assignment_failure_is_fatal() {
+                    return Err(ExecuteError::ExitCode(1));
+                }
                 return Ok(());
             }
             set_process_env(&select_command.variable, selected);

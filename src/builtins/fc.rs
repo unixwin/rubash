@@ -224,7 +224,8 @@ where
     if execute {
         let mut subs: Vec<(String, String)> = Vec::new();
         let mut spec: Option<&String> = None;
-        for a in &pos {
+        let mut spec_index: Option<usize> = None;
+        for (position, a) in pos.iter().enumerate() {
             if spec.is_none() {
                 if let Some(eq) = a.find('=') {
                     if eq > 0 {
@@ -233,7 +234,16 @@ where
                     }
                 }
                 spec = Some(a);
+                spec_index = Some(position);
             }
+        }
+        // GNU builtins/fc.def (POSIX mode, bash posix-mode notes item 56):
+        // operands after the command specification are an error ("fc: too
+        // many arguments", EXECUTION_FAILURE) instead of being ignored the
+        // way the default mode treats them.
+        if posix_mode && spec_index.is_some_and(|index| index + 1 < pos.len()) {
+            writeln!(stderr, "{diagnostic_prefix}fc: too many arguments")?;
+            return Ok(FcResult::Status(EXECUTION_FAILURE));
         }
         let resolved = match spec {
             None => Ok(last_hist.max(0) as usize),

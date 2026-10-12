@@ -1163,6 +1163,29 @@ impl Executor {
             body_start_line,
             true,
         );
+        // GNU parse.y:3105 push_heredoc: HEREDOC_MAX applies inside the
+        // substitution's own parse level too (parse.y:4524 resets the
+        // pending counter at entry, the cap does not widen) — the 17th
+        // pending heredoc is a fatal parse error reported before the body's
+        // own EOF diagnostics could matter. The body tokenize parks the
+        // condition with the outer line; abort the body here, the flag's
+        // ExitCode(2) unwinds the rest of the script like any other
+        // substitution parse error.
+        if let Some(line) = crate::lexer::heredoc_overflow_line() {
+            if std::env::var_os("RUBASH_DBG_543").is_some() {
+                eprintln!("DBG543 consume at executor funsub site2 line={}", line);
+            }
+            if std::env::var_os("RUBASH_DBG_543").is_some() {
+                eprintln!("DBG543 consume at executor comsub site1 line={}", line);
+            }
+            eprintln!(
+                "{}maximum here-document count exceeded",
+                self.diagnostic_prefix_for_line(line)
+            );
+            self.last_command_substitution_parse_error.set(true);
+            self.last_command_substitution_status.set(Some(2));
+            return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
+        }
         let mut ast = crate::parser::parse(&tokens);
         normalize_comsub_body_statement_lines(&mut ast, &tokens);
 
@@ -1581,6 +1604,18 @@ impl Executor {
             .unwrap_or(1);
         let tokens =
             crate::lexer::tokenize_comsub_body(body, self.posix_mode_enabled(), start_line, true);
+        // Same in-level HEREDOC_MAX fatality as the `$(` path above
+        // (parse.y:3105 push_heredoc; parse.y:4524 resets the counter at
+        // entry without widening the cap).
+        if let Some(line) = crate::lexer::heredoc_overflow_line() {
+            eprintln!(
+                "{}maximum here-document count exceeded",
+                self.diagnostic_prefix_for_line(line)
+            );
+            self.last_command_substitution_parse_error.set(true);
+            self.last_command_substitution_status.set(Some(2));
+            return String::new();
+        }
         let mut ast = crate::parser::parse(&tokens);
         normalize_comsub_body_statement_lines(&mut ast, &tokens);
         if ast.commands.iter().any(command_has_parse_error) {

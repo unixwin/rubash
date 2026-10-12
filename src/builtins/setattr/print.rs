@@ -92,6 +92,13 @@ where
                     format_array_value(value)
                 )?;
             } else {
+                // POSIX mode (bash posix-mode notes, item 52): readonly
+                // displays "readonly name=\"value\"" instead of the
+                // declare-format listing.
+                if posix_mode {
+                    writeln!(stdout, "readonly {name}=\"{}\"", quote_export_value(value))?;
+                    continue;
+                }
                 let attrs = setattr_scalar_attrs(
                     &name,
                     true,
@@ -125,6 +132,7 @@ where
 
 pub(super) fn print_exported<W>(
     env_vars: &crate::shell::var_table::VarTable,
+    posix_mode: bool,
     stdout: &mut W,
 ) -> io::Result<()>
 where
@@ -156,19 +164,28 @@ where
         }
         if let Some(value) = env_vars.get(&name) {
             if arrays.contains(&name) || is_array_value(value) {
-                let attrs = setattr_array_attrs(
-                    &name,
-                    readonly.contains(&name),
-                    true,
-                    &integers,
-                    &uppercase,
-                    &lowercase,
-                );
-                writeln!(
-                    stdout,
-                    "declare {attrs} {name}={}",
-                    format_array_value(value)
-                )?;
+                // POSIX mode (bash posix-mode notes, item 52): the export
+                // listing uses the posix utility format, arrays included
+                // ("export -a name=([0]="x" ...)" against GNU 5.3).
+                if posix_mode {
+                    writeln!(stdout, "export -a {name}={}", format_array_value(value))?;
+                } else {
+                    let attrs = setattr_array_attrs(
+                        &name,
+                        readonly.contains(&name),
+                        true,
+                        &integers,
+                        &uppercase,
+                        &lowercase,
+                    );
+                    writeln!(
+                        stdout,
+                        "declare {attrs} {name}={}",
+                        format_array_value(value)
+                    )?;
+                }
+            } else if posix_mode {
+                writeln!(stdout, "export {name}=\"{}\"", quote_export_value(value))?;
             } else {
                 let attrs = setattr_scalar_attrs(
                     &name,

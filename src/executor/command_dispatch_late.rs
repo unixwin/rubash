@@ -314,7 +314,14 @@ impl Executor {
                     self.execute_external(cmd)
                 }
             }
-            _ if self.shell_state.functions.contains_key(word) => {
+            // Bash posix-mode notes (item 19): in POSIX mode a function whose
+            // name contains a slash is never executed — the word falls
+            // through to the PATH search (`a/b` -> command not found, 127),
+            // even though the definition itself stays accepted. The default
+            // mode keeps the historical function-first lookup.
+            _ if self.shell_state.functions.contains_key(word)
+                && !(self.posix_mode_enabled() && word.contains('/')) =>
+            {
                 self.execute_function(word, &cmd.words[1..], cmd)
             }
             // uname/arch sit AFTER the function guard on purpose (rubash#154):

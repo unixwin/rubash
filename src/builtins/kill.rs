@@ -292,6 +292,24 @@ where
     W: Write,
     E: Write,
 {
+    execute_with_io_posix(args, stdout, stderr, false)
+}
+
+/// [`execute_with_io`] with the POSIX-mode flag. POSIX mode rejects signal
+/// specifications bearing the `SIG` prefix (bash posix-mode notes, item 58:
+/// `kill -s SIGKILL` and `kill -SIGKILL` report "invalid signal
+/// specification" with status 1); the default mode keeps the historical
+/// acceptance of both spellings.
+pub fn execute_with_io_posix<W, E>(
+    args: &[String],
+    stdout: &mut W,
+    stderr: &mut E,
+    posix: bool,
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
     let Some(first) = args.first().map(String::as_str) else {
         write_kill_usage(stderr)?;
         return Ok(2);
@@ -368,7 +386,7 @@ where
                 )?;
                 return Ok(1);
             };
-            if translate_signal(sigspec).is_none() {
+            if !sigspec_accepted(sigspec, posix) {
                 writeln!(
                     stderr,
                     "{}kill: {sigspec}: invalid signal specification",
@@ -394,7 +412,7 @@ where
                     .filter(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
             });
         if let Some(sigspec) = attached {
-            if translate_signal(sigspec).is_none() {
+            if !sigspec_accepted(sigspec, posix) {
                 writeln!(
                     stderr,
                     "{}kill: {sigspec}: invalid signal specification",
@@ -410,7 +428,7 @@ where
         }
         if value.starts_with('-') && value != "-" && !saw_signal {
             let sigspec = value.trim_start_matches('-');
-            if translate_signal(sigspec).is_none() {
+            if !sigspec_accepted(sigspec, posix) {
                 writeln!(
                     stderr,
                     "{}kill: {sigspec}: invalid signal specification",
@@ -593,6 +611,16 @@ pub fn translate_signal(value: &str) -> Option<&'static str> {
 
     let name = value.strip_prefix("SIG").unwrap_or(value);
     signal_number(name)
+}
+
+/// The kill signal-spec validator for the `-s`/`-n`/`-SPEC` forms. POSIX
+/// mode rejects the SIG-prefixed spelling outright; every other value falls
+/// through to the shared [`translate_signal`] table.
+fn sigspec_accepted(value: &str, posix: bool) -> bool {
+    if posix && value.starts_with("SIG") {
+        return false;
+    }
+    translate_signal(value).is_some()
 }
 
 fn signal_number_from_spec(value: &str) -> Option<i32> {
@@ -2096,5 +2124,31 @@ mod signal_table_tests {
         assert!(super::signal_number("RTMIN").is_none());
         assert!(super::signal_number("RTMAX").is_none());
         assert!(super::signal_name(32).is_none());
+    }
+}
+
+#[cfg(test)]
+mod posix_sigspec_tests {
+    use super::*;
+
+    /// Bash posix-mode notes item 58: the SIG-prefixed spelling is an invalid
+    /// signal specification in POSIX mode; the default mode keeps accepting
+    /// both spellings. Probed on the validator itself - a live `kill` would
+    /// either usage-out on the missing pid operand or signal the test process.
+    #[test]
+    fn posix_rejects_sig_prefixed_specifications() {
+        assert!(!sigspec_accepted("SIGKILL", true));
+        assert!(!sigspec_accepted("SIGUSR1", true));
+        assert!(sigspec_accepted("SIGKILL", false));
+        assert!(sigspec_accepted("SIGUSR1", false));
+    }
+
+    /// Numbers and bare names stay valid signal specifications in POSIX mode.
+    #[test]
+    fn posix_still_accepts_numbers_and_bare_names() {
+        assert!(sigspec_accepted("9", true));
+        assert!(sigspec_accepted("KILL", true));
+        assert!(sigspec_accepted("15", true));
+        assert!(sigspec_accepted("TERM", false));
     }
 }

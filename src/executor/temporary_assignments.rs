@@ -4,12 +4,14 @@ use crate::executor::markers::STORAGE_WORD_PREFIX;
 impl Executor {
     /// Apply assignments from a command containing no command word. GNU Bash
     /// keeps these assignments in the current shell scope; they are not the
-    /// temporary environment used by `name=value command`.
+    /// temporary environment used by `name=value command`. Returns false when
+    /// any assignment failed (the loop stops at the first failure, GNU subst.c
+    /// expand_word_error DISCARD).
     pub(in crate::executor) fn apply_permanent_assignments(
         &mut self,
         assignments: &[(String, String)],
         raw_rhs: Option<&[String]>,
-    ) {
+    ) -> bool {
         let raws_aligned = raw_rhs.is_some_and(|raws| raws.len() == assignments.len());
         for (index, (name, value)) in assignments.iter().enumerate() {
             let raw = raws_aligned
@@ -37,7 +39,7 @@ impl Executor {
                 // inside the apply path bounds the discard to this command
                 // list.
                 self.exit_code = 1;
-                break;
+                return false;
             }
             // GNU variables.c make_variable_value: an integer-attribute
             // assignment that fails arithmetic evaluation (e.g. `i=0#4`
@@ -47,8 +49,10 @@ impl Executor {
             if self.shell_state.arithmetic_expansion_error.get() {
                 self.shell_state.arithmetic_expansion_error.set(false);
                 self.exit_code = 1;
+                return false;
             }
         }
+        true
     }
 
     /// GNU failglob path for `name=(...)` / `name+=(...)`: subst.c
@@ -82,12 +86,15 @@ impl Executor {
         &mut self,
         assignments: &[(String, String)],
         raw_rhs: Option<&[String]>,
-    ) -> Vec<(
-        String,
-        Option<String>,
-        Option<crate::shell::Variable>,
-        Option<VarAttrs>,
-    )> {
+    ) -> (
+        Vec<(
+            String,
+            Option<String>,
+            Option<crate::shell::Variable>,
+            Option<VarAttrs>,
+        )>,
+        bool,
+    ) {
         // TODO(execute_cmd.c/variables.c): Bash applies assignment words with
         // different persistence rules for special builtins, functions, POSIX
         // mode, and external command environments. For upstream builtins tests,
@@ -141,6 +148,7 @@ impl Executor {
                 .insert("__RUBASH_TEMP_PATH".to_string(), "1".to_string());
         }
         let raws_aligned = raw_rhs.is_some_and(|raws| raws.len() == assignments.len());
+        let mut assignments_failed = false;
         for (index, (name, value)) in assignments.iter().enumerate() {
             let raw = raws_aligned
                 .then(|| raw_rhs.and_then(|raws| raws.get(index)))
@@ -195,11 +203,11 @@ impl Executor {
             {
                 if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, base_name) {
                     let line = format!(
-                        "{}{base_name}: readonly variable
-",
+                        "{}{base_name}: readonly variable\n",
                         self.assignment_diagnostic_prefix()
                     );
                     self.emit_assignment_diag(line);
+                    assignments_failed = true;
                     continue;
                 }
                 self.shell_state
@@ -228,6 +236,7 @@ impl Executor {
                         self.assignment_diagnostic_prefix()
                     );
                     self.emit_assignment_diag(line);
+                    assignments_failed = true;
                     continue;
                 }
                 self.shell_state
@@ -241,7 +250,14 @@ impl Executor {
                 self.mark_exported(base_name);
                 continue;
             }
-            self.apply_shell_assignment(name, expanded_value);
+            // GNU variables.c bind_variable (ASS_MKLOCAL tempenv path): a
+            // failed bind (readonly violation via ASSIGN_DISALLOWED, expansion
+            // error) reports and keeps going through the REST of the operand
+            // list here; the caller decides posix fatality (execute_cmd.c
+            // jump_to_top_level on bash_variable_assignment_error).
+            if !self.apply_shell_assignment(name, expanded_value) {
+                assignments_failed = true;
+            }
             // GNU variables.c bind_variable (ASS_NAMEREF tempenv path): the
             // temporary assignment lands on the referenced variable and it is
             // that variable which is exported for the command, never the
@@ -253,7 +269,25 @@ impl Executor {
             self.tempenv_names.push(export_target.clone());
             self.mark_exported(&export_target);
         }
-        previous
+        (previous, assignments_failed)
+    }
+
+    /// GNU execute_cmd.c: assignment errors (readonly violation, expansion
+    /// error) jump to top level only in a POSIX NON-interactive shell
+    /// (bash_variable_assignment_error -> exit status 1). With no command
+    /// word the exit is unconditional in GNU (both modes — the standalone
+    /// DISCARD path already aborts the command); the POSIX gate covers the
+    /// command-word forms, where GNU 5.3 exits for every command class, not
+    /// just special builtins (`ro=2 ls`, `ro=2 :`, `ro=2 true` all exit —
+    /// oracle probes B/B2/B3; the command itself never runs).
+    pub(in crate::executor) fn posix_assignment_failure_is_fatal(&self) -> bool {
+        self.posix_mode_enabled()
+            && self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_INTERACTIVE")
+                .map(String::as_str)
+                != Some("1")
     }
 
     /// GNU bind_variable with a nameref cell naming an array element: the

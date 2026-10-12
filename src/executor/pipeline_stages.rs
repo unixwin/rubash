@@ -204,7 +204,13 @@ impl Executor {
             return Ok(Some((String::new(), String::new(), 0)));
         };
         let expanded_name = self.expand_word(name);
-        let Some(function_name) = self.function_name_for_command_word(&expanded_name) else {
+        let Some(function_name) = self
+            .function_name_for_command_word(&expanded_name)
+            // Bash posix-mode notes (item 19): POSIX mode never executes a
+            // function whose name contains a slash; the stage falls through
+            // to the external command search.
+            .filter(|function_name| !(self.posix_mode_enabled() && function_name.contains('/')))
+        else {
             return Ok(None);
         };
         // GNU subst.c process_substitute: a <( ) word in the command's

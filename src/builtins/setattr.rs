@@ -8,7 +8,7 @@ use std::io::{self, Write};
 mod apply;
 mod marks;
 mod print;
-mod value;
+pub(crate) mod value;
 
 use apply::{apply_export_arg, apply_readonly_arg};
 use print::{print_exported, print_readonly};
@@ -124,7 +124,11 @@ where
     // nothing), exactly like readonly.
     if index >= args.len() {
         let _ = print;
-        print_exported(env_vars, stdout)?;
+        print_exported(
+            env_vars,
+            env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1"),
+            stdout,
+        )?;
         return Ok(EXECUTION_SUCCESS);
     }
 

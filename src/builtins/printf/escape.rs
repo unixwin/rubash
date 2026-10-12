@@ -30,12 +30,16 @@ where
         Some('"') => ("\"".to_string(), None),
         Some('?') => ("?".to_string(), None),
         Some('x') => {
-            let (expanded, missing) = format_escape_codepoint(
-                read_escape_digits(chars, 16, 2),
-                "\\x",
-                "missing hex digit for \\x",
-            );
-            (expanded, missing)
+            // GNU printf.def:1108-1124 tescape: `\xNN` is a BYTE escape —
+            // `*cp = evalue & 0xFF` — the raw byte, never a UTF-8 codepoint
+            // encoding (rubash#540: `printf 'a\xe9b'` emits 61 e9 62).
+            match read_escape_digits(chars, 16, 2) {
+                Some(value) => (format_escape_byte(Some(value), ""), None),
+                None => (
+                    "\\x".to_string(),
+                    Some("printf: missing hex digit for \\x".to_string()),
+                ),
+            }
         }
         Some('u') => format_unicode_escape(read_escape_digits_raw(chars, 16, 4), "\\u", 'u'),
         Some('U') => format_unicode_escape(read_escape_digits_raw(chars, 16, 8), "\\U", 'U'),
@@ -142,11 +146,16 @@ pub(super) fn expand_percent_b(value: &str) -> (String, bool, Option<String>) {
             Some('v') => output.push('\x0b'),
             Some('\\') => output.push('\\'),
             Some('x') => {
-                let (expanded, missing) = format_escape_codepoint(
-                    read_escape_digits(&mut chars, 16, 2),
-                    "\\x",
-                    "missing hex digit for \\x",
-                );
+                // GNU printf.def:1108-1124 tescape: `\xNN` is a BYTE escape
+                // (`*cp = evalue & 0xFF`), shared by the %b operand path —
+                // raw bytes, never a UTF-8 codepoint encoding (rubash#540).
+                let (expanded, missing) = match read_escape_digits(&mut chars, 16, 2) {
+                    Some(value) => (format_escape_byte(Some(value), ""), None),
+                    None => (
+                        "\\x".to_string(),
+                        Some("printf: missing hex digit for \\x".to_string()),
+                    ),
+                };
                 if missing.is_some() && diagnostic.is_none() {
                     diagnostic = missing;
                 }

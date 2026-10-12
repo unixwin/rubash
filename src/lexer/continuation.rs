@@ -1,6 +1,7 @@
 use super::heredoc_scan::{
     skip_heredoc_in_chars_decided, skip_heredoc_in_chars_with_closure, skip_heredoc_top_level,
 };
+use super::skip::dollar_word_group_len;
 
 pub(super) fn ends_with_unquoted_backslash(input: &str) -> bool {
     // GNU parse.y shell_getc remove_quoted_newline: backslash-newline is ignored
@@ -234,6 +235,12 @@ pub(crate) struct UnclosedDelim {
     /// pattern punctuation (parse.y:3383 case_item_patten), not a subshell; its `)`
     /// is the pattern terminator, so the pop bypasses the case-depth guard.
     pattern_paren: bool,
+    /// The delimiter opens a P_ARITH arithmetic body (`$(( `, `$[`, the
+    /// inner paren of a `))`-closing command-position `((` group): GNU's
+    /// arithmetic matched-pair scan treats a `$`-`{` inside as literal
+    /// text (only the `${|` funsub form nests), so the parameter-brace
+    /// push must be suppressed while this delimiter is on top.
+    arith: bool,
     /// perf19: the case-clause depth when this delimiter was pushed — a
     /// `)` only closes this delimiter when the case depth has returned to
     /// its push-time level (a `case` opened OUTSIDE never blocks the
@@ -550,6 +557,17 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                             case_depth_at_push: case_depth,
                             array_list: false,
                             pattern_paren: false,
+                            // Not a P_ARITH body: GNU reads the `<(`/`>(`
+                            // body through parse_comsub's P_COMMAND mode
+                            // (parse.y:5515 -> :5523, reached from the
+                            // shellexp arm parse.y:5494 via read_token's
+                            // procsub fall-through parse.y:3794-3798),
+                            // where a `${` inside the body nests as
+                            // ordinary command text — the
+                            // parameter-brace suppression the `arith` mark
+                            // drives (rubash#533, P_ARITH matched-pair
+                            // scan) must stay off.
+                            arith: false,
                         });
                         comment_start = true;
                         i += 1;
@@ -609,6 +627,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                     case_depth_at_push: 0,
                     array_list: false,
                     pattern_paren: false,
+                    arith: false,
                 });
             }
             '"' => {
@@ -623,6 +642,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                     case_depth_at_push: 0,
                     array_list: false,
                     pattern_paren: false,
+                    arith: false,
                 });
             }
             '`' => {
@@ -637,6 +657,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                     case_depth_at_push: 0,
                     array_list: false,
                     pattern_paren: false,
+                    arith: false,
                 });
             }
             '$' => {
@@ -658,9 +679,11 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                         // arithmetic `)' (`$((1+${${x` reports `)', not `}',
                         // 2026-10-12 WSL GNU 5.3.0 probe, #551 C3). A funsub
                         // still recurses (parse_dollar_word).
-                        let in_arith_pair = top.is_some_and(|d| {
-                            d.close == ')' && d.report_open && !d.array_list && !d.command
-                        });
+                        // The `arith` mark covers every P_ARITH body push:
+                        // the `$((` inner pair, the `$[ ]` legacy form and
+                        // the adjacent-`((` dparen inner paren (#551 C3 +
+                        // rubash#533/540 family).
+                        let in_arith_pair = top.is_some_and(|d| d.arith);
                         let funsub = chars
                             .get(i + 2)
                             .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|'));
@@ -683,6 +706,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                                 case_depth_at_push: 0,
                                 array_list: false,
                                 pattern_paren: false,
+                                arith: false,
                             });
                         }
                         if funsub {
@@ -713,6 +737,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                             case_depth_at_push: case_depth,
                             array_list: false,
                             pattern_paren: false,
+                            arith: false,
                         });
                         // A fresh substitution body starts at a token
                         // boundary: `$(#c` is a comment.
@@ -733,6 +758,8 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                         if chars.get(i + 2) == Some(&'(') {
                             // $(( ... )) arithmetic nests a second ')' and is
                             // parsed by parse_matched_pair: start_lineno.
+                            // The body is P_ARITH text: a `$`-`{` inside is
+                            // literal (rubash#533).
                             stack.push(UnclosedDelim {
                                 close: ')',
                                 open_line: line,
@@ -744,9 +771,30 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                                 case_depth_at_push: case_depth,
                                 array_list: false,
                                 pattern_paren: false,
+                                arith: true,
                             });
                             i += 1;
                         }
+                        i += 1;
+                    }
+                    Some('[') => {
+                        // `$[ ]` is the legacy arithmetic form: read_token_word
+                        // reads it through parse_matched_pair (P_ARITH,
+                        // start_lineno), and its body takes the same
+                        // literal-`$`-`{` rule as `$(( ` (rubash#533).
+                        stack.push(UnclosedDelim {
+                            close: ']',
+                            open_line: line,
+                            escapes: true,
+                            report_open: true,
+                            funsub: false,
+                            command: false,
+                            term_ready: false,
+                            case_depth_at_push: case_depth,
+                            array_list: false,
+                            pattern_paren: false,
+                            arith: true,
+                        });
                         i += 1;
                     }
                     Some('\'')
@@ -773,6 +821,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                             case_depth_at_push: 0,
                             array_list: false,
                             pattern_paren: false,
+                            arith: false,
                         });
                         i += 1;
                     }
@@ -807,6 +856,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                         case_depth_at_push: case_depth,
                         array_list: is_array_list,
                         pattern_paren: false,
+                        arith: false,
                     });
                 }
                 comment_start = true;
@@ -839,6 +889,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                     case_depth_at_push: case_depth,
                     array_list: false,
                     pattern_paren: case_depth > 0 && case_pattern_region,
+                    arith: !procsub && i > 0 && chars[i - 1] == '(',
                 });
                 comment_start = true;
             }
@@ -856,6 +907,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                     case_depth_at_push: 0,
                     array_list: false,
                     pattern_paren: false,
+                    arith: false,
                 });
             }
             _ => {}
@@ -2404,6 +2456,72 @@ pub(crate) fn comsub_residuals_advance(
             state.comment_start = false;
             index += 1;
             continue;
+        }
+        // P_ARITH units are opaque to the parameter machine: GNU's reader
+        // consumes an arithmetic body through parse_matched_pair (P_ARITH),
+        // where a `$`-`{` is literal text and never opens a parameter brace
+        // (rubash#533). `$[` is the legacy arithmetic form; a `((` whose
+        // inner group closes directly before `)` is parse_dparen's
+        // arithmetic command, and one that never closes has the arithmetic
+        // reading pending on the appended text (park + consume).
+        if ch == '$'
+            && !state.single
+            && !state.double
+            && !state.ansi_single
+            && !state.parameter_single
+            && chars.get(index + 1) == Some(&'[')
+        {
+            match dollar_word_group_len(chars, index + 1, '[', ']') {
+                Some(end) => {
+                    index = end;
+                    state.comment_start = false;
+                    continue;
+                }
+                None => {
+                    // The unit's closure is undecided against this buffer;
+                    // fall through to the inert char walk so this prefix's
+                    // end state matches the fresh full scan of the same
+                    // bytes, and let the park re-derive on the appended
+                    // text.
+                    if park.is_none() {
+                        park = Some(ComsubResidualPark {
+                            pos: index,
+                            snapshot: state.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        if ch == '('
+            && !state.single
+            && !state.double
+            && !state.ansi_single
+            && state.depth == 0
+            && chars.get(index + 1) == Some(&'(')
+        {
+            match dollar_word_group_len(chars, index + 1, '(', ')') {
+                Some(end) if chars.get(end) == Some(&')') => {
+                    index = end + 1;
+                    state.comment_start = false;
+                    continue;
+                }
+                // A closed group followed by anything else is FINAL — the
+                // nested-subshell reinterpretation: fall through, the
+                // parens are inert at top level for this machine. A group
+                // still open against this buffer is UNDECIDED (appended
+                // text may close it as `))`): fall through inertly so this
+                // prefix's end state matches the fresh full scan of the
+                // same bytes, and let the park re-derive on the append.
+                Some(_) => {}
+                None => {
+                    if park.is_none() {
+                        park = Some(ComsubResidualPark {
+                            pos: index,
+                            snapshot: state.clone(),
+                        });
+                    }
+                }
+            }
         }
         if ch == '$'
             && chars.get(index + 1) == Some(&'{')
@@ -4454,6 +4572,14 @@ pub(crate) fn close_char_residuals_advance(
                             case_depth_at_push: state.case_depth,
                             array_list: false,
                             pattern_paren: false,
+                            // Not a P_ARITH body: parse_comsub P_COMMAND
+                            // mode reads the body (parse.y:5515 -> :5523
+                            // via the shellexp arm parse.y:5494), so a
+                            // `${` inside nests as ordinary command text
+                            // — the `arith` parameter-brace suppression
+                            // (rubash#533) stays off. Mirror of the
+                            // one-shot oracle's push above.
+                            arith: false,
                         });
                         state.comment_start = true;
                         i += 1;
@@ -4515,6 +4641,7 @@ pub(crate) fn close_char_residuals_advance(
                     case_depth_at_push: 0,
                     array_list: false,
                     pattern_paren: false,
+                    arith: false,
                 });
             }
             '"' => {
@@ -4529,6 +4656,7 @@ pub(crate) fn close_char_residuals_advance(
                     case_depth_at_push: 0,
                     array_list: false,
                     pattern_paren: false,
+                    arith: false,
                 });
             }
             '`' => {
@@ -4543,6 +4671,7 @@ pub(crate) fn close_char_residuals_advance(
                     case_depth_at_push: 0,
                     array_list: false,
                     pattern_paren: false,
+                    arith: false,
                 });
             }
             '$' => {
@@ -4565,6 +4694,17 @@ pub(crate) fn close_char_residuals_advance(
                         // the `#if 0' dead arm at parser.h:83), so `${(M)x}'
                         // is a parameter brace whose first unquoted `}'
                         // closes (P_FIRSTCLOSE).
+                        let funsub = chars
+                            .get(i + 2)
+                            .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|'));
+                        if !funsub && top.is_some_and(|d| d.arith) {
+                            // P_ARITH body (parse.y parse_matched_pair): the
+                            // brace pair is literal text here, so it neither
+                            // opens a delimiter nor parks the scan
+                            // (rubash#533).
+                            i += 2;
+                            continue;
+                        }
                         //
                         // K1: `${` at the buffer tail — the FUNSUB_CHAR
                         // lookahead is undecided; the oracle commits
@@ -4584,9 +4724,11 @@ pub(crate) fn close_char_residuals_advance(
                         // (#551 C3). Mirror of the one-shot scan's arm: skip
                         // ONLY the non-funsub in-arith push; a funsub
                         // recurses even there.
-                        let in_arith_pair = top.is_some_and(|d| {
-                            d.close == ')' && d.report_open && !d.array_list && !d.command
-                        });
+                        // The `arith` mark covers every P_ARITH body push:
+                        // the `$((` inner pair, the `$[ ]` legacy form and
+                        // the adjacent-`((` dparen inner paren (#551 C3 +
+                        // rubash#533/540 family).
+                        let in_arith_pair = top.is_some_and(|d| d.arith);
                         if !(in_arith_pair && !funsub) {
                             state.stack.push(UnclosedDelim {
                                 close: '}',
@@ -4602,6 +4744,7 @@ pub(crate) fn close_char_residuals_advance(
                                 case_depth_at_push: 0,
                                 array_list: false,
                                 pattern_paren: false,
+                                arith: false,
                             });
                         }
                         if funsub {
@@ -4639,6 +4782,7 @@ pub(crate) fn close_char_residuals_advance(
                             case_depth_at_push: state.case_depth,
                             array_list: false,
                             pattern_paren: false,
+                            arith: false,
                         });
                         // A fresh substitution body starts at a token
                         // boundary: `$(#c` is a comment.
@@ -4654,6 +4798,8 @@ pub(crate) fn close_char_residuals_advance(
                         if chars.get(i + 2) == Some(&'(') {
                             // $(( ... )) arithmetic nests a second ')' and is
                             // parsed by parse_matched_pair: start_lineno.
+                            // The body is P_ARITH text: a `$`-`{` inside is
+                            // literal (rubash#533).
                             state.stack.push(UnclosedDelim {
                                 close: ')',
                                 open_line: state.line,
@@ -4665,9 +4811,31 @@ pub(crate) fn close_char_residuals_advance(
                                 case_depth_at_push: state.case_depth,
                                 array_list: false,
                                 pattern_paren: false,
+                                arith: true,
                             });
                             i += 1;
                         }
+                        i += 1;
+                    }
+                    Some('[') => {
+                        // `$[ ]` is the legacy arithmetic form: read_token_word
+                        // reads it through parse_matched_pair (P_ARITH,
+                        // start_lineno), and its body takes the same
+                        // literal-`$`-`{` rule as `$(( ` (rubash#533). The
+                        // push is decided as soon as the `[` is visible.
+                        state.stack.push(UnclosedDelim {
+                            close: ']',
+                            open_line: state.line,
+                            escapes: true,
+                            report_open: true,
+                            funsub: false,
+                            command: false,
+                            term_ready: false,
+                            case_depth_at_push: state.case_depth,
+                            array_list: false,
+                            pattern_paren: false,
+                            arith: true,
+                        });
                         i += 1;
                     }
                     Some('\'')
@@ -4694,6 +4862,7 @@ pub(crate) fn close_char_residuals_advance(
                             case_depth_at_push: 0,
                             array_list: false,
                             pattern_paren: false,
+                            arith: false,
                         });
                         i += 1;
                     }
@@ -4728,6 +4897,7 @@ pub(crate) fn close_char_residuals_advance(
                         case_depth_at_push: state.case_depth,
                         array_list: is_array_list,
                         pattern_paren: false,
+                        arith: false,
                     });
                 }
                 state.comment_start = true;
@@ -4758,6 +4928,7 @@ pub(crate) fn close_char_residuals_advance(
                     case_depth_at_push: state.case_depth,
                     array_list: false,
                     pattern_paren: state.case_depth > 0 && state.case_pattern_region,
+                    arith: !procsub && i > 0 && chars[i - 1] == '(',
                 });
                 state.comment_start = true;
             }
@@ -4775,6 +4946,7 @@ pub(crate) fn close_char_residuals_advance(
                     case_depth_at_push: 0,
                     array_list: false,
                     pattern_paren: false,
+                    arith: false,
                 });
             }
             _ => {}

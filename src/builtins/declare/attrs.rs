@@ -366,7 +366,15 @@ where
             let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
             if let Some(value) = variables.get(name).cloned().or_else(|| env::var(name).ok()) {
                 variables.insert(name.to_string(), value.clone());
-                env::set_var(name, value);
+                // GNU variables.c make_env_array_from_var_list: array and
+                // associative variables never cross the child env boundary
+                // (rubash#534) — `declare -x A` on an array keeps the
+                // exported attribute without publishing the storage value.
+                if !variables.is_marked(crate::executor::types::ARRAY_VARS, name)
+                    && !variables.is_marked(crate::executor::types::ASSOC_VARS, name)
+                {
+                    env::set_var(name, value);
+                }
                 mark_exported(variables, name);
             } else if has_assignment {
                 variables.insert((*name).to_string(), String::new());

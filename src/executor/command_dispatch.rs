@@ -44,10 +44,49 @@ impl Executor {
         let assignment_raws = (cmd.assignment_raws.len() == cmd.assignments.len())
             .then(|| cmd.assignment_raws.as_slice());
         let temporary_assignments = if standalone_assignments {
-            self.apply_permanent_assignments(&cmd.assignments, assignment_raws);
+            // GNU subst.c expand_word_error + execute_cmd.c: a failed
+            // assignment with no command word aborts the command list in
+            // every mode (the DISCARD jump); POSIX mode additionally EXITS
+            // the non-interactive shell (bash_variable_assignment_error,
+            // posix-mode notes item 35 — `ro=2` where ro is readonly).
+            let applied = self.apply_permanent_assignments(&cmd.assignments, assignment_raws);
+            if !applied && self.posix_assignment_failure_is_fatal() {
+                self.exit_code = 1;
+                return Err(ExecuteError::ExitCode(1));
+            }
             Vec::new()
         } else {
-            self.apply_temporary_assignments(&cmd.assignments, assignment_raws)
+            let (applied, assignments_failed) =
+                self.apply_temporary_assignments(&cmd.assignments, assignment_raws);
+            // POSIX-mode notes item 36, GNU 5.3 verified cell-by-cell with
+            // unbuffered per-process probes (the early "every command class
+            // exits" reading was a stdout pipe-buffering artifact — GNU's
+            // jump-exit does not flush it): a failed readonly tempenv
+            // assignment before a SPECIAL builtin exits the shell (status 1,
+            // `ro=2 :` — no further statement runs), while before an
+            // ordinary builtin, external or function the command is SKIPPED
+            // and the rest of the command list is abandoned with status 1
+            // (ksh93 emulation — GNU errors7.sub: `x=8 echo` runs nothing,
+            // `after non-special builtin: 1`; subshell forms exit the
+            // subshell with 1 and the parent continues). ExpansionFailure(1)
+            // is exactly that skip-and-abandon contract; the default mode
+            // keeps the historical apply-and-run.
+            if assignments_failed && self.posix_assignment_failure_is_fatal() {
+                self.exit_code = 1;
+                let special = cmd
+                    .words
+                    .first()
+                    .is_some_and(|word| is_posix_special_builtin(word));
+                // Restore the partial tempenv binds before unwinding: the
+                // skip-and-abandon path keeps the shell running, and an
+                // unbalanced tempenv mark would corrupt every later restore.
+                self.restore_temporary_assignments(applied);
+                if special {
+                    return Err(ExecuteError::ExitCode(1));
+                }
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+            applied
         };
         if self.xtrace_enabled() && cmd.arithmetic_command.is_none() {
             // GNU dispatches `(( ))` to execute_arith_command, whose own
@@ -95,6 +134,39 @@ impl Executor {
         }
         if !keep_temporary_assignments {
             self.restore_temporary_assignments(temporary_assignments);
+        } else if Self::attribute_builtin_absorbs_named_tempenv(cmd) {
+            // GNU setattr.def:590-614 set_var_attribute ("only called by
+            // readonly/export") + declare.def:1105: an attribute builtin
+            // absorbs from the temporary environment ONLY the variables its
+            // operands name — `FOO=val export BAR` leaves FOO unset while
+            // `FOO=val export FOO` persists; every other tempenv binding
+            // dies with the temporary environment (rubash#538). `export -f`
+            // operands name functions, not variables: nothing absorbs.
+            let keep = self.attribute_builtin_operand_names(cmd);
+            // GNU's absorption inherits the tempvar's attributes
+            // (setattr.def:604 `var->attributes |= tv->attributes &
+            // ~att_tempvar`) — assign_in_env marks every tempenv binding
+            // exported, so an ABSORBED assignment name keeps att_exported.
+            // The __RUBASH_EXPORTED_VARS marker snapshot therefore must not
+            // be restored (it predates the tempenv's export marks); the
+            // absorbed names are re-marked after the restore instead. Every
+            // other real variable entry not named by an operand is restored.
+            let absorbed: std::collections::HashSet<String> = cmd
+                .assignments
+                .iter()
+                .filter_map(|(name, _)| {
+                    let base = assignment_name_and_append(name).0.to_string();
+                    keep.contains(&base).then_some(base)
+                })
+                .collect();
+            let survivors: Vec<_> = temporary_assignments
+                .into_iter()
+                .filter(|(name, ..)| name != "__RUBASH_EXPORTED_VARS" && !keep.contains(name))
+                .collect();
+            self.restore_temporary_assignments(survivors);
+            for name in &absorbed {
+                self.mark_exported(name);
+            }
         } else if self.posix_mode_enabled() && self.shell_state.function_depth > 0 {
             // GNU execute_cmd.c:4892-4894 → variables.c:4662
             // merge_temporary_env → variables.c:4485 push_posix_temp_var:

@@ -36,7 +36,7 @@ impl Alias {
 pub fn alias(args: &[String], aliases: &mut HashMap<String, Alias>) -> io::Result<i32> {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
-    alias_with_io(args, aliases, &mut stdout, &mut stderr)
+    alias_with_io(args, aliases, &mut stdout, &mut stderr, false)
 }
 
 pub fn unalias(args: &[String], aliases: &mut HashMap<String, Alias>) -> io::Result<i32> {
@@ -49,6 +49,7 @@ pub(crate) fn alias_with_io<W, E>(
     aliases: &mut HashMap<String, Alias>,
     stdout: &mut W,
     stderr: &mut E,
+    posix: bool,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -81,12 +82,18 @@ where
         index += 1;
     }
     let args = &args[index..];
+    // Bash posix-mode notes (item 47): the alias listing omits the leading
+    // "alias" unless -p is given. `alias -p` keeps the full prefix in every
+    // mode; the bare list and the name-query form drop it only in POSIX
+    // mode (the default mode keeps `alias name='value'` everywhere). With
+    // operand names the -p flag only picks the prefixed spelling — the
+    // listing branch runs solely for the nameless invocation, exactly like
+    // GNU setattr.def's loptend split.
+    let include_prefix = pflag || !posix;
 
-    if args.is_empty() || pflag {
-        print_aliases(aliases, stdout)?;
-        if args.is_empty() {
-            return Ok(EXECUTION_SUCCESS);
-        }
+    if args.is_empty() {
+        print_aliases(aliases, stdout, include_prefix)?;
+        return Ok(EXECUTION_SUCCESS);
     }
 
     let mut status = EXECUTION_SUCCESS;
@@ -103,7 +110,7 @@ where
             }
             aliases.insert(name.to_string(), Alias::new(strip_quote_marker(value)));
         } else if let Some(alias) = aliases.get(arg) {
-            print_alias(arg, alias, stdout)?;
+            print_alias(arg, alias, stdout, include_prefix)?;
         } else {
             writeln!(stderr, "{}alias: {}: not found", diagnostic_prefix(), arg)?;
             status = EXECUTION_FAILURE;
@@ -175,7 +182,11 @@ where
     Ok(status)
 }
 
-fn print_aliases<W>(aliases: &HashMap<String, Alias>, stdout: &mut W) -> io::Result<()>
+fn print_aliases<W>(
+    aliases: &HashMap<String, Alias>,
+    stdout: &mut W,
+    include_prefix: bool,
+) -> io::Result<()>
 where
     W: Write,
 {
@@ -183,23 +194,28 @@ where
     names.sort();
     for name in names {
         if let Some(alias) = aliases.get(name) {
-            print_alias(name, alias, stdout)?;
+            print_alias(name, alias, stdout, include_prefix)?;
         }
     }
     Ok(())
 }
 
-fn print_alias<W>(name: &str, alias: &Alias, stdout: &mut W) -> io::Result<()>
+fn print_alias<W>(name: &str, alias: &Alias, stdout: &mut W, include_prefix: bool) -> io::Result<()>
 where
     W: Write,
 {
-    let prefix = if name.starts_with('-') { "-- " } else { "" };
-    writeln!(
-        stdout,
-        "alias {prefix}{}='{}'",
-        name,
-        quote_single(&alias.value)
-    )
+    // The `-- ` guard only belongs to the prefixed spelling: a bare
+    // POSIX-mode listing has no option word to disambiguate.
+    let prefix = if include_prefix {
+        if name.starts_with('-') {
+            "alias -- "
+        } else {
+            "alias "
+        }
+    } else {
+        ""
+    };
+    writeln!(stdout, "{prefix}{}='{}'", name, quote_single(&alias.value))
 }
 
 fn valid_alias_name(name: &str) -> bool {
@@ -255,10 +271,47 @@ mod tests {
             &mut aliases,
             &mut out,
             &mut err,
+            false,
         )
         .unwrap();
 
         assert_eq!(status, EXECUTION_SUCCESS);
         assert_eq!(aliases.get("a").unwrap().value, "unalias -a\nv=2");
+    }
+
+    /// Bash posix-mode notes item 47: the bare posix listing and the name
+    /// query omit the leading "alias " (and the `-- ` guard never applies —
+    /// there is no option word to disambiguate); `alias -p` keeps the
+    /// prefixed spelling in every mode, and the default mode keeps
+    /// `alias name='value'` everywhere.
+    #[test]
+    fn posix_listing_omits_prefix_unless_p_flag() {
+        let mut aliases = HashMap::new();
+        aliases.insert("ll".to_string(), Alias::new("echo LL"));
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        alias_with_io(&[], &mut aliases, &mut out, &mut err, true).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "ll='echo LL'\n");
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        alias_with_io(&["ll".to_string()], &mut aliases, &mut out, &mut err, true).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "ll='echo LL'\n");
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        alias_with_io(&["-p".to_string()], &mut aliases, &mut out, &mut err, true).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "alias ll='echo LL'\n");
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        alias_with_io(&[], &mut aliases, &mut out, &mut err, false).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "alias ll='echo LL'\n");
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        alias_with_io(&["ll".to_string()], &mut aliases, &mut out, &mut err, false).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "alias ll='echo LL'\n");
     }
 }

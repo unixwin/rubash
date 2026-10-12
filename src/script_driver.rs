@@ -2054,6 +2054,9 @@ fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> 
     }
     let tokens = tokenize_with_initial_posix(input, parse_posix);
     if crate::lexer::heredoc_overflow_line().is_some() {
+        if std::env::var_os("RUBASH_DBG_543").is_some() {
+            eprintln!("DBG543 consume at script_driver:2056 paren-verdict");
+        }
         return false;
     }
     let ast = crate::parser::parse_with_options(
@@ -2196,6 +2199,56 @@ pub fn run_source_with_line_offset(
         diagnostic_text,
         None,
     )
+}
+
+/// GNU parse.y:3105 push_heredoc: the 17th pending here-document in one
+/// parse level is fatal (report_syntax_error -> reset_parser ->
+/// exit_shell(EX_BADUSAGE), status 2). GNU parses and executes one complete
+/// command at a time, so the commands BEFORE the offending line already ran
+/// when the fatal fires: run that prefix first (the same prefix model as
+/// the delimiter-quote arm, rubash#351), then report and return 2. Nothing
+/// at or after the offending line runs.
+fn report_heredoc_overflow_fatal(
+    executor: &mut Executor,
+    input: &str,
+    interactive: bool,
+    line_offset: usize,
+    redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
+    parse_posix: bool,
+    line: usize,
+) -> i32 {
+    let source = input.trim_end_matches('\n');
+    let prefix = if line > 1 {
+        source.lines().take(line - 1).collect::<Vec<_>>().join("\n")
+    } else {
+        String::new()
+    };
+    // GNU's reader runs only COMPLETE commands before the fatal. When the
+    // offending here-documents sit inside a still-open construct — a `$(` or
+    // a brace group whose body carries them — the construct's first line
+    // never completed, so the prefix would be that incomplete line and
+    // re-running it standalone only emits a phantom second diagnostic ahead
+    // of the fatal. Skip prefixes that fail the same unclosed-construct gate
+    // the delimiter arm uses (its complements are all complete commands).
+    let prefix_complete = prefix.trim().is_empty()
+        || !crate::lexer::has_unclosed_input_syntax_posix(&prefix, parse_posix);
+    if prefix_complete && !prefix.trim().is_empty() {
+        let _ = run_source_with_line_offset(
+            executor,
+            &prefix,
+            interactive,
+            line_offset,
+            redirect_cmd,
+            diagnostic_text,
+        );
+    }
+    executor.mark_parse_error();
+    eprintln!(
+        "{}maximum here-document count exceeded",
+        executor.parser_diagnostic_prefix_for_line(line + line_offset)
+    );
+    2
 }
 
 fn run_source_impl(
@@ -2429,7 +2482,7 @@ fn run_source_impl(
                     // (parse.y:3726-3733) → parse_arith_cmd, whose
                     // parse_matched_pair(`(',`)',P_ARITH) scan (parse.y:4970)
                     // hitting EOF with the paren count still open reports
-                    // `unexpected EOF while looking for matching `)'' at the
+                    // `unexpected EOF while looking for matching `) ['' at the
                     // line the group opened (parse.y:3908-3915, start_lineno)
                     // with exit 2 (`error yacc_EOF' forces EX_BADUSAGE only
                     // when the status is still 0 — parse.y:484-490). Probes:
@@ -2439,7 +2492,7 @@ fn run_source_impl(
                     // branch's wording.
                     if crate::lexer::dparen_arith_group_never_closes(input, open_line) {
                         eprintln!(
-                            "{}unexpected EOF while looking for matching `)'",
+                            "{}unexpected EOF while looking for matching `) ['",
                             executor.parser_diagnostic_prefix_for_line(global_open)
                         );
                         executor.errexit_live_at_diagnostic();
@@ -2455,7 +2508,7 @@ fn run_source_impl(
                     // status). error.c:324-327 forces 2 under live errexit.
                     if crate::lexer::dparen_subshell_reparse_compound_eof(input, open_line) {
                         eprintln!(
-                            "{}unexpected EOF while looking for matching `)'",
+                            "{}unexpected EOF while looking for matching `) ['",
                             executor.parser_diagnostic_prefix_for_line(global_open)
                         );
                         if executor.errexit_live_at_diagnostic() {
@@ -2499,15 +2552,22 @@ fn run_source_impl(
     // A command with more than HEREDOC_MAX (16) here-documents is fatal in
     // GNU (parse.y push_heredoc -> report_syntax_error + exit_shell with
     // EX_BADUSAGE). The lexer only returns tokens, so it parks the condition
-    // for us: report it with the script-relative line and exit 2 without
-    // running anything.
+    // for us: run the complete commands before the offending line (GNU
+    // parses and executes one complete command at a time, so they already
+    // ran when push_heredoc fired — the same prefix model as the
+    // delimiter-quote arm above), then report with the script-relative line
+    // and exit 2; nothing at or after the offending line runs.
     if let Some(line) = crate::lexer::heredoc_overflow_line() {
-        executor.mark_parse_error();
-        eprintln!(
-            "{}maximum here-document count exceeded",
-            executor.parser_diagnostic_prefix_for_line(line + line_offset)
+        return report_heredoc_overflow_fatal(
+            executor,
+            input,
+            interactive,
+            line_offset,
+            redirect_cmd,
+            diagnostic_text,
+            parse_posix,
+            line,
         );
-        return 2;
     }
     if line_offset != 0 {
         for token in &mut tokens {
@@ -2528,6 +2588,24 @@ fn run_source_impl(
             source_line_offset: line_offset,
         },
     );
+    // Parse-level parking: a command substitution body is its own parse
+    // level (parse.y:4524 parse_command_substitution resets the pending
+    // counter at entry) and its tokenize parks the same overflow. GNU's
+    // push_heredoc is fatal inside the nested level too, before the body's
+    // own EOF diagnostics could matter — the node builder skipped the doomed
+    // body parse, so report the fatal instead of executing anything.
+    if let Some(line) = crate::lexer::heredoc_overflow_line() {
+        return report_heredoc_overflow_fatal(
+            executor,
+            input,
+            interactive,
+            line_offset,
+            redirect_cmd,
+            diagnostic_text,
+            parse_posix,
+            line,
+        );
+    }
     if let Some(cmd) = redirect_cmd {
         if let Err(error) = executor.apply_inherited_command_output_redirects(cmd, &mut ast) {
             eprintln!("{error}");

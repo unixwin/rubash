@@ -730,6 +730,21 @@ impl Executor {
                     && crate::lexer::has_unclosed_command_substitution(raw)
                     && !crate::lexer::command_substitutions_balanced(raw)
                 {
+                    // parse.y:3105 push_heredoc: when the comsub body's own
+                    // tokenize parked the HEREDOC_MAX overflow, GNU's nested
+                    // parse died with the fatal before any of the body's own
+                    // EOF diagnostics — this unclosed-comsub sweep and its
+                    // per-body gather replay model exactly that dead parse.
+                    // Report only the fatal, at the offending line.
+                    if let Some(line) = crate::lexer::heredoc_overflow_line() {
+                        self.mark_parse_error();
+                        eprintln!(
+                            "{}maximum here-document count exceeded",
+                            self.parser_diagnostic_prefix_for_line(line)
+                        );
+                        self.exit_code = 2;
+                        return Err(ExecuteError::ExitCode(2));
+                    }
                     self.mark_parse_error();
                     self.report_unclosed_comsub_eof(raw, base_line);
                     reported = true;

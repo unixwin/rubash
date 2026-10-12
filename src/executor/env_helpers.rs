@@ -107,6 +107,21 @@ pub(in crate::executor) fn marked_env_names(
     env_vars.marked_names(key)
 }
 
+/// Whether a marked-exported variable may carry its value into a child
+/// process environment. GNU variables.c make_env_array_from_var_list skips
+/// array and associative variables when the child env list is assembled
+/// (ARRAY_EXPORT off): `declare -a A=(x y); export A; printenv A` prints
+/// nothing — the exported attribute stays on the cell (declare -p shows
+/// -a -x) but the name never crosses the boundary. rubash#534: the
+/// storage-encoded array value must not leak into the child env block.
+pub(in crate::executor) fn is_exportable_env_name(
+    env_vars: &crate::shell::var_table::VarTable,
+    name: &str,
+) -> bool {
+    !env_vars.is_marked(crate::executor::types::ARRAY_VARS, name)
+        && !env_vars.is_marked(crate::executor::types::ASSOC_VARS, name)
+}
+
 pub(in crate::executor) fn local_export_env_values(
     env_vars: &HashMap<String, String>,
 ) -> Vec<(String, String)> {
