@@ -54,6 +54,19 @@ impl Executor {
             &mut stderr,
         )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        // GNU builtins/printf.def printf_builtin returns
+        // sh_chkwrite(format/operands success): a failed flush (a closed
+        // stdout fd) folds the write failure into the builtin's status —
+        // `exec >&-; printf "end\n"` reports
+        // `printf: write error: Bad file descriptor` AND exits 1 (issue
+        // #510; builtins/common.c:320-334). The routing already printed
+        // the diagnostic and set the flag; merge it here so the dispatch
+        // site's `self.exit_code = self.execute_printf(cmd)?` keeps the
+        // failure instead of overwriting it with the nominal zero (the
+        // same merge execute_pwd already applies).
+        if self.take_builtin_write_failed() {
+            return Ok(1);
+        }
         Ok(status)
     }
 
