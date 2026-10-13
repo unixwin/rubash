@@ -92,7 +92,7 @@ fn run_main() -> i32 {
     apply_invocation_shell_mode(&mut executor, args.first().map(String::as_str));
 
     if args.len() > 1 {
-        return run_args(&mut executor, &args[1..]);
+        return run_args(&mut executor, &args[1..], args.first().map(String::as_str));
     }
 
     // GNU shell.c:541-547: with no operands (and no -c string), tty stdin +
@@ -193,7 +193,7 @@ fn invocation_shell_name(argv0: &str) -> Option<String> {
     Some(stem.to_ascii_lowercase())
 }
 
-fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
+fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i32 {
     // TODO(shell.c): GNU Bash has a full option parser and shell-name handling.
     // This narrow parser supports the `-c` and `-o posix -c` forms used by
     // upstream alias tests.
@@ -273,7 +273,7 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
     // ("%s: invalid option" + usage, exit 2, shell.c:874-881); a single-dash
     // unknown name falls through to the short-option parser (shell.c:882).
     let mut long_state = LongOptionState::default();
-    let (mut index, early_exit) = parse_long_options(executor, args, &mut long_state);
+    let (mut index, early_exit) = parse_long_options(executor, args, &mut long_state, argv0);
     if let Some(code) = early_exit {
         return code;
     }
@@ -647,6 +647,7 @@ fn parse_long_options(
     executor: &mut Executor,
     args: &[String],
     state: &mut LongOptionState,
+    argv0: Option<&str>,
 ) -> (usize, Option<i32>) {
     let mut index = 0usize;
     while index < args.len() && args[index].starts_with('-') {
@@ -685,7 +686,15 @@ fn parse_long_options(
         }
         match name {
             "help" => {
-                print_usage();
+                // Issue #585: the help surface forks on the invocation name,
+                // exactly like GNU keys `--help` off argv[0] (shell.c:477-482
+                // show_shell_usage(stdout, 1)). Under a bash/sh invocation
+                // name the GNU usage contract prints (rc 0, stdout); under
+                // any other name the product help stays byte-identical.
+                match invocation_help_name(argv0) {
+                    Some(shell_name) => show_shell_help(executor, &shell_name),
+                    None => print_usage(),
+                }
                 return (index, Some(0));
             }
             "version" => {
@@ -786,6 +795,66 @@ bash [GNU long option] [option] script-file ...
     eprintln!("Shell options:");
     eprintln!("	-ilrsD or -c command or -O shopt_option		(invocation only)");
     eprintln!("	-abefhkmnptuvxBCEHPT or -o option");
+}
+
+/// The usage-contract shell name for this invocation, when `--help` must
+/// print the GNU usage form (issue #585). GNU keys the fork off argv[0]'s
+/// basename (shell.c set_shell_name): the `.exe` spelling is a Windows
+/// artifact and never reaches the usage lines, the `-` login marker is
+/// KEPT in the display name (empirical 5.3.0 oracle: `exec -a -bash bash
+/// --help` prints `Usage:\t-bash ...`), and the bash-vs-sh decision uses
+/// the dash-stripped lowercased stem so `-BASH.EXE` still forks. Any other
+/// name (rubash, niu, ...) returns None and keeps the product help.
+fn invocation_help_name(argv0: Option<&str>) -> Option<String> {
+    let basename = argv0?.rsplit(['/', '\\']).next()?;
+    let stem = if basename.len() >= 4 && basename.to_ascii_lowercase().ends_with(".exe") {
+        &basename[..basename.len() - 4]
+    } else {
+        basename
+    };
+    let decided = stem.strip_prefix('-').unwrap_or(stem);
+    match decided.to_ascii_lowercase().as_str() {
+        "bash" | "sh" => Some(stem.to_string()),
+        _ => None,
+    }
+}
+
+/// GNU show_shell_usage (shell.c:2057-2103) with extra=1 — the `--help`
+/// form, issue #585: printed to STDOUT and exited EXECUTION_SUCCESS
+/// (shell.c:477-482), unlike the usage-error form above (stderr, no
+/// version/extra block). The version line uses the engine's own version
+/// string and machtype in GNU's `version %s-(%s)` shape
+/// (shell.c:2071-2072 `_("GNU bash, version %s-(%s)\n")`); the long-option
+/// table is the engine's accepted LONG_OPTIONS set, and the Shell options
+/// block matches the usage-error contract byte for byte. The bash/sh names
+/// in the usage and `Type ...' lines follow the invocation (shell_name,
+/// shell.c:2084-2088, 2094-2095); the home-page lines keep GNU's literal
+/// `bash home page` text. No Windows-only resources are referenced: the
+/// same strings render in the unix cross-compile lanes.
+fn show_shell_help(executor: &Executor, shell_name: &str) {
+    let version = executor
+        .get_env("BASH_VERSION")
+        .unwrap_or("5.3.0(1)-release")
+        .to_string();
+    println!(
+        "GNU bash, version {version}-({})",
+        rubash::executor::machtype_value()
+    );
+    println!("Usage:\t{shell_name} [GNU long option] [option] ...");
+    println!("\t{shell_name} [GNU long option] [option] script-file ...");
+    println!("GNU long options:");
+    for name in LONG_OPTIONS {
+        println!("	--{name}");
+    }
+    println!("Shell options:");
+    println!("	-ilrsD or -c command or -O shopt_option		(invocation only)");
+    println!("	-abefhkmnptuvxBCEHPT or -o option");
+    println!("Type `{shell_name} -c \"help set\"' for more information about shell options.");
+    println!("Type `{shell_name} -c help' for more information about shell builtin commands.");
+    println!("Use the `bashbug' command to report bugs.");
+    println!();
+    println!("bash home page: <http://www.gnu.org/software/bash>");
+    println!("General help using GNU software: <http://www.gnu.org/gethelp/>");
 }
 
 /// pretty_print_loop (eval.c:215-253): parse the script and print each
