@@ -2868,7 +2868,12 @@ impl Executor {
                 // Same classification as execute_materialized_command
                 // (rubash#535): an unbound variable in a function call's
                 // redirect word is a fatal expansion error.
-                self.finish_heredoc_expansion_error(
+                // The classification's side effect is the exit-code store;
+                // the run/continue verdict is NOT propagated here (upstream
+                // shape carried over the 32f92600 base on both sides) — the
+                // status surfaces through the finish_process_substitutions
+                // chain below. Explicit discard keeps `-D warnings` green.
+                let _ = self.finish_heredoc_expansion_error(
                     &materialized_cmd,
                     Self::FATAL_PARAMETER_EXPANSION_STATUS,
                 );
