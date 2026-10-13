@@ -509,6 +509,29 @@ fn process_substitution_source(tokens: &[Token]) -> String {
         }
         skip_next_semicolon = false;
 
+        // rubash#564: a physical newline JOINED into the logical line by the
+        // reader reaches the flat pass as a Semicolon with line_break=true.
+        // GNU parse_comsub keeps the body verbatim (parse.y:4632 print_comsub
+        // reprints the substitution with the body's own newlines), and the
+        // source re-parses when the substitution executes — where a `;' is
+        // only valid BETWEEN complete commands, never in the positions GNU
+        // holds a bare newline: at the body's START (`cat <(\necho hi\n)`
+        // produced a leading `;' → "unexpected token `;'") or doubled after
+        // another `;'/`;;' (`;;\nesac' → ";; ;"). Fold ONLY those stray
+        // positions to the verbatim `\n`; mid-body and trailing separators
+        // keep the `;' spelling the #373/#381/#390 adjudication pins
+        // (`case esac in ; esac`, `echo bye ;` — GNU-verified wt33/wt39
+        // bytes).
+        if token.kind == TokenKind::Semicolon
+            && token.line_break
+            && (source.is_empty() || source.ends_with(';') || source.ends_with('\n'))
+        {
+            if !source.is_empty() && !source.ends_with('\n') {
+                source.push('\n');
+            }
+            continue;
+        }
+
         if token.kind == TokenKind::HereDocBody {
             if !source.ends_with('\n') {
                 source.push('\n');

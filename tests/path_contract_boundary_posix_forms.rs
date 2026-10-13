@@ -13,9 +13,11 @@
 //!     verbatim — the engine adds no path conversion at spawn (GNU-faithful
 //!     import/export, docs/issue329-path-form-policy-analysis.md option A).
 //!
-//! CONTRACT tests: expected green on current master. The known red edges are
-//! filed separately (bare `cd /c` under a configured shell root; winuxcmd
-//! `find` start-path operands) and deliberately NOT pinned here.
+//! CONTRACT tests: expected green on current master. The known red edges
+//! are filed separately and deliberately NOT pinned here — except bare
+//! `cd /c` under a configured shell root, which rubash#566 fixed and pinned
+//! in issue566_bare_drive_root_enoent_regressions.rs (winuxcmd `find`
+//! start-path operands remain open, WinuxCmd#1170).
 //!
 //! B② legs need the installed winuxcmd toolchain (WINUXCMD_HOME) and skip
 //! with a note elsewhere, e.g. CI.

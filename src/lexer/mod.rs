@@ -31,6 +31,7 @@ pub(crate) use continuation::{
 pub(crate) use alias_stream::{expand_aliases_in_source, AliasLookup};
 use brace_scan_cache::BraceScanCache;
 pub(crate) use continuation::has_unclosed_command_substitution;
+pub(crate) use continuation::line_ends_in_open_operator_process_substitution;
 pub(crate) use continuation::unclosed_command_substitution_depth;
 pub(crate) use continuation::unclosed_input_close_char_posix;
 pub(super) use continuation::word_ends_in_open_process_substitution;
@@ -535,9 +536,10 @@ pub(crate) struct GroupScanFeeder {
     gate_comsub_parked: bool,
     gate_quotes_open: bool,
     gate_quotes_parked: bool,
-    /// rubash#463: the most recent push ended inside an open word-attached
-    /// process-substitution body — the procsub join held the logical line
-    /// open. `token_level_needs_more` reports this so the incremental group
+    /// rubash#463/#564: the most recent push ended inside an open process-
+    /// substitution body — word-attached (`word<(`) or operator-position
+    /// (`cat <(`) — so the procsub join held the logical line open.
+    /// `token_level_needs_more` reports this so the incremental group
     /// reader (script/`-c` execution) keeps appending physical lines even
     /// though the keyword stack and trailing-connector summary see nothing
     /// pending; it clears when a logical line commits.
@@ -1459,13 +1461,30 @@ impl GroupScanFeeder {
         // matching `)` arrives. The last token of this pass is that word —
         // its scan consumed the `<(`/`>(` introducer and broke at end of
         // line inside the body — so ask its raw span whether the body is
-        // still open. The space-separated form (`cat <(` NL ...) needs no
-        // gate: its `(` is a standalone Keyword token and the parser's
-        // procsub target collection bridges the line separators already.
+        // still open.
         let procsub_word_open = line_tokens.last().is_some_and(|token| {
             token.kind == TokenKind::Word && word_ends_in_open_process_substitution(&token.raw)
         });
-        if (brace_group_open || param_expansion_open || dparen_open || procsub_word_open)
+        // rubash#564: the SPACE-SEPARATED form joins too. GNU read_token's
+        // procsub check (parse.y:3776-3796) declines to return the `<`/`>`
+        // operator when peek_char == '(' and falls into read_token_word —
+        // the substitution is ONE word token regardless of what precedes the
+        // introducer, and parse_comsub reads its body across physical lines.
+        // The old claim that "the parser's procsub target collection bridges
+        // the line separators already" is wrong at the reader layer: the
+        // logical line commits after the introducer line and the parser sees
+        // a bare `<(` (`echo <(echo` NL died with `syntax error near
+        // unexpected token `('`). Text-level oracle in the dparen gate's
+        // shape (cheap byte admission + span scan), introducer condition the
+        // exact complement of the word-attached gate above.
+        let procsub_operator_open = (self.logical_line.contains("<(")
+            || self.logical_line.contains(">("))
+            && line_ends_in_open_operator_process_substitution(&self.logical_line);
+        if (brace_group_open
+            || param_expansion_open
+            || dparen_open
+            || procsub_word_open
+            || procsub_operator_open)
             && !funcheck
             && !has_heredoc
         {
@@ -1508,12 +1527,13 @@ impl GroupScanFeeder {
                 }
             } else if param_expansion_open {
             }
-            // rubash#463: the procsub join's pass ended INSIDE a word (the
-            // word broke at end of line), so the tail-resume checkpoint —
-            // which only trusts token-boundary ends — must not survive to
-            // the longer buffer's pass; a full re-lex is the only sound
-            // retry (same reasoning the dparen join documents above).
-            if procsub_word_open {
+            // rubash#463/#564: a procsub join's pass ended INSIDE a word (the
+            // word broke at end of line) or inside an operator-position
+            // body, so the tail-resume checkpoint — which only trusts
+            // token-boundary ends — must not survive to the longer buffer's
+            // pass; a full re-lex is the only sound retry (same reasoning
+            // the dparen join documents above).
+            if procsub_word_open || procsub_operator_open {
                 self.boundary = None;
                 self.procsub_word_join_open = true;
             }

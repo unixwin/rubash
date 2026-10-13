@@ -1133,6 +1133,19 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 } else {
                     (*i, None)
                 };
+                // rubash#565 (merged with the #563 C4b tuple classifier): the
+                // shifted `(' is the token stream's LAST token (or only an Eof
+                // sentinel follows). The lexer emits no terminator for a
+                // script's final line, but GNU's reader still hands yacc the
+                // physical line's NEWLINE token — the function_def production
+                // shifted the `(' expecting `)' and rejects THAT token:
+                // `syntax error near unexpected token `newline'' with
+                // print_offending_line of the `(' line (parse.y:1054 via
+                // read_token's parse.y:3774-3790 classification; WSL GNU
+                // 5.3.0 probes: `[ (` NL, `f (` NL, `echo (` NL and
+                // `bash -c '[ ('` all name `newline`, never `('). The
+                // `None'/Eof arms of the classifier above are that
+                // classification.
                 super::parse_loop::push_unexpected_token_error_named(
                     state,
                     tokens,
