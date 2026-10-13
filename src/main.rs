@@ -6,10 +6,9 @@ use rubash::executor::Executor;
 use rubash::lexer::tokenize_with_initial_posix;
 use rubash::parser::parse;
 use rubash::script_driver::{
-    check_binary_file, finish_shell, prepare_interactive_history, read_unbuffered_line,
-    run_interactive_stdin, run_script_with_history, run_source, run_source_with_line_offset,
-    script_uses_aliases, script_uses_history, stdin_heredoc_declarations,
-    stdin_script_errexit_enabled, stdin_source_needs_more_posix,
+    check_binary_file, finish_shell, prepare_interactive_history, run_interactive_stdin,
+    run_script_with_history, run_source, run_source_with_line_offset, script_uses_aliases,
+    script_uses_history,
 };
 use std::env;
 use std::fs;
@@ -1380,153 +1379,11 @@ fn run_startup_files(executor: &mut Executor, rc_override: Option<&str>) -> Opti
 }
 
 fn run_stdin_script(executor: &mut Executor) -> i32 {
-    // shell.c:780-786: a non-interactive shell with no script operand reads
-    // commands from stdin (pipe/redirect), so GNU sets read_from_stdin and
-    // `$-` gains `s` (`bash < file`, `bash -s < file`). This driver is the
-    // common path for all such invocations, so set the marker once here.
-    executor.set_env(rubash::script_driver::READ_STDIN_MARKER, "1");
-    // GNU never rebinds $0 for a stdin script (the shell.c:1613 rebind runs
-    // in shell_execscript, the script-FILE path), so $0 stays argv[0] as the
-    // parent invoked it — variables.c initialize_shell_variables binds
-    // dollar_vars[0] = shell_name. Probe 2026-09-27: `printf ... | bash -s
-    // alpha` prints $0=bash (argv[0] verbatim, full path when invoked with
-    // one). Internal respawns carry the parent's name through init.rs, so
-    // only bind when absent.
-    if executor.get_env("__RUBASH_SCRIPT_NAME").is_none() {
-        let argv0 = std::env::args_os()
-            .next()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "bash".to_string());
-        executor.set_env("__RUBASH_SCRIPT_NAME", argv0.as_str());
-    }
-    // TODO(shell.c/input.c): Bash reads commands from redirected stdin without
-    // prompting, while commands launched from that stream inherit the same
-    // input. Keep ordinary input line-oriented, but gather obvious compound
-    // commands until their closing reserved word arrives.
-    executor.inherit_process_stdin();
-    let mut input = String::new();
-    let mut pending = String::new();
-    let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
-    let mut next_line = 1usize;
-    let mut pending_start_line = 1usize;
-
-    loop {
-        input.clear();
-        // GNU input.c bash_input binds the command reader to fd 0, so a
-        // permanent `exec 0<file` (redir.c do_redirections) moves the script
-        // source to the new input; only fall back to the process's real
-        // stdin while fd 0 still designates it (redir1.sub:4-6).
-        let line_result = match executor.script_fd0_line(&mut input) {
-            Some(count) => Ok(count),
-            None => read_unbuffered_line(&mut input),
-        };
-        match line_result {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => break,
-        }
-
-        if pending.is_empty() {
-            pending_start_line = next_line;
-        }
-        next_line += input.matches('\n').count().max(1);
-        pending.push_str(&input);
-        if let Some((delimiter, strip_tabs)) = pending_heredocs.first() {
-            let candidate = input.trim_end_matches(['\r', '\n']);
-            let candidate = if *strip_tabs {
-                candidate.trim_start_matches('\t')
-            } else {
-                candidate
-            };
-            if candidate == delimiter {
-                pending_heredocs.remove(0);
-            }
-        } else {
-            pending_heredocs.extend(stdin_heredoc_declarations(&input));
-        }
-
-        let stdin_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-        if !pending_heredocs.is_empty() || stdin_source_needs_more_posix(&pending, stdin_posix) {
-            continue;
-        }
-
-        // bashhist.c:869 bash_add_history: in interactive mode, each
-        // complete command is recorded to the session history.
-        if let Some(session) = executor.get_session_history() {
-            let trimmed = pending.trim_end();
-            if !trimmed.is_empty() {
-                let control = executor.get_env("HISTCONTROL").unwrap_or_default();
-                let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
-                let histsize =
-                    rubash::history::SessionHistory::size_limit(executor.get_env("HISTSIZE"));
-                session
-                    .borrow_mut()
-                    .record(trimmed, &control, &ignore, histsize);
-            }
-        }
-
-        // eval.c:178: one current_command_number increment per command
-        // list read happens in the execute_ast walk; no driver increment
-        // here (`\#` in ${var@P} reads it).
-        let status = run_source_with_line_offset(
-            executor,
-            &pending,
-            false,
-            pending_start_line.saturating_sub(1),
-            None,
-            None,
-        );
-        // GNU evalstring.c parse_and_execute leaves the group's status in
-        // last_command_exit_value for the reader to exit with — the
-        // run_source* conversion returns it, but the read-time parse-error
-        // fast paths (an unclosed `"`/`'`/`${`/`$(` reports
-        // `unexpected EOF while looking for matching ...` and returns 2)
-        // never touch executor state. Committing here keeps that 2 (and
-        // every other group status) observable as the shell's exit status
-        // instead of the stale pre-error status — rubash#508: a stdin
-        // script's syntax error must exit 2 like the identical file-driven
-        // run, whose driver returns the group status directly.
-        executor.set_last_exit_code(status);
-        let parse_error = executor.take_parse_error();
-        pending.clear();
-        if parse_error
-            || executor.take_exit_jump_pending()
-            || (status != 0
-                && stdin_script_errexit_enabled(executor)
-                // execute_cmd.c:652-656: `! CMD` status is errexit-exempt.
-                && !executor.last_command_inverted())
-        {
-            break;
-        }
-    }
-
-    if !pending.trim().is_empty() {
-        // Final list gathered at EOF (e.g. no trailing newline) — still
-        // one reader_loop iteration (eval.c:178); the walk increments it.
-        let status = run_source_with_line_offset(
-            executor,
-            &pending,
-            false,
-            pending_start_line.saturating_sub(1),
-            None,
-            None,
-        );
-        // Same group-status commit as the loop body above (rubash#508).
-        executor.set_last_exit_code(status);
-        let parse_error = executor.take_parse_error();
-        if parse_error
-            || executor.take_exit_jump_pending()
-            || (status != 0
-                && stdin_script_errexit_enabled(executor)
-                && !executor.last_command_inverted())
-        {
-            pending.clear();
-        }
-    }
-
-    let status = executor.last_exit_code();
-    let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
-    finish_shell(executor, status, interactive)
+    // rubash#586: the driver lives in the library (script_driver) so every
+    // entry — this binary's `-s`/`bash < file` route and the embedding
+    // hosts' ShellInvocation -s route — runs the SAME on-demand reader
+    // instead of a host-local slurp that pre-buffers the stream.
+    rubash::script_driver::run_stdin_script(executor)
 }
 
 fn run_internal_pipeline_utility(name: &str, args: &[String]) -> ! {
