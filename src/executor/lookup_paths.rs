@@ -16,8 +16,15 @@ impl Executor {
         // `type -t mv`), so the /bin-namespace display paths stay. Unix
         // must NOT fake them: GNU describe_command (type.def:379) prints
         // the real find_user_command hit below (WSL: `mv is /usr/bin/mv`).
+        // rubash#588: like the winuxcmd dispatcher, this /bin namespace is
+        // the stand-in for GNU's startup default PATH (variables.c:550
+        // set_if_not) and answers only while PATH is still the imported
+        // value — after a shell-level assignment, describe_command reports
+        // what find_user_command_in_path (findcmd.c:623-697) actually
+        // found, so `PATH=/nonexistent; command -v ls` fails with rc 1 the
+        // way GNU 5.3.0 does (WSL probe 2026-10-13).
         #[cfg(windows)]
-        {
+        if !crate::executor::path::path_is_user_owned(&self.shell_state.env_vars) {
             if matches!(name, "mv") {
                 return Some("/usr/bin/mv".to_string());
             }
@@ -99,8 +106,11 @@ impl Executor {
         // Same Windows/unix split as command_path above: the /bin-namespace
         // display paths are a Windows suite bridge; unix enumerates only the
         // real PATH matches, per GNU user_command_matches (findcmd.c:437).
+        // rubash#588: gated on the startup-PATH state exactly like
+        // command_path — after a shell-level PATH assignment the
+        // enumeration reports real hits only.
         #[cfg(windows)]
-        {
+        if !crate::executor::path::path_is_user_owned(&self.shell_state.env_vars) {
             if matches!(name, "mv") {
                 paths.push("/usr/bin/mv".to_string());
             }

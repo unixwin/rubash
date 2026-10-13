@@ -87,6 +87,34 @@ impl Executor {
             );
         }
 
+        // rubash#588: record the imported (normalized) PATH once at the
+        // startup boundary. GNU command search walks the PATH variable
+        // verbatim — search_for_command feeds value_cell(path) straight to
+        // find_user_command_in_path (findcmd.c:383-386), and that walk
+        // (findcmd.c:623-697 find_user_command_in_path) consults NOTHING
+        // beyond the variable's elements; the only default a PATH-less
+        // shell ever gets is a real startup assignment
+        // (variables.c:550 set_if_not("PATH", DEFAULT_PATH_VALUE)). Rubash's
+        // Windows fixture adds out-of-band namespaces (the winuxcmd
+        // dispatcher, the /bin display paths) that stand in for that
+        // default — legitimate only while PATH still holds its startup
+        // value. path::path_is_user_owned compares the live PATH against
+        // this snapshot: an explicit assignment — including a starving one
+        // like `PATH=/nonexistent; hash -r; ls`, which GNU 5.3.0 answers
+        // with 127 and `command -v ls` with rc 1 (WSL probe 2026-10-13) —
+        // owns resolution from then on and the fixture stands down
+        // (findcmd.c:623-697: a PATH element that resolves nothing yields
+        // no command). The contains_key guard keeps subshell and
+        // command-substitution executors, which re-enter this constructor
+        // on an inherited env_vars map, on the process's original snapshot.
+        if !env_vars.contains_key(crate::executor::path::INITIAL_PATH_KEY) {
+            let startup_path = env_vars.get("PATH").cloned().unwrap_or_default();
+            env_vars.insert(
+                crate::executor::path::INITIAL_PATH_KEY.to_string(),
+                startup_path,
+            );
+        }
+
         // Pin the host's POSIX toolset directory before scripts can
         // overwrite PATH: `PATH=/bin:/usr/bin` (invocation.tests) and
         // `command -p` (command.def _CS_PATH) both need the logical bin

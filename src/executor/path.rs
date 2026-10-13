@@ -215,6 +215,47 @@ pub(crate) fn shell_directory_entries(
     Ok(entries)
 }
 
+/// The env key holding the PATH value imported at the startup boundary
+/// (init.rs). `PATH` comparing unequal to it — including PATH removed by
+/// `unset PATH` — means a script owns command resolution and the
+/// out-of-band Windows fixture namespaces stand down (rubash#588).
+pub(crate) const INITIAL_PATH_KEY: &str = "__RUBASH_INITIAL_PATH";
+
+/// rubash#588: whether PATH has left its startup (fixture) state.
+///
+/// GNU search_for_command walks the PATH variable verbatim
+/// (findcmd.c:383-386 path_list = value_cell(path)) and
+/// find_user_command_in_path (findcmd.c:623-697) consults nothing beyond
+/// those elements: a PATH whose directories all miss yields no command and
+/// the caller reports 127. Rubash's Windows hosts add out-of-band lookup
+/// namespaces — the winuxcmd dispatcher (niubash's single-executable
+/// coreutils) and the /bin display paths — that stand in for GNU's
+/// variables.c:550 set_if_not("PATH", DEFAULT_PATH_VALUE) startup default;
+/// they are legitimate exactly while PATH still equals the value this
+/// process imported. A shell-level PATH assignment (`PATH=/nonexistent`,
+/// `export PATH=...`, `PATH=$dir:$PATH`, a tempenv `PATH=dir cmd`, even
+/// `unset PATH`) moves resolution under the script's control — the walk
+/// answers alone, so a starving assignment gets GNU's 127 (WSL GNU 5.3.0,
+/// probe 2026-10-13: `PATH=/nonexistent; hash -r; ls` rc=127,
+/// `command -v ls` rc=1) instead of the fixture namespaces quietly
+/// resuming service. The snapshot key is written only at the startup
+/// boundary (contains_key guard), so subshell/command-substitution
+/// executors inherit the process's original reference value; if the
+/// startup boundary never ran (embedded library use), the fixture stays.
+pub(crate) fn path_is_user_owned(env_vars: &HashMap<String, String>) -> bool {
+    let initial = env_vars.get(INITIAL_PATH_KEY);
+    match (env_vars.get("PATH"), initial) {
+        (Some(current), Some(initial)) => current != initial,
+        // PATH removed after startup: GNU path_value returns NULL and
+        // find_user_command_in_path never runs (findcmd.c:279-293
+        // _find_user_command_internal -> savestring(name)); the fixture
+        // namespaces stand down with the walk.
+        (None, Some(_)) => true,
+        // Startup boundary never recorded a reference value.
+        _ => false,
+    }
+}
+
 pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     if name.is_empty() {
         return None;
@@ -549,10 +590,18 @@ fn find_user_command_uncached(
     // A workspace may expose WinuxCmd as one dispatcher executable instead of
     // one wrapper per command.  Ask the dispatcher whether it owns the name
     // before returning it; unknown names must retain Bash's 127 behavior.
+    // rubash#588: this out-of-band namespace stands in for GNU's startup
+    // default PATH (variables.c:550 set_if_not) and answers only while PATH
+    // is still the value this process imported — a shell-level PATH
+    // assignment hands resolution to the script, and find_user_command_in_path
+    // (findcmd.c:623-697) answers from the walk alone: directories that
+    // resolve nothing yield 127, never a fixture lookup.
     #[cfg(windows)]
-    if let Some(dispatcher) = find_winuxcmd_dispatcher(env_vars) {
-        if winuxcmd_has_command_cached(&dispatcher, name, env_vars) {
-            return Some(dispatcher);
+    if !path_is_user_owned(env_vars) {
+        if let Some(dispatcher) = find_winuxcmd_dispatcher(env_vars) {
+            if winuxcmd_has_command_cached(&dispatcher, name, env_vars) {
+                return Some(dispatcher);
+            }
         }
     }
 
