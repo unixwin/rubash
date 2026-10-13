@@ -3905,7 +3905,14 @@ fn db_scan_quote_unit(
             i += 1;
             continue;
         }
-        if ch == '\\' {
+        // parse_matched_pair (parse.y:3877): a backslash escapes the next
+        // byte in every span EXCEPT a single-quoted one — inside '...' a
+        // backslash is LITERAL data and only the closing ' ends the unit
+        // (the no-P_ALLOWESC arm; bash_completion:275-277
+        // `${_word%'\'}'`, wt56-bash-completion-syntax, run 38404767765:
+        // the escape-anywhere rule ate the closing quote and reported the
+        // unit unclosed to EOF, aborting every source of the library).
+        if ch == '\\' && quote != '\'' {
             escaped = true;
             i += 1;
             continue;

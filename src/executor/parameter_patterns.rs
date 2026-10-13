@@ -516,22 +516,54 @@ fn mark_escaped_pattern_anchors(pattern: &str) -> String {
     output
 }
 
-/// Scan a pattern word for a single/double quote that never closes
-/// (backslash escapes its successor). Mirrors the quote tracking GNU's
-/// parse_matched_pair performs while finding the `}` of `${...}`.
+/// Scan a pattern word for a single/double quote that never closes.
+/// Mirrors the quote tracking GNU's parse_matched_pair performs while
+/// finding the `}` of `${...}` (parse.y:3877-3912): a backslash escapes its
+/// successor only OUTSIDE quotes; inside a double-quoted span it escapes
+/// only the dquote escapables `$ ` " \ newline` (parse.y:3992 LEX_PASSNEXT
+/// via the dquote recursion — any other `\x` pair is two literal bytes);
+/// inside a single-quoted span a backslash is LITERAL data and only the
+/// closing `'` ends the span. The escape-anywhere rule read the closing
+/// quote of `${_word%'\'}` as escaped (scop/bash-completion:277,
+/// `_comp_dequote_incomplete`), reported an unclosed `'`, and aborted every
+/// sourcing of the library (wt56-bash-completion-syntax; release run
+/// 38404767765 J6/P3-S4/P4-S1/P8-S4).
 fn unclosed_pattern_quote(pattern: &str) -> Option<char> {
-    let mut quote = None;
+    let mut quote: Option<char> = None;
     let mut escaped = false;
-    for ch in pattern.chars() {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        index += 1;
         if escaped {
             escaped = false;
             continue;
         }
-        match ch {
-            '\\' => escaped = true,
-            '\'' if quote.is_none() => quote = Some('\''),
-            '"' if quote.is_none() => quote = Some('"'),
-            c if Some(c) == quote => quote = None,
+        match quote {
+            // Single-quote span: literal context — nothing is escapable.
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                }
+            }
+            // Double-quote span: only the dquote escapables are escaped.
+            Some('"') => {
+                if ch == '\\' {
+                    if matches!(chars.get(index), Some('$' | '`' | '"' | '\\' | '\n')) {
+                        escaped = true;
+                    }
+                } else if ch == '"' {
+                    quote = None;
+                }
+            }
+            // Unquoted: a backslash quotes the next byte.
+            None => match ch {
+                '\\' => escaped = true,
+                '\'' => quote = Some('\''),
+                '"' => quote = Some('"'),
+                _ => {}
+            },
             _ => {}
         }
     }
