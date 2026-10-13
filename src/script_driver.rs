@@ -2524,7 +2524,7 @@ fn run_source_impl(
                     // (parse.y:3726-3733) → parse_arith_cmd, whose
                     // parse_matched_pair(`(',`)',P_ARITH) scan (parse.y:4970)
                     // hitting EOF with the paren count still open reports
-                    // `unexpected EOF while looking for matching `) ['' at the
+                    // `unexpected EOF while looking for matching `)'' at the
                     // line the group opened (parse.y:3908-3915, start_lineno)
                     // with exit 2 (`error yacc_EOF' forces EX_BADUSAGE only
                     // when the status is still 0 — parse.y:484-490). Probes:
@@ -2532,9 +2532,16 @@ fn run_source_impl(
                     // A group that CLOSES is the nested-subshell
                     // reinterpretation (parse.y:4938-4948) and keeps this
                     // branch's wording.
+                    // (Merge resolution rubash#578: GNU's EOF reports are a
+                    // single `%c' — parse.y:3912 names the matched-pair's
+                    // close char, parse.y:7152 the literal `)' — so the
+                    // dual-char `) [' wording this arm briefly carried has no
+                    // GNU oracle; the #390-pinned `)' report stands, matching
+                    // the pre-merge branch behavior the issue390/issue413
+                    // pins exercise.)
                     if crate::lexer::dparen_arith_group_never_closes(input, open_line) {
                         eprintln!(
-                            "{}unexpected EOF while looking for matching `) ['",
+                            "{}unexpected EOF while looking for matching `)'",
                             executor.parser_diagnostic_prefix_for_line(global_open)
                         );
                         executor.errexit_live_at_diagnostic();
@@ -2550,7 +2557,7 @@ fn run_source_impl(
                     // status). error.c:324-327 forces 2 under live errexit.
                     if crate::lexer::dparen_subshell_reparse_compound_eof(input, open_line) {
                         eprintln!(
-                            "{}unexpected EOF while looking for matching `) ['",
+                            "{}unexpected EOF while looking for matching `)'",
                             executor.parser_diagnostic_prefix_for_line(global_open)
                         );
                         if executor.errexit_live_at_diagnostic() {
