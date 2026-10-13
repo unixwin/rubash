@@ -47,12 +47,24 @@ impl Executor {
             // GNU subst.c expand_word_error + execute_cmd.c: a failed
             // assignment with no command word aborts the command list in
             // every mode (the DISCARD jump); POSIX mode additionally EXITS
-            // the non-interactive shell (bash_variable_assignment_error,
-            // posix-mode notes item 35 — `ro=2` where ro is readonly).
+            // the non-interactive shell (subst.c:13177-13182
+            // expand_word_list_internal's is_nullcmd arm sets
+            // last_command_exit_value = EXECUTION_FAILURE and calls
+            // posix_variable_assignment_error(0), subst.c:11181-11196 — the
+            // non-interactive posix branch jumps FORCE_EOF;
+            // `ro=2` where ro is readonly).
             let applied = self.apply_permanent_assignments(&cmd.assignments, assignment_raws);
             if !applied && self.posix_assignment_failure_is_fatal() {
-                self.exit_code = 1;
-                return Err(ExecuteError::ExitCode(1));
+                // The FORCE_EOF status is context-owned (shell.c:1471-1472
+                // run_one_command `case FORCE_EOF: return
+                // last_command_exit_value = 127` under -c; eval.c:104-109
+                // reader_loop keeps last_command_exit_value = 1 for scripts;
+                // execute_cmd.c:1811 contains the jump at 1 inside subshell
+                // children — WSL 5.3.0: `(ro=2)` leaves $? = 1 and the
+                // parent runs).
+                let code = self.expansion_fatal_status();
+                self.exit_code = code;
+                return Err(ExecuteError::ExitCode(code));
             }
             Vec::new()
         } else {
@@ -82,7 +94,16 @@ impl Executor {
                 // unbalanced tempenv mark would corrupt every later restore.
                 self.restore_temporary_assignments(applied);
                 if special {
-                    return Err(ExecuteError::ExitCode(1));
+                    // GNU subst.c:13186-13195 (the tempenv arm):
+                    // bash_variable_assignment_error(is_special_builtin)
+                    // jumps FORCE_EOF for a special builtin
+                    // (subst.c:11169-11180); shell.c:1471-1472
+                    // run_one_command remaps the jump to 127 under -c while
+                    // script mode exits 1 (eval.c:104-109) and subshell
+                    // children contain it at 1 (execute_cmd.c:1811).
+                    let code = self.expansion_fatal_status();
+                    self.exit_code = code;
+                    return Err(ExecuteError::ExitCode(code));
                 }
                 return Err(ExecuteError::ExpansionFailure(1));
             }

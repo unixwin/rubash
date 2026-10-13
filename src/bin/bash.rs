@@ -28,13 +28,17 @@ fn main() {
     // (bash.exe, sh.exe, ...), so Windows argv[0] cannot carry the contract
     // through Command::new — the child would see the resolved host path and
     // `sh -c 'set -o | grep -w posix'` reported off with `$0` = niu. Forward
-    // the invocation name through NIU_INVOKED_AS instead; niu's Shell::new
-    // reads it and applies the same shell.c rules (posix on for sh/ash,
-    // login marker, `$0` = sh). Every other name actively scrubs the
-    // variable: it describes how one process was invoked, and a stale value
-    // inherited from an outer `sh' run must not switch a nested
-    // `sh -c 'bash -c ...'` into POSIX mode (bash.c: the child shell keys
-    // off its own argv[0], which this forward erases).
+    // the invocation name through NIU_INVOKED_AS instead; the host applies
+    // the same shell.c rules (posix on for sh/ash, login marker) AND binds
+    // `$0` to the face: GNU set_shell_name (shell.c:1778-1806) derives
+    // dollar_vars[0] from the same argv[0], so `sh -c 'echo $0'` prints `sh`
+    // and `bash -c 'echo $0'` prints `bash` (rubash#590; #504 forwarded
+    // only the sh/ash faces). Replacing — never scrubbing — the variable
+    // keeps the isolation #504 introduced: it describes how one process was
+    // invoked, and a stale value inherited from an outer `sh' run must not
+    // switch a nested `sh -c 'bash -c ...'` into POSIX mode (bash.c: the
+    // child shell keys off its own argv[0], which this forward re-creates
+    // faithfully).
     let mut command = Command::new(&shell);
     match forwarded_invocation_name(env::args_os().next().as_deref()) {
         Some(invoked_as) => {
@@ -101,10 +105,13 @@ fn locate_shell() -> Option<PathBuf> {
 
 /// The invocation name worth forwarding to the host shell, if any. Returns
 /// the raw `argv[0]` basename with `.exe` stripped (leading `-' preserved,
-/// mirroring GNU shell.c's set_shell_name) only when the stem is `sh' or
-/// `ash' — the names whose GNU contract the host must reproduce. Any other
-/// name (bash, rbash, the shim's own dev name) forwards nothing, and the
-/// caller scrubs any inherited NIU_INVOKED_AS instead.
+/// mirroring GNU shell.c's set_shell_name) when the stem names a shell face
+/// the host must reproduce: `sh'/`ash' (the POSIX contract, rubash#504) and
+/// `bash'/`rbash' (rubash#590 — GNU set_shell_name binds dollar_vars[0] to
+/// the same argv[0], so `$0` must read the invocation face, and
+/// shell.c:1258-1299 shell_is_restricted keys `rbash' off it). Any other
+/// name forwards nothing, and the caller scrubs any inherited
+/// NIU_INVOKED_AS instead.
 fn forwarded_invocation_name(argv0: Option<&std::ffi::OsStr>) -> Option<String> {
     let argv0 = argv0?.to_str()?;
     let basename = argv0.rsplit(['/', '\\']).next()?;
@@ -114,7 +121,10 @@ fn forwarded_invocation_name(argv0: Option<&std::ffi::OsStr>) -> Option<String> 
         _ => basename,
     };
     let stripped = stem.strip_prefix('-').unwrap_or(stem);
-    if stripped.eq_ignore_ascii_case("sh") || stripped.eq_ignore_ascii_case("ash") {
+    if matches!(
+        stripped.to_ascii_lowercase().as_str(),
+        "sh" | "ash" | "bash" | "rbash"
+    ) {
         Some(stem.to_string())
     } else {
         None
@@ -188,15 +198,42 @@ mod tests {
 
     #[test]
     fn other_names_forward_nothing() {
-        // `bash.exe' behavior must stay byte-identical: no NIU_INVOKED_AS is
-        // injected on the plain bash forward.
-        assert_eq!(forwarded_invocation_name(Some("bash".as_ref())), None);
-        assert_eq!(
-            forwarded_invocation_name(Some("C:/x/bin/bash.exe".as_ref())),
-            None
-        );
-        assert_eq!(forwarded_invocation_name(Some("rbash".as_ref())), None);
+        // Non-shell names stay scrubbed: they carry no GNU contract the host
+        // could reproduce (the shim's own dev name included).
         assert_eq!(forwarded_invocation_name(Some("shd".as_ref())), None);
+        assert_eq!(forwarded_invocation_name(Some("niu".as_ref())), None);
+        assert_eq!(forwarded_invocation_name(Some("bashsh".as_ref())), None);
         assert_eq!(forwarded_invocation_name(None), None);
+    }
+
+    #[test]
+    fn bash_and_rbash_faces_forward_the_invocation_name() {
+        // rubash#590: `$0` must read the invocation face — GNU set_shell_name
+        // (shell.c:1797-1799) binds dollar_vars[0] to argv[0], which this
+        // forward erases, so the bash/rbash faces travel in NIU_INVOKED_AS
+        // the same way sh/ash already do.
+        assert_eq!(
+            forwarded_invocation_name(Some("bash".as_ref())),
+            Some("bash".to_string())
+        );
+        assert_eq!(
+            forwarded_invocation_name(Some("C:/x/winuxcmd/usr/bin/bash.exe".as_ref())),
+            Some("bash".to_string())
+        );
+        assert_eq!(
+            forwarded_invocation_name(Some("rbash".as_ref())),
+            Some("rbash".to_string())
+        );
+        // GNU shell.c:1258-1299 (shell_is_restricted / maybe_make_restricted)
+        // keys the restricted shell off the same basename, and shell.c:1787
+        // keeps a leading `-' (login marker) on the name.
+        assert_eq!(
+            forwarded_invocation_name(Some("-rbash.exe".as_ref())),
+            Some("-rbash".to_string())
+        );
+        assert_eq!(
+            forwarded_invocation_name(Some("\\usr\\bin\\BASH.EXE".as_ref())),
+            Some("BASH".to_string())
+        );
     }
 }

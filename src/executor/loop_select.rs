@@ -157,12 +157,20 @@ impl Executor {
                         for_command.variable
                     );
                     // POSIX-mode notes item 37: assigning to a readonly
-                    // loop variable exits the non-interactive POSIX shell
-                    // (status 1); the default mode fails the `for` command
-                    // with status 1 and keeps running.
+                    // loop variable exits the non-interactive POSIX shell;
+                    // the default mode fails the `for` command
+                    // with status 1 and keeps running. GNU execute_cmd.c:3085-3089
+                    // (execute_for_command) sets last_command_exit_value =
+                    // EXECUTION_FAILURE and jumps FORCE_EOF; the status is
+                    // context-owned — shell.c:1471-1472 run_one_command
+                    // remaps FORCE_EOF to 127 under -c, eval.c:104-109
+                    // keeps 1 for scripts, execute_cmd.c:1811 contains it
+                    // at 1 inside subshell children.
                     self.exit_code = 1;
                     if self.posix_assignment_failure_is_fatal() {
-                        return Err(ExecuteError::ExitCode(1));
+                        let code = self.expansion_fatal_status();
+                        self.exit_code = code;
+                        return Err(ExecuteError::ExitCode(code));
                     }
                     return Ok(());
                 }
@@ -173,11 +181,16 @@ impl Executor {
             } else {
                 // POSIX-mode notes item 37: a failed loop-variable bind
                 // (readonly violation) exits the non-interactive POSIX shell
-                // (status 1); default mode fails the command only.
+                // (GNU execute_cmd.c:3085-3089 jumps FORCE_EOF — the
+                // context-owned status maps to 127 under -c via
+                // shell.c:1471-1472 and stays 1 for scripts and contained
+                // subshells); default mode fails the command only.
                 if !self.apply_shell_assignment(&for_command.variable, value.clone()) {
                     self.exit_code = 1;
                     if self.posix_assignment_failure_is_fatal() {
-                        return Err(ExecuteError::ExitCode(1));
+                        let code = self.expansion_fatal_status();
+                        self.exit_code = code;
+                        return Err(ExecuteError::ExitCode(code));
                     }
                     return Ok(());
                 }

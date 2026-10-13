@@ -589,13 +589,22 @@ impl Executor {
                 // ExpansionFailure carries exactly that contract at top level
                 // (ast_exec.rs skips the remaining same-line commands).
                 // POSIX-mode notes item 35: a non-interactive POSIX shell
-                // additionally EXITS with status 1 (oracle: top-level
+                // additionally EXITS (oracle: top-level
                 // `ro=2` on a readonly ro ends the GNU posix script where
                 // the default mode prints the diagnostic and continues;
                 // subshells exit 1 in both modes via the DISCARD path).
+                // The fatal arm jumps FORCE_EOF (subst.c:13177-13182
+                // is_nullcmd -> posix_variable_assignment_error,
+                // subst.c:11181-11196); the status is context-owned —
+                // shell.c:1471-1472 run_one_command remaps FORCE_EOF to 127
+                // under -c, eval.c:104-109 keeps 1 for scripts, and
+                // execute_cmd.c:1811 contains it at 1 inside subshell
+                // children — so expansion_fatal_status owns the value.
                 self.exit_code = 1;
                 if self.posix_assignment_failure_is_fatal() {
-                    return Err(ExecuteError::ExitCode(1));
+                    let code = self.expansion_fatal_status();
+                    self.exit_code = code;
+                    return Err(ExecuteError::ExitCode(code));
                 }
                 return Err(ExecuteError::ExpansionFailure(1));
             }

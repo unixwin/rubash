@@ -195,9 +195,17 @@ impl Executor {
                 self.exit_code = 1;
                 // POSIX-mode notes item 37 covers select alongside for: a
                 // readonly select variable exits the non-interactive POSIX
-                // shell (status 1); default mode fails the command only.
+                // shell. GNU execute_cmd.c:3587-3592
+                // (execute_select_command) sets last_command_exit_value =
+                // EXECUTION_FAILURE and jumps FORCE_EOF; the status is
+                // context-owned — shell.c:1471-1472 run_one_command remaps
+                // FORCE_EOF to 127 under -c, eval.c:104-109 keeps 1 for
+                // scripts, execute_cmd.c:1811 contains it at 1 inside
+                // subshell children.
                 if self.posix_assignment_failure_is_fatal() {
-                    return Err(ExecuteError::ExitCode(1));
+                    let code = self.expansion_fatal_status();
+                    self.exit_code = code;
+                    return Err(ExecuteError::ExitCode(code));
                 }
                 return Ok(());
             }

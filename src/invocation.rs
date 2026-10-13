@@ -273,6 +273,19 @@ impl ShellInvocation {
         if self.command.is_some() {
             executor.set_env("__RUBASH_IS_C", "1");
         }
+        if self.read_stdin {
+            // rubash#591: flags.c:294-306 which_set_flags shows `s` in `$-`
+            // while GNU's read_from_stdin (shell.c:301) is set, and
+            // shell.c:928 records the explicit -s at option-parse time. The
+            // engine's own drivers arm the marker inside run_stdin_script /
+            // run_interactive_stdin; a library host (niu) drives the stdin
+            // script through its own reader after this shared invocation
+            // surface, so the marker must be armed here too — an explicit
+            // -s keeps the `s` in `$-` whatever driver serves the input.
+            // Like the C global it never reaches child processes (the
+            // `__RUBASH_` env filter).
+            executor.set_env(crate::script_driver::READ_STDIN_MARKER, "1");
+        }
         executor.set_positional_params(self.positional_params.clone());
         Ok(())
     }
