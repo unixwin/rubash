@@ -2864,21 +2864,30 @@ impl Executor {
         let (temporary_assignments, assignments_failed) =
             self.apply_temporary_assignments(&materialized_cmd.assignments, assignment_raws);
         if let Some(rejection) = redirect_rejection {
-            if rejection == super::redirection::RedirectRejection::FatalNounset {
-                // Same classification as execute_materialized_command
-                // (rubash#535): an unbound variable in a function call's
-                // redirect word is a fatal expansion error.
-                // The classification's side effect is the exit-code store;
-                // the run/continue verdict is NOT propagated here (upstream
-                // shape carried over the 32f92600 base on both sides) — the
-                // status surfaces through the finish_process_substitutions
-                // chain below. Explicit discard keeps `-D warnings` green.
-                let _ = self.finish_heredoc_expansion_error(
+            // Only the FatalNounset class routes through the expansion-error
+            // classifier (rubash#535): an unbound variable in a function
+            // call's redirect word is a fatal expansion error, and the
+            // classifier's Err (interactive DISCARD or main-shell FORCE_EOF)
+            // must reach the driver, not be dropped. Other rejections (bad
+            // dup fd, ambiguous redirect) keep the plain skip path —
+            // running the classifier for them would kill the script where
+            // GNU continues (issue518 dup_empty_quoted_word regression).
+            let heredoc_result = if rejection == super::redirection::RedirectRejection::FatalNounset
+            {
+                Some(self.finish_heredoc_expansion_error(
                     &materialized_cmd,
                     Self::FATAL_PARAMETER_EXPANSION_STATUS,
-                );
-            }
+                ))
+            } else {
+                None
+            };
             self.restore_temporary_assignments(temporary_assignments);
+            if let Some(Err(error)) = heredoc_result {
+                let _ = self.finish_process_substitutions(process_substitution_files);
+                let _ = self
+                    .finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
+                return Some(Err(error));
+            }
             let finish_result = self.finish_process_substitutions(process_substitution_files);
             let assignment_finish_result =
                 self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
