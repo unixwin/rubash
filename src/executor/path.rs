@@ -4710,7 +4710,9 @@ mod tests {
         let root = i164_fixture_root();
         let existing = root.join("etc").join("i164.conf");
         let existing_native = existing.to_string_lossy().into_owned();
-        let drive_letter = existing_native.as_bytes()[0].to_ascii_lowercase() as char;
+        // The drive designator is the path's first CHAR (ASCII on any
+        // Windows temp path); rebuild the POSIX spelling from the tail.
+        let drive_letter = existing_native.chars().next().unwrap().to_ascii_lowercase();
         let drive_form = format!("/{drive_letter}{}", &existing_native[2..]).replace('\\', "/");
         let mut legacy = i164_rooted_env(&root);
         legacy.insert("__RUBASH_ARGV_DIALECT".to_string(), "legacy".to_string());
