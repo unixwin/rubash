@@ -19,6 +19,8 @@ GNU Bash 5.3.0 兼容性大幅推进。83 套件 true-baseline 总差异从 3427
 - **`--version` 构建元数据**（#488，PR #490）：GNU license 块（保持逐字节不变）之后追加 `build: <git-hash> (<profile>)`——build.rs 编译期捕获 `git rev-parse --short HEAD`（git 不可用时回退 unknown，发布打包可 `RUBASH_BUILD_HASH` 钉值），profile 为 debug/release；Windows 附加一行 persona 说明：原生 Windows 构建、无 MSYS runtime，`*-pc-msys` MACHTYPE 不应读作 MSYS2/Cygwin bash 移植。
 - **GNU `cp` 移植**：-r/-n/-i/-v/-p/-u/-t、递归、缓冲 stderr；`/bin/echo` 与 `/usr/bin/echo` 路由到缓冲 builtin 通道。
 - **`history -d start-end` 范围删除**（GNU 5.3 特性）。
+- **`stty` builtin** (PR #567): console mode queries and mutations without leaving the shell (`stty size`, `stty raw -echo`, ...), complementing the `read` fd-semantics work below.
+- **`bash --help` / `sh --help` fork to the GNU usage contract** (#585, PR #596): the help screen follows the invocation name and prints GNU's usage contract — option table and exit status — instead of a product-generic help screen.
 
 ### 修复
 
@@ -58,6 +60,28 @@ GNU Bash 5.3.0 兼容性大幅推进。83 套件 true-baseline 总差异从 3427
 - **Unix 上进程替换 fd 作为外部命令参数传递**（PR #468）。
 - **coproc 子进程继承父函数表快照，DEBUG trap 函数可解析**（#441，PR #469）。
 - **引号整词默认展开保持单一复合元素**（PR #466）。
+- **Pipeline members now honor shell functions** — `date(){ ...; }; date | cat` runs the function, `echo(){ printf ...; }; echo hi | cat` shadows the builtin: two dispatch sites classified a pipeline stage before any function lookup, where GNU resolves functions before the PATH search in every stage (#587, PR #594).
+- **A `PATH=` assignment prefix owns command resolution for its own command** — `PATH=/opt/bin:$PATH git status` resolves `git` through the new PATH within that same simple command, including the pipeline and concurrent fast-path stages (#588, PR #594).
+- **`cat`/`mkdir`/`touch`/`cp`/`rm`/`rmdir` stop re-expanding already-expanded argv** (P0 pair) — `v='*.txt'; cat $v` silently read the wrong file and the mkdir/touch/cp/rm/rmdir family created or removed wrong paths; the builtins no longer re-run expansion over words the shell already expanded (#511, PR #552; #555, PR #558).
+- **`$PWD`/`pwd` render the POSIX persona form unconditionally** — the native-drive-style hatch is retired; it starved nvm's find_up loop, and native drive spelling now survives only at the Win32 spawn boundary per the path contract (#537, PR #556).
+- **GNU semantics waves** (each batch issue-locked and WSL-verified against GNU 5.3.0):
+  - Wave 1 (PR #561): trap `exit` unwind, pipeline redirect rejection, nameref unbound gating, brace-expansion shape validation, redirect `set -u`, arithmetic latch (#524 #525 #529 #532 #535 #536).
+  - Wave 2a (PR #560): SIGQUIT ignored in non-interactive shells, `-s` argument scan order, readonly attribute direction, `declare -na` structure wins, ERR single-fire guard.
+  - Wave 2c (PR #573): RANDOM reseed on `declare -i`, heredoc-max fatal ordered before the unclosed-substitution scan, export/array/dynamic-variable/encoding semantics (#533 #534 #538-#543).
+  - Wave 3 (PR #569): xtrace quote fidelity, redirect message rendering, `caller` frame limits, ERR trap function-entry, extdebug DEBUG-skip sites, `kill` signal names (#517-#522, #550).
+  - Wave 4a (PR #576): redirect ambiguity gate, backtick diagnostic window, command-position paren, compgen tilde expansion (#514-#516, #523).
+  - Wave 4b (PR #578): `$[ ]` EOF scan, `declare -aA`, procsub fd window, trap listing/DEBUG freeze, `bash -o` listing, jobs/alias parameter semantics (#543-#547, #549).
+- **`read` console/fd semantics** — empty-line exit status, fd 0 file-loop ownership, carrier-byte domain normalization, dup-stdin console reads, fractional `-t` deadlines, and the dup-fd ladder behave like GNU (#275-#282, PR #567).
+- **`-s` stdin-script reads on demand through the canonical library driver** — the parser consumes stdin one command at a time like GNU's non-seekable stream, so a `$(exec cat)`/`read`/top-level `exec cat` consumer sees exactly the bytes after the last submitted command and the unconsumed tail never executes as code (the `curl | bash -s` install-script hazard). The driver moved into `script_driver::run_stdin_script`, so embedding hosts get the same contract instead of slurping (#586, PR #593). Related: an exec'd child keeps the shell's stdin channel in every context (#575, PR #583).
+- **CLI entry-shape semantics** — POSIX special-builtin/assignment fatals map per entry shape (`-c` exits 127 like GNU `run_one_command`, scripts/stdin keep 1, subshell-contained stays 1); the shim forwards the bash/rbash invocation faces so `$0` reports the invoked name (and `sh`/`ash` keep the POSIX-mode contract) (#589 #590 #591, PR #598; #504).
+- **`eval` EOF-shape probe is comment-aware** — restores the modernish init battery (the #318 `unclosed_comsub_eof_shape` regression) (#282, PR #572).
+- **Multiline `[[ ]]` with folded `(( ))` continuations parse like GNU**, the `bind -v`/inputrc engine surface is honored, and the #433 rc regression ledger is pinned (PR #571).
+- **Arithmetic-for sections evaluate the verbatim `(( ))` capture** and carrier bytes never reach eval-error echoes (#548, PR #584).
+- **Compound redirection failures reach the ERR trap again** (the body-exemption gate was type-blind, PR #557), and the redirect expansion-error verdict propagates on the function fast path (PR #579).
+- **P1 semantic batch** — errexit body adjudication, stdin parse-error status, printf write-failure status, dirstack `EX_USAGE` (PR #553).
+- **POSIX-mode coverage audit completed** — 42/75 audited GNU posix-mode behaviors implemented: fatal assignment families, redirect no-split, `time` fd-2 routing, trap usage exits (PR #559).
+- **Diagnostic fidelity** — the C-family message formats match GNU: stdin line offsets, dolbrace scanning, PST_REGEXP two-stage EOF, outermost unclosed-block line naming, write-error prefix, and the `[[ =~` two-part diagnostic (#551, PR #563); a top-level unclosed procsub continues to the next line and `[ (` is reported as a diagnostic token (#564 #565, PR #577).
+- **Windows path contract** — POSIX drive-form operand pre-translation now covers every non-shell-wrapped child class with context/position/existence invariance: `/d/...` operands work the same inside loops, subshells, functions, pipelines and command substitution, for to-be-created targets and flag values, while data operands (grep/sed/awk patterns, `basename`/`dirname`) stay verbatim (#592, PR #600); `/mnt/c` is retired from the verbatim loop per the #568 adjudication (PR #574); bare drive-root POSIX forms are accepted (#566, PR #577).
 - 回归钉子（无用户可见行为变化）：sourced `exit N` 终止语义（PR #457）、函数定义花括号行 token 语义（PR #459）、#424 重定向目标拒绝与 procsub 输入侧（PR #464）。
 
 ### 性能
@@ -69,6 +93,9 @@ GNU Bash 5.3.0 兼容性大幅推进。83 套件 true-baseline 总差异从 3427
 - **#242 执行器热路径（部分）**：named-event catch_flag 信号轮询、单遍 `${}` 算子索引 + 直接 simple-glob 匹配 + 算术快照容量、walker `${}` 臂 inline fragment 解析与模式快路径、allocation-free shopt 咨询、字面词快路径、comsub-scan O(n²) 修复等。
 - **#375 第一刀（部分）**：`$(cd X && pwd)` 命令替换路径解析单句柄化——一次 CreateFileW 同时取目录属性 + 物理路径（PR #484）；`$(cd && pwd)×5000` 878→779 ms（−11%），bats_debug_trap 形状 −8%，输出逐位等价。
 - **perf-suite**：专用基准 harness 与首个基线（24 probes，rubash vs WSL GNU 5.3.0）。
+- **Lexer construction wins**（rubash#241，PR #554）: fold-before-push moves, gated leading_ws capture, and inline TokStr strings — parse throughput up under alias-correct ground truth.
+- **Executor dispatch floor**（rubash#375，PR #562）: shape-only cd/pwd command-substitution admission and a DEBUG-trap parse-once cache retire the handle-table scale myth.
+- **Hot-path construction-only wins**（rubash#242，PR #501）: test argv zero-copy, gated fd marks, single word materialization, copy-on-write IFS strip, cached debug switches.
 
 ### 平台
 
@@ -76,16 +103,21 @@ GNU Bash 5.3.0 兼容性大幅推进。83 套件 true-baseline 总差异从 3427
 - **平台门全量审计**（PR #492）：src/ 下 511 处平台 cfg 盘点分类；确认无「漏 macOS 腿」同类问题，真 Linux 专属门（RT 34..64 字面量、`sa_restorer` 等）保留。
 - **OpenHarmony / musl**：`ulimit` 针对 musl 与 OpenHarmony libc 编译修复（PR #449）。
 - **信号编号统一**：rubash 全表从 BSD/Cygwin 风格切换到 Linux 表（USR1=10、CHLD=17、RTMIN=34），与 GNU 5.3.0 WSL 契约一致；kill -l/trap -l 输出逐字节对齐。
+- Residual Windows assumptions are gated outside `cfg(windows)` so non-Windows builds stay honest (PR #499).
 
 ### 构建
 
 - **crates.io 打包瘦身**：发布包不再携带 `tests/` 与 `third_party/`（参考源码与测试语料，仅本地开发/CI 需要），包内容 2053 个文件 / 15.6 MB → 400 个文件 / 8.9 MB，回到 crates.io 10 MiB 上限之内；`exclude` 同步移除失效的 `!third_party/bash/tests/*.right` 反规则。功能与构建不受影响（`cargo publish --dry-run` 验证通过）。
+- Internal: twelve ghost module skeletons that never entered the compile tree are removed (PR #597); stale regression snapshots are re-baselined with an airtight snapshot env and a CI golden-refresh artifact (PR #496).
 
 ### 文档
 
 - 重写 README.md 和 README.zh-CN.md：数据驱动的兼容性展示、近期修复表、架构概览；其后一次事实保持的风格微调（PR #495）。
 - 更新 COMPATIBILITY-STATUS.md：2026-09-11 全量 true-baseline 重跑结果、总体结论刷新。
 - 归档过时文档 7 个（gnu-bash-compatibility-implementation-plan、bash-implementation-inventory、bash-source-map、performance-debugging-process、typed-expansion-migration-checkpoint、source-layout、HANDOFF-20260829）。
+- README restructured again, evidence-first, with the cross-platform identity (EN+zh) (PR #500); the three boundary invariants — native core, POSIX forms, verbatim fidelity — are codified as contract tests plus a windows-path-contract document and proxy-driver guide (PR #570).
+- Platform gap documented: foreign children cannot receive exec-established numbered fds (#378, PR #580).
+- Baseline numbers (PERF/CORPUS/COMPAT/LINUX) extracted from archived status ledgers (#477, PR #581); the debugger M0 design (DAP-over-stdio) is published (#497, PR #582); dangling COMPATIBILITY-STATUS references are repointed to the archived ledger (PR #502); the GNU suite ledger closes at 83/83 with the nameref residual proven to be GNU's own coproc reap race (PR #506).
 
 ## [0.3.0] - 2026-08-22
 
