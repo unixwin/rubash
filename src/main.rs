@@ -6,10 +6,9 @@ use rubash::executor::Executor;
 use rubash::lexer::tokenize_with_initial_posix;
 use rubash::parser::parse;
 use rubash::script_driver::{
-    check_binary_file, finish_shell, prepare_interactive_history, read_unbuffered_line,
-    run_interactive_stdin, run_script_with_history, run_source, run_source_with_line_offset,
-    script_uses_aliases, script_uses_history, stdin_heredoc_declarations,
-    stdin_script_errexit_enabled, stdin_source_needs_more_posix,
+    check_binary_file, finish_shell, prepare_interactive_history, run_interactive_stdin,
+    run_script_with_history, run_source, run_source_with_line_offset, script_uses_aliases,
+    script_uses_history,
 };
 use std::env;
 use std::fs;
@@ -118,7 +117,7 @@ fn run_main() -> i32 {
     apply_invocation_shell_mode(&mut executor, invocation_name.as_deref());
 
     if args.len() > 1 {
-        return run_args(&mut executor, &args[1..]);
+        return run_args(&mut executor, &args[1..], args.first().map(String::as_str));
     }
 
     // GNU shell.c:541-547: with no operands (and no -c string), tty stdin +
@@ -219,7 +218,7 @@ fn invocation_shell_name(argv0: &str) -> Option<String> {
     Some(stem.to_ascii_lowercase())
 }
 
-fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
+fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i32 {
     // TODO(shell.c): GNU Bash has a full option parser and shell-name handling.
     // This narrow parser supports the `-c` and `-o posix -c` forms used by
     // upstream alias tests.
@@ -299,7 +298,7 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
     // ("%s: invalid option" + usage, exit 2, shell.c:874-881); a single-dash
     // unknown name falls through to the short-option parser (shell.c:882).
     let mut long_state = LongOptionState::default();
-    let (mut index, early_exit) = parse_long_options(executor, args, &mut long_state);
+    let (mut index, early_exit) = parse_long_options(executor, args, &mut long_state, argv0);
     if let Some(code) = early_exit {
         return code;
     }
@@ -673,6 +672,7 @@ fn parse_long_options(
     executor: &mut Executor,
     args: &[String],
     state: &mut LongOptionState,
+    argv0: Option<&str>,
 ) -> (usize, Option<i32>) {
     let mut index = 0usize;
     while index < args.len() && args[index].starts_with('-') {
@@ -711,7 +711,15 @@ fn parse_long_options(
         }
         match name {
             "help" => {
-                print_usage();
+                // Issue #585: the help surface forks on the invocation name,
+                // exactly like GNU keys `--help` off argv[0] (shell.c:477-482
+                // show_shell_usage(stdout, 1)). Under a bash/sh invocation
+                // name the GNU usage contract prints (rc 0, stdout); under
+                // any other name the product help stays byte-identical.
+                match invocation_help_name(argv0) {
+                    Some(shell_name) => show_shell_help(executor, &shell_name),
+                    None => print_usage(),
+                }
                 return (index, Some(0));
             }
             "version" => {
@@ -812,6 +820,66 @@ bash [GNU long option] [option] script-file ...
     eprintln!("Shell options:");
     eprintln!("	-ilrsD or -c command or -O shopt_option		(invocation only)");
     eprintln!("	-abefhkmnptuvxBCEHPT or -o option");
+}
+
+/// The usage-contract shell name for this invocation, when `--help` must
+/// print the GNU usage form (issue #585). GNU keys the fork off argv[0]'s
+/// basename (shell.c set_shell_name): the `.exe` spelling is a Windows
+/// artifact and never reaches the usage lines, the `-` login marker is
+/// KEPT in the display name (empirical 5.3.0 oracle: `exec -a -bash bash
+/// --help` prints `Usage:\t-bash ...`), and the bash-vs-sh decision uses
+/// the dash-stripped lowercased stem so `-BASH.EXE` still forks. Any other
+/// name (rubash, niu, ...) returns None and keeps the product help.
+fn invocation_help_name(argv0: Option<&str>) -> Option<String> {
+    let basename = argv0?.rsplit(['/', '\\']).next()?;
+    let stem = if basename.len() >= 4 && basename.to_ascii_lowercase().ends_with(".exe") {
+        &basename[..basename.len() - 4]
+    } else {
+        basename
+    };
+    let decided = stem.strip_prefix('-').unwrap_or(stem);
+    match decided.to_ascii_lowercase().as_str() {
+        "bash" | "sh" => Some(stem.to_string()),
+        _ => None,
+    }
+}
+
+/// GNU show_shell_usage (shell.c:2057-2103) with extra=1 — the `--help`
+/// form, issue #585: printed to STDOUT and exited EXECUTION_SUCCESS
+/// (shell.c:477-482), unlike the usage-error form above (stderr, no
+/// version/extra block). The version line uses the engine's own version
+/// string and machtype in GNU's `version %s-(%s)` shape
+/// (shell.c:2071-2072 `_("GNU bash, version %s-(%s)\n")`); the long-option
+/// table is the engine's accepted LONG_OPTIONS set, and the Shell options
+/// block matches the usage-error contract byte for byte. The bash/sh names
+/// in the usage and `Type ...' lines follow the invocation (shell_name,
+/// shell.c:2084-2088, 2094-2095); the home-page lines keep GNU's literal
+/// `bash home page` text. No Windows-only resources are referenced: the
+/// same strings render in the unix cross-compile lanes.
+fn show_shell_help(executor: &Executor, shell_name: &str) {
+    let version = executor
+        .get_env("BASH_VERSION")
+        .unwrap_or("5.3.0(1)-release")
+        .to_string();
+    println!(
+        "GNU bash, version {version}-({})",
+        rubash::executor::machtype_value()
+    );
+    println!("Usage:\t{shell_name} [GNU long option] [option] ...");
+    println!("\t{shell_name} [GNU long option] [option] script-file ...");
+    println!("GNU long options:");
+    for name in LONG_OPTIONS {
+        println!("	--{name}");
+    }
+    println!("Shell options:");
+    println!("	-ilrsD or -c command or -O shopt_option		(invocation only)");
+    println!("	-abefhkmnptuvxBCEHPT or -o option");
+    println!("Type `{shell_name} -c \"help set\"' for more information about shell options.");
+    println!("Type `{shell_name} -c help' for more information about shell builtin commands.");
+    println!("Use the `bashbug' command to report bugs.");
+    println!();
+    println!("bash home page: <http://www.gnu.org/software/bash>");
+    println!("General help using GNU software: <http://www.gnu.org/gethelp/>");
 }
 
 /// pretty_print_loop (eval.c:215-253): parse the script and print each
@@ -1406,156 +1474,11 @@ fn run_startup_files(executor: &mut Executor, rc_override: Option<&str>) -> Opti
 }
 
 fn run_stdin_script(executor: &mut Executor) -> i32 {
-    // shell.c:780-786: a non-interactive shell with no script operand reads
-    // commands from stdin (pipe/redirect), so GNU sets read_from_stdin and
-    // `$-` gains `s` (`bash < file`, `bash -s < file`). This driver is the
-    // common path for all such invocations, so set the marker once here.
-    executor.set_env(rubash::script_driver::READ_STDIN_MARKER, "1");
-    // GNU never rebinds $0 for a stdin script (the shell.c:1613 rebind runs
-    // in shell_execscript, the script-FILE path), so $0 stays argv[0] as the
-    // parent invoked it — variables.c initialize_shell_variables binds
-    // dollar_vars[0] = shell_name. Probe 2026-09-27: `printf ... | bash -s
-    // alpha` prints $0=bash (argv[0] verbatim, full path when invoked with
-    // one). $0 itself resolves through script_name_value_from_env, whose
-    // BASH_ARGV0 slot already carries the shim-forwarded face (rubash#590);
-    // this bind only names the diagnostic prolog, which keeps the raw
-    // argv[0] spelling the parent handed over. Internal respawns carry the
-    // parent's name through init.rs, so only bind when absent.
-    if executor.get_env("__RUBASH_SCRIPT_NAME").is_none() {
-        let argv0 = std::env::args_os()
-            .next()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "bash".to_string());
-        executor.set_env("__RUBASH_SCRIPT_NAME", argv0.as_str());
-    }
-    // TODO(shell.c/input.c): Bash reads commands from redirected stdin without
-    // prompting, while commands launched from that stream inherit the same
-    // input. Keep ordinary input line-oriented, but gather obvious compound
-    // commands until their closing reserved word arrives.
-    executor.inherit_process_stdin();
-    let mut input = String::new();
-    let mut pending = String::new();
-    let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
-    let mut next_line = 1usize;
-    let mut pending_start_line = 1usize;
-
-    loop {
-        input.clear();
-        // GNU input.c bash_input binds the command reader to fd 0, so a
-        // permanent `exec 0<file` (redir.c do_redirections) moves the script
-        // source to the new input; only fall back to the process's real
-        // stdin while fd 0 still designates it (redir1.sub:4-6).
-        let line_result = match executor.script_fd0_line(&mut input) {
-            Some(count) => Ok(count),
-            None => read_unbuffered_line(&mut input),
-        };
-        match line_result {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => break,
-        }
-
-        if pending.is_empty() {
-            pending_start_line = next_line;
-        }
-        next_line += input.matches('\n').count().max(1);
-        pending.push_str(&input);
-        if let Some((delimiter, strip_tabs)) = pending_heredocs.first() {
-            let candidate = input.trim_end_matches(['\r', '\n']);
-            let candidate = if *strip_tabs {
-                candidate.trim_start_matches('\t')
-            } else {
-                candidate
-            };
-            if candidate == delimiter {
-                pending_heredocs.remove(0);
-            }
-        } else {
-            pending_heredocs.extend(stdin_heredoc_declarations(&input));
-        }
-
-        let stdin_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-        if !pending_heredocs.is_empty() || stdin_source_needs_more_posix(&pending, stdin_posix) {
-            continue;
-        }
-
-        // bashhist.c:869 bash_add_history: in interactive mode, each
-        // complete command is recorded to the session history.
-        if let Some(session) = executor.get_session_history() {
-            let trimmed = pending.trim_end();
-            if !trimmed.is_empty() {
-                let control = executor.get_env("HISTCONTROL").unwrap_or_default();
-                let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
-                let histsize =
-                    rubash::history::SessionHistory::size_limit(executor.get_env("HISTSIZE"));
-                session
-                    .borrow_mut()
-                    .record(trimmed, &control, &ignore, histsize);
-            }
-        }
-
-        // eval.c:178: one current_command_number increment per command
-        // list read happens in the execute_ast walk; no driver increment
-        // here (`\#` in ${var@P} reads it).
-        let status = run_source_with_line_offset(
-            executor,
-            &pending,
-            false,
-            pending_start_line.saturating_sub(1),
-            None,
-            None,
-        );
-        // GNU evalstring.c parse_and_execute leaves the group's status in
-        // last_command_exit_value for the reader to exit with — the
-        // run_source* conversion returns it, but the read-time parse-error
-        // fast paths (an unclosed `"`/`'`/`${`/`$(` reports
-        // `unexpected EOF while looking for matching ...` and returns 2)
-        // never touch executor state. Committing here keeps that 2 (and
-        // every other group status) observable as the shell's exit status
-        // instead of the stale pre-error status — rubash#508: a stdin
-        // script's syntax error must exit 2 like the identical file-driven
-        // run, whose driver returns the group status directly.
-        executor.set_last_exit_code(status);
-        let parse_error = executor.take_parse_error();
-        pending.clear();
-        if parse_error
-            || executor.take_exit_jump_pending()
-            || (status != 0
-                && stdin_script_errexit_enabled(executor)
-                // execute_cmd.c:652-656: `! CMD` status is errexit-exempt.
-                && !executor.last_command_inverted())
-        {
-            break;
-        }
-    }
-
-    if !pending.trim().is_empty() {
-        // Final list gathered at EOF (e.g. no trailing newline) — still
-        // one reader_loop iteration (eval.c:178); the walk increments it.
-        let status = run_source_with_line_offset(
-            executor,
-            &pending,
-            false,
-            pending_start_line.saturating_sub(1),
-            None,
-            None,
-        );
-        // Same group-status commit as the loop body above (rubash#508).
-        executor.set_last_exit_code(status);
-        let parse_error = executor.take_parse_error();
-        if parse_error
-            || executor.take_exit_jump_pending()
-            || (status != 0
-                && stdin_script_errexit_enabled(executor)
-                && !executor.last_command_inverted())
-        {
-            pending.clear();
-        }
-    }
-
-    let status = executor.last_exit_code();
-    let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
-    finish_shell(executor, status, interactive)
+    // rubash#586: the driver lives in the library (script_driver) so every
+    // entry — this binary's `-s`/`bash < file` route and the embedding
+    // hosts' ShellInvocation -s route — runs the SAME on-demand reader
+    // instead of a host-local slurp that pre-buffers the stream.
+    rubash::script_driver::run_stdin_script(executor)
 }
 
 fn run_internal_pipeline_utility(name: &str, args: &[String]) -> ! {

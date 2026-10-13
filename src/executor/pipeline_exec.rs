@@ -1255,6 +1255,24 @@ impl Executor {
         if crate::executor::builtin_names::is_shell_builtin_name(&expanded_name) {
             return None;
         }
+        // GNU never routes a pipeline member straight to the disk command:
+        // execute_pipeline (execute_cmd.c:2620) runs every element through
+        // execute_simple_command, which resolves functions BEFORE the
+        // execute_from_filesystem fallback (execute_cmd.c:4674-4677
+        // find_function; dispatch 4837-4861; execute_disk_command
+        // 4919-4925 only when both lookups missed). This fast path spawns
+        // members directly off find_user_command, so a member whose first
+        // field names a shell function must take the sequential stage
+        // executor — its dispatch runs execute_function_pipeline_stage
+        // (issue #587: `date(){ echo FAKE; }; date | cat` executed the
+        // real date(1), and a `t(){ ...; }; t git log | wc -l` prefix
+        // silently ran a 0-byte PATH stub instead of the function).
+        if self
+            .function_name_for_command_word(&expanded_name)
+            .is_some()
+        {
+            return None;
+        }
         let program =
             find_user_command(&expanded_name, &self.shell_state.env_vars).or_else(|| {
                 matches!(expanded_name.as_str(), "yes" | "head" | "wc")
@@ -1706,6 +1724,19 @@ impl Executor {
                 return Ok(None);
             }
             if crate::executor::builtin_names::is_shell_builtin_name(&expanded_name) {
+                return Ok(None);
+            }
+            // Windows twin of the find_function-first bail-out below
+            // (concurrent_external_stage_spec): GNU execute_pipeline runs
+            // every member through execute_simple_command, which resolves
+            // functions (execute_cmd.c:4674-4677) before the
+            // execute_from_filesystem disk fallback (execute_cmd.c:4919).
+            // A member naming a shell function takes the sequential stage
+            // executor, whose dispatch runs the function (issue #587).
+            if self
+                .function_name_for_command_word(&expanded_name)
+                .is_some()
+            {
                 return Ok(None);
             }
             let Some(program) = find_user_command(&expanded_name, &self.shell_state.env_vars)
@@ -2322,6 +2353,34 @@ impl Executor {
                 });
             if !builtin_stage {
                 return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+            }
+        }
+
+        // GNU execute_simple_command classifies a pipeline element exactly
+        // like a top-level command: special builtins first
+        // (execute_cmd.c:4657-4663), then func = find_function
+        // (execute_cmd.c:4674-4677) — a user-defined function shadows every
+        // ordinary builtin — and only when BOTH lookups miss does
+        // execute_from_filesystem (execute_cmd.c:4919-4925
+        // execute_disk_command) search $PATH. execute_pipeline
+        // (execute_cmd.c:2620) routes every element through that same
+        // execute_command, so `date(){ echo FAKE; }; date | cat` runs the
+        // function (WSL GNU 5.3.0: FAKE). The hardcoded ordinary-builtin
+        // arms below and execute_builtin_pipeline_stage classify by name
+        // alone and never consult the function table, and the concurrent
+        // native pipelines fall back to the sequential loop for them, so
+        // function-named members previously fell through to the disk
+        // command (issue #587: the real date(1) ran; `t(){ ...; }; t git
+        // log | wc -l` silently executed a PATH stub). Route function-named
+        // elements to the function stage first, keeping
+        // execute_function_command_invocation's posix special-builtin
+        // exception (command_prepare.rs; GNU: in posix mode a special
+        // builtin precludes find_function, execute_cmd.c:4657-4663).
+        if let Some(word) = command.words.first() {
+            let function_shadows = !(self.posix_mode_enabled() && is_posix_special_builtin(word))
+                && self.function_name_for_command_word(word).is_some();
+            if function_shadows {
+                return self.execute_function_pipeline_stage(command, input);
             }
         }
 
