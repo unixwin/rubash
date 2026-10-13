@@ -1517,9 +1517,18 @@ fn test_multiple_embedded_input_process_substitutions_rewrite_one_word() {
 }
 
 #[test]
-fn test_assignment_input_process_substitution_rewrites_to_readable_path() {
+fn test_assignment_stored_procsub_path_is_dead_after_the_assignment() {
     let output_path = "target/rubash-assignment-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
+    // rubash#545 cell 2 (scalar form): GNU reaps a command's process
+    // substitutions when the creating command finishes (execute_cmd.c:832
+    // delete_procsubs "closes fds or unlinks fifos"), so the stored
+    // /dev/fd/N string names a dead path for every later command — `cat`
+    // reports ENOENT with rc 1 and the redirect target stays empty (WSL
+    // GNU 5.3.0(1) probe 2026-10-12; array form pinned in
+    // issue545_procsub_lifetime_xtrace_regressions). The pre-#545
+    // expectation here (readable path, "alpha" on stdout) contradicted the
+    // GNU contract the fd-lifetime fix implements.
     let input = format!("p=<(printf alpha); cat \"$p\" > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -1528,8 +1537,8 @@ fn test_assignment_input_process_substitution_rewrites_to_readable_path() {
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha");
+    assert_eq!(executor.last_exit_code(), 1);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "");
     let _ = fs::remove_file(output_path);
 }
 
