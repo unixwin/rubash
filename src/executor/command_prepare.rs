@@ -2874,8 +2874,12 @@ impl Executor {
             if rejection == super::redirection::RedirectRejection::FatalNounset {
                 // Same classification as execute_materialized_command
                 // (rubash#535): an unbound variable in a function call's
-                // redirect word is a fatal expansion error.
-                self.finish_heredoc_expansion_error(
+                // redirect word is a fatal expansion error. Best-effort
+                // materialization: the rejection status below decides the
+                // command's result, so the error-print Result is discarded
+                // (same contract as the finish_process_substitutions call
+                // in the posix-assignment-failure arm).
+                let _ = self.finish_heredoc_expansion_error(
                     &materialized_cmd,
                     Self::FATAL_PARAMETER_EXPANSION_STATUS,
                 );
