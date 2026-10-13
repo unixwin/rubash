@@ -1221,7 +1221,9 @@ mod command_body_kind_tests {
 
         assert_eq!(arithmetic.init, "");
         assert_eq!(arithmetic.test, "");
-        assert_eq!(arithmetic.update, "i++");
+        // Verbatim capture keeps the trailing blank before `))` (GNU
+        // make_cmd.c:254-261 substring contract, issue #548).
+        assert_eq!(arithmetic.update, "i++ ");
         assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
         assert_eq!(for_command.body[0].words, ["echo", "$i"]);
     }

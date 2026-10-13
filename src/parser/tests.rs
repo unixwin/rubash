@@ -292,7 +292,11 @@ fn test_parse_arithmetic_for_command() {
     assert_eq!(arithmetic.test_metadata.variables, ["i"]);
     assert_eq!(arithmetic.test_metadata.operators[0].text, "<");
     assert!(arithmetic.test_metadata.has_comparison);
-    assert_eq!(arithmetic.update, "i++");
+    // The section fields carry the verbatim (( )) capture (leading blanks
+    // skipped, trailing kept) — GNU make_cmd.c:254-261 keeps everything
+    // before the section-terminating `;`, so the update's trailing blank
+    // before `))` survives (`i++ `), issue #548.
+    assert_eq!(arithmetic.update, "i++ ");
     assert_eq!(arithmetic.update_metadata.expression, " i++ ");
     assert_eq!(arithmetic.update_metadata.variables, ["i"]);
     assert_eq!(arithmetic.update_metadata.operators[0].text, "++");

@@ -13,7 +13,6 @@ pub(super) fn parse_arithmetic_for_command(
         return None;
     };
 
-    let mut parts: Vec<Vec<String>> = vec![Vec::new(), Vec::new(), Vec::new()];
     // GNU expr.c echoes the section text exactly as it appears between the
     // (( )) delimiters (leading blanks skipped at display time, trailing
     // blanks kept), so capture the raw whitespace-carrying text per section
@@ -66,7 +65,6 @@ pub(super) fn parse_arithmetic_for_command(
             paren_depth += 1;
             raw_parts[part_index].push_str(&tokens[i].leading_ws);
             raw_parts[part_index].push_str(&tokens[i].raw);
-            parts[part_index].push(tokens[i].value.clone());
             i += 1;
             continue;
         }
@@ -75,7 +73,6 @@ pub(super) fn parse_arithmetic_for_command(
             paren_depth -= 1;
             raw_parts[part_index].push_str(&tokens[i].leading_ws);
             raw_parts[part_index].push_str(&tokens[i].raw);
-            parts[part_index].push(tokens[i].value.clone());
             i += 1;
             continue;
         }
@@ -83,14 +80,12 @@ pub(super) fn parse_arithmetic_for_command(
         if let Some(combined) = arithmetic_combined_operator(&tokens[i], tokens.get(i + 1)) {
             raw_parts[part_index].push_str(&tokens[i].leading_ws);
             raw_parts[part_index].push_str(&combined);
-            parts[part_index].push(combined);
             i += 2;
             continue;
         }
 
         raw_parts[part_index].push_str(&tokens[i].leading_ws);
         raw_parts[part_index].push_str(&tokens[i].raw);
-        parts[part_index].push(tokens[i].value.clone());
         i += 1;
     }
 
@@ -176,9 +171,23 @@ pub(super) fn parse_arithmetic_for_command(
             body_open_delimiter.as_deref(),
             body_close_delimiter.as_deref(),
         );
-    let init = parts[0].join(" ");
-    let test = parts[1].join(" ");
-    let update = parts[2].join(" ");
+    // GNU make_cmd.c:254-261 splits the (( )) text into three sections by
+    // scanning with skip_to_delim and keeping each section's text verbatim
+    // (leading whitespace skipped, quotes intact); execute_cmd.c:3171
+    // eval_arith_for_expr then strips quotes (expand_arith_string) before
+    // evalexp, so the evaluator never sees a quote byte and evalerror echoes
+    // the dequoted section. A token-value join cannot serve as the eval
+    // input: a quoted section travels through token values as carrier-
+    // marked text, and a carrier byte reaching the arithmetic evaluator is
+    // a lexical failure — `for (( i="3" ; ... ))` dies with `operand
+    // expected` and the evalerror echo leaks the raw 0x1c carrier (issue
+    // #548). The whitespace-carrying capture is the verbatim section text,
+    // and the arithmetic evaluator performs the same in-place quote removal
+    // as the GNU composition, so feeding it the cleaned capture restores
+    // the contract byte for byte.
+    let init = arith_for_section_text(&raw_parts[0]);
+    let test = arith_for_section_text(&raw_parts[1]);
+    let update = arith_for_section_text(&raw_parts[2]);
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
@@ -225,6 +234,27 @@ pub(super) fn parse_arithmetic_for_command(
 
 fn delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
     Box::new(build_word_metadata(0, delimiter, delimiter))
+}
+
+/// The eval input for one arithmetic-for section: the captured section text
+/// with leading whitespace skipped (GNU make_cmd.c:254) and any in-band
+/// carrier codepoint dropped. The carrier strip is the diagnostic-boundary
+/// defense for issue #548: evalerror echoes this text verbatim (expr.c
+/// evalerror format), and no registry codepoint may reach user-visible
+/// output. Source-verbatim captures never carry carriers; a captured
+/// carrier byte would otherwise flow both into the evaluator (a spurious
+/// lexical failure) and into the rendered diagnostic.
+fn arith_for_section_text(raw: &str) -> String {
+    let trimmed = raw.trim_start();
+    let is_carrier = |c: char| {
+        crate::executor::markers::MARKERS
+            .iter()
+            .any(|m| m.code == c as u32)
+    };
+    if !trimmed.chars().any(is_carrier) {
+        return trimmed.to_string();
+    }
+    trimmed.chars().filter(|c| !is_carrier(*c)).collect()
 }
 
 fn separator_metadata(index: usize, separator: &str) -> WordMetadata {
