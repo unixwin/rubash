@@ -221,3 +221,43 @@ echo M09=[${line##@(*/|-)}]
     assert!(!text.contains("unexpected"), "text={text:?}");
     assert!(!text.contains("looking for matching"), "text={text:?}");
 }
+
+/// ANSI-C `$'...'` words inside `${...}` pattern slots keep backslash escapes
+/// live (parse.y:3992 LEX_PASSNEXT via P_ALLOWESC) — the plain-`'...` rule
+/// (no escapes) must not swallow them. Byte matrix against WSL GNU bash
+/// 5.3.0 (2026-10-13), the scop/bash-completion nquote shapes (bash tests
+/// nquote2.sub:14-27): `v="'"; t "${v/$'\''/$'\''}"` prints `'  |  '` and
+/// `${v/$'\''/x}` prints `x  |  x` on every quoting spelling.
+#[test]
+fn ansi_c_pattern_words_keep_escapes_like_gnu() {
+    let (text, code) = rubash_file(
+        "\
+v=\"'\"
+t() {
+    printf '%s  |  %s\\n' \"$1\" \"$2\"
+}
+t \"${v/$'\\''/$'\\''}\"        \"'\"
+t  ${v/$'\\''/$'\\''}         \"'\"
+t \"${v/$'\\''/x}\"            \"x\"
+t  ${v/$'\\''/x}             \"x\"
+t \"${v/x/$'\\''}\"            \"'\"
+t  ${v/x/$'\\''}             \"'\"
+t \"${v/x/$'\\x5c\\''}\"        \"'\"
+t  ${v/x/$'\\x5c\\''}         \"'\"
+t \"${v/\\'/\\'}\"              \"'\"
+t  ${v/\\'/\\'}               \"'\"
+",
+    );
+    assert_eq!(code, Some(0), "text={text:?}");
+    let rows: Vec<&str> = text.lines().filter(|l| l.contains("  |  ")).collect();
+    assert_eq!(
+        rows,
+        vec![
+            "'  |  '", "'  |  '", "x  |  x", "x  |  x", "'  |  '", "'  |  '", "'  |  '", "'  |  '",
+            "'  |  '", "'  |  '",
+        ],
+        "text={text:?}"
+    );
+    assert!(!text.contains("unexpected"), "text={text:?}");
+    assert!(!text.contains("looking for matching"), "text={text:?}");
+}

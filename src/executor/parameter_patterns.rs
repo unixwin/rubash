@@ -562,6 +562,25 @@ fn unclosed_pattern_quote(pattern: &str) -> Option<char> {
                 '\\' => escaped = true,
                 '\'' => quote = Some('\''),
                 '"' => quote = Some('"'),
+                // `$'...'` ANSI-C word (parse.y:3992 LEX_PASSNEXT via
+                // P_ALLOWESC): backslash escapes live inside it and the
+                // closing `'` ends the unit. scop/bash-completion's nquote
+                // shapes (`${v/$'\''/$'\''}`, bash tests nquote2.sub:20-23)
+                // are complete units here, not an unterminated `'` span
+                // (GNU bash 5.3.0 prints `'  |  '` for every row; WSL probe
+                // 2026-10-13).
+                '$' if chars.get(index) == Some(&'\'') => {
+                    index += 1;
+                    while index < chars.len() {
+                        let unit_ch = chars[index];
+                        index += 1;
+                        if unit_ch == '\\' {
+                            index += 1;
+                        } else if unit_ch == '\'' {
+                            break;
+                        }
+                    }
+                }
                 _ => {}
             },
             _ => {}

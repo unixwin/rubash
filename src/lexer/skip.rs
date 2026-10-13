@@ -3767,7 +3767,7 @@ fn db_scan_bracket_hunt(
             '\'' => {
                 // Quote recursion (parse.y:4040-4051): its own EOF names the
                 // quote at its start_lineno (a5: line 2 `'').
-                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '\'');
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '\'', false);
                 match event {
                     DbScan::Closed => {
                         i = next;
@@ -3784,7 +3784,7 @@ fn db_scan_bracket_hunt(
                 }
             }
             '"' => {
-                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '"');
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '"', false);
                 match event {
                     DbScan::Closed => {
                         i = next;
@@ -3798,7 +3798,7 @@ fn db_scan_bracket_hunt(
                 }
             }
             '`' => {
-                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '`');
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '`', false);
                 match event {
                     DbScan::Closed => {
                         i = next;
@@ -3885,11 +3885,24 @@ fn db_scan_bracket_hunt(
 /// delimiter (escapes honored; backslash-newline is a continuation,
 /// parse.y:3946). EOF names the unit itself at its open line (parse.y:4047
 /// recursion + 3901-3912 start_lineno report).
+///
+/// `ansi_c` marks the `$'...'` spelling (parse.y:3992 LEX_PASSNEXT via
+/// P_ALLOWESC): a backslash escapes the next byte inside it. The plain
+/// `'...'` spelling keeps the no-P_ALLOWESC rule — a backslash is LITERAL
+/// data and only the closing `'` ends the unit (bash_completion:275-277
+/// `${_word%'\'}'`, wt56-bash-completion-syntax, run 38404767765: the
+/// escape-anywhere rule ate the closing quote and reported the unit unclosed
+/// to EOF, aborting every source of the library). Treating the ANSI-C
+/// spelling as plain instead made scop/bash-completion's nquote2.sh shapes
+/// (`t "${v/$'\''/$'\''}"`, bash tests nquote2.sub:20-23) report phantom
+/// `unexpected EOF while looking for matching `'' at every `${v/$'\''/...}`
+/// substitution (GNU prints `'  |  '` there; WSL bash 5.3.0, 2026-10-13).
 fn db_scan_quote_unit(
     chars: &[char],
     open: usize,
     mut line: usize,
     quote: char,
+    ansi_c: bool,
 ) -> (DbScan, usize, usize) {
     let mut i = open + 1;
     let mut escaped = false;
@@ -3906,13 +3919,8 @@ fn db_scan_quote_unit(
             continue;
         }
         // parse_matched_pair (parse.y:3877): a backslash escapes the next
-        // byte in every span EXCEPT a single-quoted one — inside '...' a
-        // backslash is LITERAL data and only the closing ' ends the unit
-        // (the no-P_ALLOWESC arm; bash_completion:275-277
-        // `${_word%'\'}'`, wt56-bash-completion-syntax, run 38404767765:
-        // the escape-anywhere rule ate the closing quote and reported the
-        // unit unclosed to EOF, aborting every source of the library).
-        if ch == '\\' && quote != '\'' {
+        // byte in every span EXCEPT the plain single-quoted one.
+        if ch == '\\' && (quote != '\'' || ansi_c) {
             escaped = true;
             i += 1;
             continue;
@@ -3982,7 +3990,7 @@ fn db_scan_dolbrace_body(
         match ch {
             '\'' | '"' | '`' => {
                 let quote = ch;
-                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, quote);
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, quote, false);
                 match event {
                     DbScan::Closed => {
                         i = next;
@@ -4029,7 +4037,7 @@ fn db_scan_dolbrace_body(
             }
             '$' if chars.get(i + 1) == Some(&'\'') => {
                 // $'...' ANSI-C unit inside the body: quote semantics.
-                let (event, next, next_line) = db_scan_quote_unit(chars, i + 1, line, '\'');
+                let (event, next, next_line) = db_scan_quote_unit(chars, i + 1, line, '\'', true);
                 match event {
                     DbScan::Closed => {
                         i = next;
@@ -4114,7 +4122,7 @@ fn db_scan_comsub_body(
         match ch {
             '\'' | '"' | '`' => {
                 let quote = ch;
-                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, quote);
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, quote, false);
                 match event {
                     DbScan::Closed => {
                         i = next;
@@ -4171,7 +4179,7 @@ fn db_scan_comsub_body(
                 }
             }
             '$' if chars.get(i + 1) == Some(&'\'') => {
-                let (event, next, next_line) = db_scan_quote_unit(chars, i + 1, line, '\'');
+                let (event, next, next_line) = db_scan_quote_unit(chars, i + 1, line, '\'', true);
                 match event {
                     DbScan::Closed => {
                         i = next;
@@ -4238,7 +4246,7 @@ fn db_scan_dquote_span(
         if ch == '`' {
             // parse.y:4157: backticks inside a dquote span recurse as units;
             // EOF names the backtick (q13).
-            let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '`');
+            let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '`', false);
             match event {
                 DbScan::Closed => {
                     i = next;
@@ -4312,7 +4320,7 @@ fn db_skip_dparen_span(chars: &[char], open: usize, mut line: usize) -> Option<(
         }
         match ch {
             '\'' | '"' | '`' => {
-                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, ch);
+                let (event, next, next_line) = db_scan_quote_unit(chars, i, line, ch, false);
                 match event {
                     DbScan::Closed => {
                         i = next;
@@ -4457,7 +4465,7 @@ pub fn unclosed_dollar_bracket_eof(input: &str) -> Option<DollarBracketEof> {
         }
         match ch {
             '\'' => {
-                let (event, next, next_line) = db_scan_quote_unit(&chars, i, line, '\'');
+                let (event, next, next_line) = db_scan_quote_unit(&chars, i, line, '\'', false);
                 match event {
                     DbScan::Closed => {
                         i = next;
@@ -4494,7 +4502,7 @@ pub fn unclosed_dollar_bracket_eof(input: &str) -> Option<DollarBracketEof> {
                 }
             }
             '`' => {
-                let (event, next, next_line) = db_scan_quote_unit(&chars, i, line, '`');
+                let (event, next, next_line) = db_scan_quote_unit(&chars, i, line, '`', false);
                 match event {
                     DbScan::Closed => {
                         i = next;
@@ -4504,7 +4512,7 @@ pub fn unclosed_dollar_bracket_eof(input: &str) -> Option<DollarBracketEof> {
                 }
             }
             '$' if chars.get(i + 1) == Some(&'\'') => {
-                let (event, next, next_line) = db_scan_quote_unit(&chars, i + 1, line, '\'');
+                let (event, next, next_line) = db_scan_quote_unit(&chars, i + 1, line, '\'', true);
                 match event {
                     DbScan::Closed => {
                         i = next;
