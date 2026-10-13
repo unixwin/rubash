@@ -44,7 +44,7 @@ argv 字节**；路径形态的取舍按"子进程自己有没有 POSIX 层"分�
 
 - 收：`/c/...`、`/c/`、`/c/.`、`/D`（大小写）、`/mnt/c/...`、`/tmp`、`/var/tmp`、`/dev/null`、native `C:/...`、`C:\...`。
 - 渲染：`$PWD`、`$(pwd)`、`pwd -P`、cd 后的绑定值恒为 POSIX 形态且互等（`[[ $PWD == $(pwd) ]]` 恒真）。
-- **已知边缘（violation，[rubash#566](https://github.com/unixwin/rubash/issues/566)）**：配置 shell root 后，**裸盘根** `cd /c`（无尾斜杠、无后续分量）被 `map_logical_path` 截走 → ENOENT。`/c/` 正常；`/d` 能用只是 winuxcmd 根下恰有 `d/` 目录的巧合。
+- ~~**已知边缘（violation，[rubash#566](https://github.com/unixwin/rubash/issues/566)）**：配置 shell root 后，**裸盘根** `cd /c`（无尾斜杠、无后续分量）被 `map_logical_path` 截走 → ENOENT。`/c/` 正常；`/d` 能用只是 winuxcmd 根下恰有 `d/` 目录的巧合。~~ **已修（wave4c）**：`shell_path_to_windows_inner` 盘符臂收裸根 `/c`（`/D` 大小写同）→ 盘根、渲染 `/c/`；`map_logical_path` 盘符排除谓词补全，同名根子目录（`/d` 巧合）退役。锁定：`tests/issue566_bare_drive_root_enoent_regressions.rs`（7 例，含"根下同名 `c/` 不再遮蔽"反例）。
 - 内建 wrapper（cat/mkdir/touch/cp/rm/rmdir）单次展开后操作数 as-is：`rm '$FIX/r'` 报 GNU 同款错误、rc=1、绝不动 `$FIX/r`（#555 家族回归在 `verbatim.rs` 锁死）。
 
 ### L2 工具参数层

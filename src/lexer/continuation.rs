@@ -526,6 +526,52 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                     // Redirect operator: a filename word follows, so `>(` is
                     // not command position.
                     cur_word.clear();
+                    // rubash#564: an ADJACENT `(` makes this the process-
+                    // substitution introducer, not an operator — GNU
+                    // read_token's procsub check (parse.y:3776-3796) declines
+                    // to return the `<`/`>` character when peek_char == '('
+                    // and falls through to read_token_word (`tokword:`),
+                    // whose shellexp arm (parse.y:5494-5524, syntax.h:84
+                    // `shellexp(c) == '$' || '<' || '>'`) consumes the
+                    // `(...)` body via parse_comsub (parse.y:4451). The body
+                    // is command text where newlines are ordinary separators
+                    // (the #564 probe: `cat <(echo` NL `echo hi2` NL `)` runs
+                    // BOTH lines), so the reader crosses physical lines until
+                    // the matching `)`. Push the body's `)` matched pair:
+                    // EOF inside takes the yyerror route — `unexpected EOF
+                    // while looking for matching `)'` at the EOF line, never
+                    // "from `(' command" (the nested `(` arm's procsub rule,
+                    // #551 C6). Quoted introducers never reach this arm (a
+                    // quote delimiter holds the stack); the extra `i += 1`
+                    // consumes the introducer's own `(` so the push arm
+                    // below never sees it as a subshell.
+                    if chars.get(i + 1) == Some(&'(') {
+                        stack.push(UnclosedDelim {
+                            close: ')',
+                            open_line: line,
+                            escapes: true,
+                            report_open: false,
+                            funsub: false,
+                            command: false,
+                            term_ready: false,
+                            case_depth_at_push: case_depth,
+                            array_list: false,
+                            pattern_paren: false,
+                            // Not a P_ARITH body: GNU reads the `<(`/`>(`
+                            // body through parse_comsub's P_COMMAND mode
+                            // (parse.y:5515 -> :5523, reached from the
+                            // shellexp arm parse.y:5494 via read_token's
+                            // procsub fall-through parse.y:3794-3798),
+                            // where a `${` inside the body nests as
+                            // ordinary command text — the
+                            // parameter-brace suppression the `arith` mark
+                            // drives (rubash#533, P_ARITH matched-pair
+                            // scan) must stay off.
+                            arith: false,
+                        });
+                        comment_start = true;
+                        i += 1;
+                    }
                 }
                 c if c.is_whitespace() => {
                     if !cur_word.is_empty() {
@@ -961,6 +1007,111 @@ pub(crate) fn word_ends_in_open_process_substitution(raw: &str) -> bool {
             {
                 // Word-attached introducer (GNU syntax.h:84 shellexp): scan
                 // the `(...)` body with the same quote/escape discipline.
+                let mut depth = 1usize;
+                let mut scan = index + 2;
+                let mut body_single = false;
+                let mut body_double = false;
+                while scan < len && depth > 0 {
+                    let body_ch = chars[scan];
+                    if body_single {
+                        if body_ch == '\'' {
+                            body_single = false;
+                        }
+                    } else if body_double {
+                        if body_ch == '\\' {
+                            scan += 1;
+                        } else if body_ch == '"' {
+                            body_double = false;
+                        }
+                    } else {
+                        match body_ch {
+                            '\\' => scan += 1,
+                            '\'' => body_single = true,
+                            '"' => body_double = true,
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                    }
+                    scan += 1;
+                }
+                if depth > 0 {
+                    return true;
+                }
+                index = scan;
+                continue;
+            }
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+/// rubash#564: True when the accumulated line ends inside an unclosed
+/// OPERATOR-position process substitution (`cat <(` NL ...). GNU read_token
+/// (parse.y:3776-3796) declines to return an adjacent `<`/`>` + `(` as the
+/// redirection operator and falls into read_token_word, whose shellexp arm
+/// (parse.y:5494-5524) reads the `(...)` body via parse_comsub across
+/// physical newlines — regardless of what token precedes the introducer.
+/// This is the feeder JOIN GATE's text-level oracle for the space-separated
+/// form (the mod.rs dparen gate's shape); the word-ATTACHED form is
+/// `word_ends_in_open_process_substitution` (rubash#463). The introducer
+/// conditions are complements: a word character precedes the `<` there, a
+/// separator (or line start) here.
+pub(crate) fn line_ends_in_open_operator_process_substitution(raw: &str) -> bool {
+    let chars: Vec<char> = raw.chars().collect();
+    let len = chars.len();
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    while index < len {
+        let ch = chars[index];
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == '\\' {
+                index += 2;
+                continue;
+            }
+            if ch == '"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' => index += 2,
+            '\'' => {
+                single = true;
+                index += 1;
+            }
+            '"' => {
+                double = true;
+                index += 1;
+            }
+            '`' => {
+                // Backtick unit: the body scan never sees its interior.
+                index += 1;
+                while index < len && chars[index] != '`' {
+                    if chars[index] == '\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            '<' | '>'
+                if chars.get(index + 1) == Some(&'(')
+                    && (index == 0 || " \t\r\n|&;<>(){}".contains(chars[index - 1])) =>
+            {
+                // Operator-position introducer (GNU parse.y:3776-3796):
+                // scan the `(...)` body with the same quote/escape
+                // discipline as the word-attached oracle above.
                 let mut depth = 1usize;
                 let mut scan = index + 2;
                 let mut body_single = false;
@@ -4395,6 +4546,44 @@ pub(crate) fn close_char_residuals_advance(
                     // Redirect operator: a filename word follows, so `>(` is
                     // not command position.
                     state.cur_word.clear();
+                    // rubash#564 (K5 park): a `<`/`>` at the buffer tail —
+                    // the `(` introducer lookahead is undecided; the oracle
+                    // commits the plain-operator fall-through. With `(`
+                    // visible the pair is the process-substitution
+                    // introducer (parse.y:3776-3796 + 5494-5524): push the
+                    // body's `)` pair and consume the `(` — the same arm the
+                    // one-shot oracle carries above.
+                    if chars.get(i + 1).is_none() {
+                        if park.is_none() {
+                            park = Some(CloseCharResidualPark {
+                                pos: i,
+                                snapshot: state.clone(),
+                            });
+                        }
+                    } else if chars.get(i + 1) == Some(&'(') {
+                        state.stack.push(UnclosedDelim {
+                            close: ')',
+                            open_line: state.line,
+                            escapes: true,
+                            report_open: false,
+                            funsub: false,
+                            command: false,
+                            term_ready: false,
+                            case_depth_at_push: state.case_depth,
+                            array_list: false,
+                            pattern_paren: false,
+                            // Not a P_ARITH body: parse_comsub P_COMMAND
+                            // mode reads the body (parse.y:5515 -> :5523
+                            // via the shellexp arm parse.y:5494), so a
+                            // `${` inside nests as ordinary command text
+                            // — the `arith` parameter-brace suppression
+                            // (rubash#533) stays off. Mirror of the
+                            // one-shot oracle's push above.
+                            arith: false,
+                        });
+                        state.comment_start = true;
+                        i += 1;
+                    }
                 }
                 c if c.is_whitespace() => {
                     if !state.cur_word.is_empty() {
