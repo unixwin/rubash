@@ -3943,13 +3943,24 @@ fn db_scan_quote_unit(
 /// past the body's `}` is gone — `echo ${x[$[1}` reports `]'` (H probe), and
 /// so does `echo ${x:$[1` where the `}` never came. With no hunt open, an
 /// unclosed body defers to the close-char family (`echo ${x` -> `}'`).
+///
+/// The body ends at the FIRST unquoted `}` (P_FIRSTCLOSE): a bare `{` in the
+/// pattern/operator text is WORD DATA, never a nesting opener — only a
+/// nested `${` recurses (arm below). GNU bash 5.3.0 anchors (WSL, 2026-10-13):
+/// `z='a{}c'; echo ${z%{}}` prints `a{}c}` — the pattern `{` did not nest, so
+/// the expansion ended at the first `}` and the second survived as literal;
+/// `z='x{a{bQ'; echo ${z%{a{b}}` prints `x{a{bQ}` likewise. Counting a bare
+/// `{` as depth read scop/bash-completion's `option2=${option2%%[<{().[]*}`
+/// (bash_completion:1755, inside `[<{().[]`) as an open nest, the scan walked
+/// past its `}` through the rest of the library and the phantom-open body let
+/// a much later quote report `unexpected EOF while looking for matching
+/// `''` attributed to the `${` line (wt56-bash-completion-syntax layer 3).
 fn db_scan_dolbrace_body(
     chars: &[char],
     mut i: usize,
     mut line: usize,
     root_line: usize,
 ) -> (DbScan, usize, usize) {
-    let mut depth = 1usize;
     let mut escaped = false;
     while i < chars.len() {
         let ch = chars[i];
@@ -4029,15 +4040,8 @@ fn db_scan_dolbrace_body(
                 }
             }
             '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return (DbScan::Closed, i + 1, line);
-                }
-                i += 1;
-            }
-            '{' => {
-                depth += 1;
-                i += 1;
+                // P_FIRSTCLOSE: the first unquoted `}` closes the body.
+                return (DbScan::Closed, i + 1, line);
             }
             _ => {
                 i += 1;
