@@ -893,25 +893,51 @@ pub fn external_command_for_named_program(
     let posix_aware = !argv_dialect_legacy(env_vars) && posix_aware_child(program, env_vars);
     #[cfg(not(windows))]
     let posix_aware = false;
+    // unixwin/rubash#592: drive-form operands (`/d/x`, `/c/...`) translate
+    // for the POSIX-aware class too, so the pre-translation is complete
+    // across execution context, argument position and target existence. The
+    // shape alone cannot tell a path from pattern/script DATA (niubash#62:
+    // `ls /d/` and `grep -F "/h/"` are textually identical), and the data
+    // primaries are a property of the tool's grammar — the grammar twins of
+    // the niubash host mask (winuxcmd_path_translation_mask): grep/sed/awk
+    // first positional pattern/script/program text and find's
+    // pattern-primary values, plus the filesystem-blind string transforms
+    // basename/dirname (GNU dirname.c/basename.c never stat their operand;
+    // issue71 pins `dirname /a/b/c.txt` -> `/a/b`). Those indices stay
+    // verbatim; every other argv word of a POSIX-aware child takes the
+    // native funnel (external_argument_path), exactly like a native
+    // child's argv.
+    #[cfg(windows)]
+    let data_primary_positions = if posix_aware {
+        argv_data_primary_positions(command_name, args)
+    } else {
+        std::collections::HashSet::new()
+    };
     let native_args = args
         .iter()
-        .map(|arg| {
+        .enumerate()
+        .map(|(position, arg)| {
             // unixwin/niubash#164: a virtual-system-root operand (/usr/bin,
             // /etc/..., /tmp, /home/...) exists only in the shell's root
             // map and NO non-shell child resolves it, so it translates
             // through the same map for every child class BEFORE the
             // per-child dialect branches below. Real drive forms (/d/x,
-            // /mnt/d/x, /cygdrive/d/x) keep the Option B dialect: verbatim
-            // for POSIX-aware children (their own native layer converts
-            // those), converted for natives.
+            // /cygdrive/d/x) join the same every-class translation with
+            // rubash#592; /mnt/d/x was already there (#444).
             #[cfg(windows)]
             if let Some(translated) =
                 translated_virtual_system_root_argument(arg, shell_wrapped, env_vars)
             {
                 return translated;
             }
-            if preserve_native_args || shell_wrapped || posix_aware {
+            if preserve_native_args || shell_wrapped {
                 arg.clone()
+            } else if posix_aware {
+                #[cfg(windows)]
+                if data_primary_positions.contains(&position) {
+                    return arg.clone();
+                }
+                external_argument_path(arg, env_vars)
             } else {
                 external_argument_path(arg, env_vars)
             }
@@ -1052,6 +1078,220 @@ fn argv_dialect_legacy(env_vars: &HashMap<String, String>) -> bool {
     env_vars
         .get("__RUBASH_ARGV_DIALECT")
         .is_some_and(|value| value.eq_ignore_ascii_case("legacy"))
+}
+
+/// unixwin/rubash#592: the argv indices of a POSIX-aware child's arguments
+/// that are DATA by the tool's own grammar — pattern/script/program text
+/// whose bytes must cross the boundary verbatim (invariant C, niubash#62:
+/// the shell cannot separate `ls /d/` from `grep -F "/h/"` by shape). Two
+/// data classes:
+///
+/// - grammar data primaries (the engine-side twin of the niubash host's
+///   `winuxcmd_path_translation_mask`, same tool set): grep/sed/awk put
+///   their pattern/script/program in the first positional operand and find
+///   consumes pattern-primary values (`-name`, `-path`, `-regex`, ...);
+/// - filesystem-blind string transforms: basename/dirname never touch the
+///   path they take (GNU dirname.c/basename.c are pure string surgery, no
+///   stat), so their operands are display text — translating them would
+///   corrupt the GNU string contract (`dirname /a/b/c.txt` must print
+///   `/a/b`, issue71) while buying nothing: there is no FS boundary for
+///   the translation to serve.
+///
+/// Everything else in the argv is a candidate operand and translates
+/// through the native funnel like any native child's argv.
+///
+/// Only these: the mask is a grammar exemption, not a path heuristic —
+/// widening it by command name would reintroduce the per-name-list argv
+/// split niubash#164 retired (niubash#164: "要么都翻、要么都不翻").
+#[cfg(windows)]
+fn argv_data_primary_positions(
+    command_name: Option<&str>,
+    args: &[String],
+) -> std::collections::HashSet<usize> {
+    let Some(command_name) = command_name else {
+        return std::collections::HashSet::new();
+    };
+    let normalized = command_name.replace('\\', "/");
+    let base = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let base = base
+        .strip_suffix(".exe")
+        .unwrap_or(base)
+        .to_ascii_lowercase();
+    let mut masked = std::collections::HashSet::new();
+    match base.as_str() {
+        "grep" => mask_first_positional_data(
+            args,
+            &mut masked,
+            &["-e", "--regexp"],
+            &["-f", "--file"],
+            &[
+                "-m",
+                "--max-count",
+                "-A",
+                "--after-context",
+                "-B",
+                "--before-context",
+                "-C",
+                "--context",
+                "-d",
+                "--devices",
+                "-D",
+                "--directories",
+            ],
+        ),
+        "sed" => mask_first_positional_data(
+            args,
+            &mut masked,
+            &["-e", "--expression"],
+            &["-f", "--file"],
+            &[],
+        ),
+        "awk" => mask_first_positional_data(args, &mut masked, &[], &["-f", "--file"], &[]),
+        "find" => mask_find_pattern_primaries(args, &mut masked),
+        // basename NAME [SUFFIX]: both positionals are display text.
+        "basename" | "dirname" => mask_all_positionals(args, &mut masked),
+        _ => {}
+    }
+    masked
+}
+
+/// Masks every non-switch word: for filesystem-blind string tools
+/// (basename/dirname) each positional — name and SUFFIX alike — is data.
+#[cfg(windows)]
+fn mask_all_positionals(args: &[String], masked: &mut std::collections::HashSet<usize>) {
+    for (index, arg) in args.iter().enumerate() {
+        if !(arg.len() > 1 && arg.starts_with('-')) {
+            masked.insert(index);
+        }
+    }
+}
+
+fn short_option_char(opts: &[&str]) -> Option<char> {
+    opts.iter().find_map(|opt| {
+        let bytes = opt.as_bytes();
+        if bytes.len() == 2 && bytes[0] == b'-' && bytes[1].is_ascii_alphabetic() {
+            Some(bytes[1] as char)
+        } else {
+            None
+        }
+    })
+}
+
+/// Marks the first positional operand of a pattern/script command as
+/// non-translatable. `pattern_opts` consume a separate pattern value (and
+/// that value is masked too — `grep -e PAT`), `file_opts` consume a
+/// separate file operand (a real path — its value translates, and the
+/// first positional becomes a file), and `value_opts` consume a numeric or
+/// action value; attached `--opt=value` and `-oVALUE` clusters carry the
+/// value in the same token and only gate the positional operand. Word
+/// indices are argv positions (the shell words after the command name —
+/// the funnel's `args` slice).
+#[cfg(windows)]
+fn mask_first_positional_data(
+    args: &[String],
+    masked: &mut std::collections::HashSet<usize>,
+    pattern_opts: &[&str],
+    file_opts: &[&str],
+    value_opts: &[&str],
+) {
+    let pattern_short = short_option_char(pattern_opts);
+    let file_short = short_option_char(file_opts);
+
+    let mut pattern_via_option = false;
+    let mut after_dashdash = false;
+    let mut first_positional: Option<usize> = None;
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if !after_dashdash && arg == "--" {
+            after_dashdash = true;
+            i += 1;
+            continue;
+        }
+        let is_option = !after_dashdash && arg.starts_with('-') && arg.len() > 1;
+
+        if is_option {
+            if pattern_opts.contains(&arg) {
+                pattern_via_option = true;
+                // The pattern value itself is data (grep -e PAT, sed -e EX).
+                if i + 1 < args.len() {
+                    masked.insert(i + 1);
+                }
+                i += 2;
+                continue;
+            }
+            if file_opts.contains(&arg) {
+                // -f script means the pattern/script came via an option, so
+                // the first positional is a real file operand (translates).
+                pattern_via_option = true;
+                i += 2;
+                continue;
+            }
+            if value_opts.contains(&arg) {
+                i += 2;
+                continue;
+            }
+            if let Some(name) = arg
+                .strip_prefix("--")
+                .and_then(|rest| rest.split('=').next())
+            {
+                let long = format!("--{name}");
+                if pattern_opts.contains(&long.as_str()) || file_opts.contains(&long.as_str()) {
+                    pattern_via_option = true;
+                }
+            } else if let Some(cluster) = arg.strip_prefix('-') {
+                if let Some(first) = cluster.chars().next() {
+                    if Some(first) == pattern_short || Some(first) == file_short {
+                        pattern_via_option = true;
+                    }
+                }
+            }
+        } else if first_positional.is_none() {
+            first_positional = Some(i);
+        }
+        i += 1;
+    }
+
+    if !pattern_via_option {
+        if let Some(index) = first_positional {
+            masked.insert(index);
+        }
+    }
+}
+
+/// Marks find pattern-primary values (`-name`, `-path`, `-regex`, ...) as
+/// non-translatable. Leading non-option operands are starting paths and
+/// stay translatable (unixwin/WinuxCmd#1170: the start operand is the path
+/// position `find` itself cannot resolve in POSIX form).
+#[cfg(windows)]
+fn mask_find_pattern_primaries(args: &[String], masked: &mut std::collections::HashSet<usize>) {
+    const PATTERN_PRIMARIES: &[&str] = &[
+        "-name",
+        "-path",
+        "-regex",
+        "-iregex",
+        "-ipath",
+        "-lname",
+        "-wholename",
+        "-ilname",
+        "-iwholename",
+    ];
+    let mut in_expression = false;
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if !in_expression && (arg.starts_with('-') || matches!(arg, "!" | "(" | ")")) {
+            in_expression = true;
+        }
+        if in_expression && PATTERN_PRIMARIES.contains(&arg) {
+            if i + 1 < args.len() {
+                masked.insert(i + 1);
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
 }
 
 /// Case-insensitive component prefix test for Windows paths. `starts_with`
@@ -3604,8 +3844,11 @@ mod tests {
             );
         }
 
-        // POSIX-aware children keep the same pair verbatim (stage 1): the
-        // winuxcmd dispatcher route.
+        // POSIX-aware children now take the SAME uniform Windows form
+        // (rubash#592: the per-child verbatim premise died with the
+        // toolchain evidence — sed/du had no operand resolution, niugit
+        // existence-gates it). One invocation, one dialect, every class:
+        // both operands arrive as `D:\...` whether they exist or not.
         let (command, _) = external_command_for_program(
             &PathBuf::from(r"C:\t\winuxcmd\usr\bin\winuxcmd.exe"),
             &[posix_existing.clone(), posix_missing.clone()],
@@ -3615,10 +3858,17 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())
             .collect::<Vec<_>>();
-        assert!(
-            args.contains(&posix_existing) && args.contains(&posix_missing),
-            "POSIX-aware child must receive verbatim POSIX argv, got {args:?}"
-        );
+        assert_eq!(args.len(), 2, "both operands reach the child: {args:?}");
+        for arg in &args {
+            let bytes = arg.as_bytes();
+            assert!(
+                bytes.len() >= 3
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes[1] == b':'
+                    && (bytes[2] == b'\\' || bytes[2] == b'/'),
+                "POSIX-aware child argv must be uniform Windows form, got {arg:?}"
+            );
+        }
     }
 
     #[cfg(windows)]
@@ -4253,11 +4503,16 @@ mod tests {
     fn windows_virtual_system_root_arguments_keep_option_b_shapes_verbatim() {
         // niubash#164 does NOT widen translation past the root class: the
         // regression guards for the sibling shapes must hold for the applet
-        // child. /c/Windows and /cygdrive/d/x are drive forms the applet's
-        // own native layer resolves (Option B, niubash#124(b)/#62); "/" is
-        // an operand character (niubash#153); /dev/* belongs to the child's
-        // descriptor map (rubash#120); switches, relative words and
-        // leading-backslash data never enter the root class.
+        // child. "/" is an operand character (niubash#153); /dev/* belongs
+        // to the child's descriptor map (rubash#120); /cygdrive/d/x folds
+        // in the applet's own native layer (normalize_api_operand_w, the
+        // one drive form the #568 four-way probe confirmed resolves
+        // in-child); switches, relative words and leading-backslash data
+        // never enter the root class. /c/Windows is NOT in this list
+        // anymore: drive forms translate for the applet too since
+        // rubash#592 — the toolchain's self-resolution is partial (sed/du
+        // had none, WinuxCmd#1178; niugit existence-gates it), so the
+        // engine funnel owns the form.
         //
         // /mnt/c is deliberately NOT in this list: WinuxCmd's
         // normalize_api_operand_w has no /mnt arm (it folds /cygdrive/d/...
@@ -4271,7 +4526,6 @@ mod tests {
         let dispatcher = root.join("usr").join("bin").join("winuxcmd.exe");
 
         let verbatim = [
-            "/c/Windows",
             "/cygdrive/d/x",
             "/",
             "/dev/null",
@@ -4289,6 +4543,189 @@ mod tests {
                 "operand {operand:?} must stay verbatim for the applet"
             );
         }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drive_form_arguments_translate_for_the_posix_aware_child() {
+        // rubash#592: the Option-B verbatim premise ("the child's own layer
+        // resolves /d/x") is false for the shipped toolchain — sed/du had
+        // no operand resolution at all (WinuxCmd#1178) and niugit
+        // existence-gates it (`git -C /d/existing` worked while
+        // `worktree add /d/new` landed at D:\d\new). The engine funnel now
+        // hands the applet the same Windows spelling a native child gets:
+        // unconditional in execution context, argument position and target
+        // existence.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+        let dispatcher = root.join("usr").join("bin").join("winuxcmd.exe");
+        let applet = root.join("usr").join("bin").join("ls.exe");
+
+        for program in [&dispatcher, &applet] {
+            // Positional operand, existing or to-be-created: same form.
+            assert_eq!(
+                child_argv(program, &["/d/repo/x"], &env_vars),
+                vec![r"D:\repo\x".to_string()],
+            );
+            assert_eq!(
+                child_argv(program, &["/d/repo/wt-new"], &env_vars),
+                vec![r"D:\repo\wt-new".to_string()],
+                "a to-be-created target must translate like an existing one"
+            );
+            // /c/... keeps its always-translated display-path spelling.
+            assert_eq!(
+                child_argv(program, &["/c/Windows"], &env_vars),
+                vec![r"C:\Windows".to_string()],
+            );
+            // A flag-consumed value (-C-style position) is a positional
+            // word to the funnel and translates by shape.
+            assert_eq!(
+                child_argv(program, &["-C", "/d/repo"], &env_vars),
+                vec!["-C".to_string(), r"D:\repo".to_string()],
+            );
+            // Bare drive roots stay verbatim (the native funnel's rule).
+            assert_eq!(
+                child_argv(program, &["/d"], &env_vars),
+                vec!["/d".to_string()]
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn data_primary_operands_stay_verbatim_for_the_applet() {
+        // rubash#592 rule table: the shape cannot tell a path from pattern
+        // data (niubash#62), so the four tools whose grammar puts DATA in a
+        // slash-shaped operand keep those words verbatim while their real
+        // path operands translate.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+        let applet = root.join("usr").join("bin").join("ls.exe");
+
+        let named = |command: &str, args: &[&str]| {
+            let (command, _) = external_command_for_named_program(
+                &applet,
+                Some(command),
+                &args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
+                &env_vars,
+            );
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+
+        // grep: the first positional is the PATTERN; with -e it moves into
+        // the option value (masked there) and the positional is a file.
+        assert_eq!(
+            named("grep", &["-F", "/d/pat", "/d/file"]),
+            vec![
+                "-F".to_string(),
+                "/d/pat".to_string(),
+                r"D:\file".to_string()
+            ],
+            "grep pattern stays verbatim, file operand translates"
+        );
+        assert_eq!(
+            named("grep", &["-e", "/d/pat", "/d/file"]),
+            vec![
+                "-e".to_string(),
+                "/d/pat".to_string(),
+                r"D:\file".to_string()
+            ],
+        );
+        // sed: the first positional is the SCRIPT (`/n/d` is an address, not
+        // a path); with -f the script comes via the option value (masked)
+        // and the positional is a file.
+        assert_eq!(
+            named("sed", &["/n/d", "/d/file"]),
+            vec!["/n/d".to_string(), r"D:\file".to_string()],
+            "sed script text stays verbatim, file operand translates"
+        );
+        assert_eq!(
+            named("sed", &["-f", "/d/script.sed", "/d/file"]),
+            vec![
+                "-f".to_string(),
+                r"D:\script.sed".to_string(),
+                r"D:\file".to_string()
+            ],
+        );
+        // awk: first positional is the program; -f flips it to a file.
+        assert_eq!(
+            named("awk", &["{print}", "/d/file"]),
+            vec!["{print}".to_string(), r"D:\file".to_string()],
+        );
+        assert_eq!(
+            named("awk", &["-f", "/d/prog.awk", "/d/file"]),
+            vec![
+                "-f".to_string(),
+                r"D:\prog.awk".to_string(),
+                r"D:\file".to_string()
+            ],
+        );
+        // find: start paths translate (WinuxCmd#1170's engine-side half),
+        // pattern-primary values stay verbatim.
+        assert_eq!(
+            named("find", &["/d/repo", "-name", "/d/pat"]),
+            vec![
+                r"D:\repo".to_string(),
+                "-name".to_string(),
+                "/d/pat".to_string()
+            ],
+        );
+        // basename/dirname are filesystem-blind string transforms (GNU
+        // dirname.c/basename.c never stat their operand): their operands —
+        // name and SUFFIX alike — are display text and stay verbatim so
+        // `dirname /a/b/c.txt` keeps printing `/a/b` (issue71).
+        assert_eq!(
+            named("dirname", &["/a/b/c.txt"]),
+            vec!["/a/b/c.txt".to_string()],
+            "dirname operand is display text, not an FS operand"
+        );
+        assert_eq!(
+            named("basename", &["/a/b/c.txt", ".txt"]),
+            vec!["/a/b/c.txt".to_string(), ".txt".to_string()],
+        );
+        // Without a command name (external_command_for_program route) the
+        // grammar is unknown: nothing is masked, shapes translate.
+        assert_eq!(
+            child_argv(&applet, &["/d/repo/x"], &env_vars),
+            vec![r"D:\repo\x".to_string()],
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_dialect_reverts_drive_form_translation_for_the_applet() {
+        // __RUBASH_ARGV_DIALECT=legacy restores the pre-#592 behavior for
+        // the whole widening: the applet class rejoins the native funnel's
+        // existence-gated half-translation (an existing drive target still
+        // translates, a missing one stays verbatim).
+        let root = i164_fixture_root();
+        let existing = root.join("etc").join("i164.conf");
+        let existing_native = existing.to_string_lossy().into_owned();
+        let drive_letter = existing_native.as_bytes()[0].to_ascii_lowercase() as char;
+        let drive_form = format!("/{drive_letter}{}", &existing_native[2..]).replace('\\', "/");
+        let mut legacy = i164_rooted_env(&root);
+        legacy.insert("__RUBASH_ARGV_DIALECT".to_string(), "legacy".to_string());
+        let dispatcher = root.join("usr").join("bin").join("winuxcmd.exe");
+
+        // Existing target under legacy: the native funnel translates.
+        assert_eq!(
+            child_argv(&dispatcher, &[drive_form.as_str()], &legacy),
+            vec![existing_native],
+        );
+        // Missing target under legacy: verbatim (the pre-#592 gate).
+        assert_eq!(
+            child_argv(&dispatcher, &["/d/repo/missing-592"], &legacy),
+            vec!["/d/repo/missing-592".to_string()],
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -4353,11 +4790,13 @@ mod tests {
             "/mnt/d/repo/x must reach the applet as D:\\repo\\x"
         );
 
-        // The bare MSYS shapes stay verbatim: /d/x and /cygdrive/d/x are
-        // resolved by the applet's own native layer and must not be
-        // double-translated by the engine.
+        // The bare MSYS shapes: /cygdrive/d/x folds in the applet's own
+        // native layer (normalize_api_operand_w, #568 probe) and stays
+        // verbatim; /d/x joined the engine translation with rubash#592 —
+        // the applet receives the same Windows spelling a native child
+        // gets, target existence regardless.
         let argv = child_argv(&dispatcher, &["/d/repo/x"], &env_vars);
-        assert_eq!(argv, vec!["/d/repo/x".to_string()]);
+        assert_eq!(argv, vec![r"D:\repo\x".to_string()]);
         let argv = child_argv(&dispatcher, &["/cygdrive/d/x"], &env_vars);
         assert_eq!(argv, vec!["/cygdrive/d/x".to_string()]);
 
@@ -4541,8 +4980,9 @@ mod tests {
         // issue-568 claim was Git Bash argv-conversion pollution; see the
         // 2026-10-12 adjudication). The /mnt contract is owned exclusively
         // by the #444 pin in windows_mnt_drive_argument_translates_for_every_child.
+        // /c/Windows moved out with rubash#592 (drive forms translate for
+        // the applet class too); /cygdrive/d/x stays — it folds in-child.
         for verbatim in [
-            "/c/Windows",
             "/cygdrive/d/x",
             "/",
             "/dev/null",

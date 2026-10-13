@@ -230,7 +230,11 @@ fn winuxcmd_ls_literal_dollar_operand_is_not_expanded() {
         .to_string_lossy()
         .replace('\\', "/");
     // The operand '$nosuchvar/real.txt' is single-quoted: GNU ls reports the
-    // literal text and never guesses a path.
+    // literal text and never guesses a path. Since rubash#592 the PATH-FORM
+    // operand translates at the funnel (the tool boundary sees the Windows
+    // spelling), but the `$nosuchvar` component must stay LITERAL — no
+    // re-expansion into a neighboring real path is the #511-family contract
+    // this unit guards.
     let (code, stdout, stderr) = run_rubash(
         &format!("'{ls}' '{posix}/$nosuchvar/real.txt' 2>&1 | head -1"),
         &[],
@@ -238,7 +242,7 @@ fn winuxcmd_ls_literal_dollar_operand_is_not_expanded() {
     assert_eq!(code, Some(0));
     let combined = format!("{stdout}{stderr}");
     assert!(
-        combined.contains("$nosuchvar/real.txt"),
+        combined.contains("$nosuchvar") && combined.contains("real.txt"),
         "ls diagnostic lost the literal operand: {combined:?}"
     );
     let _ = std::fs::remove_dir_all(&scratch);
