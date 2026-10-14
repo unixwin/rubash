@@ -46,10 +46,25 @@ impl Executor {
     }
 
     pub fn expand_prompt_string_mut(&mut self, value: &str) -> String {
+        // GNU parse.y:6158-6160 prompt_again feeds PS1/PS2/PS0 through
+        // decode_prompt_string as a READ-side render of the reader's next
+        // prompt; it never writes the reader's status: WSL GNU Bash 5.3.0
+        // piped-`-i` probes — PS1='$(false)' / PS0='$(false)' render before
+        // the next read and the following `echo $?` still prints the
+        // PRE-render value (issue rubash#604 probes gnu604.sh/gnu604ps0.sh).
+        // The embedded-expansion engine underneath is the ASSIGNMENT engine:
+        // its command-substitution boundary publishes the body's status for
+        // the POSIX assignment exit rule (`v=$(false)` -> $? = 1), so the
+        // render channel snapshots and restores both status words here.
+        let saved_exit_code = self.exit_code;
+        let saved_pipestatus = self.shell_state.pipestatus.clone();
         let decoded = self.decode_prompt_string(value);
-        super::prompt_expansion::strip_prompt_ignore_markers(
+        let rendered = super::prompt_expansion::strip_prompt_ignore_markers(
             &self.expand_embedded_parameters_mut(&decoded),
-        )
+        );
+        self.exit_code = saved_exit_code;
+        self.shell_state.pipestatus = saved_pipestatus;
+        rendered
     }
 
     pub fn mark_parse_error(&mut self) {

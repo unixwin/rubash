@@ -6,7 +6,9 @@
 
 ## [Unreleased]
 
-暂无。
+### 修复
+
+- **prompt 渲染不再破坏读者的 `$?`/PIPESTATUS**（#604）：交互驱动（niu 原生控制台通道，`expand_prompt_string_mut`）渲染 `PS1`/`PS2`/`PS0` 时，内嵌 `$(false)` 等命令替换的退出状态此前经赋值展开引擎的替换边界写入 `exit_code`，下一个命令的 `$?` 读到 1；GNU 的 prompt 渲染是读侧操作，从不动读者的状态（WSL GNU Bash 5.3.0 piped-`-i` 探针：`PS1='$(false)'` 渲染后 `echo $?` 仍打印渲染前的值）。修复：渲染通道快照并在收尾恢复 `$?` 与 PIPESTATUS——赋值 RHS 通道（`v=$(false)` → rc=1 的 POSIX 赋值退出规则）不受影响。附带 #604 的通道 parity 回归与相对性能上限测试（PS1 渲染路径 vs PROMPT_COMMAND 路径的中位耗时比值上限），并按 profile 数据澄清该 issue 的主刀：四主题 rr 成本为外部 spawn 数 × Windows spawn 地板（每次渲染 4-6 次 git spawn；裸 `std::process::Command` 对同一 git.exe 需 208.9ms，rubash 会话内 217.6ms），两条引擎通道执行同一替换体为 parity（同进程 dev 计 47/49/68ms，release 会话内逐次 git 209.7/217.6ms）。
 
 ## [1.4.0] - 2026-10-10
 
