@@ -27,9 +27,11 @@ impl Executor {
                 eprintln!("ASSIGN {name}={value:?}");
             }
             let expanded_value = self.expand_assignment_value_with_raw(name, value, raw);
-            self.assignment_expansion_memo
-                .borrow_mut()
-                .insert((name.clone(), value.clone()), expanded_value.clone());
+            if self.xtrace_enabled() {
+                self.assignment_expansion_memo
+                    .borrow_mut()
+                    .insert((name.clone(), value.clone()), expanded_value.clone());
+            }
             // GNU subst.c:10404+ expand_word_error -> DISCARD: a failed
             // assignment word (failglob no-match, readonly violation, ...)
             // abandons the rest of this command's assignment list.
@@ -155,9 +157,11 @@ impl Executor {
                 .flatten()
                 .map(String::as_str);
             let expanded_value = self.expand_assignment_value_with_raw(name, value, raw);
-            self.assignment_expansion_memo
-                .borrow_mut()
-                .insert((name.clone(), value.clone()), expanded_value.clone());
+            if self.xtrace_enabled() {
+                self.assignment_expansion_memo
+                    .borrow_mut()
+                    .insert((name.clone(), value.clone()), expanded_value.clone());
+            }
             let (base_name, _) = assignment_name_and_append(name);
             let saved_env = self.shell_state.env_vars.get(base_name).cloned();
             let saved_typed = self.shell_state.variables.get(base_name).cloned();
@@ -1233,7 +1237,7 @@ impl Executor {
         if !is_array {
             if let Some(variable) = self.shell_state.variables.get_mut(base_name) {
                 if let crate::shell::ShellValue::Scalar(current) = &mut variable.value {
-                    *current = value.clone();
+                    current.clone_from(&value);
                 }
             } else {
                 let _ = self
@@ -1262,9 +1266,13 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
-        self.shell_state
-            .env_vars
-            .insert(base_name.to_string(), value.clone());
+        if let Some(current) = self.shell_state.env_vars.get_mut(base_name) {
+            current.clone_from(&value);
+        } else {
+            self.shell_state
+                .env_vars
+                .insert(base_name.to_string(), value.clone());
+        }
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport") {
             self.mark_exported(base_name);
         }

@@ -56,6 +56,84 @@ mod unit_tests {
     }
 
     #[test]
+    fn assignment_trace_memo_is_empty_without_xtrace() {
+        let mut executor = Executor::new();
+        executor
+            .execute_ast(&parse(&tokenize("set +x")))
+            .expect("disable inherited tracing");
+        let assignments = vec![("memo_test".to_string(), "value".to_string())];
+
+        assert!(executor.apply_permanent_assignments(&assignments, None));
+        assert!(executor.assignment_expansion_memo.borrow().is_empty());
+        let (previous, failed) = executor.apply_temporary_assignments(&assignments, None);
+        assert!(!failed);
+        assert!(executor.assignment_expansion_memo.borrow().is_empty());
+        executor.restore_temporary_assignments(previous);
+    }
+
+    #[test]
+    fn scalar_reassignment_reuses_mirror_and_typed_buffers() {
+        let mut executor = Executor::new();
+        let name = "buffer_reuse_test";
+        let initial = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        assert!(executor.apply_shell_assignment(name, initial.to_string()));
+        let mirror_capacity = executor.shell_state.env_vars[name].capacity();
+        let typed_capacity = match &executor.shell_state.variables.get(name).unwrap().value {
+            crate::shell::ShellValue::Scalar(value) => value.capacity(),
+            _ => panic!("expected scalar cell"),
+        };
+
+        for expected in ["short", "", "different", initial] {
+            assert!(executor.apply_shell_assignment(name, expected.to_string()));
+            assert_eq!(executor.get_env(name), Some(expected));
+            assert_eq!(
+                executor.shell_state.env_vars[name].capacity(),
+                mirror_capacity
+            );
+            match &executor.shell_state.variables.get(name).unwrap().value {
+                crate::shell::ShellValue::Scalar(value) => {
+                    assert_eq!(value, expected);
+                    assert_eq!(value.capacity(), typed_capacity);
+                }
+                _ => panic!("expected scalar cell"),
+            }
+        }
+    }
+
+    #[test]
+    fn assignment_trace_memo_retains_expanded_values_with_xtrace() {
+        let mut executor = Executor::new();
+        executor
+            .execute_ast(&parse(&tokenize("set -x")))
+            .expect("enable tracing");
+        executor.set_env("memo_source", "expanded");
+        let assignments = vec![("memo_test".to_string(), "$memo_source".to_string())];
+        let key = assignments[0].clone();
+
+        assert!(executor.apply_permanent_assignments(&assignments, None));
+        assert_eq!(
+            executor
+                .assignment_expansion_memo
+                .borrow()
+                .get(&key)
+                .map(String::as_str),
+            Some("expanded")
+        );
+        executor.assignment_expansion_memo.borrow_mut().clear();
+        let (previous, failed) = executor.apply_temporary_assignments(&assignments, None);
+        assert!(!failed);
+        assert_eq!(
+            executor
+                .assignment_expansion_memo
+                .borrow()
+                .get(&key)
+                .map(String::as_str),
+            Some("expanded")
+        );
+        executor.restore_temporary_assignments(previous);
+    }
+
+    #[test]
     fn export_assignment_arg_preserves_quoted_spaces() {
         let tokens = tokenize(
             r#"export RUBASH_TEST_TOOLPATH="$RUBASH_TEST_TOOLPATH;C:\Program Files\Tool""#,
