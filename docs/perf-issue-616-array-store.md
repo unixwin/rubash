@@ -508,7 +508,7 @@ Evidence: 43-case 3-way differential vs GNU (`~/bench_niu/matrix_631.sh`) —
 (`~/bench_niu/ratchet.sh`, serial) clean.
 
 Sibling divergences found while characterising the class, each its own concern:
-#635 (the declare-side duplicate of this scan, `declare`/`local`/`typeset`, still
+And issue #635 (the declare-side duplicate of this scan, `declare`/`local`/`typeset`, still
 drops the element — it needs the builtin's own fatal error channel), #636
 (`a+=( [@]=q )` reports an arithmetic error instead of GNU's `cannot assign to
 non-numeric index`, `arrayfunc.c:787-792`), #637 (`eval` does not contain the
@@ -518,3 +518,91 @@ Measurement caveat for the transportable numbers above: the host has no idle
 window (loadavg ~3.5–5 on 6 cores) and its local bash is 5.3.20, while the
 repository oracle is WSL bash 5.3.0. Every rule applied is taken from the
 vendored 5.3 source and its own probes, not from a version's observed output.
+
+## The assoc cell and `set -u` boundness (#638; attribution for #618)
+
+### Attribution — why `m[k]=v` is ~18x GNU
+
+Issue #618 reports the assoc write path at 16.7x. Re-measured on `12da0b5` with the
+order-rotated min-of-3 harness `~/bench_niu/attrib_618.sh` (bodies inlined into
+`-c` so neither shell pays an `eval` the other does not; loadavg 5–8 on 6
+cores, so min-of-rotated-rounds rather than a single run):
+
+| case | GNU | rubash | ratio |
+| --- | --- | --- | --- |
+| `m[k$((i%100))]=$i`, N=200000 | 0.921s | 16.830s | 18.3x |
+| same with 1 key | 0.712s | 2.495s | 3.5x |
+| `m+=( [k…]=$i )`, N/20 | 0.071s | 0.163s | 2.3x |
+| assoc read, 100 keys | 1.279s | 9.076s | 7.1x |
+| indexed write, 100 slots | 0.799s | 20.424s | 25.6x |
+| scalar write | 0.603s | 1.301s | 2.2x |
+
+The mechanism is isolated by scaling the **key count** K with the write count
+held at 20 000: the per-write cost tracks the number of keys, because every
+write re-renders the whole mirror (`assignment_helpers.rs:345
+format_assoc_storage`), while GNU's `assoc_insert` is an O(1) hash insert
+(`assoc.c`).
+
+| K | GNU | rubash | ratio |
+| --- | --- | --- | --- |
+| 10 | 0.007s | 0.008s | 1.1x |
+| 100 | 0.007s | 0.013s | 1.9x |
+| 1000 | 0.011s | 0.242s | 22x |
+| 5000 | 0.025s | 5.574s | 223x |
+
+The indexed side shows the same shape far more sharply (K=5000: GNU 0.109s vs
+rubash 98.947s = 908x); that residual is #616's next phase, not #618's.
+
+### #638 resolved — the scalar form is bound by element 0, and the mirror decides
+
+Surveying the assoc cell for #618 exposed two defects behind one symptom:
+`set -u` judged the **scalar form** `${m}` wrong in *both* directions —
+`declare -A m=([k]=v); unset "m[k]"` printed `x[]` at status 0 where GNU aborts
+at 127, and `declare -A m; m[0]=v` aborted at 127 where GNU prints `[v]`.
+
+GNU decides from element/key `"0"`:
+
+```c
+/* subst.c:7787-7790 parameter_brace_expand_word() */
+else if (assoc_p (var))  temp = assoc_reference (assoc_cell (var), "0");
+else if (array_p (var))  temp = array_reference (array_cell (var), 0);
+/* array.c:657 / assoc.c:120 return NULL when that element is absent;
+   subst.c:10162-10169 parameter_brace_expand() then raises err_unboundvar
+   (error.c:448), with all_element_arrayref exempting `${a[@]}`. */
+```
+
+rubash's rule was `!entries.is_empty()` — "has any element" — wrong for
+`IndexedArray` and `AssociativeArray` alike. Worse, for assoc it consulted the
+typed cell, which **no writer maintains**: only `declare`/`typeset`
+(`builtins/declare.rs:105`, `:193`) and `printf -v m[k]` (`builtins/printf.rs:365`)
+create it, while every later mirror write (`m[k]=v`, `unset "m[k]"`, `m=(...)`,
+`m+=(...)`, `${!name[k]}`, `wait`-bound assoc variables, `export`/`readonly`)
+touches only the mirror string. The indexed side has a sync family for exactly
+this (`arrays/storage.rs:390 sync_typed_indexed_storage`, `:321
+sync_typed_indexed_element`); there is **no assoc counterpart**. Since the
+mirror is what the *value* read uses (`variable_state.rs:462-470
+scalar_parameter_value` → `assoc_value_at(storage,"0")` / `array_value_at(storage,0)`),
+the stale cell let boundness disagree with the value it was guarding.
+
+The fix changes the invariant rather than chasing the ~12 writers: **the
+mirror decides**, through those same two helpers, so boundness and value agree
+by construction and a future writer cannot silently reintroduce the class. The
+typed cell is still consulted for scalars (authoritative by construction) and
+for unmarked arrays, and the array rule becomes `contains_key(0)` /
+`contains_key("0")`. Both parses are content-addressed memos
+(`arrays/storage.rs:64`, `assignment_helpers.rs:491`) and the value read
+performs the same one, so this costs a cache hit, not a re-parse — the indexed
+`set -u` fast path keeps its O(1) shape.
+
+Evidence: 40-case GNU differential (`39 match`; the 1 remaining diff is
+The remaining diff is issue #639 — an arithmetic *subscript* never runs the nounset check, which fails
+during the assignment in GNU), `tests/issue638_nounset_array_boundness.rs`
+20/20, `cargo test --lib` 584/584, serial failure-set ratchet vs `12da0b5`.
+
+Sibling divergences found while probing the class, each its own concern:
+And issue #639 (arithmetic array subscripts ignore `set -u`; the `for ((;;))` header also
+reports status 1 where GNU reports 127).
+
+Measurement caveat as before: local bash is 5.3.20, the repository oracle is
+WSL bash 5.3.0, and every rule applied here is taken from the vendored 5.3 C
+source cited above rather than from an observed version's output.

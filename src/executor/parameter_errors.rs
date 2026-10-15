@@ -1983,25 +1983,52 @@ impl Executor {
         if self.dynamic_parameter_is_set(name) {
             return true;
         }
-        // GNU variables.c find_variable returns the CELL; boundness for the
-        // scalar form is decided by the cell TYPE (array_p/assoc_p), never
-        // by the value text — a scalar like x='()' (read from a doc line,
-        // rubash #311 blast radius: liquidprompt tools/config-from-doc.sh)
-        // is bound, while an empty array cell (`e=()`, new-exp15 `-uc`) is
-        // not. The typed store carries the type; consult it first and fall
-        // back to the flat-mirror heuristics only for env-only names.
+        // GNU variables.c find_variable returns the CELL, and the scalar
+        // form reads element/key "0" of it:
+        //   subst.c:7787-7790 parameter_brace_expand_word()
+        //     assoc_p (var) -> assoc_reference (assoc_cell (var), "0")
+        //     array_p (var) -> array_reference (array_cell (var), 0)
+        //   array.c:657 array_reference() / assoc.c:120 assoc_reference()
+        //     return NULL when that element is absent
+        //   subst.c:10162-10169 parameter_brace_expand()
+        //     var_is_set == 0 -> err_unboundvar (error.c:448)
+        // So the scalar form is bound EXACTLY when element 0 exists: a
+        // non-empty array holding no element 0 (`a=([3]=x)`, or `(x y)` after
+        // `unset "a[0]"`) is unbound for `${a}`, while `${a[@]}` stays bound
+        // because all_element_arrayref exempts the `@`/`*` forms from that
+        // check. The previous rule ("the cell holds any element") was wrong
+        // in both directions. A scalar whose text merely looks like an array
+        // (x='()', rubash #311: liquidprompt tools/config-from-doc.sh) is
+        // still bound — it is a scalar cell, not an array one.
+        //
+        // For arrays and assoc arrays the MIRROR decides, through the same
+        // helpers the value read uses (variable_state.rs:462-470
+        // scalar_parameter_value -> assoc_value_at(storage, "0") /
+        // array_value_at(storage, 0)), so boundness and the value it guards
+        // agree by construction. The typed cell is consulted for scalars and
+        // for unmarked arrays only: the ASSOC cell has no writer-side sync
+        // at all — only declare/printf create it, and every later mirror
+        // write (`m[k]=v`, `unset "m[k]"`, `m=(...)`, `printf -v m[k]`, …)
+        // leaves it stale (rubash#618) — so trusting it let a stale cell
+        // print a value while calling the name bound, or abort a working
+        // script as unbound. Both parses are content-addressed memos
+        // (arrays/storage.rs:64, assignment_helpers.rs:491) and the value
+        // read performs the same one, so this costs a cache hit.
+        let assoc_marked = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name);
+        let array_marked = is_marked_array_var(&self.shell_state.env_vars, name);
+        if assoc_marked || array_marked {
+            return self.array_scalar_form_is_bound(name, assoc_marked);
+        }
         if let Some(variable) = self.shell_state.variables.get(name) {
             return match &variable.value {
                 crate::shell::ShellValue::Scalar(_) => true,
-                crate::shell::ShellValue::IndexedArray(entries) => !entries.is_empty(),
-                crate::shell::ShellValue::AssociativeArray(entries) => !entries.is_empty(),
+                crate::shell::ShellValue::IndexedArray(entries) => entries.contains_key(&0),
+                crate::shell::ShellValue::AssociativeArray(entries) => entries.contains_key("0"),
             };
         }
-        let has_array_marker = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name)
-            || is_marked_array_var(&self.shell_state.env_vars, name);
         match self.shell_state.env_vars.get(name) {
             Some(value) => {
-                if has_array_marker || is_array_storage(value) {
+                if is_array_storage(value) {
                     let resolved = self
                         .resolved_variable_name(name)
                         .unwrap_or_else(|| name.to_string());
@@ -2009,13 +2036,9 @@ impl Executor {
                         .parameter_array_storage(&resolved)
                         .map(|storage| {
                             if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved) {
-                                !assoc_hash_ordered_values(
-                                    &storage,
-                                    assoc_nbuckets(&self.shell_state.env_vars, &resolved),
-                                )
-                                .is_empty()
+                                assoc_value_at(&storage, "0").is_some()
                             } else {
-                                !indexed_array_entries(&storage).is_empty()
+                                array_value_at(&storage, 0).is_some()
                             }
                         })
                         .unwrap_or(false);
@@ -2023,10 +2046,30 @@ impl Executor {
                 true
             }
             None => {
-                !has_array_marker
-                    && crate::executor::env_helpers::exact_case_env_var(name).is_some()
+                !array_marked && crate::executor::env_helpers::exact_case_env_var(name).is_some()
             }
         }
+    }
+
+    /// Boundness of the scalar form for an array/assoc-marked name: element
+    /// 0 (array.c:657) or key "0" (assoc.c:120), read from the mirror — the
+    /// same representation the value read consults, so the two cannot
+    /// disagree (see nounset_variable_bound).
+    fn array_scalar_form_is_bound(&self, name: &str, assoc_marked: bool) -> bool {
+        let resolved = self
+            .resolved_variable_name(name)
+            .unwrap_or_else(|| name.to_string());
+        let assoc =
+            assoc_marked || is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved);
+        self.parameter_array_storage(&resolved)
+            .map(|storage| {
+                if assoc {
+                    assoc_value_at(&storage, "0").is_some()
+                } else {
+                    array_value_at(&storage, 0).is_some()
+                }
+            })
+            .unwrap_or(false)
     }
 
     /// GNU subst.c check_unbound_variable: whether an `a[sub]` element
