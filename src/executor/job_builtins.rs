@@ -1701,12 +1701,12 @@ impl Executor {
             }
 
             if has_io {
-                let file = file_arg
-                    .or_else(|| self.get_env("HISTFILE").map(String::from))
-                    .ok_or_else(|| {
-                        let _ = writeln!(stderr, "history: filename not specified");
-                        ExecuteError::ExitCode(2)
-                    })?;
+                let Some(file) = file_arg.or_else(|| self.get_env("HISTFILE").map(String::from))
+                else {
+                    writeln!(stderr, "history: filename not specified")?;
+                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                    return Ok(1);
+                };
                 let mut p = provider.borrow_mut();
                 if do_clear {
                     p.clear()?;

@@ -2173,6 +2173,19 @@ fn history_builtin_rejects_extra_and_malformed_arguments() {
 }
 
 #[test]
+fn history_append_without_histfile_reports_failure_and_continues() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("echo pre; history -a; echo AFTER")
+        .output()
+        .expect("run history append without HISTFILE probe");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "pre\nAFTER\n");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("history: filename not specified"));
+}
+
+#[test]
 fn c_command_multiline_set_h_enables_history_expansion() {
     // GNU shell.c run_one_command -> parse_and_execute reads a `-c`
     // string line-by-line; bashhist.c pre_process_line applies history
