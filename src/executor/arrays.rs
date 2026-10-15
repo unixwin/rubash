@@ -793,6 +793,12 @@ pub(super) struct IndexedAppendOutcome {
     /// attribute did not rewrite existing elements, so the new render differs
     /// from the old mirror only by `appended`.
     pub appended_only: bool,
+    /// rubash#631: the first element header whose negative subscript resolved
+    /// before the array start. GNU reports `<word>: bad array subscript` for
+    /// it and stops the scan (arrayfunc.c:804-809), so the caller must still
+    /// store the elements above (they were inserted before the failure) and
+    /// then fail the assignment with status 1. `None` on every other path.
+    pub bad_subscript: Option<String>,
 }
 
 /// rubash#616 (plan Phase 1c): the array contents the compound scan decodes
@@ -911,6 +917,11 @@ pub(super) fn append_array_value(
     // append-only path.
     let mut appended_only = !integer;
     let mut next_index = old_max.map(|index| index + 1).unwrap_or(0);
+    // rubash#631: the first element header whose negative subscript resolved
+    // before the array start. GNU reports `bad array subscript` for it and
+    // stops the scan (arrayfunc.c:804-809), with the elements it already
+    // inserted still in place, then fails the assignment.
+    let mut bad_subscript: Option<String> = None;
     // Bash appends `arr+=str` (no parens) to arr[0] for any array, not just
     // integer arrays; `arr+=(x y)` appends new elements.
     let scalar_append = !value.starts_with('(');
@@ -966,9 +977,20 @@ pub(super) fn append_array_value(
         if let Some((op_start, op_len)) = compound_element_operator_offset(&token) {
             let left = &token[..op_start];
             let rhs = &token[op_start + op_len..];
+            let resolved = array_assignment_index(left, entries.max(), env_vars);
+            if let ArrayAssignmentIndex::NegativeOutOfRange = resolved {
+                // GNU arrayfunc.c:804-809: `ind` is still below zero after
+                // the count-back at :802-803 (or the array is empty, so
+                // there is nothing to count back from), so err_badarraysub
+                // reports the whole element word, `any_failed` is counted
+                // and the scan breaks. The elements written above stay
+                // stored (arrayfunc.c:768-772 inserts as it scans).
+                bad_subscript = Some(token.clone());
+                break;
+            }
             if op_len == 2 {
                 // `[sub]+=' append form.
-                if let Some(index) = array_assignment_index(left, entries.max(), env_vars) {
+                if let ArrayAssignmentIndex::Index(index) = resolved {
                     let current = entries.get(index).cloned().unwrap_or_default();
                     let rhs = finalize_comsub_element(&dequote_compound_element_rhs(rhs));
                     let value = if integer {
@@ -991,7 +1013,7 @@ pub(super) fn append_array_value(
                 if array_assignment_has_subscript(left) {
                     continue;
                 }
-            } else if let Some(index) = array_assignment_index(left, entries.max(), env_vars) {
+            } else if let ArrayAssignmentIndex::Index(index) = resolved {
                 let decoded = finalize_comsub_element(&dequote_compound_element_rhs(rhs));
                 if old_max.is_some_and(|max| index <= max) {
                     appended_only = false;
@@ -1162,6 +1184,7 @@ pub(super) fn append_array_value(
             old_max,
             appended: Vec::new(),
             appended_only: false,
+            bad_subscript,
         });
     }
 
@@ -1179,28 +1202,69 @@ pub(super) fn append_array_value(
         old_max,
         appended,
         appended_only,
+        bad_subscript,
     })
+}
+
+/// How a `[subscript]` element header resolved while scanning a compound
+/// assignment list.
+///
+/// GNU assign_compound_array_list computes `ind` and then, when a negative
+/// subscript still lands before the array start, reports `bad array
+/// subscript`, counts a failure and STOPS the list (arrayfunc.c:804-809;
+/// error.c:440 err_badarraysub prints arrayfunc.c:63 bash_badsub_errmsg).
+/// The elements it already wrote stay in place — it inserts as it scans
+/// (arrayfunc.c:768-772). Collapsing that into an `Option` conflated it with
+/// "this word is not a subscript at all", so the element was dropped in
+/// silence and the shell carried on (rubash#631).
+#[derive(Clone, Copy)]
+pub(super) enum ArrayAssignmentIndex {
+    /// `[expr]` resolved to an absolute element index.
+    Index(usize),
+    /// `[expr]` evaluated to a negative index with no element behind it
+    /// (or the array is empty, so there is nothing to count back from):
+    /// GNU reports `bad array subscript` and stops the list.
+    NegativeOutOfRange,
+    /// No `[subscript]` header, or its arithmetic already failed and reported
+    /// its own (fatal) diagnostic — nothing further is owed for this word.
+    Unresolved,
 }
 
 pub(super) fn array_assignment_index(
     left: &str,
     max_index: Option<usize>,
     env_vars: &crate::shell::var_table::VarTable,
-) -> Option<usize> {
-    let expression = left.strip_prefix('[')?.strip_suffix(']')?;
-    let index = eval_conditional_arith_value(expression, env_vars)?;
+) -> ArrayAssignmentIndex {
+    let Some(expression) = left
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    else {
+        return ArrayAssignmentIndex::Unresolved;
+    };
+    let Some(index) = eval_conditional_arith_value(expression, env_vars) else {
+        return ArrayAssignmentIndex::Unresolved;
+    };
     if index >= 0 {
-        return usize::try_from(index).ok();
+        return match usize::try_from(index) {
+            Ok(index) => ArrayAssignmentIndex::Index(index),
+            Err(_) => ArrayAssignmentIndex::Unresolved,
+        };
     }
     // A negative subscript is relative to the array's current highest index
     // (the callers pass `IndexedDecodeBase::max`), so this needs the max only
-    // — never the whole element map.
-    let max_index = max_index?;
-    let resolved = i128::try_from(max_index)
-        .ok()?
-        .checked_add(1)?
-        .checked_add(index)?;
-    usize::try_from(resolved).ok()
+    // — never the whole element map. `array_max_index + 1 + ind`
+    // (arrayfunc.c:802-803) still lands below zero when the index reaches
+    // past the array start; with no max at all there is nothing to count back
+    // from. Both are GNU's second `if (ind < 0)` at arrayfunc.c:804.
+    let resolved = max_index
+        .and_then(|max| i128::try_from(max).ok())
+        .and_then(|max| max.checked_add(1))
+        .and_then(|next| next.checked_add(index))
+        .and_then(|resolved| usize::try_from(resolved).ok());
+    match resolved {
+        Some(index) => ArrayAssignmentIndex::Index(index),
+        None => ArrayAssignmentIndex::NegativeOutOfRange,
+    }
 }
 
 pub(super) fn array_assignment_has_subscript(left: &str) -> bool {

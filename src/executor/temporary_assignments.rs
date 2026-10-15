@@ -1056,6 +1056,11 @@ impl Executor {
         // compound write straight to the canonical mirror + structured cell,
         // so the shared tail below must not re-render and re-sync it.
         let mut mirror_written_in_place = false;
+        // rubash#631: the first element header whose negative subscript
+        // resolved before the array start (GNU arrayfunc.c:804-809). The
+        // partial element writes still land (see the tail), then the
+        // assignment fails like the plain `a[-2]=q` path does.
+        let mut bad_subscript: Option<String> = None;
         let value = if append {
             let current = self
                 .shell_state
@@ -1107,6 +1112,10 @@ impl Executor {
                     &self.shell_state.env_vars,
                 ) {
                     Ok(outcome) => {
+                        // rubash#631: the scan stopped on an out-of-range
+                        // negative subscript; the renders below still carry
+                        // every element written before it.
+                        bad_subscript = outcome.bad_subscript.clone();
                         // rubash#616 (plan Phase 1c): an append-only compound
                         // write onto a canonical mirror with a structured cell
                         // is applied in place — the decode is seeded from the
@@ -1219,7 +1228,10 @@ impl Executor {
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
                 &self.shell_state.env_vars,
             ) {
-                Ok(outcome) => render_indexed_outcome("()", outcome),
+                Ok(outcome) => {
+                    bad_subscript = outcome.bad_subscript.clone();
+                    render_indexed_outcome("()", outcome)
+                }
                 Err(pattern) => {
                     return self.fail_compound_array_assignment(base_name, &pattern);
                 }
@@ -1355,6 +1367,31 @@ impl Executor {
             value.as_str()
         };
         sync_shell_assignment_process_env(&self.shell_state.env_vars, base_name, projected);
+        if let Some(word) = bad_subscript {
+            // GNU assign_compound_array_list (arrayfunc.c:804-809): when a
+            // negative subscript still lands before the array start,
+            // err_badarraysub (error.c:440) names the whole element word
+            // (arrayfunc.c:63 bash_badsub_errmsg). It goes through
+            // report_error, so — unlike `declare: x: readonly variable` —
+            // the message carries no `command:` segment, which is why this
+            // uses diagnostic_prefix() and not assignment_diagnostic_prefix().
+            // `any_failed` is counted and the list stops — the elements written before it stay stored (the
+            // writes just above), exactly as arrayfunc.c:768-772 inserts as it
+            // scans. assign_array_var_from_string (arrayfunc.c:913-932) then
+            // returns NULL, so the assignment fails with status 1.
+            // `raise_evalerror_abort` is the same DISCARD jump the plain
+            // `a[-2]=q` path makes: function frames unwind, a subshell ends
+            // just itself, and a top-level list ends the noninteractive run.
+            let line = format!(
+                "{}{}: bad array subscript\n",
+                self.diagnostic_prefix(),
+                word
+            );
+            self.emit_assignment_diag(line);
+            self.exit_code = 1;
+            self.raise_evalerror_abort();
+            return false;
+        }
         true
     }
 
