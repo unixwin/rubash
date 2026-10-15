@@ -519,9 +519,16 @@ impl Executor {
         };
         entries.insert(index, element);
         // rubash#616 (plan Phase 1a): the structured cell follows the mirror
-        // in lockstep so `${#a[@]}` reads the count in O(1) (GNU
-        // array.h:121 num_elements) instead of reparsing the render.
-        sync_typed_indexed_array(&mut self.shell_state.variables, name, &entries);
+        // in lockstep so `${#a[@]}` reads the count in O(1) (GNU array.h:121
+        // num_elements) instead of reparsing the render. The in-place
+        // extension keeps the element-write loop off the O(n) map rebuild.
+        sync_typed_indexed_element(
+            &mut self.shell_state.variables,
+            name,
+            i64::try_from(index).unwrap_or(i64::MAX),
+            entries.get(&index).map(String::as_str).unwrap_or_default(),
+            &entries,
+        );
         self.shell_state
             .env_vars
             .insert(name.to_string(), format_indexed_array_storage(entries));

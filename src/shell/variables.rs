@@ -183,6 +183,37 @@ impl VariableStore {
         Ok(())
     }
 
+    /// rubash#616 (plan Phase 1a): extend an ALREADY-structured indexed cell
+    /// by one element without rebuilding the map. Returns `false` when the
+    /// cell is absent, of another shape, readonly, or when the resulting
+    /// size disagrees with `expected_len` (the caller's own parse of the
+    /// mirror it is about to render); the caller then performs the full
+    /// structured sync, which drops a refused cell. The size check keeps the
+    /// "complete or absent" invariant self-healing instead of trusting the
+    /// cell blindly: the element-write loop is the array battery's hot path
+    /// and a full `BTreeMap` rebuild per element made it measurably slower
+    /// than the pre-#616 baseline (GNU array.c:516 `array_insert` appends to
+    /// the ARRAY object in O(1)).
+    pub fn extend_indexed_element(
+        &mut self,
+        name: &str,
+        index: i64,
+        value: &str,
+        expected_len: usize,
+    ) -> bool {
+        let Some(variable) = self.variables.get_mut(name) else {
+            return false;
+        };
+        if variable.readonly {
+            return false;
+        }
+        let ShellValue::IndexedArray(entries) = &mut variable.value else {
+            return false;
+        };
+        entries.insert(index, value.to_string());
+        entries.len() == expected_len
+    }
+
     pub fn replace_associative_array<I, K, V>(
         &mut self,
         name: &str,

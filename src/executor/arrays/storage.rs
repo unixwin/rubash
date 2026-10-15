@@ -311,6 +311,25 @@ pub(crate) fn sync_typed_indexed_array(
     }
 }
 
+/// rubash#616 (1a): single-element extension of the structured cell for the
+/// element-write hot path. Tries the in-place extension first (O(log n), GNU
+/// array.c:516 `array_insert` appends to the ARRAY object) and falls back to
+/// the full structured sync — which is also what drops a refused cell — when
+/// the cell is missing, of another shape, readonly, or size-inconsistent.
+/// `entries` is the caller's post-write parse of the mirror it is about to
+/// render, so `entries.len()` is the expected structured size.
+pub(crate) fn sync_typed_indexed_element(
+    store: &mut crate::shell::VariableStore,
+    name: &str,
+    index: i64,
+    value: &str,
+    entries: &BTreeMap<usize, String>,
+) {
+    if !store.extend_indexed_element(name, index, value, entries.len()) {
+        sync_typed_indexed_array(store, name, entries);
+    }
+}
+
 /// Sync (or invalidate) the structured cell from a rendered mirror value.
 /// Only the indexed storage render (`STORAGE_WORD_PREFIX`) syncs; any other
 /// shape (plain scalar text, assoc `([k]=v)`) drops an indexed cell so the
