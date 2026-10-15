@@ -2000,6 +2000,10 @@ mod completion_hook_tests {
 
     #[test]
     fn compspec_file_action_lists_root() {
+        // Some supported hosts deny directory enumeration at `/`.
+        if std::fs::read_dir("/").is_err() {
+            return;
+        }
         let (env, aliases, fns, jobs) = empty_context();
         let mut specs = CompletionRegistry::new();
         let file_bit = COMPACTS

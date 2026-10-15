@@ -795,6 +795,16 @@ fn collect_positional(args: &[String], out: &mut Vec<String>) {
 mod tests {
     use super::*;
 
+    fn executor_without_host_inputrc() -> Executor {
+        let mut executor = Executor::new();
+        #[cfg(unix)]
+        const EMPTY_INPUTRC: &str = "/dev/null";
+        #[cfg(windows)]
+        const EMPTY_INPUTRC: &str = "NUL";
+        executor.set_env("INPUTRC", EMPTY_INPUTRC);
+        executor
+    }
+
     #[test]
     fn run_bind_x_sets_reads_back_and_unbinds() {
         let mut executor = Executor::new();
@@ -843,7 +853,7 @@ mod tests {
 
     #[test]
     fn bind_x_registration_is_visible_and_process_global_across_clones() {
-        let mut executor = Executor::new();
+        let mut executor = executor_without_host_inputrc();
         let code = crate::script_driver::run_source(
             &mut executor,
             r#"bind -x '"\C-g": echo bound-c-g'"#,
@@ -868,7 +878,7 @@ mod tests {
 
     #[test]
     fn bind_x_listing_and_removal_round_trip() {
-        let mut executor = Executor::new();
+        let mut executor = executor_without_host_inputrc();
         crate::script_driver::run_source(
             &mut executor,
             r#"bind -m emacs-standard -x '"\C-h": echo bound-c-h'"#,
@@ -883,7 +893,7 @@ mod tests {
 
     #[test]
     fn macro_and_function_bindings_register_and_unbind_by_function() {
-        let mut executor = Executor::new();
+        let mut executor = executor_without_host_inputrc();
         crate::script_driver::run_source(
             &mut executor,
             r#"bind '"\C-t": "ins-macro"'; bind '"\C-o": accept-line'"#,
@@ -908,7 +918,7 @@ mod tests {
 
     #[test]
     fn generation_changes_on_mutation_only() {
-        let mut executor = Executor::new();
+        let mut executor = executor_without_host_inputrc();
         let before = executor.bind_registry_generation();
         crate::script_driver::run_source(&mut executor, "bind -p >/dev/null", false);
         assert_eq!(executor.bind_registry_generation(), before);
