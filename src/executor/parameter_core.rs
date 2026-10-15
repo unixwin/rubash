@@ -435,6 +435,33 @@ impl Executor {
         String::new()
     }
 
+    /// GNU subst.c:~4038 `expand_arith_string` fast path: a trimmed optional-sign
+    /// decimal integer literal (no leading zero) needs no expansion (no `$`,
+    /// backtick, CTLESC, or quote), so it can be parsed directly — skipping the
+    /// assoc-subscript scan, embedded-parameter walk and `$(( ))` arithmetic
+    /// machinery that `eval_parameter_substring_offset*` runs per operand (the
+    /// ~43us/op hot path for `${s:5:3}`). Anything otherwise (a real arithmetic
+    /// expression, leading-0 octal, hex, letters, or a `'`-quoted span) returns
+    /// None and falls through to the full eval, so GNU `evalexp` base handling and
+    /// the invalid-offset expansion-error path are preserved unchanged.
+    fn literal_arith_integer_text(s: &str) -> Option<isize> {
+        let t = s.trim();
+        let body = t
+            .strip_prefix('+')
+            .or_else(|| t.strip_prefix('-'))
+            .unwrap_or(t);
+        if body.is_empty() || !body.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        // Bash arithmetic treats a leading 0 as octal (e.g. 010 == 8). Keep only
+        // the decimal no-leading-zero form so GNU evalexp base handling is not
+        // bypassed. "0"/"+0"/"-0" (body == "0") are fine.
+        if body.len() > 1 && body.starts_with('0') {
+            return None;
+        }
+        t.parse::<isize>().ok()
+    }
+
     pub(in crate::executor) fn parse_parameter_substring<'a>(
         &self,
         name: &'a str,
@@ -486,6 +513,10 @@ impl Executor {
 
         let offset = if offset_str.is_empty() {
             0
+        } else if let Some(lit) = Self::literal_arith_integer_text(offset_str) {
+            // GNU subst.c:~4038 expand_arith_string literal fast path +
+            // evalexp of a bare integer literal, computed once per operand.
+            lit
         } else {
             match self.eval_parameter_substring_offset(offset_str) {
                 Some(value) => value,
@@ -514,6 +545,9 @@ impl Executor {
             None
         } else if length_str.is_empty() {
             Some(0)
+        } else if let Some(lit) = Self::literal_arith_integer_text(length_str) {
+            // GNU literal fast path (same as offset above), computed once.
+            Some(lit)
         } else {
             match self.eval_parameter_substring_offset(length_str) {
                 Some(value) => Some(value),
@@ -688,6 +722,10 @@ impl Executor {
 
         let offset = if offset_str.is_empty() {
             0
+        } else if let Some(lit) = Self::literal_arith_integer_text(offset_str) {
+            // GNU subst.c:~4038 expand_arith_string literal fast path +
+            // evalexp of a bare integer literal, computed once per operand.
+            lit
         } else {
             match self.eval_parameter_substring_offset_mut(offset_str) {
                 Some(value) => value,
@@ -716,6 +754,9 @@ impl Executor {
             None
         } else if length_str.is_empty() {
             Some(0)
+        } else if let Some(lit) = Self::literal_arith_integer_text(length_str) {
+            // GNU literal fast path (same as offset above), computed once.
+            Some(lit)
         } else {
             match self.eval_parameter_substring_offset_mut(length_str) {
                 Some(value) => Some(value),
