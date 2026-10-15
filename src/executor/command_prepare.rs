@@ -1392,6 +1392,9 @@ impl Executor {
         {
             return vec![word.to_string()];
         }
+        let braced_word = word.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(word);
+        let _memo_frame = braced_parameter_spans_whole_word(braced_word)
+            .then(crate::executor::expand_braced_indices::AepvMemoFrame::new);
         // Whole-word quoted `$name` (envfix3). GNU param_expand
         // (subst.c:10464) switches on the character after `$`; for a name
         // it collects the identifier and resolves the variable in one arm
@@ -2586,6 +2589,7 @@ impl Executor {
             };
 
         let value = self.parameter_operator_value(var_name);
+        self.apply_pending_subscript_writes();
         let word_used = if use_when_set {
             value.is_some() && (!require_non_empty || !value.unwrap_or_default().is_empty())
         } else {
