@@ -28,6 +28,7 @@ pub struct ShellInvocation {
     pub positional_params: Vec<String>,
     pub script: Option<String>,
     pub read_stdin: bool,
+    pub restricted: bool,
     pub shell_flags: Vec<(String, bool)>,
     pub shopt_flags: Vec<(String, bool)>,
 }
@@ -82,6 +83,7 @@ impl ShellInvocation {
             positional_params: Vec::new(),
             script: None,
             read_stdin: false,
+            restricted: false,
             shell_flags: Vec::new(),
             shopt_flags: Vec::new(),
         };
@@ -162,7 +164,7 @@ impl ShellInvocation {
                     i += 1;
                 }
                 "--restricted" => {
-                    out.shell_flags.push(("restricted".to_string(), true));
+                    out.restricted = true;
                     i += 1;
                 }
                 "--verbose" => {
@@ -208,6 +210,13 @@ impl ShellInvocation {
                                 out.dump_strings = enabled;
                                 continue;
                             }
+                            'r' => {
+                                if out.restricted && !enabled {
+                                    return Err(format!("{option}: invalid option"));
+                                }
+                                out.restricted = enabled;
+                                continue;
+                            }
                             _ => {}
                         }
                         let name = cli_flag_name(flag)
@@ -229,7 +238,19 @@ impl ShellInvocation {
         Ok(out)
     }
 
+    /// Apply invocation options when startup files have already run, or when
+    /// the host does not run startup files. Hosts with startup files must use
+    /// `apply_to_executor_before_startup`, run startup, then `finish_startup`.
     pub fn apply_to_executor(&self, executor: &mut Executor) -> Result<(), String> {
+        self.apply_to_executor_before_startup(executor)?;
+        self.finish_startup(executor);
+        Ok(())
+    }
+
+    /// Apply options without activating invocation restrictions during startup.
+    /// GNU shell.c:679-744 main saves -r across run_startup_files and activates
+    /// it afterward through maybe_make_restricted (shell.c:1278).
+    pub fn apply_to_executor_before_startup(&self, executor: &mut Executor) -> Result<(), String> {
         // shell.c:497-503: --login/-l flips LOGIN_SHELL so the `logout`
         // builtin and exit path see a login shell.
         if self.login {
@@ -288,6 +309,13 @@ impl ShellInvocation {
         }
         executor.set_positional_params(self.positional_params.clone());
         Ok(())
+    }
+
+    /// Activate invocation restrictions after the host finishes startup files.
+    pub fn finish_startup(&self, executor: &mut Executor) {
+        if self.restricted {
+            executor.set_shell_option("restricted", true);
+        }
     }
 }
 
@@ -402,6 +430,13 @@ fn parse_post_c_option(
                     }
                     'D' => {
                         out.dump_strings = enabled;
+                        continue;
+                    }
+                    'r' => {
+                        if out.restricted && !enabled {
+                            return Err(format!("{option}: invalid option"));
+                        }
+                        out.restricted = enabled;
                         continue;
                     }
                     _ => {}
@@ -542,7 +577,7 @@ mod tests {
         assert!(parsed.dump_po);
         assert!(parsed.pretty_print);
         assert!(parsed.debugger);
-        assert!(parsed.shell_flags.contains(&("restricted".into(), true)));
+        assert!(parsed.restricted);
         assert!(parsed.shell_flags.contains(&("verbose".into(), true)));
         assert_eq!(parsed.rc_file.as_deref(), Some("alt.rc"));
     }
@@ -570,7 +605,6 @@ mod tests {
             "monitor",
             "noexec",
             "privileged",
-            "restricted",
             "onecmd",
             "nounset",
             "verbose",
@@ -588,6 +622,7 @@ mod tests {
             );
         }
         assert_eq!(parsed.script.as_deref(), Some("script.sh"));
+        assert!(parsed.restricted);
     }
 
     #[test]
