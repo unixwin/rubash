@@ -366,10 +366,18 @@ fn assign_printf_output(
             }
             assign_printf_assoc_element(env_vars, base, &key, output);
         } else if let Some(index) = resolve_printf_indexed_subscript(env_vars, base, subscript) {
-            if let Some(store) = variables.as_deref_mut() {
-                let _ = store.set_indexed_element(base, index as i64, output.clone());
-            }
             assign_printf_indexed_element(env_vars, base, index, output);
+            // rubash#616 (plan Phase 1a): rebuild the structured cell from
+            // the mirror this element write just produced. A direct typed
+            // element write would EXTEND whatever cell is present — an empty
+            // map or a Scalar storage render left by `declare -i a=(...)`
+            // — and the resulting incomplete cell would shadow the mirror
+            // count for `${#name[@]}`.
+            if let Some(store) = variables.as_deref_mut() {
+                if let Some(mirror) = env_vars.get(base) {
+                    crate::executor::sync_typed_indexed_storage(store, base, mirror);
+                }
+            }
         } else {
             // GNU bind_variable -> assign_array_element -> array_expand_index:
             // `@`/`*` (and any subscript the index expansion rejects) reports

@@ -145,6 +145,44 @@ impl VariableStore {
         Ok(())
     }
 
+    /// rubash#616 (plan Phase 1a): replace the structured indexed cell while
+    /// PRESERVING the caller's keys. `replace_indexed_array` is dense by
+    /// position (it enumerates the values), which cannot carry a sparse
+    /// array across — `a=([5]=x [2]=y)` must stay `{2,5}`, not `{0,1}`
+    /// (GNU array.c array_insert keeps the real index). Same readonly
+    /// refusal as the dense form.
+    pub fn replace_indexed_array_entries<I, V>(
+        &mut self,
+        name: &str,
+        entries: I,
+    ) -> Result<(), &'static str>
+    where
+        I: IntoIterator<Item = (i64, V)>,
+        V: Into<String>,
+    {
+        let variable = self
+            .variables
+            .entry(name.to_string())
+            .or_insert_with(|| Variable {
+                value: ShellValue::IndexedArray(BTreeMap::new()),
+                ..Variable::scalar("")
+            });
+        if variable.readonly {
+            return Err("readonly variable");
+        }
+        if !matches!(variable.value, ShellValue::IndexedArray(_)) {
+            variable.value = ShellValue::IndexedArray(BTreeMap::new());
+        }
+        let ShellValue::IndexedArray(values) = &mut variable.value else {
+            unreachable!();
+        };
+        values.clear();
+        for (index, value) in entries {
+            values.insert(index, value.into());
+        }
+        Ok(())
+    }
+
     pub fn replace_associative_array<I, K, V>(
         &mut self,
         name: &str,

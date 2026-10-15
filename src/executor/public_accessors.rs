@@ -565,19 +565,12 @@ impl Executor {
             // ./dbg-support.tests"), so only a top-level script-name change
             // (startup, -c, bashdb launcher) rebinds BASH_SOURCE.
             if self.shell_state.env_vars.contains_key("__RUBASH_IN_SOURCE") {
-                store_indexed_array(
-                    &mut self.shell_state.env_vars,
-                    "BASH_SOURCE",
-                    self.shell_state.bash_source_stack.clone(),
-                );
+                let values = self.shell_state.bash_source_stack.clone();
+                store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", values);
                 return;
             }
             self.shell_state.bash_source_stack = vec![source_value.clone()];
-            store_indexed_array(
-                &mut self.shell_state.env_vars,
-                "BASH_SOURCE",
-                vec![source_value],
-            );
+            store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", vec![source_value]);
         }
     }
 
@@ -658,11 +651,8 @@ impl Executor {
             source
         };
         self.shell_state.bash_source_stack.insert(0, source);
-        store_indexed_array(
-            &mut self.shell_state.env_vars,
-            "BASH_SOURCE",
-            self.shell_state.bash_source_stack.clone(),
-        );
+        let values = self.shell_state.bash_source_stack.clone();
+        store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", values);
     }
 
     fn debugger_source_path(path: &std::path::Path) -> String {
@@ -680,11 +670,8 @@ impl Executor {
         if !self.shell_state.bash_source_stack.is_empty() {
             self.shell_state.bash_source_stack.remove(0);
         }
-        store_indexed_array(
-            &mut self.shell_state.env_vars,
-            "BASH_SOURCE",
-            self.shell_state.bash_source_stack.clone(),
-        );
+        let values = self.shell_state.bash_source_stack.clone();
+        store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", values);
     }
 
     /// Pushes the synthetic "source" call frame for a `source`/`.` of a
@@ -698,11 +685,8 @@ impl Executor {
             .function_name_stack
             .insert(0, "source".to_string());
         self.shell_state.bash_lineno_stack.insert(0, call_line);
-        store_indexed_array(
-            &mut self.shell_state.env_vars,
-            "BASH_LINENO",
-            self.shell_state.bash_lineno_stack.clone(),
-        );
+        let values = self.shell_state.bash_lineno_stack.clone();
+        store_indexed_array_state(&mut self.shell_state, "BASH_LINENO", values);
     }
 
     pub(crate) fn pop_source_call_frame(&mut self) {
@@ -718,11 +702,8 @@ impl Executor {
         if !self.shell_state.bash_lineno_stack.is_empty() {
             self.shell_state.bash_lineno_stack.remove(0);
         }
-        store_indexed_array(
-            &mut self.shell_state.env_vars,
-            "BASH_LINENO",
-            self.shell_state.bash_lineno_stack.clone(),
-        );
+        let values = self.shell_state.bash_lineno_stack.clone();
+        store_indexed_array_state(&mut self.shell_state, "BASH_LINENO", values);
     }
 
     /// Returns whether a shell function is currently defined in this executor.

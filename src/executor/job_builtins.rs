@@ -2344,7 +2344,7 @@ impl Executor {
                         .lines()
                         .map(str::to_string)
                         .collect();
-                    store_indexed_array(&mut self.shell_state.env_vars, &varname, values);
+                    store_indexed_array_state(&mut self.shell_state, &varname, values);
                 }
                 stdout.clear();
             }
@@ -2487,7 +2487,7 @@ impl Executor {
         self.set_env("COMP_POINT", &point.to_string());
         self.set_env("COMP_TYPE", "0");
         self.set_env("COMP_KEY", "0");
-        store_indexed_array(&mut self.shell_state.env_vars, "COMP_WORDS", words.to_vec());
+        store_indexed_array_state(&mut self.shell_state, "COMP_WORDS", words.to_vec());
         self.shell_state.variables.remove("COMP_WORDS");
         self.set_env("COMP_CWORD", &cword.to_string());
     }

@@ -207,6 +207,10 @@ pub(crate) use assignment_helpers::{assoc_nbuckets, bash_assoc_order};
 // Shared with builtins::declare for `declare -p` $'...' value rendering
 // (strtrans.c ansic_shouldquote/ansic_quote over the raw byte stream).
 pub(crate) use arrays::{ansic_quote, ansic_shouldquote};
+// rubash#616 (1a): typed-cell writers shared with builtins::declare and
+// builtins::printf (the executor-private `drop_typed_indexed_array` stays
+// internal).
+pub(crate) use arrays::{replace_typed_indexed_array, sync_typed_indexed_storage};
 use builtin_names::*;
 use command_subst_helpers::*;
 use command_text::*;

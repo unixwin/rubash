@@ -369,6 +369,26 @@ impl Executor {
         if let Some(values) = self.dynamic_stack_array_values(name) {
             return values.len();
         }
+        // rubash#616 (plan Phase 1a): the structured cell is the O(1) length
+        // truth — GNU reads the `num_elements` count field directly
+        // (subst.c:7533 `array_num_elements`, array.h:121) instead of
+        // walking the storage render this fallback parses. A nameref name
+        // skips the fast path: its mirror resolves through
+        // resolved_variable_name inside parameter_array_storage, and the
+        // structured cell is keyed by the raw name. RUBASH_ARRAY_STORE=0
+        // bypasses the read entirely (Q4 escape hatch).
+        if array_store_enabled(&self.shell_state.env_vars) {
+            if let Some(crate::shell::ShellValue::IndexedArray(entries)) = self
+                .shell_state
+                .variables
+                .get(name)
+                .map(|variable| &variable.value)
+            {
+                if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
+                    return entries.len();
+                }
+            }
+        }
         self.parameter_array_storage(name)
             .map(|value| array_values(&value).len())
             .unwrap_or(0)

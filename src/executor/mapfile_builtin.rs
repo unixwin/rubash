@@ -564,6 +564,9 @@ impl Executor {
                 }
                 entries.insert(target_index, value);
             }
+            // rubash#616 (1a): mirror written — sync the structured cell from
+            // the same entries map (origin/-O offsets keep their real keys).
+            sync_typed_indexed_array(&mut self.shell_state.variables, &name, &entries);
             self.shell_state
                 .env_vars
                 .insert(name.clone(), format_indexed_array_storage(entries));
@@ -574,6 +577,7 @@ impl Executor {
             return 0;
         }
 
+        sync_typed_indexed_array(&mut self.shell_state.variables, &name, &BTreeMap::new());
         self.shell_state
             .env_vars
             .insert(name.clone(), format_indexed_array_storage(BTreeMap::new()));

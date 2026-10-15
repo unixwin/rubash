@@ -744,6 +744,10 @@ impl Executor {
                     self.shell_state
                         .env_vars
                         .insert(base_name.to_string(), value.clone());
+                    // rubash#616 (1a): a scalar bind over a name that still
+                    // carries a structured cell drops it — the mirror is
+                    // authoritative for this shape.
+                    sync_typed_indexed_storage(&mut self.shell_state.variables, base_name, &value);
                     self.exit_code = 0;
                     return true;
                 }
@@ -999,6 +1003,14 @@ impl Executor {
                             base_name.to_string(),
                             format_indexed_array_storage(BTreeMap::new()),
                         );
+                        // rubash#616 (1a): the partial failure still
+                        // materializes an empty array — keep the structured
+                        // cell in lockstep with the `()` render.
+                        sync_typed_indexed_array(
+                            &mut self.shell_state.variables,
+                            base_name,
+                            &BTreeMap::new(),
+                        );
                         mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, base_name);
                     }
                     let current = self
@@ -1024,7 +1036,11 @@ impl Executor {
                     };
                     self.shell_state
                         .env_vars
-                        .insert(base_name.to_string(), stored);
+                        .insert(base_name.to_string(), stored.clone());
+                    // rubash#616 (1a): mirror written — refresh/drop the
+                    // structured cell (indexed render syncs, other shapes
+                    // invalidate).
+                    sync_typed_indexed_storage(&mut self.shell_state.variables, base_name, &stored);
 
                     self.exit_code = 1;
                     return false;
@@ -1223,6 +1239,11 @@ impl Executor {
                 .unwrap_or_default();
             let mut entries = indexed_array_entries(&current);
             entries.insert(0, value.clone());
+            // rubash#616 (1a): the scalar-over-array bind rewrites element 0
+            // (GNU variables.c:3128-3142 bind_variable_internal keeps the
+            // array) — refresh the structured cell from the same entries the
+            // render uses.
+            sync_typed_indexed_array(&mut self.shell_state.variables, base_name, &entries);
             let storage = format_indexed_array_storage(entries);
             self.shell_state
                 .env_vars
@@ -1245,6 +1266,10 @@ impl Executor {
                     .variables
                     .set_scalar(base_name, value.clone());
             }
+            // rubash#616 (1a): a scalar bind is mirror-authoritative — a
+            // lingering structured cell (marker/typed divergence) must not
+            // shadow it.
+            drop_typed_indexed_array(&mut self.shell_state.variables, base_name);
         }
         // GNU variables.c:3139-3140: for an assoc array, a scalar assignment
         // stores the value at key "0" via assign_func. Without this, a value
@@ -1266,6 +1291,10 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
+        // rubash#616 (1a): final mirror write — a compound `a=(...)` render
+        // syncs the structured cell, any other shape invalidates it (the
+        // !is_array scalar bind above already handled the plain case).
+        sync_typed_indexed_storage(&mut self.shell_state.variables, base_name, &value);
         if let Some(current) = self.shell_state.env_vars.get_mut(base_name) {
             current.clone_from(&value);
         } else {

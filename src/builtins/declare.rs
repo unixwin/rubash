@@ -100,7 +100,7 @@ pub(crate) fn sync_typed_assignments(
         if arrays.contains(base) {
             let entries = indexed_array_entries(value);
             let values = entries.into_iter().map(|(_, value)| value);
-            let _ = store.replace_indexed_array(base, values);
+            crate::executor::replace_typed_indexed_array(store, base, values);
         } else if assocs.contains(base) {
             let _ = store.replace_associative_array(base, parse_assoc_words(value));
         }
@@ -164,7 +164,7 @@ pub(crate) fn sync_typed_attributes(
             } else {
                 vec![env_value]
             };
-            let _ = store.replace_indexed_array(base, elements);
+            crate::executor::replace_typed_indexed_array(store, base, elements);
         } else if assocs.contains(base)
             && !matches!(
                 store.get(base).map(|v| &v.value),

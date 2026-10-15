@@ -13,7 +13,7 @@ use super::{
 use crate::executor::arithmetic::{
     assoc_skip_substitution, assoc_subscript_end, eval_mutable_arith_value_with_random_flags,
 };
-use crate::executor::arrays::format_indexed_array_storage;
+use crate::executor::arrays::{format_indexed_array_storage, sync_typed_indexed_array};
 use crate::parser::QuoteKind;
 
 mod args;
@@ -699,6 +699,7 @@ impl Executor {
                 capture.map(|matched| (index, matched.as_str().to_string()))
             })
             .collect();
+        sync_typed_indexed_array(&mut self.shell_state.variables, "BASH_REMATCH", &entries);
         self.shell_state.env_vars.insert(
             "BASH_REMATCH".to_string(),
             format_indexed_array_storage(entries),
@@ -707,6 +708,11 @@ impl Executor {
     }
 
     pub(super) fn clear_bash_rematch(&mut self) {
+        sync_typed_indexed_array(
+            &mut self.shell_state.variables,
+            "BASH_REMATCH",
+            &BTreeMap::new(),
+        );
         self.shell_state.env_vars.insert(
             "BASH_REMATCH".to_string(),
             format_indexed_array_storage(BTreeMap::new()),

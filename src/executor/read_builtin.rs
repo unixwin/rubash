@@ -2094,10 +2094,11 @@ impl Executor {
         if timeout_zero {
             let status = self.read_timeout_zero_status(cmd, read_fd);
             if let Some(name) = array_name {
-                let _ = self
-                    .shell_state
-                    .variables
-                    .replace_indexed_array(&name, std::iter::empty::<String>());
+                let _ = replace_typed_indexed_array(
+                    &mut self.shell_state.variables,
+                    &name,
+                    std::iter::empty::<String>(),
+                );
                 self.shell_state
                     .env_vars
                     .insert(name.clone(), read_array_storage(&[]));
@@ -2149,10 +2150,11 @@ impl Executor {
                 return self.finish_read_error(cmd, &stderr, 2);
             }
             if char_limit == Some(0) {
-                let _ = self
-                    .shell_state
-                    .variables
-                    .replace_indexed_array(&name, std::iter::empty::<String>());
+                let _ = replace_typed_indexed_array(
+                    &mut self.shell_state.variables,
+                    &name,
+                    std::iter::empty::<String>(),
+                );
                 self.shell_state
                     .env_vars
                     .insert(name.clone(), read_array_storage(&[]));
@@ -2179,10 +2181,11 @@ impl Executor {
                 (Some(line), _) => line.clone(),
                 (None, Some(text)) => text.clone(),
                 (None, None) => {
-                    let _ = self
-                        .shell_state
-                        .variables
-                        .replace_indexed_array(&name, std::iter::empty::<String>());
+                    let _ = replace_typed_indexed_array(
+                        &mut self.shell_state.variables,
+                        &name,
+                        std::iter::empty::<String>(),
+                    );
                     self.shell_state
                         .env_vars
                         .insert(name.clone(), read_array_storage(&[]));
@@ -2202,10 +2205,7 @@ impl Executor {
                 )
             };
             let value = read_array_storage(&values);
-            let _ = self
-                .shell_state
-                .variables
-                .replace_indexed_array(&name, values);
+            let _ = replace_typed_indexed_array(&mut self.shell_state.variables, &name, values);
             self.shell_state.env_vars.insert(name.clone(), value);
             mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
             return if invalid_name {

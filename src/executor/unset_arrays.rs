@@ -752,6 +752,10 @@ impl Executor {
             };
             let mut entries = indexed_array_entries(&current);
             entries.remove(&resolved);
+            // rubash#616 (1a): element unset rewrites the mirror — the
+            // structured cell must follow (count drops by one) or the
+            // `${#a[@]}` fast path would shadow the removal.
+            sync_typed_indexed_array(&mut self.shell_state.variables, array_name, &entries);
             self.shell_state.env_vars.insert(
                 array_name.to_string(),
                 format_indexed_array_storage(entries),

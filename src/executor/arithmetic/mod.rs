@@ -91,7 +91,23 @@ fn sync_arith_writes_to_shell_state(executor: &mut Executor) {
             continue;
         }
         let new_value = new_value.expect("changed implies present").clone();
-        if let Some(variable) = executor.shell_state.variables.get_mut(&name) {
+        // rubash#616 (plan Phase 1a): an arithmetic element write stores the
+        // rendered array storage into the mirror (value.rs set_array_element
+        // -> format_indexed_array_storage); the structured cell must follow
+        // with the real entries. The previous blind Scalar downgrade left a
+        // Scalar(storage) cell, so a later element-level typed write (printf
+        // -v name[i]) extended an EMPTY structured base and shadowed the
+        // mirror count — `${#name[@]}` then read the typed cell (the fast
+        // path) instead of the mirror. `sync_typed_indexed_storage` syncs an
+        // indexed render and drops a stale structured cell for other shapes;
+        // the scalar branches keep the pre-#616 behavior.
+        if new_value.starts_with(crate::executor::markers::STORAGE_WORD_PREFIX) {
+            crate::executor::arrays::sync_typed_indexed_storage(
+                &mut executor.shell_state.variables,
+                &name,
+                &new_value,
+            );
+        } else if let Some(variable) = executor.shell_state.variables.get_mut(&name) {
             variable.value = crate::shell::ShellValue::Scalar(new_value);
         } else if !name.starts_with("__RUBASH_") {
             let _ = executor.shell_state.variables.set_scalar(&name, &new_value);

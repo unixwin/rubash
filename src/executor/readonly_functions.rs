@@ -59,6 +59,21 @@ impl Executor {
             &mut stderr,
             context_name,
         )?;
+        // rubash#616 (1a): `readonly -a name=(...)` rewrites the array mirror
+        // inside the pure builtin — refresh the structured cell for
+        // assignment operands (same rule as export above).
+        for arg in &args {
+            if let Some((raw, _)) = arg.split_once('=') {
+                let base = raw.trim_end_matches('+');
+                let base = base.split('[').next().unwrap_or(base);
+                if base.is_empty() {
+                    continue;
+                }
+                if let Some(mirror) = self.shell_state.env_vars.get(base).cloned() {
+                    sync_typed_indexed_storage(&mut self.shell_state.variables, base, &mirror);
+                }
+            }
+        }
         let status = if arith_eval_failure.is_some() {
             status.max(1)
         } else {

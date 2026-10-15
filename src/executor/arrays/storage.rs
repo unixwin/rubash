@@ -280,6 +280,110 @@ pub(in crate::executor) fn store_indexed_array(
     mark_env_name(env_vars, ARRAY_VARS, name);
 }
 
+/// rubash#616 (plan Phase 1a): structured-cell synchronization for indexed
+/// arrays. `shell_state.variables` (`ShellValue::IndexedArray`) is the
+/// O(1) truth `${#a[@]}` reads — GNU counts the ARRAY object directly
+/// (subst.c:7533 `array_num_elements`, array.h:121 the `num_elements`
+/// field) — while the rendered `env_vars` string stays the projection every
+/// storage reader sees (dynamic_arrays.rs parameter_array_storage is
+/// mirror-only). GNU has ONE owner (bind_variable writes the array cell,
+/// array.c array_insert); the typed/mirror split is ours during the
+/// typed-store migration, so every mirror write must either sync through
+/// here or drop the structured cell — a stale typed entry must never
+/// shadow the mirror.
+///
+/// `entries` always comes from the same `indexed_array_entries` parse the
+/// mirror render uses, so the structured count equals the mirror-derived
+/// count by construction. Keys are preserved (a sparse `a=([5]=x)` stays
+/// `{5}`) — `replace_indexed_array` enumerates positionally.
+pub(crate) fn sync_typed_indexed_array(
+    store: &mut crate::shell::VariableStore,
+    name: &str,
+    entries: &BTreeMap<usize, String>,
+) {
+    let mapped = entries
+        .iter()
+        .map(|(index, value)| (i64::try_from(*index).unwrap_or(i64::MAX), value.clone()));
+    if store.replace_indexed_array_entries(name, mapped).is_err() {
+        // A readonly refusal would leave the structured cell older than the
+        // mirror — drop it so reads fall back to the mirror projection.
+        drop_typed_indexed_array(store, name);
+    }
+}
+
+/// Sync (or invalidate) the structured cell from a rendered mirror value.
+/// Only the indexed storage render (`STORAGE_WORD_PREFIX`) syncs; any other
+/// shape (plain scalar text, assoc `([k]=v)`) drops an indexed cell so the
+/// mirror stays authoritative for it. Assoc cells are left exactly as they
+/// were — associative arrays are out of Phase 1a scope.
+pub(crate) fn sync_typed_indexed_storage(
+    store: &mut crate::shell::VariableStore,
+    name: &str,
+    storage: &str,
+) {
+    if storage.starts_with(STORAGE_WORD_PREFIX) {
+        sync_typed_indexed_array(store, name, &indexed_array_entries(storage));
+    } else {
+        drop_typed_indexed_array(store, name);
+    }
+}
+
+/// Remove only an indexed structured cell (assoc/scalar cells keep their
+/// pre-1a behavior untouched). Used whenever a mirror write bypasses the
+/// indexed sync paths.
+pub(crate) fn drop_typed_indexed_array(store: &mut crate::shell::VariableStore, name: &str) {
+    if matches!(
+        store.get(name).map(|variable| &variable.value),
+        Some(crate::shell::ShellValue::IndexedArray(_))
+    ) {
+        store.remove(name);
+    }
+}
+
+/// rubash#616 (1a): dense typed replace for writers that render their own
+/// values (read -a, declare sync). A refused write — a readonly typed cell
+/// while the mirror write still lands (read -a on a readonly array) — must
+/// not leave the structured cell shadowing the mirror, so drop it and let
+/// reads fall back to the mirror projection.
+pub(crate) fn replace_typed_indexed_array<I, V>(
+    store: &mut crate::shell::VariableStore,
+    name: &str,
+    values: I,
+) where
+    I: IntoIterator<Item = V>,
+    V: Into<String>,
+{
+    if store.replace_indexed_array(name, values).is_err() {
+        drop_typed_indexed_array(store, name);
+    }
+}
+
+/// rubash#616 (Q4 escape hatch): `RUBASH_ARRAY_STORE=0` bypasses structured
+/// length reads. Writes still sync, so toggling the variable is safe in
+/// both directions (no stale cell can be observed after re-enabling).
+pub(in crate::executor) fn array_store_enabled(
+    env_vars: &crate::shell::var_table::VarTable,
+) -> bool {
+    env_vars
+        .get("RUBASH_ARRAY_STORE")
+        .map_or(true, |value| value.as_str() != "0")
+}
+
+/// rubash#616 (1a): runtime array replacers (mapfile, compgen -V, the
+/// COMP_WORDS/BASH_SOURCE/BASH_LINENO stacks) refresh the structured cell
+/// alongside the mirror so `${#name[@]}` reads the fresh count.
+/// `init.rs` keeps the plain mirror form: startup BASH_* arrays never gain
+/// a typed cell there, so reads fall back to the mirror.
+pub(in crate::executor) fn store_indexed_array_state(
+    state: &mut crate::shell::ShellState,
+    name: &str,
+    values: Vec<String>,
+) {
+    let entries: BTreeMap<usize, String> = values.iter().cloned().enumerate().collect();
+    sync_typed_indexed_array(&mut state.variables, name, &entries);
+    store_indexed_array(&mut state.env_vars, name, values);
+}
+
 /// GNU subst.c:4807 dequote_string: strip every CTLESC carrier pair, keeping
 /// the protected character (CTLESC + CTLESC yields a literal CTLESC byte,
 /// matching GNU). A trailing lone CTLESC contributes nothing.
