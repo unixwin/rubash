@@ -12,13 +12,13 @@ pub(crate) use storage::{ansic_quote, ansic_shouldquote};
 // rubash#616 (1a): typed-cell writers shared with builtins::declare and
 // builtins::printf (executor/mod.rs re-exports them at crate visibility).
 pub(super) use storage::{
-    array_indices, array_store_enabled, array_value_at, array_values, drop_typed_indexed_array,
-    format_indexed_array_storage, format_indexed_array_values, indexed_array_entries,
-    is_array_storage, is_marked_array_var, normalize_array_expanded_value,
-    parse_array_integer_subscript, parse_array_numeric_subscript, parse_array_subscript,
-    parse_expanded_array_subscript, quote_array_value, resolve_indexed_array_subscript,
-    store_indexed_array, store_indexed_array_state, sync_typed_indexed_array,
-    sync_typed_indexed_element,
+    append_indexed_mirror_segments, array_indices, array_store_enabled, array_value_at,
+    array_values, drop_typed_indexed_array, format_indexed_array_storage,
+    format_indexed_array_values, indexed_array_entries, is_array_storage, is_marked_array_var,
+    normalize_array_expanded_value, parse_array_integer_subscript, parse_array_numeric_subscript,
+    parse_array_subscript, parse_expanded_array_subscript, quote_array_value,
+    resolve_indexed_array_subscript, store_indexed_array, store_indexed_array_state,
+    sync_typed_indexed_array, sync_typed_indexed_element,
 };
 pub(crate) use storage::{replace_typed_indexed_array, sync_typed_indexed_storage};
 
@@ -771,24 +771,146 @@ fn finalize_comsub_element(value: &str) -> String {
     )
 }
 
+/// rubash#616 (plan Phase 1c): the decoded result of a compound `( ... )`
+/// value, WITHOUT the render. Separating the render from the decode lets an
+/// append-only write grow the canonical mirror in place instead of
+/// re-rendering the whole array — what GNU does: assign_compound_array_list
+/// (arrayfunc.c:700) appends each element to the ARRAY object
+/// (`array_insert`, array.c:516; `last_ind = array_max_index(a) + 1`,
+/// arrayfunc.c:743) and never re-serialises it.
+pub(super) struct IndexedAppendOutcome {
+    /// The complete post-write element map — GNU's ARRAY object contents — or
+    /// `None` when the write was a pure append, which `appended` fully
+    /// describes and the caller can apply without ever building the map.
+    pub entries: Option<BTreeMap<usize, String>>,
+    /// Max index BEFORE this write (`None` for an empty array) — GNU
+    /// `array_max_index(a)` at arrayfunc.c:743.
+    pub old_max: Option<usize>,
+    /// Every element strictly above `old_max`, ascending — exactly what a
+    /// canonical mirror must grow by.
+    pub appended: Vec<(usize, String)>,
+    /// True when every mutation inserted above `old_max` and the integer
+    /// attribute did not rewrite existing elements, so the new render differs
+    /// from the old mirror only by `appended`.
+    pub appended_only: bool,
+}
+
+/// rubash#616 (plan Phase 1c): the array contents the compound scan decodes
+/// against. GNU edits the ARRAY object in place — assign_compound_array_list
+/// (arrayfunc.c:700) inserts each element and `array_max_index` + 1 is the
+/// append slot (arrayfunc.c:743) — and never rebuilds it from the serialised
+/// form. rubash therefore seeds from the structured cell, whose 1a
+/// "complete or absent" invariant makes it the same element set as the
+/// rendered mirror (see `Variables::indexed_array_cell`), and holds this
+/// call's writes in `mutations`. An append-only `a+=(...)` then costs
+/// O(elements appended) instead of O(array): the full map is built only when
+/// the caller actually needs a render.
+struct IndexedDecodeBase<'a> {
+    /// The structured cell (GNU's ARRAY object) when the array has one.
+    cell: Option<&'a BTreeMap<i64, String>>,
+    /// Fallback: the mirror's elements, parsed once, when there is no cell
+    /// (a fresh array, or a route whose cell was dropped).
+    parsed: BTreeMap<usize, String>,
+    /// Writes made by THIS call; the last write to an index wins.
+    mutations: BTreeMap<usize, String>,
+}
+
+impl IndexedDecodeBase<'_> {
+    /// Highest index present, this call's writes included — GNU
+    /// `array_max_index` (array.h:30-41, read at arrayfunc.c:743).
+    fn max(&self) -> Option<usize> {
+        let base = match self.cell {
+            Some(cell) => cell
+                .keys()
+                .next_back()
+                .and_then(|index| usize::try_from(*index).ok()),
+            None => self.parsed.keys().next_back().copied(),
+        };
+        base.max(self.mutations.keys().next_back().copied())
+    }
+
+    fn get(&self, index: usize) -> Option<&String> {
+        if let Some(value) = self.mutations.get(&index) {
+            return Some(value);
+        }
+        match self.cell {
+            Some(cell) => cell.get(&i64::try_from(index).ok()?),
+            None => self.parsed.get(&index),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.mutations.is_empty()
+            && match self.cell {
+                Some(cell) => cell.is_empty(),
+                None => self.parsed.is_empty(),
+            }
+    }
+
+    fn insert(&mut self, index: usize, value: String) {
+        self.mutations.insert(index, value);
+    }
+
+    /// The elements added strictly above `old_max`, ascending.
+    fn appended_above(&self, old_max: Option<usize>) -> Vec<(usize, String)> {
+        let start = match old_max {
+            Some(max) => std::ops::Bound::Excluded(max),
+            None => std::ops::Bound::Unbounded,
+        };
+        self.mutations
+            .range((start, std::ops::Bound::Unbounded))
+            .map(|(index, value)| (*index, value.clone()))
+            .collect()
+    }
+
+    /// Fold this call's writes into the full element map (the render input).
+    fn materialize(self) -> BTreeMap<usize, String> {
+        let mut entries = match self.cell {
+            Some(cell) => cell
+                .iter()
+                .filter_map(|(index, value)| {
+                    usize::try_from(*index)
+                        .ok()
+                        .map(|index| (index, value.clone()))
+                })
+                .collect(),
+            None => self.parsed,
+        };
+        entries.extend(self.mutations);
+        entries
+    }
+}
+
 /// GNU assign_compound_array_list (arrayfunc.c:700+): builds the indexed
-/// element map for a compound `( ... )` value. `Err(pattern)` reports a
-/// failglob pathname-expansion failure on one element word — GNU
+/// element map for a compound `( ... )` value. `cell` is the target's
+/// structured cell when it has one (Phase 1c seed) — pass `None` to decode
+/// against the mirror `current` alone, exactly as before. `Err(pattern)`
+/// reports a failglob pathname-expansion failure on one element word: GNU
 /// expand_compound_array_assignment (arrayfunc.c:557) aborts the whole
 /// assignment then, leaving the target's previous binding untouched.
 pub(super) fn append_array_value(
     current: &str,
+    cell: Option<&BTreeMap<i64, String>>,
     value: &str,
     integer: bool,
     ifs: Option<&str>,
     env_vars: &crate::shell::var_table::VarTable,
-) -> Result<String, String> {
-    let mut entries = indexed_array_entries(current);
-    let mut next_index = entries
-        .keys()
-        .next_back()
-        .map(|index| index + 1)
-        .unwrap_or(0);
+) -> Result<IndexedAppendOutcome, String> {
+    let mut entries = IndexedDecodeBase {
+        cell,
+        parsed: if cell.is_some() {
+            BTreeMap::new()
+        } else {
+            indexed_array_entries(current)
+        },
+        mutations: BTreeMap::new(),
+    };
+    let old_max = entries.max();
+    // An integer array rewrites EVERY element in the post-pass below, so even
+    // a pure append there can change existing values and must not take the
+    // append-only path.
+    let mut appended_only = !integer;
+    let mut next_index = old_max.map(|index| index + 1).unwrap_or(0);
     // Bash appends `arr+=str` (no parens) to arr[0] for any array, not just
     // integer arrays; `arr+=(x y)` appends new elements.
     let scalar_append = !value.starts_with('(');
@@ -846,8 +968,8 @@ pub(super) fn append_array_value(
             let rhs = &token[op_start + op_len..];
             if op_len == 2 {
                 // `[sub]+=' append form.
-                if let Some(index) = array_assignment_index(left, &entries, env_vars) {
-                    let current = entries.get(&index).cloned().unwrap_or_default();
+                if let Some(index) = array_assignment_index(left, entries.max(), env_vars) {
+                    let current = entries.get(index).cloned().unwrap_or_default();
                     let rhs = finalize_comsub_element(&dequote_compound_element_rhs(rhs));
                     let value = if integer {
                         // GNU make_array_variable_value (arrayfunc.c:173-195) with
@@ -859,6 +981,9 @@ pub(super) fn append_array_value(
                     } else {
                         append_scalar_value(&current, &rhs)
                     };
+                    if old_max.is_some_and(|max| index <= max) {
+                        appended_only = false;
+                    }
                     entries.insert(index, value);
                     next_index = index + 1;
                     continue;
@@ -866,8 +991,11 @@ pub(super) fn append_array_value(
                 if array_assignment_has_subscript(left) {
                     continue;
                 }
-            } else if let Some(index) = array_assignment_index(left, &entries, env_vars) {
+            } else if let Some(index) = array_assignment_index(left, entries.max(), env_vars) {
                 let decoded = finalize_comsub_element(&dequote_compound_element_rhs(rhs));
+                if old_max.is_some_and(|max| index <= max) {
+                    appended_only = false;
+                }
                 entries.insert(index, decoded);
                 next_index = index + 1;
                 continue;
@@ -999,12 +1127,14 @@ pub(super) fn append_array_value(
             continue;
         }
         if scalar_append && !entries.is_empty() {
-            let current = entries.get(&0).cloned().unwrap_or_default();
+            let current = entries.get(0).cloned().unwrap_or_default();
             let appended = if integer {
                 (eval_arith_value(&current) + eval_arith_value(&token)).to_string()
             } else {
                 append_scalar_value(&current, &finalize_comsub_element(&token))
             };
+            // `arr+=word` rewrites element 0 — never an append.
+            appended_only = false;
             entries.insert(0, appended);
         } else {
             entries.insert(next_index, finalize_comsub_element(&token));
@@ -1021,19 +1151,40 @@ pub(super) fn append_array_value(
         // fatal evaluation GNU jumps out and aborts the assignment; storing
         // the raw text (the ASS_NOLONGJMP `goto make_value' fallback,
         // variables.c:2928) is the non-fatal approximation used here.
+        let mut entries = entries.materialize();
         for element in entries.values_mut() {
             if let Some(value) = eval_conditional_arith_value(element, env_vars) {
                 *element = value.to_string();
             }
         }
+        return Ok(IndexedAppendOutcome {
+            entries: Some(entries),
+            old_max,
+            appended: Vec::new(),
+            appended_only: false,
+        });
     }
 
-    Ok(format_indexed_array_storage(entries))
+    let appended = entries.appended_above(old_max);
+    // A pure append is described entirely by `appended`, which the caller can
+    // apply to the canonical mirror in place; only an overwrite (a subscript
+    // at or below `old_max`) needs the full element map for a render.
+    let entries = if appended_only {
+        None
+    } else {
+        Some(entries.materialize())
+    };
+    Ok(IndexedAppendOutcome {
+        entries,
+        old_max,
+        appended,
+        appended_only,
+    })
 }
 
 pub(super) fn array_assignment_index(
     left: &str,
-    entries: &BTreeMap<usize, String>,
+    max_index: Option<usize>,
     env_vars: &crate::shell::var_table::VarTable,
 ) -> Option<usize> {
     let expression = left.strip_prefix('[')?.strip_suffix(']')?;
@@ -1041,7 +1192,10 @@ pub(super) fn array_assignment_index(
     if index >= 0 {
         return usize::try_from(index).ok();
     }
-    let max_index = entries.keys().next_back().copied()?;
+    // A negative subscript is relative to the array's current highest index
+    // (the callers pass `IndexedDecodeBase::max`), so this needs the max only
+    // — never the whole element map.
+    let max_index = max_index?;
     let resolved = i128::try_from(max_index)
         .ok()?
         .checked_add(1)?

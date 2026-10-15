@@ -313,3 +313,162 @@ append — each also re-run with `RUBASH_ARRAY_STORE=0`.
   `parameter_array_storage` and 82
   `array_values`/`array_value_at`/`array_indices` call sites. It is a design of
   its own (Phase 1c), not a patch to land on top of this PR.
+
+## Phase 1c — the compound append grows in place
+
+Phase 1b's "Not addressed here" named this one: `a+=(...)` still re-parsed and
+re-rendered the whole mirror, so the loop idiom `a+=($i)` stayed quadratic. It
+is the same concern as 1a/1b — the structured cell is the array's working
+truth, not a counter — so it is Phase 1c rather than a new issue.
+
+1c takes the *seed-and-patch* half of the design 1b sketched: decode from the
+cell, then patch the canonical render in place. The full lazily-materialised
+mirror (defer the render at every whole-table consumer) is left for later; the
+render is still there, it is just no longer rebuilt per element.
+
+### Attribution
+
+The chain for `a+=( ... )` (all citations are the vendored GNU bash 5.3 tree,
+`third_party/bash/`):
+
+1. `expand_compound_array_assignment` (`arrayfunc.c:557`) →
+   `assign_compound_array_list` (`arrayfunc.c:700`).
+2. `last_ind = array_max_index(a) + 1` (`arrayfunc.c:743`) — GNU reads the
+   `ARRAY` object's shape (`array.h:30-41`), inserts each element
+   (`array_insert`, `array.c:516`) **in place**, and never rebuilds the array
+   from its serialised form.
+3. rubash's `append_array_value` (`src/executor/arrays.rs`) instead opened with
+   `indexed_array_entries(current)` — a full parse of the rendered mirror into
+   a `BTreeMap` — and the caller then re-rendered the whole mirror
+   (`format_indexed_array_storage`) and re-synced the cell. Three O(n) passes
+   per element appended.
+
+The parse is memoised (`indexed_array_entries_cached`, `arrays/storage.rs:64`:
+content-addressed on the exact storage string, 128 entries, "a stale parse
+cannot be served"), and each render feeds the memo back — so in master it is a
+*hit*. It is still `as_ref().clone()` of the whole map (`storage.rs:51`), i.e.
+O(n) allocations, which is why 1b's element write could be amortised but the
+compound append could not.
+
+Measured on untouched master (`37d6caf`), n elements in a loop, release build:
+`cmp2000` 1985 ms, `cmp4000` 8175 ms — 4.12x for 2x the elements
+(**quadratic**), and 50.9x / 190.1x the GNU time (39 ms / 43 ms) for the same
+work.
+
+### Fix
+
+GNU's `ARRAY` object *is* rubash's structured cell. Phase 1a established
+"the structured cell is a COMPLETE mirror of the render, or it is absent";
+1b already trusts that invariant for the element write. 1c seeds the compound
+scan from the same cell:
+
+- `Variables::indexed_array_cell` (`src/shell/variables.rs`) exposes the cell —
+  the read GNU makes through `array_max_index` (`arrayfunc.c:743`).
+- `IndexedDecodeBase` (`src/executor/arrays.rs`) is the decode view: it borrows
+  the cell, keeps this call's writes in a small `mutations` map, and answers
+  `max` / `get` / `is_empty` in O(log n) **without ever building the element
+  map**. It materialises the full map only when a render is actually needed.
+- `append_array_value` takes the cell and returns
+  `IndexedAppendOutcome { entries: Option<_>, old_max, appended, appended_only }`.
+  For a pure append (`appended_only`) `entries` is `None`: the write is fully
+  described by `appended`, the elements strictly above `old_max`. The two reads
+  that used to need the map were re-pointed at O(1) state —
+  `array_assignment_index` now takes the max index (it only ever used
+  `keys().next_back()`) and the `[i]+=` read goes through the view.
+- On that route the executor grows the mirror in place by exactly the segments
+  the renderer would have appended (`append_indexed_mirror_segments` — 1b's
+  per-element helper generalised to a segment list, which is now the single
+  owner of both) and extends the cell (`extend_indexed_element`). No render, no
+  re-parse.
+
+Every other shape — a subscript at or below `old_max` (an overwrite), an integer
+array (the post-pass rewrites every element, so `appended_only` is false by
+construction), no cell, a non-canonical mirror, a readonly target — falls back
+to `render_indexed_outcome`, which rebuilds the map from the mirror and folds
+`appended` back in. That fallback is the unchanged real path: a whitelist whose
+fallback is the real thing, not a symptom blacklist.
+
+Ordering is inherited from 1b and still matters: the mirror is extended
+**before** the cell, so a refused cell write re-renders and re-syncs from an
+already-correct mirror; and "is the body empty?" is judged by **length**, never
+by `ends_with('(')`.
+
+### An intermediate cut that measured SLOWER (kept for the record)
+
+The first attempt removed the render and the trailing sync but still seeded from
+`indexed_array_entries(current)`. Because the in-place route no longer renders,
+it no longer feeds the parse memo — so every iteration became a **miss**, an
+uncached O(n) parse replacing a memo-hit O(n) clone. The order-rotated A/B said
+so plainly, and the measurement is why the design changed rather than being
+tuned by eye:
+
+| case | bash | master | branch (step 1) | master/branch |
+| --- | --- | --- | --- | --- |
+| `cmp2000` | 42 | 2453 | 3649 | **0.67x** |
+| `cmp4000` | 51 | 9896 | 14277 | **0.69x** |
+| `cmp_literal2000` | 42 | 2397 | 3565 | **0.67x** |
+| `elem2000_ctl` (1b control) | 37 | 68 | 71 | 0.96x |
+
+Removing work is not the same as removing the *right* work; only seeding from
+the cell removes the O(n) itself.
+
+### Results
+
+Order-rotated best-of-9, release binaries, same tree, same host; `master/branch
+> 1` means the branch wins. Shell order is rotated per round because a binary
+invoked later in a round reads measurably slower here.
+
+| case | bash ms | master ms | branch ms | master/bash | branch/bash | master/branch |
+| --- | --- | --- | --- | --- | --- | --- |
+| `cmp2000` | 39 | 1985 | **68** | 50.9x | 1.74x | **29.2x** |
+| `cmp4000` | 43 | 8175 | **95** | 190.1x | 2.21x | **86.1x** |
+| `cmp_literal2000` | 34 | 1979 | **63** | 58.2x | 1.85x | **31.4x** |
+| `elem2000_ctl` (1b control) | 33 | 61 | 55 | 1.85x | 1.67x | 1.11x |
+
+The control row (1b's element write) does not regress, so the win is entirely in
+the compound path. The shape is the point: master goes 1985 → 8175 ms for 2x the
+elements (4.12x, quadratic) while the branch goes 68 → 95 ms (1.40x, ~linear).
+`cmp2000` is now 1.7x GNU instead of 50.9x, and the remaining gap is the render
+that 1c still performs once per call.
+
+The master side drifts with host load (this host is never idle — `cmp2000` read
+2361 ms in one clean run and 1985 ms in another), which is why the *ratio*,
+measured in the same tree with per-round shell-order rotation, is the claim
+here and not the millisecond.
+
+### Semantic verification
+
+- `tests/array_store_parity.rs` green with the store on and with
+  `RUBASH_ARRAY_STORE=0`; Phase 1c cases added: loop append, batch twice, sparse
+  start, sparse gap, rewrite-then-append (fallback), empty list, unset target, a
+  value ending in `(`, integer array (fallback), interleaved element writes,
+  quoted word with a space, expansions.
+- 2500-seed differential fuzz (branch vs master vs GNU bash) over the write
+  routes that can precede an append — `unset`, `readonly`, `declare -i`,
+  `mapfile -O`, `local`, namerefs, `export`, `eval`, `compgen` — plus 1c
+  compound-append routes; the reported signal is `branch != master`.
+  Result: **0/2500**, and `bash != branch` (622) equals `bash != master` (622),
+  so no new GNU divergence was introduced.
+- Whole-class differential matrix (`~/bench_niu/compound_matrix.sh`): 52 cases
+  across assignment position × literal/variable/substitution/arithmetic ×
+  spacing/quoting × append shape × attributes. Result: **0** `branch != master`
+  (the single `bash != master` row is the pre-existing `bash:` vs full-path
+  diagnostic prefix, identical before and after).
+- `cli_tests` and `executor_tests` failure **sets** identical to master `37d6caf`
+  (compared serial, `--test-threads=1`): `cli_tests` 1 vs 1 with no row on one
+  side only, `executor_tests` 0 new failures (1172 vs 1173; the single
+  master-only row passes on the branch and is a flake). Run in parallel this
+  suite is not a usable gate: at `--test-threads=4` it races on shared paths
+  under `target/` (`target/rubash-lineno-assignment-output.txt: No such file or
+  directory`) and reported 2 "new" `cli_tests` failures and 4 new / 6
+  disappeared `executor_tests` rows, every one of which passes in isolation.
+  The comparison is therefore serial, and by failure set, never by count.
+- `cargo test --lib` 584/584.
+
+### Found while building the 1c matrix, filed separately
+
+An out-of-range negative subscript in a compound assignment (`a=(); a+=([-1]=x)`,
+`a=(p); a+=([-2]=Q)`) is silently dropped by rubash, where GNU reports
+`bad array subscript` (`arrayfunc.c:801-809`), abandons the assignment and
+(non-interactive) exits 1. Pre-existing on master, unrelated to the store, and
+filed as its own bug — #631 — so this performance line stays one concern.

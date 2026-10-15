@@ -1025,14 +1025,17 @@ impl Executor {
                     {
                         append_assoc_value(&current, &partial, integer, &self.shell_state.env_vars)
                     } else {
-                        append_array_value(
+                        match append_array_value(
                             &current,
+                            None,
                             &partial,
                             integer,
                             self.shell_state.env_vars.get("IFS").map(String::as_str),
                             &self.shell_state.env_vars,
-                        )
-                        .unwrap_or(current)
+                        ) {
+                            Ok(outcome) => render_indexed_outcome(&current, outcome),
+                            Err(_) => current,
+                        }
                     };
                     self.shell_state
                         .env_vars
@@ -1049,6 +1052,10 @@ impl Executor {
         } else {
             value
         };
+        // rubash#616 (plan Phase 1c): set when the append branch applied the
+        // compound write straight to the canonical mirror + structured cell,
+        // so the shared tail below must not re-render and re-sync it.
+        let mut mirror_written_in_place = false;
         let value = if append {
             let current = self
                 .shell_state
@@ -1093,12 +1100,36 @@ impl Executor {
                 // store the serialized `("word")` literal as a scalar).
                 match append_array_value(
                     &current,
+                    self.shell_state.variables.indexed_array_cell(base_name),
                     &value,
                     is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name),
                     self.shell_state.env_vars.get("IFS").map(String::as_str),
                     &self.shell_state.env_vars,
                 ) {
-                    Ok(storage) => storage,
+                    Ok(outcome) => {
+                        // rubash#616 (plan Phase 1c): an append-only compound
+                        // write onto a canonical mirror with a structured cell
+                        // is applied in place — the decode is seeded from the
+                        // cell, so no O(n) element map is built, no render is
+                        // produced and the mirror is never re-parsed. Every
+                        // other shape (a subscript that overwrites, an integer
+                        // array, no cell, a non-canonical mirror) renders
+                        // exactly as before.
+                        if outcome.appended_only
+                            && self.apply_compound_append_in_place(base_name, &outcome)
+                        {
+                            // No ARRAY_VARS mark here: the render path this
+                            // replaces does not set one either, and array-ness
+                            // is recognised by `is_array_storage` on the mirror
+                            // (see the arm condition above). The in-place write
+                            // must leave the same observable state as the
+                            // render + tail it short-circuits.
+                            mirror_written_in_place = true;
+                            String::new()
+                        } else {
+                            render_indexed_outcome(&current, outcome)
+                        }
+                    }
                     Err(pattern) => {
                         return self.fail_compound_array_assignment(base_name, &pattern);
                     }
@@ -1182,12 +1213,13 @@ impl Executor {
             // `x=([0]=7+11)` gives x[0]=18).
             match append_array_value(
                 "()",
+                None,
                 &value,
                 is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name),
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
                 &self.shell_state.env_vars,
             ) {
-                Ok(storage) => storage,
+                Ok(outcome) => render_indexed_outcome("()", outcome),
                 Err(pattern) => {
                     return self.fail_compound_array_assignment(base_name, &pattern);
                 }
@@ -1294,18 +1326,108 @@ impl Executor {
         // rubash#616 (1a): final mirror write — a compound `a=(...)` render
         // syncs the structured cell, any other shape invalidates it (the
         // !is_array scalar bind above already handled the plain case).
-        sync_typed_indexed_storage(&mut self.shell_state.variables, base_name, &value);
-        if let Some(current) = self.shell_state.env_vars.get_mut(base_name) {
-            current.clone_from(&value);
-        } else {
-            self.shell_state
-                .env_vars
-                .insert(base_name.to_string(), value.clone());
+        // Phase 1c: the append branch may already have written the mirror and
+        // cell in place, in which case that write is skipped and only the
+        // process-env projection (exported / special names) still runs.
+        if !mirror_written_in_place {
+            sync_typed_indexed_storage(&mut self.shell_state.variables, base_name, &value);
+            if let Some(current) = self.shell_state.env_vars.get_mut(base_name) {
+                current.clone_from(&value);
+            } else {
+                self.shell_state
+                    .env_vars
+                    .insert(base_name.to_string(), value.clone());
+            }
         }
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport") {
             self.mark_exported(base_name);
         }
-        sync_shell_assignment_process_env(&self.shell_state.env_vars, base_name, value);
+        // The in-place append already wrote the mirror, so the process-env
+        // projection reads it back; every other path projects the render it
+        // just produced.
+        let projected = if mirror_written_in_place {
+            self.shell_state
+                .env_vars
+                .get(base_name)
+                .map(String::as_str)
+                .unwrap_or_default()
+        } else {
+            value.as_str()
+        };
+        sync_shell_assignment_process_env(&self.shell_state.env_vars, base_name, projected);
         true
+    }
+
+    /// rubash#616 (plan Phase 1c): apply an append-only compound write
+    /// (`a+=(...)`) straight to the canonical mirror and the structured cell.
+    /// The decode was seeded from that same cell (`indexed_array_cell`), so
+    /// `outcome.appended` is exactly the tail GNU's assign_compound_array_list
+    /// (arrayfunc.c:700) inserted past `array_max_index` (arrayfunc.c:743);
+    /// the mirror therefore grows by those segments alone.
+    ///
+    /// Returns `false` — leaving the mirror and the cell untouched — when the
+    /// cell is absent or readonly, or when the mirror is not the canonical
+    /// `STORAGE_WORD_PREFIX(...)` render the in-place segment patch requires,
+    /// so every other shape falls back to `render_indexed_outcome`. The mirror
+    /// is extended BEFORE the cell: if the cell write is then refused, the
+    /// caller's fallback re-renders and re-syncs from the mirror, landing on
+    /// the correct value rather than a stale one.
+    fn apply_compound_append_in_place(
+        &mut self,
+        name: &str,
+        outcome: &super::arrays::IndexedAppendOutcome,
+    ) -> bool {
+        if outcome.appended.is_empty() {
+            return false;
+        }
+        let Some((len, _)) = self.shell_state.variables.indexed_array_shape(name) else {
+            return false;
+        };
+        if self
+            .shell_state
+            .variables
+            .get(name)
+            .is_some_and(|variable| variable.readonly)
+        {
+            return false;
+        }
+        if !append_indexed_mirror_segments(
+            &mut self.shell_state.env_vars,
+            name,
+            outcome
+                .appended
+                .iter()
+                .map(|(index, value)| (*index, value.as_str())),
+        ) {
+            return false;
+        }
+        for (offset, (index, value)) in outcome.appended.iter().enumerate() {
+            let typed_index = i64::try_from(*index).unwrap_or(i64::MAX);
+            if !self.shell_state.variables.extend_indexed_element(
+                name,
+                typed_index,
+                value,
+                len + offset + 1,
+            ) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// rubash#616 (plan Phase 1c): the render for an `append_array_value` outcome
+/// that was NOT applied in place. A pure append carries no full element map
+/// (see `IndexedAppendOutcome::entries`), so the map is rebuilt from the
+/// mirror `current` and the appended tail is folded back in — byte-identical
+/// to what the scan would have rendered itself.
+fn render_indexed_outcome(current: &str, outcome: super::arrays::IndexedAppendOutcome) -> String {
+    match outcome.entries {
+        Some(entries) => format_indexed_array_storage(entries),
+        None => {
+            let mut entries = indexed_array_entries(current);
+            entries.extend(outcome.appended);
+            format_indexed_array_storage(entries)
+        }
     }
 }

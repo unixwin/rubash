@@ -276,6 +276,21 @@ impl VariableStore {
         }
     }
 
+    /// rubash#616 (plan Phase 1c): the structured cell for `name` — GNU's
+    /// ARRAY object — or `None` when `name` holds no indexed cell. The
+    /// compound-append scan seeds from this instead of re-parsing the rendered
+    /// mirror, so an append-only `a+=(...)` never materialises the whole
+    /// element map (GNU assign_compound_array_list edits the ARRAY object in
+    /// place, arrayfunc.c:700). The 1a invariant — the cell is a COMPLETE
+    /// mirror of the render or absent — is what makes the seed equivalent to
+    /// that parse.
+    pub fn indexed_array_cell(&self, name: &str) -> Option<&BTreeMap<i64, String>> {
+        match self.get(name).map(|variable| &variable.value) {
+            Some(ShellValue::IndexedArray(values)) => Some(values),
+            _ => None,
+        }
+    }
+
     pub fn replace_associative_array<I, K, V>(
         &mut self,
         name: &str,

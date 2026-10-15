@@ -299,6 +299,89 @@ out=3
         r##"declare -a f=([0]="10" [1]="20" [2]="X" [3]="40")
 "##,
     ),
+    // rubash#616 (1c): `a+=(...)` grows the canonical mirror and the
+    // structured cell in place whenever every new element lands strictly above
+    // the pre-write max (GNU assign_compound_array_list, arrayfunc.c:700;
+    // `last_ind = array_max_index(a) + 1`, arrayfunc.c:743). The decode is
+    // seeded from the structured cell, so these pin the in-place shapes — a
+    // plain loop, a batch, an unset target, a sparse gap — and every fallback:
+    // an element that rewrites an existing index, an integer array, an empty
+    // list, and a value that ends in `(` (the separator judgement must be by
+    // length, not by the last body byte).
+    (
+        "compound_append_loop",
+        r##"a=(); for i in 0 1 2; do a+=($i); done; declare -p a"##,
+        r##"declare -a a=([0]="0" [1]="1" [2]="2")
+"##,
+    ),
+    (
+        "compound_append_batch_twice",
+        r##"a=(p q); a+=(r); a+=(s t); declare -p a"##,
+        r##"declare -a a=([0]="p" [1]="q" [2]="r" [3]="s" [4]="t")
+"##,
+    ),
+    (
+        "compound_append_after_sparse_start",
+        r##"a=([4]=k); a+=(x y); declare -p a; echo ${#a[@]}"##,
+        r##"declare -a a=([4]="k" [5]="x" [6]="y")
+3
+"##,
+    ),
+    (
+        "compound_append_sparse_gap",
+        r##"a=(1 2); a+=([5]=p [6]=q); declare -p a; echo ${#a[@]}"##,
+        r##"declare -a a=([0]="1" [1]="2" [5]="p" [6]="q")
+4
+"##,
+    ),
+    (
+        "compound_append_rewrites_then_appends",
+        r##"a=(1 2 3); a+=( [0]=z [3]=w ); declare -p a"##,
+        r##"declare -a a=([0]="z" [1]="2" [2]="3" [3]="w")
+"##,
+    ),
+    (
+        "compound_append_empty_list_then_append",
+        r##"a=(); a+=(); a+=(x); declare -p a"##,
+        r##"declare -a a=([0]="x")
+"##,
+    ),
+    (
+        "compound_append_value_ends_in_paren",
+        r##"a=('x('); a+=(y); declare -p a"##,
+        r##"declare -a a=([0]="x(" [1]="y")
+"##,
+    ),
+    (
+        "compound_append_integer_array",
+        r##"declare -i a=(1); a+=(2+3); declare -p a"##,
+        r##"declare -ai a=([0]="1" [1]="5")
+"##,
+    ),
+    (
+        "compound_append_creates_then_grows",
+        r##"a+=(1 2); a+=(3); declare -p a"##,
+        r##"declare -a a=([0]="1" [1]="2" [2]="3")
+"##,
+    ),
+    (
+        "compound_append_interleaved_element_writes",
+        r##"a=(a b c); a[1]=B; a+=(d); a[2]=C; a+=(e); declare -p a"##,
+        r##"declare -a a=([0]="a" [1]="B" [2]="C" [3]="d" [4]="e")
+"##,
+    ),
+    (
+        "compound_append_quoted_word_with_space",
+        r##"f=(); for x in 'p q' r; do f+=("$x"); done; printf '%s|%s|' "${f[0]}" "${f[1]}"; declare -p f"##,
+        r##"p q|r|declare -a f=([0]="p q" [1]="r")
+"##,
+    ),
+    (
+        "compound_append_expansions",
+        r##"n=3; a=(1 2); a+=($n $((n+1))); declare -p a"##,
+        r##"declare -a a=([0]="1" [1]="2" [2]="3" [3]="4")
+"##,
+    ),
 ];
 
 #[test]

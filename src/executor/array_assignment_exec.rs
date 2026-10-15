@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{STORAGE_WORD_PREFIX, STORAGE_WORD_PREFIX_STR};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 impl Executor {
     /// GNU never expands `name[subscript]=value` as one word:
@@ -574,11 +574,10 @@ impl Executor {
                 // the (already extended) mirror and re-inserts the same
                 // element, so a failed cell write still lands on the correct
                 // value instead of a stale mirror.
-                Self::append_indexed_mirror_element(
+                append_indexed_mirror_segments(
                     &mut self.shell_state.env_vars,
                     name,
-                    index,
-                    &element,
+                    std::iter::once((index, element.as_str())),
                 ) && self.shell_state.variables.extend_indexed_element(
                     name,
                     typed_index,
@@ -621,42 +620,6 @@ impl Executor {
         // `${idx[*]@A}` renders the `=(...)` body (rubash#371).
         unmark_env_name(&mut self.shell_state.env_vars, DECLARED_UNSET_VARS, name);
         self.exit_code = 0;
-        true
-    }
-
-    /// rubash#616 (plan Phase 1b): extend a canonical indexed mirror in place
-    /// by exactly the segment `format_indexed_array_storage` would have
-    /// appended for `element` at `index`. The caller has already verified the
-    /// mirror is a `STORAGE_WORD_PREFIX(...)` render with a trailing `)`, so
-    /// the result is byte-identical to a full re-render; `false` is returned
-    /// without touching the value when that precondition does not hold.
-    fn append_indexed_mirror_element(
-        env_vars: &mut crate::shell::var_table::VarTable,
-        name: &str,
-        index: usize,
-        element: &str,
-    ) -> bool {
-        let Some(mirror) = env_vars.get_mut(name) else {
-            return false;
-        };
-        // Canonical form is `PREFIX(seg seg seg)`, or `PREFIX()` when empty.
-        let prefix_len = STORAGE_WORD_PREFIX_STR.len();
-        if !mirror.starts_with(STORAGE_WORD_PREFIX_STR)
-            || !mirror.ends_with(')')
-            || mirror.as_bytes().get(prefix_len) != Some(&b'(')
-        {
-            return false;
-        }
-        // Body emptiness must be judged by length, not by the last body byte:
-        // a value may itself end in `(` (e.g. `a=(x; a[0]='a(')`), so
-        // `ends_with('(')` would wrongly drop the separator.
-        let body_is_empty = mirror.len() == prefix_len + 2;
-        mirror.truncate(mirror.len() - 1);
-        if !body_is_empty {
-            mirror.push(' ');
-        }
-        mirror.push_str(&format!("[{index}]={}", quote_array_value(element)));
-        mirror.push(')');
         true
     }
 }

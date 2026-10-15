@@ -330,6 +330,58 @@ pub(crate) fn sync_typed_indexed_element(
     }
 }
 
+/// rubash#616 (plan Phase 1c): extend a canonical indexed mirror in place by
+/// exactly the segments `format_indexed_array_storage` would have appended for
+/// each `(index, element)` pair, which the caller supplies in ascending index
+/// order. The caller has verified the mirror is a `STORAGE_WORD_PREFIX(...)`
+/// render with a trailing `)`, so when those pairs are the render's only
+/// change the result is byte-identical to a full re-render (GNU array.c:516
+/// `array_insert` appends to the ARRAY object and never re-serialises it;
+/// `array_max_index` + 1 is the append slot, arrayfunc.c:743). Returns `false`
+/// without touching the value when that precondition fails or there is
+/// nothing to append.
+pub(in crate::executor) fn append_indexed_mirror_segments<'a, I>(
+    env_vars: &mut crate::shell::var_table::VarTable,
+    name: &str,
+    segments: I,
+) -> bool
+where
+    I: IntoIterator<Item = (usize, &'a str)>,
+{
+    let mut segments = segments.into_iter();
+    let Some((first_index, first_element)) = segments.next() else {
+        return false;
+    };
+    let Some(mirror) = env_vars.get_mut(name) else {
+        return false;
+    };
+    let prefix_len = STORAGE_WORD_PREFIX_STR.len();
+    if !mirror.starts_with(STORAGE_WORD_PREFIX_STR)
+        || !mirror.ends_with(')')
+        || mirror.as_bytes().get(prefix_len) != Some(&b'(')
+    {
+        return false;
+    }
+    // Body emptiness must be judged by length, not by the last body byte: a
+    // value may itself end in `(` (e.g. `a[0]='a('`), so `ends_with('(')`
+    // would wrongly drop the separator.
+    let need_separator = mirror.len() != prefix_len + 2;
+    mirror.truncate(mirror.len() - 1);
+    if need_separator {
+        mirror.push(' ');
+    }
+    mirror.push_str(&format!(
+        "[{first_index}]={}",
+        quote_array_value(first_element)
+    ));
+    for (index, element) in segments {
+        mirror.push(' ');
+        mirror.push_str(&format!("[{index}]={}", quote_array_value(element)));
+    }
+    mirror.push(')');
+    true
+}
+
 /// Sync (or invalidate) the structured cell from a rendered mirror value.
 /// Only the indexed storage render (`STORAGE_WORD_PREFIX`) syncs; any other
 /// shape (plain scalar text, assoc `([k]=v)`) drops an indexed cell so the
