@@ -2073,8 +2073,7 @@ fn cp_dot_slash_source_copies_contents_into_existing_directory() {
     // GNU coreutils cp.c copy_internal: a source operand ending in `/.`
     // names the directory's CONTENTS (dotfiles included), not the
     // directory itself. With an existing directory destination the
-    // children land inside it; there is no `dst/src` subdirectory. The
-    // `/.` diagnostics keep exit status 0 under the local GNU oracle.
+    // children land inside it; there is no `dst/src` subdirectory.
     let dir = env::temp_dir().join(format!("rubash-cp-dotslash-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create cp dot-slash probe dir");
@@ -2103,9 +2102,9 @@ fn cp_dot_slash_source_copies_contents_into_existing_directory() {
         String::from_utf8_lossy(&output.stdout),
         concat!(
             "C1OK\nC2OK\n",
-            "rc3=0\n",
+            "rc3=1\n",
             "bash: line 1: cp: -r not specified; omitting directory 'src/.'\n",
-            "rc5=0\n",
+            "rc5=1\n",
             "bash: line 1: cp: cannot overwrite non-directory 'f.txt' with directory 'src/.'\n",
             "bash: line 1: cp: cannot stat 'f.txt/.': Not a directory\n"
         )

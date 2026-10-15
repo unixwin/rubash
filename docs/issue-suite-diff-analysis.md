@@ -1,5 +1,156 @@
 # Issue Suite DIFF Analysis
 
+## 2026-10-15 Issue #615 Test/Platform Slice
+
+### Review follow-up: strict fixture gate and production fixes
+
+The paragraphs below this follow-up describe the initial test-only checkpoint,
+not the final production state. Issue #615 remains open. The remaining indexed
+compound-expansion failure is self-assigned to `caomengxuan666` as rubash #621;
+its original CLI assertion is still red on Linux and Windows. A scalar control
+(`scalar=' 1 '; plain=($scalar)`) reproduces the same extra empty element, so
+the issue is not specific to associative subscripts or an absent bashdb fixture.
+No #614 negative-subscript/getopts/history or #607/#609 assignment hot-path
+files are changed by this follow-up.
+
+`tests/support/bashdb_fixture.rs` now enforces
+`RUBASH_REQUIRE_BASHDB_FIXTURE=1`: absent external launchers panic instead of
+returning early. `scripts/check-bashdb-fixture.sh` always sets that variable.
+Ordinary suites still report `SKIP ... no bashdb coverage`; their early returns
+remain Cargo passes and must not count as coverage. Four independent policy
+tests pass on both platforms. The actual Linux CLI negative control with a
+missing launcher exits 101 in strict mode and 0 in optional mode, with the
+strict failure naming the variable and setup command.
+The dedicated script was itself exercised with
+`sh scripts/check-bashdb-fixture.sh --exact bashdb_compat::bashdb_help_command_list_is_populated`:
+it builds successfully then exits 101 for the absent launcher
+(`strict-gate-script.log`). No external bashdb coverage is claimed.
+
+Two runtime causes now have separate helper modules and regression files:
+
+- `src/executor/inherited_stdin.rs` duplicates the live process stdin handle.
+  The hook replaces Unix `File::open(target)` in `shell_options.rs`
+  `open_fd_read_endpoint`, which had attempted to open the literal `&3`.
+  Specification: GNU Bash `redir.c:767 do_redirection_internal`, duplication
+  cases at 1115 and `dup2(redir_fd, redirector)` at 1170. The independent
+  `issue615_inherited_stdin` tests cover external-child input, raw bytes, and
+  closed-fd rejection: 3/3 pass on Linux and Windows.
+- `src/executor/copy_source.rs` uses metadata without flattening its errno to
+  `exists()`. The embedded cp `/.` branch now returns status 1 for bad source,
+  omitted recursive option, and directory-over-file errors. Specification:
+  GNU coreutils 9.11 `src/copy.c:1623 copy_internal`, stat failure/false return
+  at 1671-1675, omitted recursion at 1679-1685, and overwrite rejection at
+  1880-1892. `issue615_copy_contents` is 4/4 on both platforms. The old CLI
+  cp test's status-0 assertions were themselves wrong and now require 1;
+  `production-matrix.sh` verifies all four errors against GNU's real cp.
+
+Final fresh-build named CLI slices: Linux **51 passed / 1 failed / 2 ignored**;
+Windows **55 passed / 1 failed / 2 ignored**. Both passed totals include eleven
+optional-launcher early returns, not external bashdb coverage. The only failure
+in these slices is #621. Android and the full workspace remain unverified.
+The Linux adjacent fd slice passes **20/20 with `--test-threads=1`**. A parallel
+attempt was 11/20 because existing tests share/delete one helper directory;
+it is retained as evidence, not hidden or fixed here. One Windows run inherited
+`WINUXSH_ROOT` and failed three passwd-fixture cases; it is invalid measurement
+per AGENTS.md. The clean rerun removes that variable and only #621 fails.
+
+`scripts/validate-semantic-map.sh` was attempted and fails on the pre-existing
+missing owner `src/input/readline/`, already present in the baseline map; this
+slice does not create fake directories or rewrite unrelated ownership entries
+to green it. The new modules are registered in the map and source indexes.
+
+Additional raw evidence under the same issue-615 artifact directory:
+`strict-policy-tests.log`, `strict-missing-launcher.log`,
+`optional-missing-launcher.log`, `production-build.log`,
+`issue615_inherited_stdin-after.log`, `issue615_copy_contents-after.log`,
+`cli-production-after.log`, `production-matrix.log`,
+`production-final-slice.log`, `adjacent-fd-slice.log`,
+`adjacent-fd-serial.log`, `semantic-map.log`, `windows-production-build.log`,
+`windows-inherited-stdin.log`, `windows-copy-contents.log`,
+`windows-strict-policy.log`, `windows-production-final-slice.log` (polluted),
+and `windows-production-clean-slice.log` (authoritative Windows slice).
+
+Baseline: `334afab2`, branch `fix/issue-615`, dedicated worktree
+`D:/repo/rubash-wt-615`. This slice changes tests and fixture documentation
+only: no runtime, WinuxCmd backend, or Niubash integration changes, and no new
+`#[ignore]` attributes. Android/Termux was not available for execution; the
+actual Unix verification below used WSL Linux and GNU Bash 5.3.0.
+
+### Fixture and expectation repairs
+
+- Only tests invoking the optional external bashdb launcher return early when
+  that launcher is absent. Eleven active tests took this path on both hosts;
+  the two existing stdin-loop ignores remain. Missing-launcher diagnostics
+  include the setup command. A deliberately broken, present launcher still
+  fails the original assertion (negative control, removed after the probe).
+- The tracked getopts fallback is copied into `target/bashdb-clean` only when
+  absent, preserving a real external installation's implementation. The
+  getopts regression now executes and passes without installing bashdb.
+- Windows passwd-fixture tests and the explicitly Windows-only login-startup
+  test are Windows-gated. A new Unix CLI test uses the current UID's system
+  passwd entry and covers word, assignment, colon, and missing-user expansion.
+- NUL alias and CRLF tests assert each platform's contract rather than skip
+  Unix execution. GNU 5.3 and Linux Rubash both reject `nUl` with status 1 and
+  the CRLF control-flow script with status 2.
+- The uname test compares function bypass against an unshadowed invocation on
+  the same platform, not the Windows `Msys` constant. Bashdb canonical source
+  paths retain Unix paths rather than applying Windows drive slicing there.
+- The CLI shopt test now expects `invalid shell option name`, matching both
+  GNU `builtins/shopt.def:455 shopt_error()` (diagnostic at line 457) and the
+  existing Rubash implementation. Status 2 and no command execution are still
+  required.
+
+### Bounded verification and remaining red tests
+
+Both hosts built `cargo test --test cli_tests --locked --no-run` successfully.
+Windows used the separate `--target-dir target/issue615-windows` directory;
+Linux used `target/debug`. Tests then ran directly from those fresh test
+binaries with a 30-second slice timeout, avoiding rebuild time in the test
+budget. The shared filter arguments were:
+
+```text
+bashdb_compat uname_builtin_yields tilde_user_ login_flag_does
+c_external_command_reads_eof crlf_control_flow cp_dot_slash
+invalid_cli_shopt_option c_command_external_uses_persistent_fd --nocapture
+```
+
+| Evidence | Passed | Failed | Existing ignored |
+| --- | ---: | ---: | ---: |
+| Linux before: platform/fixture filters, excluding the last two filters | 31 | 22 | 2 |
+| Linux before: each of the last two tests, separately | 0 | 1 each | 0 |
+| Linux after: complete named slice | 49 | 3 | 2 |
+| Windows after: complete named slice | 55 | 1 | 2 |
+
+The passed totals **include eleven missing-launcher early returns** on each
+host; they do not certify external bashdb behavior. Neither the full CLI suite
+nor the workspace suite ran, and these counts are not Android results.
+`rustfmt --check` on the two changed test files and `git diff --check` pass.
+
+Three true runtime gaps are deliberately left red, not hidden by fixture
+checks or weaker expectations:
+
+1. `compound_assignment_splits_unquoted_associative_array_element` does not
+   consume the external fixture at all. GNU prints `<1:1>`; Rubash prints
+   `<2:>`. This also fails in the Windows slice.
+2. `c_command_external_uses_persistent_fd_copied_from_stdin`: the same script
+   file under GNU can launch the freshly built Linux Rubash child and deliver
+   `external-stdin` (status 0); the Rubash parent instead diagnoses
+   `&3: No such file or directory` (status 1). The Windows test passes.
+3. `cp_dot_slash_source_copies_contents_into_existing_directory`: this Linux
+   failure is **not a toybox diagnostic** in this checkout. Rubash intercepts
+   cp in `src/executor/external_file_builtins.rs:528`; its `source.exists()`
+   check on a regular file's `/.` operand selects `No such file or directory`
+   instead of GNU's `Not a directory`. The minimal GNU cp probe also returns
+   1 while Rubash returns 0. The existing test is untouched; runtime ownership
+   needs a separate semantic repair. The Windows test passes.
+
+Raw evidence lives under `target/issue-suites/results/issue-615/`:
+`before-platform.log`, the four `before-<test-name>.log` files,
+`after-build.log`, `after-slice.log`, `windows-build.log`, `windows-slice.log`,
+`probe.sh`, `probe.log`, and `present-broken-launcher.log`. The probe compares
+LF script files with `/usr/local/bin/bash` 5.3.0 and the freshly built Linux
+Rubash; it includes the CRLF input as an explicit generated fixture.
+
 ## 2026-09-06 Root-Cause Matrix and Implementation Handoff
 
 This checkpoint separates compatibility families by semantic owner; aggregate DIFF counts are not closure criteria. All semantic probes must compare script files with WSL GNU Bash 5.2.21.

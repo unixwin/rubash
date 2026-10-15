@@ -139,17 +139,7 @@ impl Executor {
                 File::open(&path)
             }
             Some(FdReadEndpoint::InheritedProcessStdin) => {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::io::AsHandle;
-                    let owned = std::io::stdin().as_handle().try_clone_to_owned()?;
-                    return Ok(File::from(owned));
-                }
-                #[cfg(not(windows))]
-                {
-                    return File::open(target)
-                        .map_err(|e| crate::posix_errors::path_error(target, e));
-                }
+                super::inherited_stdin::duplicate_process_stdin()
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::NotFound,

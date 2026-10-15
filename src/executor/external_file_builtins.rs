@@ -526,22 +526,19 @@ impl Executor {
             };
             let mut copy_units: Vec<(PathBuf, String)> = Vec::new();
             if source_names_contents {
-                if !source.is_dir() {
-                    // stat(src/.) fails with ENOTDIR when src exists but is
-                    // not a directory, ENOENT when src itself is missing.
-                    let detail = if source.exists() {
-                        "Not a directory"
-                    } else {
-                        "No such file or directory"
-                    };
+                if let Err(error) = super::copy_source::require_directory_contents_source(&source) {
+                    status = 1;
                     let _ = writeln!(
                         stderr,
                         "{}cp: cannot stat '{}': {}",
-                        prefix, source_word, detail
+                        prefix,
+                        source_word,
+                        crate::posix_errors::message(&error)
                     );
                     continue;
                 }
                 if !recursive {
+                    status = 1;
                     let _ = writeln!(
                         stderr,
                         "{}cp: -r not specified; omitting directory '{}'",
@@ -550,6 +547,7 @@ impl Executor {
                     continue;
                 }
                 if destination.exists() && !destination.is_dir() {
+                    status = 1;
                     let _ = writeln!(
                         stderr,
                         "{}cp: cannot overwrite non-directory '{}' with directory '{}'",

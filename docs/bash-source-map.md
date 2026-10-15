@@ -103,7 +103,7 @@ needed.
 | `pathexp.c`, `lib/glob/glob.c`, `lib/glob/strmatch.c` | `src/executor/glob.rs`, `src/parser/pathname_pattern.rs` | Now | Pathname expansion and shell pattern matching use one active executor owner plus parser metadata. |
 | `lib/tilde/tilde.c` | `src/expand/tilde/tilde.rs` | Now | Needed by `cd`, assignments, and word expansion. |
 | `execute_cmd.c`, `execute_cmd.h`, `eval.c` | `src/executor/command_execute.rs`, `src/executor/compound_exec.rs`, `src/executor/pipeline_exec.rs` | Now | Main command execution is distributed across dispatch, compound execution, and pipeline owners. `src/executor/command.rs` is not an active module. |
-| `redir.c`, `redir.h` | `src/executor/redirection.rs` | Now | File descriptor and redirect semantics. |
+| `redir.c`, `redir.h` | `src/executor/redirection.rs`, `src/executor/inherited_stdin.rs` | Now | File descriptor and redirect semantics; inherited stdin duplication follows the live kernel object (`redir.c:1170 dup2`). |
 | `findcmd.c`, `hashcmd.c`, `hashlib.c` | `src/executor/path.rs`, `src/builtins/hash.rs` | Later | Command lookup and builtin hash behavior are separate owners. |
 | `variables.c`, `variables.h` | `src/shell/variables.rs` | Now | Shell variables, exported environment, special parameters. |
 | `flags.c`, `shell.c`, `shell.h` | `src/executor/shell_options.rs`, `src/shell/state.rs` | Now | Shell options and shared runtime state have separate active owners. |

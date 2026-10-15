@@ -45,7 +45,9 @@ mod command_substitution_pipelines;
 mod command_substitution_values;
 mod command_words;
 mod compound_exec;
+mod copy_source;
 mod history_exec;
+mod inherited_stdin;
 pub(crate) mod substitution_metadata;
 
 /// Decode raw input bytes (script source read from stdin, command output,

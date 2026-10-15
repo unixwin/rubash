@@ -2,6 +2,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::{fs, path::Path};
 
+#[path = "../support/bashdb_fixture.rs"]
+mod bashdb_fixture;
+
 fn run_rubash_inline(script: &str) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
@@ -22,13 +25,30 @@ fn ensure_bashdb_probe_fixture() {
     use std::sync::Once;
     static SYNC: Once = Once::new();
     SYNC.call_once(|| {
-        let tracked = fs::read("tests/fixtures/bashdb/probe-target.sh").unwrap_or_default();
+        fs::create_dir_all("target/bashdb-clean").expect("create bashdb fixture directory");
+        let tracked = fs::read("tests/fixtures/bashdb/probe-target.sh")
+            .expect("read tracked bashdb probe fixture");
         let current = fs::read("target/bashdb-probe-target.sh").unwrap_or_default();
         if tracked != current {
-            let _ = fs::create_dir_all("target");
-            let _ = fs::write("target/bashdb-probe-target.sh", &tracked);
+            fs::write("target/bashdb-probe-target.sh", &tracked)
+                .expect("sync bashdb probe fixture");
+        }
+        let getopts = Path::new("target/bashdb-clean/getopts_long.sh");
+        if !getopts.try_exists().expect("check bashdb getopts fixture") {
+            fs::copy("tests/fixtures/bashdb/getopts_long.sh", getopts)
+                .expect("copy tracked getopts fixture");
         }
     });
+}
+
+fn bashdb_fixture_available() -> bool {
+    let launcher = Path::new("target/bashdb-clean/bashdb-generated");
+    let requirement = std::env::var_os("RUBASH_REQUIRE_BASHDB_FIXTURE");
+    if !bashdb_fixture::launcher_available(launcher, requirement.as_deref()) {
+        return false;
+    }
+    ensure_bashdb_probe_fixture();
+    true
 }
 
 fn ensure_bash_shim_fixture() {
@@ -345,7 +365,9 @@ fn scalar_length_of_empty_and_populated_arrays_uses_element_zero() {
 
 #[test]
 fn bashdb_help_command_list_is_populated() {
-    ensure_bashdb_probe_fixture();
+    if !bashdb_fixture_available() {
+        return;
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -452,7 +474,9 @@ outer
 
 #[test]
 fn bashdb_delete_removes_breakpoint_entry() {
-    ensure_bashdb_probe_fixture();
+    if !bashdb_fixture_available() {
+        return;
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -513,7 +537,9 @@ printf '<%s:%s:%s>\n' "${#via_eval[@]}" "${via_eval[0]}" "$(( via_eval[0] == 4 )
 // the bashdb stdin command loop lands (owner directive 2026-09-26).
 #[ignore = "stdin-loop hang: bashdb command stream not consumed"]
 fn bashdb_clear_removes_breakpoint_by_file_line() {
-    ensure_bashdb_probe_fixture();
+    if !bashdb_fixture_available() {
+        return;
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -563,7 +589,9 @@ printf '<%s:%s:%s>\n' "$i" "${a[0]}" "${a[1]-}"
 // the full cli suite completes; unignore with the stdin command-loop fix.
 #[ignore = "stdin-loop hang: secondary input block never sees EOF"]
 fn bashdb_commands_block_consumes_secondary_input_without_fd_loop() {
-    ensure_bashdb_probe_fixture();
+    if !bashdb_fixture_available() {
+        return;
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -611,7 +639,9 @@ declare -p e q literal
 
 #[test]
 fn bashdb_examine_prints_debugged_local_variable() {
-    ensure_bashdb_probe_fixture();
+    if !bashdb_fixture_available() {
+        return;
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -664,7 +694,9 @@ printf '<%s:%s:%s>\n' "${map["declare -A BASH_ALIASES"]}" "${map[k]}" "${arr[0]}
 
 #[test]
 fn bashdb_info_variables_runs_without_assoc_value_errors() {
-    ensure_bashdb_probe_fixture();
+    if !bashdb_fixture_available() {
+        return;
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -748,7 +780,9 @@ fn debug_trap_respects_subshell_and_command_substitution_inheritance() {
 
 #[test]
 fn bashdb_info_variables_filters_indexed_and_associative_arrays() {
-    ensure_bashdb_probe_fixture();
+    if !bashdb_fixture_available() {
+        return;
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -776,7 +810,9 @@ fn bashdb_info_variables_filters_indexed_and_associative_arrays() {
 
 #[test]
 fn bashdb_sourced_command_errors_name_sourced_file() {
-    ensure_bashdb_probe_fixture();
+    if !bashdb_fixture_available() {
+        return;
+    }
     let outer = Path::new("target/bashdb-source-diagnostic-outer.sh");
     let inner = Path::new("target/bashdb-source-diagnostic-inner.sh");
     fs::write(outer, "source target/bashdb-source-diagnostic-inner.sh\n").unwrap();
@@ -809,7 +845,9 @@ fn bashdb_sourced_command_errors_name_sourced_file() {
 
 #[test]
 fn bashdb_info_files_reports_source_files_without_command_substitution_error() {
-    ensure_bashdb_probe_fixture();
+    if !bashdb_fixture_available() {
+        return;
+    }
     // bashdb canonicalizes the debugged script through `(cd dir; pwd)`,
     // which prints the shell's POSIX drive form (/<drive>/...). Derive the
     // expected path from the actual checkout so the assertion holds in any
@@ -818,7 +856,10 @@ fn bashdb_info_files_reports_source_files_without_command_substitution_error() {
         .unwrap()
         .to_string_lossy()
         .replace('\\', "/");
+    #[cfg(windows)]
     let posix_drive_form = format!("/{}/{}", cwd[..1].to_ascii_lowercase(), &cwd[3..]);
+    #[cfg(not(windows))]
+    let posix_drive_form = cwd;
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -850,14 +891,19 @@ fn bashdb_info_files_reports_source_files_without_command_substitution_error() {
 
 #[test]
 fn bashdb_continue_numeric_location_hits_function_source_line() {
-    ensure_bashdb_probe_fixture();
+    if !bashdb_fixture_available() {
+        return;
+    }
     // Same checkout-agnostic canonical path as the info-files test:
     // tbreak/continue messages print the frame file in POSIX drive form.
     let cwd = std::env::current_dir()
         .unwrap()
         .to_string_lossy()
         .replace('\\', "/");
+    #[cfg(windows)]
     let posix_drive_form = format!("/{}/{}", cwd[..1].to_ascii_lowercase(), &cwd[3..]);
+    #[cfg(not(windows))]
+    let posix_drive_form = cwd;
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -913,6 +959,9 @@ fn bash_compat_debugger_options_run_init_file_before_script() {
 
 #[test]
 fn bashdb_debug_nested_shell_preserves_typeset_array_quotes() {
+    if !bashdb_fixture_available() {
+        return;
+    }
     ensure_bash_shim_fixture();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
@@ -943,6 +992,9 @@ fn bashdb_debug_nested_shell_preserves_typeset_array_quotes() {
 
 #[test]
 fn bashdb_shell_nested_bash_uses_compatible_shim() {
+    if !bashdb_fixture_available() {
+        return;
+    }
     // ENVIRONMENT-BOUND (2026-09-27): bashdb's `shell` command execs
     // $_Dbg_shell, which the generated launcher hardcodes at configure
     // time to /usr/local/bin/bash (fixture bashdb-main.inc:23). The nested
@@ -1011,7 +1063,9 @@ fn local_array_assignment_splits_unquoted_command_substitution_output() {
 
 #[test]
 fn bashdb_list_function_name_uses_extdebug_declare_metadata() {
-    ensure_bashdb_probe_fixture();
+    if !bashdb_fixture_available() {
+        return;
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")

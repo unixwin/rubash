@@ -158,6 +158,40 @@ problem.
 
 ## Regression Coverage
 
+The CLI tests sync the tracked probe target and, when absent, the tracked
+`getopts_long.sh` fallback into `target/`. They do not overwrite an installed
+external getopts implementation. Pure shell-language regressions in
+`bashdb_compat` run without a bashdb installation.
+
+Only tests that invoke `target/bashdb-clean/bashdb-generated` return early when
+that external launcher is absent, printing `SKIP` with the setup command under
+`--nocapture`. Rust's test harness counts these early returns as passed, not
+ignored: they are **not evidence of bashdb coverage**. Once the launcher exists,
+the tests run their original assertions; launcher/library/runtime failures are
+not skipped. The two existing stdin-loop ignores remain unchanged.
+
+The dedicated fixture gate must require the external launcher explicitly:
+
+```sh
+sh scripts/check-bashdb-fixture.sh
+```
+
+With this setting, a missing launcher fails rather than returning early. A
+normal suite run without it may skip external tests and is not a bashdb
+coverage gate. Existing launchers still run the original debugger assertions;
+the switch does not certify launcher/library validity or suppress failures.
+The script exports `RUBASH_REQUIRE_BASHDB_FIXTURE=1` before invoking Cargo;
+the equivalent explicit command is
+`RUBASH_REQUIRE_BASHDB_FIXTURE=1 cargo test --test cli_tests --locked bashdb_compat -- --nocapture`.
+Run it from the repository root with an outer timeout appropriate for the
+fixture host, and use the forwarded Rust test arguments for a smaller slice.
+
+The requirement policy has an independent regression target:
+
+```sh
+cargo test --test issue615_bashdb_fixture_gate --locked -- --nocapture
+```
+
 The focused regression suite for this workflow is:
 
 ```sh

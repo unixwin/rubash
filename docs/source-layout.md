@@ -18,6 +18,11 @@ winuxcmd / winuxsh architecture boundary, use
 
 ## Target Layout
 
+Issue #615's executor helpers keep live inherited-stdin duplication in
+`src/executor/inherited_stdin.rs` and embedded cp source metadata validation in
+`src/executor/copy_source.rs`. Their call sites remain in `shell_options.rs`
+and `external_file_builtins.rs`; neither adds host-side Niubash semantics.
+
 ```text
 src/
   main.rs

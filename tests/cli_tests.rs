@@ -2448,15 +2448,27 @@ fn c_command_redirects_stdout_and_stderr_to_dev_null() {
 
 #[test]
 fn c_external_command_reads_eof_from_null_device_alias() {
+    let dir = std::env::temp_dir().join(format!("rubash-cli-null-alias-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .current_dir(&dir)
         .arg("-c")
         .arg("cat < nUl; printf 'status:%s\\n' \"$?\"")
         .output()
         .expect("run rubash");
 
+    let _ = fs::remove_dir(&dir);
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "status:0\n");
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    if cfg!(windows) {
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "status:0\n");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    } else {
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "status:1\n");
+        assert_stderr_matches(
+            &String::from_utf8_lossy(&output.stderr),
+            r"nUl: No such file or directory",
+        );
+    }
 }
 
 #[test]
@@ -2970,7 +2982,7 @@ fn script_file_uses_script_name_and_positional_arguments() {
 }
 
 #[test]
-fn script_file_accepts_crlf_control_flow() {
+fn script_file_crlf_control_flow_follows_platform_policy() {
     let script_path = Path::new("target").join("rubash-cli-crlf-control-flow.sh");
     fs::create_dir_all("target").unwrap();
     fs::write(
@@ -2985,13 +2997,22 @@ fn script_file_accepts_crlf_control_flow() {
         .expect("run rubash");
 
     let _ = fs::remove_file(script_path);
-    assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "crlf:1\n");
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    if cfg!(windows) {
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "crlf:1\n");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    } else {
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+        assert_stderr_matches(
+            &String::from_utf8_lossy(&output.stderr),
+            r"syntax error: unexpected end of file from `if\x27",
+        );
+    }
 }
 
 #[test]
-fn source_file_accepts_crlf_control_flow() {
+fn source_file_crlf_control_flow_follows_platform_policy() {
     let script_dir = Path::new("target").join("rubash-cli-crlf-source");
     let main_path = script_dir.join("main.sh");
     let lib_path = script_dir.join("lib.niu");
@@ -3015,9 +3036,18 @@ fn source_file_accepts_crlf_control_flow() {
     let _ = fs::remove_file(&main_path);
     let _ = fs::remove_file(&lib_path);
     let _ = fs::remove_dir(&script_dir);
-    assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "sourced-crlf\n");
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    if cfg!(windows) {
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "sourced-crlf\n");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    } else {
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+        assert_stderr_matches(
+            &String::from_utf8_lossy(&output.stderr),
+            r"syntax error: unexpected end of file from `if\x27",
+        );
+    }
 }
 
 #[test]
@@ -3216,6 +3246,7 @@ fn login_startup_options_are_accepted_before_command_string() {
 }
 
 #[test]
+#[cfg(windows)]
 fn login_flag_does_not_change_windows_startup_behavior() {
     // rubash#487: the profile/rc chain is a Unix requirement (linux + macOS
     // legs). On Windows
@@ -3549,6 +3580,15 @@ fn uname_builtin_yields_to_shell_function_but_command_bypasses() {
     // rubash#154: in GNU bash uname/arch are external commands, so a shell
     // function named `uname` must win over the engine builtin; `command
     // uname` bypasses functions by definition and reaches the builtin.
+    let baseline = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("command uname -o")
+        .output()
+        .expect("run rubash uname baseline");
+    assert!(baseline.status.success());
+    assert!(!baseline.stdout.is_empty());
+    assert!(baseline.stderr.is_empty());
+
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
         .arg("uname() { echo user-fn; }; uname; command uname -o")
@@ -3559,10 +3599,9 @@ fn uname_builtin_yields_to_shell_function_but_command_bypasses() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         stdout,
-        "user-fn
-Msys
-"
+        format!("user-fn\n{}", String::from_utf8_lossy(&baseline.stdout))
     );
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
@@ -3684,7 +3723,8 @@ fn invalid_cli_shopt_option_fails_before_command_string() {
 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid option name"));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("no_such_shopt: invalid shell option name"));
 }
 
 #[test]
@@ -3826,6 +3866,7 @@ fn assoc_key_list_star_assignment_rhs_joins_with_ifs_first_char() {
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "[c:a b]");
 }
 
+#[cfg(windows)]
 fn tilde_user_passwd_fixture_root(tag: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
         "rubash-cli-tilde-user-{tag}-{}",
@@ -3841,6 +3882,7 @@ fn tilde_user_passwd_fixture_root(tag: &str) -> std::path::PathBuf {
 }
 
 #[test]
+#[cfg(windows)]
 fn tilde_user_expands_passwd_home_via_rubash_root() {
     let root = tilde_user_passwd_fixture_root("word");
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
@@ -3859,6 +3901,7 @@ fn tilde_user_expands_passwd_home_via_rubash_root() {
 }
 
 #[test]
+#[cfg(windows)]
 fn tilde_user_assignment_value_expands_and_missing_stays_literal() {
     let root = tilde_user_passwd_fixture_root("assign");
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
@@ -3877,6 +3920,7 @@ fn tilde_user_assignment_value_expands_and_missing_stays_literal() {
 }
 
 #[test]
+#[cfg(windows)]
 fn tilde_user_colon_terminated_word_glues_verbatim() {
     let root = tilde_user_passwd_fixture_root("colon");
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
@@ -3892,6 +3936,59 @@ fn tilde_user_colon_terminated_word_glues_verbatim() {
         String::from_utf8_lossy(&output.stdout),
         "/c/Users/niu-home:sub\n/c/Users/niu-home:~niu2\n"
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn tilde_user_expands_system_passwd_home_on_unix() {
+    let mut buffer = vec![0u8; 16384];
+    let (username, home) = loop {
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result = std::ptr::null_mut();
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                &mut entry,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        assert_eq!(status, 0, "system passwd lookup failed");
+        assert!(!result.is_null(), "current uid has no passwd entry");
+        break unsafe {
+            (
+                std::ffi::CStr::from_ptr(entry.pw_name)
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                std::ffi::CStr::from_ptr(entry.pw_dir)
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+            )
+        };
+    };
+    let missing = format!("rubash-no-user-{}", std::process::id());
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(format!(
+            "printf '%s\\n' ~{username} ~{username}/docs ~{missing}; \
+             assigned_home=~{username}/bin; colon_home=bin:~{username}/tools; missing_home=~{missing}/x; \
+             printf '%s\\n' \"$assigned_home|$colon_home|$missing_home\"; printf '%s\\n' ~{username}:sub ~{username}:~{missing}"
+        ))
+        .output()
+        .expect("run Unix passwd tilde probe");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{home}\n{home}/docs\n~{missing}\n{home}/bin|bin:{home}/tools|~{missing}/x\n{home}:sub\n{home}:~{missing}\n")
+    );
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
