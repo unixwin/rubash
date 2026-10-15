@@ -472,3 +472,49 @@ An out-of-range negative subscript in a compound assignment (`a=(); a+=([-1]=x)`
 `bad array subscript` (`arrayfunc.c:801-809`), abandons the assignment and
 (non-interactive) exits 1. Pre-existing on master, unrelated to the store, and
 filed as its own bug — #631 — so this performance line stays one concern.
+
+### #631 resolved (correctness of the compound element-header scan)
+
+Fixed by the #631 PR for the **assignment** route. The wrong invariant was
+`array_assignment_index` (`src/executor/arrays.rs`): it returned
+`Option<usize>`, conflating "this word is not a `[subscript]` header" with
+"this subscript resolved out of range", so the scan's
+`if array_assignment_has_subscript(left) { continue; }` dropped the element in
+silence — for both element forms (`[sub]=`, `[sub]+=`) and both compound forms
+(`a+=(...)`, `a=(...)`).
+
+GNU's contract, from the vendored 5.3 source: `assign_compound_array_list`
+(`arrayfunc.c:700`) counts a negative subscript back from the end
+(`array_max_index + 1 + ind`, `:802-803`); when it is still below zero it calls
+`err_badarraysub (w)` on the whole element word — through `report_error`
+(`error.c:440`; message `arrayfunc.c:63`, so **no** `command:` segment, unlike
+`declare: x: readonly variable`) — counts `any_failed` and `break`s the list
+(`:804-809`). Elements inserted before the failure stay stored (`:768-772`),
+and `assign_array_var_from_string` (`:913-932`) returns NULL, so the assignment
+fails: `bash_variable_assignment_error` (`subst.c:11169`) →
+`exp_jump_to_top_level (DISCARD)` (`subst.c:11174`).
+
+The fix returns a three-state `ArrayAssignmentIndex { Index, NegativeOutOfRange,
+Unresolved }`, stops the scan on `NegativeOutOfRange` with the word carried in
+`IndexedAppendOutcome::bad_subscript`, stores the partial outcome, then reports
+and fails with the same jump the plain `a[-2]=q` path already makes. Because the
+jump is the plain path's, the compound and plain routes stay consistent; the
+remaining `eval`-containment divergence is #637.
+
+Evidence: 43-case 3-way differential vs GNU (`~/bench_niu/matrix_631.sh`) —
+25 fixed, **0 regressions**, 6 pre-existing divergences unchanged;
+`~/bench_niu/verify_631.sh` for the per-route byte comparison;
+`tests/issue631_neg_subscript_regressions.rs`; failure-set ratchet vs `81c0df5`
+(`~/bench_niu/ratchet.sh`, serial) clean.
+
+Sibling divergences found while characterising the class, each its own concern:
+#635 (the declare-side duplicate of this scan, `declare`/`local`/`typeset`, still
+drops the element — it needs the builtin's own fatal error channel), #636
+(`a+=( [@]=q )` reports an arithmetic error instead of GNU's `cannot assign to
+non-numeric index`, `arrayfunc.c:787-792`), #637 (`eval` does not contain the
+DISCARD jump; reproducible on master with the plain `eval 'a[-2]=q'`).
+
+Measurement caveat for the transportable numbers above: the host has no idle
+window (loadavg ~3.5–5 on 6 cores) and its local bash is 5.3.20, while the
+repository oracle is WSL bash 5.3.0. Every rule applied is taken from the
+vendored 5.3 source and its own probes, not from a version's observed output.
