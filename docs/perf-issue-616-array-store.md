@@ -87,57 +87,110 @@ Binaries compared:
 - `branch` — `projects/rubash/target/release/rubash`
   (`perf/array-structured-store`, release).
 
-Protocol: for each case, seven interleaved invocations per binary, best-of-7
-taken (min filters transient host interference); each invocation has a 90 s
-timeout and is reported `NA` when it trips. Workloads are files/one-liners from
+Protocol: for each case, five rounds; in each round all three shells run
+consecutively and their order is **rotated** (`bash, master, branch` →
+`master, branch, bash` → …), and the per-shell minimum over the rounds is
+taken. Each invocation has a timeout and is reported `NA` when it trips.
+Workloads are files/one-liners from
 `bench_niu/perf_battery/run_array_ab.sh`. Host load was **not** idle
 (`loadavg ≈ 3.5–5.0` on 6 cores) because the agent harness itself is a large
 CPU consumer, so these are best-of-N minima, not clean-room medians; ratios are
 the claim, not absolute milliseconds.
 
+> **Why the order is rotated (a correction).** This host throttles, and the
+> *first* case of a round is the fastest. Measured directly: the **same**
+> binary ran **1.14x slower** merely for being invoked later in the round
+> (`$PREFIX/tmp/order_ctl.sh`, same binary in positions 1 and 3). An earlier
+> revision of this harness always ran `bash, master, branch`, so the `branch`
+> was always last and accumulated a phantom ~10–15% penalty. The `19_arrcopy`
+> row below is the visible casualty: it read `1.1x branch faster` under one
+> ordering and `0.8x branch slower` under another, and is **1.0x** once the
+> ordering is neutralised. Rows that move by less than the ~15% ordering
+> amplitude should be read as parity.
+
 ## Results
+
+Order-rotated best-of-5, release binaries, same tree and same minute. The
+`master/branch` column is the ratchet: `< 1` would mean the branch regressed.
 
 | Workload | bash ms | master ms | branch ms | master/branch | verdict |
 | --- | --- | --- | --- | --- | --- |
-| `08_arlen` scalar control (200k) | 562 | 1601 | 1615 | 1.0x | unchanged (control) |
-| `len@10k` + 200k `${#a[@]}` | 589 | **NA (>90 s)** | 2274 | — | 3.86x vs GNU, master unreachable |
-| `len@1k` + 200k `${#a[@]}` | 583 | **NA (>90 s)** | 1685 | — | 2.89x vs GNU, master unreachable |
-| `len@sparse` + 200k `${#a[@]}` | 588 | 1917 | 1641 | 1.2x | branch faster |
-| `15_arrbuild` n=2000 | 30 | 2005 | 2008 | 1.0x | unchanged |
-| `16_arriter` n=2000 | 42 | 1977 | 1998 | 1.0x | unchanged |
-| `19_arrcopy` n=2000 | 5815 | 22790 | 19885 | 1.1x | branch faster |
-| `comboundedit` (write+len) | 36 | 20422 | 10116 | 2.0x | branch faster |
+| `08_arlen` scalar control (200k) | 659 | 1848 | 1886 | 1.0x | unchanged (control) |
+| `build10k` compound + `${#a[@]}` | 39 | 79 | 79 | 1.0x | unchanged |
+| `len@sparse` + 200k `${#a[@]}` | 669 | 2244 | 1906 | 1.2x | branch faster |
+| `15_arrbuild` n=2000 | 33 | 2104 | 2130 | 1.0x | unchanged (1b takes this) |
+| `15b_arrbuild` n=10000 | 55 | 57448 | 57984 | 1.0x | unchanged (1b takes this) |
+| `15c_arrbuild_compound` n=2000 | 34 | 2318 | 2319 | 1.0x | compound append at parity |
+| `16_arriter` n=2000 | 47 | 2319 | 2349 | 1.0x | unchanged (1b takes this) |
+| `19_arrcopy` n=2000 | 6810 | 26592 | 27746 | 1.0x | unchanged |
+| `comboundedit` (write+len) | 53 | 27210 | 11702 | 2.3x | branch faster |
 
-Prior-art figure for the target construct: 10k-element array + 200k `${#a[@]}`
-reads was `bash 594 ms`, `master >300 s` (timed out), `branch 2616 ms` — the
-branch is the only one that completes, at 3.8x GNU.
+No workload regresses. `comboundedit`'s 2.3x is Phase 1a's own win: it is
+dominated by 2000 `${#a[@]}` reads, which stop parsing the render.
 
-### Regressing rows, preserved
+Marquee length-read construct — the fixed cost being removed (measured with the
+**earlier non-rotated** protocol, which cannot flatter an `NA`):
 
-An **intermediate revision of this branch** rebuilt the whole `BTreeMap` on
-every element write and regressed the element-write battery 6–12% vs the
-pre-#616 baseline (`15_arrbuild` 1943 → 2168 ms, `16_arriter` 1950 → 2181 ms,
-`19_arrcopy` 22588 → 23880 ms). That regression is **fixed within the branch**
-by the in-place single-key extension; the rows above are the post-fix
-measurement and are unchanged (1.0x) or improved vs master.
+| Workload | bash ms | master ms | branch ms | verdict |
+| --- | --- | --- | --- | --- |
+| 10k-element array + 200k `${#a[@]}` | 594 | **NA (>300 s)** | 2274 | 3.86x vs GNU; master unreachable |
+| 1k-element array + 200k `${#a[@]}` | 583 | **NA (>90 s)** | 1685 | 2.89x vs GNU; master unreachable |
+
+That is the deliverable: the branch is the only build that completes, at ~2.8–3.9x
+GNU, where master does not finish at all.
+
+### Regressions found and fixed within the branch
+
+Two O(n)-per-write costs were introduced by intermediate revisions of this
+branch and removed before it was proposed. Both were found by the same method —
+measure every write path, not just the target read:
+
+1. **Element write rebuilt the `BTreeMap`.** The first revision re-parsed the
+   mirror and rebuilt the whole structured cell per `a[i]=v`. Fixed by the
+   in-place single-key extension (`VariableStore::extend_indexed_element`),
+   which is only taken when the resulting size equals the caller's own parse
+   size, so a cell that is not a complete mirror is never extended. The
+   element-write rows above are back to 1.0x.
+2. **Compound append rebuilt the structured cell.** The next revision refreshed
+   the cell from the whole parsed map on every write, so `a+=(...)` in a loop
+   copied the entire array once per iteration — work the pre-#616 baseline never
+   did. Fixed by `extend_indexed_array_from_parsed`: when the parsed map is a
+   **verified** extension of the current cell, only the appended tail is copied.
+   `15c_arrbuild_compound` is 1.0x above.
+
+Both are the same lesson as the phase itself: the structured cell must be the
+cheap thing, not a second full copy behind every write.
+
+> The first revision's magnitudes (`15_arrbuild` 1943 → 2168 ms) were measured
+> with the pre-rotation harness, whose ordering bias works *against* the branch,
+> so they are an upper bound on a real effect rather than a clean figure. The
+> mechanism — rebuilding n entries per write — is what was diagnosed and
+> removed, and the post-fix rows are 1.0x.
 
 ### Not fixed by Phase 1a
 
-`15_arrbuild` n=2000 remains 66x slower than GNU. Phase 1a deliberately does
-not touch the per-write render, because the review scoped build cost to phase
-1c. Note that the fixed cost is *per element write* — for n=2000 it is ~1 ms per
-write, so the construct is **quadratic**, not a constant-factor gap. Closing it
-requires a lazily materialised mirror (write the structured cell, defer the
-render to readers that need the string), which is phase 1b/1c, not this PR.
+`15_arrbuild` n=2000 is still ~64x slower than GNU (2130 ms vs 33 ms) and
+`15b_arrbuild` n=10000 ~1050x. Phase 1a deliberately does not touch the
+per-write render, and this cost is *per element write* — ~1 ms each at n=2000 —
+so the construct is **quadratic**, not a constant-factor gap. `master` is 57 s
+at n=10000 against the branch's 58 s, i.e. Phase 1a neither caused nor fixed it.
+
+The element-write half is Phase 1b (stacked PR), which amortises `a[i]=v` to
+O(log n) cell work plus an in-place mirror append. The *compound* half
+(`a+=(...)`) still re-renders. What remains for both is a lazily materialised
+mirror (write the cell, defer the render to readers that need the string),
+which is Phase 1c.
 
 ## Semantic verification
 
 - Library suite: **581/581**.
-- `tests/array_store_parity.rs` (new, 34 GNU-verified cases): green with the
+- `tests/array_store_parity.rs` (new, 38 GNU-verified cases): green with the
   store enabled **and** with `RUBASH_ARRAY_STORE=0`, covering indexed/sparse/negative
   subscripts, `${#a[@]}`/`${!a[@]}`/`${a[@]:1:2}`, `+=`, unset→reread, nameref
-  write-through, `declare -p` round trip, temporary assignment, and the
-  `mapfile`/`read -a`/`printf -v`/arith builtin writers.
+  write-through, `declare -p` round trip, temporary assignment, the
+  `mapfile`/`read -a`/`printf -v`/arith builtin writers, and the
+  incrementally-refreshed compound-append shapes (edit-then-append, sparse
+  prefix, negative subscript).
 - `cli_tests`: red set **name-identical** to master in the same tree (1
   pre-existing failure: `bashdb_compat::compound_assignment_splits_unquoted_associative_array_element`).
 - `executor_tests`: failure set **identical** to master (1229 items, compared as
@@ -156,9 +209,10 @@ render to readers that need the string), which is phase 1b/1c, not this PR.
 Phase 1a's target was `${#a[@]}` O(1) with zero behavioural change. Achieved:
 the scalar control is unchanged, no workload regresses, length reads are
 reachable where master times out, and every semantic gate matches master by
-**set identity**, not by count. The build path remains quadratic and is
-explicitly deferred; #616 is therefore **partially** addressed by this PR and
-should be closed only together with the phase 1b/1c mirror work if the
-maintainers want the build construct in scope.
+**set identity**, not by count. The per-write render remains quadratic and is
+explicitly deferred; #616 is therefore **partially** addressed by this PR.
+Phase 1b (stacked PR, already implemented on top of this branch) removes the
+element-write half; the compound/overwrite render and the lazily materialised
+mirror remain Phase 1c.
 
 These Termux/Android figures are not Windows or Linux x86_64 validation.
