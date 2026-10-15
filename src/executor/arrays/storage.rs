@@ -341,7 +341,25 @@ pub(crate) fn sync_typed_indexed_storage(
     storage: &str,
 ) {
     if storage.starts_with(STORAGE_WORD_PREFIX) {
-        sync_typed_indexed_array(store, name, &indexed_array_entries(storage));
+        // Reuse the memoised parse directly. `indexed_array_entries` would
+        // deep-copy the whole map into a local and `sync_typed_indexed_array`
+        // would copy it again; taking the `Arc` means one copy total. The
+        // renderer that produced `storage` always feeds the memo first
+        // (`format_indexed_array_storage` / `format_indexed_array_values`),
+        // so this is a hit in the compound-write path (rubash#616 1a).
+        let parsed = indexed_array_entries_cached(storage);
+        // Append-shaped writes (compound `a+=(...)` in a loop) get the tail
+        // only; the retained prefix is verified, so this is still exactly
+        // `parsed`. Everything else rebuilds.
+        if store.extend_indexed_array_from_parsed(name, &parsed) {
+            return;
+        }
+        let mapped = parsed
+            .iter()
+            .map(|(index, value)| (i64::try_from(*index).unwrap_or(i64::MAX), value.clone()));
+        if store.replace_indexed_array_entries(name, mapped).is_err() {
+            drop_typed_indexed_array(store, name);
+        }
     } else {
         drop_typed_indexed_array(store, name);
     }

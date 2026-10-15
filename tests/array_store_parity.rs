@@ -242,6 +242,34 @@ out=3
         r##"3:4 5 6:keep x y
 "##,
     ),
+    // rubash#616 (1a): the compound-append cell refresh copies only the
+    // appended tail, so these pin the shapes where the retained prefix must
+    // survive an element write, a sparse gap, or a negative subscript, and
+    // where a later append must still land after the max index.
+    (
+        "compound_append_after_element_edit",
+        r##"a=(p q r); a[1]=Q; a+=(s); declare -p a"##,
+        r##"declare -a a=([0]="p" [1]="Q" [2]="r" [3]="s")
+"##,
+    ),
+    (
+        "compound_append_sparse_after_edit",
+        r##"b=([2]=x); b[0]=y; b+=(z); declare -p b"##,
+        r##"declare -a b=([0]="y" [2]="x" [3]="z")
+"##,
+    ),
+    (
+        "compound_append_edit_append",
+        r##"e=(a b c); e+=(d); e[1]=B; e+=(f); declare -p e"##,
+        r##"declare -a e=([0]="a" [1]="B" [2]="c" [3]="d" [4]="f")
+"##,
+    ),
+    (
+        "negative_then_append",
+        r##"f=(10 20 30); f[-1]=X; f+=(40); declare -p f"##,
+        r##"declare -a f=([0]="10" [1]="20" [2]="X" [3]="40")
+"##,
+    ),
 ];
 
 #[test]

@@ -214,6 +214,53 @@ impl VariableStore {
         entries.len() == expected_len
     }
 
+    /// rubash#616 (plan Phase 1a): refresh a complete indexed cell from a
+    /// freshly parsed mirror WITHOUT rebuilding it, when the new map is an
+    /// extension of the current one. This is the append-shaped case the
+    /// compound write path (`a+=(...)`) hits once per iteration; a full
+    /// rebuild there copies every value per write, which made the
+    /// compound-append battery measurably slower than the pre-#616 baseline
+    /// (GNU `array.c:516 array_insert` appends to the ARRAY object and
+    /// `array.h:121` counts it — nothing is re-serialised).
+    ///
+    /// The retained prefix is **verified key-by-key**, not assumed: a cell
+    /// that is not an exact prefix of `parsed` returns `false` and the caller
+    /// performs the full sync. That keeps this a cache-refresh, never a
+    /// second source of truth. Returns `true` only when the cell is now
+    /// exactly `parsed`.
+    pub fn extend_indexed_array_from_parsed(
+        &mut self,
+        name: &str,
+        parsed: &BTreeMap<usize, String>,
+    ) -> bool {
+        let Some(variable) = self.variables.get_mut(name) else {
+            return false;
+        };
+        if variable.readonly {
+            return false;
+        }
+        let ShellValue::IndexedArray(cell) = &mut variable.value else {
+            return false;
+        };
+        if parsed.len() < cell.len() {
+            return false;
+        }
+        if !cell.iter().zip(parsed.iter()).all(|((a, va), (b, vb))| {
+            i64::try_from(*b).map(|b| b == *a).unwrap_or(false) && va == vb
+        }) {
+            return false;
+        }
+        let tail = parsed
+            .iter()
+            .skip(cell.len())
+            .map(|(index, value)| (i64::try_from(*index).unwrap_or(i64::MAX), value.clone()))
+            .collect::<Vec<_>>();
+        for (index, value) in tail {
+            cell.insert(index, value);
+        }
+        true
+    }
+
     pub fn replace_associative_array<I, K, V>(
         &mut self,
         name: &str,
