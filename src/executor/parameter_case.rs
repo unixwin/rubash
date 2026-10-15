@@ -116,6 +116,13 @@ pub(in crate::executor) fn apply_parameter_case_mod(
     operation: CaseMod,
     pattern: &str,
 ) -> String {
+    if pattern.is_empty() {
+        match operation {
+            CaseMod::UpperAll => return value.chars().flat_map(char::to_uppercase).collect(),
+            CaseMod::LowerAll => return value.chars().flat_map(char::to_lowercase).collect(),
+            _ => {}
+        }
+    }
     let pattern = if pattern.is_empty() { "?" } else { pattern };
     let mut changed_first = false;
 

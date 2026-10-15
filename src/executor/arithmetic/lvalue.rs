@@ -32,19 +32,17 @@ impl ConditionalArithParser<'_> {
         while self.peek().is_some_and(|ch| is_shell_name_char(ch as char)) {
             self.pos += 1;
         }
-        let name = std::str::from_utf8(&self.input[start..self.pos])
-            .ok()?
-            .to_string();
+        let name = std::str::from_utf8(&self.input[start..self.pos]).ok()?;
 
         // GNU expr.c:1350: `[` must immediately follow the name — `a [0]`
         // is STR `a` followed by the junk char `[`.
         if self.peek() != Some(b'[') {
-            let name = self.resolved_lvalue_name(&name);
+            let name = self.resolved_lvalue_name(name);
             return Some(ArithLValue::Scalar(name));
         }
         self.pos += 1;
 
-        let resolved_name = self.resolved_lvalue_name(&name);
+        let resolved_name = self.resolved_lvalue_name(name);
         if is_marked_var(self.env_vars, ASSOC_VARS, &resolved_name) {
             // Associative arrays use the key verbatim; no deferred evaluation.
 
@@ -142,21 +140,19 @@ impl ConditionalArithParser<'_> {
         while self.peek().is_some_and(|ch| is_shell_name_char(ch as char)) {
             self.pos += 1;
         }
-        let name = std::str::from_utf8(&self.input[start..self.pos])
-            .ok()?
-            .to_string();
+        let name = std::str::from_utf8(&self.input[start..self.pos]).ok()?;
 
         // GNU expr.c:1350: `[` must immediately follow the name
         // characters — `a [0]` is STR `a` then junk `[` -> "invalid
         // arithmetic operator" (verified: `(( a [0] ))` reports
         // `(error token is "[0] ")`).
         if self.peek() != Some(b'[') {
-            let name = self.resolved_lvalue_name(&name);
+            let name = self.resolved_lvalue_name(name);
             return Some(ArithLValue::Scalar(name));
         }
         self.pos += 1;
 
-        let resolved_name = self.resolved_lvalue_name(&name);
+        let resolved_name = self.resolved_lvalue_name(name);
         if is_marked_var(self.env_vars, ASSOC_VARS, &resolved_name) {
             match self.parse_assoc_subscript(&resolved_name)? {
                 ParsedAssocSubscript::Key(key) => {
@@ -198,10 +194,13 @@ impl ConditionalArithParser<'_> {
     }
 
     pub(super) fn resolved_lvalue_name(&self, name: &str) -> String {
+        if !is_marked_var(self.env_vars, NAMEREF_VARS, name) {
+            return name.to_owned();
+        }
         let mut current = name;
         let mut seen = HashSet::new();
         for _ in 0..16 {
-            if !seen.insert(current.to_string()) {
+            if !seen.insert(current) {
                 return name.to_string();
             }
             if !is_marked_var(self.env_vars, NAMEREF_VARS, current) {

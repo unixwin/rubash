@@ -739,6 +739,26 @@ fn perf_canary_yes_head_read_terminates() {
     );
 }
 
+/// A short consumer must close its read end while the producer is still
+/// running. The parent must drain the final stage before waiting upstream;
+/// otherwise `yes` can remain blocked forever with `head -1` already exited.
+#[test]
+fn yes_head_one_terminates_after_downstream_closes() {
+    let _guard = HEAVY_TEST_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("rubash-yes-head-one-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create pipeline scratch");
+    std::fs::write(dir.join("yes-head-one.sh"), "yes | head -1\n").expect("write pipeline script");
+
+    let out = run_rubash_in(&dir, &["yes-head-one.sh"], Duration::from_secs(10));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(!out.timed_out, "yes | head -1 did not terminate");
+    assert_eq!(out.code, Some(0), "pipeline exit status");
+    assert_eq!(out.stdout, b"y\n", "pipeline output");
+    assert!(out.stderr.is_empty(), "pipeline stderr: {:?}", out.stderr);
+}
+
 /// readhang regression (2026-09-28, bisected to b6cc735a): a script-file
 /// `while IFS= read -r ...; done < file` loop must terminate on the
 /// redirect's own EOF while the parent's stdin stays piped open.

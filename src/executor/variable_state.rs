@@ -113,14 +113,13 @@ impl Executor {
         // starting one (v == orig) or the one we just came from
         // (v == oldv); cycles that do not pass through orig keep looping
         // until the depth limit fires.
-        let mut current = name.to_string();
+        if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
+            return NamerefResolution::NotNameref;
+        }
+        let mut current = name.to_owned();
         for level in 1..=9 {
             if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &current) {
-                return if current == name {
-                    NamerefResolution::NotNameref
-                } else {
-                    NamerefResolution::Target(current)
-                };
+                return NamerefResolution::Target(current);
             }
             if level > 8 {
                 return NamerefResolution::MaxDepth;

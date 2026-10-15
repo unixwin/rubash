@@ -216,6 +216,27 @@ fn test_parameter_case_mod_lowercases_first_and_all_chars() {
 }
 
 #[test]
+fn test_parameter_case_mod_unpatterned_all_preserves_unicode_case_mapping() {
+    let output_path = "target/rubash-param-case-unpatterned-unicode-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("v='Straße İ'; printf '%s\\n%s\\n' \"${{v^^}}\" \"${{v,,}}\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "STRASSE \u{0130}\nstra\u{00DF}e i\u{307}\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_parameter_case_mod_uses_pattern() {
     let output_path = "target/rubash-param-case-pattern-output.txt";
     let _ = fs::remove_file(output_path);
