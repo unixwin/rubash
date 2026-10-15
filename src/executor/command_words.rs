@@ -311,10 +311,34 @@ impl Executor {
         // `for testcmd in 'set -- ${foo="$*"}'` iterated over
         // `set -- ${foo=$*}` (posixexp5 lost the testcmd echo).
         if super::command_prepare::raw_word_is_fully_single_quoted(raw) {
-            // The token value carries the protected-dollar marker; the walker
-            // normally restores it, so do that here too (posixexp5 echoed the
-            // raw marker instead of the dollar).
-            return Ok(vec![word.replace('\u{1f}', "$")]);
+            // This fast path stands in for the whole expansion walker, so it
+            // must return what the walker returns for this word. Two
+            // downstream finalisation steps were both missing:
+            //
+            //  * the quote-data carrier decode. The `'`-quoted interior
+            //    carries DATA_DOLLAR / DATA_BACKTICK / DATA_DQUOTE for every
+            //    expansion-trigger byte inside it (lexer/quotes.rs:321/325/329;
+            //    markers.rs:86-95 and :135), and the walker's last step
+            //    decodes the whole family (decode_word_position_carriers,
+            //    markers.rs:378). GNU keeps no marker inside a single-quoted
+            //    span — parse.y:3877 parse_matched_pair reads it literally and
+            //    subst.c:4807 dequote_string is the only removal.
+            //  * the word-prefix marker drop. The lexer prefixes a word that
+            //    begins with a quoted tilde with QUOTED_WORD_PREFIX (0x1b,
+            //    markers.rs:107) so no later tilde pass touches it, and the
+            //    walker drops it in expand_marked_or_special_word
+            //    (expand_word.rs:515).
+            //
+            // Restoring only '\u{1f}' bound the loop variable with live
+            // \x18/\x1a carriers, and dropping nothing left the \x1b prefix on
+            // `for v in '~'` (rubash#629: both leaked into the compound
+            // element, which serialises the value verbatim).
+            let word = word
+                .strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX)
+                .unwrap_or(word);
+            return Ok(vec![
+                crate::executor::markers::decode_word_position_carriers(word),
+            ]);
         }
         let suppress_glob = word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
             || word.starts_with(STORAGE_WORD_PREFIX)

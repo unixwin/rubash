@@ -155,3 +155,87 @@ fn scalar_append_keeps_expansion_result_backslashes() {
         b"ax y"
     );
 }
+
+/// Bind `element` (a `V...` compound-assignment fragment) in a for-loop over
+/// `for_word` and return element 0's bytes.
+fn for_element_zero(for_word: &str, element: &str) -> Vec<u8> {
+    rubash_raw(&format!(
+        "V=()\nfor v in {for_word}; do V{element}; done\nprintf '%s' \"${{V[0]}}\""
+    ))
+}
+
+#[test]
+fn fully_single_quoted_for_word_decodes_all_quote_carriers() {
+    // rubash#629: the fully-single-quoted for-word fast path
+    // (command_words.rs) restored only the protected-dollar carrier, leaving
+    // the lexer's DATA_DQUOTE (0x18, lexer/quotes.rs b'"' arm) and
+    // DATA_BACKTICK (0x1a) carriers live in the bound loop variable, so they
+    // reached the compound element as raw C0 bytes. GNU keeps no carrier for
+    // these: parse.y:3877 parse_matched_pair reads the `'...'` interior
+    // literally (subst.c:4807 dequote_string is the only removal), so the
+    // element must hold `"` / `` ` `` exactly. Cover every compound form that
+    // serializes back through quote_array_value: `=`, `+=`,
+    // `[i]=`, and `+=([i]=)`.
+    let expected: &[u8] = b"he said \"hi\"";
+    for element in ["=(\"$v\")", "+=(\"$v\")", "=([0]=\"$v\")", "+=([0]=\"$v\")"] {
+        assert_eq!(
+            for_element_zero("'he said \"hi\"'", element),
+            expected,
+            "compound element `{element}` leaked a data carrier byte"
+        );
+    }
+    // The backtick carrier must decode too (a bare `` ` `` is literal data
+    // inside `'...'`; GNU never rescans for command substitution there).
+    assert_eq!(
+        for_element_zero("'a`b'", "+=(\"$v\")"),
+        b"a`b",
+        "backtick carrier (0x1a) leaked"
+    );
+    // The dollar carrier already decoded before #629; pin it so the fix
+    // cannot regress it.
+    assert_eq!(for_element_zero("'a$b'", "+=(\"$v\")"), b"a$b");
+}
+
+#[test]
+fn for_word_carrier_decode_leaves_clean_paths_unchanged() {
+    // `a[0]="$v"` (indexed element assignment, not compound) and any
+    // for-word that is not fully single quoted already ran through the
+    // walker's whole-family decode; they must stay clean.
+    assert_eq!(
+        rubash_raw(
+            "V=()\nfor v in 'he said \"hi\"'; do V[0]=\"$v\"; done\nprintf '%s' \"${V[0]}\"",
+        ),
+        b"he said \"hi\""
+    );
+    assert_eq!(
+        for_element_zero("x'he said \"hi\"'", "+=(\"$v\")"),
+        b"xhe said \"hi\""
+    );
+}
+
+#[test]
+fn fully_single_quoted_for_word_drops_quoted_tilde_prefix() {
+    // rubash#629: the same fast path also returned the lexer's
+    // QUOTED_WORD_PREFIX (0x1b, markers.rs:107) — the marker a word that
+    // begins with a quoted tilde carries so that no later tilde pass touches
+    // it. The walker drops it in expand_marked_or_special_word
+    // (expand_word.rs:515); the fast path must too, otherwise the loop
+    // variable holds `\x1b~` and the compound element serialises the C0 byte.
+    // GNU keeps the tilde literal — it is only special unquoted at word start
+    // (parse.y:3877 parse_matched_pair reads the span verbatim).
+    for word in ["'~'", "'~user'", "'~/'", "'~$x'"] {
+        assert_eq!(
+            for_element_zero(word, "+=(\"$v\")"),
+            word.trim_matches('\'').as_bytes(),
+            "quoted-tilde for-word `{word}` kept the word-prefix marker"
+        );
+    }
+    // A tilde that does not begin the word never carried the marker; it must
+    // stay a literal tilde.
+    assert_eq!(for_element_zero("'x~y'", "+=(\"$v\")"), b"x~y");
+    // The bare binding (no compound assignment) must be clean as well.
+    assert_eq!(
+        rubash_raw("for v in '~'; do printf '%s' \"$v\"; done"),
+        b"~"
+    );
+}
