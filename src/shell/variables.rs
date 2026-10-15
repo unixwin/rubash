@@ -261,6 +261,21 @@ impl VariableStore {
         true
     }
 
+    /// rubash#616 (plan Phase 1b): `(len, max_index)` of a complete indexed
+    /// cell, or `None` when `name` is not an indexed cell. This is GNU's
+    /// `ARRAY` shape — `num_elements` and `max_index` (array.h:30-41) — read
+    /// without touching the mirror render, so the element-write path can
+    /// decide whether a write is an append (index == max_index + 1) in
+    /// O(log n) instead of re-parsing the whole array.
+    pub fn indexed_array_shape(&self, name: &str) -> Option<(usize, Option<i64>)> {
+        match self.get(name).map(|variable| &variable.value) {
+            Some(ShellValue::IndexedArray(values)) => {
+                Some((values.len(), values.keys().next_back().copied()))
+            }
+            _ => None,
+        }
+    }
+
     pub fn replace_associative_array<I, K, V>(
         &mut self,
         name: &str,

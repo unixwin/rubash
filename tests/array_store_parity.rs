@@ -242,7 +242,36 @@ out=3
         r##"3:4 5 6:keep x y
 "##,
     ),
-    // rubash#616 (1a): the compound-append cell refresh copies only the
+    // rubash#616 (1b): the in-place mirror extension must be byte-identical to
+    // a full re-render, so `declare -p` (which prints the render's parse) pins
+    // it. The first case is the empty-array first element write, which a wrong
+    // "is the body empty?" test renders as `( [0]=...)`; the second is a value
+    // whose own last byte is `(`/`)`, which a `ends_with('(')` test mishandles.
+    (
+        "element_append_from_empty_declare_p",
+        r##"a=(); a[0]=x; a[1]=y; declare -p a"##,
+        r##"declare -a a=([0]="x" [1]="y")
+"##,
+    ),
+    (
+        "element_append_paren_edges_declare_p",
+        r##"b=(); b[0]='p('; b[1]='q)'; declare -p b"##,
+        r##"declare -a b=([0]="p(" [1]="q)")
+"##,
+    ),
+    (
+        "element_append_sparse_gap_declare_p",
+        r##"e=(); e[0]=a; e[2]=c; e[3]=d; declare -p e"##,
+        r##"declare -a e=([0]="a" [2]="c" [3]="d")
+"##,
+    ),
+    (
+        "compound_then_element_append_declare_p",
+        r##"f=(p q); f[2]='r('; declare -p f"##,
+        r##"declare -a f=([0]="p" [1]="q" [2]="r(")
+"##,
+    ),
+    // rubash#616 (1b): the compound-append cell refresh copies only the
     // appended tail, so these pin the shapes where the retained prefix must
     // survive an element write, a sparse gap, or a negative subscript, and
     // where a later append must still land after the max index.

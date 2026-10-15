@@ -216,3 +216,100 @@ element-write half; the compound/overwrite render and the lazily materialised
 mirror remain Phase 1c.
 
 These Termux/Android figures are not Windows or Linux x86_64 validation.
+
+## Phase 1b — the element write is amortised (append path)
+
+Phase 1a made `${#a[@]}` O(1) but left the element write quadratic, so it is
+handled here as a continuation of the same concern: the structured cell is the
+array's working truth, not just its counter.
+
+### Attribution
+
+`array_assignment_exec.rs` did **four** O(n) operations per `a[i]=v`:
+
+1. `env_vars.get(name).cloned()` — deep-copies the whole mirror `String`;
+2. `indexed_array_entries(&current)` — deep-copies the parsed map (128-entry
+   string-keyed memo, so it is a cache *hit* and still O(n));
+3. `format_indexed_array_storage(entries)` — re-renders the whole array;
+4. `env_vars.insert(...)` — swaps in the new `String`.
+
+So building an n-element array was O(n²). GNU touches one node —
+`array.c:516 array_insert` splices one `ARRAY_ELEMENT` and maintains
+`num_elements`/`max_index` (`array.c:533-629`, read by `array.h:121`) — and
+never re-serialises anything, because the `ARRAY` object *is* the array.
+
+### Fix
+
+When the structured cell is a **complete** `IndexedArray`, the mirror is a
+**canonical** `STORAGE_WORD_PREFIX(...)` render, and the write is an **append**
+(`index == max_index + 1`, `0` for an empty cell), then:
+
+- the old element is read from the cell (`BTreeMap::get`, O(log n));
+- the cell gains one key (`extend_indexed_element`, O(log n));
+- the mirror grows in place by exactly the segment the renderer would have
+  appended (`append_indexed_mirror_element`, amortised O(1)).
+
+Every other shape — overwrite, sparse insert, readonly, missing cell,
+non-canonical mirror — falls through to the unchanged full path. This is a
+whitelist whose fallback is the real path, not a symptom blacklist.
+
+Two ordering details that matter:
+
+- the mirror is extended **before** the cell, so if the cell write is refused
+  the fallback re-parses the already-extended mirror and re-inserts the same
+  element — idempotent, landing on the correct value rather than a stale one;
+- "is the body empty?" is judged by **length**
+  (`len == PREFIX.len() + 2`), never by `ends_with('(')`, because an element
+  value may itself end in `(`. Getting this wrong made the first write into an
+  empty array render as `( [0]=...)`; the differential vs master caught it in
+  one line, and the regression case below fails if the wrong test is restored.
+
+### Results
+
+Order-rotated best-of-5, release binaries, same tree and same minute. The
+`master/branch` column is the ratchet.
+
+| Workload | bash ms | master ms | branch ms | master/branch |
+| --- | --- | --- | --- | --- |
+| `08_arlen` scalar control (200k) | 540 | 1842 | 1751 | 1.1x |
+| `build10k` compound + `${#a[@]}` | 30 | 64 | 52 | 1.2x |
+| `len@sparse` + 200k `${#a[@]}` | 582 | 1875 | 1610 | 1.2x |
+| `15_arrbuild` n=2000 | 31 | 1760 | **51** | **34.5x** |
+| `15b_arrbuild` n=10000 | 56 | 46071 | **157** | **293.4x** |
+| `15c_arrbuild_compound` n=2000 | 29 | 1898 | 1915 | 1.0x |
+| `16_arriter` n=2000 | 36 | 1930 | **64** | **30.2x** |
+| `19_arrcopy` n=2000 | 5554 | 21843 | 22086 | 1.0x |
+| `comboundedit` (write+len) | 42 | 23199 | **9890** | **2.3x** |
+
+No row regresses, and the shape of the fix shows up in the scaling: `master`
+goes 1760 → 46071 ms for 5x the elements (26.2x, **quadratic**), while the
+branch goes 51 → 157 ms (3.1x, **~linear**). `15b_arrbuild` is still 2.8x GNU,
+but it is no longer quadratic in the shell's own work.
+
+`declare -p` byte-identity is the correctness bar for the in-place extension:
+the mirror must equal a full re-render, and `declare -p` prints the mirror's
+parse. `tests/array_store_parity.rs` pins it for the empty-array first write,
+values ending in `(`/`)`, appends across a sparse gap, and compound-then-element
+append — each also re-run with `RUBASH_ARRAY_STORE=0`.
+
+### Not addressed here
+
+- The **compound** append `a+=(...)` still re-renders the whole mirror
+  (`append_array_value`, `arrays.rs:779`, opens with `indexed_array_entries`
+  and the caller re-renders), so `a+=($i)` in a loop is quadratic **in the
+  render**. The structured cell is no longer the problem: Phase 1a already
+  refreshes it tail-only with a verified prefix
+  (`extend_indexed_array_from_parsed`, O(tail·log n)), which is what took the
+  compound battery back to 1.00x. Closing the remaining render cost means an
+  incremental *insert into the render* — the natural Phase 1c, on top of this
+  cell.
+- A mid-array overwrite (`a[3]=x` in a loop) is still O(n) per write, because
+  the render is text and patching a middle token needs a byte-offset index.
+- The root fix for both is a **lazily materialised mirror**: write the cell and
+  defer the render until a reader that needs the string asks for it. That needs
+  a materialisation point at every whole-table consumer — `env_vars.iter()` (2),
+  `env_vars.clone()` (18), `values_map()` (4), whole-table for/`into_iter` (2),
+  plus 5 child-environment construction sites — as well as the 60
+  `parameter_array_storage` and 82
+  `array_values`/`array_value_at`/`array_indices` call sites. It is a design of
+  its own (Phase 1c), not a patch to land on top of this PR.

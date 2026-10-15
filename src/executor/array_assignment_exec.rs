@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::markers::{STORAGE_WORD_PREFIX, STORAGE_WORD_PREFIX_STR};
 
 impl Executor {
     /// GNU never expands `name[subscript]=value` as one word:
@@ -478,13 +479,13 @@ impl Executor {
             return true;
         }
 
-        let current = self
-            .shell_state
-            .env_vars
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
         let index = if computed_index < 0 {
+            let current = self
+                .shell_state
+                .env_vars
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
             let Some(index) = resolve_indexed_array_subscript(&current, computed_index) else {
                 eprintln!(
                     "{}{}: bad array subscript",
@@ -501,8 +502,38 @@ impl Executor {
             };
             index
         };
-        let mut entries = indexed_array_entries(&current);
-        let current_element = entries.get(&index).cloned().unwrap_or_default();
+        let typed_index = i64::try_from(index).unwrap_or(i64::MAX);
+        // rubash#616 (plan Phase 1b): GNU assigns an array element on the
+        // ARRAY object itself — arrayfunc.c:815 assign_array_element reaches
+        // array.c:516 array_insert, which appends ONE node — and never
+        // re-serialises the array. When the structured cell is a complete
+        // `IndexedArray`, read the old element from that cell rather than
+        // re-parsing the mirror render (O(n) per write, O(n^2) to build an
+        // n-element array).
+        let structured = self.shell_state.variables.indexed_array_shape(name);
+        let current_element = if structured.is_some() {
+            self.shell_state
+                .variables
+                .get(name)
+                .and_then(|variable| match &variable.value {
+                    crate::shell::ShellValue::IndexedArray(values) => {
+                        values.get(&typed_index).cloned()
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default()
+        } else {
+            let current = self
+                .shell_state
+                .env_vars
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            indexed_array_entries(&current)
+                .get(&index)
+                .cloned()
+                .unwrap_or_default()
+        };
         let element = if append {
             if is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, name) {
                 (eval_arith_value(&current_element) + eval_arith_value(value)).to_string()
@@ -517,21 +548,71 @@ impl Executor {
         } else {
             element
         };
-        entries.insert(index, element);
-        // rubash#616 (plan Phase 1a): the structured cell follows the mirror
-        // in lockstep so `${#a[@]}` reads the count in O(1) (GNU array.h:121
-        // num_elements) instead of reparsing the render. The in-place
-        // extension keeps the element-write loop off the O(n) map rebuild.
-        sync_typed_indexed_element(
-            &mut self.shell_state.variables,
-            name,
-            i64::try_from(index).unwrap_or(i64::MAX),
-            entries.get(&index).map(String::as_str).unwrap_or_default(),
-            &entries,
-        );
-        self.shell_state
-            .env_vars
-            .insert(name.to_string(), format_indexed_array_storage(entries));
+        // rubash#616 (plan Phase 1b): an append (index == max_index + 1) onto a
+        // canonical mirror is applied in place — one structured insert plus the
+        // exact segment the renderer would have appended — instead of a full
+        // re-parse and re-render. Every other shape (overwrite, sparse insert,
+        // readonly, no structured cell, non-canonical mirror) falls through to
+        // the unchanged full path below, so this is a whitelist whose fallback
+        // is the real path.
+        let appended = match structured {
+            Some((len, max))
+                if self
+                    .shell_state
+                    .variables
+                    .get(name)
+                    .is_none_or(|variable| !variable.readonly)
+                    && match max {
+                        Some(max) => typed_index == max + 1,
+                        None => typed_index == 0,
+                    }
+                    && self.shell_state.env_vars.get(name).is_some_and(|mirror| {
+                        mirror.starts_with(STORAGE_WORD_PREFIX) && mirror.ends_with(')')
+                    }) =>
+            {
+                // Mirror first, cell second: the caller's fallback re-parses
+                // the (already extended) mirror and re-inserts the same
+                // element, so a failed cell write still lands on the correct
+                // value instead of a stale mirror.
+                Self::append_indexed_mirror_element(
+                    &mut self.shell_state.env_vars,
+                    name,
+                    index,
+                    &element,
+                ) && self.shell_state.variables.extend_indexed_element(
+                    name,
+                    typed_index,
+                    &element,
+                    len + 1,
+                )
+            }
+            _ => false,
+        };
+        if !appended {
+            let current = self
+                .shell_state
+                .env_vars
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            let mut entries = indexed_array_entries(&current);
+            entries.insert(index, element);
+            // rubash#616 (plan Phase 1a): the structured cell follows the
+            // mirror in lockstep so `${#a[@]}` reads the count in O(1) (GNU
+            // array.h:121 num_elements) instead of reparsing the render. The
+            // in-place extension keeps the element-write loop off the O(n)
+            // map rebuild.
+            sync_typed_indexed_element(
+                &mut self.shell_state.variables,
+                name,
+                typed_index,
+                entries.get(&index).map(String::as_str).unwrap_or_default(),
+                &entries,
+            );
+            self.shell_state
+                .env_vars
+                .insert(name.to_string(), format_indexed_array_storage(entries));
+        }
         mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, name);
         // Same GNU owner as the assoc branch above: bind_array_variable
         // (arrayfunc.c:815 assign_array_element) allocates a real array
@@ -540,6 +621,42 @@ impl Executor {
         // `${idx[*]@A}` renders the `=(...)` body (rubash#371).
         unmark_env_name(&mut self.shell_state.env_vars, DECLARED_UNSET_VARS, name);
         self.exit_code = 0;
+        true
+    }
+
+    /// rubash#616 (plan Phase 1b): extend a canonical indexed mirror in place
+    /// by exactly the segment `format_indexed_array_storage` would have
+    /// appended for `element` at `index`. The caller has already verified the
+    /// mirror is a `STORAGE_WORD_PREFIX(...)` render with a trailing `)`, so
+    /// the result is byte-identical to a full re-render; `false` is returned
+    /// without touching the value when that precondition does not hold.
+    fn append_indexed_mirror_element(
+        env_vars: &mut crate::shell::var_table::VarTable,
+        name: &str,
+        index: usize,
+        element: &str,
+    ) -> bool {
+        let Some(mirror) = env_vars.get_mut(name) else {
+            return false;
+        };
+        // Canonical form is `PREFIX(seg seg seg)`, or `PREFIX()` when empty.
+        let prefix_len = STORAGE_WORD_PREFIX_STR.len();
+        if !mirror.starts_with(STORAGE_WORD_PREFIX_STR)
+            || !mirror.ends_with(')')
+            || mirror.as_bytes().get(prefix_len) != Some(&b'(')
+        {
+            return false;
+        }
+        // Body emptiness must be judged by length, not by the last body byte:
+        // a value may itself end in `(` (e.g. `a=(x; a[0]='a(')`), so
+        // `ends_with('(')` would wrongly drop the separator.
+        let body_is_empty = mirror.len() == prefix_len + 2;
+        mirror.truncate(mirror.len() - 1);
+        if !body_is_empty {
+            mirror.push(' ');
+        }
+        mirror.push_str(&format!("[{index}]={}", quote_array_value(element)));
+        mirror.push(')');
         true
     }
 }
