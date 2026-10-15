@@ -425,6 +425,14 @@ pub enum ExecuteError {
     /// execute_cmd.c:2758 `execute_command_internal(cmd, ...)` runs the
     /// lastpipe stage in the current shell; `exit` longjmps to top level.
     LastpipeExit(i32),
+    /// niubash#345: a shell-side pipeline producer wrote to the next stage's
+    /// OS pipe after the downstream consumer closed its read end. This is the
+    /// in-process analogue of SIGPIPE (execute_cmd.c:2695/redir.c): the
+    /// producing stage terminates with the synthesized status 141. The stage
+    /// helpers (`execute_compound_pipeline_stage`,
+    /// `execute_builtin_pipeline_stage`, `execute_function_pipeline_stage`)
+    /// convert it to that status; it never escapes a pipeline element.
+    BrokenPipe,
 }
 
 impl std::fmt::Display for ExecuteError {
@@ -445,6 +453,7 @@ impl std::fmt::Display for ExecuteError {
                 write!(f, "rubash: {}: builtin command not found", name)
             }
             ExecuteError::LastpipeExit(code) => write!(f, "exit code: {}", code),
+            ExecuteError::BrokenPipe => write!(f, "broken pipe"),
         }
     }
 }
@@ -926,6 +935,16 @@ pub struct Executor {
     pub(crate) read_eof_no_delimiter: bool,
     stdout_capture: Option<Vec<u8>>,
     stderr_capture: Option<Vec<u8>>,
+    /// niubash#345: while a shell-side pipeline producer (compound `while`/
+    /// `for`/`until`, ...) streams its fd 1 into the NEXT stage's OS pipe
+    /// instead of the in-memory capture. Set by
+    /// `execute_shell_writer_pipeline` around the producing stage; inherited
+    /// by the stage's subshell (command_substitution_executor). Default fd-1
+    /// writes go to this raw handle; a broken pipe (the downstream consumer
+    /// exited) terminates the producing stage with the SIGPIPE status (141)
+    /// so an unbounded shell-side writer stops exactly like GNU's
+    /// SIGPIPE-killed pipeline element, instead of buffering forever.
+    pipeline_stdout_stream: Option<crate::fd::HANDLE>,
     /// niubash#144: outcome of the external stdio plan from the last
     /// `apply_external_redirects` (ordered-walk shared handles), consumed
     /// by the immediately following `spawn_external_process`. `Some(..)`

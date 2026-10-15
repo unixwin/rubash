@@ -732,6 +732,9 @@ impl Executor {
             // A `return` that reaches the script top level is just the
             // child's status; it must not return from a parent function.
             | ExecuteError::Return(code) => Ok(code),
+            // niubash#345: a broken pipe escaping an in-process child script
+            // is the child's SIGPIPE-shaped status (141).
+            ExecuteError::BrokenPipe => Ok(141),
             // Loop control can never escape a child process.
             ExecuteError::Break(_) | ExecuteError::Continue(_) => Ok(1),
             ExecuteError::CommandNotFound(name) => {

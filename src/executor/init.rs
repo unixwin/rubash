@@ -410,6 +410,7 @@ impl Executor {
             read_eof_no_delimiter: false,
             stdout_capture: None,
             stderr_capture: None,
+            pipeline_stdout_stream: None,
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,

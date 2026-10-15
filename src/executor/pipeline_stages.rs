@@ -3,6 +3,22 @@ use super::*;
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::pipeline_exec::command_is_compound_pipeline_stage;
 
+/// niubash#345: adopt a duplicated host handle as a child's `Stdio`. The
+/// caller hand-duplicates the pipeline write end so the child owns a private
+/// copy (the parent keeps its own until the producer stage returns).
+fn stdio_from_fd_handle(handle: crate::fd::HANDLE) -> Stdio {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::FromRawHandle;
+        unsafe { Stdio::from_raw_handle(handle as *mut std::ffi::c_void) }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::FromRawFd;
+        unsafe { Stdio::from_raw_fd(handle) }
+    }
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_lastpipe_stage(
         &mut self,
@@ -66,6 +82,11 @@ impl Executor {
             Err(ExecuteError::ExitCode(code)) => {
                 self.exit_code = code;
                 return Err(ExecuteError::LastpipeExit(code));
+            }
+            // niubash#345: the lastpipe element is a shell-side producer too;
+            // a broken pipe terminates it with the SIGPIPE status (141).
+            Err(ExecuteError::BrokenPipe) => {
+                self.exit_code = 141;
             }
             Err(error) => return Err(error),
         }
@@ -134,6 +155,10 @@ impl Executor {
         // stdout capture execute_builtin_pipeline_stage uses and merge both
         // capture sources.
         let saved_capture = crate::executor::shell_options::begin_stdout_capture();
+        // niubash#345: this element is the shell-side producer when the
+        // driver armed `pipeline_stdout_stream`; give its capture frame the
+        // pipe target so the body streams (nested frames still capture).
+        crate::executor::shell_options::set_capture_stream(self.pipeline_stdout_stream);
 
         let result = if command.brace_group.is_some() {
             subshell.execute_brace_group_pipeline(command).map(|_| ())
@@ -176,6 +201,10 @@ impl Executor {
             (Ok(()), Ok(trap_status)) => trap_status,
             (Err(ExecuteError::ExitCode(code)), Ok(_)) => code,
             (Err(ExecuteError::ExpansionFailure(code)), Ok(_)) => code,
+            // niubash#345: the stage's fd-1 write hit a broken pipe (the
+            // downstream consumer exited): the element is SIGPIPE-killed, so
+            // report 141 rather than unwinding the whole pipeline.
+            (Err(ExecuteError::BrokenPipe), Ok(_)) => 141,
             (_, Err(error)) | (Err(error), _) => return Err(error),
         };
         // The subshell's FUNCTION_STDIN cursor is the element's fd-0
@@ -262,9 +291,10 @@ impl Executor {
         // Direct-stdout builtins in the function consult the thread-local
         // capture, which belongs to an enclosing capture when this stage
         // runs inside one; give the call its own capture.
-        let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
-            subshell.execute_function(&function_name, &args, &call)
-        });
+        let (thread_captured, result) = crate::executor::shell_options::capture_stdout_streamed(
+            self.pipeline_stdout_stream,
+            || subshell.execute_function(&function_name, &args, &call),
+        );
         let mut output = subshell.stdout_capture.take().unwrap_or_default();
         output.extend_from_slice(&thread_captured);
         // The call's ORDERED redirect list (call.redirects) still carries
@@ -291,6 +321,9 @@ impl Executor {
         let status = match result {
             Ok(()) => status,
             Err(ExecuteError::ExitCode(code)) | Err(ExecuteError::ExpansionFailure(code)) => code,
+            // niubash#345: a function pipeline element writing past the
+            // consumer's exit is SIGPIPE-killed (status 141).
+            Err(ExecuteError::BrokenPipe) => 141,
             Err(error) => return Err(error),
         };
         let consumed = subshell
@@ -343,6 +376,10 @@ impl Executor {
         call.append = None;
 
         let saved_capture = crate::executor::shell_options::begin_stdout_capture();
+        // niubash#345: this builtin element is the shell-side producer when
+        // the driver armed `pipeline_stdout_stream`; bind its capture frame
+        // to the pipe so an unbounded writer streams.
+        crate::executor::shell_options::set_capture_stream(self.pipeline_stdout_stream);
 
         // Bash applies a pipeline element's redirections before running the
         // command (redir.c do_redirection_internal runs for every command). A
@@ -384,6 +421,9 @@ impl Executor {
         let status = match result {
             Ok(()) => status,
             Err(ExecuteError::ExitCode(code)) | Err(ExecuteError::ExpansionFailure(code)) => code,
+            // niubash#345: a builtin pipeline element writing past the
+            // consumer's exit is SIGPIPE-killed (status 141).
+            Err(ExecuteError::BrokenPipe) => 141,
             Err(error) => return Err(error),
         };
         let consumed = subshell
@@ -753,7 +793,29 @@ impl Executor {
             });
             self.pipeline_stage_fds_pre_wired.set(true);
         } else {
-            process.stdout(Stdio::piped());
+            // niubash#345: a shell-writer pipeline producer wires the child's
+            // fd 1 onto the inter-member pipe (the caller's `os_pipe` write
+            // end) instead of a parent capture — GNU binds the stage pipe to
+            // the element's fd 1 (execute_cmd.c:2702) and the element writes
+            // it directly, dying of SIGPIPE when the consumer exits. The
+            // parent keeps its own copy of the write end open until the stage
+            // returns, then closes it so a finite producer's EOF reaches the
+            // consumer.
+            let streamed_stdout = if matches!(&fd1_target, OutputTarget::Stdout) {
+                self.pipeline_stdout_stream
+            } else {
+                None
+            };
+            match streamed_stdout {
+                Some(stream) => {
+                    let duplicated = crate::fd::duplicate_handle_inheritable(stream)
+                        .map_err(ExecuteError::IoError)?;
+                    process.stdout(stdio_from_fd_handle(duplicated));
+                }
+                None => {
+                    process.stdout(Stdio::piped());
+                }
+            }
             match &fd2_target {
                 // fd 2 still on the stage pipe (`2>&1 >f`: the dup ran
                 // before fd 1 left for the file): pipe it and let the

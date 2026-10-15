@@ -77,7 +77,7 @@ impl Executor {
             .unwrap_or(1);
 
         let Some(current) = args.get(optind.saturating_sub(1)) else {
-            self.getopts_finish_eof(variable.as_str(), optind, stderr);
+            self.getopts_finish_eof(variable.as_str(), args.len() + 1, stderr);
             return 1;
         };
         if offset == 1 {

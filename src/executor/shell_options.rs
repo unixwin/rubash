@@ -580,26 +580,42 @@ impl Executor {
             // re-resolve against the active command-substitution capture
             // and swallow bytes that GNU sends outside the substitution
             // (rubash#368: `exec 3>&1; v=$(echo x >&3)` prints x outside).
-            FdWriteEndpoint::Stdout => match self.fd_table.stdout_alias_generation.get(&fd) {
-                Some(Some(generation)) => {
-                    let _ = crate::executor::shell_options::write_stdout_capture_at_generation(
-                        output,
-                        *generation,
-                    );
-                }
-                Some(None) => {
-                    write_real_stdout_uncaptured(output)?;
-                }
-                None => {
-                    if stdout_capture_active() {
-                        stdout_capture_write(output)?;
-                    } else if let Some(capture) = &mut self.stdout_capture {
-                        capture.write_all(output)?;
-                    } else {
-                        write_stdout_bytes(output)?;
+            FdWriteEndpoint::Stdout => {
+                // niubash#345: while a shell-side pipeline producer's capture
+                // frame is active, its fd-1 writes stream into the next
+                // stage's OS pipe instead of any in-memory capture. This must
+                // win over the thread-local capture the compound-stage
+                // boundary installs, or an unbounded `while`/`for` writer
+                // would buffer forever. A broken pipe (the downstream consumer
+                // exited) surfaces as a SIGPIPE-shaped termination of the
+                // producing stage. Nested frames carry `None`, so an inner
+                // pipeline's stage bodies keep capturing.
+                if fd == 1 {
+                    if let Some(stream) = active_capture_stream() {
+                        return write_pipeline_stream(stream, output);
                     }
                 }
-            },
+                match self.fd_table.stdout_alias_generation.get(&fd) {
+                    Some(Some(generation)) => {
+                        let _ = crate::executor::shell_options::write_stdout_capture_at_generation(
+                            output,
+                            *generation,
+                        );
+                    }
+                    Some(None) => {
+                        write_real_stdout_uncaptured(output)?;
+                    }
+                    None => {
+                        if stdout_capture_active() {
+                            stdout_capture_write(output)?;
+                        } else if let Some(capture) = &mut self.stdout_capture {
+                            capture.write_all(output)?;
+                        } else {
+                            write_stdout_bytes(output)?;
+                        }
+                    }
+                }
+            }
             FdWriteEndpoint::Stderr => {
                 if let Some(capture) = &mut self.stderr_capture {
                     capture.write_all(output)?;
@@ -1305,6 +1321,34 @@ thread_local! {
     /// (rubash#223).
     static STDOUT_CAPTURE_PARKED: std::cell::RefCell<Vec<Vec<u8>>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// niubash#345: the shell-side pipeline producer's fd-1 destination,
+    /// attached to the capture FRAME that `run_shell_writer_pipeline` opened
+    /// for the producing stage. While this frame is on top, fd-1 writes go
+    /// to the next stage's OS pipe (SIGPIPE-shaped 141 when the consumer
+    /// exits). Nested capture scopes (an inner pipeline's stage bodies, a
+    /// command substitution) get `None`, so only the producing element's own
+    /// stream — and its pipeline's final placement — leaves through the pipe.
+    static STDOUT_CAPTURE_STREAM: std::cell::RefCell<Option<crate::fd::HANDLE>> =
+        const { std::cell::RefCell::new(None) };
+    /// The enclosing frames' stream targets, parked by `begin_stdout_capture`
+    /// and restored by `restore_stdout_capture` (parallel to
+    /// `STDOUT_CAPTURE_PARKED`).
+    static STDOUT_STREAM_PARKED: std::cell::RefCell<Vec<Option<crate::fd::HANDLE>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// niubash#345: the active capture frame's pipeline-pipe target, if this
+/// frame belongs to a shell-side pipeline producer.
+pub(in crate::executor) fn active_capture_stream() -> Option<crate::fd::HANDLE> {
+    STDOUT_CAPTURE_STREAM.with(|stream| *stream.borrow())
+}
+
+/// niubash#345: bind (or clear) the active capture frame's pipeline-pipe
+/// target. Called by the pipeline stage helpers right after they open their
+/// capture frame, so a producing element streams while every nested frame
+/// (inner pipeline stages, substitutions) keeps capturing.
+pub(in crate::executor) fn set_capture_stream(stream: Option<crate::fd::HANDLE>) {
+    STDOUT_CAPTURE_STREAM.with(|slot| *slot.borrow_mut() = stream);
 }
 
 /// Background-output capture pipe for async children spawned while a stdout
@@ -1479,6 +1523,45 @@ pub(in crate::executor) fn write_stdout_capture_at_generation(
     }
 }
 
+/// niubash#345: write a shell-side pipeline producer's fd-1 bytes to the
+/// next stage's OS pipe. A broken pipe means the downstream consumer closed
+/// its read end — GNU's SIGPIPE — so the producing stage terminates with the
+/// synthesized SIGPIPE status (141), matching `lingerer_sigpipe_status` and
+/// the external-member contract. Any other IO error propagates normally.
+pub(in crate::executor) fn write_pipeline_stream(
+    handle: crate::fd::HANDLE,
+    output: &[u8],
+) -> Result<(), ExecuteError> {
+    match crate::fd::write_all(handle, output) {
+        Ok(()) => Ok(()),
+        Err(error) if is_broken_pipe_error(&error) => Err(ExecuteError::BrokenPipe),
+        Err(error) => Err(ExecuteError::IoError(error)),
+    }
+}
+
+/// True when a write failed because the read end of the pipe is gone —
+/// Windows ERROR_BROKEN_PIPE (109) or a POSIX EPIPE.
+pub(in crate::executor) fn is_broken_pipe_error(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::BrokenPipe {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        const ERROR_BROKEN_PIPE: i32 = 109;
+        const ERROR_NO_DATA: i32 = 232;
+        if let Some(code) = error.raw_os_error() {
+            return code == ERROR_BROKEN_PIPE || code == ERROR_NO_DATA;
+        }
+    }
+    #[cfg(unix)]
+    {
+        if let Some(code) = error.raw_os_error() {
+            return code == 32; // EPIPE
+        }
+    }
+    false
+}
+
 /// Begins thread-local stdout capture, returning the previous capture buffer
 /// (if any) so callers can nest captures and restore afterwards. The
 /// background-capture pipe state is saved alongside: a nested capture scope
@@ -1500,6 +1583,11 @@ pub(in crate::executor) fn begin_stdout_capture() -> Option<Vec<u8>> {
     });
     let saved_bg = BG_CAPTURE.with(|state| state.borrow_mut().take());
     BG_CAPTURE_SAVED.with(|saved| saved.borrow_mut().push(saved_bg));
+    // niubash#345: a nested capture frame starts with no pipeline-pipe
+    // target of its own; the enclosing frame's target is parked and comes
+    // back in `restore_stdout_capture`.
+    let enclosing_stream = STDOUT_CAPTURE_STREAM.with(|slot| slot.borrow_mut().take());
+    STDOUT_STREAM_PARKED.with(|parked| parked.borrow_mut().push(enclosing_stream));
     previous
 }
 
@@ -1544,6 +1632,12 @@ pub(in crate::executor) fn restore_stdout_capture(previous: Option<Vec<u8>>) {
     if let Some(state) = saved_bg {
         BG_CAPTURE.with(|state_slot| *state_slot.borrow_mut() = Some(state));
     }
+    // niubash#345: reinstate the enclosing capture frame's pipeline-pipe
+    // target (parallel to the buffer popped above).
+    let enclosing_stream = STDOUT_STREAM_PARKED
+        .with(|parked| parked.borrow_mut().pop())
+        .flatten();
+    STDOUT_CAPTURE_STREAM.with(|slot| *slot.borrow_mut() = enclosing_stream);
 }
 
 /// Runs `body` under a fresh thread-local stdout capture and returns the
@@ -1561,6 +1655,23 @@ pub(in crate::executor) fn restore_stdout_capture(previous: Option<Vec<u8>>) {
 /// restored afterwards.
 pub(in crate::executor) fn capture_stdout<R>(body: impl FnOnce() -> R) -> (Vec<u8>, R) {
     let saved = begin_stdout_capture();
+    let result = body();
+    let captured = take_stdout_capture();
+    restore_stdout_capture(saved);
+    (captured, result)
+}
+
+/// niubash#345: `capture_stdout` for a shell-side pipeline producer. The
+/// frame opened here carries `stream` as its fd-1 destination, so the body's
+/// writes go to the next stage's OS pipe instead of the capture buffer; a
+/// nested frame the body opens (an inner pipeline stage, a substitution)
+/// still captures normally.
+pub(in crate::executor) fn capture_stdout_streamed<R>(
+    stream: Option<crate::fd::HANDLE>,
+    body: impl FnOnce() -> R,
+) -> (Vec<u8>, R) {
+    let saved = begin_stdout_capture();
+    set_capture_stream(stream);
     let result = body();
     let captured = take_stdout_capture();
     restore_stdout_capture(saved);

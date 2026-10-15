@@ -1541,6 +1541,12 @@ impl Executor {
             read_eof_no_delimiter: false,
             stdout_capture: None,
             stderr_capture: None,
+            // niubash#345: a command-substitution fork captures its stdout;
+            // it must NOT inherit the outer pipeline producer's fd-1 stream
+            // target. The pipeline stage helpers (execute_compound/
+            // function/builtin_pipeline_stage) opt in explicitly after this
+            // boundary.
+            pipeline_stdout_stream: None,
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,

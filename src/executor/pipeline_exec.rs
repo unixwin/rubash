@@ -575,6 +575,14 @@ impl Executor {
             return Ok(Some(end + 1));
         }
 
+        // niubash#345: a shell-side producer (compound loop) feeding an
+        // external consumer chain runs the consumers concurrently on OS pipes
+        // so an unbounded writer dies on the broken pipe instead of being
+        // slurped into memory by the sequential loop.
+        if self.execute_shell_writer_pipeline(&commands)?.is_some() {
+            return Ok(Some(end + 1));
+        }
+
         let time_prefix = time_pipeline_prefix(first);
         let time_prefix_started = time_prefix.as_ref().map(|_| time_command_started());
         let mut input = String::new();
@@ -1170,6 +1178,354 @@ impl Executor {
         Ok(Some(results))
     }
 
+    /// True when the stage is an external program whose fd 1 is the plain
+    /// pipeline pipe and whose fd 2 is NOT merged onto it — the shapes
+    /// `execute_external_pipeline_stage_inner` streams through
+    /// `pipeline_stdout_stream` instead of a parent capture. Builtins are
+    /// excluded: their stderr redirects are applied by the driver's routing
+    /// walk, which the concurrent shell-writer path bypasses.
+    #[cfg(windows)]
+    fn command_is_streamable_external_producer(
+        &mut self,
+        command: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
+        if command.time_command.is_some()
+            || command.brace_group.is_some()
+            || command.subshell
+            || command.redirect_out.is_some()
+            || command.append.is_some()
+            || command.redirect_in.is_some()
+            || command_is_compound_pipeline_stage(command)
+            || self.command_first_word_is_function(command)
+        {
+            return Ok(false);
+        }
+        if command
+            .words
+            .first()
+            .is_some_and(|word| crate::executor::builtin_names::is_shell_builtin_name(word))
+        {
+            return Ok(false);
+        }
+        let (stdout_target, stderr_target) = match self.pipeline_stage_stdio_targets(command)? {
+            Some(targets) => targets,
+            None => return Ok(true),
+        };
+        use crate::executor::redirection::OutputTarget;
+        Ok(matches!(stdout_target, OutputTarget::Stdout)
+            && !matches!(stderr_target, OutputTarget::Stdout))
+    }
+
+    /// True when the stage's first word names a shell function (GNU
+    /// execute_cmd.c:4674-4677 find_function runs before the disk-command
+    /// fallback). Only a literal first word is consulted so this admission
+    /// probe never re-runs a command substitution its own stage expansion
+    /// would — names carrying `$`/backticks/quotes take the sequential path.
+    #[cfg(windows)]
+    fn command_first_word_is_function(&self, command: &CommandNode) -> bool {
+        let Some(word) = command.words.first() else {
+            return false;
+        };
+        if word.is_empty()
+            || word
+                .chars()
+                .any(|ch| matches!(ch, '$' | '`' | '(' | ')' | '\\' | '\'' | '"'))
+        {
+            return false;
+        }
+        self.function_name_for_command_word(word.as_str()).is_some()
+    }
+
+    /// niubash#345: a shell-side producer (a compound `while`/`for`/`until`
+    /// loop and friends) feeding an external consumer chain. GNU forks every
+    /// pipeline element (execute_cmd.c:2620 execute_pipeline): the producer
+    /// writes the inter-member pipe directly and dies of SIGPIPE once a
+    /// bounding consumer (`head -N`, ...) exits. Rubash runs the compound
+    /// element in-process, and the sequential stage loop would materialize
+    /// its entire — for an infinite writer, unbounded — output in memory
+    /// before the consumer even starts, so the pipeline never terminates.
+    ///
+    /// Here the external consumers are spawned first on real OS pipes and
+    /// the in-process producer streams into pipe 0, with EPIPE surfaced as
+    /// the SIGPIPE-shaped status 141 (see `write_pipeline_stream` /
+    /// `lingerer_sigpipe_status`). This is the shell-side twin of
+    /// `execute_external_pipeline_concurrently`, which already covers the
+    /// all-external `yes | head` case.
+    #[cfg(windows)]
+    fn execute_shell_writer_pipeline(
+        &mut self,
+        commands: &[&CommandNode],
+    ) -> Result<Option<()>, ExecuteError> {
+        if commands.len() < 2
+            || self.stderr_capture.is_some()
+            // Same DEBUG-trap bail-out as the concurrent external paths: the
+            // sequential loop owns the per-element run_debug_trap fires.
+            || (self.debug_trap_in_scope()
+                && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
+                    .is_some_and(|action| !action.is_empty()))
+            || commands[0].inverted
+            || commands[0].inverted_command.is_some()
+        {
+            return Ok(None);
+        }
+        // Shell-side producers (compound loops, functions) are the ones the
+        // sequential loop would materialize: they run in-process and may be
+        // unbounded writers. An external first stage is normally claimed by
+        // the all-external path above; reaching here means it declined —
+        // commonly a stderr redirect (`yes 2>/dev/null | head -1`), which the
+        // single-stage external spawner can still stream.
+        if !command_is_compound_pipeline_stage(commands[0])
+            && !self.command_first_word_is_function(commands[0])
+            && !self.command_is_streamable_external_producer(commands[0])?
+        {
+            return Ok(None);
+        }
+        // The producer's own fd-1 target must be the pipe: `>file` needs the
+        // sequential routing walk. A stderr redirect is fine — the element's
+        // body applies it internally (execute_compound_pipeline_stage).
+        if commands[0].redirect_out.is_some()
+            || commands[0].append.is_some()
+            || commands[0].time_command.is_some()
+        {
+            return Ok(None);
+        }
+        // Every downstream stage must be a concurrent-eligible external
+        // member; otherwise the ordinary sequential path owns the pipeline.
+        let mut specs = Vec::with_capacity(commands.len() - 1);
+        for (offset, command) in commands.iter().enumerate().skip(1) {
+            let is_last = offset + 1 == commands.len();
+            let Some(spec) = self.concurrent_external_stage_spec(command, offset, is_last) else {
+                return Ok(None);
+            };
+            specs.push(spec);
+        }
+        // A `/dev/`-family operand on a consumer needs the dev-fd
+        // materializer the plain external spawner wires; bail to the
+        // sequential path rather than mis-resolve it here.
+        if specs.iter().any(|(_, _, args)| {
+            args.iter().any(|arg| {
+                crate::executor::dev_fd_operands::dev_operand_targets_fd(arg, 0)
+                    || crate::executor::dev_fd_operands::dev_operand_targets_fd(arg, 1)
+            })
+        }) {
+            return Ok(None);
+        }
+        self.run_shell_writer_pipeline(commands, specs)?;
+        Ok(Some(()))
+    }
+
+    /// Spawn the external consumers on real OS pipes, run the in-process
+    /// compound producer streaming its fd 1 into pipe 0, then reap the chain
+    /// and publish the statuses. See `execute_shell_writer_pipeline`.
+    #[cfg(windows)]
+    fn run_shell_writer_pipeline(
+        &mut self,
+        commands: &[&CommandNode],
+        specs: Vec<(std::path::PathBuf, String, Vec<String>)>,
+    ) -> Result<(), ExecuteError> {
+        use std::os::windows::io::AsRawHandle;
+
+        // node0 = producer; node1..nodeN = consumers. pipe[j] connects node j
+        // to node j+1, so there are `consumer_count` pipes: pipe[0] carries
+        // the producer's stream and pipe[j] carries consumer j-1 -> consumer j.
+        let consumer_count = specs.len();
+        let mut pipes: Vec<(Option<os_pipe::PipeReader>, Option<os_pipe::PipeWriter>)> =
+            Vec::with_capacity(consumer_count);
+        for _ in 0..consumer_count {
+            let (read, write) = os_pipe::pipe().map_err(ExecuteError::IoError)?;
+            pipes.push((Some(read), Some(write)));
+        }
+        let capture_intermediate_stderr =
+            self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout);
+        let mut processes = Vec::with_capacity(consumer_count);
+        let mut intermediate_stderr = Vec::new();
+        for (index, (program, expanded_name, args)) in specs.iter().enumerate() {
+            let (mut process, _) = if let Some(name) = internal_pipeline_program_name(program) {
+                let mut process = std::process::Command::new(std::env::current_exe()?);
+                process.arg(format!("--internal-{name}")).args(args);
+                (process, false)
+            } else {
+                external_command_for_named_program(
+                    program,
+                    Some(expanded_name),
+                    args,
+                    &self.shell_state.env_vars,
+                )
+            };
+            self.apply_external_environment(&commands[index + 1], &mut process);
+            // Consumer j's stdin is pipe[j]'s read end.
+            {
+                let (read, _) = &mut pipes[index];
+                process.stdin(stdio_from_transferred_handle(
+                    read.take().expect("producer reader already transferred"),
+                ));
+            }
+            if index + 1 < consumer_count {
+                // Consumer j's stdout is pipe[j+1]'s write end.
+                let (_, write) = &mut pipes[index + 1];
+                process.stdout(stdio_from_transferred_handle(
+                    write.take().expect("pipeline writer already transferred"),
+                ));
+                if capture_intermediate_stderr {
+                    process.stderr(Stdio::piped());
+                }
+            } else {
+                process.stdout(Stdio::piped());
+                process.stderr(Stdio::piped());
+            }
+            let mut child = process.spawn().map_err(|error| {
+                ExecuteError::IoError(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{}: {}",
+                        program
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("external"),
+                        crate::posix_errors::message(&error)
+                    ),
+                ))
+            })?;
+            if capture_intermediate_stderr && index + 1 < consumer_count {
+                if let Some(mut stderr) = child.stderr.take() {
+                    intermediate_stderr.push(std::thread::spawn(move || {
+                        let mut output = Vec::new();
+                        stderr.read_to_end(&mut output)?;
+                        Ok::<_, std::io::Error>(output)
+                    }));
+                }
+            }
+            processes.push(child);
+        }
+
+        // The producer stage runs in-process with its fd 1 bound to pipe[0]'s
+        // write end. Holding the writer here keeps the pipe open across the
+        // stage; it is dropped below so the consumers see EOF on a normal
+        // (finite) producer.
+        let mut producer_writer = pipes[0].1.take();
+        let stream_handle = producer_writer
+            .as_ref()
+            .map(|writer| writer.as_raw_handle() as crate::fd::HANDLE);
+        let (stage0_input, stage0_stdin_base) = self.initial_pipeline_input(commands[0]);
+        let stage0_stdin_inherit = stage0_input.is_empty()
+            && self.stdin_string_for_command(commands[0]).is_none()
+            && match self.fd_table.entries.get(&0) {
+                Some(entry) => {
+                    !entry.closed
+                        && matches!(entry.read, Some(FdReadEndpoint::InheritedProcessStdin))
+                }
+                None => true,
+            };
+        let saved_pipeline_stream = self.pipeline_stdout_stream;
+        self.pipeline_stdout_stream = stream_handle;
+        let producer_result =
+            self.execute_pipeline_stage(commands[0], &stage0_input, stage0_stdin_inherit);
+        self.pipeline_stdout_stream = saved_pipeline_stream;
+
+        let (mut producer_status, producer_out, producer_err, mut producer_error) =
+            match producer_result {
+                Ok(Some((out, err, status))) => (status, out, err, None),
+                Ok(None) => (0, String::new(), String::new(), None),
+                Err(error) => (0, String::new(), String::new(), Some(error)),
+            };
+        // A compound producer streams through fd 1 (producer_out empty); an
+        // inline arm that returned buffered bytes gets them written before the
+        // writer closes. A broken pipe here is the same SIGPIPE shape.
+        if producer_error.is_none() && !producer_out.is_empty() {
+            let bytes =
+                crate::executor::substitution_metadata::shell_text_to_raw_bytes(&producer_out);
+            if let Some(writer) = producer_writer.as_mut() {
+                if let Err(error) = writer.write_all(&bytes) {
+                    if crate::executor::shell_options::is_broken_pipe_error(&error) {
+                        producer_status = 141;
+                    } else {
+                        producer_error = Some(ExecuteError::IoError(error));
+                    }
+                }
+            }
+        }
+        // Close the producer's write end so a normal producer's EOF reaches
+        // the first consumer.
+        drop(producer_writer.take());
+
+        // Reap the consumers exactly like the all-external path: drain the
+        // last member's stdout/stderr first (niubash#158), then wait each
+        // member against its immediate downstream so the Windows broken-pipe
+        // window only arms after that downstream exited.
+        let mut results: Vec<(String, String, i32)> = vec![Default::default(); consumer_count];
+        let last_index = consumer_count - 1;
+        let last_stdout = processes[last_index].stdout.take().map(spawn_pipe_drain);
+        let last_stderr = processes[last_index].stderr.take().map(spawn_pipe_drain);
+        for index in 0..last_index {
+            let (head, tail) = processes.split_at_mut(index + 1);
+            let member = head.last_mut().expect("member index inside pipeline");
+            let downstream = tail.first_mut().expect("downstream member after index");
+            let status = wait_for_windows_pipeline_member(member, Some(downstream))?;
+            results[index] = (
+                String::new(),
+                String::new(),
+                crate::executor::wait_status::process_exit_status(&status),
+            );
+        }
+        let mut last = processes.pop().expect("pipeline has at least two stages");
+        let status = last.wait().map_err(ExecuteError::IoError)?;
+        let stdout_bytes = join_pipe_drain(last_stdout)?;
+        results[last_index] = (
+            crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
+            crate::executor::substitution_metadata::bytes_to_shell_text(&join_pipe_drain(
+                last_stderr,
+            )?),
+            crate::executor::wait_status::process_exit_status(&status),
+        );
+        for reader in intermediate_stderr {
+            let output = reader.join().map_err(|_| {
+                ExecuteError::IoError(std::io::Error::other("pipeline stderr reader panicked"))
+            })??;
+            if capture_intermediate_stderr {
+                self.write_default_stdout(&output)?;
+            }
+        }
+
+        // The producer element's own stderr was redirected inside the body
+        // when the stage carried a `2>...`; whatever escaped belongs on the
+        // ambient fd 2 (GNU routes a stage's stray stderr to the shell's).
+        if producer_error.is_none() && !producer_err.is_empty() {
+            self.write_default_stderr(
+                &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&producer_err),
+            )?;
+        }
+        if let Some(base) = stage0_stdin_base {
+            let consumed = self.pipeline_stdin_consumed.take().unwrap_or(0);
+            self.shell_state.env_vars.insert(
+                FUNCTION_STDIN_OFFSET.to_string(),
+                (base + consumed).to_string(),
+            );
+        }
+
+        if producer_error.is_none() {
+            let final_command = *commands.last().expect("pipeline has at least two stages");
+            self.write_pipeline_output(final_command, &results[last_index].0, false)?;
+            if !results[last_index].1.is_empty() {
+                std::io::stderr().write_all(
+                    &crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                        &results[last_index].1,
+                    ),
+                )?;
+            }
+        }
+
+        let mut statuses = Vec::with_capacity(consumer_count + 1);
+        statuses.push(producer_status);
+        statuses.extend(results.iter().map(|(_, _, status)| *status));
+        self.exit_code = self.pipeline_exit_status(&statuses);
+        self.set_pipestatus(statuses);
+
+        if let Some(error) = producer_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Admission and argv expansion for one concurrent external pipeline
     /// member (execute_cmd.c:5789 execute_disk_command runs every member
     /// through the full expand_words sequence, so the member's arguments
@@ -1631,6 +1987,18 @@ impl Executor {
         &mut self,
         _commands: &[&CommandNode],
     ) -> Result<Option<(usize, String, String, Vec<i32>)>, ExecuteError> {
+        Ok(None)
+    }
+
+    /// Unix port: the shell-writer concurrent path is Windows-only for now
+    /// (the os_pipe spawn plumbing the external concurrent paths use); on
+    /// Unix the sequential stage loop keeps handling mixed pipelines.
+    /// niubash#345 follow-up.
+    #[cfg(not(windows))]
+    fn execute_shell_writer_pipeline(
+        &mut self,
+        _commands: &[&CommandNode],
+    ) -> Result<Option<()>, ExecuteError> {
         Ok(None)
     }
 
