@@ -1280,6 +1280,17 @@ impl Executor {
             return Ok(());
         }
 
+        // rubash#619: GNU execute_cmd.c execute_if_command walks the stored
+        // condition/branch tree by POINTER and applies redirections only when
+        // the statement carries them. With no redirect/procsub fields on `cmd`
+        // the clone of the ~40-field CommandNode plus the deep clone of
+        // if_command (condition/then/elif/else CommandNode trees) and the
+        // guaranteed no-op redirect application are pure per-execution
+        // overhead (measured: `if :; then :; fi` +10.9us/op vs GNU 1.3us/op).
+        if !compound_command_has_redirects(cmd) {
+            return self.execute_if_command(if_command);
+        }
+
         let mut redirect_cmd = cmd.clone();
         let group_outputs =
             self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
@@ -2432,6 +2443,19 @@ impl Executor {
         cmd: &CommandNode,
         case_command: &CaseCommand,
     ) -> Result<(), ExecuteError> {
+        // rubash#619: same pointer-walk fast path as if — GNU execute_cmd.c
+        // execute_case_command walks the stored clauses by pointer and applies
+        // redirections only when the statement carries them. Without redirect
+        // fields the cmd + case_command deep clones and the no-op redirect
+        // application only add per-execution churn; keep the ambient line
+        // binding (line_number = case_command->line) semantics intact.
+        if !compound_command_has_redirects(cmd) {
+            let case_line = cmd.line;
+            return self.with_ambient_line(case_line, |executor| {
+                executor.execute_case_command(case_command)
+            });
+        }
+
         let mut redirect_cmd = cmd.clone();
         let group_outputs =
             self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
@@ -2520,6 +2544,27 @@ pub(in crate::executor) fn command_is_time_prefixed_compound(cmd: &CommandNode) 
             || cmd.coproc_command.is_some()
             || cmd.subshell_command.is_some()
             || cmd.brace_group.is_some())
+}
+
+/// True when the compound statement's own CommandNode carries any redirect,
+/// heredoc, here-string, or structured process substitution — i.e. when the
+/// clone-and-apply machinery in the `*_with_redirects` wrappers has work to
+/// do. Mirrors every field consulted by materialize_compound_output_
+/// process_substitutions, apply_*_redirects, and with_command_input_redirects
+/// (rubash#619 fast path).
+fn compound_command_has_redirects(cmd: &CommandNode) -> bool {
+    cmd.redirect_in.is_some()
+        || cmd.redirect_out.is_some()
+        || cmd.append.is_some()
+        || cmd.redirect_err.is_some()
+        || cmd.redirect_err_append.is_some()
+        || !cmd.redirects.is_empty()
+        || cmd.heredoc.is_some()
+        || cmd.heredoc_body.is_some()
+        || !cmd.heredoc_redirects.is_empty()
+        || cmd.here_string.is_some()
+        || cmd.here_string_carrier.is_some()
+        || !cmd.process_substitutions.is_empty()
 }
 
 fn apply_if_redirects(
