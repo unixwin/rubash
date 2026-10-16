@@ -325,6 +325,46 @@ impl Executor {
         self.eval_arithmetic_command_value_with_flags(expression, true, "((")
     }
 
+    /// State half of the #607 fast-ticket gate: the current bindings must
+    /// make every skipped ticket item unobservable. The write log must be
+    /// empty on entry (it is drained by the sync below after every
+    /// evaluation, so a non-empty log means an unevaluated push is pending
+    /// and only the slow ticket's pre-clear drops it correctly). Every
+    /// identifier the expression can read must be unset (reads 0 with no
+    /// recursion) or hold a plain decimal value (parsed directly with no
+    /// nested evaluation) — any other shape (another expression, a name, a
+    /// subscript, an expansion) would recurse into the nested evaluator,
+    /// where the skipped dynamic context, EXP_EXPANDED marker or write log
+    /// are observable. Whitelist admission only: doubt returns false and
+    /// the caller runs the full ticket.
+    fn fast_arith_ticket_state_ok(&self, expression: &str) -> bool {
+        if !ARITH_WRITES.with(|log| log.borrow().is_empty()) {
+            return false;
+        }
+        let bytes = expression.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if byte != b'_' && !byte.is_ascii_alphabetic() {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric())
+            {
+                index += 1;
+            }
+            if let Some(value) = self.shell_state.env_vars.get(&expression[start..index]) {
+                if !arith_value_is_plain_decimal(value) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// `let`'s operand (GNU let.def: `evalexp(arg, EXP_EXPANDED)`): the
     /// argument was already word-expanded once, so top-level `$name`/`$(...)`
     /// text is data for readtok's junk branch — never re-expanded. Indexed
@@ -357,15 +397,6 @@ impl Executor {
         // so the ordinary expansion below cannot expand them a second time and
         // the parser stores the key verbatim.
 
-        // GNU expr.c:1171 expr_streval: `tflag = (array_expand_once &&
-        // already_expanded) ? AV_NOEXPAND : 0` — `let`/`[[` operands arrive
-        // EXP_EXPANDED, `(( ))` does not, so only the former switches the
-        // assoc subscript scan to flag-1 (verbatim key) semantics.
-        let assoc_noexpand = !expand
-            && crate::builtins::shopt::option_enabled(
-                &self.shell_state.env_vars,
-                "array_expand_once",
-            );
         // Fast admission (rubash#156): an expression drawn entirely from
         // the pure arithmetic alphabet contains none of the characters the
         // pre-evaluation pipeline reacts to (no `$`/backquote for the
@@ -378,6 +409,45 @@ impl Executor {
         // is the character class itself, not a symptom blacklist); a
         // non-matching expression falls through to the full pipeline.
         let preexpansion_is_identity = arithmetic_preexpansion_is_identity(expression.as_bytes());
+        // #607 residual per-evaluation ticket: even identity-admitted
+        // expressions still paid the post-expansion ticket on every
+        // `(( ))` evaluation — the `array_expand_once` shopt lookup, the
+        // EXP_EXPANDED remove, the ARITH_WRITES clear, the dynamic-context
+        // snapshot and the write sync. GNU evaluates a `(( ))` command via
+        // execute_arith_for_command (execute_cmd.c:3219), which — unlike
+        // eval_arith_for_expr (execute_cmd.c:3163, the `let` path passing
+        // EXP_EXPANDED per expr.c:340,368) — never marks its operand
+        // already-expanded, so for the `expand` caller every EXP_EXPANDED
+        // item below is provably a no-op; expand_arith_string (subst.c:3981)
+        // likewise leaves this alphabet untouched. When the shape gate
+        // (pure syntax) and the state gate (current bindings) both admit,
+        // the ticket items are skipped; any doubt falls through to the
+        // full ticket. DEBUG-trap/xtrace/LINENO firing lives in the command
+        // loop around this call, not in the ticket, so it still fires;
+        // nounset, the EXP_EXPANDED consumers, readonly and subscript
+        // diagnostics keep their exact slow-path handling (see each gate).
+        let ticket_shape = if expand && preexpansion_is_identity {
+            fast_arith_ticket_shape(expression)
+        } else {
+            None
+        };
+        let fast_ticket = ticket_shape.is_some() && self.fast_arith_ticket_state_ok(expression);
+        // GNU expr.c:1171 expr_streval: `tflag = (array_expand_once &&
+        // already_expanded) ? AV_NOEXPAND : 0` — `let`/`[[` operands arrive
+        // EXP_EXPANDED, `(( ))` does not, so only the former switches the
+        // assoc subscript scan to flag-1 (verbatim key) semantics.
+        // Fast ticket: an identity-alphabet expression holds no `[`, so the
+        // assoc scan this flag parametrizes can never fire — hard-coding it
+        // skips the shopt lookup.
+        let assoc_noexpand = if fast_ticket {
+            false
+        } else {
+            !expand
+                && crate::builtins::shopt::option_enabled(
+                    &self.shell_state.env_vars,
+                    "array_expand_once",
+                )
+        };
         let expression = if preexpansion_is_identity {
             std::borrow::Cow::Borrowed(expression)
         } else {
@@ -395,7 +465,17 @@ impl Executor {
         // diagnostic input slot is written lazily: the unbound-variable
         // early return and the failed-evaluation tail below are the only
         // paths whose callers read arithmetic_last_eval_input.
-        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
+        // Fast ticket: identifier-free text (digits and operators only)
+        // cannot spell an unbound name, so both the option lookup and the
+        // scan are provably no-ops and are skipped. Anything spelling an
+        // identifier keeps the exact slow-path check.
+        let skip_nounset = fast_ticket
+            && ticket_shape
+                .as_ref()
+                .is_some_and(|shape| !shape.has_identifier);
+        if !skip_nounset
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset")
+        {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars)
             {
                 *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
@@ -444,7 +524,9 @@ impl Executor {
         // full pre-evaluation pipeline a command substitution may have
         // flipped the option, so the lookup re-runs there; the
         // identity-admitted path ran nothing between the two points, so
-        // the assoc_noexpand value is provably still current.
+        // the assoc_noexpand value is provably still current. The fast
+        // ticket forces assoc_noexpand false with expand set, so
+        // exp_expanded is false and the marker insert below is skipped.
         let exp_expanded = if preexpansion_is_identity {
             assoc_noexpand
         } else {
@@ -459,14 +541,29 @@ impl Executor {
                 .env_vars
                 .insert("__RUBASH_ARITH_EXP_EXPANDED".to_string(), "1".to_string());
         }
-        // Save a snapshot of variable values before evaluation to detect changes.
-        ARITH_WRITES.with(|log| log.borrow_mut().clear());
-        let dynamic_values = self.arith_dynamic_context();
+        // The write log is drained by the sync below after every
+        // evaluation; the state gate proved it empty on entry, so the
+        // pre-evaluation clear is a no-op on the fast ticket and skipped.
+        if !fast_ticket {
+            ARITH_WRITES.with(|log| log.borrow_mut().clear());
+        }
+        // Fast ticket: the state gate proved no operand can observe the
+        // dynamic context (no dynamic-context name is spelled, and every
+        // identifier reads as unset/0 or a plain decimal with no nested
+        // evaluation), so the snapshot — and its per-evaluation clones —
+        // are skipped and the parser runs context-free. RANDOM/SRANDOM
+        // travel on the RNG state, LINENO on `__RUBASH_CURRENT_LINE` and
+        // SECONDS/EPOCH* on the env-derived helper, none of which need it.
+        let dynamic_values = if fast_ticket {
+            None
+        } else {
+            Some(self.arith_dynamic_context())
+        };
         let (value, category) = eval_mutable_arith_value_with_random_flags(
             &expression,
             &mut self.shell_state.env_vars,
             Some(&self.shell_state.random_state),
-            Some(&dynamic_values),
+            dynamic_values.as_ref(),
             true,
         );
         // Failure path: every consumer of arithmetic_last_eval_input
@@ -476,9 +573,15 @@ impl Executor {
         if value.is_none() {
             *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
         }
-        self.shell_state
-            .env_vars
-            .remove("__RUBASH_ARITH_EXP_EXPANDED");
+        // Fast ticket: the marker above is never inserted (exp_expanded is
+        // false), and its lifecycle is a straight-line insert-to-remove
+        // with no early exits between, so no stale entry can be present
+        // and the removal is skipped.
+        if !fast_ticket {
+            self.shell_state
+                .env_vars
+                .remove("__RUBASH_ARITH_EXP_EXPANDED");
+        }
         self.shell_state
             .arithmetic_last_error_category
             .set(category);
@@ -491,7 +594,15 @@ impl Executor {
 
         // Sync any variable changes from env_vars to shell_state.variables
         // so that subsequent variable expansions see the updated values.
-        sync_arith_writes_to_shell_state(self);
+        // Fast ticket: a read-only shape provably leaves the write log
+        // empty (empty on entry per the state gate, no top-level writer per
+        // the shape, no nested writer per the plain-decimal bindings), so
+        // the take-and-walk is skipped. Write-shaped fast expressions
+        // (`i++`, `i=0`) keep the exact slow sync.
+        let needs_sync = !fast_ticket || ticket_shape.is_some_and(|shape| shape.write_possible);
+        if needs_sync {
+            sync_arith_writes_to_shell_state(self);
+        }
         value
     }
 
@@ -3038,4 +3149,258 @@ fn arithmetic_preexpansion_is_identity(bytes: &[u8]) -> bool {
                 | b' '
                 | b'\t')
     })
+}
+
+/// Executor-injected dynamic names behind `ArithDynamicContext`
+/// (`Executor::arith_dynamic_context`, the port of GNU variables.c
+/// INIT_DYNAMIC_VAR getters resolved through find_variable at expr.c:1150
+/// expr_streval): an operand spelling one of these reads the
+/// per-evaluation context, so the fast ticket — which skips building it —
+/// admits no expression mentioning them. Every other dynamic spelling
+/// (RANDOM/SRANDOM via the RNG state, LINENO via `__RUBASH_CURRENT_LINE`,
+/// SECONDS/EPOCHSECONDS/EPOCHREALTIME via the env-derived helper) resolves
+/// without the context and stays eligible.
+const ARITH_DYNAMIC_CONTEXT_NAMES: [&str; 9] = [
+    "BASHPID",
+    "BASH_SUBSHELL",
+    "BASH_ARGV0",
+    "FUNCNAME",
+    "GROUPS",
+    "BASH_COMMAND",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "PIPESTATUS",
+];
+
+/// Syntax half of the #607 fast-ticket gate, over an expression the
+/// identity whitelist already admitted (so only the pure arithmetic
+/// alphabet can appear — no `$`, quotes, backslashes or `[`).
+struct ArithTicketShape {
+    /// Whether the text spells any identifier. Identifier-free text needs
+    /// no nounset scan; anything with identifiers keeps the slow check.
+    has_identifier: bool,
+    /// Whether the text can write: contains `=` (every assignment operator
+    /// ends in `=`) or `++`/`--`. A read-only shape provably leaves the
+    /// write log empty, so the post-evaluation sync is skipped.
+    write_possible: bool,
+}
+
+/// Whitelist shape gate for the #607 fast ticket: `Some` admits, `None` is
+/// doubt and falls through to the slow ticket. Rejects any identifier the
+/// skipped ticket items could observe — the nine dynamic-context names
+/// (which read the skipped snapshot) and `__RUBASH_` internals (a write
+/// shaped like `(( __RUBASH_ARITH_EXP_EXPANDED=1 ))` would leak past the
+/// skipped marker removal).
+fn fast_arith_ticket_shape(expression: &str) -> Option<ArithTicketShape> {
+    let bytes = expression.as_bytes();
+    let mut index = 0usize;
+    let mut shape = ArithTicketShape {
+        has_identifier: false,
+        write_possible: false,
+    };
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'=' {
+            shape.write_possible = true;
+            index += 1;
+        } else if (byte == b'+' || byte == b'-') && bytes.get(index + 1) == Some(&byte) {
+            shape.write_possible = true;
+            index += 2;
+        } else if byte == b'_' || byte.is_ascii_alphabetic() {
+            shape.has_identifier = true;
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric())
+            {
+                index += 1;
+            }
+            let name = &expression[start..index];
+            if name.starts_with("__RUBASH_")
+                || ARITH_DYNAMIC_CONTEXT_NAMES
+                    .iter()
+                    .any(|dynamic| *dynamic == name)
+            {
+                return None;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    Some(shape)
+}
+
+/// Whether a variable value needs no nested evaluation: empty (reads 0) or
+/// an optional sign plus ASCII digits (parsed directly, with the leading-
+/// zero-octal form resolved inline). Any such read terminates without
+/// touching the dynamic context, the EXP_EXPANDED marker or the write log,
+/// which is what lets the fast ticket skip them.
+fn arith_value_is_plain_decimal(value: &str) -> bool {
+    let text = value.trim();
+    // An empty (or whitespace-only) binding reads as 0 with no recursion.
+    if text.is_empty() {
+        return true;
+    }
+    let text = text
+        .strip_prefix('+')
+        .or_else(|| text.strip_prefix('-'))
+        .unwrap_or(text);
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod fast_arith_ticket_tests {
+    use super::arithmetic_preexpansion_is_identity;
+    use super::{
+        arith_value_is_plain_decimal, fast_arith_ticket_shape, ARITH_DYNAMIC_CONTEXT_NAMES,
+    };
+    use crate::executor::Executor;
+
+    #[test]
+    fn hot_loop_shapes_are_fast() {
+        for expression in [
+            "1", "i<200000", "i++", "++i", "i--", "i=0", "i += 1", "a+b*c", "(x)", "i<=n",
+        ] {
+            assert!(
+                arithmetic_preexpansion_is_identity(expression.as_bytes()),
+                "{expression} must pass the identity whitelist"
+            );
+            assert!(
+                fast_arith_ticket_shape(expression).is_some(),
+                "{expression} must stay fast-eligible"
+            );
+        }
+        assert!(!fast_arith_ticket_shape("i<200000").unwrap().write_possible);
+        assert!(!fast_arith_ticket_shape("1").unwrap().write_possible);
+        assert!(fast_arith_ticket_shape("i++").unwrap().write_possible);
+        assert!(fast_arith_ticket_shape("i=0").unwrap().write_possible);
+        assert!(!fast_arith_ticket_shape("1").unwrap().has_identifier);
+        assert!(fast_arith_ticket_shape("i++").unwrap().has_identifier);
+    }
+
+    #[test]
+    fn doubt_falls_through_to_slow() {
+        // Dynamic-context names read the skipped snapshot, so the shape
+        // gate must reject them even though they pass the identity
+        // whitelist.
+        for name in ARITH_DYNAMIC_CONTEXT_NAMES {
+            let expression = format!("{name}+1");
+            assert!(
+                arithmetic_preexpansion_is_identity(expression.as_bytes()),
+                "{expression} passes identity so the shape gate must reject it"
+            );
+            assert!(
+                fast_arith_ticket_shape(&expression).is_none(),
+                "{expression} must take the slow ticket"
+            );
+        }
+        // Internal marker traffic is never fast.
+        assert!(fast_arith_ticket_shape("__RUBASH_ARITH_EXP_EXPANDED").is_none());
+        // Subscripts and expansions never reach the shape gate: the identity
+        // whitelist rejects them first.
+        for expression in ["a[1]", "$i"] {
+            assert!(
+                !arithmetic_preexpansion_is_identity(expression.as_bytes()),
+                "{expression} must not pass the identity whitelist"
+            );
+        }
+    }
+
+    #[test]
+    fn decimal_values_keep_state_eligible() {
+        assert!(arith_value_is_plain_decimal("199999"));
+        assert!(arith_value_is_plain_decimal(""));
+        assert!(arith_value_is_plain_decimal("   "));
+        assert!(arith_value_is_plain_decimal("  +42 "));
+        assert!(arith_value_is_plain_decimal("-7"));
+        assert!(arith_value_is_plain_decimal("007"));
+        assert!(!arith_value_is_plain_decimal("1+2"));
+        assert!(!arith_value_is_plain_decimal("BASHPID"));
+        assert!(!arith_value_is_plain_decimal("a[1]"));
+        assert!(!arith_value_is_plain_decimal("+"));
+    }
+
+    /// Eligibility probe for the contract test below: the production gate
+    /// also requires the `(( ))` caller (expand), which this test's
+    /// evaluator is.
+    fn fast_eligible(executor: &Executor, expression: &str) -> bool {
+        arithmetic_preexpansion_is_identity(expression.as_bytes())
+            && fast_arith_ticket_shape(expression).is_some()
+            && executor.fast_arith_ticket_state_ok(expression)
+    }
+
+    /// Contract: fast-eligible expressions evaluate (value and side-effect
+    /// mirror) exactly as the slow ticket does. Eligible inputs run the
+    /// fast ticket inside the evaluator, so any fast/slow divergence in
+    /// evaluation, nounset, readonly or sync surfaces as a wrong value or
+    /// a wrong binding here.
+    #[test]
+    fn fast_eligible_exprs_evaluate_exactly() {
+        let mut executor = Executor::new();
+        executor.set_env("i", "5");
+        // (expression, expected value, expected `i` binding afterwards)
+        let probes: &[(&str, Option<i128>, &str)] = &[
+            ("1", Some(1), "5"),
+            ("i", Some(5), "5"),
+            ("i<200000", Some(1), "5"),
+            ("i+1", Some(6), "5"),
+            ("i++", Some(5), "6"),
+            ("++i", Some(7), "7"),
+            ("i=200000", Some(200000), "200000"),
+        ];
+        for (expression, expected, i_after) in probes {
+            assert!(
+                fast_eligible(&executor, expression),
+                "{expression} must be fast-eligible under decimal bindings"
+            );
+            assert_eq!(
+                executor.eval_arithmetic_command_value(expression),
+                *expected,
+                "value of {expression}"
+            );
+            assert_eq!(
+                executor.get_env("i"),
+                Some(*i_after),
+                "binding of i after {expression}"
+            );
+        }
+        // The `let` caller stays on the slow ticket (EXP_EXPANDED) and
+        // must agree with the fast `(( ))` result.
+        executor.set_env("i", "5");
+        assert_eq!(
+            executor.eval_arithmetic_command_value_no_expand("i++"),
+            Some(5)
+        );
+        assert_eq!(executor.get_env("i"), Some("6"));
+    }
+
+    #[test]
+    fn state_gate_falls_back_without_changing_semantics() {
+        let mut executor = Executor::new();
+        // A non-decimal binding fails the state gate (slow ticket) but
+        // evaluates identically: the nested read still resolves.
+        executor.set_env("i", "1+2");
+        assert!(!fast_eligible(&executor, "i"));
+        assert_eq!(executor.eval_arithmetic_command_value("i"), Some(3));
+        // Dynamic-context spellings stay slow and stay correct.
+        assert!(!fast_eligible(&executor, "BASHPID+1"));
+        assert!(executor.eval_arithmetic_command_value("BASHPID+1").unwrap() > 0);
+    }
+
+    #[test]
+    fn fast_ticket_preserves_nounset() {
+        let mut executor = Executor::new();
+        executor.set_shell_option("nounset", true);
+        // Identifier-free fast expressions skip the nounset scan and pass.
+        assert_eq!(executor.eval_arithmetic_command_value("1"), Some(1));
+        // Bound identifiers pass with the exact slow check.
+        executor.set_env("i", "5");
+        assert_eq!(executor.eval_arithmetic_command_value("i"), Some(5));
+        // Unbound identifiers trap exactly as on the slow ticket.
+        assert_eq!(
+            executor.eval_arithmetic_command_value("missing_name_xyz"),
+            None
+        );
+        assert!(executor.shell_state.arithmetic_nounset_error.get());
+    }
 }
