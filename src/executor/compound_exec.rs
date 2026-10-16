@@ -2486,7 +2486,17 @@ impl Executor {
         Ok(())
     }
 
-    fn expand_case_pattern(&mut self, pattern: &crate::parser::CasePattern) -> String {
+    fn expand_case_pattern<'a>(
+        &mut self,
+        pattern: &'a crate::parser::CasePattern,
+    ) -> std::borrow::Cow<'a, str> {
+        // GNU execute_cmd.c:3686/3712 re-expands every arm per match attempt
+        // (expand_word_leave_quoted, matched via match.c/cond.c): dynamic
+        // re-expansion is semantics and stays. A static literal expands to
+        // itself, so borrow the stored text: zero alloc, skip the pipeline.
+        if case_arm_pattern_is_static_literal(&pattern.text, &pattern.raw_text) {
+            return std::borrow::Cow::Borrowed(pattern.text.as_str());
+        }
         const PROTECTED_CASE_PATTERN_BACKSLASH: char =
             crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD;
 
@@ -2508,10 +2518,12 @@ impl Executor {
             let expanded = self.expand_word_mut(&protected);
             let decoded = decode_parameter_pattern_quotes(&expanded);
             let restored = decoded.replace(PROTECTED_CASE_PATTERN_BACKSLASH, "\\");
-            return strip_surrounding_quotes(&restored);
+            return std::borrow::Cow::Owned(strip_surrounding_quotes(&restored));
         }
 
-        quote_aware_case_pattern(&pattern.raw_text, |word| self.expand_word_mut(word))
+        std::borrow::Cow::Owned(quote_aware_case_pattern(&pattern.raw_text, |word| {
+            self.expand_word_mut(word)
+        }))
     }
 
     pub(in crate::executor) fn execute_case_command_with_redirects(
@@ -2789,6 +2801,25 @@ fn case_pattern_has_extglob(pattern: &str) -> bool {
         index += 1;
     }
     false
+}
+
+/// Static-literal gate for case arms (perf #662): GNU execute_cmd.c:3686
+/// re-expands each arm per match attempt, but a pattern whose stored text
+/// and raw source carry no expansion trigger expands to itself. Whitelist
+/// (default-deny): plain chars only — `$`, backquote, quotes, `\`, plus
+/// `~{<>}` (tilde/brace/process-subst act in expand_word_mut), controls,
+/// and the markers.rs PUA carriers. Any doubt falls to the slow path.
+fn case_arm_pattern_is_static_literal(text: &str, raw: &str) -> bool {
+    fn plain(word: &str) -> bool {
+        word.chars().all(|c| {
+            !matches!(
+                c,
+                '$' | '`' | '\'' | '"' | '\\' | '~' | '{' | '}' | '<' | '>'
+            ) && !c.is_control()
+                && !('\u{E000}'..='\u{F8FF}').contains(&c)
+        })
+    }
+    plain(text) && plain(raw)
 }
 
 fn case_pattern_raw_has_quotes(raw: &str) -> bool {
@@ -3199,4 +3230,87 @@ fn escape_case_pattern_literal(value: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod case_arm_static_tests {
+    //! Perf #662: the static-literal short-circuit must agree with the
+    //! slow path per pattern shape — GNU execute_cmd.c:3686/3712
+    //! re-expands dynamic arms every attempt (match.c/cond.c), so only
+    //! proven-static text may borrow.
+    use super::case_arm_pattern_is_static_literal;
+    use crate::executor::Executor;
+    use crate::parser::CasePattern;
+    use std::borrow::Cow;
+
+    #[test]
+    fn static_shapes_borrow_stored_text() {
+        for shape in [
+            "foo",
+            "*.sh",
+            "[a-z]",
+            "a?c",
+            "a b",
+            "caf\u{e9}",
+            "+x%/=:;!#&@()|",
+        ] {
+            let pattern = CasePattern::new(shape.to_string(), 0, 0);
+            assert!(
+                case_arm_pattern_is_static_literal(&pattern.text, &pattern.raw_text),
+                "static {shape:?} rejected"
+            );
+            match Executor::new().expand_case_pattern(&pattern) {
+                Cow::Borrowed(text) => assert_eq!(text, shape),
+                Cow::Owned(_) => panic!("static {shape:?} took the slow path"),
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_shapes_take_slow_path() {
+        for (text, raw) in [
+            ("$v", "$v"),
+            ("`id`", "`id`"),
+            ("*", "\"*\""),
+            ("a", "'a'"),
+            ("\\a", "\\a"),
+            ("~/x", "~/x"),
+            ("{a,b}", "{a,b}"),
+            ("<(x)", "<(x)"),
+            ("a\u{e317}b", "a\u{e317}b"),
+            ("a\u{11}b", "a\u{11}b"),
+        ] {
+            assert!(
+                !case_arm_pattern_is_static_literal(text, raw),
+                "dynamic {raw:?} admitted"
+            );
+        }
+        let mut executor = Executor::new();
+        executor.set_env("V", "foo");
+        match executor.expand_case_pattern(&CasePattern::new("$V".to_string(), 0, 0)) {
+            Cow::Owned(text) => assert_eq!(text, "foo"),
+            Cow::Borrowed(_) => panic!("dynamic $V borrowed"),
+        }
+    }
+
+    #[test]
+    fn arms_match_like_gnu_per_shape() {
+        for (script, code) in [
+            ("case foo in foo) true;; *) false;; esac", 0),
+            ("case foo in bar) true;; *) false;; esac", 1),
+            ("case foo in f*) true;; *) false;; esac", 0),
+            ("case 'a b' in a\\ b) true;; *) false;; esac", 0),
+            ("v=foo; case foo in $v) true;; *) false;; esac", 0),
+            ("v=bar; case foo in $v) true;; *) false;; esac", 1),
+            ("case foo in $(echo foo)) true;; *) false;; esac", 0),
+            ("v='f*'; case foo in \"$v\") true;; *) false;; esac", 1),
+            ("case a in \\a) true;; *) false;; esac", 0),
+        ] {
+            let tokens = crate::lexer::tokenize(script);
+            let ast = crate::parser::parse(&tokens);
+            let mut executor = Executor::new();
+            executor.execute_ast(&ast).ok();
+            assert_eq!(executor.last_exit_code(), code, "{script:?}");
+        }
+    }
 }
