@@ -120,46 +120,87 @@ pub(in crate::executor) fn apply_parameter_case_mod(
         match operation {
             CaseMod::UpperAll => return value.chars().flat_map(char::to_uppercase).collect(),
             CaseMod::LowerAll => return value.chars().flat_map(char::to_lowercase).collect(),
+            // An empty pattern behaves as `?`, matching every character, so
+            // toggle-all needs no matcher either (rubash#608).
+            CaseMod::ToggleAll => {
+                return value
+                    .chars()
+                    .flat_map(|ch| {
+                        if ch.is_lowercase() {
+                            ch.to_uppercase().collect::<Vec<_>>()
+                        } else if ch.is_uppercase() {
+                            ch.to_lowercase().collect::<Vec<_>>()
+                        } else {
+                            vec![ch]
+                        }
+                    })
+                    .collect()
+            }
             _ => {}
         }
     }
-    let pattern = if pattern.is_empty() { "?" } else { pattern };
-    let mut changed_first = false;
-
-    value
-        .chars()
-        .enumerate()
-        .map(|(char_index, ch)| {
-            let char_value = ch.to_string();
-            let matches = case_pattern_matches(pattern, &char_value);
-            let should_change = matches
-                && match operation {
-                    CaseMod::UpperAll | CaseMod::LowerAll | CaseMod::ToggleAll => true,
-                    // subst.c case_transform: the First operators test only
-                    // the word's first character against the pattern — when
-                    // it does not match, the word is left alone (no scan for
-                    // a later matching character; casemod.tests ${@^[rstlne]}).
-                    CaseMod::UpperFirst | CaseMod::LowerFirst | CaseMod::ToggleFirst => {
-                        char_index == 0 && !changed_first
-                    }
-                };
-
-            if should_change {
-                changed_first = true;
-                match operation {
-                    CaseMod::UpperFirst | CaseMod::UpperAll => ch.to_uppercase().collect(),
-                    CaseMod::LowerFirst | CaseMod::LowerAll => ch.to_lowercase().collect(),
-                    CaseMod::ToggleFirst | CaseMod::ToggleAll if ch.is_lowercase() => {
-                        ch.to_uppercase().collect()
-                    }
-                    CaseMod::ToggleFirst | CaseMod::ToggleAll if ch.is_uppercase() => {
-                        ch.to_lowercase().collect()
-                    }
-                    CaseMod::ToggleFirst | CaseMod::ToggleAll => char_value,
+    // First-only operators test just the word's first character against the
+    // pattern (subst.c case_transform; casemod.tests ${@^[rstlne]}): handle
+    // it directly and append the rest verbatim instead of running the
+    // matcher once per character (rubash#608). An empty pattern behaves as
+    // `?` and matches unconditionally, so no matcher call is needed there
+    // either; otherwise a stack buffer carries the single character with no
+    // heap allocation.
+    if matches!(
+        operation,
+        CaseMod::UpperFirst | CaseMod::LowerFirst | CaseMod::ToggleFirst
+    ) {
+        let mut chars = value.chars();
+        let Some(first) = chars.next() else {
+            return String::new();
+        };
+        let matched = if pattern.is_empty() {
+            true
+        } else {
+            let mut buf = [0u8; 4];
+            case_pattern_matches(pattern, first.encode_utf8(&mut buf))
+        };
+        if !matched {
+            return value.to_string();
+        }
+        let mut out = String::with_capacity(value.len());
+        match operation {
+            CaseMod::UpperFirst => out.extend(first.to_uppercase()),
+            CaseMod::LowerFirst => out.extend(first.to_lowercase()),
+            _ => {
+                if first.is_lowercase() {
+                    out.extend(first.to_uppercase())
+                } else if first.is_uppercase() {
+                    out.extend(first.to_lowercase())
+                } else {
+                    out.push(first)
                 }
-            } else {
-                char_value
             }
-        })
-        .collect()
+        }
+        out.push_str(chars.as_str());
+        return out;
+    }
+    // First operators returned above; only All operators reach here.
+    let pattern = if pattern.is_empty() { "?" } else { pattern };
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        // Stack buffer instead of the per-character heap `to_string()`.
+        let mut buf = [0u8; 4];
+        if !case_pattern_matches(pattern, ch.encode_utf8(&mut buf)) {
+            out.push(ch);
+            continue;
+        }
+        match operation {
+            CaseMod::UpperAll | CaseMod::UpperFirst => out.extend(ch.to_uppercase()),
+            CaseMod::LowerAll | CaseMod::LowerFirst => out.extend(ch.to_lowercase()),
+            CaseMod::ToggleAll | CaseMod::ToggleFirst if ch.is_lowercase() => {
+                out.extend(ch.to_uppercase())
+            }
+            CaseMod::ToggleAll | CaseMod::ToggleFirst if ch.is_uppercase() => {
+                out.extend(ch.to_lowercase())
+            }
+            CaseMod::ToggleAll | CaseMod::ToggleFirst => out.push(ch),
+        }
+    }
+    out
 }
