@@ -40,6 +40,7 @@ fn main() {
     // child shell keys off its own argv[0], which this forward re-creates
     // faithfully).
     let mut command = Command::new(&shell);
+    suppress_child_console_window(&mut command);
     match forwarded_invocation_name(env::args_os().next().as_deref()) {
         Some(invoked_as) => {
             command.env("NIU_INVOKED_AS", invoked_as);
@@ -65,6 +66,34 @@ fn main() {
             );
             std::process::exit(126);
         }
+    }
+}
+
+/// niubash#379: a GUI parent with no console of its own (Claude Code
+/// spawning the shim with piped stdio) makes Windows allocate a *visible*
+/// console for the niu.exe child — one black flash per invocation. When
+/// none of our own stdio is a console there is no console to inherit, so
+/// the child is created with CREATE_NO_WINDOW; an interactive console
+/// session always keeps at least stdin on a console and takes the
+/// unchanged path, as does every non-Windows platform (no-op there).
+fn suppress_child_console_window(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::io::IsTerminal as _;
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW = 0x08000000 (WinBase.h). Deliberately gated on
+        // all-three-redirected, not just "stdout is piped": a child with no
+        // console can still use inherited console handles for plain I/O,
+        // but console APIs (ReadConsole/SetConsoleMode) fail in it, so an
+        // interactive niu session must keep inheriting the real console.
+        if !io::stdin().is_terminal() && !io::stdout().is_terminal() && !io::stderr().is_terminal()
+        {
+            command.creation_flags(0x0800_0000);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
     }
 }
 
