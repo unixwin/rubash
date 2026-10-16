@@ -38,7 +38,7 @@ pub struct ShellState {
     /// see `var_table`). Kept in sync with `variables` at mutation sites
     /// during the ongoing typed-store migration.
     pub(crate) env_vars: VarTable,
-    /// rubash#618 assoc element writes append one `[k]=v` segment in O(1)
+    /// rubash#618/#616: element writes append one storage segment in O(1)
     /// instead of re-rendering every key, so the storage string accumulates
     /// duplicate segments until the next canonical render folds them. This is
     /// how many appends each array is still allowed before that render runs;
@@ -47,7 +47,7 @@ pub struct ShellState {
     /// the string never exceeds twice its canonical length, keeping read-side
     /// parses as cheap as before. A scheduling hint only: a stale budget moves
     /// the compaction, never the resulting value.
-    pub(crate) assoc_compact_budget: HashMap<String, u32>,
+    pub(crate) array_compact_budget: HashMap<String, u32>,
     /// alias.c aliases.
     pub(crate) aliases: HashMap<String, Alias>,
     /// variables.c shell_functions.
@@ -319,7 +319,7 @@ impl Clone for ShellState {
         Self {
             variables: self.variables.clone(),
             env_vars: self.env_vars.clone(),
-            assoc_compact_budget: self.assoc_compact_budget.clone(),
+            array_compact_budget: self.array_compact_budget.clone(),
             aliases: self.aliases.clone(),
             functions: self.functions.clone(),
             function_definition_redirects: self.function_definition_redirects.clone(),

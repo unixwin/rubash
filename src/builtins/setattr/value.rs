@@ -4,7 +4,8 @@ use super::COMPOUND_ASSIGNMENT_MARKER;
 use super::{ARRAY_VARS, ASSOC_VARS, INTEGER_VARS};
 use crate::builtins::declare::storage::{append_array_value, append_assoc_value};
 use crate::builtins::declare::storage::{
-    format_assoc_storage, format_indexed_array_storage, indexed_array_entries, parse_assoc_words,
+    fold_indexed_storage_dupes, format_assoc_storage, format_indexed_array_storage,
+    indexed_array_entries, parse_assoc_words,
 };
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 
@@ -146,7 +147,9 @@ pub(super) fn readonly_error_subject(
 
 pub(super) fn format_array_value(value: &str) -> String {
     if let Some(rendered) = value.strip_prefix(STORAGE_WORD_PREFIX) {
-        return rendered.to_string();
+        // rubash#616: fold transient duplicates from the append-updated
+        // write path (identity on canonical mirrors).
+        return fold_indexed_storage_dupes(value, rendered);
     }
     if value == "()" {
         return "()".to_string();

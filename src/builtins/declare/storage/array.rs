@@ -236,6 +236,35 @@ pub(in crate::builtins) fn format_indexed_array_storage(
     format!("{STORAGE_WORD_PREFIX_STR}({rendered})")
 }
 
+/// Fold transient duplicate index segments before printing (rubash#616).
+/// The element-write path appends one segment per write until the next
+/// budget-seeded compaction, so a verbatim print would show `[i]=old ...
+/// [i]=new` where GNU prints a single binding. Parsing already folds
+/// (BTreeMap last-wins, same as every other reader); re-render only when
+/// the segment count exceeds the distinct count, so canonical mirrors keep
+/// printing byte-identical bytes to before.
+pub(in crate::builtins) fn fold_indexed_storage_dupes(value: &str, rendered: &str) -> String {
+    let entries = indexed_array_entries(value);
+    let inner = rendered
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(rendered);
+    if inner.is_empty() {
+        return rendered.to_string();
+    }
+    if split_storage_words(inner).count() > entries.len() {
+        // The re-render carries the storage prefix for store-shape
+        // consistency, but print output never shows it (the verbatim path
+        // above strips it) — GNU prints `([i]="v" ...)`.
+        let folded = format_indexed_array_storage(entries);
+        return folded
+            .strip_prefix(STORAGE_WORD_PREFIX)
+            .unwrap_or(&folded)
+            .to_string();
+    }
+    rendered.to_string()
+}
+
 fn array_assignment_index(left: &str, entries: &BTreeMap<usize, String>) -> Option<usize> {
     let expression = left.strip_prefix('[')?.strip_suffix(']')?;
     if expression.trim().is_empty() {

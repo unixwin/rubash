@@ -4,7 +4,9 @@ mod assoc;
 mod words;
 
 pub(in crate::builtins) use array::append_array_value;
-pub(in crate::builtins) use array::{format_indexed_array_storage, indexed_array_entries};
+pub(in crate::builtins) use array::{
+    fold_indexed_storage_dupes, format_indexed_array_storage, indexed_array_entries,
+};
 pub(in crate::builtins) use assoc::append_assoc_value;
 pub(in crate::builtins) use assoc::{format_assoc_storage, parse_assoc_words};
 pub(super) use assoc::{quote_assoc_key, quote_assoc_storage_value};
@@ -18,7 +20,9 @@ pub(super) fn parse_single_element_array(value: &str) -> Option<&str> {
 
 pub(super) fn format_array_value(value: &str) -> String {
     if let Some(rendered) = value.strip_prefix(STORAGE_WORD_PREFIX) {
-        return rendered.to_string();
+        // rubash#616: fold transient duplicates from the append-updated
+        // write path (identity on canonical mirrors).
+        return fold_indexed_storage_dupes(value, rendered);
     }
 
     let elements = parse_array_words(value);

@@ -282,7 +282,7 @@ impl Executor {
             shell_state: ShellState {
                 variables: VariableStore::from_environment(&env_vars),
                 env_vars,
-                assoc_compact_budget: HashMap::new(),
+                array_compact_budget: HashMap::new(),
                 aliases: HashMap::new(),
                 functions: imported_functions,
                 function_definition_redirects: HashMap::new(),

@@ -706,3 +706,73 @@ writes) — a different subsystem, not this issue.
   unmodified master — Android tzdata environment issue.)
 - Full serial failure-set gate vs `ce471a2` + niubash product A/B: see the
   PR record.
+
+## #616 overwrite arm — append replaces re-render for `a[i]=v` too
+
+### Attribution
+
+Key-count sweep on `333973c` (N=20000 `a[i%K]=$i`, min-of-3 order-rotated,
+release; new harness `~/bench_niu/sweep_616_keys.sh`, no indexed sweep
+existed before): per-write 14.80µs (K=1) → 3571µs (K=5000), 736x vs GNU at
+the top. Same three O(n) steps as assoc (mirror clone, BTreeMap deep-clone
+out of the memo, full re-render). The tail-append fast path (1b/1c) already
+covered `index == max+1`; everything else — overwrites, sparse jumps —
+paid full price, which is exactly what a hot loop does after the fill.
+
+### Precondition: the declare-seeded dense cell
+
+The 50-case indexed differential battery (new, `~/bench_niu/indexed_diff.sh`)
+caught a live correctness bug on master before any perf change:
+`declare -a a=([5]=x [2]=y); a[2]=z` printed
+`([2]="y" [5]="x" [2]="z")` with count 3. Bisected to
+`builtins/declare.rs sync_typed_assignments`: it mapped entries to
+values-only and dense-replaced, seeding `{0,1}`, so the 1b fast path fired
+on `index == max+1 == 2` and appended. (Bare `a=([5]=x [2]=y)` seeds
+correctly through the executor compound tail; only the declare-builtin
+route dropped keys.) Both declare sync sites now preserve keys via
+`replace_indexed_array_entries` — the helper's own doc comment already named
+this exact case. The 1b path (and the new arm) trust the cell, so an
+untrustworthy cell is a correctness precondition of the perf fix, fixed in
+the same PR like `bash_assoc_order` was for #618. The `unset "a[@]"`
+stale-count sibling lives on the unset path and was filed as #651, not
+bundled.
+
+### Fix
+
+New overwrite/sparse-jump arm beside 1b in `execute_array_element_assignment`:
+with a complete cell, a canonical mirror, and budget remaining, append one
+`[i]=v` segment (O(segment)) and extend the cell (overwrite → same length,
+new index → len+1, decided by a cell lookup; `extend` verifies the size and
+falls back otherwise). `+=` reads the old value from the cell, so it parses
+nothing either. Mirror-first-cell-second like 1b, so the canonical fallback
+re-parses the extended mirror and self-heals. Budget map renamed
+`assoc_compact_budget` → `array_compact_budget` and shared; canonical renders
+re-seed from the (already distinct) BTreeMap length. No parse/render changes:
+indexed readers fold by construction. The two verbatim
+`format_array_value` printers (`declare -p`, `export -p`) re-render from the
+folded map only when segments outnumber distinct keys (new shared
+`fold_indexed_storage_dupes`; identity otherwise, prefix stripped for print
+shape).
+
+### Results
+
+| keys | master/write | branch/write | master/GNU | branch/GNU |
+| --- | --- | --- | --- | --- |
+| 1 | 17.10µs | 18.75µs | 3.60x | 3.95x |
+| 100 | 101.10µs | 20.85µs | 21.51x | 4.44x |
+| 1000 | 889.55µs | 20.45µs | 172.73x | 3.97x |
+| 5000 | 3638.45µs | 20.60µs | 673.79x | 3.81x |
+
+177x faster than master at K=5000; GNU gap 674x → 3.8x. The indexed
+splitter (`rendered_array_parts`) shows no superlinearity — the flat curve
+with compactions included is the proof. Residuals: K=1 +1.6µs structural
+memo-miss price (same as #618, negative by K=10); ~3.8x fixed pipeline
+overhead (separate subsystem).
+
+### Verification (this phase)
+
+- Indexed battery 49/50 (only #651); master baseline 48/50.
+- Focused suites green; the two failures fail identically on baseline
+  (Android tzdata + positionals environment issues).
+- Full serial failure-set gate vs `333973c` + niubash product A/B: see the
+  PR record.

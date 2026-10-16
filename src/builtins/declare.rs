@@ -99,8 +99,17 @@ pub(crate) fn sync_typed_assignments(
         };
         if arrays.contains(base) {
             let entries = indexed_array_entries(value);
-            let values = entries.into_iter().map(|(_, value)| value);
-            crate::executor::replace_typed_indexed_array(store, base, values);
+            // rubash#616: preserve sparse keys — a values-only replace
+            // enumerates densely, so `declare -a a=([5]=x [2]=y)` seeded
+            // {0,1} and the element-write append fast path misfired on
+            // index==max+1, duplicating the segment (GNU array.c
+            // array_insert keeps the real index).
+            let keyed = entries
+                .into_iter()
+                .map(|(index, value)| (i64::try_from(index).unwrap_or(i64::MAX), value));
+            if store.replace_indexed_array_entries(base, keyed).is_err() {
+                crate::executor::drop_typed_indexed_array(store, base);
+            }
         } else if assocs.contains(base) {
             let _ = store.replace_associative_array(base, parse_assoc_words(value));
         }
@@ -155,16 +164,27 @@ pub(crate) fn sync_typed_attributes(
             // (`declare -a v` on v=7 keeps [0]="7"). Serialized storage text
             // is parsed back into entries.
             let env_value = variables.get(base).cloned().unwrap_or_default();
-            let elements: Vec<String> = if env_value.starts_with(STORAGE_WORD_PREFIX)
+            if env_value.starts_with(STORAGE_WORD_PREFIX)
                 || (env_value.starts_with('(') && env_value.ends_with(')'))
             {
-                indexed_array_entries(&env_value).into_values().collect()
-            } else if env_value.is_empty() {
-                Vec::new()
+                // Parsed back with keys intact (same sparse-cell reason as
+                // above: a values-only replace would seed {0,1} for
+                // `([5]=x [2]=y)`). The scalar/empty arms below stay dense,
+                // which is correct there (a scalar moves to element 0).
+                let keyed = indexed_array_entries(&env_value)
+                    .into_iter()
+                    .map(|(index, value)| (i64::try_from(index).unwrap_or(i64::MAX), value));
+                if store.replace_indexed_array_entries(base, keyed).is_err() {
+                    crate::executor::drop_typed_indexed_array(store, base);
+                }
             } else {
-                vec![env_value]
-            };
-            crate::executor::replace_typed_indexed_array(store, base, elements);
+                let elements: Vec<String> = if env_value.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![env_value]
+                };
+                crate::executor::replace_typed_indexed_array(store, base, elements);
+            }
         } else if assocs.contains(base)
             && !matches!(
                 store.get(base).map(|v| &v.value),

@@ -321,7 +321,7 @@ impl Executor {
                     value.to_string()
                 };
                 let mut fast = false;
-                if let Some(budget) = self.shell_state.assoc_compact_budget.get_mut(name) {
+                if let Some(budget) = self.shell_state.array_compact_budget.get_mut(name) {
                     if *budget > 0 {
                         *budget -= 1;
                         fast = true;
@@ -344,7 +344,7 @@ impl Executor {
                     }
                     // Not an appendable assoc cell yet — drop the budget so the
                     // canonical path below rebuilds it and re-seeds.
-                    self.shell_state.assoc_compact_budget.remove(name);
+                    self.shell_state.array_compact_budget.remove(name);
                 }
             }
             let current = self
@@ -409,7 +409,7 @@ impl Executor {
                 .env_vars
                 .insert(name.to_string(), new_value);
             self.shell_state
-                .assoc_compact_budget
+                .array_compact_budget
                 .insert(name.to_string(), compact_budget);
             // GNU assign_array_element (arrayfunc.c:815) ->
             // bind_assoc_variable gives the variable a real assoc cell, so
@@ -605,7 +605,7 @@ impl Executor {
         // readonly, no structured cell, non-canonical mirror) falls through to
         // the unchanged full path below, so this is a whitelist whose fallback
         // is the real path.
-        let appended = match structured {
+        let mut appended = match structured {
             Some((len, max))
                 if self
                     .shell_state
@@ -637,6 +637,75 @@ impl Executor {
             }
             _ => false,
         };
+        // rubash#616 (overwrite/sparse-jump arm): 1b above handles only
+        // index == max_index + 1. Any other shaped write with a complete
+        // cell and a canonical mirror appends one duplicate segment in
+        // O(segment) instead of re-parsing and re-rendering every element:
+        // GNU array.c:516 array_insert overwrites in place and never
+        // re-serialises. Every indexed reader folds duplicates through its
+        // BTreeMap (last wins for value, distinct for keys/count, sorted
+        // for order — verified), and the budget-seeded canonical render
+        // below compacts. Falls through to the full path on any shape
+        // mismatch, so this is a whitelist with the real path as fallback.
+        if !appended {
+            if let Some((len, _)) = structured {
+                let mut budgeted = false;
+                if let Some(budget) = self.shell_state.array_compact_budget.get_mut(name) {
+                    if *budget > 0 {
+                        *budget -= 1;
+                        budgeted = true;
+                    }
+                }
+                if budgeted
+                    && self
+                        .shell_state
+                        .variables
+                        .get(name)
+                        .is_none_or(|variable| !variable.readonly)
+                    && self.shell_state.env_vars.get(name).is_some_and(|mirror| {
+                        mirror.starts_with(STORAGE_WORD_PREFIX) && mirror.ends_with(')')
+                    })
+                {
+                    // An overwrite keeps the length; a new index grows it by
+                    // one. The cell answers which (O(log n)); a wrong answer
+                    // only costs a fallback, because extend verifies the size.
+                    let expected_len = if self
+                        .shell_state
+                        .variables
+                        .indexed_element(name, typed_index)
+                        .is_some()
+                    {
+                        len
+                    } else {
+                        len.saturating_add(1)
+                    };
+                    let mirror_ok = append_indexed_mirror_segments(
+                        &mut self.shell_state.env_vars,
+                        name,
+                        std::iter::once((index, element.as_str())),
+                    );
+                    // Mirror first, cell second (same rationale as 1b): the
+                    // canonical fallback re-parses the extended mirror and
+                    // re-syncs the cell from it, so a failed cell write still
+                    // lands on the correct value instead of a stale mirror.
+                    if mirror_ok
+                        && self.shell_state.variables.extend_indexed_element(
+                            name,
+                            typed_index,
+                            &element,
+                            expected_len,
+                        )
+                    {
+                        appended = true;
+                    } else {
+                        // Not an appendable cell (or cell/mirror disagree) —
+                        // drop the budget so the canonical path below rebuilds
+                        // both and re-seeds.
+                        self.shell_state.array_compact_budget.remove(name);
+                    }
+                }
+            }
+        }
         if !appended {
             let current = self
                 .shell_state
@@ -658,9 +727,17 @@ impl Executor {
                 entries.get(&index).map(String::as_str).unwrap_or_default(),
                 &entries,
             );
+            // Re-seed the budget from the distinct entry count (BTreeMap is
+            // already folded): that buys the next O(entries) appends for free
+            // and keeps the storage string within twice its canonical length,
+            // so reads stay O(entries). rubash#616 overwrite arm.
+            let compact_budget = entries.len().max(1) as u32;
             self.shell_state
                 .env_vars
                 .insert(name.to_string(), format_indexed_array_storage(entries));
+            self.shell_state
+                .array_compact_budget
+                .insert(name.to_string(), compact_budget);
         }
         mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, name);
         // Same GNU owner as the assoc branch above: bind_array_variable
