@@ -367,12 +367,18 @@ fn glob_vector_expand(
         names.push("..".to_string());
     }
     names.extend(entries.into_iter().map(|entry| entry.name));
+    // GNU glob.c:641 glob_vector matches every dirent against the same
+    // compiled byte-domain pattern; decode each candidate into one reused
+    // scratch buffer instead of a fresh Vec<char> per file (no per-file
+    // staging allocation, same class as the #281 Vec<char> removal).
+    let mut scratch: Vec<char> = Vec::new();
     let mut matches: Vec<String> = names
         .into_iter()
         .filter(|name| {
-            let name_chars: Vec<char> = name.chars().collect();
+            scratch.clear();
+            scratch.extend(name.chars());
             !skipname(&pattern_chars, name, dot_mode, globskipdots)
-                && component_matches(&pattern_chars, &name_chars, nocaseglob, extglob, dot_mode)
+                && component_matches(&pattern_chars, &scratch, nocaseglob, extglob, dot_mode)
         })
         .collect();
     globsort_matches(&mut matches, env_vars);
@@ -1793,8 +1799,10 @@ fn alt_matches_slice(
     guard: DotMode,
     nocase: bool,
 ) -> bool {
-    let slice: Vec<char> = name[s..srest].to_vec();
-    gmatch(alt, 0, &slice, 0, extglob, guard, nocase)
+    // Match the sub-slice in place: gmatch only reads name[0..len], so
+    // passing &name[s..srest] at offset 0 is identical to matching a copied
+    // prefix buffer (sm_loop.c:843/881) with no per-split allocation.
+    gmatch(alt, 0, &name[s..srest], 0, extglob, guard, nocase)
 }
 
 fn chars_match(pattern: char, candidate: char, nocase: bool) -> bool {
@@ -2017,6 +2025,42 @@ fn numeric_value(s: &str) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Contract for the #681 per-file staging removal: scratch-buffer reuse
+    /// plus the zero-copy extglob alt subslice must preserve dotfile,
+    /// casefold and extglob matching (whitelist rubash#117).
+    #[test]
+    fn glob_vector_expand_scratch_reuse_matches() {
+        let root = std::env::temp_dir().join("rubash-glob-scratch-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["a.txt", "b.txt", "c.log", ".hidden.txt", "AB.TXT"] {
+            std::fs::write(root.join(name), "x").unwrap();
+        }
+        let dir = root.to_string_lossy().to_string();
+        let env = std::collections::HashMap::new();
+        // `*` hides dotfiles under Period mode (dotglob off).
+        let mut got = glob_vector_expand("*.txt", &dir, false, false, DotMode::Period, true, &env);
+        got.sort();
+        assert_eq!(got, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        // nocaseglob folds AB.TXT in.
+        let mut got = glob_vector_expand("*.txt", &dir, true, false, DotMode::Period, true, &env);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "AB.TXT".to_string(),
+                "a.txt".to_string(),
+                "b.txt".to_string()
+            ]
+        );
+        // Extglob exercises the zero-copy alt subslice path.
+        let mut got =
+            glob_vector_expand("+(a|b).txt", &dir, false, true, DotMode::Period, true, &env);
+        got.sort();
+        assert_eq!(got, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// The rubash#148 re-encoding: quoted spans collapse to CTLESC-protected
     /// characters (GNU subst.c:4773 quote_string), unquoted text (including
