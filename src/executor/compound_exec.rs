@@ -1813,6 +1813,20 @@ impl Executor {
     }
 
     fn commands_contain_alias_if_control(&self, commands: &[CommandNode]) -> bool {
+        // rubash#661: GNU parse.y alias_expand_token passes words through
+        // untouched when the alias table is empty (and words from the
+        // grouped alias-stream driver are already expanded, so executor
+        // expansion is the identity there too) — the raw first word IS the
+        // expanded first word. Skip the per-command words.to_vec() plus the
+        // per-word table probes of expand_aliases in that case.
+        if self.shell_state.aliases.is_empty() || self.alias_streamed() {
+            return commands.iter().any(|command| {
+                matches!(
+                    command.words.first().map(String::as_str),
+                    Some("if" | "then" | "elif" | "else" | "fi")
+                )
+            });
+        }
         commands.iter().any(|command| {
             let words = self.expand_aliases(&command.words);
             matches!(
@@ -1882,9 +1896,28 @@ impl Executor {
         // GNU evaluates the condition list by pointer (execute_cmd.c:5200
         // execute_if_command -> execute_command on the stored COMMAND); the
         // slice entry re-walks the stored nodes without the Vec clone.
-        let saved_condition = self.inside_compound_condition.replace(true);
-        let result = self.with_errexit_suppressed(|executor| executor.execute_ast_inner(condition));
-        self.inside_compound_condition.set(saved_condition);
+        // rubash#661: a side-effect-free condition exits 0 with no
+        // expansion work, so it can neither fail (the only reader of the
+        // compound-condition marking) nor trip errexit (the only reader of
+        // the suppression). Run it unmarked; GNU's execute_if_command
+        // (execute_cmd.c:3862) pays no equivalent state traffic for a
+        // trivial condition either.
+        // A shadowing function or alias makes `:`/`true` execute user code
+        // that can fail (a `true()` returning nonzero under `set -e` must
+        // keep the slow path's errexit suppression). Gate it here.
+        let condition_word_unshadowed = matches!(condition, [command]
+            if command.words.len() == 1
+                && !self.shell_state.functions.contains_key(command.words[0].as_str())
+                && !self.shell_state.aliases.contains_key(command.words[0].as_str()));
+        let result = if condition_word_unshadowed && if_condition_is_side_effect_free(condition) {
+            self.execute_ast_inner(condition)
+        } else {
+            let saved_condition = self.inside_compound_condition.replace(true);
+            let result =
+                self.with_errexit_suppressed(|executor| executor.execute_ast_inner(condition));
+            self.inside_compound_condition.set(saved_condition);
+            result
+        };
         match result {
             Err(ExecuteError::ExpansionFailure(code)) => {
                 self.exit_code = code;
@@ -2620,6 +2653,74 @@ pub(in crate::executor) fn command_is_time_prefixed_compound(cmd: &CommandNode) 
             || cmd.coproc_command.is_some()
             || cmd.subshell_command.is_some()
             || cmd.brace_group.is_some())
+}
+
+/// Whitelist for the rubash#661 condition-state fast path: exactly one
+/// bare `:` or `true` with every assignment/redirect/substitution channel empty
+/// (shadowing is gated at the call site: a `true()` function or alias
+/// makes the word execute user code that can fail).
+/// (same trigger-free class as #607's literal admission — keep in sync).
+/// GNU's execute_if_command (execute_cmd.c:3862) runs such a condition with
+/// no observable state traffic: the literal word cannot fail expansion, it
+/// exits 0 without touching variables, fds, or traps, and it observes
+/// neither the compound-condition marking (consulted only on
+/// ExpansionFailure paths) nor the errexit suppression (consulted only on
+/// nonzero status). Anything else falls through to the marked path, so a
+/// false negative only costs speed.
+fn if_condition_is_side_effect_free(condition: &[CommandNode]) -> bool {
+    let [command] = condition else {
+        return false;
+    };
+    if !matches!(command.words.as_slice(), [word] if word == ":" || word == "true") {
+        return false;
+    }
+    command.assignments.is_empty()
+        && command.assignment_raws.is_empty()
+        && command.compound_assignments.is_empty()
+        && command.array_element_assignments.is_empty()
+        && command.process_substitutions.is_empty()
+        && command.command_substitutions.is_empty()
+        && command.arithmetic_expansions.is_empty()
+        && command.parameter_expansions.is_empty()
+        && command.brace_expansions.is_empty()
+        && command.extglob_patterns.is_empty()
+        && command.tilde_expansions.is_empty()
+        && command.pathname_patterns.is_empty()
+        && command.word_quotes.is_empty()
+        && command.redirects.is_empty()
+        && command.redirect_in.is_none()
+        && command.redirect_out.is_none()
+        && command.append.is_none()
+        && command.redirect_err.is_none()
+        && command.redirect_err_append.is_none()
+        && command.heredoc.is_none()
+        && command.heredoc_body.is_none()
+        && command.heredoc_delimiter.is_none()
+        && command.heredoc_redirects.is_empty()
+        && command.here_string.is_none()
+        && command.here_string_carrier.is_none()
+        && command.pipe.is_none()
+        && !command.background
+        && command.and_or.is_none()
+        && !command.inverted
+        && !command.subshell
+        && !command.subshell_end
+        && command.pipeline_command.is_none()
+        && command.and_or_list.is_none()
+        && command.time_command.is_none()
+        && command.background_command.is_none()
+        && command.inverted_command.is_none()
+        && command.for_command.is_none()
+        && command.arithmetic_command.is_none()
+        && command.if_command.is_none()
+        && command.loop_command.is_none()
+        && command.conditional_command.is_none()
+        && command.subshell_command.is_none()
+        && command.case_command.is_none()
+        && command.select_command.is_none()
+        && command.function_command.is_none()
+        && command.brace_group.is_none()
+        && command.coproc_command.is_none()
 }
 
 /// True when the compound statement's own CommandNode carries any redirect,
