@@ -354,14 +354,24 @@ impl Executor {
                         (Some(input), carved)
                     }
                     (None, _, binding) => {
-                        if let Some(binding) = binding {
-                            fd0_bindings.push(binding);
+                        // GNU execute_cmd.c: the definition redirects apply
+                        // inside execute_function (execute_command_internal
+                        // over the body copy), i.e. after the call-site
+                        // redirects, so a definition `< file` that installed
+                        // a live fd 0 wins and the call site must not
+                        // overwrite it.
+                        if binding.is_some() {
+                            if let Some(binding) = binding {
+                                fd0_bindings.push(binding);
+                            }
+                            (None, false)
+                        } else {
+                            let (input, carved, binding) = self.function_call_stdin(call_cmd)?;
+                            if let Some(binding) = binding {
+                                fd0_bindings.push(binding);
+                            }
+                            (input, carved)
                         }
-                        let (input, carved, binding) = self.function_call_stdin(call_cmd)?;
-                        if let Some(binding) = binding {
-                            fd0_bindings.push(binding);
-                        }
-                        (input, carved)
                     }
                 }
             } else {
