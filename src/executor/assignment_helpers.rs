@@ -728,6 +728,16 @@ pub(in crate::executor) fn split_indexed_tagged_token(
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut chars = token.chars().peekable();
+    // The transport prefix is bookkeeping, not field data: consume it up
+    // front. Otherwise it sits in `current` when a leading separator fires
+    // and the emptiness guard below pushes a spurious marker-only first
+    // part, which decodes to a phantom `""` element (rubash#621: GNU
+    // subst.c:3142 strips leading IFS whitespace). The post-loop map
+    // re-adds the prefix to every part, so skipping here changes no bytes
+    // downstream; untagged tokens never enter this branch.
+    if tagged {
+        chars.next();
+    }
     while let Some(ch) = chars.next() {
         if ch == crate::executor::COMPOUND_EXPANSION_WS_TAG
             && chars.peek().is_some_and(|next| is_boundary(*next))

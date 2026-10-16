@@ -357,6 +357,12 @@ pub(in crate::builtins::declare) fn split_indexed_tagged_token(
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut chars = token.chars().peekable();
+    // Same transport-prefix skip as the executor twin (rubash#621): the
+    // leading marker is bookkeeping, and leaving it in `current` turns a
+    // leading separator into a phantom `""` first element.
+    if tagged {
+        chars.next();
+    }
     while let Some(ch) = chars.next() {
         if (ch == crate::executor::markers::IFS_GLUE
             && matches!(chars.peek(), Some(' ' | '\t' | '\n')))
