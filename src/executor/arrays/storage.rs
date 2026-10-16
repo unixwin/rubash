@@ -495,6 +495,20 @@ pub(in crate::executor) fn dequote_ctlesc_pairs(value: &str) -> String {
 }
 
 pub(in crate::executor) fn quote_array_value(value: &str) -> String {
+    // perf rubash#680 (mapfile store-side): fast path for values that need
+    // no escaping. GNU array.c:948-989 array_to_assign wraps every element
+    // via ansic_quote only when ansic_shouldquote fires (strtrans.c:341)
+    // and via sh_double_quote otherwise; sh_double_quote (shquote.c:134)
+    // escapes only slashify_in_quotes (`\`$"\n`, syntax.h:26), so a
+    // printable-ASCII value outside that set renders as `"value"` verbatim.
+    // Whitelist-only (rubash#117): anything else falls through below.
+    if quote_array_value_is_plain(value) {
+        let mut out = String::with_capacity(value.len() + 2);
+        out.push('"');
+        out.push_str(value);
+        out.push('"');
+        return out;
+    }
     // The element value reaching storage may still carry the lexer's
     // data-quote markers for $'...'-decoded quotes (U+E010/U+E011, the
     // CTLESC analog for the protection GNU gives decoded bytes via
@@ -545,6 +559,25 @@ pub(in crate::executor) fn quote_array_value(value: &str) -> String {
 
 /// shquote.c sh_contains_shell_metas (376-407): returns 1 if the string
 /// contains shell metacharacters that force quoting of a bare word.
+/// Whitelist for the `quote_array_value` fast path: non-empty ASCII that is
+/// printable (so strtrans.c:341 `ansic_shouldquote` stays false) and holds
+/// none of the sh_double_quote escapes (shquote.c:134 over
+/// slashify_in_quotes, syntax.h:26). Markers/CTLESC/non-ASCII fail the byte
+/// test and fall through to the full path.
+fn quote_array_value_is_plain(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|b| {
+            matches!(
+                b,
+                b'0'..=b'9'
+                    | b'A'..=b'Z'
+                    | b'a'..=b'z'
+                    | b' '
+                    | b'_' | b'-' | b'+' | b'.' | b'/' | b',' | b':' | b'='
+            )
+        })
+}
+
 pub(in crate::executor) fn sh_contains_shell_metas(value: &str) -> bool {
     let chars: Vec<char> = value.chars().collect();
     for (index, ch) in chars.iter().enumerate() {
