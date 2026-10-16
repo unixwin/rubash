@@ -39,12 +39,27 @@ pub fn export(
 ) -> io::Result<i32> {
     let mut stdout = crate::executor::GlobalStdout;
     let mut stderr = io::stderr().lock();
-    export_with_io(
+    let mut oob_word = None;
+    let status = export_with_io(
         args.iter().map(String::as_str),
         env_vars,
         &mut stdout,
         &mut stderr,
-    )
+        &mut oob_word,
+    )?;
+    // No abort channel here (test-only path in practice): keep the bare
+    // report_error diagnostic plus the failure status so a direct caller
+    // still sees GNU-identical output.
+    if let Some(word) = oob_word {
+        writeln!(
+            stderr,
+            "{}{}: bad array subscript",
+            diagnostic_prefix(),
+            word
+        )?;
+        return Ok(EXECUTION_FAILURE);
+    }
+    Ok(status)
 }
 
 /// Execute `readonly` with arguments after the command name.
@@ -54,13 +69,26 @@ pub fn readonly(
 ) -> io::Result<i32> {
     let mut stdout = crate::executor::GlobalStdout;
     let mut stderr = io::stderr().lock();
-    readonly_with_io(
+    let mut oob_word = None;
+    let status = readonly_with_io(
         args.iter().map(String::as_str),
         env_vars,
         &mut stdout,
         &mut stderr,
         None,
-    )
+        &mut oob_word,
+    )?;
+    // Same direct-path diagnostic as export above (no Executor to abort).
+    if let Some(word) = oob_word {
+        writeln!(
+            stderr,
+            "{}{}: bad array subscript",
+            diagnostic_prefix(),
+            word
+        )?;
+        return Ok(EXECUTION_FAILURE);
+    }
+    Ok(status)
 }
 
 pub(crate) fn export_with_io<'a, I, W, E>(
@@ -68,6 +96,7 @@ pub(crate) fn export_with_io<'a, I, W, E>(
     env_vars: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
+    oob_word: &mut Option<String>,
 ) -> io::Result<i32>
 where
     I: IntoIterator<Item = &'a str>,
@@ -146,8 +175,17 @@ where
 
     let mut status = EXECUTION_SUCCESS;
     for arg in &args[index..] {
-        if apply_export_arg(arg, mode, array, assoc, env_vars, stderr)? != EXECUTION_SUCCESS {
+        if apply_export_arg(arg, mode, array, assoc, env_vars, stderr, oob_word)?
+            != EXECUTION_SUCCESS
+        {
             status = EXECUTION_FAILURE;
+        }
+        // GNU setattr.def:240-258 delegates `-a/-A name=value` to a nested
+        // declare_builtin, whose OOB DISCARDs out of the whole export
+        // command (arrayfunc.c:804-809): later operands never run, and the
+        // Executor aborts the list. Stop here like declare's assign loop.
+        if oob_word.is_some() {
+            return Ok(EXECUTION_FAILURE);
         }
     }
 
@@ -160,6 +198,7 @@ pub(crate) fn readonly_with_io<'a, I, W, E>(
     stdout: &mut W,
     stderr: &mut E,
     context_name: Option<&str>,
+    oob_word: &mut Option<String>,
 ) -> io::Result<i32>
 where
     I: IntoIterator<Item = &'a str>,
@@ -227,10 +266,14 @@ where
 
     let mut status = EXECUTION_SUCCESS;
     for arg in &args[index..] {
-        if apply_readonly_arg(arg, array, assoc, env_vars, stderr, context_name)?
+        if apply_readonly_arg(arg, array, assoc, env_vars, stderr, context_name, oob_word)?
             != EXECUTION_SUCCESS
         {
             status = EXECUTION_FAILURE;
+        }
+        // Same nested-declare DISCARD stop as the export loop above.
+        if oob_word.is_some() {
+            return Ok(EXECUTION_FAILURE);
         }
     }
     Ok(status)

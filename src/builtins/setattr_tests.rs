@@ -10,7 +10,14 @@ fn exports_assignment() {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
-    let status = export_with_io(["NAME=value"], &mut vars, &mut stdout, &mut stderr).unwrap();
+    let status = export_with_io(
+        ["NAME=value"],
+        &mut vars,
+        &mut stdout,
+        &mut stderr,
+        &mut None,
+    )
+    .unwrap();
 
     assert_eq!(status, EXECUTION_SUCCESS);
     assert_eq!(vars.get("NAME"), Some(&"value".to_string()));
@@ -24,7 +31,14 @@ fn rejects_invalid_identifier() {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
-    let status = export_with_io(["1BAD=value"], &mut vars, &mut stdout, &mut stderr).unwrap();
+    let status = export_with_io(
+        ["1BAD=value"],
+        &mut vars,
+        &mut stdout,
+        &mut stderr,
+        &mut None,
+    )
+    .unwrap();
 
     assert_eq!(status, EXECUTION_FAILURE);
     assert!(String::from_utf8(stderr)
@@ -40,7 +54,7 @@ fn prints_exported_variables() {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
-    let status = export_with_io(["-p"], &mut vars, &mut stdout, &mut stderr).unwrap();
+    let status = export_with_io(["-p"], &mut vars, &mut stdout, &mut stderr, &mut None).unwrap();
 
     assert_eq!(status, EXECUTION_SUCCESS);
     assert_eq!(

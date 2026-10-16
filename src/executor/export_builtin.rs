@@ -39,11 +39,13 @@ impl Executor {
             }
             self.raise_evalerror_abort();
         }
+        let mut oob_word = None;
         let status = crate::builtins::setattr::export_with_io(
             args.iter().map(String::as_str),
             &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
+            &mut oob_word,
         )?;
         // rubash#616 (1a): `export -a name=(...)` rewrites the array mirror
         // inside the pure builtin (setattr/apply.rs `env_vars.insert`), so
@@ -61,6 +63,31 @@ impl Executor {
                     sync_typed_indexed_storage(&mut self.shell_state.variables, base, &mirror);
                 }
             }
+        }
+        // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
+        // rubash#635): the nested declare_builtin reports the bare
+        // `<word>: bad array subscript` (report_error, no `export:`
+        // segment) and DISCARDs the command list (subst.c:11169
+        // bash_variable_assignment_error). Partial store already
+        // installed by the assign path; the early return skips the
+        // status-0 gates below, exactly like execute_declare.
+        if let Some(word) = oob_word {
+            writeln!(
+                stderr,
+                "{}{}: bad array subscript",
+                self.diagnostic_prefix(),
+                word
+            )?;
+            self.exit_code = 1;
+            // Bad-subscript class for the eval boundary (rubash#637
+            // primitive, reused): eval absorbs it and continues.
+            self.evalerror_subscript_pending.set(true);
+            self.raise_evalerror_abort();
+            // Flush here: this early return skips the normal
+            // buffered-output flush below, which would swallow the
+            // diagnostic (rubash#635).
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            return Ok(1);
         }
         let status = if arith_eval_failure.is_some() {
             status.max(1)

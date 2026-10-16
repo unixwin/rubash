@@ -20,6 +20,7 @@ pub(super) fn apply_export_arg<W>(
     assoc: bool,
     env_vars: &mut crate::shell::var_table::VarTable,
     stderr: &mut W,
+    oob_word: &mut Option<String>,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -71,17 +72,10 @@ where
             // `export -a name` alone just marks att_exported.
             let has_assign = value.is_some();
             let converted = env_vars.contains_key(name) || env::var(name).is_ok();
-            let mut oob_word = None;
             let (value, bound_array) = value
                 .map(|value| {
                     array_attribute_assignment_value(
-                        value,
-                        array,
-                        assoc,
-                        append,
-                        env_vars,
-                        name,
-                        &mut oob_word,
+                        value, array, assoc, append, env_vars, name, oob_word,
                     )
                 })
                 .unwrap_or_else(|| {
@@ -101,16 +95,12 @@ where
                 mark_array(env_vars, name);
             }
             // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
-            // rubash#635): the partial store and marks above stay; report
-            // here, fail the builtin. The list-abort needs Executor
-            // threading like declare_local's -- follow-up, not silent.
-            if let Some(word) = oob_word {
-                writeln!(
-                    stderr,
-                    "{}{}: bad array subscript",
-                    diagnostic_prefix(),
-                    word
-                )?;
+            // rubash#635): the partial store and marks above stay; fail the
+            // builtin and stop here. The recorded word travels up for the
+            // bare report_error diagnostic plus the DISCARD list-abort at
+            // the Executor layer, exactly like declare/local (subst.c:11169
+            // bash_variable_assignment_error).
+            if oob_word.is_some() {
                 return Ok(EXECUTION_FAILURE);
             }
             // GNU variables.c make_env_array_from_var_list: array and
@@ -140,6 +130,7 @@ pub(super) fn apply_readonly_arg<W>(
     env_vars: &mut crate::shell::var_table::VarTable,
     stderr: &mut W,
     context_name: Option<&str>,
+    oob_word: &mut Option<String>,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -213,18 +204,9 @@ where
     // printed list, so the marks below need the assignment word.
     let has_assign = value.is_some();
     let converted = env_vars.contains_key(name) || env::var(name).is_ok();
-    let mut oob_word = None;
     let (value, bound_array) = value
         .map(|value| {
-            array_attribute_assignment_value(
-                value,
-                array,
-                assoc,
-                append,
-                env_vars,
-                name,
-                &mut oob_word,
-            )
+            array_attribute_assignment_value(value, array, assoc, append, env_vars, name, oob_word)
         })
         .unwrap_or_else(|| {
             (
@@ -242,15 +224,9 @@ where
     } else if (array && has_assign) || bound_array {
         mark_array(env_vars, name);
     }
-    // Same OOB report as export above (rubash#635); list-abort threading
-    // is the documented follow-up.
-    if let Some(word) = oob_word {
-        writeln!(
-            stderr,
-            "{}{}: bad array subscript",
-            diagnostic_prefix(),
-            word
-        )?;
+    // Same OOB stop as export above (arrayfunc.c:804-809, rubash#635):
+    // fail here, diagnostic + DISCARD abort at the Executor layer.
+    if oob_word.is_some() {
         return Ok(EXECUTION_FAILURE);
     }
     // Same array-export contract as apply_export_arg above (GNU variables.c

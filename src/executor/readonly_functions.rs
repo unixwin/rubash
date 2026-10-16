@@ -52,12 +52,14 @@ impl Executor {
             .function_name_stack
             .first()
             .map(String::as_str);
+        let mut oob_word = None;
         let status = crate::builtins::setattr::readonly_with_io(
             args.iter().map(String::as_str),
             &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
             context_name,
+            &mut oob_word,
         )?;
         // rubash#616 (1a): `readonly -a name=(...)` rewrites the array mirror
         // inside the pure builtin — refresh the structured cell for
@@ -73,6 +75,27 @@ impl Executor {
                     sync_typed_indexed_storage(&mut self.shell_state.variables, base, &mirror);
                 }
             }
+        }
+        // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
+        // rubash#635): same nested-declare DISCARD as the export path
+        // (subst.c:11169 bash_variable_assignment_error): bare
+        // `<word>: bad array subscript`, no `readonly:` segment, list
+        // aborted. Partial store already installed by the assign path.
+        if let Some(word) = oob_word {
+            writeln!(
+                stderr,
+                "{}{}: bad array subscript",
+                self.diagnostic_prefix(),
+                word
+            )?;
+            self.exit_code = 1;
+            // Same eval-boundary class as execute_declare (rubash#637).
+            self.evalerror_subscript_pending.set(true);
+            self.raise_evalerror_abort();
+            // Flush here: this early return skips the normal
+            // buffered-output flush below (rubash#635).
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            return Ok(1);
         }
         let status = if arith_eval_failure.is_some() {
             status.max(1)
