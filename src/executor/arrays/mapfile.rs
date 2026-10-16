@@ -5,29 +5,31 @@ pub(in crate::executor) fn split_mapfile_input(
 ) -> Vec<String> {
     use crate::executor::substitution_metadata::{bytes_to_shell_text, shell_text_to_raw_bytes};
 
-    // GNU mapfile.c: delim is an unsigned char (single byte). Even delimiter
-    // bytes >= 0x80 travel as U+E000 marker pairs in Rubash's Rust String
-    // carrier; byte-exact split must operate on the decoded raw bytes and
-    // re-encode each segment only once at the boundary (subst.c raw-byte
-    // marker contract). This fixes mapfile -d $'\xff' where the previous
-    // char-wise split compared the sentinel U+E000 alone and leaked the
-    // payload marker as stray PUA data (mapfile.tests s=$'a\xffb\xffc\xff').
+    // GNU builtins/mapfile.def:177-209: the zgetline loop splits raw input
+    // bytes on the delimiter and bind_array_element stores each line, with
+    // no per-line re-encode. Decode once, split the raw bytes as ranges
+    // (no per-byte push buffer), strip `-t` in the byte domain, and encode
+    // each segment exactly once (subst.c raw-byte marker contract keeps
+    // `-d $'\xff'` byte-exact).
     let delim = delimiter.unwrap_or(b'\n');
     let bytes = shell_text_to_raw_bytes(input);
-    let mut values = Vec::new();
-    let mut current: Vec<u8> = Vec::new();
-    for &byte in &bytes {
-        current.push(byte);
-        if byte == delim {
-            if trim_delimiter || delim == 0 {
-                current.pop();
-            }
-            values.push(bytes_to_shell_text(&current));
-            current.clear();
-        }
+    if bytes.is_empty() {
+        return Vec::new();
     }
-    if !current.is_empty() {
-        values.push(bytes_to_shell_text(&current));
+    let strip = trim_delimiter || delim == 0;
+    let mut values = Vec::new();
+    values.reserve(std::cmp::min(bytes.len() / 8, 65_536) + 1);
+    let mut start = 0;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if byte != delim {
+            continue;
+        }
+        let end = if strip { index } else { index + 1 };
+        values.push(bytes_to_shell_text(&bytes[start..end]));
+        start = index + 1;
+    }
+    if start < bytes.len() {
+        values.push(bytes_to_shell_text(&bytes[start..]));
     }
     values
 }

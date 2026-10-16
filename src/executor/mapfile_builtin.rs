@@ -541,6 +541,21 @@ impl Executor {
                 values.truncate(count);
             }
             let start = origin.unwrap_or(0);
+            if callback.is_none() && origin.is_none() {
+                // GNU mapfile.def:177-209 zgetline loop + bind_array_element:
+                // a fresh read replaces the array wholesale, so the split
+                // batch pushes straight into the dense bulk store with no
+                // intermediate index map (one owner per line, not two).
+                replace_typed_indexed_array(
+                    &mut self.shell_state.variables,
+                    &name,
+                    values.iter().cloned(),
+                );
+                store_indexed_array(&mut self.shell_state.env_vars, &name, values);
+                mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
+                let _ = self.write_buffered_builtin_output(cmd, &[], &stderr);
+                return 0;
+            }
             let mut entries = if origin.is_some() {
                 self.shell_state
                     .env_vars
