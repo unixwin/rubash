@@ -707,6 +707,22 @@ pub struct Executor {
     /// that clears `evalerror_pending` clears this alongside, so a caught
     /// abort never poisons a later unrelated abandon with 127.
     pub(crate) nounset_force_eof: Cell<bool>,
+    /// rubash#637: marks a pending evalerror abort as bad-subscript class.
+    /// The eval boundary absorbs exactly this class (eval returns failure,
+    /// the caller continues — GNU evalstring.c:365,422-442 swallowing
+    /// DISCARD) while arithmetic failures keep escaping. Armed alongside
+    /// the abort at the bad-subscript sites; consumed at the abandon point
+    /// and cleared at every pending-clearing boundary, same discipline as
+    /// `nounset_force_eof`.
+    pub(crate) evalerror_subscript_pending: Cell<bool>,
+    /// rubash#637: the `evalerror_exec_depth` value at which the currently
+    /// executing eval'd list runs (`None` outside `eval`). A nested abort
+    /// unwinds silently everywhere EXCEPT the eval'd top list itself, where
+    /// GNU's parse_and_execute loops per line — so a later line still runs
+    /// and eval returns its status. Function/loop bodies inside eval run
+    /// deeper and keep unwinding. Save/restored per eval nesting, exactly
+    /// like `__RUBASH_EVAL_CONTEXT`.
+    pub(crate) eval_list_depth: Cell<Option<usize>>,
     /// Source line of the reader-level command whose list tail is being
     /// discarded; set lazily when the reader-level loop first observes
     /// `evalerror_pending`.

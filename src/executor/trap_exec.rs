@@ -524,8 +524,13 @@ impl Executor {
         // redirections still bound (redir.c do_redirection_internal for the
         // builtin's duration), so a body's `1>&3` resolves fd 3 to eval's
         // `3>&1`, not the leaf's own fd 1.
+        let saved_eval_list_depth = self
+            .eval_list_depth
+            .replace(Some(self.evalerror_exec_depth.get() + 1));
         let result =
             self.with_compound_output_redirects(cmd, |executor| executor.execute_ast(&ast));
+        self.eval_list_depth.set(saved_eval_list_depth);
+
         self.resume_alias_streamed(saved_alias_streamed);
         match saved_eval_context {
             Some(previous) => {
@@ -594,7 +599,30 @@ impl Executor {
                 self.exit_code = code;
                 Ok(())
             }
+            Ok(()) if self.evalerror_subscript_pending.replace(false) => {
+                // GNU evalstring.c:365,422-442: DISCARD inside the eval'd
+                // string is caught at the eval boundary — eval returns
+                // failure and the caller continues (rubash#637). Absorb
+                // exactly the bad-subscript class (armed alongside the
+                // abort); arithmetic and nounset failures keep escaping,
+                // and a real Err below propagates untouched. The exit code
+                // is left alone: it already holds the last status (a later
+                // line that ran fine yields eval rc 0, GNU's
+                // parse_and_execute loop semantics).
+                self.evalerror_pending.set(false);
+                self.evalerror_line.set(None);
+                Ok(())
+            }
             other => {
+                // A real error outranks containment: drop a subscript mark
+                // the eval did not absorb so an outer eval cannot mistake
+                // it for its own string's failure. Plain Ok results never
+                // reach here with the mark set (the absorb arm above owns
+                // Ok+marked), so an ancestor eval's mark survives a nested
+                // successful eval untouched.
+                if other.is_err() {
+                    self.evalerror_subscript_pending.set(false);
+                }
                 // Not a contained parse error (e.g. a real `exit`): the
                 // parse-error flag raised inside the eval'd string keeps its
                 // abort meaning for the enclosing reader.

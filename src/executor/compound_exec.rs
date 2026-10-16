@@ -1576,6 +1576,7 @@ impl Executor {
                     // verified GNU 5.3).
                     executor.evalerror_pending.set(false);
                     executor.nounset_force_eof.set(false);
+                    executor.evalerror_subscript_pending.set(false);
                     executor.evalerror_line.set(None);
                     // Bash runs a subshell with errexit active; a failing
                     // command exits the subshell with that status but the

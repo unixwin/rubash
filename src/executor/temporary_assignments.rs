@@ -1394,6 +1394,9 @@ impl Executor {
             );
             self.emit_assignment_diag(line);
             self.exit_code = 1;
+            // Bad-subscript class for the eval boundary (rubash#637), armed
+            // alongside the abort the top-level list needs.
+            self.evalerror_subscript_pending.set(true);
             self.raise_evalerror_abort();
             return false;
         }

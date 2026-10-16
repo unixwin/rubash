@@ -429,6 +429,8 @@ impl Executor {
         // array subscript (`h[]=10`).
         if index.trim().is_empty() && raw_subscript.is_none_or(str::is_empty) {
             self.report_bad_array_subscript(&lhs_as_written);
+            // Bad-subscript class for the eval boundary (rubash#637).
+            self.evalerror_subscript_pending.set(true);
             self.exit_code = 1;
             return true;
         }
@@ -492,6 +494,8 @@ impl Executor {
         // the whole `name[sub]` word).
         if matches!(eval_input.trim(), "*" | "@") {
             self.report_bad_array_subscript(&lhs_as_written);
+            // Bad-subscript class for the eval boundary (rubash#637).
+            self.evalerror_subscript_pending.set(true);
             self.exit_code = 1;
             return true;
         }
@@ -500,6 +504,8 @@ impl Executor {
                 IndexedSubscript::Index(index) => index,
                 IndexedSubscript::Empty => {
                     self.report_bad_array_subscript(&lhs_as_written);
+                    // Bad-subscript class for the eval boundary (rubash#637).
+                    self.evalerror_subscript_pending.set(true);
                     self.exit_code = 1;
                     return true;
                 }
@@ -535,6 +541,8 @@ impl Executor {
                 self.diagnostic_prefix(),
                 lhs_as_written
             );
+            // Bad-subscript class for the eval boundary (rubash#637).
+            self.evalerror_subscript_pending.set(true);
             self.exit_code = 1;
             return true;
         }
@@ -552,6 +560,8 @@ impl Executor {
                     self.diagnostic_prefix(),
                     lhs_as_written
                 );
+                // Bad-subscript class for the eval boundary (rubash#637).
+                self.evalerror_subscript_pending.set(true);
                 self.exit_code = 1;
                 return true;
             };

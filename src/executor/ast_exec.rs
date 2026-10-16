@@ -66,6 +66,7 @@ impl Executor {
         // finished run is stale and must not discard commands here.
         self.evalerror_pending.set(false);
         self.nounset_force_eof.set(false);
+        self.evalerror_subscript_pending.set(false);
         self.evalerror_line.set(None);
         self.reader_command_line.set(None);
         // rubash#353: this run's unit (file / -c string) was upfront-lexed
@@ -173,6 +174,7 @@ impl Executor {
                 if $command.subshell_end {
                     self.evalerror_pending.set(false);
                     self.nounset_force_eof.set(false);
+                    self.evalerror_subscript_pending.set(false);
                     self.evalerror_line.set(None);
                     if let Some(saved_state) = subshell_state.take() {
                         self.restore_flat_subshell(saved_state, subshell_cwd.take());
@@ -334,6 +336,7 @@ impl Executor {
                         }
                         self.evalerror_pending.set(false);
                         self.nounset_force_eof.set(false);
+                        self.evalerror_subscript_pending.set(false);
                         self.evalerror_line.set(None);
                     }
                     index += 1;
@@ -348,11 +351,19 @@ impl Executor {
                 if command.subshell_end {
                     self.evalerror_pending.set(false);
                     self.nounset_force_eof.set(false);
+                    self.evalerror_subscript_pending.set(false);
                     self.evalerror_line.set(None);
                     index += 1;
                     continue;
                 }
-                if self.evalerror_exec_depth.get() > 1 {
+                if self.evalerror_exec_depth.get() > 1
+                    && self.eval_list_depth.get() != Some(self.evalerror_exec_depth.get())
+                {
+                    // Nested function/loop/subshell bodies unwind silently on
+                    // abort — except the eval'd top list itself (rubash#637):
+                    // GNU's parse_and_execute loops per line inside eval, so
+                    // falling through lets the normal line-skip logic run
+                    // later lines and eval return their status.
                     return Ok(());
                 }
                 if self.evalerror_line.get().is_none() {
@@ -372,6 +383,17 @@ impl Executor {
                         self.exit_code = self.expansion_fatal_status();
                     } else {
                         self.exit_code = 1;
+                    }
+                    // The subscript class served its purpose once the abandon
+                    // fires (rubash#637) — except anywhere inside an eval
+                    // string, whose boundary (not this block) owns
+                    // absorption: consuming here would starve it, and the
+                    // same-line skip below still runs. Functions called
+                    // inside eval keep the mark for the eval boundary for
+                    // the same reason; nested silent unwinds return before
+                    // this block either way.
+                    if self.eval_list_depth.get().is_none() {
+                        self.evalerror_subscript_pending.set(false);
                     }
                 }
                 let boundary = self.evalerror_line.get();
@@ -394,6 +416,7 @@ impl Executor {
                 }
                 self.evalerror_pending.set(false);
                 self.nounset_force_eof.set(false);
+                self.evalerror_subscript_pending.set(false);
                 self.evalerror_line.set(None);
             }
             if self.evalerror_exec_depth.get() == 1 {
@@ -1388,6 +1411,7 @@ impl Executor {
                 // subshell (`( a[$bad]=v ); echo after` runs `after`).
                 self.evalerror_pending.set(false);
                 self.nounset_force_eof.set(false);
+                self.evalerror_subscript_pending.set(false);
                 self.evalerror_line.set(None);
                 if let Some(saved_state) = subshell_state.take() {
                     self.restore_flat_subshell(saved_state, subshell_cwd.take());

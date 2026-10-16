@@ -796,3 +796,22 @@ more hop (its failure maps through `apply_shell_assignment` to
 when the array exists (probed). No memo changes: subscript memo frames are
 per-word-expansion (both toggle directions probed). Battery 10/25 → 25/25;
 regression file `tests/issue639_nounset_subscript.rs`.
+
+## #637 — eval contains the assignment DISCARD jump (split from #631)
+
+`eval 'a=(p); a[-2]=q; echo IN'; echo AFTER` ended the whole script.
+GNU catches DISCARD at the eval boundary (`evalstring.c:365,422-442`):
+eval returns failure and the caller continues. Rubash absorbed
+`ExpansionFailure` there but let the `evalerror_pending` abort escape.
+
+A distinct `evalerror_subscript_pending` cell marks bad-subscript aborts
+(armed at the element-write sites + compound tail); the eval boundary
+absorbs exactly this class on `Ok`, leaving exit status to the last
+command run (GNU parse_and_execute loop semantics: a later line that ran
+fine yields eval rc 0). Arithmetic and nounset failures never arm it and
+keep escaping. The eval'd top list runs at a recorded depth so nested
+aborts fall through to line-skip logic instead of unwinding silently;
+function/loop bodies inside eval run deeper and keep unwinding. Consumed
+at the abandon point (except inside eval strings) and cleared at every
+pending-clearing boundary. Battery 9/20 -> 20/20; regression file
+`tests/issue637_eval_discard.rs`.

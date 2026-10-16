@@ -1473,6 +1473,8 @@ impl Executor {
             function_tempenv_names: Vec::new(),
             evalerror_pending: Cell::new(false),
             nounset_force_eof: Cell::new(false),
+            evalerror_subscript_pending: Cell::new(false),
+            eval_list_depth: Cell::new(None),
             evalerror_line: Cell::new(None),
             command_expansion_failed: Cell::new(false),
             evalerror_exec_depth: Cell::new(0),
