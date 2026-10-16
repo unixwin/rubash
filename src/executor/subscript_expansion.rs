@@ -834,6 +834,26 @@ impl Executor {
                             ));
                             return Err(format!("({out})"));
                         }
+                        // GNU arrayfunc.c:786-792 assign_compound_array_list:
+                        // ALL_ELEMENT_SUB rejects [@]/[*] on indexed arrays
+                        // before arithmetic eval, naming the whole element
+                        // word (rubash#636). No abort, like the []= arm: Err
+                        // carries GNU's break (partial store kept, eval
+                        // contains it). Assoc keys never reach here (the
+                        // assoc arm above returns first); match the resolved
+                        // text exactly, so `[ @ ]` still takes the arith path.
+                        if matches!(resolved.as_str(), "@" | "*") {
+                            eprintln!(
+                                "{}{}: cannot assign to non-numeric index",
+                                self.diagnostic_prefix(),
+                                compound_element_diagnostic_word(
+                                    inner, index, sub_end, &resolved, false
+                                )
+                            );
+                            use std::io::Write;
+                            let _ = std::io::stderr().flush();
+                            return Err(format!("({out})"));
+                        }
                         let Some(index_value) = self.eval_indexed_subscript_expression(&resolved)
                         else {
                             self.report_indexed_subscript_error_unless_nounset(&resolved);
@@ -995,6 +1015,18 @@ impl Executor {
                     self.report_bad_array_subscript(&compound_token_diagnostic_word(
                         token, sub_end, &resolved, false,
                     ));
+                    return Err(format!("({})", elements.join(" ")));
+                }
+                // Same ALL_ELEMENT_SUB rejection as the rewrite path above
+                // (GNU arrayfunc.c:786-792, rubash#636).
+                if matches!(resolved.as_str(), "@" | "*") {
+                    eprintln!(
+                        "{}{}: cannot assign to non-numeric index",
+                        self.diagnostic_prefix(),
+                        compound_token_diagnostic_word(token, sub_end, &resolved, false)
+                    );
+                    use std::io::Write;
+                    let _ = std::io::stderr().flush();
                     return Err(format!("({})", elements.join(" ")));
                 }
                 let Some(index_value) = self.eval_indexed_subscript_expression(&resolved) else {
