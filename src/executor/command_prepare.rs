@@ -844,66 +844,180 @@ impl Executor {
         })
     }
 
+    /// Whitelist admission for the #607 literal fast path: exactly one
+    /// word, drawn from characters with no expansion meaning, with every
+    /// structured/redirect/assignment channel empty. GNU's own expansion
+    /// leaves such a word untouched (subst.c:13219 expand_word_list_internal
+    /// drives per-word stages with nothing to do on trigger-free text),
+    /// and execute_cmd.c:4468 runs the stored SIMPLE_COM as-is — so the
+    /// output equals the input plus the pipeline's standard post-conditions
+    /// (cleared kind vectors, metadata per the shared predicate).
+    /// Returns the expanded node or `None` to run the real path. The only
+    /// name-based exclusions are words whose expansion can itself fail
+    /// (`[`, `[[` report bad-substitution shapes) and dispatch verbs whose
+    /// expansion-phase side effects are out of scope for a loop fast path;
+    /// everything else is structural, so the roster cannot silently rot.
+    /// A contract test pins fast output == pipeline output per word.
+    pub(in crate::executor) fn try_expand_literal_command(
+        cmd: &CommandNode,
+    ) -> Option<CommandNode> {
+        let [word] = cmd.words.as_slice() else {
+            return None;
+        };
+        if word.is_empty()
+            || !word.bytes().all(|b| {
+                b.is_ascii_alphanumeric()
+                    || matches!(
+                        b,
+                        b'_' | b'.' | b',' | b':' | b'@' | b'%' | b'+' | b'-' | b'/'
+                    )
+            })
+        {
+            return None;
+        }
+        match word.as_str() {
+            "[" | "[[" | "command" | "builtin" | "exec" | "eval" | "source" | "." => return None,
+            _ => {}
+        }
+        if !cmd.assignments.is_empty()
+            || !cmd.assignment_raws.is_empty()
+            || !cmd.compound_assignments.is_empty()
+            || !cmd.array_element_assignments.is_empty()
+            || !cmd.process_substitutions.is_empty()
+            || !cmd.command_substitutions.is_empty()
+            || !cmd.arithmetic_expansions.is_empty()
+            || !cmd.parameter_expansions.is_empty()
+            || !cmd.brace_expansions.is_empty()
+            || !cmd.extglob_patterns.is_empty()
+            || !cmd.tilde_expansions.is_empty()
+            || !cmd.pathname_patterns.is_empty()
+            || !cmd.word_quotes.is_empty()
+            || !cmd.redirects.is_empty()
+            || cmd.redirect_in.is_some()
+            || cmd.redirect_out.is_some()
+            || cmd.append.is_some()
+            || cmd.redirect_err.is_some()
+            || cmd.redirect_err_append.is_some()
+            || cmd.heredoc.is_some()
+            || cmd.heredoc_body.is_some()
+            || cmd.heredoc_delimiter.is_some()
+            || !cmd.heredoc_redirects.is_empty()
+            || cmd.here_string.is_some()
+            || cmd.here_string_carrier.is_some()
+        {
+            return None;
+        }
+        // Clone and apply the pipeline's own post-conditions: cleared kind
+        // vectors, metadata exactly per the shared predicate (never a
+        // private copy of it). Construction is deliberately minimal rather
+        // than a full clone: a whole-struct clone costs ~0.7us (mostly the
+        // metadata/kinds Vec allocs it then drops), dwarfing the win.
+        // Every field the real pipeline could leave non-default for this
+        // input shape is set below; the contract test pins fast == slow
+        // field-for-field, so a future field with expansion semantics
+        // fails the test instead of shipping a divergence.
+        let mut expanded = CommandNode::new();
+        expanded.words = cmd.words.clone();
+        if Self::preserves_word_metadata(cmd) {
+            expanded.word_metadata = cmd.word_metadata.clone();
+        }
+        expanded.line = cmd.line;
+        expanded.logical_line = cmd.logical_line;
+        expanded.pipe = cmd.pipe;
+        expanded.background = cmd.background;
+        expanded.and_or = cmd.and_or;
+        expanded.inverted = cmd.inverted;
+        Some(expanded)
+    }
+
+    /// Whether `expand_command_words` keeps raw word metadata on the output node.
+    /// GNU execute_cmd.c:4468 works on the stored SIMPLE_COM without rebuilding it;
+    /// declaration builtins and ARRAYREF consumers additionally need the raw
+    /// tokens downstream (general.c:480, builtins/common.c:1040, read.def:405).
+    /// Shared with the #607 literal fast path so the two can never disagree
+    /// about which commands keep metadata — a second copy of this predicate
+    /// would be a silent-divergence risk every time it grows.
+    fn preserves_word_metadata(cmd: &CommandNode) -> bool {
+        cmd.conditional_command.is_some()
+        || cmd.words.first().is_some_and(|word| word == "[[")
+        // Declaration builtins need the raw tokens downstream: GNU's
+        // W_ASSIGNMENT (general.c:480 assignment() on the raw word)
+        // decides both field-split suppression and declare.def:429's
+        // assoc_noexpand — neither can be recovered from the expanded
+        // text (a quoted `"a[$x]=v"` looks identical to an assignment
+        // word after expansion).
+        || cmd.words.first().is_some_and(|word| {
+            matches!(
+                word.as_str(),
+                "declare" | "typeset" | "local" | "export" | "readonly"
+            )
+        })
+        // GNU execute_cmd.c:4366-4401 fix_arrayref_words marks every
+        // syntactic array-reference word W_ARRAYREF before execution;
+        // unset.def consumes it via builtin_arrayref_flags
+        // (builtins/common.c:1040 → VA_ONEWORD|VA_NOEXPAND), so the
+        // element subscript binds verbatim. `unset dict["'"]` and
+        // `unset 'dict[']'` expand to identical text; only the raw
+        // token distinguishes a valid reference from an invalid one.
+        || cmd.words.first().is_some_and(|word| word == "unset")
+        // `wait -p NAME` shares the same W_ARRAYREF consumption:
+        // wait.def:156 SET_VFLAGS reads it from the operand word's raw
+        // token to decide VA_NOEXPAND|VA_ONEWORD on the bound element.
+        || cmd.words.first().is_some_and(|word| word == "wait")
+        // `read NAME`/`printf -v NAME` likewise consume W_ARRAYREF via
+        // SET_VFLAGS (read.def:405, printf.def:305): VA_ONEWORD only
+        // attaches when array_expand_once is on AND the operand's raw
+        // token was a syntactic array reference, which the expanded
+        // text cannot recover.
+        || cmd.words.first().is_some_and(|word| word == "read" || word == "printf")
+        || !cmd.process_substitutions.is_empty()
+        || cmd.word_metadata.iter().any(|metadata| {
+            !metadata.process_substitutions.is_empty()
+                || metadata.raw.contains("<(")
+                || metadata.raw.contains(">(")
+                // GNU parse.y: an escaped `\<(...)` word is NOT a process
+                // substitution, but after quote removal the expanded value
+                // looks like one. Preserve the metadata so the executor
+                // can consult the raw form and avoid mis-materializing
+                // the expanded word as a process substitution (func5.sub
+                // line 45 `\<\(:\)` must report "command not found").
+                // The expanded value carries CTLESC markers between the
+                // metacharacters (`<` CTLESC `(`), so compare against the
+                // dequoted form.
+                || metadata
+                    .value
+                    .replace(crate::executor::markers::CTLESC, "")
+                    .contains("<(")
+                || metadata
+                    .value
+                    .replace(crate::executor::markers::CTLESC, "")
+                    .contains(">(")
+        })
+    }
+
     pub(in crate::executor) fn expand_command_words(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<CommandNode, ExecuteError> {
         let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_EXPAND);
-        let preserve_word_metadata = cmd.conditional_command.is_some()
-            || cmd.words.first().is_some_and(|word| word == "[[")
-            // Declaration builtins need the raw tokens downstream: GNU's
-            // W_ASSIGNMENT (general.c:480 assignment() on the raw word)
-            // decides both field-split suppression and declare.def:429's
-            // assoc_noexpand — neither can be recovered from the expanded
-            // text (a quoted `"a[$x]=v"` looks identical to an assignment
-            // word after expansion).
-            || cmd.words.first().is_some_and(|word| {
-                matches!(
-                    word.as_str(),
-                    "declare" | "typeset" | "local" | "export" | "readonly"
-                )
-            })
-            // GNU execute_cmd.c:4366-4401 fix_arrayref_words marks every
-            // syntactic array-reference word W_ARRAYREF before execution;
-            // unset.def consumes it via builtin_arrayref_flags
-            // (builtins/common.c:1040 → VA_ONEWORD|VA_NOEXPAND), so the
-            // element subscript binds verbatim. `unset dict["'"]` and
-            // `unset 'dict[']'` expand to identical text; only the raw
-            // token distinguishes a valid reference from an invalid one.
-            || cmd.words.first().is_some_and(|word| word == "unset")
-            // `wait -p NAME` shares the same W_ARRAYREF consumption:
-            // wait.def:156 SET_VFLAGS reads it from the operand word's raw
-            // token to decide VA_NOEXPAND|VA_ONEWORD on the bound element.
-            || cmd.words.first().is_some_and(|word| word == "wait")
-            // `read NAME`/`printf -v NAME` likewise consume W_ARRAYREF via
-            // SET_VFLAGS (read.def:405, printf.def:305): VA_ONEWORD only
-            // attaches when array_expand_once is on AND the operand's raw
-            // token was a syntactic array reference, which the expanded
-            // text cannot recover.
-            || cmd.words.first().is_some_and(|word| word == "read" || word == "printf")
-            || !cmd.process_substitutions.is_empty()
-            || cmd.word_metadata.iter().any(|metadata| {
-                !metadata.process_substitutions.is_empty()
-                    || metadata.raw.contains("<(")
-                    || metadata.raw.contains(">(")
-                    // GNU parse.y: an escaped `\<(...)` word is NOT a process
-                    // substitution, but after quote removal the expanded value
-                    // looks like one. Preserve the metadata so the executor
-                    // can consult the raw form and avoid mis-materializing
-                    // the expanded word as a process substitution (func5.sub
-                    // line 45 `\<\(:\)` must report "command not found").
-                    // The expanded value carries CTLESC markers between the
-                    // metacharacters (`<` CTLESC `(`), so compare against the
-                    // dequoted form.
-                    || metadata
-                        .value
-                        .replace(crate::executor::markers::CTLESC, "")
-                        .contains("<(")
-                    || metadata
-                        .value
-                        .replace(crate::executor::markers::CTLESC, "")
-                        .contains(">(")
-            });
+        // Fast admission (rubash#607): a single literal word with no
+        // redirects, assignments, metadata consumers, or structured
+        // expansions expands to itself — GNU's expand_words is the identity
+        // here, so clone the node and set the expanded words directly
+        // instead of running the full pipeline (measured 1.34us/call saved
+        // on `:` loops). This mirrors the arithmetic-command clone above
+        // and the identity argument of
+        // materialize_expanded_command_word's own fast path. Whitelist
+        // admission, not a symptom guard: any doubt falls through to the
+        // real path below, and downstream code (alias expansion, traps,
+        // dispatch) cannot distinguish the result — it is byte-identical
+        // to what the pipeline produces for this input shape.
+        if let Some(expanded) = Self::try_expand_literal_command(cmd) {
+            return Ok(expanded);
+        }
+
+        let preserve_word_metadata = Self::preserves_word_metadata(cmd);
+
         // rubash#353: assignment RHS values get the same read-time locale
         // re-derivation as command words (GNU decodes the RHS's `$'...'`
         // backslash-u escapes when the reader pulls the list). The raws are
@@ -4061,5 +4175,74 @@ mod command_word_materialization_tests {
         // Literal `${` keeps its skip; a plain `{a,b}` is a real group.
         assert!(!word_contains_brace_group("${VAR}"));
         assert!(word_contains_brace_group("{a,b}"));
+    }
+
+    /// rubash#607 literal fast-path contract: for every admitted shape the
+    /// fast output must equal the real pipeline output field-for-field
+    /// (compared via Debug rendering — deliberately sensitive), and every
+    /// excluded shape must fall through. This is the anti-rot pin: any
+    /// future pipeline special-casing, new struct field with expansion
+    /// semantics, or admission bug fails here instead of shipping a silent
+    /// divergence. (Behavioral equivalence across the whole suite is also
+    /// covered by the serial failure-set gate.)
+    #[test]
+    fn literal_fast_path_matches_pipeline() {
+        use super::Executor;
+        let mut executor = Executor::new();
+        // Admitted: plain builtins, externals, paths, punctuation words.
+        for word in [
+            ":",
+            "true",
+            "false",
+            "pwd",
+            "ls",
+            "x",
+            "a-b_c.d,e:f@g%h+i/j",
+            "-",
+            "--",
+            "declare",
+            "unset",
+            "export",
+        ] {
+            let node = single_word_node(word).expect("one command");
+            let fast = Executor::try_expand_literal_command(&node)
+                .unwrap_or_else(|| panic!("{word:?} should admit"));
+            let slow = executor
+                .expand_command_words(&node)
+                .unwrap_or_else(|_| panic!("{word:?} pipeline failed"));
+            assert_eq!(
+                format!("{fast:?}"),
+                format!("{slow:?}"),
+                "fast/slow divergence on {word:?}"
+            );
+        }
+        // Excluded: expansion-error shapes, dispatch verbs, non-literals.
+        for word in ["[", "[[", "command", "eval", "*", "$x", "a b"] {
+            let node = single_word_node(word).expect("one command");
+            assert!(
+                Executor::try_expand_literal_command(&node).is_none(),
+                "{word:?} should fall through"
+            );
+        }
+        assert!(single_word_node("").is_none());
+        // Structured nodes never admit, however literal the word looks.
+        for src in [": >out", "x=1", "echo hi", "a[0]=v"] {
+            let tokens = crate::lexer::tokenize(src);
+            let ast = crate::parser::parse(&tokens);
+            let node = &ast.commands[0];
+            assert!(
+                Executor::try_expand_literal_command(node).is_none(),
+                "{src:?} should fall through"
+            );
+        }
+    }
+
+    fn single_word_node(word: &str) -> Option<crate::parser::CommandNode> {
+        let tokens = crate::lexer::tokenize(word);
+        let ast = crate::parser::parse(&tokens);
+        if ast.commands.len() != 1 {
+            return None;
+        }
+        ast.commands.into_iter().next()
     }
 }
