@@ -449,13 +449,13 @@ impl Executor {
             // never sourced).
             let fields = self.field_split_values(&expanded);
             if suppress_glob {
-                return Ok(fields);
+                return Ok(fields.into_iter().map(finalize_for_list_value).collect());
             }
             let mut values = Vec::with_capacity(fields.len());
             for field in fields {
                 match glob::pathname_expand_word(&field, &self.shell_state.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => values.extend(matches),
-                    glob::PathnameExpansion::NoMatch => values.push(field),
+                    glob::PathnameExpansion::NoMatch => values.push(finalize_for_list_value(field)),
                     glob::PathnameExpansion::Fail(pattern) => return Err(pattern),
                 }
             }
@@ -465,13 +465,22 @@ impl Executor {
             // A for-list value is a bound VALUE, not split transport: drop
             // the ANSI_C_IFS_GUARD pairs (decoded `$'...'` blanks) the way
             // argv materialization does (rubash#379; array27.sub `for k in
-            // $\'\t'` must bind the bare tab).
-            return Ok(vec![strip_for_word_guards(&expanded)]);
+            // $\'\t'` must bind the bare tab). GNU subst.c:4807
+            // dequote_string strips the CTLESC quoting pairs off every word
+            // once pathname expansion has decided, quoted or not — a
+            // double-quoted `"f*"` binds plain `f*` (glob-active on later
+            // unquoted use), exactly like the single-quoted fast path and
+            // plain assignment do. Without this the loop variable kept the
+            // CTLESC carrier (${#p} is 3, unquoted $p never globs, and an
+            // unquoted $p in a case pattern stays literal — issue #675:
+            // per-arm expand_word_leave_quoted (execute_cmd.c:3712) sees
+            // quoted text where GNU sees plain data).
+            return Ok(vec![finalize_for_list_value(expanded)]);
         }
         // Apply glob expansion for for-loop words
         match glob::pathname_expand_word(&expanded, &self.shell_state.env_vars) {
             glob::PathnameExpansion::Matches(matches) => Ok(matches),
-            glob::PathnameExpansion::NoMatch => Ok(vec![strip_for_word_guards(&expanded)]),
+            glob::PathnameExpansion::NoMatch => Ok(vec![finalize_for_list_value(expanded)]),
             glob::PathnameExpansion::Fail(pattern) => Err(pattern),
         }
     }
@@ -594,4 +603,12 @@ pub(in crate::executor) fn raw_word_has_unquoted_parameter_expansion(raw: &str) 
 /// (command_prepare::materialize_expanded_command_word) applies.
 pub(in crate::executor) fn strip_for_word_guards(value: &str) -> String {
     value.replace(crate::executor::markers::ANSI_C_IFS_GUARD, "")
+}
+
+/// Storage-side half of GNU dequote_string (subst.c:4807) for for-list
+/// bindings: after field splitting and pathname expansion have decided,
+/// every bound word is dequoted — CTLESC quoting pairs reduce to their data
+/// character — whether or not globbing ran. See expand_for_brace_word_values.
+fn finalize_for_list_value(value: String) -> String {
+    crate::executor::markers::dequote_ctlesc_pairs(&strip_for_word_guards(&value))
 }
