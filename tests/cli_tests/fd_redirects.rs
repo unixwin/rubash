@@ -2,6 +2,7 @@ use std::process::Command;
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 #[test]
@@ -408,7 +409,15 @@ fn c_builtin_printf_preserves_left_to_right_stderr_redirects() {
 }
 
 fn external_fd_copy_bin_dir() -> std::path::PathBuf {
-    Path::new("target").join("rubash-cli-external-fd-copy-bin")
+    // Unique per call so parallel tests never share (and delete) one dir.
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    Path::new("target").join(format!(
+        "rubash-cli-external-fd-copy-bin-{}-{:?}-{}",
+        std::process::id(),
+        std::thread::current().id(),
+        id
+    ))
 }
 
 fn helper_path(bin_dir: &Path, name: &str) -> PathBuf {
