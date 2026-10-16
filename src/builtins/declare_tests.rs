@@ -23,6 +23,7 @@ fn capcase_attribute_transforms_assignments_and_prints() {
         &mut variables,
         &mut stdout,
         &mut stderr,
+        &mut None,
     )
     .unwrap();
     assert_eq!(
@@ -36,6 +37,7 @@ fn capcase_attribute_transforms_assignments_and_prints() {
         &mut variables,
         &mut stdout,
         &mut stderr,
+        &mut None,
     )
     .unwrap();
     assert_eq!(
@@ -61,6 +63,7 @@ fn export_p_listing_skips_invalid_identifier_names() {
         &mut variables,
         &mut stdout,
         &mut stderr,
+        &mut None,
     )
     .unwrap();
     assert!(variables.contains_key("VALID"));
@@ -73,6 +76,7 @@ fn export_p_listing_skips_invalid_identifier_names() {
         &mut variables,
         &mut stdout,
         &mut stderr,
+        &mut None,
     )
     .unwrap();
     assert!(!variables.contains_key("CommonProgramFiles(x86)"));
@@ -86,6 +90,7 @@ fn export_p_listing_skips_invalid_identifier_names() {
         &mut variables,
         &mut stdout,
         &mut stderr,
+        &mut None,
     )
     .unwrap();
     let listing = String::from_utf8(stdout).unwrap();
@@ -109,6 +114,7 @@ fn declare_p_rejected_operand_prints_error_not_full_listing() {
         &mut variables,
         &mut stdout,
         &mut stderr,
+        &mut None,
     )
     .unwrap();
     assert!(stdout.is_empty(), "{}", String::from_utf8_lossy(&stdout));

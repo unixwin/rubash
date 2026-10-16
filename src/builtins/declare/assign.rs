@@ -29,6 +29,7 @@ pub(super) fn assign_declare_names<W>(
     mark_unset_declarations: bool,
     deleted_names: &mut std::collections::HashSet<String>,
     stderr: &mut W,
+    oob_word: &mut Option<String>,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -104,7 +105,9 @@ where
                 .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
                 .unwrap_or(value);
             let expanded_value = expand_compound_array_value(list, variables);
-            if let Err(pattern) = append_array_value("()", &expanded_value, integer, variables) {
+            if let Err(pattern) =
+                append_array_value("()", &expanded_value, integer, variables, oob_word)
+            {
                 writeln!(
                     stderr,
                     "{}no match: {pattern}",
@@ -113,6 +116,12 @@ where
                 status = EXECUTION_FAILURE;
                 deleted_names.insert(raw_target.to_string());
                 continue;
+            }
+            // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
+            // rubash#635): an out-of-range subscript stops the whole
+            // declaration; the word travels up for the fatal diagnostic.
+            if oob_word.is_some() {
+                return Ok(EXECUTION_FAILURE);
             }
             writeln!(
                 stderr,
@@ -162,7 +171,7 @@ where
                     variables.insert(base.to_string(), appended);
                     mark_typed(variables, ASSOC_VARS, base);
                 } else {
-                    match append_array_value("()", &expanded_value, integer, variables) {
+                    match append_array_value("()", &expanded_value, integer, variables, oob_word) {
                         Ok(storage) => {
                             variables.insert(base.to_string(), storage);
                             mark_typed(variables, ARRAY_VARS, base);
@@ -176,6 +185,9 @@ where
                             status = EXECUTION_FAILURE;
                             deleted_names.insert(raw_target.to_string());
                         }
+                    }
+                    if oob_word.is_some() {
+                        return Ok(EXECUTION_FAILURE);
                     }
                 }
                 unmark_typed(variables, DECLARED_UNSET_VARS, base);
@@ -502,7 +514,7 @@ where
                 || current.starts_with(STORAGE_WORD_PREFIX)
                 || current.starts_with('(') && current.ends_with(')')
             {
-                match append_array_value(&current, value, integer, variables) {
+                match append_array_value(&current, value, integer, variables, oob_word) {
                     Ok(storage) => storage,
                     Err(pattern) => {
                         writeln!(
@@ -558,7 +570,7 @@ where
             append_assoc_value("()", value, integer, variables)
         } else if integer {
             if value.starts_with('(') && value.ends_with(')') {
-                match append_array_value("()", value, true, variables) {
+                match append_array_value("()", value, true, variables, oob_word) {
                     Ok(storage) => storage,
                     Err(pattern) => {
                         writeln!(
@@ -593,7 +605,7 @@ where
             // literal scalar (nameref22.sub: declare array='(one two three)'
             // prints `declare -- array="(one two three)"`).
             let expanded_value = expand_compound_array_value(value, variables);
-            match append_array_value("()", &expanded_value, false, variables) {
+            match append_array_value("()", &expanded_value, false, variables, oob_word) {
                 Ok(storage) => storage,
                 Err(pattern) => {
                     writeln!(
@@ -663,6 +675,13 @@ where
         }
         variables.insert(var_name.to_string(), value.clone());
         unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
+        // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
+        // rubash#635): an out-of-range subscript stops the whole
+        // declaration here; the partial store above stays, and the
+        // recorded word travels up for the fatal diagnostic.
+        if oob_word.is_some() {
+            return Ok(EXECUTION_FAILURE);
+        }
     }
     Ok(status)
 }

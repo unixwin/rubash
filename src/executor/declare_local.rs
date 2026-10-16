@@ -925,6 +925,7 @@ impl Executor {
                 } else {
                     Vec::new()
                 };
+                let mut oob_word = None;
                 let status = crate::builtins::declare::execute_with_io_named_in_context(
                     command_name,
                     &args,
@@ -934,7 +935,13 @@ impl Executor {
                     self.shell_state.function_depth > 0,
                     &frame_locals,
                     &dynamic_views,
+                    &mut oob_word,
                 )?;
+                // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
+                // rubash#635): report_error carries no `command:` segment
+                // (unlike `declare: x: readonly variable`); abort the list
+                // like the assignment route does. Partial store already
+                // installed by the assign path.
                 if let Some(saved) = saved_funcname {
                     match saved {
                         Some(value) => {
@@ -946,6 +953,30 @@ impl Executor {
                             self.shell_state.env_vars.remove("FUNCNAME");
                         }
                     }
+                }
+                // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
+                // rubash#635): report_error carries no `command:` segment
+                // (unlike `declare: x: readonly variable`); abort the list
+                // like the assignment route does. Partial store already
+                // installed by the assign path. Placed after the FUNCNAME
+                // restore so frame cleanup always runs.
+                if let Some(word) = oob_word {
+                    writeln!(
+                        stderr,
+                        "{}{}: bad array subscript",
+                        self.diagnostic_prefix(),
+                        word
+                    )?;
+                    self.exit_code = 1;
+                    // Bad-subscript class for the eval boundary (rubash#637
+                    // primitive, reused): eval absorbs it and continues.
+                    self.evalerror_subscript_pending.set(true);
+                    self.raise_evalerror_abort();
+                    // Flush here: this early return skips the normal
+                    // buffered-output flush below, which would swallow the
+                    // diagnostic (rubash#635).
+                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                    return Ok(1);
                 }
                 if local_blocked.is_empty() {
                     status
@@ -1298,6 +1329,7 @@ impl Executor {
                 } else {
                     Vec::new()
                 };
+                let mut oob_word = None;
                 let builtin_status = crate::builtins::declare::execute_with_io_named_in_context(
                     "local",
                     &args,
@@ -1307,6 +1339,7 @@ impl Executor {
                     true,
                     &frame_locals,
                     &dynamic_views,
+                    &mut oob_word,
                 )?;
                 let status = if local_blocked.is_empty() && print_missing.is_empty() {
                     builtin_status
@@ -1320,7 +1353,28 @@ impl Executor {
                 } else {
                     status
                 };
-                (status, builtin_status)
+                // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
+                // rubash#635): an out-of-range subscript aborts the whole
+                // local command with the bare report_error diagnostic (no
+                // `local:` segment). Partial store already installed by the
+                // assign path; the `builtin_status == 0` gate below then
+                // skips the scalar-shadow pass, and the pending abort ends
+                // the list like the assignment route does.
+                if let Some(word) = oob_word {
+                    writeln!(
+                        stderr,
+                        "{}{}: bad array subscript",
+                        self.diagnostic_prefix(),
+                        word
+                    )?;
+                    self.exit_code = 1;
+                    // Same eval-boundary class as execute_declare (rubash#637).
+                    self.evalerror_subscript_pending.set(true);
+                    self.raise_evalerror_abort();
+                    (1, 1)
+                } else {
+                    (status, builtin_status)
+                }
             };
             if builtin_status == 0 {
                 // Plain scalar locals must shadow the outer value in the typed

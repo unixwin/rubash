@@ -20,6 +20,7 @@ pub(super) fn array_attribute_assignment_value(
     append: bool,
     env_vars: &crate::shell::var_table::VarTable,
     name: &str,
+    oob_word: &mut Option<String>,
 ) -> (String, bool) {
     // The bool reports whether the bind produced array storage (a compound
     // assignment or a scalar bound to an existing array's element 0) so the
@@ -55,7 +56,7 @@ pub(super) fn array_attribute_assignment_value(
             if assoc_target {
                 append_assoc_value(&current, compound, integer, env_vars)
             } else {
-                append_array_value(&current, compound, integer, env_vars)
+                append_array_value(&current, compound, integer, env_vars, oob_word)
                     .unwrap_or_else(|_| compound.to_string())
             },
             true,

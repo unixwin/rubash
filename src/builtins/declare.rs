@@ -233,7 +233,14 @@ pub fn execute(
 ) -> io::Result<i32> {
     let mut stdout = crate::executor::GlobalStdout;
     let mut stderr = io::stderr();
-    execute_with_io(args, variables, &mut stdout, &mut stderr)
+    let mut oob_word = None;
+    let status = execute_with_io(args, variables, &mut stdout, &mut stderr, &mut oob_word)?;
+    // No abort channel here (test-only path in practice): preserve the
+    // failure as status so a future caller cannot mistake it for success.
+    if oob_word.is_some() {
+        return Ok(EXECUTION_FAILURE);
+    }
+    Ok(status)
 }
 
 /// Minimal flag scan used by the executor to decide whether a declare/typeset
@@ -359,12 +366,13 @@ pub(crate) fn execute_with_io<W, E>(
     variables: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
+    oob_word: &mut Option<String>,
 ) -> io::Result<i32>
 where
     W: Write,
     E: Write,
 {
-    execute_with_io_named("declare", args, variables, stdout, stderr)
+    execute_with_io_named("declare", args, variables, stdout, stderr, oob_word)
 }
 
 pub(crate) fn execute_with_io_named<W, E>(
@@ -373,6 +381,7 @@ pub(crate) fn execute_with_io_named<W, E>(
     variables: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
+    oob_word: &mut Option<String>,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -387,6 +396,7 @@ where
         false,
         &[],
         &[],
+        oob_word,
     )
 }
 
@@ -404,6 +414,7 @@ pub(crate) fn execute_with_io_named_in_context<W, E>(
     in_function: bool,
     frame_locals: &[String],
     dynamic_views: &[(String, String)],
+    oob_word: &mut Option<String>,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -1070,9 +1081,17 @@ where
         !print,
         &mut deleted_names,
         stderr,
+        oob_word,
     )? != EXECUTION_SUCCESS
     {
         attr_status = EXECUTION_FAILURE;
+    }
+    // GNU err_badarraysub + any_failed (arrayfunc.c:804-809, rubash#635):
+    // an out-of-range subscript stops the whole declaration; attribute
+    // passes below must not run. The word travels up for the fatal
+    // diagnostic at the Executor layer, which owns abort + status.
+    if oob_word.is_some() {
+        return Ok(EXECUTION_FAILURE);
     }
     let names = attr_names;
     // GNU declare.def: with explicit operands, -p prints exactly those

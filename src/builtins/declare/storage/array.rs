@@ -26,6 +26,20 @@ fn token_is_subscript_assignment(unquoted_token: &str) -> bool {
     false
 }
 
+/// How `[sub]` on an indexed compound element resolves (GNU
+/// arrayfunc.c:753-809 assign_compound_array_list, rubash#635): a plain
+/// index, a non-subscript bare word, or an out-of-range negative that must
+/// break the scan with the elements written so far (any_failed).
+/// A `[]` empty header keeps its historical append-next meaning here;
+/// GNU's err_badarraysub for it is a separate concern, deliberately
+/// untouched.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::builtins) enum ArrayAssignmentIndex {
+    Index(usize),
+    NoHeader,
+    NegativeOutOfRange,
+}
+
 /// GNU assign_compound_array_list (arrayfunc.c:700+). `Err(pattern)`
 /// reports a failglob pathname-expansion failure on one element word —
 /// expand_compound_array_assignment (arrayfunc.c:557) aborts the operand
@@ -35,6 +49,7 @@ pub(in crate::builtins) fn append_array_value(
     value: &str,
     integer: bool,
     env_vars: &HashMap<String, String>,
+    bad_subscript: &mut Option<String>,
 ) -> Result<String, String> {
     let mut entries = indexed_array_entries(current);
     let mut next_index = entries
@@ -103,28 +118,39 @@ pub(in crate::builtins) fn append_array_value(
         }
         if !from_field_split {
             if let Some((left, rhs)) = unquoted_token.split_once("+=") {
-                if let Some(index) = array_assignment_index(left, &entries) {
-                    let current = entries.get(&index).cloned().unwrap_or_default();
-                    // GNU assign_compound_array_list (arrayfunc.c:839-842)
-                    // stores the value text that the ONE expansion pass
-                    // (expand_words_no_vars, arrayfunc.c:610) already
-                    // dequoted; unquoted_token IS that post-removal text,
-                    // so the split-out rhs is final and a second
-                    // unquote_storage_value pass would re-read literal
-                    // backslashes as escape syntax (rubash#288:
-                    // `declare -a D=([0]='\[\e[33m\]Z')` stored
-                    // `[e[33m]Z`). Only the CTLESC sentinel strip that
-                    // dequote_string (subst.c:4807) performs after globbing
-                    // remains.
-                    let rhs = crate::executor::markers::dequote_ctlesc_pairs(rhs);
-                    let value = if integer {
-                        (eval_arith_value(&current) + eval_arith_value(&rhs)).to_string()
-                    } else {
-                        format!("{current}{rhs}")
-                    };
-                    entries.insert(index, value);
-                    next_index = index + 1;
-                    continue;
+                match array_assignment_index(left, &entries) {
+                    ArrayAssignmentIndex::NegativeOutOfRange => {
+                        // GNU err_badarraysub + any_failed + break
+                        // (arrayfunc.c:804-809, rubash#635): stop the scan
+                        // with the elements written so far; the caller
+                        // aborts the declaration from the recorded word.
+                        *bad_subscript = Some(unquoted_token.clone());
+                        break;
+                    }
+                    ArrayAssignmentIndex::NoHeader => {}
+                    ArrayAssignmentIndex::Index(index) => {
+                        let current = entries.get(&index).cloned().unwrap_or_default();
+                        // GNU assign_compound_array_list (arrayfunc.c:839-842)
+                        // stores the value text that the ONE expansion pass
+                        // (expand_words_no_vars, arrayfunc.c:610) already
+                        // dequoted; unquoted_token IS that post-removal text,
+                        // so the split-out rhs is final and a second
+                        // unquote_storage_value pass would re-read literal
+                        // backslashes as escape syntax (rubash#288:
+                        // `declare -a D=([0]='\[\e[33m\]Z')` stored
+                        // `[e[33m]Z`). Only the CTLESC sentinel strip that
+                        // dequote_string (subst.c:4807) performs after globbing
+                        // remains.
+                        let rhs = crate::executor::markers::dequote_ctlesc_pairs(rhs);
+                        let value = if integer {
+                            (eval_arith_value(&current) + eval_arith_value(&rhs)).to_string()
+                        } else {
+                            format!("{current}{rhs}")
+                        };
+                        entries.insert(index, value);
+                        next_index = index + 1;
+                        continue;
+                    }
                 }
                 if array_assignment_has_subscript(left) {
                     continue;
@@ -132,17 +158,25 @@ pub(in crate::builtins) fn append_array_value(
             }
 
             if let Some((left, rhs)) = unquoted_token.split_once('=') {
-                if let Some(index) = array_assignment_index(left, &entries) {
-                    // Same single-removal invariant as the `+=` arm above:
-                    // unquoted_token already lost its quote syntax, the rhs
-                    // is stored verbatim (arrayfunc.c:839-842 `val = w +
-                    // len + 2`), and dequote_string's CTLESC strip
-                    // (subst.c:4807) is the only remaining cleanup
-                    // (`declare -a x=([0]="*y")` stores `*y`).
-                    let stored = crate::executor::markers::dequote_ctlesc_pairs(rhs);
-                    entries.insert(index, stored);
-                    next_index = index + 1;
-                    continue;
+                match array_assignment_index(left, &entries) {
+                    ArrayAssignmentIndex::NegativeOutOfRange => {
+                        // Same GNU break as the `+=` arm (rubash#635).
+                        *bad_subscript = Some(unquoted_token.clone());
+                        break;
+                    }
+                    ArrayAssignmentIndex::NoHeader => {}
+                    ArrayAssignmentIndex::Index(index) => {
+                        // Same single-removal invariant as the `+=` arm above:
+                        // unquoted_token already lost its quote syntax, the rhs
+                        // is stored verbatim (arrayfunc.c:839-842 `val = w +
+                        // len + 2`), and dequote_string's CTLESC strip
+                        // (subst.c:4807) is the only remaining cleanup
+                        // (`declare -a x=([0]="*y")` stores `*y`).
+                        let stored = crate::executor::markers::dequote_ctlesc_pairs(rhs);
+                        entries.insert(index, stored);
+                        next_index = index + 1;
+                        continue;
+                    }
                 }
                 if array_assignment_has_subscript(left) {
                     continue;
@@ -265,25 +299,42 @@ pub(in crate::builtins) fn fold_indexed_storage_dupes(value: &str, rendered: &st
     rendered.to_string()
 }
 
-fn array_assignment_index(left: &str, entries: &BTreeMap<usize, String>) -> Option<usize> {
-    let expression = left.strip_prefix('[')?.strip_suffix(']')?;
+fn array_assignment_index(left: &str, entries: &BTreeMap<usize, String>) -> ArrayAssignmentIndex {
+    let Some(expression) = left
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    else {
+        // A `[` without its closer is not a subscript at all.
+        return ArrayAssignmentIndex::NoHeader;
+    };
     if expression.trim().is_empty() {
-        return entries
-            .keys()
-            .next_back()
-            .map(|index| index + 1)
-            .or(Some(0));
+        return ArrayAssignmentIndex::Index(
+            entries
+                .keys()
+                .next_back()
+                .map(|index| index + 1)
+                .unwrap_or(0),
+        );
     }
     let index = eval_arith_value(expression);
     if index >= 0 {
-        return usize::try_from(index).ok();
+        return usize::try_from(index)
+            .map(ArrayAssignmentIndex::Index)
+            .unwrap_or(ArrayAssignmentIndex::NoHeader);
     }
-    let max_index = entries.keys().next_back().copied()?;
+    let Some(max_index) = entries.keys().next_back().copied() else {
+        return ArrayAssignmentIndex::NegativeOutOfRange;
+    };
     let resolved = i128::try_from(max_index)
-        .ok()?
-        .checked_add(1)?
-        .checked_add(index)?;
-    usize::try_from(resolved).ok()
+        .ok()
+        .and_then(|max| max.checked_add(1))
+        .and_then(|base| base.checked_add(index));
+    match resolved.and_then(|value| usize::try_from(value).ok()) {
+        Some(resolved) => ArrayAssignmentIndex::Index(resolved),
+        // Still negative past the array start: GNU err_badarraysub +
+        // any_failed + break (arrayfunc.c:804-809, rubash#635).
+        None => ArrayAssignmentIndex::NegativeOutOfRange,
+    }
 }
 
 fn array_assignment_has_subscript(left: &str) -> bool {

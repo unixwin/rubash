@@ -71,9 +71,18 @@ where
             // `export -a name` alone just marks att_exported.
             let has_assign = value.is_some();
             let converted = env_vars.contains_key(name) || env::var(name).is_ok();
+            let mut oob_word = None;
             let (value, bound_array) = value
                 .map(|value| {
-                    array_attribute_assignment_value(value, array, assoc, append, env_vars, name)
+                    array_attribute_assignment_value(
+                        value,
+                        array,
+                        assoc,
+                        append,
+                        env_vars,
+                        name,
+                        &mut oob_word,
+                    )
                 })
                 .unwrap_or_else(|| {
                     (
@@ -90,6 +99,19 @@ where
                 mark_assoc(env_vars, name, converted);
             } else if (array && has_assign) || bound_array {
                 mark_array(env_vars, name);
+            }
+            // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
+            // rubash#635): the partial store and marks above stay; report
+            // here, fail the builtin. The list-abort needs Executor
+            // threading like declare_local's -- follow-up, not silent.
+            if let Some(word) = oob_word {
+                writeln!(
+                    stderr,
+                    "{}{}: bad array subscript",
+                    diagnostic_prefix(),
+                    word
+                )?;
+                return Ok(EXECUTION_FAILURE);
             }
             // GNU variables.c make_env_array_from_var_list: array and
             // associative variables never cross the child env boundary
@@ -191,8 +213,19 @@ where
     // printed list, so the marks below need the assignment word.
     let has_assign = value.is_some();
     let converted = env_vars.contains_key(name) || env::var(name).is_ok();
+    let mut oob_word = None;
     let (value, bound_array) = value
-        .map(|value| array_attribute_assignment_value(value, array, assoc, append, env_vars, name))
+        .map(|value| {
+            array_attribute_assignment_value(
+                value,
+                array,
+                assoc,
+                append,
+                env_vars,
+                name,
+                &mut oob_word,
+            )
+        })
         .unwrap_or_else(|| {
             (
                 env_vars
@@ -208,6 +241,17 @@ where
         mark_assoc(env_vars, name, converted);
     } else if (array && has_assign) || bound_array {
         mark_array(env_vars, name);
+    }
+    // Same OOB report as export above (rubash#635); list-abort threading
+    // is the documented follow-up.
+    if let Some(word) = oob_word {
+        writeln!(
+            stderr,
+            "{}{}: bad array subscript",
+            diagnostic_prefix(),
+            word
+        )?;
+        return Ok(EXECUTION_FAILURE);
     }
     // Same array-export contract as apply_export_arg above (GNU variables.c
     // make_env_array_from_var_list, rubash#534): a readonly array keeps the

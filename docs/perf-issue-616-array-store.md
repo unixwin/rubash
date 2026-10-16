@@ -815,3 +815,17 @@ function/loop bodies inside eval run deeper and keep unwinding. Consumed
 at the abandon point (except inside eval strings) and cleared at every
 pending-clearing boundary. Battery 9/20 -> 20/20; regression file
 `tests/issue637_eval_discard.rs`.
+
+## #635 — abort declare/local on out-of-range negative subscripts
+
+`declare -a a=( [-2]=q )` printed AFTER with status 0. GNU reports the
+whole element word and fails without running on (arrayfunc.c:804-809).
+The builtin resolver conflated "no header" with "out of range"; it now
+resolves 3 states and breaks with partial store kept, and the word
+travels up via out-params for the fatal diagnostic + DISCARD abort at the
+Executor layer (mirroring the arith_eval_failure precedent, bare
+report_error shape). Eval containment reuses the #637 absorption
+primitive. export/readonly record failure status with the same
+diagnostic; their list-abort threading is a documented follow-up.
+Battery 6/20 -> 20/20; regression file
+`tests/issue635_builtin_oob.rs`.
