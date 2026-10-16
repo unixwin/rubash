@@ -1232,21 +1232,30 @@ impl Executor {
         }
 
         let mut ran_body = false;
-        let body_ast = Ast {
-            commands: body.to_vec(),
-        };
+        // Header strings are borrowed from the parsed node, so the body
+        // cannot mutate them: trim once per loop entry. GNU eval_arith_for_
+        // expr (execute_cmd.c:3163) consults the trap table per evaluation;
+        // the probe is its cheap gate (no DEBUG action means run_debug_trap
+        // returns None), re-probed after the body, which can change it.
+        let test_empty = arithmetic.test.trim().is_empty();
+        let update_empty = arithmetic.update.trim().is_empty();
         while !arithmetic_failed {
             // execute_cmd.c:3191-3199: the skipped test evaluates as 0 —
             // the loop exits like any failing test (probe k2/m-series).
+            let mut debug_may_fire = crate::builtins::trap::has_active_trap_action(
+                &self.shell_state.env_vars,
+                "DEBUG",
+                "__RUBASH_TRAP_DEBUG",
+            );
             let mut test_skipped = false;
-            if self.debug_trap_in_scope() && !arithmetic.test.trim().is_empty() {
+            if !test_empty && debug_may_fire && self.debug_trap_in_scope() {
                 restore_for_line(self);
                 test_skipped = self.run_debug_trap(&arithmetic.test)?.is_some();
             }
             if test_skipped {
                 break;
             }
-            if !arithmetic.test.trim().is_empty() {
+            if !test_empty {
                 let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_TEST);
                 // GNU execute_cmd.c:3201: xtrace before test expression.
                 // Use raw expression to preserve original whitespace. The
@@ -1275,10 +1284,13 @@ impl Executor {
             self.shell_state.loop_depth += 1;
             let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_BODY);
             // execute_cmd.c:3236: line_number = arith_for_command->line is
-            // the ambient for the body's non-line-setting commands.
-            let for_ambient = for_line;
+            // the ambient for the body's non-line-setting commands. GNU
+            // execute_arith_for_command (execute_cmd.c:3219) re-walks the
+            // stored body by POINTER per iteration; execute_ast_inner walks
+            // the borrowed slice the same way (while/until and for-in bodies
+            // already skip the reader-level wrapper through it).
             let result =
-                self.with_ambient_line(for_ambient, |executor| executor.execute_ast(&body_ast));
+                self.with_ambient_line(for_line, |executor| executor.execute_ast_inner(body));
             drop(_t);
             self.shell_state.loop_depth -= 1;
             match result {
@@ -1300,14 +1312,19 @@ impl Executor {
             // execute_cmd.c:3191-3199: the skipped update evaluates as 0 —
             // the index variable keeps its value, so the next test sees the
             // unchanged index (probe k2: the body re-ran with the same `i`).
-            let update_skipped =
-                if self.debug_trap_in_scope() && !arithmetic.update.trim().is_empty() {
-                    restore_for_line(self);
-                    self.run_debug_trap(&arithmetic.update)?.is_some()
-                } else {
-                    false
-                };
-            if !update_skipped && !arithmetic.update.trim().is_empty() {
+            // Re-probe: the body above may have installed/removed the trap.
+            debug_may_fire = crate::builtins::trap::has_active_trap_action(
+                &self.shell_state.env_vars,
+                "DEBUG",
+                "__RUBASH_TRAP_DEBUG",
+            );
+            let update_skipped = if !update_empty && debug_may_fire && self.debug_trap_in_scope() {
+                restore_for_line(self);
+                self.run_debug_trap(&arithmetic.update)?.is_some()
+            } else {
+                false
+            };
+            if !update_skipped && !update_empty {
                 let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_UPDATE);
                 // GNU execute_cmd.c:3201: xtrace before update expression.
                 // Use raw expression to preserve original whitespace. The

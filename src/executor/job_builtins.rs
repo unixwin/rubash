@@ -531,6 +531,12 @@ impl Executor {
     /// silently reaps dead jobs when it is non-interactive or job control is
     /// off — `for/while/until/select/(( ;; ))` iterations call this.
     pub(in crate::executor) fn reap_dead_jobs_after_loop_body(&mut self) {
+        // GNU execute_cmd.c:3267 REAP() runs once per loop iteration; an
+        // empty table makes the scan plus cleanup below no-ops, so skip the
+        // consults too. Any `&` spawn restores the full path next iteration.
+        if self.shell_state.job_table.jobs.is_empty() {
+            return;
+        }
         let interactive = self
             .shell_state
             .env_vars
