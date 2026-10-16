@@ -389,6 +389,18 @@ impl Executor {
                 }
             }
         }
+        // rubash#618: the storage string can carry a transient duplicated
+        // `[k]=v` segment while an element-write burst runs ahead of its next
+        // canonical render, and `array_values` counts segments. A GNU assoc
+        // cell holds one binding per key (assoc.c assoc_insert overwrites in
+        // place), so its length is the number of distinct keys the parse
+        // folds out, not the number of segments in flight.
+        if self.is_assoc_parameter_array(name) {
+            return self
+                .parameter_array_storage(name)
+                .map(|value| crate::executor::assignment_helpers::assoc_entries(&value).len())
+                .unwrap_or(0);
+        }
         self.parameter_array_storage(name)
             .map(|value| array_values(&value).len())
             .unwrap_or(0)

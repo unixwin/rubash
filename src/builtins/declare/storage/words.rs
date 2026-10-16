@@ -70,14 +70,21 @@ impl Iterator for StorageWordIter<'_> {
             // arrayfunc.c:610 — pathname expansion with no field splitting,
             // rubash#391).
             if ch == '[' && !in_single && !in_double && word.is_empty() {
-                let rest: Vec<char> = self.input[self.offset + relative..].chars().collect();
-                if let Some(end) = crate::lexer::arraysub_span_len(&rest) {
-                    word.push_str(&rest[..end].iter().collect::<String>());
-                    // The leading `[` was already consumed by the loop's
-                    // iterator; the walker's span covers it, so advance
-                    // only the remaining end - 1 characters.
-                    for _ in 1..end {
-                        chars.next();
+                let rest = &self.input[self.offset + relative..];
+                // rubash#618: measure the span on the string itself — the old
+                // `chars().collect::<Vec<char>>()` of the whole rest made
+                // every segment cost O(remaining input), i.e. the parse O(n^2).
+                if let Some(end) = crate::lexer::arraysub_span_len_str(rest) {
+                    word.push_str(&rest[..end]);
+                    // The leading `[` (one byte) was already consumed by the
+                    // loop's iterator; advance past the span's remaining
+                    // end - 1 bytes.
+                    let mut consumed = 1usize;
+                    while consumed < end {
+                        match chars.next() {
+                            Some((_, c)) => consumed += c.len_utf8(),
+                            None => break,
+                        }
                     }
                     continue;
                 }

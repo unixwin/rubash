@@ -3031,6 +3031,47 @@ pub(crate) fn extglob_pattern_group_len(chars: &[char], open: usize) -> Option<u
     None
 }
 
+/// Length (in bytes, ending just past the closer) of the `[...]` array
+/// subscript span whose `[` sits at `text[0]` — the same scan as
+/// `arraysub_span_len` (same GNU owner, parse.y:5635-5651), but over the
+/// string itself so storage splitters never `collect()` the whole rest of
+/// the input into a `Vec<char>` just to measure one span (rubash#618: that
+/// collect made every assoc segment cost O(remaining input), i.e. the whole
+/// parse O(n^2)). Returns a byte index, always a char boundary (it stops
+/// just past the ASCII `]`).
+pub(crate) fn arraysub_span_len_str(text: &str) -> Option<usize> {
+    let mut bytes = text.char_indices();
+    // The caller guarantees `text[0] == '['`; depth starts covered.
+    match bytes.next() {
+        Some((_, '[')) => {}
+        _ => return None,
+    }
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    for (off, ch) in bytes {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '[' if !single && !double => depth += 1,
+            ']' if !single && !double => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(off + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Length (in chars, ending just past the closer) of the `[...]` array
 /// subscript span whose `[` sits at `chars[0]`, consumed the way GNU
 /// read_token_word's element arm does under PST_COMPASSIGN

@@ -308,6 +308,45 @@ impl Executor {
                 self.exit_code = 1;
                 return true;
             }
+            // rubash#618: a plain element assignment never needs the array's
+            // current contents — GNU assoc_insert just overwrites the binding
+            // (assoc.c assoc_insert) — so it can append one `[k]=v` segment in
+            // O(1) instead of parsing the whole storage string and re-rendering
+            // every key. `+=` and a non-`(...)` storage still take the canonical
+            // path below, which reads the current binding or rebuilds the cell.
+            if !append {
+                let stored = if is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, name) {
+                    self.eval_integer_assignment_value(value).to_string()
+                } else {
+                    value.to_string()
+                };
+                let mut fast = false;
+                if let Some(budget) = self.shell_state.assoc_compact_budget.get_mut(name) {
+                    if *budget > 0 {
+                        *budget -= 1;
+                        fast = true;
+                    }
+                }
+                if fast {
+                    let segment = super::assignment_helpers::assoc_element_segment(&key, &stored);
+                    let appended = match self.shell_state.env_vars.get_mut(name) {
+                        Some(storage) => {
+                            super::assignment_helpers::assoc_storage_append(storage, &segment)
+                        }
+                        None => false,
+                    };
+                    if appended {
+                        // Same bookkeeping as the canonical path: an element
+                        // assignment binds the variable (rubash#371).
+                        unmark_env_name(&mut self.shell_state.env_vars, DECLARED_UNSET_VARS, name);
+                        self.exit_code = 0;
+                        return true;
+                    }
+                    // Not an appendable assoc cell yet — drop the budget so the
+                    // canonical path below rebuilds it and re-seeds.
+                    self.shell_state.assoc_compact_budget.remove(name);
+                }
+            }
             let current = self
                 .shell_state
                 .env_vars
@@ -354,13 +393,24 @@ impl Executor {
             } else {
                 entries.push((key, value));
             }
-            // format_assoc_storage feeds the content-addressed parse cache
-            // with the rendered string, so a run of element assignments over
-            // this array re-parses nothing (perf: OMB spectrum-style fills).
+            // format_assoc_storage folds duplicated segments back to one binding
+            // per key, which makes this render the compaction step for the
+            // append-updated form, and feeds the content-addressed parse cache
+            // with the folded entries so a run of element assignments over this
+            // array re-parses nothing (perf: OMB spectrum-style fills,
+            // rubash#618).
+            let entries = super::assignment_helpers::dedupe_assoc_entries(entries);
+            // Re-seed the budget from the canonical entry count: that buys the
+            // next O(entries) appends for free and keeps the storage string
+            // within twice its canonical length, so reads stay O(entries).
+            let compact_budget = entries.len().max(1) as u32;
             let new_value = super::assignment_helpers::format_assoc_storage(entries);
             self.shell_state
                 .env_vars
                 .insert(name.to_string(), new_value);
+            self.shell_state
+                .assoc_compact_budget
+                .insert(name.to_string(), compact_budget);
             // GNU assign_array_element (arrayfunc.c:815) ->
             // bind_assoc_variable gives the variable a real assoc cell, so
             // var_isset is true and array_var_assignment (subst.c:8690-8697)

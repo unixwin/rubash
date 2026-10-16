@@ -514,16 +514,22 @@ fn assoc_entries(value: &str) -> Vec<(String, String)> {
         return Vec::new();
     };
 
-    split_storage_words(inner)
-        .into_iter()
-        .filter_map(|part| {
-            let (key, value) = part.split_once('=')?;
-            Some((
-                unquote_storage_value(key.trim_start_matches('[').trim_end_matches(']')),
-                unquote_storage_value(value),
-            ))
-        })
-        .collect()
+    // Fold transient duplicated segments to one binding per key (rubash#618:
+    // the element-write path appends instead of re-rendering, so repeats can
+    // be in flight) — same first-slot / last-value contract as the other two
+    // storage parsers, via the single shared helper.
+    crate::executor::assignment_helpers::dedupe_assoc_entries(
+        split_storage_words(inner)
+            .into_iter()
+            .filter_map(|part| {
+                let (key, value) = part.split_once('=')?;
+                Some((
+                    unquote_storage_value(key.trim_start_matches('[').trim_end_matches(']')),
+                    unquote_storage_value(value),
+                ))
+            })
+            .collect(),
+    )
 }
 
 fn format_indexed_storage(entries: BTreeMap<usize, String>) -> String {

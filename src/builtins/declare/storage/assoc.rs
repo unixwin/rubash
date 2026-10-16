@@ -1,6 +1,13 @@
 use super::{parse_array_tokens, split_storage_words, unquote_storage_value};
 
 pub(in crate::builtins) fn parse_assoc_words(value: &str) -> Vec<(String, String)> {
+    // Every parse folds transient duplicated segments back to one binding per
+    // key (rubash#618: the element-write path appends instead of re-rendering,
+    // so repeats can be in flight). The fold lives in the single shared
+    // helper so all three storage parsers agree on first-slot / last-value.
+    let folded = |entries: Vec<(String, String)>| {
+        crate::executor::assignment_helpers::dedupe_assoc_entries(entries)
+    };
     let Some(inner) = value
         .strip_prefix('(')
         .and_then(|value| value.strip_suffix(')'))
@@ -14,40 +21,44 @@ pub(in crate::builtins) fn parse_assoc_words(value: &str) -> Vec<(String, String
     // declare -A inside=(a 1 b 2 c 3)).
     match tokens.first() {
         Some(first) if assoc_assignment_token(first).is_none() && !first.starts_with('[') => {
-            return tokens
-                .chunks(2)
-                .filter_map(|pair| {
-                    let key = pair.first()?;
-                    Some((
-                        unquote_storage_value(key),
-                        pair.get(1)
-                            .map(|value| unquote_storage_value(value))
-                            .unwrap_or_default(),
-                    ))
-                })
-                .collect();
+            return folded(
+                tokens
+                    .chunks(2)
+                    .filter_map(|pair| {
+                        let key = pair.first()?;
+                        Some((
+                            unquote_storage_value(key),
+                            pair.get(1)
+                                .map(|value| unquote_storage_value(value))
+                                .unwrap_or_default(),
+                        ))
+                    })
+                    .collect(),
+            );
         }
         _ => {}
     }
 
-    tokens
-        .into_iter()
-        .filter_map(|part| {
-            // Storage pairs are `[key]=value`; split at the quote-aware
-            // subscript close so a quoted `=` inside a stored key stays in
-            // the key (assoc.tests assoc4: ["a]=test1;#a"]="123").
-            if let Some((key, value, _)) = assoc_assignment_token(&part) {
-                let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(key)
-                    .unwrap_or_else(|| unquote_storage_value(key));
-                return Some((key, unquote_storage_value(value)));
-            }
-            let (key, value) = part.split_once('=')?;
-            Some((
-                unquote_storage_value(key.trim_start_matches('[').trim_end_matches(']')),
-                unquote_storage_value(value),
-            ))
-        })
-        .collect()
+    folded(
+        tokens
+            .into_iter()
+            .filter_map(|part| {
+                // Storage pairs are `[key]=value`; split at the quote-aware
+                // subscript close so a quoted `=` inside a stored key stays in
+                // the key (assoc.tests assoc4: ["a]=test1;#a"]="123").
+                if let Some((key, value, _)) = assoc_assignment_token(&part) {
+                    let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(key)
+                        .unwrap_or_else(|| unquote_storage_value(key));
+                    return Some((key, unquote_storage_value(value)));
+                }
+                let (key, value) = part.split_once('=')?;
+                Some((
+                    unquote_storage_value(key.trim_start_matches('[').trim_end_matches(']')),
+                    unquote_storage_value(value),
+                ))
+            })
+            .collect(),
+    )
 }
 pub(in crate::builtins) fn append_assoc_value(
     current: &str,

@@ -606,3 +606,103 @@ reports status 1 where GNU reports 127).
 Measurement caveat as before: local bash is 5.3.20, the repository oracle is
 WSL bash 5.3.0, and every rule applied here is taken from the vendored 5.3 C
 source cited above rather than from an observed version's output.
+
+## #618 perf phase — the element write no longer re-renders (append + compact)
+
+### Attribution — three O(keys) steps, not one
+
+Decomposing one `m[k]=v` at K=5000 (crate-internal microbench, since
+superseded and removed): string clone 1.47µs, parse+memo-hit+**Vec deep-clone
+out of the Arc** 715.69µs, full re-render 2139.84µs. The earlier parse memo
+only removed the *scan*; the clone (24–25%) and the render (73–75%) stayed
+O(keys). Fixing only the render could never flatten the curve.
+
+A cell-authoritative + lazy-render redesign was surveyed and **rejected**: the
+read surface is ~125 A-class sites behind one good hook
+(`parameter_array_storage`, 54 callers, owned `String`) but ~20 direct
+`env_vars.get(name)` borrows through `VarTable`'s `Deref<HashMap>` admit no
+hook, and 8 B-class groups need the literal bytes (`set` listing, scope
+save/restore round-trips, two unfiltered OS-env projections). Routing all of
+them is #638's dual-store class at 20× the blast radius.
+
+### Fix
+
+Plain `m[k]=v` (`!append`, integer attribute pre-evaluated as before)
+appends one `[k]=v` segment before the closing `)` in O(segment) instead of
+parsing + re-rendering (`array_assignment_exec.rs`, `assignment_helpers.rs:
+assoc_element_segment`, `assoc_storage_append`). The segment is quoted by the
+same quoters the full renderer uses, so an append-built string is
+byte-identical to a rendered one whenever no key repeats. `+=`,
+non-`(...)` storage, and append-failures fall through to the unchanged
+canonical path (whitelist with the real path as fallback). A per-variable
+`assoc_compact_budget` (`shell_state.rs`, seeded from the canonical entry
+count, cloned with the state) buys O(entries) appends per O(entries)
+compaction — amortized O(1) per write, string never beyond twice canonical —
+and is scheduling-only: a stale budget moves the compaction, never the value.
+
+Appending creates transient duplicated segments, so three readers had to agree
+on the contract `bash_assoc_order` already documents — *"first occurrence
+fixes the slot; last occurrence supplies the value"* (GNU `assoc.c
+assoc_insert` overwrites in place, one binding per key):
+
+- `assoc_entries_uncached` + builtins `parse_assoc_words` + printf's own
+  parser fold at the source via one shared `dedupe_assoc_entries`
+  (first-slot, last-value; identity on dupe-free input, i.e. a no-op on the
+  pre-existing corpus). Every RMW (`unset` retain, forward-`find` scalar
+  writers, `rev`-`find` element writers) is then safe regardless of find
+  direction.
+- `bash_assoc_order` now implements what its comment promised: the slot keeps
+  its first index, the value comes from the key's last index. Previously it
+  returned the first value — unreachable before (no writer ever produced
+  dupes), exposed by a direct injection probe.
+- `${#m[@]}` counts `assoc_entries(...).len()` for assocs instead of raw
+  `array_values` segments.
+
+### The tokenizer was O(n^2) — found by the miss, fixed at the root
+
+Compaction parses a novel (never-memo-fed) dupe-laden string, and the true
+parse measured ~O(n^1.6): 201 segments 1.0ms, 2001 24.6ms, 10001 563ms.
+Root cause: `StorageWordIter::next()` collected the **entire rest of input**
+into a `Vec<char>` for every `[`-leading word (i.e. every assoc segment)
+just to measure the subscript span — O(remaining) per word. Fixed with
+`lexer::skip::arraysub_span_len_str`, the identical state machine over `&str`
+returning a byte length (same GNU owner, parse.y:5635-5651 P_ARRAYSUB), used
+by the two storage-input splitters (executor `assignment_helpers.rs`, declare
+`storage/words.rs`). Five other `arraysub_span_len` callers take
+command-bounded single tokens and are untouched. True parse after the fix:
+10001 segments 17.8ms, linear.
+
+### Results — the curve is flat
+
+Key-count sweep, N=20000 writes, min-of-3 order-rotated (same tree, release):
+
+| keys | master/write | branch/write | master/GNU | branch/GNU |
+| --- | --- | --- | --- | --- |
+| 1 | 44.75µs | 45.90µs | 8.77x | 9.00x |
+| 100 | 87.45µs | 47.85µs | 15.08x | 8.25x |
+| 1000 | 537.40µs | 48.90µs | 99.52x | 9.06x |
+| 5000 | 2361.35µs | 52.40µs | 445.54x | 9.89x |
+
+5000x key growth moves branch per-write 1.14x (host noise); master blows up
+52.8x. K=5000 branch is 45x faster than master; the GNU gap closes
+445x → 9.9x.
+
+Residuals, honestly: K≤3 branch trails master ~+1.5µs/write (~3%). Rate-fit
+over K∈{1,2,3,5,10} (canonical share ≈1/(K+1)) attributes it structurally —
+master's canonical always memo-HITs (it parses the string it just fed) while a
+compaction parse always memo-MISSes (append-built strings are novel by
+construction); the miss premium is linear and 2x-bounded after the tokenizer
+fix. It vanishes by K=5 and is negative beyond. The remaining ~9x vs GNU is
+fixed per-statement pipeline overhead (present at K=1, shared with scalar
+writes) — a different subsystem, not this issue.
+
+### Verification (this phase)
+
+- 50-case assoc-write GNU differential battery: 50/50 identical before and
+  after (master baseline 50/50, so the battery is a clean guard).
+- Focused targets green: `array_store_parity`, `issue371`, `issue638`,
+  `array_compound_quote_regressions`, declare/nameref/export suites.
+  (`issue326/unset_tz_uses_system_localtime_offset` fails identically on
+  unmodified master — Android tzdata environment issue.)
+- Full serial failure-set gate vs `ce471a2` + niubash product A/B: see the
+  PR record.

@@ -46,6 +46,7 @@ pub(crate) use continuation::SubscriptResidualState;
 use heredoc::{heredoc_delimiters, HereDocDelimiter};
 use scanner::{Lexer, LexerBoundaryState, LexerParseState};
 pub(crate) use skip::arraysub_span_len;
+pub(crate) use skip::arraysub_span_len_str;
 pub(crate) use skip::command_substitutions_balanced;
 pub(crate) use skip::dollar_double_paren_is_arithmetic;
 pub(crate) use skip::dollar_word_group_len;

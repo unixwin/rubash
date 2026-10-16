@@ -342,8 +342,42 @@ pub(in crate::executor) fn append_assoc_scalar_value(current: &str, value: &str)
     format_assoc_storage(entries)
 }
 
+/// Collapse duplicated `[k]=v` segments to a single binding per key, using the
+/// contract `bash_assoc_order` documents: the FIRST occurrence fixes the key's
+/// slot and the LAST occurrence supplies its value.
+///
+/// GNU assoc.c assoc_insert overwrites an existing key in place, so a live
+/// associative array never holds two bindings for one key. rubash's storage
+/// string is append-updated on the hot element-write path (rubash#618), so a
+/// transient duplicated segment CAN be in flight between two canonical
+/// renders; every parse and every render folds it back to the GNU shape.
+/// Storage that never carried a duplicate — everything that renders today —
+/// passes through unchanged, so this is a no-op on the pre-existing corpus.
+pub(crate) fn dedupe_assoc_entries(entries: Vec<(String, String)>) -> Vec<(String, String)> {
+    if entries.len() < 2 {
+        return entries;
+    }
+    let mut slot_of: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::with_capacity(entries.len());
+    let mut out: Vec<(String, String)> = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        match slot_of.get_mut(&key) {
+            Some(slot) => out[*slot].1 = value,
+            None => {
+                slot_of.insert(key.clone(), out.len());
+                out.push((key, value));
+            }
+        }
+    }
+    out
+}
+
 pub(in crate::executor) fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
-    let entries = std::sync::Arc::new(entries);
+    // A canonical render doubles as the compaction step for the append-updated
+    // storage form (rubash#618): duplicated segments fold back to one binding
+    // here, and the memo below is fed with the folded entries so a later parse
+    // hit agrees with what the string now says.
+    let entries = std::sync::Arc::new(dedupe_assoc_entries(entries));
     let rendered = format!(
         "({})",
         entries
@@ -369,6 +403,38 @@ pub(in crate::executor) fn format_assoc_storage(entries: Vec<(String, String)>) 
     }
     cache.insert(rendered.clone(), std::sync::Arc::clone(&entries));
     rendered
+}
+
+/// One `[k]=v` storage segment, quoted exactly as `format_assoc_storage`
+/// renders it, so a string built by appending segments is byte-identical to
+/// one built by a full render whenever no key repeats.
+pub(in crate::executor) fn assoc_element_segment(key: &str, value: &str) -> String {
+    format!(
+        "[{}]={}",
+        quote_assoc_key(key),
+        quote_assoc_storage_value(value)
+    )
+}
+
+/// Append one segment to a `(...)` storage string in O(segment) time: only the
+/// closing `)` shifts, so the whole array is never re-rendered (rubash#618).
+///
+/// Returns `false` when the storage is not in the appendable `(...)` shape, so
+/// the caller falls back to a canonical render instead of corrupting a value
+/// that is not an assoc cell yet.
+pub(in crate::executor) fn assoc_storage_append(storage: &mut String, segment: &str) -> bool {
+    if storage.len() < 2 || !storage.starts_with('(') || !storage.ends_with(')') {
+        return false;
+    }
+    let at = storage.len() - 1;
+    // `()` has no entries to separate from; anything longer already carries a
+    // first segment that the new one must be space-delimited from.
+    if at > 1 {
+        storage.insert_str(at, &format!(" {segment}"));
+    } else {
+        storage.insert_str(at, segment);
+    }
+    true
 }
 
 pub(in crate::executor) fn quote_assoc_key(key: &str) -> String {
@@ -470,22 +536,28 @@ fn assoc_entries_uncached(value: &str) -> Vec<(String, String)> {
         return Vec::new();
     };
 
-    merge_assoc_subscript_tokens(split_storage_words(inner).collect())
-        .into_iter()
-        .filter_map(|part| {
-            // Storage pairs are `[key]=value`; split at the quote-aware
-            // subscript close so a quoted `=` inside a stored key stays in
-            // the key (assoc.tests assoc4: ["a]=test1;#a"]="123").
-            if let Some((key, value, _)) = assoc_assignment_token(&part) {
-                return Some((unquote_storage_value(key), unquote_storage_value(value)));
-            }
-            let (key, value) = part.split_once('=')?;
-            Some((
-                unquote_storage_value(key.trim_start_matches('[').trim_end_matches(']')),
-                unquote_storage_value(value),
-            ))
-        })
-        .collect()
+    let parsed: Vec<(String, String)> =
+        merge_assoc_subscript_tokens(split_storage_words(inner).collect())
+            .into_iter()
+            .filter_map(|part| {
+                // Storage pairs are `[key]=value`; split at the quote-aware
+                // subscript close so a quoted `=` inside a stored key stays in
+                // the key (assoc.tests assoc4: ["a]=test1;#a"]="123").
+                if let Some((key, value, _)) = assoc_assignment_token(&part) {
+                    return Some((unquote_storage_value(key), unquote_storage_value(value)));
+                }
+                let (key, value) = part.split_once('=')?;
+                Some((
+                    unquote_storage_value(key.trim_start_matches('[').trim_end_matches(']')),
+                    unquote_storage_value(value),
+                ))
+            })
+            .collect();
+    // The storage string can carry a transient duplicated segment while an
+    // element-write burst runs ahead of its next canonical render (rubash#618):
+    // GNU's table holds one binding per key, so fold here rather than let every
+    // caller disagree about which binding wins.
+    dedupe_assoc_entries(parsed)
 }
 
 pub(in crate::executor) fn assoc_value_at(value: &str, key: &str) -> Option<String> {
@@ -549,12 +621,19 @@ pub(crate) fn bash_assoc_order(
 ) -> Vec<(usize, (String, String))> {
     // First occurrence fixes the slot; last occurrence supplies the value.
     let mut first_index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut last_index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut unique: Vec<usize> = Vec::new();
     for (index, (key, _)) in entries.iter().enumerate() {
         if first_index.contains_key(key.as_str()) {
+            // A repeated key keeps the slot its first occurrence claimed and
+            // only re-points the value, so a slot never moves because a value
+            // was rewritten. Storage without repeats — every render today —
+            // leaves `last_index` equal to `first_index`.
+            last_index.insert(key.as_str(), index);
             continue;
         }
         first_index.insert(key.as_str(), index);
+        last_index.insert(key.as_str(), index);
         unique.push(index);
     }
 
@@ -581,7 +660,15 @@ pub(crate) fn bash_assoc_order(
     buckets
         .into_iter()
         .flatten()
-        .map(|index| (index, entries[index].clone()))
+        .map(|index| {
+            // The slot keeps its first occurrence's key and position; the
+            // value comes from that key's last occurrence.
+            let value_index = last_index[entries[index].0.as_str()];
+            (
+                index,
+                (entries[index].0.clone(), entries[value_index].1.clone()),
+            )
+        })
         .collect()
 }
 
@@ -910,14 +997,21 @@ impl Iterator for StorageWordIter<'_> {
             // — `[ empty ]` matches a one-char file, rubash#391).
             if ch == '[' && !in_single && !in_double && word.is_empty() {
                 let rest_offset = self.offset + relative;
-                let rest: Vec<char> = self.input[rest_offset..].chars().collect();
-                if let Some(end) = crate::lexer::arraysub_span_len(&rest) {
-                    let consumed: String = rest[..end].iter().collect();
-                    word.push_str(&consumed);
-                    // The leading `[` was already consumed by the iterator;
-                    // the walker's span covers it, so advance end - 1.
-                    for _ in 1..end {
-                        chars.next();
+                let rest = &self.input[rest_offset..];
+                // rubash#618: measure the span on the string itself — the old
+                // `chars().collect::<Vec<char>>()` of the whole rest made
+                // every segment cost O(remaining input), i.e. the parse O(n^2).
+                if let Some(end) = crate::lexer::arraysub_span_len_str(rest) {
+                    word.push_str(&rest[..end]);
+                    // The leading `[` (one byte) was already consumed by the
+                    // iterator; advance the walker past the span's remaining
+                    // end - 1 bytes.
+                    let mut consumed = 1usize;
+                    while consumed < end {
+                        match chars.next() {
+                            Some((_, c)) => consumed += c.len_utf8(),
+                            None => break,
+                        }
                     }
                     continue;
                 }
