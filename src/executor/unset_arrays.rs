@@ -728,6 +728,15 @@ impl Executor {
                     array_name.to_string(),
                     format_indexed_array_storage(Default::default()),
                 );
+                // The mirror is flushed but the structured cell still holds
+                // the old count — `${#a[@]}` reads the cell (rubash#651,
+                // same dual-store class as #638). Sync it empty like the
+                // element-unset path below does.
+                sync_typed_indexed_array(
+                    &mut self.shell_state.variables,
+                    array_name,
+                    &Default::default(),
+                );
                 return Some(0);
             }
             let index = match self.eval_indexed_subscript(if arrayref {
