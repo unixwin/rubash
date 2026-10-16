@@ -651,6 +651,11 @@ impl Executor {
         // separately on WORD_DESC/ASSIGNMENT_WORD. This narrow path handles
         // scalar `name+=value` until SHELL_VAR attributes and arrays own it.
         let (base_name, append) = assignment_name_and_append(name);
+        if !append {
+            if let Some(done) = self.bind_marks_free_scalar(base_name, &value) {
+                return done;
+            }
+        }
         // A subscript inside the operand itself (`read a[$x]`, `a[$x]=v`
         // reaching this path) is ExpandedOnce argv data; a subscript that
         // arrives via a nameref cell is raw stored text GNU expands at bind
@@ -1401,6 +1406,95 @@ impl Executor {
             return false;
         }
         true
+    }
+
+    /// #609 slice 2: marks-free plain scalar bind. GNU subst.c:3524
+    /// do_assignment_internal -> variables.c:3225 bind_variable (->:3054)
+    /// is one hash insert with the value moved once; rubash pays two
+    /// stores plus ten attribute probes. One attr_of probe (variables.h
+    /// att_* word) whitelists the shape; identical values skip both
+    /// stores, otherwise both are written together so the #616/#618
+    /// mirror-must-never-go-stale rule holds. None = fall through.
+    fn bind_marks_free_scalar(&mut self, base: &str, value: &str) -> Option<bool> {
+        if base.contains('[')
+            || value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+            || value.starts_with(STORAGE_WORD_PREFIX)
+            || matches!(
+                base,
+                "OPTIND"
+                    | "IGNOREEOF"
+                    | "ignoreeof"
+                    | "SECONDS"
+                    | "RANDOM"
+                    | "SRANDOM"
+                    | "BASHPID"
+                    | "BASH_SUBSHELL"
+                    | "FUNCNAME"
+                    | "LINENO"
+                    | "BASH_COMMAND"
+                    | "BASH_ARGC"
+                    | "BASH_ARGV"
+                    | "BASH_LINENO"
+                    | "BASH_SOURCE"
+                    | "PIPESTATUS"
+            )
+            || shell_assignment_needs_process_env(base)
+            || self.shell_state.env_vars.attr_of(base) != VarAttrs::default()
+            || is_marked_var(&self.shell_state.env_vars, CAPCASE_VARS, base)
+            || crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport")
+        {
+            return None;
+        }
+        self.pending_scalar_assignment = false;
+        // Identical rebinds skip both stores. The cell flag rides along:
+        // a readonly rebind still falls through to the generic bind's
+        // diagnostic even when the value is unchanged (GNU
+        // variables.c:3258 bind_variable refuses before comparing).
+        if self
+            .shell_state
+            .env_vars
+            .get(base)
+            .is_some_and(|cur| cur == value)
+            && matches!(self.shell_state.variables.get(base), Some(v) if !v.readonly && matches!(&v.value, crate::shell::ShellValue::Scalar(cur) if cur == value))
+        {
+            return Some(true);
+        }
+        match self.shell_state.variables.get_mut(base) {
+            Some(v) => {
+                // The in-place write below skips VariableStore::set, so
+                // enforce its readonly refusal here (the word above should
+                // already have excluded it).
+                if v.readonly {
+                    return None;
+                }
+                match &mut v.value {
+                    crate::shell::ShellValue::Scalar(cur) => {
+                        cur.clear();
+                        cur.push_str(value);
+                    }
+                    _ => return None,
+                }
+            }
+            None => {
+                if self
+                    .shell_state
+                    .variables
+                    .set(base.to_string(), crate::shell::Variable::scalar(value))
+                    .is_err()
+                {
+                    return None;
+                }
+            }
+        }
+        if let Some(cur) = self.shell_state.env_vars.get_mut(base) {
+            cur.clear();
+            cur.push_str(value);
+        } else {
+            self.shell_state
+                .env_vars
+                .insert(base.to_string(), value.to_string());
+        }
+        Some(true)
     }
 
     /// rubash#616 (plan Phase 1c): apply an append-only compound write
