@@ -11,7 +11,8 @@ use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceS
 /// its in_double state so `$'` inside it stays literal (issue #109).
 pub(in crate::executor) const DATA_DOUBLE_QUOTE: &'static str =
     crate::executor::markers::ASSIGN_DATA_DQUOTE_STR;
-
+/// Whitelist bytes needing no expansion on an assignment RHS (#609).
+const FAST_RHS_LITERAL: &[u8] = b"_-@%+=:,./-";
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::executor) struct AssignmentExpansionResult {
     pub(in crate::executor) value: String,
@@ -374,6 +375,41 @@ pub(in crate::executor) fn dbg_aav_enabled() -> bool {
 }
 
 impl Executor {
+    // #609 slice 1: `name=literal|$other|"$other"` fast expansion (GNU
+    // subst.c:3524 do_assignment_internal; variables.c:3225 bind_variable).
+    fn fast_plain_scalar_rhs(&self, value: &str, raw: Option<&str>) -> Option<String> {
+        let raw = raw?;
+        if value == raw {
+            let mut bytes = raw.bytes();
+            if bytes.all(|b| b.is_ascii_alphanumeric() || FAST_RHS_LITERAL.contains(&b)) {
+                return Some(raw.to_string());
+            }
+            return self.fast_plain_copy(raw.strip_prefix('$')?);
+        }
+        let src = raw.strip_prefix("\"$")?.strip_suffix('"')?;
+        let tail = value.strip_prefix(markers::QUOTED_WORD_VALUE_PREFIX_STR)?;
+        let inner = tail
+            .strip_prefix('$')?
+            .strip_suffix(markers::PARAM_NAME_END_MARKER_STR)?;
+        if inner != src {
+            return None;
+        }
+        self.fast_plain_copy(src)
+    }
+    // Borrowed read behind `$name`: one clone of the walker's cell
+    // (shell_variable_value); dynamics and `set -u` stay general.
+    fn fast_plain_copy(&self, src: &str) -> Option<String> {
+        if !is_shell_name(src) || matches!(src, "RANDOM" | "SRANDOM") {
+            return None;
+        }
+        if self.dynamic_parameter_value(src).is_some()
+            || crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset")
+        {
+            return None;
+        }
+        let value = self.shell_variable_value(src).unwrap_or_default();
+        (!value.contains([markers::IFS_GLUE, markers::ANSI_C_IFS_GUARD])).then_some(value)
+    }
     /// Assignment expansion with the parser-preserved verbatim RHS available.
     ///
     /// GNU subst.c:11349-11378 (`expand_word_internal`): an unquoted `<(`/`>(`
@@ -393,6 +429,9 @@ impl Executor {
         value: &str,
         raw: Option<&str>,
     ) -> String {
+        if let Some(fast) = self.fast_plain_scalar_rhs(value, raw) {
+            return fast;
+        }
         if let Some(raw) = raw.filter(|raw| {
             (value.contains("<(") || value.contains(">("))
                 && crate::parser::raw_word_has_unquoted_process_substitution(raw)
