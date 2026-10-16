@@ -484,6 +484,11 @@ impl Executor {
                 return false;
             }
             IndexedSubscript::Error => {
+                // A nounset trap already set the fatal status and raised the
+                // abort — skip the plain exit-1 so it survives (rubash#639).
+                if self.raise_nounset_subscript_abort() {
+                    return false;
+                }
                 self.exit_code = 1;
                 return false;
             }

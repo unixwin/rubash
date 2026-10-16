@@ -776,3 +776,23 @@ overhead (separate subsystem).
   (Android tzdata + positionals environment issues).
 - Full serial failure-set gate vs `333973c` + niubash product A/B: see the
   PR record.
+
+## #639 — nounset in arithmetic subscripts on the write path (split from #638)
+
+`set -u; a[k]=v` silently stored with status 0. GNU evaluates every
+subscript through `evalexp` → `expr_streval`, whose unbound block aborts on
+both read and write (`expr.c:1190-1216`). The write-path subscript
+evaluator was missing the nounset prologue its arithmetic
+command/expansion siblings have.
+
+The trap is FORCE_EOF, not DISCARD: a distinct `nounset_force_eof` cell
+rides the shared abandon vehicle, and the ast abandon point recomputes the
+context status there (127 at `-c`, 1 in script) — verified matrix on both.
+Every boundary that clears the pending flag clears the cell alongside
+(subshell/comsub/external/function resets). Compound `m=([k]=v)` needed one
+more hop (its failure maps through `apply_shell_assignment` to
+`ExpansionFailure(1)`; the cell now diverts to `Err(ExitCode(fatal))`).
+`unset` on a missing array stays silent — GNU evaluates subscripts only
+when the array exists (probed). No memo changes: subscript memo frames are
+per-word-expansion (both toggle directions probed). Battery 10/25 → 25/25;
+regression file `tests/issue639_nounset_subscript.rs`.

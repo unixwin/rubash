@@ -407,6 +407,7 @@ impl Executor {
         // into the parent's reader (nameref18.sub `ref[foo]=bar` under
         // ${THIS_SH} discarded the parent's remaining same-line commands).
         let saved_evalerror_pending = self.evalerror_pending.get();
+        let saved_nounset_force_eof = self.nounset_force_eof.get();
         let saved_evalerror_line = self.evalerror_line.get();
         let saved_reader_command_line = self.reader_command_line.get();
         let saved_parameter_assignment_failure = self.parameter_assignment_failure.get();
@@ -417,6 +418,7 @@ impl Executor {
         let saved_evalerror_exec_depth = self.evalerror_exec_depth.get();
         self.evalerror_exec_depth.set(0);
         self.evalerror_pending.set(false);
+        self.nounset_force_eof.set(false);
         self.evalerror_line.set(None);
         self.parameter_assignment_failure.set(false);
         // A parse error inside the child dies with it (GNU shell.c: the
@@ -690,6 +692,7 @@ impl Executor {
         self.inside_compound_condition
             .set(saved_inside_compound_condition);
         self.evalerror_pending.set(saved_evalerror_pending);
+        self.nounset_force_eof.set(saved_nounset_force_eof);
         self.evalerror_line.set(saved_evalerror_line);
         self.reader_command_line.set(saved_reader_command_line);
         self.parameter_assignment_failure

@@ -451,7 +451,12 @@ impl Executor {
         let index = match self.eval_indexed_subscript_expression(&resolved) {
             Some(index) => index,
             None => {
-                self.report_indexed_subscript_error(&resolved);
+                self.report_indexed_subscript_error_unless_nounset(&resolved);
+                // A nounset trap already set the fatal status and raised the
+                // abort — skip the generic fatal flags below (rubash#639).
+                if self.raise_nounset_subscript_abort() {
+                    return false;
+                }
                 // Runs during word expansion of a pending command: the
                 // evalerror DISCARDs the command itself
                 // (eval_indexed_subscript_deferred documents the model).

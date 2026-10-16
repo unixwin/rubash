@@ -223,7 +223,11 @@ impl Executor {
         let result = match self.eval_indexed_subscript_expression(&resolved) {
             Some(index) => IndexedSubscript::Index(index),
             None => {
-                self.report_indexed_subscript_error(&resolved);
+                // Silent on a nounset trap (message already printed once);
+                // the abort itself is raised by each status-sensitive caller
+                // via raise_nounset_subscript_abort, because only the caller
+                // knows whether its own status/message must yield (rubash#639).
+                self.report_indexed_subscript_error_unless_nounset(&resolved);
                 IndexedSubscript::Error
             }
         };
@@ -299,7 +303,7 @@ impl Executor {
         let result = match result {
             Some(index) => IndexedSubscript::Index(index),
             None => {
-                self.report_indexed_subscript_error(&resolved);
+                self.report_indexed_subscript_error_unless_nounset(&resolved);
                 // This variant runs while expanding a PENDING command's
                 // words (subst.c expand_word_internal -> param_expand), so
                 // GNU's evalerror DISCARD abandons the command itself:
@@ -832,7 +836,12 @@ impl Executor {
                         }
                         let Some(index_value) = self.eval_indexed_subscript_expression(&resolved)
                         else {
-                            self.report_indexed_subscript_error(&resolved);
+                            self.report_indexed_subscript_error_unless_nounset(&resolved);
+                            // A nounset trap aborts with the fatal status;
+                            // the partial `out` still returns so written
+                            // elements keep GNU's partial-store shape
+                            // (rubash#639).
+                            self.raise_nounset_subscript_abort();
                             return Err(format!("({out})"));
                         };
                         out.push('[');
@@ -989,7 +998,10 @@ impl Executor {
                     return Err(format!("({})", elements.join(" ")));
                 }
                 let Some(index_value) = self.eval_indexed_subscript_expression(&resolved) else {
-                    self.report_indexed_subscript_error(&resolved);
+                    self.report_indexed_subscript_error_unless_nounset(&resolved);
+                    // Same nounset-abort routing as the rewrite path above
+                    // (rubash#639).
+                    self.raise_nounset_subscript_abort();
                     return Err(format!("({})", elements.join(" ")));
                 };
                 let tail = &token[sub_end + 1..];

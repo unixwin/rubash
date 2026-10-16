@@ -586,6 +586,22 @@ impl Executor {
                 // exp_jump_to_top_level(DISCARD) in a noninteractive shell —
                 // the rest of the current command list is abandoned, the
                 // script continues on the next line with status 1.
+                // A nounset subscript trap is FORCE_EOF, not DISCARD
+                // (rubash#639, shell.c:1471): abandon with the context-owned
+                // fatal status instead of the ExpansionFailure(1) below.
+                if self.nounset_force_eof.replace(false) {
+                    self.shell_state.arithmetic_expansion_error.set(false);
+                    self.evalerror_pending.set(false);
+                    self.evalerror_line.set(None);
+                    let code = self.expansion_fatal_status();
+                    self.exit_code = code;
+                    return Err(ExecuteError::ExitCode(code));
+                }
+                // a failed standalone assignment (readonly violation, invalid
+                // nameref value, ...) prints its diagnostic and then
+                // exp_jump_to_top_level(DISCARD) in a noninteractive shell —
+                // the rest of the current command list is abandoned, the
+                // script continues on the next line with status 1.
                 // ExpansionFailure carries exactly that contract at top level
                 // (ast_exec.rs skips the remaining same-line commands).
                 // POSIX-mode notes item 35: a non-interactive POSIX shell

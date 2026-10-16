@@ -65,6 +65,7 @@ impl Executor {
         // A fresh reader-level run: an evalerror abort still pending from a
         // finished run is stale and must not discard commands here.
         self.evalerror_pending.set(false);
+        self.nounset_force_eof.set(false);
         self.evalerror_line.set(None);
         self.reader_command_line.set(None);
         // rubash#353: this run's unit (file / -c string) was upfront-lexed
@@ -118,6 +119,17 @@ impl Executor {
         let result = self.execute_ast_inner_body(commands);
         self.evalerror_exec_depth
             .set(self.evalerror_exec_depth.get().saturating_sub(1));
+        // A trapped list tail with no following commands never reaches the
+        // in-loop abandon check (rubash#639): convert a surviving nounset
+        // trap here. Only the true reader top (entered at depth 0) converts;
+        // nested lists (if/loop/function/eval bodies enter above 0)
+        // silent-unwind with the flags intact for their owner, which
+        // abandons and converts.
+        if self.evalerror_exec_depth.get() == 0 && self.nounset_force_eof.replace(false) {
+            self.exit_code = self.expansion_fatal_status();
+            self.evalerror_pending.set(false);
+            self.evalerror_line.set(None);
+        }
         result
     }
 
@@ -160,6 +172,7 @@ impl Executor {
             ($command:expr) => {
                 if $command.subshell_end {
                     self.evalerror_pending.set(false);
+                    self.nounset_force_eof.set(false);
                     self.evalerror_line.set(None);
                     if let Some(saved_state) = subshell_state.take() {
                         self.restore_flat_subshell(saved_state, subshell_cwd.take());
@@ -320,6 +333,7 @@ impl Executor {
                             }
                         }
                         self.evalerror_pending.set(false);
+                        self.nounset_force_eof.set(false);
                         self.evalerror_line.set(None);
                     }
                     index += 1;
@@ -333,6 +347,7 @@ impl Executor {
                 // (`( a[\" \"]=v ); echo after` prints `after`).
                 if command.subshell_end {
                     self.evalerror_pending.set(false);
+                    self.nounset_force_eof.set(false);
                     self.evalerror_line.set(None);
                     index += 1;
                     continue;
@@ -347,8 +362,17 @@ impl Executor {
                     // observes the unwound abort before anything else runs,
                     // so $? is 1 no matter which compound shape carried the
                     // failure (an `if` whose condition died never completes
-                    // and cannot leave its own 0).
-                    self.exit_code = 1;
+                    // and cannot leave its own 0). A nounset subscript trap
+                    // is FORCE_EOF, not DISCARD (rubash#639, shell.c:1471):
+                    // recompute the context status here (127 at the `-c`
+                    // top level, 1 in script mode) so no intermediate
+                    // exit-code write between the trap and the abandon can
+                    // downgrade it.
+                    if self.nounset_force_eof.replace(false) {
+                        self.exit_code = self.expansion_fatal_status();
+                    } else {
+                        self.exit_code = 1;
+                    }
                 }
                 let boundary = self.evalerror_line.get();
                 if std::env::var("RUBASH_DEBUG_EVALERR").is_ok() {
@@ -369,6 +393,7 @@ impl Executor {
                     continue;
                 }
                 self.evalerror_pending.set(false);
+                self.nounset_force_eof.set(false);
                 self.evalerror_line.set(None);
             }
             if self.evalerror_exec_depth.get() == 1 {
@@ -1362,6 +1387,7 @@ impl Executor {
                 // forked process boundary, so the abort dies with the
                 // subshell (`( a[$bad]=v ); echo after` runs `after`).
                 self.evalerror_pending.set(false);
+                self.nounset_force_eof.set(false);
                 self.evalerror_line.set(None);
                 if let Some(saved_state) = subshell_state.take() {
                     self.restore_flat_subshell(saved_state, subshell_cwd.take());

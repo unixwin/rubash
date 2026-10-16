@@ -412,6 +412,11 @@ impl Executor {
                     IndexedSubscript::Index(_)
                 ))
         {
+            // A nounset trap must abandon, not fall through and write the
+            // assoc entry (rubash#639).
+            if self.raise_nounset_subscript_abort() {
+                return;
+            }
             let mut entries = assoc_entries(&current);
             let key = self.resolve_array_subscript(source);
             if let Some(slot) = entries.iter_mut().find(|(entry_key, _)| *entry_key == key) {
@@ -439,6 +444,11 @@ impl Executor {
                 }
             }
             _ => {
+                // A nounset trap must abandon, not write the scalar fallback
+                // (rubash#639).
+                if self.raise_nounset_subscript_abort() {
+                    return;
+                }
                 self.apply_shell_assignment_command("wait", name, value);
             }
         }

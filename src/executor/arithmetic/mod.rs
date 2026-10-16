@@ -605,6 +605,25 @@ impl Executor {
         let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(&reexpanded, false);
 
         let expression = normalize_arithmetic_quotes(&with_assoc_keys);
+        // GNU expr.c:1190-1216 expr_streval: an unset (or invisible)
+        // variable reference with unbound_vars_is_error set aborts with
+        // err_unboundvar — the same prologue the arithmetic command and
+        // expansion evaluators run. This is the write path's only
+        // arithmetic-subscript entry (rubash#639); without it
+        // `set -u; a[k]=v` silently stored.
+        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
+            if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars)
+            {
+                *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
+                self.shell_state.arithmetic_nounset_error.set(true);
+                if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                    eprintln!("{}{}: unbound variable", self.diagnostic_prefix(), name);
+                    use std::io::Write;
+                    let _ = std::io::stderr().flush();
+                }
+                return None;
+            }
+        }
         *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
         let dynamic_values = self.arith_dynamic_context();
@@ -643,6 +662,42 @@ impl Executor {
     /// source line; nested lists unwind silently.
     pub(in crate::executor) fn raise_evalerror_abort(&self) {
         self.evalerror_pending.set(true);
+    }
+
+    /// Report a failed subscript evaluation — unless the failure was already
+    /// reported as nounset (rubash#639: the unbound-variable message prints
+    /// once at the trap site inside `eval_indexed_subscript_expression`, so
+    /// every downstream consumer stays silent or the user sees two
+    /// diagnostics for one trap).
+    pub(in crate::executor) fn report_indexed_subscript_error_unless_nounset(
+        &self,
+        resolved: &str,
+    ) {
+        if self.shell_state.arithmetic_nounset_error.get() {
+            return;
+        }
+        self.report_indexed_subscript_error(resolved);
+    }
+
+    /// After a subscript evaluation failed under `set -u` (rubash#639):
+    /// abandon with the context-owned fatal status (127 at the `-c` top
+    /// level, 1 in script mode) — the same rails the read path's nounset
+    /// handling uses. Returns true when it fired, so callers skip their own
+    /// status/message and fail now. Consumes the flag: a caught abort
+    /// (eval/function/subshell boundary) must never poison later commands
+    /// with a stale trap.
+    pub(in crate::executor) fn raise_nounset_subscript_abort(&mut self) -> bool {
+        if self.shell_state.arithmetic_nounset_error.replace(false) {
+            self.shell_state.arithmetic_expansion_error.set(false);
+            self.exit_code = self.expansion_fatal_status();
+            self.evalerror_pending.set(true);
+            // Distinct FORCE_EOF class for the abandon point (rubash#639):
+            // consumed there, cleared alongside every pending-clear.
+            self.nounset_force_eof.set(true);
+            true
+        } else {
+            false
+        }
     }
 
     /// GNU expr.c `evalerror` diagnostic for a subscript evaluated through

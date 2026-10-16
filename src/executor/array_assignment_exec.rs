@@ -504,6 +504,16 @@ impl Executor {
                     return true;
                 }
                 IndexedSubscript::Error => {
+                    // GNU expr.c:1190-1216: a nounset trap in the subscript
+                    // is FORCE_EOF, not a plain bad-subscript error
+                    // (rubash#639) — abandon with the context-owned fatal
+                    // status (127 at the `-c` top level, 1 in script mode),
+                    // the same rails the read path's nounset handling uses.
+                    // Any other evaluation failure keeps the existing
+                    // operand-expected behavior.
+                    if self.raise_nounset_subscript_abort() {
+                        return true;
+                    }
                     self.exit_code = 1;
                     return true;
                 }

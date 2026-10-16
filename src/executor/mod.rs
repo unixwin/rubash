@@ -699,6 +699,14 @@ pub struct Executor {
     /// the discarded tail as the commands sharing the failing reader-level
     /// command's source line (`CommandNode::line`).
     pub(crate) evalerror_pending: Cell<bool>,
+    /// rubash#639: a nounset (FORCE_EOF) subscript trap rides the same
+    /// `evalerror_pending` abandon vehicle as DISCARD failures, but GNU
+    /// exits 127 at the `-c` top level for FORCE_EOF (shell.c:1471) versus
+    /// 1 for DISCARD (shell.c:1477). This marker carries the class from the
+    /// trap site to the abandon point, which consumes it; every boundary
+    /// that clears `evalerror_pending` clears this alongside, so a caught
+    /// abort never poisons a later unrelated abandon with 127.
+    pub(crate) nounset_force_eof: Cell<bool>,
     /// Source line of the reader-level command whose list tail is being
     /// discarded; set lazily when the reader-level loop first observes
     /// `evalerror_pending`.

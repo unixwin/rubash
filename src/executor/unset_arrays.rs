@@ -738,7 +738,12 @@ impl Executor {
                 IndexedSubscript::Index(index) => index,
                 // GNU: `unset 'a[]'` is a silent no-op.
                 IndexedSubscript::Empty => return Some(0),
-                IndexedSubscript::Error => return Some(1),
+                IndexedSubscript::Error => {
+                    // A nounset trap aborts with the fatal status; other
+                    // failures keep status 1 (rubash#639).
+                    self.raise_nounset_subscript_abort();
+                    return Some(1);
+                }
             };
             // GNU arrayfunc.c:1207-1211: negative subscripts to indexed arrays
             // count back from end; if still negative, report "bad array
@@ -786,7 +791,11 @@ impl Executor {
             IndexedSubscript::Index(0) => {}
             IndexedSubscript::Index(_) => return None,
             IndexedSubscript::Empty => return Some(0),
-            IndexedSubscript::Error => return Some(1),
+            IndexedSubscript::Error => {
+                // Same nounset-abort routing (rubash#639).
+                self.raise_nounset_subscript_abort();
+                return Some(1);
+            }
         }
         if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, array_name) {
             return None;
