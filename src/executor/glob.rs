@@ -600,9 +600,11 @@ fn globstar_expand(
     if matches.is_empty() {
         return unmatched_expansion(word, nullglob, failglob);
     }
-    // Depth-first per-directory order is the GNU globstar emission order;
-    // do not re-sort globally here (each directory level is sorted in
-    // collect_globstar_matches instead).
+    // GNU pathexp.c shell_glob_filename + sh_sortglob: the collected
+    // globstar walk is re-sorted globally (byte order under C/POSIX via
+    // strcoll_posixcmp, live collation otherwise).
+    let mut matches = matches;
+    globsort_matches(&mut matches, env_vars);
     PathnameExpansion::Matches(matches)
 }
 
@@ -1017,10 +1019,9 @@ fn collect_globstar_matches(
     };
     let mut names = synthetic_dot_names(suffix, globskipdots);
     names.extend(entries.iter().map(|entry| entry.name.clone()));
-    // GNU glob.c sorts each directory's entries and emits depth-first:
-    // results group by directory in traversal order rather than a global
-    // byte sort over full paths (which would interleave `builtins.o` with
-    // `builtins/...`).
+    // GNU glob.c sorts each directory's entries during the depth-first
+    // walk; the single-** caller re-sorts the full list globally via
+    // sh_sortglob, so `builtins.o` orders beside `builtins/...`.
     names.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
     let include_dotfiles =
         dotglob || suffix.starts_with('.') || globignore_patterns(env_vars).is_some();
