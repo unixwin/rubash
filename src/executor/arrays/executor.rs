@@ -440,6 +440,22 @@ impl Executor {
         if is_marked_array_var(&self.shell_state.env_vars, &resolved) {
             return true;
         }
+        // Genuine indexed storage always carries the STORAGE_WORD_PREFIX
+        // (`format_indexed_array_values`/`_storage`), and a scalar value
+        // never does — so the prefix is an UNAMBIGUOUS array marker even
+        // when the ARRAY/ASSOC table lags (e.g. `local v=("${foo[@]}")`
+        // renders the prefixed storage before the mark lands). The BARE
+        // `(a b c)` form is deliberately NOT accepted here: that is the
+        // rubash#755 scalar shape. Assoc storage is bare `([k]=v)` but
+        // always ASSOC-marked, so it is covered above.
+        if self
+            .shell_state
+            .env_vars
+            .get(&resolved)
+            .is_some_and(|value| value.starts_with(crate::executor::markers::STORAGE_WORD_PREFIX))
+        {
+            return true;
+        }
         if matches!(
             self.shell_state
                 .variables
