@@ -828,7 +828,9 @@ impl Executor {
     /// `-c` top-level catch, shell.c:1471 run_one_command
     /// (`case FORCE_EOF: return last_command_exit_value = 127`); in script
     /// mode eval.c:98-107 reader_loop ends input and exits with
-    /// last_command_exit_value (1).
+    /// last_command_exit_value (1). With errexit on the fatal never reaches
+    /// that catch: error.c:169-187 report_error's `exit_immediately_on_error`
+    /// branch EXITPROG-jumps with 1 — see the arm below.
     ///
     /// Every forked child that re-arms `top_level` contains the jump and
     /// exits with last_command_exit_value — 1 — instead: the `( ... )`
@@ -851,7 +853,21 @@ impl Executor {
         {
             1
         } else if self.shell_state.env_vars.contains_key("__RUBASH_IS_C") {
-            127
+            // GNU error.c:169-187 report_error: when `set -e' is in effect
+            // (exit_immediately_on_error / flags.c:263) the error report
+            // itself calls exit_shell(last_command_exit_value), which
+            // EXITPROG-jumps out with EXECUTION_FAILURE (1) and never
+            // reaches shell.c:1471 run_one_command's FORCE_EOF remap to 127.
+            // So `bash -eu -c 'echo $UNDEF'` exits 1 while `bash -u -c` (no
+            // -e) still exits 127; the `-c` 127 mapping holds only with
+            // errexit off. The option value at the error site is what GNU
+            // reads — an `if`/`||` context does not clear it (empirical GNU
+            // 5.3.0: `bash -eu -c 'false || echo $UNDEF'` exits 1).
+            if self.errexit_enabled() {
+                1
+            } else {
+                127
+            }
         } else {
             1
         }
