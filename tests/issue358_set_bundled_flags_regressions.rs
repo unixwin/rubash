@@ -187,10 +187,17 @@ fn chars_after_o_still_apply() {
 /// noglob off — `echo zz*` still expands against an existing match.
 #[test]
 fn fast_path_validates_all_words_first() {
-    let (stdout, stderr, code) = rubash(
-        "mkdir -p /tmp/i358-empty-probe\ncd /tmp/i358-empty-probe\ntouch zzq\n\
+    // Sandbox dir under temp_dir (/tmp is not writable on Android, and a
+    // repo-root fallback would pollute the checkout — #763/#765 class).
+    let dir = std::env::temp_dir().join(format!("rubash-i358-{}", std::process::id()));
+    let dir_s = dir.to_string_lossy().replace('\\', "/");
+    let script = format!(
+        "rm -rf '{d}'\nmkdir -p '{d}'\ncd '{d}'\ntouch zzq\n\
          set -f -Z\nr=$?\necho zz*\necho \"setrc=$r\"",
+        d = dir_s
     );
+    let (stdout, stderr, code) = rubash(&script);
+    let _ = std::fs::remove_dir_all(&dir);
     assert!(
         stderr.contains("set: -Z: invalid option"),
         "stderr: {stderr}"
