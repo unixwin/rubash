@@ -166,6 +166,54 @@ pub fn char_count(s: &str) -> usize {
     s.chars().count()
 }
 
+/// Byte offsets of the GNU multibyte character boundaries in `bytes`.
+///
+/// This is the ADVANCE_CHAR walk of `include/shmbutil.h:114-147`: a valid
+/// multibyte sequence is one character, and every byte of an invalid
+/// sequence is one character (`mbrlen` returns (size_t)-1 / (size_t)-2, so
+/// the macro advances the index by one byte). `${#v}` (MB_STRLEN,
+/// subst.c:8308 -> utf8.c:167-184) and `${v:off:len}` (mb_substring,
+/// subst.c:9022 -> ADVANCE_CHAR) share this walk.
+///
+/// The result always begins with 0 and ends with `bytes.len()`, so a
+/// character count is `offsets.len() - 1` and the `n`-th character spans
+/// `offsets[n]..offsets[n + 1]`.
+pub fn multibyte_char_offsets(bytes: &[u8]) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(bytes.len() + 1);
+    offsets.push(0);
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match std::str::from_utf8(&bytes[index..]) {
+            Ok(text) => {
+                let mut cursor = index;
+                for ch in text.chars() {
+                    cursor += ch.len_utf8();
+                    offsets.push(cursor);
+                }
+                index = bytes.len();
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid > 0 {
+                    let text = std::str::from_utf8(&bytes[index..index + valid])
+                        .expect("valid_up_to prefix is valid UTF-8");
+                    let mut cursor = index;
+                    for ch in text.chars() {
+                        cursor += ch.len_utf8();
+                        offsets.push(cursor);
+                    }
+                    index += valid;
+                }
+                // utf8.c:177-178 / shmbutil.h:134-138: an invalid byte is
+                // one character and advances the walk by one byte.
+                index += 1;
+                offsets.push(index);
+            }
+        }
+    }
+    offsets
+}
+
 /// Count bytes in a string.
 pub fn byte_count(s: &str) -> usize {
     s.len()
@@ -916,5 +964,27 @@ mod tests {
         ] {
             assert!(!is_utf8_locale_name(name), "{name}");
         }
+    }
+
+    #[test]
+    fn multibyte_char_offsets_walk_invalid_bytes_one_at_a_time() {
+        // Empty and plain ASCII: one offset per byte.
+        assert_eq!(super::multibyte_char_offsets(b""), vec![0]);
+        assert_eq!(super::multibyte_char_offsets(b"abc"), vec![0, 1, 2, 3]);
+        // A valid multibyte sequence is a single character.
+        assert_eq!(super::multibyte_char_offsets(b"\xc3\xa9"), vec![0, 2]);
+        assert_eq!(super::multibyte_char_offsets(b"\xe2\x82\xac"), vec![0, 3]);
+        // An invalid byte is one character (ADVANCE_CHAR's mbrlen -1 path).
+        assert_eq!(super::multibyte_char_offsets(&[0xff]), vec![0, 1]);
+        assert_eq!(
+            super::multibyte_char_offsets(&[0x61, 0xff, 0x62]),
+            vec![0, 1, 2, 3]
+        );
+        // Truncated lead bytes are each their own invalid character.
+        assert_eq!(super::multibyte_char_offsets(&[0xe2, 0x82]), vec![0, 1, 2]);
+        assert_eq!(
+            super::multibyte_char_offsets(&[0xe2, 0x82, 0xac, 0xff, 0x41]),
+            vec![0, 3, 4, 5]
+        );
     }
 }

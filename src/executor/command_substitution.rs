@@ -920,11 +920,25 @@ impl Executor {
                 // niubash#177: same operand resolution as the argv funnel —
                 // a virtual-root file operand may exist only under its
                 // `.exe` spelling on disk.
-                match fs::read_to_string(crate::executor::path::windows_operand_file_path(
+                //
+                // Read bytes, not a decoded String: GNU cat.c reads the file
+                // as raw bytes (safe_read -> write), so a non-UTF-8 file is
+                // content, not an error. `read_to_string` rejected any
+                // invalid sequence as ENOENT and the shortcut then reported a
+                // file that plainly exists as "No such file" and returned an
+                // empty value (rubash#772). The bytes ride the same
+                // bytes_to_shell_text carrier contract as every other
+                // substitution capture, and GNU read_comsub discards NUL
+                // bytes while reading the child pipe (substitution_metadata
+                // SubstitutionOutput::readback), so drop NUL first.
+                match fs::read(crate::executor::path::windows_operand_file_path(
                     shell_path_to_windows(&path, &self.shell_state.env_vars),
                     &self.shell_state.env_vars,
                 )) {
-                    Ok(value) => output.push_str(&value),
+                    Ok(mut bytes) => {
+                        bytes.retain(|byte| *byte != 0);
+                        output.push_str(&bytes_to_shell_text(&bytes));
+                    }
                     Err(_) => {
                         status = 1;
                         eprintln!("cat: '{}': No such file or directory", path);

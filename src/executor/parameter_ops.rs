@@ -576,7 +576,17 @@ pub(in crate::executor) fn parameter_substring(
     if !crate::locale::is_multi_byte() {
         return parameter_substring_bytes(value, offset, length);
     }
-    let char_count = value.chars().count();
+    // GNU subst.c:9087-9092 parameter_brace_substring calls mb_substring()
+    // in a multibyte locale (subst.c:9022): the offset/length are character
+    // counts, and each step is one ADVANCE_CHAR (include/shmbutil.h:114),
+    // which advances one byte for an invalid sequence. Raw bytes >= 0x80
+    // travel as U+E000 marker pairs (substitution_metadata), so the walk must
+    // run over the decoded byte view. Taking `value.chars()` would instead
+    // cut a marker pair in half, leaking a carrier char: `${x:0:1}` on
+    // x=$'\xff' printed ee 80 80 (U+E000) instead of ff (rubash#772).
+    let raw = locale_byte_span(value);
+    let boundaries = crate::locale::multibyte_char_offsets(&raw);
+    let char_count = boundaries.len().saturating_sub(1);
     let Some(start) = parameter_substring_start(char_count, offset) else {
         return String::new();
     };
@@ -588,8 +598,10 @@ pub(in crate::executor) fn parameter_substring(
         Some(length) => usize::try_from(length).unwrap_or(usize::MAX),
         None => usize::MAX,
     };
-
-    value.chars().skip(start).take(take).collect()
+    let end = start.saturating_add(take).min(char_count);
+    crate::executor::substitution_metadata::bytes_to_shell_text(
+        &raw[boundaries[start]..boundaries[end]],
+    )
 }
 
 /// Byte-indexed form of GNU subst.c substring expansion: with MB_CUR_MAX of 1
