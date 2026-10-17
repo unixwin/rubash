@@ -16,6 +16,13 @@
 //! byte order in the merged stream discriminates the shared-handle fix
 //! (E1 O2 E3) from the retired two-pipe replay (O2 E1 E3) with no sleeps.
 
+//! Windows-only: every fixture child is `cmd /c` (plus `ping -n`, `>nul`).
+//! There is no cmd.exe on Unix/Android, so the file compiles to zero tests
+//! there (same gate as issue154). The merge machinery itself is covered on
+//! all hosts by the portable suites.
+
+#![cfg(windows)]
+
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
