@@ -902,6 +902,14 @@ impl Executor {
             // The child was handed the whole payload; model it as consumed
             // (same approximation as comsub_stdin_writeback — a spawned
             // process's read() calls are not observable here).
+            //
+            // `input` is transport text and this delta is folded into
+            // FUNCTION_STDIN_OFFSET, a transport byte index into the same
+            // buffer (`function_stdin_remaining`/`read_function_stdin` slice
+            // `input[offset..]`). Advance by the TRANSPORT length, never the
+            // raw payload length: a raw delta under-advances by the carrier
+            // overhead (x6 per control byte, x2 per high byte) and replays
+            // bytes the child already consumed (niubash#383 follow-up).
             self.pipeline_stdin_consumed.set(Some(input.len()));
             std::thread::spawn(move || {
                 let _ = stdin.write_all(&payload);

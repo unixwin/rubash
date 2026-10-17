@@ -1884,7 +1884,12 @@ impl Executor {
         if let Some(mut stdin) = processes[0].stdin.take() {
             if let Some(base) = stage0_stdin_base {
                 // The spawned child was handed the whole unread tail; GNU's
-                // shared fd 0 models that as consumed.
+                // shared fd 0 models that as consumed. `stage0_input` is
+                // transport text sliced from FUNCTION_STDIN at `base`, and
+                // FUNCTION_STDIN_OFFSET indexes that transport buffer, so the
+                // delta is its TRANSPORT length — `shell_text_to_raw_bytes`'s
+                // raw length would stop short by the carrier overhead and
+                // leave consumed bytes readable (niubash#383 follow-up).
                 self.shell_state.env_vars.insert(
                     FUNCTION_STDIN_OFFSET.to_string(),
                     (base + stage0_input.len()).to_string(),
@@ -2257,6 +2262,10 @@ impl Executor {
 
         if let Some(mut stdin) = first_stdin {
             if let Some(base) = stage0_stdin_base {
+                // Same unit contract as the concurrent path above:
+                // FUNCTION_STDIN_OFFSET indexes the transport buffer that
+                // `stage0_input` was sliced from, so advance by its transport
+                // length, not its raw length (niubash#383 follow-up).
                 self.shell_state.env_vars.insert(
                     FUNCTION_STDIN_OFFSET.to_string(),
                     (base + stage0_input.len()).to_string(),
