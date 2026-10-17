@@ -36,8 +36,13 @@ fn dev_null_redirect_beats_upstream_payload() {
 /// A real file beats the upstream payload too (`seq 3 | cat < f` -> f).
 #[test]
 fn file_redirect_beats_upstream_payload() {
+    let f = std::env::temp_dir().join("rubash429f");
     assert_eq!(
-        rubash("printf 'z\\n' > /tmp/rubash429f\nseq 3 | cat < /tmp/rubash429f"),
+        rubash(&format!(
+            "printf 'z\\n' > {}\nseq 3 | cat < {}",
+            f.display(),
+            f.display()
+        )),
         "z\n"
     );
 }
@@ -46,8 +51,13 @@ fn file_redirect_beats_upstream_payload() {
 /// element's redirects in its forked child after the pipe binds fd 0).
 #[test]
 fn later_stage_file_redirect_wins() {
+    let g = std::env::temp_dir().join("rubash429g");
     assert_eq!(
-        rubash("printf 'a\\n' > /tmp/rubash429g\nprintf 'up\\n' | cat | cat < /tmp/rubash429g"),
+        rubash(&format!(
+            "printf 'a\\n' > {}\nprintf 'up\\n' | cat | cat < {}",
+            g.display(),
+            g.display()
+        )),
         "a\n"
     );
 }
