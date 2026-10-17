@@ -106,9 +106,14 @@ fn array_join_comsub_under_redirect() {
 /// The outer redirect target must NOT receive the body's output.
 #[test]
 fn body_output_does_not_leak_into_outer_target() {
-    let (stdout, stderr, code) = rubash(
-        "f2() { v=$(IFS=:; echo hi); echo \"compound=[$v]\" >&2; }\nf2 > /tmp/i362-outer.txt\ncat /tmp/i362-outer.txt",
+    // temp_dir-based probe path (/tmp is not writable on Android).
+    let probe = std::env::temp_dir().join("i362-outer.txt");
+    let probe_s = probe.to_string_lossy().replace('\\', "/");
+    let script = format!(
+        "f2() {{ v=$(IFS=:; echo hi); echo \"compound=[$v]\" >&2; }}\nf2 > '{p}'\ncat '{p}'",
+        p = probe_s
     );
+    let (stdout, stderr, code) = rubash(&script);
     assert_eq!(stdout, "");
     assert_eq!(stderr, "compound=[hi]\n");
     assert_eq!(code, Some(0));

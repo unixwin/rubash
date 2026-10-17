@@ -115,10 +115,15 @@ fn read_missing_input_redirect_still_reports() {
 /// (no preflight side effects on the working paths).
 #[test]
 fn mapfile_working_paths_unaffected() {
-    let (stdout, stderr, code) = rubash(
-        "mapfile -t h <<< $'one\\ntwo'\necho \"h=${#h[@]}:${h[0]}:${h[1]}\"\n\
-         printf 'x\\ny\\n' > /tmp/rubash324f.txt\nmapfile -t f < /tmp/rubash324f.txt\necho \"f=${#f[@]}:${f[0]}:${f[1]}\"\nrm -f /tmp/rubash324f.txt",
+    // temp_dir-based probe path (/tmp is not writable on Android).
+    let probe = std::env::temp_dir().join("rubash324f.txt");
+    let probe_s = probe.to_string_lossy().replace('\\', "/");
+    let script = format!(
+        "mapfile -t h <<< $'one\\ntwo'\necho \"h=${{#h[@]}}:${{h[0]}}:${{h[1]}}\"\n\
+         printf 'x\\ny\\n' > '{p}'\nmapfile -t f < '{p}'\necho \"f=${{#f[@]}}:${{f[0]}}:${{f[1]}}\"\nrm -f '{p}'",
+        p = probe_s
     );
+    let (stdout, stderr, code) = rubash(&script);
     assert!(stderr.is_empty(), "stderr: {stderr}");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "h=2:one:two\nf=2:x:y\n");
