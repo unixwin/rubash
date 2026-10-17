@@ -968,7 +968,7 @@ fn run_command_string_with_init(
     if let Some(status) = run_startup_files(executor, init_file) {
         return finish_shell(executor, status, interactive);
     }
-    if let Some(init_file) = init_file {
+    if let Some(init_file) = init_file.filter(|rc| init_file_needs_direct_run(executor, rc)) {
         let status = run_init_file(executor, init_file);
         // rubash#297: `exit` in the rcfile terminates the shell before the
         // -c string runs (GNU builtins/exit.def -> exit_shell; verified
@@ -1126,7 +1126,7 @@ fn run_script_file_with_init(
     if let Some(status) = run_startup_files(executor, init_file) {
         return finish_shell(executor, status, interactive);
     }
-    if let Some(init_file) = init_file {
+    if let Some(init_file) = init_file.filter(|rc| init_file_needs_direct_run(executor, rc)) {
         let status = run_init_file(executor, init_file);
         // rubash#297: `exit` in the rcfile terminates the shell before the
         // script body runs (GNU builtins/exit.def -> exit_shell).
@@ -1228,7 +1228,7 @@ fn run_no_script_with_init(
     if let Some(status) = run_startup_files(executor, init_file) {
         return finish_shell(executor, status, true);
     }
-    if let Some(init_file) = init_file {
+    if let Some(init_file) = init_file.filter(|rc| init_file_needs_direct_run(executor, rc)) {
         let status = run_init_file(executor, init_file);
         // GNU: `exit` in a sourced startup file terminates the shell —
         // builtins/exit.def exit_builtin -> exit_shell unwinds through the
@@ -1289,7 +1289,7 @@ fn run_stdin_script_with_init(
     if let Some(status) = run_startup_files(executor, init_file) {
         return finish_shell(executor, status, true);
     }
-    if let Some(init_file) = init_file {
+    if let Some(init_file) = init_file.filter(|rc| init_file_needs_direct_run(executor, rc)) {
         let status = run_init_file(executor, init_file);
         // rubash#297: `exit` in the rcfile terminates the shell before the
         // stdin reader starts (GNU builtins/exit.def -> exit_shell; verified
@@ -1312,6 +1312,15 @@ fn run_stdin_script_with_init(
     } else {
         run_stdin_script(executor)
     }
+}
+
+/// Whether the drivers' direct --rcfile call should run: false when
+/// run_startup_files already sourced this exact file (recorded in
+/// __RUBASH_SOURCED_RC) — without this, interactive shells source
+/// --rcfile twice (issue312 gate test). True for the leftover shapes
+/// startup skips (empty HOME, non-interactive extension, login).
+fn init_file_needs_direct_run(executor: &Executor, init_file: &str) -> bool {
+    executor.get_env("__RUBASH_SOURCED_RC").as_deref() != Some(init_file)
 }
 
 fn run_init_file(executor: &mut Executor, init_file: &str) -> i32 {
@@ -1388,6 +1397,17 @@ fn run_startup_files(executor: &mut Executor, rc_override: Option<&str>) -> Opti
                 Vec::new()
             }
         };
+        // issue312 gate: record the rc override sourced here (verbatim CLI
+        // form, matching nonlogin_interactive_files) so the drivers'
+        // direct run_init_file call can skip it — else interactive shells
+        // source --rcfile twice. Only set when actually included: the
+        // empty-HOME early return above and the non-interactive/login
+        // shapes leave it unset and keep the direct call.
+        if let Some(rc) = rc_override {
+            if files.iter().any(|file| file == rc) {
+                executor.set_env("__RUBASH_SOURCED_RC", rc);
+            }
+        }
         for file in files {
             let status = run_init_file(executor, &file);
             if executor.take_exit_jump_pending() {
