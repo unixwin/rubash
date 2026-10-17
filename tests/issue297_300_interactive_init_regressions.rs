@@ -222,13 +222,34 @@ fn noninteractive_shells_do_not_bind_columns() {
     }
 }
 
+/// Root marker as THIS engine renders it: `\$` is `#` for euid 0, `$`
+/// otherwise (GNU variables.c:984 uidset — the old expectation pinned
+/// the root-emulation era unconditionally). libc is a unix dependency
+/// of this crate, so integration tests can read it directly; the
+/// Windows persona has no euid and keeps `#`, as before.
+#[cfg(unix)]
+fn root_mark() -> &'static str {
+    if unsafe { libc::geteuid() } == 0 {
+        "#"
+    } else {
+        "$"
+    }
+}
+
+/// Windows persona has no euid; `\$` renders `#` there, as before.
+#[cfg(windows)]
+fn root_mark() -> &'static str {
+    "#"
+}
+
 /// The reader shape renders the expanded default prompt exactly like GNU's
 /// non-tty readline path: `bash --rcfile /dev/null -i </dev/null` leaves
-/// `bash-5.3# exit\n` on stderr (clean-env WSL GNU 5.3.0, probe o4).
+/// `bash-5.3$ exit\n` (or `#` as root) on stderr (clean-env WSL GNU 5.3.0,
+/// probe o4, recorded as root).
 #[test]
 fn interactive_reader_echoes_expanded_default_prompt_at_eof() {
     let run = run_simple(&["--rcfile", "/dev/null", "-i"], b"");
-    assert_eq!(run.stderr, "bash-5.3# exit\n");
+    assert_eq!(run.stderr, format!("bash-5.3{} exit\n", root_mark()));
     assert_eq!(run.code, Some(0));
 }
 
