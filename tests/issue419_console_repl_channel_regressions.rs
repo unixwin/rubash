@@ -29,7 +29,16 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn run_stdin(args: &[&str], stdin: &[u8], env: &[(&str, &str)]) -> (String, String, Option<i32>) {
+    // Hermetic HOME: an interactive shell reads ~/.bashrc, so the
+    // developer's themed rc would override the default prompt these
+    // tests pin (rubash#690 class — host files leaking into assertions).
+    // An empty dir means no rc, no inputrc: the default prompt renders
+    // deterministically on every host.
+    let home_dir = std::env::temp_dir().join(format!("rubash-419-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home_dir);
+    std::fs::create_dir_all(&home_dir).expect("empty HOME");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    cmd.env("HOME", &home_dir);
     cmd.args(args)
         .env_remove("PS1")
         .env_remove("PS2")
@@ -48,6 +57,7 @@ fn run_stdin(args: &[&str], stdin: &[u8], env: &[(&str, &str)]) -> (String, Stri
         .expect("write stdin");
     drop(child.stdin.take());
     let output = child.wait_with_output().expect("wait rubash");
+    let _ = std::fs::remove_dir_all(&home_dir);
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -105,12 +115,30 @@ fn interactive_syntax_error_does_not_end_session() {
 /// `-i -s` with piped stdin is GNU's readline reader too (verified WSL
 /// GNU 5.3.0: `printf 'echo $-\n' | bash -i -s` renders PS1 on stderr):
 /// the prompt channel renders and `$-` keeps the `himBHs` shape.
+/// Root marker as the engine renders it (`\$` is `#` for euid 0;
+/// calibrated per host — pinning `#` unconditionally only passed as
+/// root).
+#[cfg(unix)]
+fn root_mark() -> &'static str {
+    if unsafe { libc::geteuid() } == 0 {
+        "#"
+    } else {
+        "$"
+    }
+}
+
+/// Windows persona has no euid; `\$` renders `#` there, as before.
+#[cfg(windows)]
+fn root_mark() -> &'static str {
+    "#"
+}
+
 #[test]
 fn interactive_dash_s_stdin_renders_prompt_stream() {
     let (stdout, stderr, _) = run_stdin(&["-i", "-s"], b"echo $-\nexit\n", &[]);
     assert!(stdout.contains("himBHs"), "stdout: {stdout:?}");
     assert!(
-        stderr.contains("bash-5.3#"),
+        stderr.contains(&format!("bash-5.3{}", root_mark())),
         "PS1 stream missing on -i -s: {stderr:?}"
     );
 }
