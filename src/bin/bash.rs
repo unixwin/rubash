@@ -81,14 +81,25 @@ fn suppress_child_console_window(command: &mut Command) {
     {
         use std::io::IsTerminal as _;
         use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW = 0x08000000 (WinBase.h). Deliberately gated on
-        // all-three-redirected, not just "stdout is piped": a child with no
-        // console can still use inherited console handles for plain I/O,
-        // but console APIs (ReadConsole/SetConsoleMode) fail in it, so an
-        // interactive niu session must keep inheriting the real console.
+        // DETACHED_PROCESS = 0x00000008, CREATE_NO_WINDOW = 0x08000000
+        // (WinBase.h). Deliberately gated on all-three-redirected, not just
+        // "stdout is piped": a child with no console can still use inherited
+        // console handles for plain I/O, but console APIs (ReadConsole/
+        // SetConsoleMode) fail in it, so an interactive niu session must keep
+        // inheriting the real console.
+        //
+        // niubash#379 picked CREATE_NO_WINDOW to stop the visible flash, and
+        // that allocates a *hidden console* for the child: starting conhost.exe
+        // with it costs ~22 ms per invocation, measured on every `bash -c`/
+        // `sh -c` with piped stdio - which is the case agents, CI and git hooks
+        // hit. With all three streams redirected the child has no console to
+        // inherit and does not need one, so DETACHED_PROCESS gives it that for
+        // free. Neither flag lets the child receive the parent's Ctrl+C (a
+        // CREATE_NO_WINDOW child has a console of its own, not the parent's),
+        // so cancellation semantics are unchanged.
         if !io::stdin().is_terminal() && !io::stdout().is_terminal() && !io::stderr().is_terminal()
         {
-            command.creation_flags(0x0800_0000);
+            command.creation_flags(0x0000_0008);
         }
     }
     #[cfg(not(windows))]
