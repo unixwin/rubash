@@ -158,10 +158,19 @@ pub(in crate::builtins) fn append_array_value(
             }
 
             if let Some((left, rhs)) = unquoted_token.split_once('=') {
-                match array_assignment_index(left, &entries) {
+                // The left side may carry CTLESC protection from a
+                // quote-serialized field (issue377 producer): dequote it
+                // for the subscript parse (no-op when absent), so a
+                // protected "[2]" still binds index 2.
+                match array_assignment_index(
+                    &crate::executor::markers::dequote_ctlesc_pairs(left),
+                    &entries,
+                ) {
                     ArrayAssignmentIndex::NegativeOutOfRange => {
                         // Same GNU break as the `+=` arm (rubash#635).
-                        *bad_subscript = Some(unquoted_token.clone());
+                        *bad_subscript = Some(crate::executor::markers::dequote_ctlesc_pairs(
+                            &unquoted_token,
+                        ));
                         break;
                     }
                     ArrayAssignmentIndex::NoHeader => {}

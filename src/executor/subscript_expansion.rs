@@ -1082,12 +1082,34 @@ impl Executor {
                         }
                     }
                     super::glob::PathnameExpansion::NoMatch => {
-                        elements.push(format!(
-                            "{ARRAY_FIELD_SPLIT_MARKER}{}",
-                            quote_compound_field_value(
-                                &super::arrays::dequote_compound_element_rhs(token)
-                            )
-                        ));
+                        // A whole-quote-wrapped token was never splittable
+                        // (quoted words don't split, subst.c:13219
+                        // W_QUOTED): pushing the dequoted-then-requoted
+                        // form routes it into the dequote-then-glob arm
+                        // downstream, which drops the quoting state
+                        // (issue377: ("$x") with x='*' stored the
+                        // matches). Serialize the quoting state INSIDE
+                        // the quotes instead (CTLESC pairs, like the
+                        // producer below): the downstream glob gate
+                        // declines protected words, the tail stores them
+                        // whole (the wrapper still suppresses the
+                        // whitespace split) and dequoted. Unwrapped tokens
+                        // keep the old form (their quotes, if any, are
+                        // DATA); subscript detection downstream reads the
+                        // dequoted text either way.
+                        let wrapped = token.len() >= 2
+                            && ((token.starts_with('"') && token.ends_with('"'))
+                                || (token.starts_with('\'') && token.ends_with('\'')));
+                        if wrapped {
+                            elements.push(format!("{ARRAY_FIELD_SPLIT_MARKER}\"{}\"", glob_word));
+                        } else {
+                            elements.push(format!(
+                                "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                                quote_compound_field_value(
+                                    &super::arrays::dequote_compound_element_rhs(token)
+                                )
+                            ));
+                        }
                     }
                     super::glob::PathnameExpansion::Fail(pattern) => {
                         self.report_failglob(&pattern);
