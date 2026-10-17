@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_command_source_redirects_body_stdout_and_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let script_path = "target/rubash-command-source-body-redirect.sh";
     let output_path = "target/rubash-command-source-body-output.txt";
     let error_path = "target/rubash-command-source-body-error.txt";
@@ -43,6 +44,7 @@ fn test_command_source_redirects_body_stdout_and_stderr() {
 
 #[test]
 fn test_command_source_searches_sourcepath() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-command-sourcepath-bin";
     let script_name = "rubash-command-sourcepath-script.sh";
     let script_path = format!("{bin_dir}/{script_name}");
@@ -70,6 +72,7 @@ fn test_command_source_searches_sourcepath() {
 
 #[test]
 fn test_command_dot_missing_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-dot-missing-status.txt";
     let error_path = "target/rubash-command-dot-missing-error.txt";
     let _ = fs::remove_file(output_path);
@@ -93,6 +96,7 @@ fn test_command_dot_missing_redirects_stderr() {
 
 #[test]
 fn test_command_dot_appends_body_stdout_and_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let script_path = "target/rubash-command-dot-body-append.sh";
     let output_path = "target/rubash-command-dot-body-output.txt";
     let error_path = "target/rubash-command-dot-body-error.txt";
@@ -129,6 +133,7 @@ fn test_command_dot_appends_body_stdout_and_stderr() {
 
 #[test]
 fn test_command_declare_assigns_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-declare-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -148,6 +153,7 @@ fn test_command_declare_assigns_variable() {
 
 #[test]
 fn test_command_unset_removes_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-unset-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -167,6 +173,7 @@ fn test_command_unset_removes_variable() {
 
 #[test]
 fn test_command_shopt_updates_shell_option_state() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-shopt-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("command shopt -s nullglob; shopt -q nullglob; echo $? > {output_path}");
@@ -184,6 +191,7 @@ fn test_command_shopt_updates_shell_option_state() {
 
 #[test]
 fn test_command_eval_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-eval-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("command eval 'echo alpha; echo beta' > {output_path}");
@@ -201,6 +209,7 @@ fn test_command_eval_redirects_output() {
 
 #[test]
 fn test_command_exec_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-exec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("command exec -a custom sh -c 'echo $0' > {output_path}");
@@ -218,6 +227,7 @@ fn test_command_exec_redirects_output() {
 
 #[test]
 fn test_shift_help_redirects_output_and_returns_usage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shift-help-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("shift --help > {output_path}; echo $? >> {output_path}");
@@ -238,6 +248,7 @@ fn test_shift_help_redirects_output_and_returns_usage() {
 
 #[test]
 fn test_shift_help_appends_output_and_returns_usage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shift-help-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();

@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_while_command_redirect_creates_file_without_iterations() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-while-command-redirect-empty-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("while false; do echo bad; done > {output_path}");
@@ -20,6 +21,7 @@ fn test_while_command_redirect_creates_file_without_iterations() {
 
 #[test]
 fn test_while_command_redirects_body_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-while-command-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -39,6 +41,7 @@ fn test_while_command_redirects_body_stdout() {
 
 #[test]
 fn test_until_command_redirect_creates_file_without_iterations() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-until-command-redirect-empty-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("until true; do echo bad; done > {output_path}");
@@ -56,6 +59,7 @@ fn test_until_command_redirect_creates_file_without_iterations() {
 
 #[test]
 fn test_while_command_here_string_feeds_condition_read() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-while-command-herestring-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("while read value; do echo got:$value; done <<< alpha > {output_path}");
@@ -73,6 +77,7 @@ fn test_while_command_here_string_feeds_condition_read() {
 
 #[test]
 fn test_until_command_here_string_feeds_body_read() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-until-command-herestring-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -92,6 +97,7 @@ fn test_until_command_here_string_feeds_body_read() {
 
 #[test]
 fn test_alias_introduced_while_command_executes_loop() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-while-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -113,6 +119,7 @@ fn test_alias_introduced_while_command_executes_loop() {
 
 #[test]
 fn test_alias_introduced_until_command_executes_loop() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-until-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -130,6 +137,7 @@ fn test_alias_introduced_until_command_executes_loop() {
 
 #[test]
 fn test_alias_introduced_while_keeps_nested_alias_for_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-while-nested-for-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -147,6 +155,7 @@ fn test_alias_introduced_while_keeps_nested_alias_for_body() {
 
 #[test]
 fn test_alias_introduced_while_prefix_with_do_skips_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-while-prefix-do-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

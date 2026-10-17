@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_export_assignment_rejects_readonly_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-export-readonly-assignment-output.txt");
     let error_path = target_test_path("rubash-export-readonly-assignment-error.txt");
     let _ = fs::remove_file(&output_path);
@@ -35,6 +36,7 @@ fn test_export_assignment_rejects_readonly_variable() {
 
 #[test]
 fn test_export_without_assignment_marks_readonly_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-export-readonly-unset-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -60,6 +62,7 @@ fn test_export_without_assignment_marks_readonly_variable() {
 
 #[test]
 fn test_attribute_printing_preserves_combined_flags() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-attribute-combined-flags-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -90,6 +93,7 @@ fn test_attribute_printing_preserves_combined_flags() {
 
 #[test]
 fn test_child_environment_contains_only_exported_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-child-export-env-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -117,6 +121,7 @@ fn test_child_environment_contains_only_exported_variables() {
 
 #[test]
 fn test_temporary_assignment_reaches_external_command_environment() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-temp-assignment-env-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -139,6 +144,7 @@ fn test_temporary_assignment_reaches_external_command_environment() {
 
 #[test]
 fn test_temporary_assignment_expands_value_for_external_command_environment() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-temp-assignment-expanded-env-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -160,6 +166,7 @@ fn test_temporary_assignment_expands_value_for_external_command_environment() {
 }
 #[test]
 fn test_temporary_assignment_reaches_shell_function() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-temp-assignment-function-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -183,6 +190,7 @@ fn test_temporary_assignment_reaches_shell_function() {
 
 #[test]
 fn test_posix_function_temporary_assignment_persists_when_exported() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-posix-temp-function-export-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -209,6 +217,7 @@ fn test_posix_function_temporary_assignment_persists_when_exported() {
 
 #[test]
 fn test_posix_function_declare_prefix_assignment_stays_local() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-posix-declare-prefix-local-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -234,6 +243,7 @@ fn test_posix_function_declare_prefix_assignment_stays_local() {
 
 #[test]
 fn test_posix_function_typeset_plus_x_unsets_shell_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-posix-typeset-plus-x-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);

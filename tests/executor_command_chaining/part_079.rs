@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_alias_introduced_arithmetic_for_executes_loop() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-arithmetic-for-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -21,6 +22,7 @@ fn test_alias_introduced_arithmetic_for_executes_loop() {
 
 #[test]
 fn test_alias_introduced_arithmetic_for_accepts_brace_group_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-arithmetic-for-brace-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -39,6 +41,7 @@ fn test_alias_introduced_arithmetic_for_accepts_brace_group_body() {
 
 #[test]
 fn test_alias_introduced_arithmetic_for_accepts_empty_init() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-arithmetic-for-empty-init-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -57,6 +60,7 @@ fn test_alias_introduced_arithmetic_for_accepts_empty_init() {
 
 #[test]
 fn test_alias_introduced_arithmetic_for_accepts_empty_update() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-arithmetic-for-empty-update-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -75,6 +79,7 @@ fn test_alias_introduced_arithmetic_for_accepts_empty_update() {
 
 #[test]
 fn test_alias_introduced_compact_arithmetic_for_accepts_empty_test() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-compact-arithmetic-for-empty-test-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

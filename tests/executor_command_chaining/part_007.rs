@@ -13,6 +13,7 @@ fn assert_status_bang_line(line: &str, prefix: &str) {
 
 #[test]
 fn test_brace_group_redirects_combined_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-brace-group-redirect-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -32,6 +33,7 @@ fn test_brace_group_redirects_combined_stdout() {
 
 #[test]
 fn test_brace_group_input_redirect_feeds_body_reads() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = target_test_path("rubash-brace-group-input.txt");
     let output_path = target_test_path("rubash-brace-group-input-output.txt");
     let shell_input_path = shell_test_path(&input_path);
@@ -56,6 +58,7 @@ fn test_brace_group_input_redirect_feeds_body_reads() {
 
 #[test]
 fn test_brace_group_here_string_feeds_body_read() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-brace-group-herestring-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -74,6 +77,7 @@ fn test_brace_group_here_string_feeds_body_read() {
 
 #[test]
 fn test_brace_group_stdout_fd_copy_does_not_create_literal_target() {
+    let _cwd_guard = CwdGuard::take();
     let literal_fd_path = "&2";
     let _ = fs::remove_file(literal_fd_path);
     let tokens = tokenize("{ echo grouped; } >&2");
@@ -90,6 +94,7 @@ fn test_brace_group_stdout_fd_copy_does_not_create_literal_target() {
 
 #[test]
 fn test_subshell_input_redirect_feeds_body_reads() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = target_test_path("rubash-subshell-input.txt");
     let output_path = target_test_path("rubash-subshell-input-output.txt");
     let shell_input_path = shell_test_path(&input_path);
@@ -114,6 +119,7 @@ fn test_subshell_input_redirect_feeds_body_reads() {
 
 #[test]
 fn test_subshell_here_string_feeds_body_read() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-subshell-herestring-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -132,6 +138,7 @@ fn test_subshell_here_string_feeds_body_read() {
 
 #[test]
 fn test_brace_group_preserves_quoted_bracket_words() {
+    let _cwd_guard = CwdGuard::take();
     let input = "[ $# -lt 1 ] && {\n\
          echo \"zprintf: usage: zprintf format [args ...]\" >&2\n\
          exit 2\n\
@@ -149,6 +156,7 @@ fn test_brace_group_preserves_quoted_bracket_words() {
 
 #[test]
 fn test_command_substitution_output_is_not_reexpanded() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-substitution-no-reexpand-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -168,6 +176,7 @@ fn test_command_substitution_output_is_not_reexpanded() {
 
 #[test]
 fn test_command_v_pipeline_command_substitution_outputs_description() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-v-pipeline-comsub-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -186,6 +195,7 @@ fn test_command_v_pipeline_command_substitution_outputs_description() {
 
 #[test]
 fn test_command_substitution_sed_replaces_backslashes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-comsub-sed-backslash-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -205,6 +215,7 @@ fn test_command_substitution_sed_replaces_backslashes() {
 
 #[test]
 fn test_escaped_quotes_survive_adjacent_command_substitution() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-substitution-escaped-quote-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -227,6 +238,7 @@ fn test_escaped_quotes_survive_adjacent_command_substitution() {
 
 #[test]
 fn test_last_background_pid_parameter_tracks_background_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-last-background-pid-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -249,6 +261,7 @@ fn test_last_background_pid_parameter_tracks_background_command() {
 
 #[test]
 fn test_last_background_pid_parameter_tracks_background_compound_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-last-background-compound-pid-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -272,6 +285,7 @@ fn test_last_background_pid_parameter_tracks_background_compound_command() {
 
 #[test]
 fn test_background_if_command_executes_and_updates_bang_pid() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-background-if-command-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -311,6 +325,7 @@ fn test_background_if_command_executes_and_updates_bang_pid() {
 // on WSL GNU 5.3.0 under target/probe-wt38/run403/p403m.sh.
 #[test]
 fn test_bash_subshell_tracks_command_substitution_depth() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-subshell-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -335,6 +350,7 @@ fn test_bash_subshell_tracks_command_substitution_depth() {
 
 #[test]
 fn test_bash_subshell_tracks_parenthesized_subshell() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-subshell-parenthesized-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -354,6 +370,7 @@ fn test_bash_subshell_tracks_parenthesized_subshell() {
 
 #[test]
 fn test_background_function_definition_does_not_leak_to_parent() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-background-function-definition-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -390,6 +407,7 @@ fn test_background_function_definition_does_not_leak_to_parent() {
 
 #[test]
 fn test_background_time_prefix_updates_bang_pid() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-background-time-prefix-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -411,6 +429,7 @@ fn test_background_time_prefix_updates_bang_pid() {
 
 #[test]
 fn test_background_case_command_executes_and_updates_bang_pid() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-background-case-command-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -436,6 +455,7 @@ fn test_background_case_command_executes_and_updates_bang_pid() {
 
 #[test]
 fn test_background_loop_commands_execute_and_update_bang_pid() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-background-loop-command-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -473,6 +493,7 @@ fn test_background_loop_commands_execute_and_update_bang_pid() {
 #[ignore = "rubash#396: see issue (probe wt37-374 K008)"]
 #[test]
 fn test_background_iteration_commands_execute_and_update_bang_pid() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-background-iteration-command-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -509,6 +530,7 @@ fn test_background_iteration_commands_execute_and_update_bang_pid() {
 
 #[test]
 fn test_background_test_commands_execute_and_update_bang_pid() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-background-test-command-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -542,6 +564,7 @@ fn test_background_test_commands_execute_and_update_bang_pid() {
 
 #[test]
 fn test_background_pipeline_executes_and_waits_for_child_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-background-pipeline-output.txt";
     let status_path = "target/rubash-background-pipeline-status.txt";
     let _ = fs::remove_file(output_path);
@@ -570,6 +593,7 @@ fn test_background_pipeline_executes_and_waits_for_child_status() {
 
 #[test]
 fn test_bash_subshell_assignment_does_not_override_dynamic_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-subshell-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("BASH_SUBSHELL=9; printf '%s\\n' \"$BASH_SUBSHELL\" > {output_path}");

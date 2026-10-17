@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_unset_nameref_removes_target_unless_n_option_is_used() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-unset-nameref-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -49,6 +50,7 @@ fn test_unset_nameref_removes_target_unless_n_option_is_used() {
 
 #[test]
 fn test_unset_nameref_target_reports_readonly_target() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-unset-nameref-readonly-output.txt");
     let error_path = target_test_path("rubash-unset-nameref-readonly-error.txt");
     let shell_output_path = shell_test_path(&output_path);
@@ -87,6 +89,7 @@ fn test_unset_nameref_target_reports_readonly_target() {
 
 #[test]
 fn test_unset_invalid_option_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-unset-invalid-option-stderr-output.txt";
     let status_path = "target/rubash-unset-invalid-option-status.txt";
     let _ = fs::remove_file(error_path);
@@ -110,6 +113,7 @@ fn test_unset_invalid_option_redirects_stderr() {
 
 #[test]
 fn test_unset_conflicting_options_append_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-unset-conflicting-options-stderr-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -130,6 +134,7 @@ fn test_unset_conflicting_options_append_stderr() {
 
 #[test]
 fn test_enable_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-enable-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("enable -ps > {output_path}");
@@ -149,6 +154,7 @@ fn test_enable_redirects_output() {
 
 #[test]
 fn test_enable_p_lists_enabled_builtins() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-enable-p-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("enable -p > {output_path}");
@@ -169,6 +175,7 @@ fn test_enable_p_lists_enabled_builtins() {
 
 #[test]
 fn test_enable_a_marks_disabled_builtins() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-enable-a-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("enable -n echo; enable -a > {output_path}");
@@ -188,6 +195,7 @@ fn test_enable_a_marks_disabled_builtins() {
 
 #[test]
 fn test_enable_can_disable_extended_builtin_set() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-enable-extended-builtins-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("enable -n declare local typeset shopt wait; enable -a > {output_path}");
@@ -208,6 +216,7 @@ fn test_enable_can_disable_extended_builtin_set() {
 
 #[test]
 fn test_builtin_enable_updates_disabled_builtin_state() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = target_test_path("rubash-builtin-enable-bin");
     let script_path = if cfg!(windows) {
         bin_dir.join("test.cmd")
@@ -243,6 +252,7 @@ fn test_builtin_enable_updates_disabled_builtin_state() {
 
 #[test]
 fn test_disabled_test_builtin_uses_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-disabled-test-bin";
     let script_path = test_command_path(bin_dir, "test");
     let output_path = "target/rubash-disabled-test-output.txt";

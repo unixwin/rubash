@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_unalias_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-unalias-stderr-output.txt";
     let status_path = "target/rubash-unalias-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -25,6 +26,7 @@ fn test_unalias_redirects_stderr() {
 
 #[test]
 fn test_unalias_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-unalias-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -45,6 +47,7 @@ fn test_unalias_appends_stderr() {
 
 #[test]
 fn test_set_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("RUBASH_SET_REDIRECT=value set > {output_path}");
@@ -63,6 +66,7 @@ fn test_set_redirects_output() {
 
 #[test]
 fn test_set_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -83,6 +87,7 @@ fn test_set_appends_output() {
 
 #[test]
 fn test_set_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-set-stderr-output.txt";
     let status_path = "target/rubash-set-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -107,6 +112,7 @@ fn test_set_redirects_stderr() {
 
 #[test]
 fn test_set_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-set-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -128,6 +134,7 @@ fn test_set_appends_stderr() {
 
 #[test]
 fn test_unset_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-unset-stderr-output.txt";
     let status_path = "target/rubash-unset-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -150,6 +157,7 @@ fn test_unset_redirects_stderr() {
 
 #[test]
 fn test_unset_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-unset-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -168,6 +176,7 @@ fn test_unset_appends_stderr() {
 
 #[test]
 fn test_builtin_unset_removes_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-unset-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("RUBASH_BUILTIN_UNSET=value; builtin unset RUBASH_BUILTIN_UNSET; echo ${{RUBASH_BUILTIN_UNSET:-missing}} > {output_path}");
@@ -185,6 +194,7 @@ fn test_builtin_unset_removes_variable() {
 
 #[test]
 fn test_unset_clears_export_attribute() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-unset-export-output.txt");
     let error_path = target_test_path("rubash-unset-export-error.txt");
     let _ = fs::remove_file(&output_path);
@@ -219,6 +229,7 @@ fn test_unset_clears_export_attribute() {
 
 #[test]
 fn test_unset_rejects_unset_readonly_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-unset-readonly-output.txt");
     let error_path = target_test_path("rubash-unset-readonly-error.txt");
     let _ = fs::remove_file(&output_path);

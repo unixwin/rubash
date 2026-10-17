@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_semicolon_separation() {
+    let _cwd_guard = CwdGuard::take();
     let input = "echo a; echo b";
     let tokens = tokenize(input);
     let ast = parse(&tokens);
@@ -14,6 +15,7 @@ fn test_semicolon_separation() {
 
 #[test]
 fn test_empty_command_does_not_reset_exit_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-empty-command-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("false; ; echo $? > {output_path}");
@@ -34,6 +36,7 @@ fn test_empty_command_does_not_reset_exit_status() {
 
 #[test]
 fn test_underscore_tracks_last_command_argument() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-underscore-last-arg-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -61,6 +64,7 @@ fn test_underscore_tracks_last_command_argument() {
 
 #[test]
 fn test_quoted_assignment_like_argument_suppresses_tilde_expansion() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-assignment-like-arg-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -85,6 +89,7 @@ fn test_quoted_assignment_like_argument_suppresses_tilde_expansion() {
 
 #[test]
 fn test_and_operator() {
+    let _cwd_guard = CwdGuard::take();
     let input = "true && echo success";
     let tokens = tokenize(input);
     let ast = parse(&tokens);
@@ -95,6 +100,7 @@ fn test_and_operator() {
 
 #[test]
 fn test_or_operator() {
+    let _cwd_guard = CwdGuard::take();
     let input = "false || echo fallback";
     let tokens = tokenize(input);
     let ast = parse(&tokens);
@@ -105,6 +111,7 @@ fn test_or_operator() {
 
 #[test]
 fn test_mixed_and_or_lists_short_circuit_left_to_right() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mixed-and-or-list-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -132,6 +139,7 @@ fn test_mixed_and_or_lists_short_circuit_left_to_right() {
 }
 #[test]
 fn test_ansi_c_quoted_words_decode_as_single_arguments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-ansi-c-quoted-word-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '<%s>\\n' $'hello world!' $'hello\\' world' > {output_path}");
@@ -152,6 +160,7 @@ fn test_ansi_c_quoted_words_decode_as_single_arguments() {
 
 #[test]
 fn test_locale_quoted_words_expand_like_double_quotes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-locale-quoted-word-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -173,6 +182,7 @@ fn test_locale_quoted_words_expand_like_double_quotes() {
 
 #[test]
 fn test_pipeline_redirects_filtered_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("echo hello | grep hello > {output_path}");
@@ -195,6 +205,7 @@ fn test_pipeline_redirects_filtered_output() {
 
 #[test]
 fn test_pipeline_counts_bytes_with_wc() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-wc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("echo hello | wc -c > {output_path}");
@@ -217,6 +228,7 @@ fn test_pipeline_counts_bytes_with_wc() {
 
 #[test]
 fn test_pipeline_filters_printf_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-printf-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf 'a\\nb\\n' | grep b > {output_path}");
@@ -240,6 +252,7 @@ fn test_pipeline_filters_printf_output() {
 
 #[test]
 fn test_pipeline_grep_matches_start_anchor() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-grep-anchor-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf 'foo=abc\\nbar=foo\\n' | grep ^foo= > {output_path}");
@@ -257,6 +270,7 @@ fn test_pipeline_grep_matches_start_anchor() {
 
 #[test]
 fn test_pipeline_status_uses_last_command_by_default() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("false | true; echo $? > {output_path}");
@@ -274,6 +288,7 @@ fn test_pipeline_status_uses_last_command_by_default() {
 
 #[test]
 fn test_pipestatus_tracks_simple_and_pipeline_statuses() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipestatus-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -298,6 +313,7 @@ fn test_pipestatus_tracks_simple_and_pipeline_statuses() {
 
 #[test]
 fn test_for_loop_function_assignment_preserves_remaining_values() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-ifs-posix-loop-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

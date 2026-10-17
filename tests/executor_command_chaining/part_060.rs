@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_remaining_stateful_set_short_flags_update_shell_options() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-remaining-flags-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -48,6 +49,7 @@ fn test_remaining_stateful_set_short_flags_update_shell_options() {
 
 #[test]
 fn test_return_trap_requires_function_tracing() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-return-trap-tracing-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -70,6 +72,7 @@ fn test_return_trap_requires_function_tracing() {
 
 #[test]
 fn test_return_trap_registered_inside_function_fires_without_tracing() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-return-trap-local-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -89,6 +92,7 @@ fn test_return_trap_registered_inside_function_fires_without_tracing() {
 
 #[test]
 fn test_return_in_signal_trap_unwinds_function_after_subshell_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-return-in-signal-trap-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -114,6 +118,7 @@ fn test_return_in_signal_trap_unwinds_function_after_subshell_status() {
 
 #[test]
 fn test_noclobber_prevents_output_overwrite() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-noclobber-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "old\n").unwrap();
@@ -129,6 +134,7 @@ fn test_noclobber_prevents_output_overwrite() {
 
 #[test]
 fn test_external_command_not_found_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-external-notfound-status.txt";
     let error_path = "target/rubash-external-notfound-error.txt";
     let _ = fs::remove_file(output_path);
@@ -152,6 +158,7 @@ fn test_external_command_not_found_redirects_stderr() {
 
 #[test]
 fn test_command_not_found_redirects_stderr_and_creates_stdout_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-notfound-output.txt";
     let status_path = "target/rubash-command-notfound-status.txt";
     let error_path = "target/rubash-command-notfound-error.txt";
@@ -181,6 +188,7 @@ fn test_command_not_found_redirects_stderr_and_creates_stdout_redirect() {
 
 #[test]
 fn test_noclobber_can_be_disabled_for_output_overwrite() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-noclobber-disabled-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "old\n").unwrap();
@@ -199,6 +207,7 @@ fn test_noclobber_can_be_disabled_for_output_overwrite() {
 
 #[test]
 fn test_clobber_redirect_overrides_noclobber() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-clobber-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "old\n").unwrap();
@@ -217,6 +226,7 @@ fn test_clobber_redirect_overrides_noclobber() {
 
 #[test]
 fn test_noclobber_prevents_stderr_overwrite() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-noclobber-stderr.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "old\n").unwrap();
@@ -232,6 +242,7 @@ fn test_noclobber_prevents_stderr_overwrite() {
 
 #[test]
 fn test_stderr_clobber_redirect_overrides_noclobber() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-clobber-stderr.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "old\n").unwrap();
@@ -252,6 +263,7 @@ fn test_stderr_clobber_redirect_overrides_noclobber() {
 
 #[test]
 fn test_nounset_errors_for_unbound_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-nounset-unbound-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -268,6 +280,7 @@ fn test_nounset_errors_for_unbound_variable() {
 
 #[test]
 fn test_nounset_errors_for_unbound_positional_parameter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-nounset-positional-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -u; echo $1 > {output_path}; echo after > {output_path}");
@@ -282,6 +295,7 @@ fn test_nounset_errors_for_unbound_positional_parameter() {
 
 #[test]
 fn test_nounset_allows_default_parameter_expansion() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-nounset-default-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -300,6 +314,7 @@ fn test_nounset_allows_default_parameter_expansion() {
 
 #[test]
 fn test_nounset_errors_for_unbound_assignment_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-nounset-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

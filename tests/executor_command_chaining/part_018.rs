@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_declare_plus_r_rejects_readonly_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-plus-r-output.txt");
     let error_path = target_test_path("rubash-declare-plus-r-error.txt");
     let _ = fs::remove_file(&output_path);
@@ -35,6 +36,7 @@ fn test_declare_plus_r_rejects_readonly_variable() {
 
 #[test]
 fn test_declare_assignment_rejects_readonly_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-readonly-assignment-output.txt");
     let error_path = target_test_path("rubash-declare-readonly-assignment-error.txt");
     let _ = fs::remove_file(&output_path);
@@ -67,6 +69,7 @@ fn test_declare_assignment_rejects_readonly_variable() {
 
 #[test]
 fn test_declare_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-declare-stderr-output.txt";
     let status_path = "target/rubash-declare-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -90,6 +93,7 @@ fn test_declare_redirects_stderr() {
 
 #[test]
 fn test_declare_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-declare-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -111,6 +115,7 @@ fn test_declare_appends_stderr() {
 
 #[test]
 fn test_typeset_invalid_option_uses_typeset_diagnostics() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-typeset-invalid-option-error.txt";
     let status_path = "target/rubash-typeset-invalid-option-status.txt";
     let _ = fs::remove_file(error_path);
@@ -134,6 +139,7 @@ fn test_typeset_invalid_option_uses_typeset_diagnostics() {
 
 #[test]
 fn test_declare_capital_g_is_accepted_as_noop_attribute() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-capital-g-output.txt";
     let error_path = "target/rubash-declare-capital-g-error.txt";
     let _ = fs::remove_file(output_path);
@@ -167,6 +173,7 @@ fn test_declare_capital_g_is_accepted_as_noop_attribute() {
 
 #[test]
 fn test_declare_capital_i_is_accepted_as_noop_attribute() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-capital-i-output.txt";
     let error_path = "target/rubash-declare-capital-i-error.txt";
     let _ = fs::remove_file(output_path);
@@ -196,6 +203,7 @@ fn test_declare_capital_i_is_accepted_as_noop_attribute() {
 
 #[test]
 fn test_builtin_declare_assigns_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-declare-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin declare RUBASH_BUILTIN_DECLARE=value; echo $RUBASH_BUILTIN_DECLARE > {output_path}");
@@ -213,6 +221,7 @@ fn test_builtin_declare_assigns_variable() {
 
 #[test]
 fn test_builtin_typeset_assigns_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-typeset-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin typeset RUBASH_BUILTIN_TYPESET=value; echo $RUBASH_BUILTIN_TYPESET > {output_path}");
@@ -230,6 +239,7 @@ fn test_builtin_typeset_assigns_variable() {
 
 #[test]
 fn test_export_p_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-export-p-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("export RUBASH_EXPORT_REDIR=value; export -p > {output_path}");
@@ -250,6 +260,7 @@ fn test_export_p_redirects_output() {
 
 #[test]
 fn test_export_p_omits_unexported_shell_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-export-p-unexported-output.txt";
     let _ = fs::remove_file(output_path);
     let old_value = std::env::var("RUBASH_EXPORT_INHERITED").ok();
@@ -279,6 +290,7 @@ fn test_export_p_omits_unexported_shell_variables() {
 
 #[test]
 fn test_export_n_clears_export_attribute_without_unsetting_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-export-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -305,6 +317,7 @@ fn test_export_n_clears_export_attribute_without_unsetting_variable() {
 
 #[test]
 fn test_export_without_assignment_marks_unset_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-export-unset-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);

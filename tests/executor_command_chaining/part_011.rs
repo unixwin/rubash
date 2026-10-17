@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_pipeline_feeds_external_stage_stdin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-pipeline-external-output.txt");
     #[cfg(windows)]
     let script_path = target_test_path("rubash-pipeline-filter.cmd");
@@ -58,6 +59,7 @@ fn test_pipeline_feeds_external_stage_stdin() {
 
 #[test]
 fn test_external_command_appends_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-external-append-bin";
     let script_path = test_command_path(bin_dir, "emit");
     let output_path = "target/rubash-external-append-output.txt";
@@ -95,6 +97,7 @@ fn test_external_command_appends_stdout() {
 
 #[test]
 fn test_external_command_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-external-stderr-append-bin";
     let script_path = test_command_path(bin_dir, "emiterr");
     let output_path = "target/rubash-external-stderr-append-output.txt";
@@ -132,6 +135,7 @@ fn test_external_command_appends_stderr() {
 
 #[test]
 fn test_redirects_without_spaces_around_operator() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-nospace-redirect-output.txt";
     let error_path = "target/rubash-nospace-redirect-error.txt";
     let _ = fs::remove_file(output_path);
@@ -157,6 +161,7 @@ fn test_redirects_without_spaces_around_operator() {
 
 #[test]
 fn test_redirection_only_command_touches_output_files() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-redirection-only-output.txt";
     let append_path = "target/rubash-redirection-only-append.txt";
     let _ = fs::remove_file(output_path);
@@ -179,6 +184,7 @@ fn test_redirection_only_command_touches_output_files() {
 
 #[test]
 fn test_mapfile_t_reads_here_string_into_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-t-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -198,6 +204,7 @@ fn test_mapfile_t_reads_here_string_into_array() {
 
 #[test]
 fn test_mapfile_reads_redirected_default_parameter_path() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = target_test_path("rubash-mapfile-default-redirect-input.txt");
     let output_path = target_test_path("rubash-mapfile-default-redirect-output.txt");
     let shell_input_path = shell_test_path(&input_path);
@@ -222,6 +229,7 @@ fn test_mapfile_reads_redirected_default_parameter_path() {
 
 #[test]
 fn test_mapfile_file_redirect_preserves_carriage_return_bytes() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = target_test_path("rubash-mapfile-crlf-input.txt");
     let output_path = target_test_path("rubash-mapfile-crlf-output.txt");
     let shell_input_path = shell_test_path(&input_path);
@@ -246,6 +254,7 @@ fn test_mapfile_file_redirect_preserves_carriage_return_bytes() {
 
 #[test]
 fn test_mapfile_without_input_sets_empty_array_at_eof() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-eof-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -269,6 +278,7 @@ fn test_mapfile_without_input_sets_empty_array_at_eof() {
 
 #[test]
 fn test_mapfile_option_errors_match_bash_statuses() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-option-status-output.txt";
     let error_path = "target/rubash-mapfile-option-error-output.txt";
     let _ = fs::remove_file(output_path);

@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_hash_p_requires_pathname_argument() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-hash-p-missing-stderr-output.txt";
     let status_path = "target/rubash-hash-p-missing-status.txt";
     let _ = fs::remove_file(error_path);
@@ -26,6 +27,7 @@ fn test_hash_p_requires_pathname_argument() {
 
 #[test]
 fn test_hash_p_without_name_prints_table() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-hash-p-without-name-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("hash -p /tmp/rubash-cat cat; hash -p /tmp/ignored > {output_path}; echo $? >> {output_path}");
@@ -46,6 +48,7 @@ fn test_hash_p_without_name_prints_table() {
 
 #[test]
 fn test_hash_p_compact_pathname_sets_entry() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-hash-p-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("hash -p/tmp/rubash-compact-cat cat; hash -t cat > {output_path}");
@@ -66,6 +69,7 @@ fn test_hash_p_compact_pathname_sets_entry() {
 
 #[test]
 fn test_hash_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-hash-stderr-output.txt";
     let status_path = "target/rubash-hash-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -88,6 +92,7 @@ fn test_hash_redirects_stderr() {
 
 #[test]
 fn test_hash_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-hash-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -108,6 +113,7 @@ fn test_hash_appends_stderr() {
 
 #[test]
 fn test_shopt_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shopt-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("shopt -p sourcepath > {output_path}");
@@ -128,6 +134,7 @@ fn test_shopt_redirects_output() {
 
 #[test]
 fn test_shopt_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shopt-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -149,6 +156,7 @@ fn test_shopt_appends_output() {
 
 #[test]
 fn test_builtin_shopt_updates_shell_option_state() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-shopt-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin shopt -s nullglob; shopt -q nullglob; echo $? > {output_path}");
@@ -166,6 +174,7 @@ fn test_builtin_shopt_updates_shell_option_state() {
 
 #[test]
 fn test_shopt_print_mode_preserves_query_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shopt-print-status.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -195,6 +204,7 @@ fn test_shopt_print_mode_preserves_query_status() {
 // GNU. `set -o` keeps the 15-wide form (set.def:291, probe so2.sh).
 #[test]
 fn test_shopt_o_uses_readable_format_without_print_flag() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shopt-o-readable-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("shopt -o pipefail > {output_path}; shopt -o -p pipefail >> {output_path}");
@@ -212,6 +222,7 @@ fn test_shopt_o_uses_readable_format_without_print_flag() {
 
 #[test]
 fn test_shopt_list_returns_failure_for_disabled_option() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shopt-list-disabled-status.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("shopt -u expand_aliases; shopt expand_aliases >/dev/null; echo $? > {output_path}; shopt -s expand_aliases; shopt expand_aliases >/dev/null; echo $? >> {output_path}");
@@ -229,6 +240,7 @@ fn test_shopt_list_returns_failure_for_disabled_option() {
 
 #[test]
 fn test_shopt_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-shopt-stderr-output.txt";
     let status_path = "target/rubash-shopt-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -252,6 +264,7 @@ fn test_shopt_redirects_stderr() {
 
 #[test]
 fn test_shopt_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-shopt-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -278,6 +291,7 @@ fn test_shopt_appends_stderr() {
 // wt33-373/run/H04_cdable_vars_pwd).
 #[test]
 fn test_cdable_vars_uses_variable_as_directory() {
+    let _cwd_guard = CwdGuard::take();
     let original_dir = std::env::current_dir().unwrap();
     let original_pwd = std::env::var("PWD").ok();
     let original_oldpwd = std::env::var("OLDPWD").ok();
@@ -307,7 +321,6 @@ fn test_cdable_vars_uses_variable_as_directory() {
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
-    let _ = std::env::set_current_dir(&original_dir);
     match original_pwd {
         Some(value) => std::env::set_var("PWD", value),
         None => std::env::remove_var("PWD"),

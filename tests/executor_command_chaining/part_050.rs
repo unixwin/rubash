@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_break_outside_loop_returns_success() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-break-outside-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("break not-a-number; echo $? > {output_path}");
@@ -20,6 +21,7 @@ fn test_break_outside_loop_returns_success() {
 
 #[test]
 fn test_break_outside_loop_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-break-outside-redirect-output.txt";
     let error_path = "target/rubash-break-outside-redirect-error.txt";
     let _ = fs::remove_file(output_path);
@@ -43,6 +45,7 @@ fn test_break_outside_loop_redirects_stderr() {
 
 #[test]
 fn test_continue_outside_loop_returns_success() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-continue-outside-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("continue; echo $? > {output_path}");
@@ -66,6 +69,7 @@ fn test_continue_outside_loop_returns_success() {
 // 5.3.0 script-file probes (target/issue395/matrix.sh M1/M3/M9).
 #[test]
 fn test_break_zero_in_loop_breaks_with_failure_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-break-zero-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("while true; do break 0; echo $? > {output_path}; break; done");
@@ -83,6 +87,7 @@ fn test_break_zero_in_loop_breaks_with_failure_status() {
 
 #[test]
 fn test_break_zero_in_loop_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-break-zero-redirect-output.txt";
     let error_path = "target/rubash-break-zero-redirect-error.txt";
     let _ = fs::remove_file(output_path);
@@ -107,6 +112,7 @@ fn test_break_zero_in_loop_redirects_stderr() {
 
 #[test]
 fn test_break_accepts_positive_signed_level() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-break-plus-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -130,6 +136,7 @@ fn test_break_accepts_positive_signed_level() {
 // GNU Bash 5.3.0 (target/issue395/matrix.sh M2/M4/M11/M14).
 #[test]
 fn test_continue_zero_in_loop_ends_loop_with_failure_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-continue-zero-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("while true; do continue 0; echo $? > {output_path}; break; done");
@@ -147,6 +154,7 @@ fn test_continue_zero_in_loop_ends_loop_with_failure_status() {
 
 #[test]
 fn test_continue_zero_in_loop_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-continue-zero-redirect-output.txt";
     let error_path = "target/rubash-continue-zero-redirect-error.txt";
     let _ = fs::remove_file(output_path);
@@ -171,6 +179,7 @@ fn test_continue_zero_in_loop_redirects_stderr() {
 
 #[test]
 fn test_break_two_exits_nested_loops() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-break-two-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -190,6 +199,7 @@ fn test_break_two_exits_nested_loops() {
 
 #[test]
 fn test_until_true_skips_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-until-true-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("until true; do echo bad > {output_path}; done");
@@ -209,6 +219,7 @@ fn test_until_true_skips_body() {
 
 #[test]
 fn test_case_question_mark_pattern_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-question-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -229,6 +240,7 @@ fn test_case_question_mark_pattern_matches() {
 
 #[test]
 fn test_case_bracket_range_pattern_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-bracket-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -249,6 +261,7 @@ fn test_case_bracket_range_pattern_matches() {
 
 #[test]
 fn test_posix_character_class_patterns_match() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = "target/rubash-posix-class-patterns";
     let output_path = "target/rubash-posix-class-patterns-output.txt";
     let _ = fs::remove_dir_all(dir_path);
@@ -280,6 +293,7 @@ fn test_posix_character_class_patterns_match() {
 
 #[test]
 fn test_case_backslash_patterns_preserve_literal_backslash() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-backslash-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

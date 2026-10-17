@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_exec_invalid_option_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exec-invalid-option-output.txt";
     let error_path = "target/rubash-exec-invalid-option-error.txt";
     let _ = fs::remove_file(output_path);
@@ -26,6 +27,7 @@ fn test_exec_invalid_option_redirects_stderr() {
 
 #[test]
 fn test_exec_a_requires_argument() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exec-a-requires-argument-output.txt";
     let error_path = "target/rubash-exec-a-requires-argument-error.txt";
     let _ = fs::remove_file(output_path);
@@ -49,6 +51,7 @@ fn test_exec_a_requires_argument() {
 
 #[test]
 fn test_builtin_exec_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-exec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin exec -a custom sh -c 'echo $0' > {output_path}");
@@ -66,6 +69,7 @@ fn test_builtin_exec_redirects_output() {
 
 #[test]
 fn test_builtin_command_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-command-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin command echo hello > {output_path}");
@@ -83,6 +87,7 @@ fn test_builtin_command_redirects_output() {
 
 #[test]
 fn test_command_echo_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-echo-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("command echo hello > {output_path}");
@@ -100,6 +105,7 @@ fn test_command_echo_redirects_output() {
 
 #[test]
 fn test_command_echo_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-echo-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -118,6 +124,7 @@ fn test_command_echo_appends_output() {
 
 #[test]
 fn test_command_type_invokes_type_builtin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-type-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -136,6 +143,7 @@ fn test_command_type_invokes_type_builtin() {
 
 #[test]
 fn test_command_test_invokes_test_builtin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-test-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("command test 3 -eq 4; echo $? > {output_path}");
@@ -153,6 +161,7 @@ fn test_command_test_invokes_test_builtin() {
 
 #[test]
 fn test_command_builtin_invokes_builtin_builtin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-builtin-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("command builtin echo hello > {output_path}");
@@ -170,6 +179,7 @@ fn test_command_builtin_invokes_builtin_builtin() {
 
 #[test]
 fn test_command_builtin_redirects_disabled_builtin_diagnostic() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-command-builtin-disabled-status.txt";
     let error_path = "target/rubash-command-builtin-disabled-error.txt";
     let _ = fs::remove_file(status_path);
@@ -194,6 +204,7 @@ fn test_command_builtin_redirects_disabled_builtin_diagnostic() {
 
 #[test]
 fn test_command_trap_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-trap-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("trap 'echo bye' EXIT; command trap -p EXIT > {output_path}");
@@ -214,6 +225,7 @@ fn test_command_trap_redirects_output() {
 
 #[test]
 fn test_command_kill_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-kill-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("command kill -l HUP > {output_path}");
@@ -231,6 +243,7 @@ fn test_command_kill_redirects_output() {
 
 #[test]
 fn test_command_source_missing_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-source-missing-status.txt";
     let error_path = "target/rubash-command-source-missing-error.txt";
     let _ = fs::remove_file(output_path);

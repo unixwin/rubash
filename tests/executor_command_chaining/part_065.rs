@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_parameter_replacement_keeps_value_when_anchor_does_not_match() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-replace-anchor-miss-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v=abcabc; echo ${{v/#bc/X}} ${{v/%ab/X}} > {output_path}");
@@ -20,6 +21,7 @@ fn test_parameter_replacement_keeps_value_when_anchor_does_not_match() {
 
 #[test]
 fn test_parameter_replacement_anchor_uses_shell_patterns() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-replace-anchor-pattern-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v=abcd; echo ${{v/#a?/X}} ${{v/%?d/X}} > {output_path}");
@@ -37,6 +39,7 @@ fn test_parameter_replacement_anchor_uses_shell_patterns() {
 
 #[test]
 fn test_array_parameter_replacement_expands_elements() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-replace-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("arr=(banana gamma); echo ${{arr[@]/a/o}} > {output_path}");
@@ -54,6 +57,7 @@ fn test_array_parameter_replacement_expands_elements() {
 
 #[test]
 fn test_array_parameter_replacement_expands_all_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-replace-all-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("arr=(banana gamma); echo ${{arr[*]//a/o}} > {output_path}");
@@ -71,6 +75,7 @@ fn test_array_parameter_replacement_expands_all_matches() {
 
 #[test]
 fn test_array_parameter_replacement_deletes_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-replace-delete-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("arr=(banana gamma); echo ${{arr[@]//a}} > {output_path}");
@@ -88,6 +93,7 @@ fn test_array_parameter_replacement_deletes_matches() {
 
 #[test]
 fn test_array_pattern_replacement_and_case_expand_per_word() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-pattern-word-expansion-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -116,6 +122,7 @@ fn test_array_pattern_replacement_and_case_expand_per_word() {
 
 #[test]
 fn test_positional_parameter_replacement_expands_numeric_parameter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-positional-replace-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -135,6 +142,7 @@ fn test_positional_parameter_replacement_expands_numeric_parameter() {
 
 #[test]
 fn test_positional_parameter_replacement_expands_all_parameters() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-positional-replace-all-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function p {{ echo ${{@/%a/Z}} > {output_path}; }}; p alpha beta gamma");
@@ -155,6 +163,7 @@ fn test_positional_parameter_replacement_expands_all_parameters() {
 
 #[test]
 fn test_positional_pattern_replacement_and_case_expand_per_word() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-positional-pattern-word-expansion-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -183,6 +192,7 @@ fn test_positional_pattern_replacement_and_case_expand_per_word() {
 
 #[test]
 fn test_parameter_case_mod_uppercases_first_and_all_chars() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-case-upper-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v=hello; echo ${{v^}} ${{v^^}} > {output_path}");
@@ -200,6 +210,7 @@ fn test_parameter_case_mod_uppercases_first_and_all_chars() {
 
 #[test]
 fn test_parameter_case_mod_lowercases_first_and_all_chars() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-case-lower-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v=HELLO; echo ${{v,}} ${{v,,}} > {output_path}");
@@ -217,6 +228,7 @@ fn test_parameter_case_mod_lowercases_first_and_all_chars() {
 
 #[test]
 fn test_parameter_case_mod_unpatterned_all_preserves_unicode_case_mapping() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-case-unpatterned-unicode-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -238,6 +250,7 @@ fn test_parameter_case_mod_unpatterned_all_preserves_unicode_case_mapping() {
 
 #[test]
 fn test_parameter_case_mod_uses_pattern() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-case-pattern-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v=abcde; echo ${{v^^[bd]}} > {output_path}");
@@ -255,6 +268,7 @@ fn test_parameter_case_mod_uses_pattern() {
 
 #[test]
 fn test_parameter_case_mod_toggles_case() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-case-toggle-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -280,6 +294,7 @@ fn test_parameter_case_mod_toggles_case() {
 #[ignore = "rubash#396: see issue (probe wt37-374 K080)"]
 #[test]
 fn test_indirect_parameter_case_mod_applies_to_target_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-case-indirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -306,6 +321,7 @@ fn test_indirect_parameter_case_mod_applies_to_target_value() {
 
 #[test]
 fn test_array_parameter_case_mod_expands_elements() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-case-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("arr=(alpha beta); echo ${{arr[@]^^}} > {output_path}");
@@ -323,6 +339,7 @@ fn test_array_parameter_case_mod_expands_elements() {
 
 #[test]
 fn test_array_parameter_case_mod_uses_pattern() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-case-pattern-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("arr=(ALPHA BETA); echo ${{arr[*],,[PT]}} > {output_path}");
@@ -340,6 +357,7 @@ fn test_array_parameter_case_mod_uses_pattern() {
 
 #[test]
 fn test_quoted_array_star_case_and_transform_use_ifs_first_char() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-star-transform-ifs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -364,6 +382,7 @@ fn test_quoted_array_star_case_and_transform_use_ifs_first_char() {
 
 #[test]
 fn test_positional_parameter_case_mod_expands_elements() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-positional-case-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function p {{ echo ${{@^^}} / ${{1,,}} > {output_path}; }}; p alpha BETA");
@@ -384,6 +403,7 @@ fn test_positional_parameter_case_mod_expands_elements() {
 
 #[test]
 fn test_indirect_parameter_expands_named_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("target=value; ref=target; echo ${{!ref}} > {output_path}");

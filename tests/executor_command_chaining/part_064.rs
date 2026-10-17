@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_unquoted_positional_at_splits_each_parameter_and_empty_ifs_joins_star_without_separator() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-positional-ifs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -26,6 +27,7 @@ fn test_unquoted_positional_at_splits_each_parameter_and_empty_ifs_joins_star_wi
 
 #[test]
 fn test_parameter_assignment_operator_expands_in_command_word_order() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-parameter-operator-order-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -45,6 +47,7 @@ fn test_parameter_assignment_operator_expands_in_command_word_order() {
 
 #[test]
 fn test_array_parameter_pattern_removal_applies_to_each_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-pattern-removal-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("arr=(src/main.rs src/lib.rs); echo ${{arr[@]#*/}} > {output_path}");
@@ -62,6 +65,7 @@ fn test_array_parameter_pattern_removal_applies_to_each_value() {
 
 #[test]
 fn test_quoted_array_star_pattern_ops_use_ifs_first_char() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-star-pattern-ifs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -87,6 +91,7 @@ fn test_quoted_array_star_pattern_ops_use_ifs_first_char() {
 
 #[test]
 fn test_array_element_parameter_substring_uses_element_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-element-substring-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -107,6 +112,7 @@ fn test_array_element_parameter_substring_uses_element_value() {
 
 #[test]
 fn test_positional_parameter_substring_uses_offset_and_length() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-positional-substring-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -129,6 +135,7 @@ fn test_positional_parameter_substring_uses_offset_and_length() {
 
 #[test]
 fn test_unquoted_positional_parameter_substring_splits_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-positional-substring-split-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -148,6 +155,7 @@ fn test_unquoted_positional_parameter_substring_splits_words() {
 
 #[test]
 fn test_positional_substring_preserves_quoted_and_splits_unquoted_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-positional-substring-word-boundaries-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -173,6 +181,7 @@ fn test_positional_substring_preserves_quoted_and_splits_unquoted_words() {
 
 #[test]
 fn test_quoted_positional_at_expands_to_separate_arguments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-positional-at-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -- 3 1 2; printf '[%s]\\n' \"${{@}}\" > {output_path}");
@@ -190,6 +199,7 @@ fn test_quoted_positional_at_expands_to_separate_arguments() {
 
 #[test]
 fn test_set_positional_operands_split_unquoted_variable_with_custom_ifs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-positional-custom-ifs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -212,6 +222,7 @@ fn test_set_positional_operands_split_unquoted_variable_with_custom_ifs() {
 
 #[test]
 fn test_positional_parameter_substring_supports_negative_offset() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-positional-substring-negative-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function p {{ echo ${{@: -2:1}} > {output_path}; }}; p alpha beta gamma");
@@ -229,6 +240,7 @@ fn test_positional_parameter_substring_supports_negative_offset() {
 
 #[test]
 fn test_positional_parameter_pattern_removal_applies_to_each_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-positional-pattern-removal-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -- alpha.tmp beta.tmp; echo ${{@%.tmp}} / ${{1%%.*}} > {output_path}");
@@ -249,6 +261,7 @@ fn test_positional_parameter_pattern_removal_applies_to_each_value() {
 
 #[test]
 fn test_array_element_parameter_operations_use_element_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-element-param-ops-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -272,6 +285,7 @@ fn test_array_element_parameter_operations_use_element_value() {
 
 #[test]
 fn test_parameter_replacement_replaces_first_and_all_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-replace-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v=banana; echo ${{v/a/o}} ${{v//a/o}} > {output_path}");
@@ -289,6 +303,7 @@ fn test_parameter_replacement_replaces_first_and_all_matches() {
 
 #[test]
 fn test_parameter_replacement_deletes_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-replace-delete-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v=banana; echo ${{v/a}} ${{v//a}} > {output_path}");
@@ -306,6 +321,7 @@ fn test_parameter_replacement_deletes_matches() {
 
 #[test]
 fn test_parameter_replacement_uses_shell_patterns() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-replace-pattern-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v=abcd; echo ${{v/?b/X}} ${{v//?/x}} > {output_path}");
@@ -323,6 +339,7 @@ fn test_parameter_replacement_uses_shell_patterns() {
 
 #[test]
 fn test_parameter_replacement_supports_negated_bracket_patterns() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-replace-negated-class-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v='a-12b'; echo ${{v//[^0-9]}} ${{v//[^-]}} > {output_path}");
@@ -340,6 +357,7 @@ fn test_parameter_replacement_supports_negated_bracket_patterns() {
 
 #[test]
 fn test_parameter_replacement_supports_prefix_and_suffix_anchors() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-replace-anchor-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v=abcabc; echo ${{v/#abc/X}} ${{v/%abc/X}} > {output_path}");

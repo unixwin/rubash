@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_read_empty_ifs_does_not_split() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-empty-ifs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("IFS= read first rest <<< 'alpha beta'; echo $first:$rest > {output_path}");
@@ -20,6 +21,7 @@ fn test_read_empty_ifs_does_not_split() {
 
 #[test]
 fn test_read_mixed_ifs_whitespace_before_delimiter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-mixed-ifs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf ':a :' | ( IFS=': '; read first rest; printf '<%s><%s>\\n' \"$first\" \"$rest\" ) > {output_path}");
@@ -34,6 +36,7 @@ fn test_read_mixed_ifs_whitespace_before_delimiter() {
 
 #[test]
 fn test_read_process_substitution_from_function_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-process-subst-function-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -55,6 +58,7 @@ fn test_read_process_substitution_from_function_output() {
 
 #[test]
 fn test_cat_reads_process_substitution_argument() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-cat-process-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat <(echo process substitution) > {output_path}");
@@ -76,6 +80,7 @@ fn test_cat_reads_process_substitution_argument() {
 #[cfg(windows)]
 #[test]
 fn test_process_substitution_extensionless_script_preserves_shopt_state() {
+    let _cwd_guard = CwdGuard::take();
     let helper_path = target_test_path("rubash-process-subst-shopt-helper");
     let output_path = target_test_path("rubash-process-subst-shopt-output.txt");
     let _ = fs::remove_file(&helper_path);
@@ -111,6 +116,7 @@ fn test_process_substitution_extensionless_script_preserves_shopt_state() {
 
 #[test]
 fn test_process_substitution_preserves_quoted_printf_escapes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-process-subst-printf-quoted-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat <(printf \"x\\n\") > {output_path}");
@@ -128,6 +134,7 @@ fn test_process_substitution_preserves_quoted_printf_escapes() {
 
 #[test]
 fn test_cat_reads_process_substitution_stdin_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-cat-process-subst-stdin-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat < <(echo redirected stdin) > {output_path}");
@@ -148,6 +155,7 @@ fn test_cat_reads_process_substitution_stdin_redirect() {
 
 #[test]
 fn test_output_process_substitution_redirect_feeds_command_stdin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-output-process-subst-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("echo hi > >(cat > {output_path})");
@@ -169,6 +177,7 @@ fn test_output_process_substitution_redirect_feeds_command_stdin() {
 
 #[test]
 fn test_stderr_process_substitution_redirect_feeds_command_stdin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-stderr-process-subst-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -u x value 2> >(cat > {output_path})");
@@ -192,6 +201,7 @@ fn test_stderr_process_substitution_redirect_feeds_command_stdin() {
 #[ignore = "rubash#378: see issue (probe wt37-374 K041)"]
 #[test]
 fn test_output_process_substitution_word_feeds_command_stdin() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-output-process-subst-word-input.txt";
     let mirror_path = "target/rubash-output-process-subst-word-mirror.txt";
     let _ = fs::remove_file(input_path);
@@ -214,6 +224,7 @@ fn test_output_process_substitution_word_feeds_command_stdin() {
 
 #[test]
 fn test_process_substitution_does_not_see_temporary_assignment() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-process-subst-temp-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -237,6 +248,7 @@ fn test_process_substitution_does_not_see_temporary_assignment() {
 
 #[test]
 fn test_cat_reads_shell_style_file_path() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-cat-shell-path-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -257,6 +269,7 @@ fn test_cat_reads_shell_style_file_path() {
 
 #[test]
 fn test_process_substitution_from_default_parameter_word() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-default-process-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("value=; cat ${{value:-<(echo fallback)}} > {output_path}");
@@ -274,6 +287,7 @@ fn test_process_substitution_from_default_parameter_word() {
 
 #[test]
 fn test_for_loop_body_reads_process_substitution_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-process-subst-read-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -295,6 +309,7 @@ fn test_for_loop_body_reads_process_substitution_redirect() {
 
 #[test]
 fn test_process_substitution_keeps_case_pattern_parentheses() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-process-subst-case-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -314,6 +329,7 @@ fn test_process_substitution_keeps_case_pattern_parentheses() {
 
 #[test]
 fn test_process_substitution_defers_source_parameter_expansion() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-process-subst-deferred-expansion-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat <(value=inner; echo $value) > {output_path}");
@@ -331,6 +347,7 @@ fn test_process_substitution_defers_source_parameter_expansion() {
 
 #[test]
 fn test_read_without_name_assigns_reply() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-reply-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("unset REPLY; read <<< hello; echo $REPLY > {output_path}");
@@ -348,6 +365,7 @@ fn test_read_without_name_assigns_reply() {
 
 #[test]
 fn test_read_n_reads_limited_characters() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -n 3 value <<< abcdef; echo $value > {output_path}");
@@ -365,6 +383,7 @@ fn test_read_n_reads_limited_characters() {
 
 #[test]
 fn test_read_n_compact_option_reads_limited_characters() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-n-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -n3 value <<< abcdef; echo $value > {output_path}");
@@ -382,6 +401,7 @@ fn test_read_n_compact_option_reads_limited_characters() {
 
 #[test]
 fn test_read_combined_sn_consumes_limit() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sn-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -sn 3 value <<< abcdef; echo $value > {output_path}");
@@ -399,6 +419,7 @@ fn test_read_combined_sn_consumes_limit() {
 
 #[test]
 fn test_read_combined_en_consumes_limit() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-en-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -en 3 value <<< abcdef; echo $value > {output_path}");
@@ -416,6 +437,7 @@ fn test_read_combined_en_consumes_limit() {
 
 #[test]
 fn test_read_combined_en_compact_limit() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-en-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -en3 value <<< abcdef; echo $value > {output_path}");
@@ -433,6 +455,7 @@ fn test_read_combined_en_compact_limit() {
 
 #[test]
 fn test_read_combined_ren_consumes_limit_and_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-ren-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -ren 4 value <<< 'a\\bcd'; echo $value > {output_path}");
@@ -450,6 +473,7 @@ fn test_read_combined_ren_consumes_limit_and_reads_raw() {
 
 #[test]
 fn test_read_combined_ern_compact_limit_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-ern-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -ern4 value <<< 'a\\bcd'; echo $value > {output_path}");
@@ -467,6 +491,7 @@ fn test_read_combined_ern_compact_limit_reads_raw() {
 
 #[test]
 fn test_read_combined_rsen_consumes_limit_and_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rsen-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -rsen 4 value <<< 'a\\bcd'; echo $value > {output_path}");
@@ -484,6 +509,7 @@ fn test_read_combined_rsen_consumes_limit_and_reads_raw() {
 
 #[test]
 fn test_read_combined_sren_compact_limit_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sren-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -sren4 value <<< 'a\\bcd'; echo $value > {output_path}");
@@ -501,6 +527,7 @@ fn test_read_combined_sren_compact_limit_reads_raw() {
 
 #[test]
 fn test_read_combined_s_upper_n_compact_limits_characters() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-s-upper-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -sN4 value <<< abcdef; echo $value > {output_path}");
@@ -518,6 +545,7 @@ fn test_read_combined_s_upper_n_compact_limits_characters() {
 
 #[test]
 fn test_read_combined_e_upper_n_consumes_limit() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-e-upper-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -eN 4 value <<< abcdef; echo $value > {output_path}");
@@ -535,6 +563,7 @@ fn test_read_combined_e_upper_n_consumes_limit() {
 
 #[test]
 fn test_read_combined_e_upper_n_compact_limit() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-e-upper-n-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -eN4 value <<< abcdef; echo $value > {output_path}");
@@ -552,6 +581,7 @@ fn test_read_combined_e_upper_n_compact_limit() {
 
 #[test]
 fn test_read_combined_re_upper_n_consumes_limit_and_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-re-upper-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -reN 4 value <<< 'a\\bcd'; echo $value > {output_path}");
@@ -569,6 +599,7 @@ fn test_read_combined_re_upper_n_consumes_limit_and_reads_raw() {
 
 #[test]
 fn test_read_combined_er_upper_n_compact_limit_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-er-upper-n-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -erN4 value <<< 'a\\bcd'; echo $value > {output_path}");
@@ -586,6 +617,7 @@ fn test_read_combined_er_upper_n_compact_limit_reads_raw() {
 
 #[test]
 fn test_read_n_zero_succeeds_with_empty_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-n-zero-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -n 0 value <<< abc; printf '<%s>:%s' \"$value\" $? > {output_path}");
@@ -603,6 +635,7 @@ fn test_read_n_zero_succeeds_with_empty_value() {
 
 #[test]
 fn test_read_upper_n_zero_succeeds_with_empty_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-upper-n-zero-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -N 0 value <<< abc; printf '<%s>:%s' \"$value\" $? > {output_path}");
@@ -627,6 +660,7 @@ fn write_raw_byte_probe_input(path: &str, bytes: &[u8]) {
 // printf %s replay (od probe prints ff).
 #[test]
 fn test_read_process_substitution_preserves_raw_non_utf8_bytes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-procsub-raw-bytes.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -646,6 +680,7 @@ fn test_read_process_substitution_preserves_raw_non_utf8_bytes() {
 // GNU read preserves invalid UTF-8 stored in a regular input file.
 #[test]
 fn test_read_file_redirect_preserves_raw_non_utf8_bytes() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-read-file-raw-bytes-input.bin";
     let output_path = "target/rubash-read-file-raw-bytes.txt";
     let _ = fs::remove_file(output_path);
@@ -668,6 +703,7 @@ fn test_read_file_redirect_preserves_raw_non_utf8_bytes() {
 // the same byte provenance (GNU redir.c descriptor duplication).
 #[test]
 fn test_exec_persistent_fd_read_preserves_raw_non_utf8_bytes() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-exec-fd-raw-bytes-input.bin";
     let output_path = "target/rubash-exec-fd-raw-bytes-u.txt";
     let output_move_path = "target/rubash-exec-fd-raw-bytes-dup.txt";
@@ -706,6 +742,7 @@ fn test_exec_persistent_fd_read_preserves_raw_non_utf8_bytes() {
 // stage boundary (GNU transports raw bytes through the OS pipe).
 #[test]
 fn test_pipeline_builtin_to_external_preserves_raw_non_utf8_bytes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-raw-bytes-consumer.txt";
     let _ = fs::remove_file(output_path);
     let input = "printf 'AB\\377CD' | cat > ".to_string() + output_path + ";";
@@ -725,6 +762,7 @@ fn test_pipeline_builtin_to_external_preserves_raw_non_utf8_bytes() {
 // probe read x < <(printf \\\377...) once the stage seam decodes markers.
 #[test]
 fn test_read_record_replay_through_pipeline_keeps_raw_bytes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-replay-pipeline-bytes.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -745,6 +783,7 @@ fn test_read_record_replay_through_pipeline_keeps_raw_bytes() {
 // including direct file redirection (builtins/echo.def).
 #[test]
 fn test_echo_direct_redirect_decodes_read_raw_bytes() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-echo-raw-bytes-input.bin";
     let output_path = "target/rubash-echo-raw-bytes-output.bin";
     write_raw_byte_probe_input(input_path, &[b'a', 0xff, b'b', b'\n']);

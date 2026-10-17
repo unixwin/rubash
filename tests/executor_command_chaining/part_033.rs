@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_builtin_bracket_invokes_test_builtin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-bracket-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin [ 3 -eq 4 ]; echo $? > {output_path}");
@@ -20,6 +21,7 @@ fn test_builtin_bracket_invokes_test_builtin() {
 
 #[test]
 fn test_builtin_test_redirect_truncates_output_file() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-test-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -38,6 +40,7 @@ fn test_builtin_test_redirect_truncates_output_file() {
 
 #[test]
 fn test_builtin_let_invokes_let_builtin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-let-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin let n=1+2 n; echo $? $n > {output_path}");
@@ -55,6 +58,7 @@ fn test_builtin_let_invokes_let_builtin() {
 
 #[test]
 fn test_builtin_read_uses_here_string() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-read-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -73,6 +77,7 @@ fn test_builtin_read_uses_here_string() {
 
 #[test]
 fn test_builtin_mapfile_uses_here_string() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-mapfile-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -92,6 +97,7 @@ fn test_builtin_mapfile_uses_here_string() {
 
 #[test]
 fn test_builtin_umask_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-umask-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin umask 077; builtin umask > {output_path}");
@@ -109,6 +115,7 @@ fn test_builtin_umask_redirects_output() {
 
 #[test]
 fn test_builtin_trap_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-trap-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin trap 'echo bye' EXIT; builtin trap -p EXIT > {output_path}");
@@ -129,6 +136,7 @@ fn test_builtin_trap_redirects_output() {
 
 #[test]
 fn test_builtin_source_updates_current_shell() {
+    let _cwd_guard = CwdGuard::take();
     let script_path = "target/rubash-builtin-source-script.sh";
     let output_path = "target/rubash-builtin-source-output.txt";
     let _ = fs::remove_file(script_path);
@@ -151,6 +159,7 @@ fn test_builtin_source_updates_current_shell() {
 
 #[test]
 fn test_builtin_dot_updates_current_shell() {
+    let _cwd_guard = CwdGuard::take();
     let script_path = "target/rubash-builtin-dot-script.sh";
     let output_path = "target/rubash-builtin-dot-output.txt";
     let _ = fs::remove_file(script_path);
@@ -172,6 +181,7 @@ fn test_builtin_dot_updates_current_shell() {
 
 #[test]
 fn test_source_searches_path_before_current_directory() {
+    let _cwd_guard = CwdGuard::take();
     let local_script = "rubash-sourcepath-temp.sh";
     let bin_dir = "target/rubash-sourcepath-bin";
     let path_script = format!("{bin_dir}/{local_script}");
@@ -201,6 +211,7 @@ fn test_source_searches_path_before_current_directory() {
 
 #[test]
 fn test_sourcepath_disabled_uses_current_directory() {
+    let _cwd_guard = CwdGuard::take();
     let local_script = "rubash-sourcepath-disabled-temp.sh";
     let bin_dir = "target/rubash-sourcepath-disabled-bin";
     let path_script = format!("{bin_dir}/{local_script}");
@@ -231,6 +242,7 @@ fn test_sourcepath_disabled_uses_current_directory() {
 
 #[test]
 fn test_source_p_empty_path_uses_current_directory() {
+    let _cwd_guard = CwdGuard::take();
     let script_path = "rubash-source-p-empty-temp.sh";
     let output_path = "target/rubash-source-p-empty-output.txt";
     let _ = fs::remove_file(script_path);

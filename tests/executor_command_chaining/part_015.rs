@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_compound_array_assignment_expands_glob_matches_as_values() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = target_test_path("rubash-array-glob-values");
     let output_path = target_test_path("rubash-array-glob-values-output.txt");
     let shell_dir_path = shell_test_path(&dir_path);
@@ -10,7 +11,6 @@ fn test_compound_array_assignment_expands_glob_matches_as_values() {
     let _ = fs::remove_dir_all(&dir_path);
     let _ = fs::remove_file(&output_path);
     fs::create_dir_all(&dir_path).unwrap();
-    let old_cwd = std::env::current_dir().unwrap();
     let input = format!(
         "cd {shell_dir_path}; touch '[3]=abcde' r s t u v; \
          x=(*); echo \"${{x[3]}}\" > {shell_output_path}; echo \"${{x[@]}}\" >> {shell_output_path}"
@@ -21,7 +21,6 @@ fn test_compound_array_assignment_expands_glob_matches_as_values() {
 
     let result = executor.execute_ast(&ast);
 
-    std::env::set_current_dir(old_cwd).unwrap();
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
@@ -34,6 +33,7 @@ fn test_compound_array_assignment_expands_glob_matches_as_values() {
 
 #[test]
 fn test_compound_array_assignment_expands_brace_elements() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = target_test_path("rubash-array-brace-values");
     let output_path = target_test_path("rubash-array-brace-values-output.txt");
     let shell_dir_path = shell_test_path(&dir_path);
@@ -41,7 +41,6 @@ fn test_compound_array_assignment_expands_brace_elements() {
     let _ = fs::remove_dir_all(&dir_path);
     let _ = fs::remove_file(&output_path);
     fs::create_dir_all(&dir_path).unwrap();
-    let old_cwd = std::env::current_dir().unwrap();
     let input = format!(
         "cd {shell_dir_path}; touch a.rs b.rs c.txt; \
          arr=(pre{{a,b}} {{a,b}}.rs); \
@@ -55,7 +54,6 @@ fn test_compound_array_assignment_expands_brace_elements() {
 
     let result = executor.execute_ast(&ast);
 
-    std::env::set_current_dir(old_cwd).unwrap();
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
@@ -68,6 +66,7 @@ fn test_compound_array_assignment_expands_brace_elements() {
 
 #[test]
 fn test_quoted_expansions_suppress_pathname_expansion() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = target_test_path("rubash-quoted-expansion-glob");
     let output_path = target_test_path("rubash-quoted-expansion-glob-output.txt");
     let shell_dir_path = shell_test_path(&dir_path);
@@ -75,7 +74,6 @@ fn test_quoted_expansions_suppress_pathname_expansion() {
     let _ = fs::remove_dir_all(&dir_path);
     let _ = fs::remove_file(&output_path);
     fs::create_dir_all(&dir_path).unwrap();
-    let old_cwd = std::env::current_dir().unwrap();
     let input = format!(
         "cd {shell_dir_path}; touch a.rs b.rs c.txt; \
          v='*.rs'; printf 'quoted<%s>\\n' \"$v\" > {shell_output_path}; \
@@ -88,7 +86,6 @@ fn test_quoted_expansions_suppress_pathname_expansion() {
 
     let result = executor.execute_ast(&ast);
 
-    std::env::set_current_dir(old_cwd).unwrap();
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
@@ -101,6 +98,7 @@ fn test_quoted_expansions_suppress_pathname_expansion() {
 
 #[test]
 fn test_for_word_globs_after_quoted_prefix() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = target_test_path("rubash-for-quoted-prefix-glob");
     let output_path = target_test_path("rubash-for-quoted-prefix-glob-output.txt");
     let shell_dir_path = shell_test_path(&dir_path);
@@ -112,7 +110,6 @@ fn test_for_word_globs_after_quoted_prefix() {
     fs::write(prefix_dir.join("alpha.winux"), "").unwrap();
     fs::write(prefix_dir.join("beta.winux"), "").unwrap();
     fs::write(prefix_dir.join("skip.txt"), "").unwrap();
-    let old_cwd = std::env::current_dir().unwrap();
     let input = format!(
         "cd {shell_dir_path}; prefix='prefix dir'; \
          printf 'cmd<%s>\\n' \"$prefix\"/lib/*.winux > {shell_output_path}; \
@@ -125,7 +122,6 @@ fn test_for_word_globs_after_quoted_prefix() {
 
     let result = executor.execute_ast(&ast);
 
-    std::env::set_current_dir(old_cwd).unwrap();
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
@@ -142,6 +138,7 @@ fn test_for_word_globs_after_quoted_prefix() {
 
 #[test]
 fn test_indexed_array_quoted_variable_subscript_evaluates_arithmetic() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-array-quoted-var-subscript-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -161,6 +158,7 @@ fn test_indexed_array_quoted_variable_subscript_evaluates_arithmetic() {
 
 #[test]
 fn test_declare_indexed_array_assignment_preserves_explicit_indices() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-indexed-array-sparse-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -184,6 +182,7 @@ fn test_declare_indexed_array_assignment_preserves_explicit_indices() {
 
 #[test]
 fn test_declare_invalid_array_names_do_not_panic() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-invalid-array-names-output.txt";
     let sink_path = "target/rubash-declare-invalid-array-names-sink.txt";
     let _ = fs::remove_file(output_path);
@@ -217,6 +216,7 @@ fn test_declare_invalid_array_names_do_not_panic() {
 // where the same-line echo is skipped and next-line $? is 1).
 #[test]
 fn test_declare_rejects_indexed_to_assoc_conversion() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-indexed-to-assoc-output.txt");
     let error_path = target_test_path("rubash-declare-indexed-to-assoc-error.txt");
     let shell_output_path = shell_test_path(&output_path);
@@ -253,6 +253,7 @@ fn test_declare_rejects_indexed_to_assoc_conversion() {
 // status:1 with the variable keeping its assoc shape (GNU m1).
 #[test]
 fn test_declare_rejects_assoc_to_indexed_conversion() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-assoc-to-indexed-output.txt");
     let error_path = target_test_path("rubash-declare-assoc-to-indexed-error.txt");
     let shell_output_path = shell_test_path(&output_path);
@@ -284,6 +285,7 @@ fn test_declare_rejects_assoc_to_indexed_conversion() {
 
 #[test]
 fn test_declare_readonly_assoc_array_prints_combined_attrs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-readonly-assoc-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -305,6 +307,7 @@ fn test_declare_readonly_assoc_array_prints_combined_attrs() {
 
 #[test]
 fn test_declare_indexed_array_arithmetic_subscript_names_default_to_zero() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-indexed-named-subscript-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -327,6 +330,7 @@ fn test_declare_indexed_array_arithmetic_subscript_names_default_to_zero() {
 
 #[test]
 fn test_declare_indexed_array_assignment_resolves_negative_indices() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-indexed-array-negative-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -347,6 +351,7 @@ fn test_declare_indexed_array_assignment_resolves_negative_indices() {
 
 #[test]
 fn test_declare_integer_array_assignment_preserves_indices() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-integer-array-sparse-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

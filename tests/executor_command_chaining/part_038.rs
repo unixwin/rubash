@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_exec_a_accepts_attached_argument() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exec-a-attached-argument-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("exec -acustom sh -c 'echo $0' > {output_path}");
@@ -20,6 +21,7 @@ fn test_exec_a_accepts_attached_argument() {
 
 #[test]
 fn test_exec_double_dash_stops_option_parsing() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exec-double-dash-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("exec -- sh -c 'echo $0' > {output_path}");
@@ -37,6 +39,7 @@ fn test_exec_double_dash_stops_option_parsing() {
 
 #[test]
 fn test_exec_stdout_redirect_persists_for_following_commands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-exec-persistent-stdout-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -60,6 +63,7 @@ fn test_exec_stdout_redirect_persists_for_following_commands() {
 
 #[test]
 fn test_exec_stdout_close_persists_until_reopened() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-exec-close-stdout-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -81,6 +85,7 @@ fn test_exec_stdout_close_persists_until_reopened() {
 
 #[test]
 fn test_exec_stderr_redirect_persists_for_following_commands() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = target_test_path("rubash-exec-persistent-stderr-output.txt");
     let shell_error_path = shell_test_path(&error_path);
     let _ = fs::remove_file(&error_path);
@@ -103,6 +108,7 @@ fn test_exec_stderr_redirect_persists_for_following_commands() {
 
 #[test]
 fn test_exec_stderr_close_persists_until_reopened() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = target_test_path("rubash-exec-close-stderr-output.txt");
     let shell_error_path = shell_test_path(&error_path);
     let _ = fs::remove_file(&error_path);
@@ -126,6 +132,7 @@ fn test_exec_stderr_close_persists_until_reopened() {
 
 #[test]
 fn test_exec_stderr_can_copy_persistent_stdout_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-exec-copy-stdout-to-stderr-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -145,6 +152,7 @@ fn test_exec_stderr_can_copy_persistent_stdout_redirect() {
 
 #[test]
 fn test_exec_stdout_can_copy_persistent_stderr_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = target_test_path("rubash-exec-copy-stderr-to-stdout-output.txt");
     let shell_error_path = shell_test_path(&error_path);
     let _ = fs::remove_file(&error_path);
@@ -163,6 +171,7 @@ fn test_exec_stdout_can_copy_persistent_stderr_redirect() {
 
 #[test]
 fn test_exec_stdin_redirect_persists_for_following_reads() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = target_test_path("rubash-exec-persistent-stdin-input.txt");
     let output_path = target_test_path("rubash-exec-persistent-stdin-output.txt");
     let shell_input_path = shell_test_path(&input_path);
@@ -187,6 +196,7 @@ fn test_exec_stdin_redirect_persists_for_following_reads() {
 
 #[test]
 fn test_exec_stdin_close_persists_for_following_reads() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = target_test_path("rubash-exec-close-stdin-input.txt");
     let output_path = target_test_path("rubash-exec-close-stdin-output.txt");
     let shell_input_path = shell_test_path(&input_path);
@@ -213,6 +223,7 @@ fn test_exec_stdin_close_persists_for_following_reads() {
 
 #[test]
 fn test_exec_stdout_redirect_is_inherited_by_external_commands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-exec-external-stdout-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
@@ -232,6 +243,7 @@ fn test_exec_stdout_redirect_is_inherited_by_external_commands() {
 
 #[test]
 fn test_exec_stderr_redirect_is_inherited_by_external_commands() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = target_test_path("rubash-exec-external-stderr-output.txt");
     let shell_error_path = shell_test_path(&error_path);
     let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
@@ -253,6 +265,7 @@ fn test_exec_stderr_redirect_is_inherited_by_external_commands() {
 
 #[test]
 fn test_exec_stdin_redirect_is_inherited_by_external_commands() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = target_test_path("rubash-exec-external-stdin-input.txt");
     let output_path = target_test_path("rubash-exec-external-stdin-output.txt");
     let shell_input_path = shell_test_path(&input_path);
@@ -278,6 +291,7 @@ fn test_exec_stdin_redirect_is_inherited_by_external_commands() {
 
 #[test]
 fn test_exec_child_environment_contains_only_exported_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-exec-child-env-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -305,6 +319,7 @@ fn test_exec_child_environment_contains_only_exported_variables() {
 
 #[test]
 fn test_exec_printenv_ignores_unexported_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-exec-printenv-local-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -324,6 +339,7 @@ fn test_exec_printenv_ignores_unexported_variable() {
 
 #[test]
 fn test_exec_printenv_reads_exported_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-exec-printenv-exported-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -343,6 +359,7 @@ fn test_exec_printenv_reads_exported_variable() {
 
 #[test]
 fn test_exec_runs_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-exec-runs-external-output.txt");
     #[cfg(windows)]
     let script_path = target_test_path("rubash-exec-runs-external.cmd");
@@ -385,6 +402,7 @@ fn test_exec_runs_external_command() {
 
 #[test]
 fn test_exec_stops_after_successful_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-exec-stops-output.txt");
     #[cfg(windows)]
     let script_path = target_test_path("rubash-exec-stops.cmd");
@@ -429,6 +447,7 @@ fn test_exec_stops_after_successful_command() {
 
 #[test]
 fn test_exec_c_clears_external_command_environment() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-exec-clean-env-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
@@ -452,6 +471,7 @@ fn test_exec_c_clears_external_command_environment() {
 
 #[test]
 fn test_exec_missing_command_returns_not_found() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-exec-missing-command-error.txt";
     let _ = fs::remove_file(error_path);
     let input = format!("exec no_such_rubash_command 2> {error_path}");

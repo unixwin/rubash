@@ -10,8 +10,33 @@ use std::sync::Mutex;
 
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Process-CWD guard for tests that execute engine `cd`/`pushd`/`popd`
+/// (or chdir directly): those builtins chdir the whole test process
+/// (`cd.rs:152`), so without this every later test in the binary inherits
+/// the wrong directory and all relative `target/` fixtures break
+/// (rubash#690). Restores on Drop, so even a panicking test cannot leak
+/// the directory change into its neighbors.
+pub(crate) struct CwdGuard {
+    saved: std::path::PathBuf,
+}
+
+impl CwdGuard {
+    pub(crate) fn take() -> Self {
+        Self {
+            saved: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        }
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.saved);
+    }
+}
+
 #[test]
 fn diagnostic_prefix_three_modes_match_gnu() {
+    let _cwd_guard = CwdGuard::take();
     let _lock = ENV_LOCK.lock().unwrap();
 
     // Interactive mode: only shell name, no line segment
@@ -44,6 +69,7 @@ fn diagnostic_prefix_three_modes_match_gnu() {
 
 #[test]
 fn builtin_error_prefix_three_modes_match_gnu() {
+    let _cwd_guard = CwdGuard::take();
     let _lock = ENV_LOCK.lock().unwrap();
 
     // Interactive mode: only shell name, no line segment
@@ -195,6 +221,7 @@ mod simple_execution {
 
     #[test]
     fn test_echo_command() {
+        let _cwd_guard = CwdGuard::take();
         let input = "echo hello";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -205,6 +232,7 @@ mod simple_execution {
 
     #[test]
     fn test_whitespace_braced_substitution_is_bad_substitution() {
+        let _cwd_guard = CwdGuard::take();
         // wt37 (#374): GNU Bash 5.3.0 executes a whitespace-led `${ cmd; }` as
         // the current-shell substitution (probe wt37-374 K121: stdout
         // "x\nafter:0\n", rc 0, empty stderr on both shells); the old
@@ -217,6 +245,7 @@ mod simple_execution {
 
     #[test]
     fn test_echo_multiple_args() {
+        let _cwd_guard = CwdGuard::take();
         let input = "echo hello world";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -227,6 +256,7 @@ mod simple_execution {
 
     #[test]
     fn test_exit_command() {
+        let _cwd_guard = CwdGuard::take();
         let input = "exit 0";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -237,6 +267,7 @@ mod simple_execution {
 
     #[test]
     fn test_pwd_command() {
+        let _cwd_guard = CwdGuard::take();
         let input = "pwd";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -247,6 +278,7 @@ mod simple_execution {
 
     #[test]
     fn test_true_command() {
+        let _cwd_guard = CwdGuard::take();
         let tokens = tokenize("true");
         let ast = parse(&tokens);
         let mut executor = Executor::new();
@@ -256,6 +288,7 @@ mod simple_execution {
 
     #[test]
     fn test_false_command() {
+        let _cwd_guard = CwdGuard::take();
         let tokens = tokenize("false");
         let ast = parse(&tokens);
         let mut executor = Executor::new();
@@ -269,6 +302,7 @@ mod exit_codes {
 
     #[test]
     fn test_exit_with_code() {
+        let _cwd_guard = CwdGuard::take();
         let input = "exit 42";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -279,6 +313,7 @@ mod exit_codes {
 
     #[test]
     fn test_exit_without_code() {
+        let _cwd_guard = CwdGuard::take();
         let input = "exit";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -293,6 +328,7 @@ mod environment_tests {
 
     #[test]
     fn test_export_command() {
+        let _cwd_guard = CwdGuard::take();
         let input = "export TEST_VAR=hello";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -303,6 +339,7 @@ mod environment_tests {
 
     #[test]
     fn test_env_var_storage() {
+        let _cwd_guard = CwdGuard::take();
         let mut executor = Executor::new();
         executor.set_env("MY_VAR", "hello");
         assert_eq!(executor.get_env("MY_VAR"), Some("hello"));
@@ -310,6 +347,7 @@ mod environment_tests {
 
     #[test]
     fn public_export_env_marks_variable_for_child_environment() {
+        let _cwd_guard = CwdGuard::take();
         let mut executor = Executor::new();
         executor.export_env("RUBASH_PUBLIC_EXPORT_ENV", "visible");
         let snapshot = executor.env_vars_snapshot();
@@ -327,6 +365,7 @@ mod environment_tests {
 
     #[test]
     fn default_shell_is_current_executable_when_missing() {
+        let _cwd_guard = CwdGuard::take();
         let _guard = ENV_LOCK.lock().unwrap();
         let _shell = EnvGuard::unset("SHELL");
         let _bash = EnvGuard::unset("BASH");
@@ -341,6 +380,7 @@ mod environment_tests {
 
     #[test]
     fn inherited_shell_is_preserved() {
+        let _cwd_guard = CwdGuard::take();
         let _guard = ENV_LOCK.lock().unwrap();
         let _shell = EnvGuard::set("SHELL", "C:/custom/shell.exe");
 
@@ -351,6 +391,7 @@ mod environment_tests {
 
     #[test]
     fn test_unset_command() {
+        let _cwd_guard = CwdGuard::take();
         let input = "unset HOME";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -394,6 +435,7 @@ mod function_api_tests {
 
     #[test]
     fn public_call_function_invokes_defined_function_with_temporary_env() {
+        let _cwd_guard = CwdGuard::take();
         let output_path = target_test_path("rubash-public-function-call-output.txt");
         let shell_output_path = shell_test_path(&output_path);
         let _ = std::fs::remove_file(&output_path);
@@ -421,6 +463,7 @@ mod function_api_tests {
 
     #[test]
     fn public_call_function_reports_missing_function_without_path_lookup() {
+        let _cwd_guard = CwdGuard::take();
         let mut executor = Executor::new();
 
         let error = executor
@@ -436,6 +479,7 @@ mod function_api_tests {
 
     #[test]
     fn functions_snapshot_returns_defined_function_names_sorted() {
+        let _cwd_guard = CwdGuard::take();
         let _env_guard = ENV_LOCK.lock().unwrap();
         let imported_function_var = "BASH_FUNC_rubash_imported%%";
         let old_imported_function = std::env::var_os(imported_function_var);
@@ -462,6 +506,7 @@ mod windows_script_commands {
 
     #[test]
     fn dot_sh_path_command_runs_in_rubash_without_leaking_state() {
+        let _cwd_guard = CwdGuard::take();
         let dir = target_test_path("windows-direct-sh-script");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -497,6 +542,7 @@ mod windows_script_commands {
 
     #[test]
     fn dot_ps1_path_command_runs_with_powershell() {
+        let _cwd_guard = CwdGuard::take();
         if !powershell_runtime_available() {
             return;
         }
@@ -550,6 +596,7 @@ mod builtin_commands {
 
     #[test]
     fn test_env_builtin() {
+        let _cwd_guard = CwdGuard::take();
         let input = "env";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -560,6 +607,7 @@ mod builtin_commands {
 
     #[test]
     fn test_set_builtin() {
+        let _cwd_guard = CwdGuard::take();
         let input = "set";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -570,6 +618,7 @@ mod builtin_commands {
 
     #[test]
     fn test_test_builtin() {
+        let _cwd_guard = CwdGuard::take();
         let input = "test 1 -eq 1";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -580,6 +629,7 @@ mod builtin_commands {
 
     #[test]
     fn test_bracket_builtin() {
+        let _cwd_guard = CwdGuard::take();
         let input = "[ 1 -eq 1 ]";
         let tokens = tokenize(input);
         let ast = parse(&tokens);

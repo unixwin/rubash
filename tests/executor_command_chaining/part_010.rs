@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_quoted_heredoc_keeps_parameters_literal() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("value=expanded; cat > {output_path} <<'EOF'\n$value\nEOF");
@@ -20,6 +21,7 @@ fn test_quoted_heredoc_keeps_parameters_literal() {
 
 #[test]
 fn test_spaced_quoted_heredoc_keeps_parameters_literal() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-spaced-quoted-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("value=expanded; cat > {output_path} << 'EOF'\n$value\nEOF");
@@ -37,6 +39,7 @@ fn test_spaced_quoted_heredoc_keeps_parameters_literal() {
 
 #[test]
 fn test_partially_quoted_heredoc_delimiter_keeps_parameters_literal() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-partial-quoted-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("value=expanded; cat > {output_path} <<E\"OF\"\n$value\nEOF");
@@ -54,6 +57,7 @@ fn test_partially_quoted_heredoc_delimiter_keeps_parameters_literal() {
 
 #[test]
 fn test_multiple_heredocs_use_last_stdin_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-multiple-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat > {output_path} <<EOF1 <<EOF2\nfirst\nEOF1\nsecond\nEOF2");
@@ -71,6 +75,7 @@ fn test_multiple_heredocs_use_last_stdin_redirect() {
 
 #[test]
 fn test_sequential_commands_keep_heredoc_body_order() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-sequential-heredoc-order-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat <<A > {output_path}; cat <<B >> {output_path}\none\nA\ntwo\nB");
@@ -88,6 +93,7 @@ fn test_sequential_commands_keep_heredoc_body_order() {
 
 #[test]
 fn test_dash_heredoc_strips_leading_tabs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dash-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat > {output_path} <<-EOF\n\tone\n\ttwo\n\tEOF");
@@ -105,6 +111,7 @@ fn test_dash_heredoc_strips_leading_tabs() {
 
 #[test]
 fn test_dash_quoted_tab_delimiter_strips_leading_tabs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dash-quoted-tab-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -123,6 +130,7 @@ fn test_dash_quoted_tab_delimiter_strips_leading_tabs() {
 
 #[test]
 fn test_empty_quoted_heredoc_delimiter_reads_until_eof() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-empty-quoted-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat > {output_path} <<''\nhi\nthere\n''");
@@ -140,6 +148,7 @@ fn test_empty_quoted_heredoc_delimiter_reads_until_eof() {
 
 #[test]
 fn test_unquoted_heredoc_removes_backslash_newline() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-heredoc-backslash-newline-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat > {output_path} <<EOF\nline 1\\\nline 2\nEOF");
@@ -157,6 +166,7 @@ fn test_unquoted_heredoc_removes_backslash_newline() {
 
 #[test]
 fn test_heredoc_delimiter_word_removes_backslash_newline() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-heredoc-delimiter-continuation-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat > {output_path} <<EO\\\nF\nhi\nEOF");
@@ -174,6 +184,7 @@ fn test_heredoc_delimiter_word_removes_backslash_newline() {
 
 #[test]
 fn test_unquoted_heredoc_matches_delimiter_after_backslash_newline() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-heredoc-body-delimiter-continuation-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat > {output_path} <<EOF\nhi\nEO\\\nF");
@@ -191,6 +202,7 @@ fn test_unquoted_heredoc_matches_delimiter_after_backslash_newline() {
 
 #[test]
 fn test_unquoted_heredoc_body_continuation_before_delimiter_check() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-heredoc-body-continuation-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat > {output_path} <<EOF\nnext\\\nEOF\nEOF");
@@ -208,6 +220,7 @@ fn test_unquoted_heredoc_body_continuation_before_delimiter_check() {
 
 #[test]
 fn test_unterminated_subshell_heredoc_does_not_execute_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-unterminated-subshell-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("(cat <<EOF > {output_path}\nstill more text in a subshell\nEOF)");
@@ -224,6 +237,7 @@ fn test_unterminated_subshell_heredoc_does_not_execute_body() {
 
 #[test]
 fn test_for_loop_heredoc_append_expands_loop_variable_target() {
+    let _cwd_guard = CwdGuard::take();
     let dir = target_test_path("rubash-for-heredoc-append");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -246,6 +260,7 @@ fn test_for_loop_heredoc_append_expands_loop_variable_target() {
 
 #[test]
 fn test_while_loop_reads_stdin_and_fd_heredocs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-while-fd-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -268,6 +283,7 @@ fn test_while_loop_reads_stdin_and_fd_heredocs() {
 
 #[test]
 fn test_lineno_assignment_does_not_override_dynamic_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-lineno-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("LINENO=99; printf '%s\\n' \"$LINENO\" > {output_path}");

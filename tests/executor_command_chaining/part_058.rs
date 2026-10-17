@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_shift_invalid_counts_redirect_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-shift-invalid-stderr.txt";
     let output_path = "target/rubash-shift-invalid-status.txt";
     let _ = fs::remove_file(error_path);
@@ -32,6 +33,7 @@ fn test_shift_invalid_counts_redirect_stderr() {
 
 #[test]
 fn test_shift_too_many_arguments_fails_without_changing_positional_params() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-shift-too-many-args-stderr.txt";
     let output_path = "target/rubash-shift-too-many-args-output.txt";
     let _ = fs::remove_file(error_path);
@@ -57,6 +59,7 @@ fn test_shift_too_many_arguments_fails_without_changing_positional_params() {
 
 #[test]
 fn test_shift_verbose_reports_count_out_of_range() {
+    let _cwd_guard = CwdGuard::take();
     let quiet_error_path = "target/rubash-shift-verbose-quiet-error.txt";
     let verbose_error_path = "target/rubash-shift-verbose-error.txt";
     let output_path = "target/rubash-shift-verbose-output.txt";
@@ -91,6 +94,7 @@ fn test_shift_verbose_reports_count_out_of_range() {
 
 #[test]
 fn test_function_return_sets_status_and_skips_rest() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-return-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -109,6 +113,7 @@ fn test_function_return_sets_status_and_skips_rest() {
 
 #[test]
 fn test_function_return_normalizes_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-return-normalize-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function r {{ return 258; }}; r; echo $? > {output_path}");
@@ -126,6 +131,7 @@ fn test_function_return_normalizes_status() {
 
 #[test]
 fn test_function_return_non_numeric_status_is_usage_error() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-return-bad-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -145,6 +151,7 @@ fn test_function_return_non_numeric_status_is_usage_error() {
 
 #[test]
 fn test_shell_flags_expand_into_dollar_dash() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shell-flags-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -e -x; echo $- > {output_path}");
@@ -164,6 +171,7 @@ fn test_shell_flags_expand_into_dollar_dash() {
 
 #[test]
 fn test_shell_flags_expand_inside_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shell-flags-embedded-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -u; printf '%s\\n' \"flags:$-\" > {output_path}");
@@ -183,6 +191,7 @@ fn test_shell_flags_expand_inside_words() {
 
 #[test]
 fn test_set_operands_replace_positional_params_after_expansion() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-operands-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("name=beta; set -e alpha $name; echo $# $1 $2 $- > {output_path}");
@@ -202,6 +211,7 @@ fn test_set_operands_replace_positional_params_after_expansion() {
 
 #[test]
 fn test_set_nounset_updates_shell_flags_and_option_tests() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-nounset-flags-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -230,6 +240,7 @@ fn test_set_nounset_updates_shell_flags_and_option_tests() {
 
 #[test]
 fn test_set_nounset_with_positional_operands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-nounset-operands-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("name=beta; set -u alpha $name; echo $# $1 $2 $- > {output_path}");
@@ -249,6 +260,7 @@ fn test_set_nounset_with_positional_operands() {
 
 #[test]
 fn test_set_plus_assigns_operands_after_empty_option_word() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-plus-operands-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -264,6 +276,7 @@ fn test_set_plus_assigns_operands_after_empty_option_word() {
 
 #[test]
 fn test_set_long_option_continues_to_positional_operands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-long-option-operands-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -282,6 +295,7 @@ fn test_set_long_option_continues_to_positional_operands() {
 
 #[test]
 fn test_set_plus_long_option_continues_to_positional_operands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-plus-long-option-operands-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -298,6 +312,7 @@ fn test_set_plus_long_option_continues_to_positional_operands() {
 
 #[test]
 fn test_set_o_nounset_updates_shell_flags() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-o-nounset-flags-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -o nounset; echo $- > {output_path}; test -o nounset");
@@ -316,6 +331,7 @@ fn test_set_o_nounset_updates_shell_flags() {
 
 #[test]
 fn test_shellopts_reflects_set_options() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shellopts-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

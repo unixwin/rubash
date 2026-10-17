@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_mapfile_without_t_preserves_record_newlines() {
+    let _cwd_guard = CwdGuard::take();
     let input = "mapfile arr <<< $'alpha\\nbeta'";
     let tokens = tokenize(input);
     let ast = parse(&tokens);
@@ -19,6 +20,7 @@ fn test_mapfile_without_t_preserves_record_newlines() {
 }
 #[test]
 fn test_mapfile_t_preserves_trailing_empty_line() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-trailing-empty-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -36,6 +38,7 @@ fn test_mapfile_t_preserves_trailing_empty_line() {
 }
 #[test]
 fn test_readarray_t_reads_here_string_into_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-readarray-t-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -55,6 +58,7 @@ fn test_readarray_t_reads_here_string_into_array() {
 
 #[test]
 fn test_quoted_array_length_counts_elements() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-array-length-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -75,6 +79,7 @@ fn test_quoted_array_length_counts_elements() {
 
 #[test]
 fn test_mapfile_n_limits_read_lines() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -94,6 +99,7 @@ fn test_mapfile_n_limits_read_lines() {
 
 #[test]
 fn test_mapfile_n_zero_reads_all_lines() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-n-zero-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -113,6 +119,7 @@ fn test_mapfile_n_zero_reads_all_lines() {
 
 #[test]
 fn test_mapfile_callback_runs_at_quantum() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-callback-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -135,6 +142,7 @@ fn test_mapfile_callback_runs_at_quantum() {
 
 #[test]
 fn test_mapfile_combined_tc_sets_callback_quantum_and_trims() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-combined-tc-callback-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -157,6 +165,7 @@ fn test_mapfile_combined_tc_sets_callback_quantum_and_trims() {
 
 #[test]
 fn test_readarray_combined_t_c_sets_callback_and_trims() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-readarray-combined-tc-callback-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -179,6 +188,7 @@ fn test_readarray_combined_t_c_sets_callback_and_trims() {
 
 #[test]
 fn test_mapfile_combined_t_c_consumes_separate_callback() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-combined-tc-separate-callback-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -201,6 +211,7 @@ fn test_mapfile_combined_t_c_consumes_separate_callback() {
 
 #[test]
 fn test_readarray_compact_n_limits_read_lines() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-readarray-compact-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -220,6 +231,7 @@ fn test_readarray_compact_n_limits_read_lines() {
 
 #[test]
 fn test_readarray_combined_tn_limits_and_trims_lines() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-readarray-combined-tn-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -239,6 +251,7 @@ fn test_readarray_combined_tn_limits_and_trims_lines() {
 
 #[test]
 fn test_mapfile_combined_tn_consumes_separate_count() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-combined-tn-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -258,6 +271,7 @@ fn test_mapfile_combined_tn_consumes_separate_count() {
 
 #[test]
 fn test_mapfile_s_skips_initial_lines() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-s-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -277,6 +291,7 @@ fn test_mapfile_s_skips_initial_lines() {
 
 #[test]
 fn test_readarray_compact_s_combines_with_n() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-readarray-compact-s-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -296,6 +311,7 @@ fn test_readarray_compact_s_combines_with_n() {
 
 #[test]
 fn test_readarray_combined_ts_skips_and_trims_lines() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-readarray-combined-ts-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -315,6 +331,7 @@ fn test_readarray_combined_ts_skips_and_trims_lines() {
 
 #[test]
 fn test_mapfile_combined_ts_consumes_separate_skip_count() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-combined-ts-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -334,6 +351,7 @@ fn test_mapfile_combined_ts_consumes_separate_skip_count() {
 
 #[test]
 fn test_mapfile_o_sets_origin_index() {
+    let _cwd_guard = CwdGuard::take();
     let input = "unset arr; mapfile -O 2 -t arr <<< $'alpha\\nbeta'";
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -351,6 +369,7 @@ fn test_mapfile_o_sets_origin_index() {
 
 #[test]
 fn test_readarray_compact_o_preserves_existing_elements() {
+    let _cwd_guard = CwdGuard::take();
     let input = "arr=(zero one two); readarray -O2 -n1 -t arr <<< $'new\\nmore'";
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -368,6 +387,7 @@ fn test_readarray_compact_o_preserves_existing_elements() {
 
 #[test]
 fn test_readarray_combined_to_preserves_existing_elements() {
+    let _cwd_guard = CwdGuard::take();
     let input = "arr=(zero one two); readarray -tO2 -n1 arr <<< $'new\\nmore'";
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -385,6 +405,7 @@ fn test_readarray_combined_to_preserves_existing_elements() {
 
 #[test]
 fn test_mapfile_combined_to_consumes_separate_origin() {
+    let _cwd_guard = CwdGuard::take();
     let input = "arr=(zero one two); mapfile -tO 2 -n1 arr <<< $'new\\nmore'";
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -402,6 +423,7 @@ fn test_mapfile_combined_to_consumes_separate_origin() {
 
 #[test]
 fn test_mapfile_d_uses_custom_delimiter() {
+    let _cwd_guard = CwdGuard::take();
     let input = "mapfile -d : -t arr <<< 'alpha:beta:gamma'";
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -419,6 +441,7 @@ fn test_mapfile_d_uses_custom_delimiter() {
 
 #[test]
 fn test_readarray_compact_d_keeps_delimiter_without_t() {
+    let _cwd_guard = CwdGuard::take();
     let input = "readarray -d: arr <<< 'alpha:beta'";
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -436,6 +459,7 @@ fn test_readarray_compact_d_keeps_delimiter_without_t() {
 
 #[test]
 fn test_readarray_combined_td_uses_delimiter_and_trims_records() {
+    let _cwd_guard = CwdGuard::take();
     let input = "readarray -td: arr <<< 'alpha:beta'";
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -453,6 +477,7 @@ fn test_readarray_combined_td_uses_delimiter_and_trims_records() {
 
 #[test]
 fn test_mapfile_combined_td_consumes_separate_delimiter() {
+    let _cwd_guard = CwdGuard::take();
     let input = "mapfile -td : arr <<< 'alpha:beta'";
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -471,6 +496,7 @@ fn test_mapfile_combined_td_consumes_separate_delimiter() {
 #[ignore = "rubash#399: see issue (probe wt37-374 K012)"]
 #[test]
 fn test_mapfile_u_reads_numbered_fd_here_string() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-u-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -491,6 +517,7 @@ fn test_mapfile_u_reads_numbered_fd_here_string() {
 #[ignore = "rubash#399: see issue (probe wt37-374 K013)"]
 #[test]
 fn test_readarray_combined_tu_reads_numbered_fd_here_string() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-readarray-combined-tu-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -511,6 +538,7 @@ fn test_readarray_combined_tu_reads_numbered_fd_here_string() {
 #[ignore = "rubash#399: see issue (probe wt37-374 K011)"]
 #[test]
 fn test_mapfile_combined_tu_consumes_separate_fd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-combined-tu-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -530,6 +558,7 @@ fn test_mapfile_combined_tu_consumes_separate_fd() {
 
 #[test]
 fn test_readarray_compact_u_reads_numbered_fd_file() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-readarray-u-fd-input.txt";
     fs::write(input_path, "alpha\nbeta\n").unwrap();
     let input = format!("readarray -u3 -t arr 3<{input_path}");
@@ -550,6 +579,7 @@ fn test_readarray_compact_u_reads_numbered_fd_file() {
 
 #[test]
 fn test_array_at_indices_expand() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-at-indices-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -569,6 +599,7 @@ fn test_array_at_indices_expand() {
 
 #[test]
 fn test_mapfile_u_rejects_invalid_fd_specifications() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-u-invalid-fd-status.txt";
     let error_path = "target/rubash-mapfile-u-invalid-fd-error.txt";
     let _ = fs::remove_file(output_path);
@@ -600,6 +631,7 @@ fn test_mapfile_u_rejects_invalid_fd_specifications() {
 
 #[test]
 fn test_mapfile_u_reports_bad_fd_for_unopened_or_closed_fd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-u-bad-fd-status.txt";
     let error_path = "target/rubash-mapfile-u-bad-fd-error.txt";
     let _ = fs::remove_file(output_path);
@@ -629,6 +661,7 @@ fn test_mapfile_u_reports_bad_fd_for_unopened_or_closed_fd() {
 
 #[test]
 fn test_mapfile_rejects_invalid_array_name() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-invalid-array-status.txt";
     let error_path = "target/rubash-mapfile-invalid-array-error.txt";
     let _ = fs::remove_file(output_path);
@@ -660,6 +693,7 @@ fn test_mapfile_rejects_invalid_array_name() {
 
 #[test]
 fn test_mapfile_ignores_extra_array_names_and_accepts_double_dash() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-mapfile-extra-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

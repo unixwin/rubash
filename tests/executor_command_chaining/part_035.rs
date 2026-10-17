@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_jobs_without_jobs_returns_success() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-jobs-empty-output.txt";
     let status_path = "target/rubash-jobs-empty-status.txt";
     let _ = fs::remove_file(output_path);
@@ -24,6 +25,7 @@ fn test_jobs_without_jobs_returns_success() {
 
 #[test]
 fn test_jobs_invalid_option_returns_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-jobs-invalid-error.txt";
     let status_path = "target/rubash-jobs-invalid-status.txt";
     let _ = fs::remove_file(error_path);
@@ -47,6 +49,7 @@ fn test_jobs_invalid_option_returns_usage() {
 
 #[test]
 fn test_jobs_x_executes_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-jobs-x-output.txt";
     let status_path = "target/rubash-jobs-x-status.txt";
     let _ = fs::remove_file(output_path);
@@ -68,6 +71,7 @@ fn test_jobs_x_executes_command() {
 
 #[test]
 fn test_jobs_x_uses_command_status() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-jobs-x-status-output.txt";
     let _ = fs::remove_file(status_path);
     let input = format!("jobs -x false; echo $? > {status_path}");
@@ -85,6 +89,7 @@ fn test_jobs_x_uses_command_status() {
 
 #[test]
 fn test_jobs_x_replaces_jobspec_with_background_pid() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-jobs-x-jobspec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("true & pid=$!; jobs -x echo %1 \"$pid\" > {output_path}; disown \"$pid\"");
@@ -108,6 +113,7 @@ fn test_jobs_x_replaces_jobspec_with_background_pid() {
 
 #[test]
 fn test_jobs_x_unknown_jobspec_reports_failure() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-jobs-x-unknown-error.txt";
     let status_path = "target/rubash-jobs-x-unknown-status.txt";
     let _ = fs::remove_file(error_path);
@@ -131,6 +137,7 @@ fn test_jobs_x_unknown_jobspec_reports_failure() {
 
 #[test]
 fn test_jobs_lists_background_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-jobs-list-output.txt";
     let status_path = "target/rubash-jobs-list-status.txt";
     let _ = fs::remove_file(output_path);
@@ -156,6 +163,7 @@ fn test_jobs_lists_background_command() {
 
 #[test]
 fn test_jobs_p_lists_background_pid_only() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-jobs-p-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("true & pid=$!; jobs -p > {output_path}; wait \"$pid\"");
@@ -175,6 +183,7 @@ fn test_jobs_p_lists_background_pid_only() {
 
 #[test]
 fn test_jobs_lists_requested_background_jobspec() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-jobs-jobspec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("true & first=$!; false & second=$!; jobs %1 > {output_path}; disown \"$first\"; disown \"$second\"");
@@ -195,6 +204,7 @@ fn test_jobs_lists_requested_background_jobspec() {
 
 #[test]
 fn test_jobs_p_lists_requested_current_jobspec_pid_only() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-jobs-current-p-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("true & pid=$!; jobs -p %% > {output_path}; disown \"$pid\"");
@@ -217,6 +227,7 @@ fn test_jobs_p_lists_requested_current_jobspec_pid_only() {
 
 #[test]
 fn test_jobs_unknown_jobspec_reports_failure() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-jobs-unknown-error.txt";
     let status_path = "target/rubash-jobs-unknown-status.txt";
     let _ = fs::remove_file(error_path);
@@ -243,6 +254,7 @@ fn test_jobs_unknown_jobspec_reports_failure() {
 
 #[test]
 fn test_disown_without_jobs_reports_current_job_failure() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-disown-empty-error.txt";
     let status_path = "target/rubash-disown-empty-status.txt";
     let _ = fs::remove_file(error_path);
@@ -266,6 +278,7 @@ fn test_disown_without_jobs_reports_current_job_failure() {
 
 #[test]
 fn test_disown_all_or_running_without_jobs_succeeds() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-disown-all-status.txt";
     let _ = fs::remove_file(status_path);
     let input = format!("disown -a; echo $? > {status_path}; disown -r; echo $? >> {status_path}");
@@ -283,6 +296,7 @@ fn test_disown_all_or_running_without_jobs_succeeds() {
 
 #[test]
 fn test_disown_current_background_job_removes_it_from_jobs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-disown-current-output.txt";
     let status_path = "target/rubash-disown-current-status.txt";
     let _ = fs::remove_file(output_path);
@@ -304,6 +318,7 @@ fn test_disown_current_background_job_removes_it_from_jobs() {
 
 #[test]
 fn test_disown_background_pid_removes_only_that_job() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-disown-pid-output.txt";
     let status_path = "target/rubash-disown-pid-status.txt";
     let _ = fs::remove_file(output_path);
@@ -329,6 +344,7 @@ fn test_disown_background_pid_removes_only_that_job() {
 
 #[test]
 fn test_disown_all_background_jobs_clears_jobs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-disown-all-output.txt";
     let status_path = "target/rubash-disown-all-jobs-status.txt";
     let _ = fs::remove_file(output_path);
@@ -350,6 +366,7 @@ fn test_disown_all_background_jobs_clears_jobs() {
 
 #[test]
 fn test_disown_invalid_option_returns_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-disown-invalid-error.txt";
     let status_path = "target/rubash-disown-invalid-status.txt";
     let _ = fs::remove_file(error_path);
@@ -373,6 +390,7 @@ fn test_disown_invalid_option_returns_usage() {
 
 #[test]
 fn test_builtin_and_command_disown_use_shell_builtin() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-disown-builtin-status.txt";
     let _ = fs::remove_file(status_path);
     let input = format!(
@@ -396,6 +414,7 @@ fn test_builtin_and_command_disown_use_shell_builtin() {
 
 #[test]
 fn test_logout_non_login_shell_reports_error_and_continues() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-logout-error.txt";
     let output_path = "target/rubash-logout-output.txt";
     let _ = fs::remove_file(error_path);
@@ -424,6 +443,7 @@ fn test_logout_non_login_shell_reports_error_and_continues() {
 
 #[test]
 fn test_builtin_and_command_logout_use_shell_builtin() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-logout-builtin-error.txt";
     let output_path = "target/rubash-logout-builtin-output.txt";
     let _ = fs::remove_file(error_path);
@@ -455,6 +475,7 @@ fn test_builtin_and_command_logout_use_shell_builtin() {
 
 #[test]
 fn test_wait_without_operands_returns_success() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-wait-empty-status.txt";
     let _ = fs::remove_file(status_path);
     let input = format!("wait; echo $? > {status_path}");

@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_declare_plus_array_attributes_cannot_destroy_arrays() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-plus-array-attrs-output.txt");
     let error_path = target_test_path("rubash-declare-plus-array-attrs-error.txt");
     let shell_output_path = shell_test_path(&output_path);
@@ -36,6 +37,7 @@ fn test_declare_plus_array_attributes_cannot_destroy_arrays() {
 
 #[test]
 fn test_declare_nameref_reads_and_assigns_target() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-nameref-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -71,6 +73,7 @@ fn test_declare_nameref_reads_and_assigns_target() {
 
 #[test]
 fn test_declare_assoc_alternating_bracket_words_are_literal_keys() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-assoc-bracket-word-keys-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -95,6 +98,7 @@ fn test_declare_assoc_alternating_bracket_words_are_literal_keys() {
 
 #[test]
 fn test_assoc_element_assignment_quotes_bracket_keys() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-assoc-bracket-key-assignment-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -120,6 +124,7 @@ fn test_assoc_element_assignment_quotes_bracket_keys() {
 
 #[test]
 fn test_nameref_unary_conditionals_use_nameref_attribute() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-nameref-unary-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -167,6 +172,7 @@ fn test_nameref_unary_conditionals_use_nameref_attribute() {
 
 #[test]
 fn test_declare_plus_n_clears_nameref_attribute() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-plus-nameref-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -195,6 +201,7 @@ fn test_declare_plus_n_clears_nameref_attribute() {
 
 #[test]
 fn test_nameref_array_elements_read_and_assign_target() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-nameref-array-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -229,6 +236,7 @@ fn test_nameref_array_elements_read_and_assign_target() {
 
 #[test]
 fn test_nameref_assoc_array_elements_read_keys_and_assign_target() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-nameref-assoc-array-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -263,6 +271,7 @@ fn test_nameref_assoc_array_elements_read_keys_and_assign_target() {
 
 #[test]
 fn test_nameref_parameter_transforms_describe_target() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-nameref-transform-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -317,6 +326,7 @@ fn test_nameref_parameter_transforms_describe_target() {
 
 #[test]
 fn test_local_nameref_restores_after_function() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-local-nameref-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);

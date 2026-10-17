@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_declare_g_inside_function_unsets_global_attributes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-declare-global-unset-attrs-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -28,6 +29,7 @@ fn test_declare_g_inside_function_unsets_global_attributes() {
 
 #[test]
 fn test_declare_g_export_unset_global_behind_local_keeps_value_unset() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-declare-global-export-unset-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -53,6 +55,7 @@ fn test_declare_g_export_unset_global_behind_local_keeps_value_unset() {
 
 #[test]
 fn test_function_readonly_attributes_persist_but_local_attrs_restore() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-readonly-attrs-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -79,6 +82,7 @@ fn test_function_readonly_attributes_persist_but_local_attrs_restore() {
 
 #[test]
 fn test_getopts_parses_explicit_option_argument() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-getopts-explicit-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -97,6 +101,7 @@ fn test_getopts_parses_explicit_option_argument() {
 
 #[test]
 fn test_getopts_walks_clustered_options() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-getopts-cluster-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -116,6 +121,7 @@ fn test_getopts_walks_clustered_options() {
 
 #[test]
 fn test_getopts_reports_missing_argument_modes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-getopts-missing-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -139,6 +145,7 @@ fn test_getopts_reports_missing_argument_modes() {
 
 #[test]
 fn test_getopts_invalid_builtin_option_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-getopts-invalid-error.txt";
     let status_path = "target/rubash-getopts-invalid-status.txt";
     let _ = fs::remove_file(error_path);
@@ -162,6 +169,7 @@ fn test_getopts_invalid_builtin_option_redirects_stderr() {
 
 #[test]
 fn test_getopts_invalid_user_option_diagnostic_styles() {
+    let _cwd_guard = CwdGuard::take();
     let bash_error_path = "target/rubash-getopts-bash-invalid-error.txt";
     let ash_error_path = "target/rubash-getopts-ash-invalid-error.txt";
     let _ = fs::remove_file(bash_error_path);
@@ -193,6 +201,7 @@ fn test_getopts_invalid_user_option_diagnostic_styles() {
 
 #[test]
 fn test_builtin_and_command_getopts_update_shell_state() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-getopts-command-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -216,6 +225,7 @@ fn test_builtin_and_command_getopts_update_shell_state() {
 
 #[test]
 fn test_shift_too_many_fails_without_changing_positional_params() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shift-too-many-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function s {{ shift 3; echo $? $# $1 > {output_path}; }}; s one two");
@@ -233,6 +243,7 @@ fn test_shift_too_many_fails_without_changing_positional_params() {
 
 #[test]
 fn test_shift_non_numeric_fails_without_changing_positional_params() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shift-nonnumeric-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function s {{ shift x; echo $? $# $1 > {output_path}; }}; s one two");
@@ -250,6 +261,7 @@ fn test_shift_non_numeric_fails_without_changing_positional_params() {
 
 #[test]
 fn test_shift_negative_fails_without_changing_positional_params() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shift-negative-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function s {{ shift -1; echo $? $# $1 > {output_path}; }}; s one two");

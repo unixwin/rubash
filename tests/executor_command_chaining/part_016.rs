@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_unset_assoc_array_element() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-unset-assoc-element-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -21,6 +22,7 @@ fn test_unset_assoc_array_element() {
 
 #[test]
 fn test_declare_assoc_compound_assignment_accepts_key_value_pairs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-assoc-pairs-output.txt";
     let _ = fs::remove_file(output_path);
     std::env::remove_var("RUBASH_ASSOC_PAIRS");
@@ -43,6 +45,7 @@ fn test_declare_assoc_compound_assignment_accepts_key_value_pairs() {
 
 #[test]
 fn test_declare_assoc_compound_assignment_preserves_quoted_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-assoc-quotes-output.txt";
     let _ = fs::remove_file(output_path);
     std::env::remove_var("RUBASH_ASSOC_QUOTED_PAIRS");
@@ -68,6 +71,7 @@ fn test_declare_assoc_compound_assignment_preserves_quoted_words() {
 
 #[test]
 fn test_declare_assoc_compound_assignment_preserves_quoted_keys() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-assoc-quoted-keys-output.txt";
     let _ = fs::remove_file(output_path);
     std::env::remove_var("RUBASH_ASSOC_QUOTED_KEYS");
@@ -93,6 +97,7 @@ fn test_declare_assoc_compound_assignment_preserves_quoted_keys() {
 
 #[test]
 fn test_declare_assoc_compound_assignment_accepts_unquoted_keys_with_spaces() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-assoc-spaced-keys-output.txt";
     let _ = fs::remove_file(output_path);
     std::env::remove_var("RUBASH_ASSOC_SPACED_KEYS");
@@ -120,6 +125,7 @@ fn test_declare_assoc_compound_assignment_accepts_unquoted_keys_with_spaces() {
 
 #[test]
 fn test_assoc_parameter_expansion_accepts_quoted_keys() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assoc-quoted-key-expansion-output.txt";
     let _ = fs::remove_file(output_path);
     std::env::remove_var("RUBASH_ASSOC_QUOTED_LOOKUP");
@@ -143,6 +149,7 @@ fn test_assoc_parameter_expansion_accepts_quoted_keys() {
 
 #[test]
 fn test_assoc_parameter_expansion_accepts_direct_quoted_keys() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assoc-direct-quoted-key-output.txt";
     let _ = fs::remove_file(output_path);
     std::env::remove_var("RUBASH_ASSOC_DIRECT_QUOTED_LOOKUP");
@@ -165,6 +172,7 @@ fn test_assoc_parameter_expansion_accepts_direct_quoted_keys() {
 
 #[test]
 fn test_assoc_element_assignment_accepts_expanded_quoted_keys() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assoc-expanded-key-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     std::env::remove_var("RUBASH_ASSOC_EXPANDED_ASSIGN");
@@ -188,6 +196,7 @@ fn test_assoc_element_assignment_accepts_expanded_quoted_keys() {
 
 #[test]
 fn test_variable_is_set_accepts_quoted_associative_keys() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assoc-quoted-key-test-v-output.txt";
     let _ = fs::remove_file(output_path);
     std::env::remove_var("RUBASH_ASSOC_TEST_V");
@@ -211,6 +220,7 @@ fn test_variable_is_set_accepts_quoted_associative_keys() {
 
 #[test]
 fn test_assoc_compound_append_accepts_key_value_pairs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assoc-append-pairs-output.txt";
     let _ = fs::remove_file(output_path);
     std::env::remove_var("RUBASH_ASSOC_APPEND_PAIRS");
@@ -233,6 +243,7 @@ fn test_assoc_compound_append_accepts_key_value_pairs() {
 
 #[test]
 fn test_assoc_compound_append_accepts_element_append_assignments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assoc-append-element-assign-output.txt";
     let _ = fs::remove_file(output_path);
     std::env::remove_var("RUBASH_ASSOC_APPEND_ELEMENTS");
@@ -257,6 +268,7 @@ fn test_assoc_compound_append_accepts_element_append_assignments() {
 
 #[test]
 fn test_declare_assoc_append_accepts_element_append_assignments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-assoc-append-element-output.txt";
     let _ = fs::remove_file(output_path);
     std::env::remove_var("RUBASH_DECLARE_ASSOC_APPEND_ELEMENTS");
@@ -281,6 +293,7 @@ fn test_declare_assoc_append_accepts_element_append_assignments() {
 
 #[test]
 fn test_assoc_scalar_append_assigns_zero_key() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assoc-scalar-append-output.txt";
     let _ = fs::remove_file(output_path);
     std::env::remove_var("RUBASH_ASSOC_SCALAR_APPEND");
@@ -308,6 +321,7 @@ fn test_assoc_scalar_append_assigns_zero_key() {
 
 #[test]
 fn test_declare_p_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-p-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v=value; declare -p v > {output_path}");

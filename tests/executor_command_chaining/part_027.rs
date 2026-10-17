@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_ulimit_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-ulimit-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -25,6 +26,7 @@ fn test_ulimit_appends_stderr() {
 
 #[test]
 fn test_ulimit_combined_invalid_resource_option() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-ulimit-combined-invalid-error.txt";
     let status_path = "target/rubash-ulimit-combined-invalid-status.txt";
     let _ = fs::remove_file(error_path);
@@ -49,6 +51,7 @@ fn test_ulimit_combined_invalid_resource_option() {
 
 #[test]
 fn test_alias_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("alias ll='ls -l'; alias -p > {output_path}");
@@ -69,6 +72,7 @@ fn test_alias_redirects_output() {
 
 #[test]
 fn test_alias_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -90,6 +94,7 @@ fn test_alias_appends_output() {
 
 #[test]
 fn test_builtin_alias_updates_alias_table() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-alias-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin alias ll='ls -l'; builtin alias -p > {output_path}");
@@ -110,6 +115,7 @@ fn test_builtin_alias_updates_alias_table() {
 
 #[test]
 fn test_builtin_unalias_updates_alias_table() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-unalias-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -128,6 +134,7 @@ fn test_builtin_unalias_updates_alias_table() {
 
 #[test]
 fn test_alias_rejects_invalid_option() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-alias-invalid-option-error.txt";
     let status_path = "target/rubash-alias-invalid-option-status.txt";
     let _ = fs::remove_file(error_path);
@@ -151,6 +158,7 @@ fn test_alias_rejects_invalid_option() {
 
 #[test]
 fn test_alias_accepts_double_dash_before_operand() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-double-dash-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("alias -- a='echo ok'; alias a > {output_path}");
@@ -171,6 +179,7 @@ fn test_alias_accepts_double_dash_before_operand() {
 
 #[test]
 fn test_unalias_a_clears_all_and_ignores_operands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-unalias-a-output.txt";
     let status_path = "target/rubash-unalias-a-status.txt";
     let _ = fs::remove_file(output_path);
@@ -193,6 +202,7 @@ fn test_unalias_a_clears_all_and_ignores_operands() {
 
 #[test]
 fn test_unalias_rejects_invalid_option() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-unalias-invalid-option-error.txt";
     let status_path = "target/rubash-unalias-invalid-option-status.txt";
     let _ = fs::remove_file(error_path);
@@ -216,6 +226,7 @@ fn test_unalias_rejects_invalid_option() {
 
 #[test]
 fn test_unalias_accepts_double_dash_before_dash_name() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-unalias-double-dash-status.txt";
     let _ = fs::remove_file(status_path);
     let input = format!("alias -- -a=1; unalias -- -a; echo $? > {status_path}");
@@ -233,6 +244,7 @@ fn test_unalias_accepts_double_dash_before_dash_name() {
 
 #[test]
 fn test_alias_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-alias-stderr-output.txt";
     let status_path = "target/rubash-alias-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -255,6 +267,7 @@ fn test_alias_redirects_stderr() {
 
 #[test]
 fn test_alias_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-alias-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();

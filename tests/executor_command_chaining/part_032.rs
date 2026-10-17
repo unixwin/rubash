@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_disabled_builtin_dispatch_uses_external_commands() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-disabled-builtin-dispatch-bin";
     let outputs = [
         "target/rubash-disabled-cd-output.txt",
@@ -82,6 +83,7 @@ fn test_disabled_builtin_dispatch_uses_external_commands() {
 
 #[test]
 fn test_enable_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-enable-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -103,6 +105,7 @@ fn test_enable_appends_output() {
 
 #[test]
 fn test_enable_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-enable-stderr-output.txt";
     let status_path = "target/rubash-enable-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -125,6 +128,7 @@ fn test_enable_redirects_stderr() {
 
 #[test]
 fn test_enable_delete_reports_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-enable-delete-error.txt";
     let _ = fs::remove_file(error_path);
     let input = format!("enable -d notbuiltin 2> {error_path}");
@@ -145,6 +149,7 @@ fn test_enable_delete_reports_usage() {
 
 #[test]
 fn test_enable_f_consumes_load_filename() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-enable-f-error.txt";
     let status_path = "target/rubash-enable-f-status.txt";
     let _ = fs::remove_file(error_path);
@@ -168,6 +173,7 @@ fn test_enable_f_consumes_load_filename() {
 
 #[test]
 fn test_enable_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-enable-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -188,6 +194,7 @@ fn test_enable_appends_stderr() {
 
 #[test]
 fn test_builtin_echo_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-echo-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin echo hello > {output_path}");
@@ -205,6 +212,7 @@ fn test_builtin_echo_redirects_output() {
 
 #[test]
 fn test_builtin_echo_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-echo-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -223,6 +231,7 @@ fn test_builtin_echo_appends_output() {
 
 #[test]
 fn test_builtin_missing_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-missing-status.txt";
     let error_path = "target/rubash-builtin-missing-error.txt";
     let _ = fs::remove_file(output_path);
@@ -246,6 +255,7 @@ fn test_builtin_missing_redirects_stderr() {
 
 #[test]
 fn test_builtin_colon_redirect_truncates_output_file() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-colon-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -264,6 +274,7 @@ fn test_builtin_colon_redirect_truncates_output_file() {
 
 #[test]
 fn test_builtin_type_invokes_type_builtin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-type-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -282,6 +293,7 @@ fn test_builtin_type_invokes_type_builtin() {
 
 #[test]
 fn test_builtin_test_invokes_test_builtin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-test-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin test 3 -eq 3; echo $? > {output_path}");

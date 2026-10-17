@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_kill_translates_int_and_term_signals() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-common-signals-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -27,6 +28,7 @@ fn test_kill_translates_int_and_term_signals() {
 
 #[test]
 fn test_kill_translates_quit_and_kill_signals() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-quit-kill-signals-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -51,6 +53,7 @@ fn test_kill_translates_quit_and_kill_signals() {
 
 #[test]
 fn test_kill_translates_more_common_signals() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-more-common-signals-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -77,6 +80,7 @@ fn test_kill_translates_more_common_signals() {
 
 #[test]
 fn test_kill_translates_realtime_signals() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-realtime-signals-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -106,6 +110,7 @@ fn test_kill_translates_realtime_signals() {
 
 #[test]
 fn test_kill_lists_common_signals() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-list-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("kill -l > {output_path}");
@@ -130,6 +135,7 @@ fn test_kill_lists_common_signals() {
 
 #[test]
 fn test_kill_capital_l_translates_and_lists_signals() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-capital-l-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("kill -L HUP > {output_path}; kill -L >> {output_path}");
@@ -150,6 +156,7 @@ fn test_kill_capital_l_translates_and_lists_signals() {
 
 #[test]
 fn test_kill_zero_reports_missing_process() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-zero-missing-status-output.txt";
     let error_path = "target/rubash-kill-zero-missing-error-output.txt";
     let input = format!("kill -0 4294967294 2> {error_path}; echo $? > {output_path}");
@@ -168,6 +175,7 @@ fn test_kill_zero_reports_missing_process() {
 
 #[test]
 fn test_kill_validates_signal_options_and_pid_operands() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-kill-option-status-output.txt";
     let error_path = "target/rubash-kill-option-error-output.txt";
     let _ = fs::remove_file(status_path);
@@ -195,6 +203,7 @@ fn test_kill_validates_signal_options_and_pid_operands() {
 
 #[test]
 fn test_kill_signal_zero_accepts_negative_process_group_operand() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-signal-zero-group-status.txt";
     let input = format!("kill -s 0 -1; echo $? > {output_path}");
 
@@ -208,6 +217,7 @@ fn test_kill_signal_zero_accepts_negative_process_group_operand() {
 
 #[test]
 fn test_kill_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-kill-stderr-output.txt";
     let status_path = "target/rubash-kill-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -230,6 +240,7 @@ fn test_kill_redirects_stderr() {
 
 #[test]
 fn test_kill_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-kill-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -250,6 +261,7 @@ fn test_kill_appends_stderr() {
 
 #[test]
 fn test_ulimit_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-ulimit-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("ulimit -n > {output_path}");
@@ -267,6 +279,7 @@ fn test_ulimit_redirects_output() {
 
 #[test]
 fn test_ulimit_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-ulimit-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -285,6 +298,7 @@ fn test_ulimit_appends_output() {
 
 #[test]
 fn test_ulimit_all_lists_resource_limits() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-ulimit-all-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("ulimit -n 2048; ulimit -a > {output_path}");
@@ -307,6 +321,7 @@ fn test_ulimit_all_lists_resource_limits() {
 
 #[test]
 fn test_ulimit_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-ulimit-stderr-output.txt";
     let status_path = "target/rubash-ulimit-stderr-status.txt";
     let _ = fs::remove_file(error_path);

@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_export_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-export-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -24,6 +25,7 @@ fn test_export_appends_stderr() {
 
 #[test]
 fn test_readonly_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-readonly-stderr-output.txt";
     let status_path = "target/rubash-readonly-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -47,6 +49,7 @@ fn test_readonly_redirects_stderr() {
 
 #[test]
 fn test_readonly_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-readonly-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -68,6 +71,7 @@ fn test_readonly_appends_stderr() {
 
 #[test]
 fn test_export_p_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-export-p-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -89,6 +93,7 @@ fn test_export_p_appends_output() {
 
 #[test]
 fn test_pwd_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pwd-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("PWD=/tmp/rubash-pwd-test pwd > {output_path}");
@@ -109,6 +114,7 @@ fn test_pwd_redirects_output() {
 
 #[test]
 fn test_pwd_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pwd-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -130,6 +136,7 @@ fn test_pwd_appends_output() {
 
 #[test]
 fn test_pwd_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-pwd-stderr-output.txt";
     let status_path = "target/rubash-pwd-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -154,6 +161,7 @@ fn test_pwd_redirects_stderr() {
 
 #[test]
 fn test_pwd_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-pwd-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -176,6 +184,7 @@ fn test_pwd_appends_stderr() {
 
 #[test]
 fn test_pwd_preserves_ordered_output_redirects() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pwd-ordered-output.txt";
     let _ = fs::remove_file(output_path);
 
@@ -195,6 +204,7 @@ fn test_pwd_preserves_ordered_output_redirects() {
 
 #[test]
 fn test_export_preserves_ordered_output_redirects() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-export-ordered-output.txt";
     let _ = fs::remove_file(output_path);
 
@@ -215,6 +225,7 @@ fn test_export_preserves_ordered_output_redirects() {
 
 #[test]
 fn test_readonly_preserves_ordered_diagnostic_redirects() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-readonly-ordered-error.txt";
     let _ = fs::remove_file(error_path);
 
@@ -235,6 +246,7 @@ fn test_readonly_preserves_ordered_diagnostic_redirects() {
 
 #[test]
 fn test_option_builtins_preserve_ordered_output_redirects() {
+    let _cwd_guard = CwdGuard::take();
     for (name, command) in [
         ("shopt", "shopt -p sourcepath"),
         ("umask", "umask"),
@@ -262,6 +274,7 @@ fn test_option_builtins_preserve_ordered_output_redirects() {
 
 #[test]
 fn test_misc_io_builtins_preserve_ordered_output_redirects() {
+    let _cwd_guard = CwdGuard::take();
     for (name, command) in [
         ("declare", "declare -p PATH"),
         ("help", "help cd"),
@@ -292,6 +305,7 @@ fn test_misc_io_builtins_preserve_ordered_output_redirects() {
 
 #[test]
 fn test_alias_preserves_ordered_output_redirects() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-ordered-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -310,6 +324,7 @@ fn test_alias_preserves_ordered_output_redirects() {
 
 #[test]
 fn test_hash_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-hash-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("hash -p /tmp/rubash-cat cat; hash -t cat > {output_path}");
@@ -330,6 +345,7 @@ fn test_hash_redirects_output() {
 
 #[test]
 fn test_hash_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-hash-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -351,6 +367,7 @@ fn test_hash_appends_output() {
 
 #[test]
 fn test_hash_empty_table_reports_success() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-hash-empty-stderr-output.txt";
     let status_path = "target/rubash-hash-empty-status.txt";
     let _ = fs::remove_file(error_path);
@@ -374,6 +391,7 @@ fn test_hash_empty_table_reports_success() {
 
 #[test]
 fn test_function_and_or_left_command_keeps_heredoc_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-and-or-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -393,6 +411,7 @@ fn test_function_and_or_left_command_keeps_heredoc_body() {
 
 #[test]
 fn test_redirect_failure_sets_status_without_stopping_script() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-redirect-failure-status.txt";
     let _ = fs::remove_file(status_path);
     let missing_parent = "target/rubash-redirect-failure-missing-parent/output.txt";
@@ -412,6 +431,7 @@ fn test_redirect_failure_sets_status_without_stopping_script() {
 
 #[test]
 fn test_empty_command_substitution_word_is_removed() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-empty-command-substitution-status.txt";
     let value_path = "target/rubash-empty-command-substitution-value.txt";
     let _ = fs::remove_file(status_path);

@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_read_array_n_zero_assigns_empty_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-array-n-zero-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -22,6 +23,7 @@ fn test_read_array_n_zero_assigns_empty_array() {
 
 #[test]
 fn test_read_n_rejects_negative_count() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-n-negative-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -n -1 value <<< abc; echo $? > {output_path}");
@@ -39,6 +41,7 @@ fn test_read_n_rejects_negative_count() {
 
 #[test]
 fn test_read_compact_n_rejects_non_numeric_count() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-n-invalid-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -nabc value <<< abc; echo $? > {output_path}");
@@ -56,6 +59,7 @@ fn test_read_compact_n_rejects_non_numeric_count() {
 
 #[test]
 fn test_read_invalid_counts_redirect_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-invalid-count-status.txt";
     let error_path = "target/rubash-read-invalid-count-error.txt";
     let _ = fs::remove_file(output_path);
@@ -86,6 +90,7 @@ fn test_read_invalid_counts_redirect_stderr() {
 #[ignore = "rubash#398: see issue (probe wt37-374 K045)"]
 #[test]
 fn test_read_timeout_zero_checks_without_consuming_input() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-timeout-zero-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -106,6 +111,7 @@ fn test_read_timeout_zero_checks_without_consuming_input() {
 
 #[test]
 fn test_read_t_rejects_invalid_timeout_specification() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-invalid-timeout-status.txt";
     let error_path = "target/rubash-read-invalid-timeout-error.txt";
     let _ = fs::remove_file(output_path);
@@ -135,6 +141,7 @@ fn test_read_t_rejects_invalid_timeout_specification() {
 
 #[test]
 fn test_read_invalid_options_fail_with_status_two() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-invalid-option-status.txt";
     let error_path = "target/rubash-read-invalid-option-error.txt";
     let _ = fs::remove_file(output_path);
@@ -166,6 +173,7 @@ fn test_read_invalid_options_fail_with_status_two() {
 
 #[test]
 fn test_read_double_dash_allows_name_arguments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-double-dash-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -185,6 +193,7 @@ fn test_read_double_dash_allows_name_arguments() {
 
 #[test]
 fn test_read_invalid_scalar_name_reports_identifier_error() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-invalid-scalar-status.txt";
     let error_path = "target/rubash-read-invalid-scalar-error.txt";
     let _ = fs::remove_file(output_path);
@@ -210,6 +219,7 @@ fn test_read_invalid_scalar_name_reports_identifier_error() {
 
 #[test]
 fn test_read_invalid_array_name_falls_back_to_scalar_names() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-invalid-array-status.txt";
     let error_path = "target/rubash-read-invalid-array-error.txt";
     let _ = fs::remove_file(output_path);
@@ -235,6 +245,7 @@ fn test_read_invalid_array_name_falls_back_to_scalar_names() {
 
 #[test]
 fn test_read_a_missing_argument_reports_usage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-a-missing-status.txt";
     let error_path = "target/rubash-read-a-missing-error.txt";
     let _ = fs::remove_file(output_path);
@@ -258,6 +269,7 @@ fn test_read_a_missing_argument_reports_usage() {
 
 #[test]
 fn test_read_combined_rn_reads_raw_limited_characters() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rn-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -rn3 value <<< 'a\\bcdef'; printf '<%s>' \"$value\" > {output_path}");
@@ -275,6 +287,7 @@ fn test_read_combined_rn_reads_raw_limited_characters() {
 
 #[test]
 fn test_read_combined_rn_consumes_limit_and_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rn-separate-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -293,6 +306,7 @@ fn test_read_combined_rn_consumes_limit_and_reads_raw() {
 
 #[test]
 fn test_read_combined_rsn_consumes_limit_and_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rsn-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -311,6 +325,7 @@ fn test_read_combined_rsn_consumes_limit_and_reads_raw() {
 
 #[test]
 fn test_read_combined_srn_compact_limit_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-srn-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -329,6 +344,7 @@ fn test_read_combined_srn_compact_limit_reads_raw() {
 
 #[test]
 fn test_read_combined_rt_consumes_timeout_and_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rt-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -rt 1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
@@ -346,6 +362,7 @@ fn test_read_combined_rt_consumes_timeout_and_reads_raw() {
 
 #[test]
 fn test_read_combined_rt_compact_timeout_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rt-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -rt1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
@@ -363,6 +380,7 @@ fn test_read_combined_rt_compact_timeout_reads_raw() {
 
 #[test]
 fn test_read_combined_st_consumes_timeout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-st-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -st 1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
@@ -380,6 +398,7 @@ fn test_read_combined_st_consumes_timeout() {
 
 #[test]
 fn test_read_combined_st_compact_timeout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-st-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -st1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
@@ -397,6 +416,7 @@ fn test_read_combined_st_compact_timeout() {
 
 #[test]
 fn test_read_combined_et_consumes_timeout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-et-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -et 1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
@@ -414,6 +434,7 @@ fn test_read_combined_et_consumes_timeout() {
 
 #[test]
 fn test_read_combined_et_compact_timeout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-et-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -et1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
@@ -431,6 +452,7 @@ fn test_read_combined_et_compact_timeout() {
 
 #[test]
 fn test_read_combined_ret_consumes_timeout_and_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-ret-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -ret 1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
@@ -448,6 +470,7 @@ fn test_read_combined_ret_consumes_timeout_and_reads_raw() {
 
 #[test]
 fn test_read_combined_ert_compact_timeout_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-ert-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -ert1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
@@ -465,6 +488,7 @@ fn test_read_combined_ert_compact_timeout_reads_raw() {
 
 #[test]
 fn test_read_combined_rst_consumes_timeout_and_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -rst 1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
@@ -482,6 +506,7 @@ fn test_read_combined_rst_consumes_timeout_and_reads_raw() {
 
 #[test]
 fn test_read_combined_srt_compact_timeout_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-srt-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -srt1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
@@ -499,6 +524,7 @@ fn test_read_combined_srt_compact_timeout_reads_raw() {
 
 #[test]
 fn test_read_combined_rest_consumes_timeout_and_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rest-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -rest 1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
@@ -516,6 +542,7 @@ fn test_read_combined_rest_consumes_timeout_and_reads_raw() {
 
 #[test]
 fn test_read_combined_sert_compact_timeout_reads_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sert-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -sert1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
@@ -533,6 +560,7 @@ fn test_read_combined_sert_compact_timeout_reads_raw() {
 
 #[test]
 fn test_read_upper_n_reads_through_newline() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-upper-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -N 4 value <<< $'ab\\ncd'; printf '<%s>' \"$value\" > {output_path}");
@@ -550,6 +578,7 @@ fn test_read_upper_n_reads_through_newline() {
 
 #[test]
 fn test_read_combined_r_upper_n_reads_raw_through_newline() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-r-upper-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -rN4 value <<< $'ab\\ncd'; printf '<%s>' \"$value\" > {output_path}");
@@ -567,6 +596,7 @@ fn test_read_combined_r_upper_n_reads_raw_through_newline() {
 
 #[test]
 fn test_read_combined_r_upper_n_consumes_limit_and_reads_raw_through_newline() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-r-upper-n-separate-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -585,6 +615,7 @@ fn test_read_combined_r_upper_n_consumes_limit_and_reads_raw_through_newline() {
 
 #[test]
 fn test_read_combined_rs_upper_n_consumes_limit_and_reads_raw_through_newline() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rs-upper-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -603,6 +634,7 @@ fn test_read_combined_rs_upper_n_consumes_limit_and_reads_raw_through_newline() 
 
 #[test]
 fn test_read_combined_sr_upper_n_compact_limit_reads_raw_through_newline() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sr-upper-n-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -621,6 +653,7 @@ fn test_read_combined_sr_upper_n_compact_limit_reads_raw_through_newline() {
 
 #[test]
 fn test_read_combined_rse_upper_n_consumes_limit_and_reads_raw_through_newline() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rse-upper-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -639,6 +672,7 @@ fn test_read_combined_rse_upper_n_consumes_limit_and_reads_raw_through_newline()
 
 #[test]
 fn test_read_combined_sre_upper_n_compact_limit_reads_raw_through_newline() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sre-upper-n-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -657,6 +691,7 @@ fn test_read_combined_sre_upper_n_compact_limit_reads_raw_through_newline() {
 
 #[test]
 fn test_read_upper_n_ignores_delimiter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-upper-n-delim-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -675,6 +710,7 @@ fn test_read_upper_n_ignores_delimiter() {
 
 #[test]
 fn test_read_combined_rd_uses_delimiter_and_raw_input() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -rd / value <<< 'a\\ b/c'; printf '<%s>' \"$value\" > {output_path}");
@@ -692,6 +728,7 @@ fn test_read_combined_rd_uses_delimiter_and_raw_input() {
 
 #[test]
 fn test_read_combined_rd_compact_uses_delimiter_and_raw_input() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rd-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -rd/ value <<< 'a\\ b/c'; printf '<%s>' \"$value\" > {output_path}");
@@ -709,6 +746,7 @@ fn test_read_combined_rd_compact_uses_delimiter_and_raw_input() {
 
 #[test]
 fn test_read_combined_sd_uses_delimiter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -sd / value <<< 'a\\ b/c'; printf '<%s>' \"$value\" > {output_path}");
@@ -726,6 +764,7 @@ fn test_read_combined_sd_uses_delimiter() {
 
 #[test]
 fn test_read_combined_sd_compact_uses_delimiter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sd-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -sd/ value <<< 'a\\ b/c'; printf '<%s>' \"$value\" > {output_path}");
@@ -743,6 +782,7 @@ fn test_read_combined_sd_compact_uses_delimiter() {
 
 #[test]
 fn test_read_combined_ed_uses_delimiter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-ed-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -ed / value <<< 'a\\ b/c'; printf '<%s>' \"$value\" > {output_path}");
@@ -760,6 +800,7 @@ fn test_read_combined_ed_uses_delimiter() {
 
 #[test]
 fn test_read_combined_ed_compact_uses_delimiter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-ed-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -ed/ value <<< 'a\\ b/c'; printf '<%s>' \"$value\" > {output_path}");
@@ -777,6 +818,7 @@ fn test_read_combined_ed_compact_uses_delimiter() {
 
 #[test]
 fn test_read_combined_red_uses_delimiter_and_raw_input() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-red-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -795,6 +837,7 @@ fn test_read_combined_red_uses_delimiter_and_raw_input() {
 
 #[test]
 fn test_read_combined_erd_compact_uses_delimiter_and_raw_input() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-erd-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -erd/ value <<< 'a\\ b/c'; printf '<%s>' \"$value\" > {output_path}");
@@ -812,6 +855,7 @@ fn test_read_combined_erd_compact_uses_delimiter_and_raw_input() {
 
 #[test]
 fn test_read_combined_rsd_uses_delimiter_and_raw_input() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rsd-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -830,6 +874,7 @@ fn test_read_combined_rsd_uses_delimiter_and_raw_input() {
 
 #[test]
 fn test_read_combined_srd_compact_uses_delimiter_and_raw_input() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-srd-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -srd/ value <<< 'a\\ b/c'; printf '<%s>' \"$value\" > {output_path}");
@@ -847,6 +892,7 @@ fn test_read_combined_srd_compact_uses_delimiter_and_raw_input() {
 
 #[test]
 fn test_read_combined_rsed_uses_delimiter_and_raw_input() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rsed-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -865,6 +911,7 @@ fn test_read_combined_rsed_uses_delimiter_and_raw_input() {
 
 #[test]
 fn test_read_combined_sred_compact_uses_delimiter_and_raw_input() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sred-compact-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -883,6 +930,7 @@ fn test_read_combined_sred_compact_uses_delimiter_and_raw_input() {
 
 #[test]
 fn test_read_a_splits_here_string_into_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-a-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -905,6 +953,7 @@ fn test_read_a_splits_here_string_into_array() {
 
 #[test]
 fn test_read_compact_a_uses_attached_array_name() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-a-attached-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -923,6 +972,7 @@ fn test_read_compact_a_uses_attached_array_name() {
 
 #[test]
 fn test_read_a_processes_backslash_escaped_whitespace() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-a-backslash-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -a arr <<< 'a\\ b c'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}");

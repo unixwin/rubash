@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_wait_for_last_background_pid_returns_child_status() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-wait-last-background-status.txt";
     let error_path = "target/rubash-wait-last-background-error.txt";
     let _ = fs::remove_file(status_path);
@@ -24,6 +25,7 @@ fn test_wait_for_last_background_pid_returns_child_status() {
 
 #[test]
 fn test_wait_for_background_jobspec_returns_child_status_and_removes_job() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-wait-jobspec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -43,6 +45,7 @@ fn test_wait_for_background_jobspec_returns_child_status_and_removes_job() {
 
 #[test]
 fn test_wait_for_current_jobspec_uses_last_background_job() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-wait-current-jobspec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -62,6 +65,7 @@ fn test_wait_for_current_jobspec_uses_last_background_job() {
 
 #[test]
 fn test_wait_for_multiple_background_operands_returns_last_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-wait-multiple-background-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -81,6 +85,7 @@ fn test_wait_for_multiple_background_operands_returns_last_status() {
 
 #[test]
 fn test_wait_f_accepts_multiple_background_jobspecs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-wait-f-multiple-jobspec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -100,6 +105,7 @@ fn test_wait_f_accepts_multiple_background_jobspecs() {
 
 #[test]
 fn test_wait_n_waits_one_background_job() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-wait-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -119,6 +125,7 @@ fn test_wait_n_waits_one_background_job() {
 
 #[test]
 fn test_jobs_refreshes_completed_background_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-jobs-completed-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("false & sleep 0.2; jobs -l > {output_path}");
@@ -139,6 +146,7 @@ fn test_jobs_refreshes_completed_background_status() {
 
 #[test]
 fn test_wait_n_prefers_a_completed_job_over_an_earlier_running_job() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-wait-n-completed-first-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -157,6 +165,7 @@ fn test_wait_n_prefers_a_completed_job_over_an_earlier_running_job() {
 
 #[test]
 fn test_wait_n_preserves_status_for_later_explicit_pid_wait() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-wait-n-explicit-pid-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -179,6 +188,7 @@ fn test_wait_n_preserves_status_for_later_explicit_pid_wait() {
 
 #[test]
 fn test_wait_n_accepts_requested_jobspec() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-wait-n-jobspec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -198,6 +208,7 @@ fn test_wait_n_accepts_requested_jobspec() {
 
 #[test]
 fn test_wait_n_p_assigns_completed_pid() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-wait-n-p-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -221,6 +232,7 @@ fn test_wait_n_p_assigns_completed_pid() {
 
 #[test]
 fn test_wait_np_assigns_requested_jobspec_pid() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-wait-np-jobspec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -244,6 +256,7 @@ fn test_wait_np_assigns_requested_jobspec_pid() {
 
 #[test]
 fn test_wait_np_compact_var_assigns_requested_jobspec_pid() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-wait-np-compact-var-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -267,6 +280,7 @@ fn test_wait_np_compact_var_assigns_requested_jobspec_pid() {
 
 #[test]
 fn test_kill_background_jobspec_removes_job() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-jobspec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -286,6 +300,7 @@ fn test_kill_background_jobspec_removes_job() {
 
 #[test]
 fn test_kill_current_jobspec_uses_last_background_job() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-current-jobspec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -305,6 +320,7 @@ fn test_kill_current_jobspec_uses_last_background_job() {
 
 #[test]
 fn test_kill_zero_checks_jobspec_without_removing_job() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-zero-jobspec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -330,6 +346,7 @@ fn test_kill_zero_checks_jobspec_without_removing_job() {
 
 #[test]
 fn test_kill_unknown_jobspec_reports_failure() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-kill-unknown-jobspec-error.txt";
     let status_path = "target/rubash-kill-unknown-jobspec-status.txt";
     let _ = fs::remove_file(error_path);
@@ -353,6 +370,7 @@ fn test_kill_unknown_jobspec_reports_failure() {
 
 #[test]
 fn test_wait_for_unknown_pid_returns_notfound() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-wait-pid-error.txt";
     let status_path = "target/rubash-wait-pid-status.txt";
     let _ = fs::remove_file(error_path);
@@ -375,6 +393,7 @@ fn test_wait_for_unknown_pid_returns_notfound() {
 
 #[test]
 fn test_wait_invalid_operand_returns_failure() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-wait-invalid-error.txt";
     let status_path = "target/rubash-wait-invalid-status.txt";
     let _ = fs::remove_file(error_path);
@@ -397,6 +416,7 @@ fn test_wait_invalid_operand_returns_failure() {
 
 #[test]
 fn test_wait_invalid_option_returns_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-wait-invalid-option-error.txt";
     let status_path = "target/rubash-wait-invalid-option-status.txt";
     let _ = fs::remove_file(error_path);
@@ -420,6 +440,7 @@ fn test_wait_invalid_option_returns_usage() {
 
 #[test]
 fn test_fg_without_job_control_returns_failure() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-fg-error.txt";
     let status_path = "target/rubash-fg-status.txt";
     let _ = fs::remove_file(error_path);
@@ -442,6 +463,7 @@ fn test_fg_without_job_control_returns_failure() {
 
 #[test]
 fn test_fg_invalid_option_without_job_control_returns_failure() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-fg-invalid-option-error.txt";
     let status_path = "target/rubash-fg-invalid-option-status.txt";
     let _ = fs::remove_file(error_path);
@@ -467,6 +489,7 @@ fn test_fg_invalid_option_without_job_control_returns_failure() {
 
 #[test]
 fn test_bg_without_job_control_returns_failure() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-bg-error.txt";
     let status_path = "target/rubash-bg-status.txt";
     let _ = fs::remove_file(error_path);
@@ -499,6 +522,7 @@ fn test_bg_without_job_control_returns_failure() {
 // line is asserted with contains.
 #[test]
 fn test_fg_background_pid_waits_and_removes_job() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-fg-pid-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -532,6 +556,7 @@ fn test_fg_background_pid_waits_and_removes_job() {
 // markers are nondeterministic in GNU, asserted with contains.
 #[test]
 fn test_bg_background_pid_succeeds_and_keeps_job() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bg-pid-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("true & pid=$!; bg \"$pid\"; echo bg:$? > {output_path}; sleep 0.3; jobs >> {output_path}; disown \"$pid\"; echo disown:$? >> {output_path}");
@@ -557,6 +582,7 @@ fn test_bg_background_pid_succeeds_and_keeps_job() {
 
 #[test]
 fn test_suspend_without_job_control_returns_failure() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-suspend-error.txt";
     let status_path = "target/rubash-suspend-status.txt";
     let _ = fs::remove_file(error_path);
@@ -579,6 +605,7 @@ fn test_suspend_without_job_control_returns_failure() {
 
 #[test]
 fn test_suspend_invalid_option_returns_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-suspend-invalid-error.txt";
     let status_path = "target/rubash-suspend-invalid-status.txt";
     let _ = fs::remove_file(error_path);
@@ -602,6 +629,7 @@ fn test_suspend_invalid_option_returns_usage() {
 
 #[test]
 fn test_history_without_entries_returns_success() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-history-empty-output.txt";
     let status_path = "target/rubash-history-empty-status.txt";
     let _ = fs::remove_file(output_path);
@@ -623,6 +651,7 @@ fn test_history_without_entries_returns_success() {
 
 #[test]
 fn test_history_clear_returns_success() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-history-clear-status.txt";
     let _ = fs::remove_file(status_path);
     let input = format!("history -c; echo $? > {status_path}");
@@ -640,6 +669,7 @@ fn test_history_clear_returns_success() {
 
 #[test]
 fn test_history_invalid_option_returns_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-history-invalid-error.txt";
     let status_path = "target/rubash-history-invalid-status.txt";
     let _ = fs::remove_file(error_path);
@@ -663,6 +693,7 @@ fn test_history_invalid_option_returns_usage() {
 
 #[test]
 fn test_kill_stop_continue_preserves_job_lifecycle() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-stop-jobs-pid.txt";
     let status_path = "target/rubash-kill-stop-status.txt";
     let _ = fs::remove_file(output_path);

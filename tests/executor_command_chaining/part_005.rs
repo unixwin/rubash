@@ -3,6 +3,7 @@ use std::{env, fs};
 
 #[test]
 fn test_random_assignment_reseeds_sequence() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-random-seed-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -24,6 +25,7 @@ fn test_random_assignment_reseeds_sequence() {
 
 #[test]
 fn test_random_expands_inside_arithmetic_expressions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-random-arithmetic-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -46,6 +48,7 @@ fn test_random_expands_inside_arithmetic_expressions() {
 
 #[test]
 fn test_random_advances_inside_arithmetic_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-random-arithmetic-command-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -67,6 +70,7 @@ fn test_random_advances_inside_arithmetic_command() {
 
 #[test]
 fn test_srandom_expands_inside_arithmetic_expressions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-srandom-arithmetic-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '%s\\n' \"$((SRANDOM))\" \"$((SRANDOM))\" > {output_path}");
@@ -90,6 +94,7 @@ fn test_srandom_expands_inside_arithmetic_expressions() {
 
 #[test]
 fn test_bashpid_expands_to_current_shell_pid() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bashpid-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '%s:%s\\n' \"$BASHPID\" \"$$\" > {output_path}");
@@ -110,6 +115,7 @@ fn test_bashpid_expands_to_current_shell_pid() {
 
 #[test]
 fn test_bashpid_assignment_does_not_override_dynamic_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bashpid-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("BASHPID=1; printf '%s\\n' \"$BASHPID\" > {output_path}");
@@ -130,6 +136,7 @@ fn test_bashpid_assignment_does_not_override_dynamic_value() {
 
 #[test]
 fn test_bashpid_changes_in_command_substitution() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bashpid-command-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -154,6 +161,7 @@ fn test_bashpid_changes_in_command_substitution() {
 
 #[test]
 fn test_current_shell_command_substitution_captures_stdout_and_keeps_side_effects() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-current-shell-command-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -177,6 +185,7 @@ fn test_current_shell_command_substitution_captures_stdout_and_keeps_side_effect
 
 #[test]
 fn test_current_shell_reply_command_substitution_uses_reply_without_capturing_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-current-shell-reply-command-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -203,6 +212,7 @@ fn test_current_shell_reply_command_substitution_uses_reply_without_capturing_st
 
 #[test]
 fn test_adjacent_current_shell_reply_substitutions_update_reply_left_to_right() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-adjacent-current-shell-reply-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -225,6 +235,7 @@ fn test_adjacent_current_shell_reply_substitutions_update_reply_left_to_right() 
 
 #[test]
 fn test_current_shell_reply_substitution_expands_inside_command_substitutions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-nested-current-shell-reply-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -248,6 +259,7 @@ fn test_current_shell_reply_substitution_expands_inside_command_substitutions() 
 
 #[test]
 fn test_printf_command_substitution_strips_trailing_newlines() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-command-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -271,6 +283,7 @@ fn test_printf_command_substitution_strips_trailing_newlines() {
 
 #[test]
 fn test_escaped_backticks_remain_literal_outside_command_substitution() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-escaped-literal-backticks-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("echo \\`literal\\` > {output_path}");
@@ -288,6 +301,7 @@ fn test_escaped_backticks_remain_literal_outside_command_substitution() {
 
 #[test]
 fn test_echo_command_substitution_uses_builtin_semantics() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-echo-command-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -311,6 +325,7 @@ fn test_echo_command_substitution_uses_builtin_semantics() {
 
 #[test]
 fn test_nested_backtick_command_substitution_uses_escaped_delimiters() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-nested-backtick-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("echo `echo \\`echo nested\\`` > {output_path}");
@@ -328,6 +343,7 @@ fn test_nested_backtick_command_substitution_uses_escaped_delimiters() {
 
 #[test]
 fn test_nested_dollar_command_substitution_stays_in_one_word() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-nested-dollar-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("echo $(echo $(echo nested)) > {output_path}");
@@ -345,6 +361,7 @@ fn test_nested_dollar_command_substitution_stays_in_one_word() {
 
 #[test]
 fn test_compound_command_substitution_captures_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compound-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -364,6 +381,7 @@ fn test_compound_command_substitution_captures_stdout() {
 
 #[test]
 fn test_command_substitution_runs_inner_exit_trap_without_parent_trap() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-subst-exit-trap-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -380,6 +398,7 @@ fn test_command_substitution_runs_inner_exit_trap_without_parent_trap() {
 
 #[test]
 fn test_select_command_substitution_with_here_string_captures_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-select-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -403,6 +422,7 @@ fn test_select_command_substitution_with_here_string_captures_stdout() {
 
 #[test]
 fn test_pipeline_command_substitution_with_here_string_captures_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-here-string-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -425,6 +445,7 @@ fn test_pipeline_command_substitution_with_here_string_captures_stdout() {
 
 #[test]
 fn test_alias_here_string_command_substitution_pipeline_captures_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-here-string-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -448,6 +469,7 @@ fn test_alias_here_string_command_substitution_pipeline_captures_stdout() {
 
 #[test]
 fn test_command_list_substitution_captures_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-list-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -470,6 +492,7 @@ fn test_command_list_substitution_captures_stdout() {
 
 #[test]
 fn test_cd_pwd_command_substitution_accepts_semicolon_separator() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-cd-pwd-semicolon-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -503,6 +526,7 @@ fn test_cd_pwd_command_substitution_accepts_semicolon_separator() {
 
 #[test]
 fn test_command_list_substitution_runs_in_subshell_capture() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-list-command-subst-subshell-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -536,6 +560,7 @@ fn test_command_list_substitution_runs_in_subshell_capture() {
 
 #[test]
 fn test_case_command_substitution_captures_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -559,6 +584,7 @@ fn test_case_command_substitution_captures_stdout() {
 
 #[test]
 fn test_case_command_substitution_allows_clause_without_terminator_after_if() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-command-subst-if-no-terminator-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -582,6 +608,7 @@ fn test_case_command_substitution_allows_clause_without_terminator_after_if() {
 
 #[test]
 fn test_case_command_substitution_allows_nested_case_without_outer_terminator() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-command-subst-nested-case-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -602,6 +629,7 @@ fn test_case_command_substitution_allows_nested_case_without_outer_terminator() 
 
 #[test]
 fn test_case_command_substitution_keeps_reserved_patterns_before_for_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-command-subst-reserved-patterns-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -625,6 +653,7 @@ fn test_case_command_substitution_keeps_reserved_patterns_before_for_body() {
 
 #[test]
 fn test_case_command_substitution_keeps_esac_after_comment() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-command-subst-comment-output.txt";
     let error_path = "target/rubash-case-command-subst-comment-error.txt";
     let _ = fs::remove_file(output_path);
@@ -649,6 +678,7 @@ fn test_case_command_substitution_keeps_esac_after_comment() {
 
 #[test]
 fn test_and_or_command_substitution_captures_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-and-or-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -671,6 +701,7 @@ fn test_and_or_command_substitution_captures_stdout() {
 
 #[test]
 fn test_multi_command_substitution_keeps_assignments_local() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-multi-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -693,6 +724,7 @@ fn test_multi_command_substitution_keeps_assignments_local() {
 
 #[test]
 fn test_function_pipeline_command_substitution_captures_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-pipeline-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -714,6 +746,7 @@ fn test_function_pipeline_command_substitution_captures_stdout() {
 
 #[test]
 fn test_time_command_substitution_captures_timed_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-command-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -735,6 +768,7 @@ fn test_time_command_substitution_captures_timed_stdout() {
 
 #[test]
 fn test_time_command_substitution_inverts_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-command-substitution-invert-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -753,6 +787,7 @@ fn test_time_command_substitution_inverts_status() {
 
 #[test]
 fn test_adjacent_command_substitutions_stay_in_one_word() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-adjacent-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -775,6 +810,7 @@ fn test_adjacent_command_substitutions_stay_in_one_word() {
 
 #[test]
 fn test_command_substitution_captures_heredoc_pipeline() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-comsub-heredoc-pipeline-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -794,6 +830,7 @@ fn test_command_substitution_captures_heredoc_pipeline() {
 
 #[test]
 fn test_stdin_script_waits_for_command_substitution_heredoc_closer() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-stdin-comsub-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -819,6 +856,7 @@ fn test_stdin_script_waits_for_command_substitution_heredoc_closer() {
 
 #[test]
 fn test_backtick_command_substitution_captures_heredoc() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-backtick-comsub-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("foo=`cat <<EOF\nhi\nEOF`\necho \"$foo\" > {output_path}");
@@ -836,6 +874,7 @@ fn test_backtick_command_substitution_captures_heredoc() {
 
 #[test]
 fn test_command_substitution_captures_heredoc_with_parentheses() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-comsub-heredoc-parens-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -858,6 +897,7 @@ fn test_command_substitution_captures_heredoc_with_parentheses() {
 
 #[test]
 fn test_command_substitution_heredoc_delimiter_closes_before_paren() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-comsub-heredoc-delim-before-paren-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("text=$(cat <<EOF\nhere is the text\nEOF)\necho = $text = > {output_path}");
@@ -878,6 +918,7 @@ fn test_command_substitution_heredoc_delimiter_closes_before_paren() {
 
 #[test]
 fn test_command_substitution_captures_sequential_heredocs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-comsub-sequential-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("echo $(cat <<A; cat <<B\none\nA\ntwo\nB\n) > {output_path}");

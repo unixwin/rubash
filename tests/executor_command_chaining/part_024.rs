@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_parameter_replacement_matches_literal_backslashes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-parameter-backslash-replacement.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -20,6 +21,7 @@ fn test_parameter_replacement_matches_literal_backslashes() {
 
 #[test]
 fn test_times_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-times-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("times > {output_path}");
@@ -40,6 +42,7 @@ fn test_times_redirects_output() {
 
 #[test]
 fn test_times_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-times-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -61,6 +64,7 @@ fn test_times_appends_output() {
 
 #[test]
 fn test_times_ignores_non_option_arguments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-times-extra-args-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("times ignored > {output_path}; echo $? >> {output_path}");
@@ -81,6 +85,7 @@ fn test_times_ignores_non_option_arguments() {
 
 #[test]
 fn test_times_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-times-stderr-output.txt";
     let status_path = "target/rubash-times-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -104,6 +109,7 @@ fn test_times_redirects_stderr() {
 
 #[test]
 fn test_times_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-times-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -125,6 +131,7 @@ fn test_times_appends_stderr() {
 
 #[test]
 fn test_help_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-help-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("help -s help > {output_path}");
@@ -145,6 +152,7 @@ fn test_help_redirects_output() {
 
 #[test]
 fn test_help_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-help-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -166,6 +174,7 @@ fn test_help_appends_output() {
 
 #[test]
 fn test_help_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-help-stderr-output.txt";
     let status_path = "target/rubash-help-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -189,6 +198,7 @@ fn test_help_redirects_stderr() {
 
 #[test]
 fn test_help_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-help-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -210,6 +220,7 @@ fn test_help_appends_stderr() {
 
 #[test]
 fn test_dirs_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dirs-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("PWD=/tmp/rubash-dirs dirs > {output_path}");
@@ -230,6 +241,7 @@ fn test_dirs_redirects_output() {
 
 #[test]
 fn test_dirs_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dirs-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -251,6 +263,7 @@ fn test_dirs_appends_output() {
 
 #[test]
 fn test_builtin_dirs_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-dirs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("PWD=/tmp/rubash-builtin-dirs builtin dirs > {output_path}");

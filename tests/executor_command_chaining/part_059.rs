@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_set_posix_updates_visible_option_state() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-posix-option-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -37,6 +38,7 @@ fn test_set_posix_updates_visible_option_state() {
 
 #[test]
 fn test_noninteractive_shell_option_defaults_match_bash() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-noninteractive-defaults-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -o > {output_path}");
@@ -59,6 +61,7 @@ fn test_noninteractive_shell_option_defaults_match_bash() {
 
 #[test]
 fn test_igncr_shell_option_is_listed_and_toggleable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-igncr-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -87,6 +90,7 @@ fn test_igncr_shell_option_is_listed_and_toggleable() {
 
 #[test]
 fn test_shopt_without_options_lists_readable_states() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-shopt-default-list-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("shopt > {output_path}");
@@ -107,6 +111,7 @@ fn test_shopt_without_options_lists_readable_states() {
 
 #[test]
 fn test_shellopts_assignment_reports_readonly() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-shellopts-readonly-status.txt";
     let _ = fs::remove_file(status_path);
     let input = format!("SHELLOPTS=ignored; echo $? > {status_path}");
@@ -126,6 +131,7 @@ fn test_shellopts_assignment_reports_readonly() {
 
 #[test]
 fn test_bashopts_reflects_shopt_options() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bashopts-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -158,6 +164,7 @@ fn test_bashopts_reflects_shopt_options() {
 
 #[test]
 fn test_bashopts_assignment_reports_readonly() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-bashopts-readonly-status.txt";
     let _ = fs::remove_file(status_path);
     let input = format!("BASHOPTS=$BASHOPTS; echo $? > {status_path}");
@@ -177,6 +184,7 @@ fn test_bashopts_assignment_reports_readonly() {
 
 #[test]
 fn test_setopt_tracks_compat_options_and_maps_shell_state() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-setopt-zsh-options-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -212,6 +220,7 @@ fn test_setopt_tracks_compat_options_and_maps_shell_state() {
 
 #[test]
 fn test_command_and_builtin_setopt_update_same_state() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-builtin-setopt-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -235,6 +244,7 @@ fn test_command_and_builtin_setopt_update_same_state() {
 
 #[test]
 fn test_source_executes_setopt_without_host_preprocessing() {
+    let _cwd_guard = CwdGuard::take();
     let script_path = "target/rubash-setopt-source.rc";
     let output_path = "target/rubash-setopt-source-output.txt";
     let _ = fs::remove_file(script_path);
@@ -263,6 +273,7 @@ fn test_source_executes_setopt_without_host_preprocessing() {
 
 #[test]
 fn test_setopt_invalid_option_reports_failure() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-setopt-invalid-output.txt";
     let error_path = "target/rubash-setopt-invalid-error.txt";
     let _ = fs::remove_file(output_path);
@@ -285,6 +296,7 @@ fn test_setopt_invalid_option_reports_failure() {
 
 #[test]
 fn test_set_noclobber_updates_shell_flags() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-noclobber-flags-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -C; echo $- > {output_path}; set +C; echo $- >> {output_path}");
@@ -308,6 +320,7 @@ fn test_set_noclobber_updates_shell_flags() {
 
 #[test]
 fn test_set_noglob_updates_shell_flags_and_option_tests() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-noglob-flags-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -336,6 +349,7 @@ fn test_set_noglob_updates_shell_flags_and_option_tests() {
 
 #[test]
 fn test_set_noglob_with_positional_operands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-noglob-operands-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -f alpha beta; echo $# $1 $2 $- > {output_path}");
@@ -355,6 +369,7 @@ fn test_set_noglob_with_positional_operands() {
 
 #[test]
 fn test_extglob_pathname_expansion_matches_files() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = "target/rubash-extglob-pathname";
     let output_path = "target/rubash-extglob-pathname-output.txt";
     let _ = fs::remove_dir_all(dir_path);
@@ -383,6 +398,7 @@ fn test_extglob_pathname_expansion_matches_files() {
 
 #[test]
 fn test_pathname_expansion_matches_intermediate_segments() {
+    let _cwd_guard = CwdGuard::take();
     let base_path = "target/rubash-glob-segments";
     let one_dir = format!("{base_path}/dir-one");
     let two_dir = format!("{base_path}/dir-two");
@@ -416,6 +432,7 @@ fn test_pathname_expansion_matches_intermediate_segments() {
 
 #[test]
 fn test_globskipdots_controls_dot_and_dotdot_matches() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = "target/rubash-globskipdots";
     let output_path = "target/rubash-globskipdots-output.txt";
     let _ = fs::remove_dir_all(dir_path);
@@ -447,6 +464,7 @@ fn test_globskipdots_controls_dot_and_dotdot_matches() {
 
 #[test]
 fn test_failglob_unmatched_command_word_aborts_command_list() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-failglob-command-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -463,6 +481,7 @@ fn test_failglob_unmatched_command_word_aborts_command_list() {
 
 #[test]
 fn test_failglob_takes_precedence_over_nullglob() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-failglob-nullglob-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -479,6 +498,7 @@ fn test_failglob_takes_precedence_over_nullglob() {
 
 #[test]
 fn test_failglob_unmatched_for_word_skips_loop_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-failglob-for-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -495,6 +515,7 @@ fn test_failglob_unmatched_for_word_skips_loop_body() {
 
 #[test]
 fn test_failglob_unmatched_select_word_skips_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-failglob-select-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -511,6 +532,7 @@ fn test_failglob_unmatched_select_word_skips_body() {
 
 #[test]
 fn test_noglob_suppresses_failglob_pathname_expansion() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-noglob-suppresses-failglob-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -533,6 +555,7 @@ fn test_noglob_suppresses_failglob_pathname_expansion() {
 
 #[test]
 fn test_set_noexec_updates_shell_option() {
+    let _cwd_guard = CwdGuard::take();
     let tokens = tokenize("set -n");
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -546,6 +569,7 @@ fn test_set_noexec_updates_shell_option() {
 
 #[test]
 fn test_set_noexec_skips_later_commands_and_redirections() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-noexec-skips-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -n; echo should-not-run > {output_path}");
@@ -562,6 +586,7 @@ fn test_set_noexec_skips_later_commands_and_redirections() {
 
 #[test]
 fn test_additional_set_short_flags_update_shell_options() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-extra-flags-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_bash_aliases_preserves_values_with_spaces() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-aliases-spaces-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -28,6 +29,7 @@ fn test_bash_aliases_preserves_values_with_spaces() {
 
 #[test]
 fn test_unset_indexed_array_element() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-unset-array-element-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -47,6 +49,7 @@ fn test_unset_indexed_array_element() {
 
 #[test]
 fn test_unset_indexed_array_negative_subscript() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-unset-array-negative-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -70,6 +73,7 @@ fn test_unset_indexed_array_negative_subscript() {
 
 #[test]
 fn test_unset_indexed_array_arithmetic_subscript() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-unset-array-arith-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -89,6 +93,7 @@ fn test_unset_indexed_array_arithmetic_subscript() {
 
 #[test]
 fn test_indexed_array_arithmetic_subscript_assignment_and_expansion() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-arith-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -108,6 +113,7 @@ fn test_indexed_array_arithmetic_subscript_assignment_and_expansion() {
 
 #[test]
 fn test_indexed_array_assignment_preserves_empty_and_sparse_elements() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-indexed-array-sparse-assign-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -131,6 +137,7 @@ fn test_indexed_array_assignment_preserves_empty_and_sparse_elements() {
 
 #[test]
 fn test_eval_multiple_indexed_array_element_assignments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-eval-multi-array-assign-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -150,6 +157,7 @@ fn test_eval_multiple_indexed_array_element_assignments() {
 
 #[test]
 fn test_unquoted_parameter_compound_array_assignment_preserves_quote_chars() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-param-quotes-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -172,6 +180,7 @@ fn test_unquoted_parameter_compound_array_assignment_preserves_quote_chars() {
 
 #[test]
 fn test_unquoted_parameter_compound_array_assignment_globs_split_fields() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = target_test_path("rubash-array-param-glob");
     let output_path = target_test_path("rubash-array-param-glob-output.txt");
     let shell_dir_path = shell_test_path(&dir_path);
@@ -179,7 +188,6 @@ fn test_unquoted_parameter_compound_array_assignment_globs_split_fields() {
     let _ = fs::remove_dir_all(&dir_path);
     let _ = fs::remove_file(&output_path);
     fs::create_dir_all(&dir_path).unwrap();
-    let old_cwd = std::env::current_dir().unwrap();
     let input = format!(
         "cd {shell_dir_path}; touch a.rs b.rs c.txt; \
          command='*.rs'; arr=($command); \
@@ -191,7 +199,6 @@ fn test_unquoted_parameter_compound_array_assignment_globs_split_fields() {
 
     let result = executor.execute_ast(&ast);
 
-    std::env::set_current_dir(old_cwd).unwrap();
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
@@ -204,6 +211,7 @@ fn test_unquoted_parameter_compound_array_assignment_globs_split_fields() {
 
 #[test]
 fn test_quoted_array_star_assignment_preserves_empty_quote_argument_for_eval() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-star-eval-quotes-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -227,6 +235,7 @@ fn test_quoted_array_star_assignment_preserves_empty_quote_argument_for_eval() {
 
 #[test]
 fn test_compound_indexed_array_assignment_preserves_explicit_indices() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-indexed-array-compound-sparse-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -250,6 +259,7 @@ fn test_compound_indexed_array_assignment_preserves_explicit_indices() {
 
 #[test]
 fn test_compound_indexed_array_assignment_resolves_negative_indices() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-indexed-array-compound-negative-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -270,6 +280,7 @@ fn test_compound_indexed_array_assignment_resolves_negative_indices() {
 
 #[test]
 fn test_compound_indexed_array_assignment_evaluates_arithmetic_indices() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-indexed-array-compound-arithmetic-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -293,6 +304,7 @@ fn test_compound_indexed_array_assignment_evaluates_arithmetic_indices() {
 
 #[test]
 fn test_indexed_compound_append_uses_string_append_for_plain_arrays() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-indexed-compound-string-append-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -318,6 +330,7 @@ fn test_indexed_compound_append_uses_string_append_for_plain_arrays() {
 
 #[test]
 fn test_integer_indexed_compound_append_uses_arithmetic_append() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-indexed-compound-integer-append-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -338,6 +351,7 @@ fn test_integer_indexed_compound_append_uses_arithmetic_append() {
 
 #[test]
 fn test_compound_indexed_array_assignment_preserves_quoted_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-indexed-array-compound-quotes-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -361,6 +375,7 @@ fn test_compound_indexed_array_assignment_preserves_quoted_words() {
 
 #[test]
 fn test_compound_array_assignment_splits_unquoted_command_substitution() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-command-subst-split-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -386,6 +401,7 @@ fn test_compound_array_assignment_splits_unquoted_command_substitution() {
 
 #[test]
 fn test_compound_array_assignment_globs_unquoted_command_substitution_fields() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = target_test_path("rubash-array-command-subst-glob");
     let output_path = target_test_path("rubash-array-command-subst-glob-output.txt");
     let shell_dir_path = shell_test_path(&dir_path);
@@ -393,7 +409,6 @@ fn test_compound_array_assignment_globs_unquoted_command_substitution_fields() {
     let _ = fs::remove_dir_all(&dir_path);
     let _ = fs::remove_file(&output_path);
     fs::create_dir_all(&dir_path).unwrap();
-    let old_cwd = std::env::current_dir().unwrap();
     let input = format!(
         "cd {shell_dir_path}; touch a.rs b.rs c.txt; \
          arr=($(printf '%s\\n' '*.rs')); \
@@ -405,7 +420,6 @@ fn test_compound_array_assignment_globs_unquoted_command_substitution_fields() {
 
     let result = executor.execute_ast(&ast);
 
-    std::env::set_current_dir(old_cwd).unwrap();
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
@@ -418,6 +432,7 @@ fn test_compound_array_assignment_globs_unquoted_command_substitution_fields() {
 
 #[test]
 fn test_compound_array_assignment_preserves_quoted_command_substitution() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-command-subst-quoted-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

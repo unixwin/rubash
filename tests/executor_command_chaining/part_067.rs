@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_conditional_shell_option_unary() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-shell-option-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -22,6 +23,7 @@ fn test_conditional_shell_option_unary() {
 
 #[test]
 fn test_short_errexit_updates_shell_option() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-short-errexit-option-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -41,6 +43,7 @@ fn test_short_errexit_updates_shell_option() {
 
 #[test]
 fn test_set_o_errexit_exits_on_failed_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-set-o-errexit-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -o errexit; false; echo after > {output_path}");
@@ -57,6 +60,7 @@ fn test_set_o_errexit_exits_on_failed_command() {
 
 #[test]
 fn test_test_shell_option_unary() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-test-shell-option-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -76,6 +80,7 @@ fn test_test_shell_option_unary() {
 
 #[test]
 fn test_conditional_numeric_checks_evaluate_arithmetic_expressions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-arithmetic-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -95,6 +100,7 @@ fn test_conditional_numeric_checks_evaluate_arithmetic_expressions() {
 
 #[test]
 fn test_arithmetic_command_status_uses_expression_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -114,6 +120,7 @@ fn test_arithmetic_command_status_uses_expression_value() {
 
 #[test]
 fn test_arithmetic_command_redirect_creates_output_file() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-redirect-output.txt";
     let status_path = "target/rubash-arithmetic-command-redirect-status.txt";
     let _ = fs::remove_file(output_path);
@@ -141,6 +148,7 @@ fn test_arithmetic_command_redirect_creates_output_file() {
 
 #[test]
 fn test_and_brace_group_short_circuits_and_returns() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-and-brace-group-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -164,6 +172,7 @@ fn test_and_brace_group_short_circuits_and_returns() {
 
 #[test]
 fn test_arithmetic_expansion_evaluates_expressions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-expansion-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -186,6 +195,7 @@ fn test_arithmetic_expansion_evaluates_expressions() {
 
 #[test]
 fn test_arithmetic_expansion_applies_side_effects() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-expansion-side-effects-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -208,6 +218,7 @@ fn test_arithmetic_expansion_applies_side_effects() {
 
 #[test]
 fn test_legacy_bracket_arithmetic_expansion_evaluates() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-legacy-bracket-arithmetic-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -233,6 +244,7 @@ fn test_legacy_bracket_arithmetic_expansion_evaluates() {
 
 #[test]
 fn test_arithmetic_command_updates_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-updates-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -255,6 +267,7 @@ fn test_arithmetic_command_updates_variables() {
 
 #[test]
 fn test_arithmetic_assignments_evaluate_rhs_recursively() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-recursive-assign-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -285,6 +298,7 @@ fn test_arithmetic_assignments_evaluate_rhs_recursively() {
 // issue is included; matrix probed byte-identical on WSL GNU 5.3.0.
 #[test]
 fn test_arithmetic_variables_evaluate_recursively() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-recursive-vars-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

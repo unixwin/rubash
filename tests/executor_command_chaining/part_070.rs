@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_export_and_readonly_nameref_apply_to_targets() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-nameref-setattr-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -47,6 +48,7 @@ fn test_export_and_readonly_nameref_apply_to_targets() {
 
 #[test]
 fn test_declare_nameref_rejects_self_reference() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-nameref-self-reference-output.txt");
     let error_path = target_test_path("rubash-nameref-self-reference-error.txt");
     let shell_output_path = shell_test_path(&output_path);
@@ -81,6 +83,7 @@ fn test_declare_nameref_rejects_self_reference() {
 #[ignore = "rubash#408: see issue (probe wt37-374 K082)"]
 #[test]
 fn test_declare_nameref_cycle_expands_as_unset_and_rejects_assignment() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-nameref-cycle-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -114,6 +117,7 @@ fn test_declare_nameref_cycle_expands_as_unset_and_rejects_assignment() {
 
 #[test]
 fn test_arithmetic_command_comma_sequences_evaluate_in_order() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-comma-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -136,6 +140,7 @@ fn test_arithmetic_command_comma_sequences_evaluate_in_order() {
 
 #[test]
 fn test_arithmetic_command_comparison_operators() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-comparison-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -158,6 +163,7 @@ fn test_arithmetic_command_comparison_operators() {
 
 #[test]
 fn test_arithmetic_command_logical_operators() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-logical-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -180,6 +186,7 @@ fn test_arithmetic_command_logical_operators() {
 
 #[test]
 fn test_arithmetic_command_accepts_dollar_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-dollar-vars-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -201,6 +208,7 @@ fn test_arithmetic_command_accepts_dollar_variables() {
 
 #[test]
 fn test_arithmetic_command_logical_operators_short_circuit() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-short-circuit-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -220,6 +228,7 @@ fn test_arithmetic_command_logical_operators_short_circuit() {
 
 #[test]
 fn test_arithmetic_command_bitwise_and_shift_operators() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-bitwise-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

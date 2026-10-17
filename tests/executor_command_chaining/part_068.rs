@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_arithmetic_array_subscripts_read_and_update() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-array-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -25,6 +26,7 @@ fn test_arithmetic_array_subscripts_read_and_update() {
 
 #[test]
 fn test_arithmetic_assoc_subscripts_read_and_update() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-assoc-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -47,6 +49,7 @@ fn test_arithmetic_assoc_subscripts_read_and_update() {
 
 #[test]
 fn test_arithmetic_assoc_subscripts_expand_parameter_keys() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-assoc-expanded-key-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -66,6 +69,7 @@ fn test_arithmetic_assoc_subscripts_expand_parameter_keys() {
 
 #[test]
 fn test_arithmetic_lvalues_resolve_nameref_targets() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-nameref-lvalue-output.txt";
     let _ = fs::remove_file(output_path);
     for name in [
@@ -121,6 +125,7 @@ fn test_arithmetic_lvalues_resolve_nameref_targets() {
 
 #[test]
 fn test_grouped_arithmetic_assignments_have_side_effects() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-grouped-assign-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -140,6 +145,7 @@ fn test_grouped_arithmetic_assignments_have_side_effects() {
 
 #[test]
 fn test_embedded_arithmetic_expansion_interleaves_parameter_expansion() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-embedded-expansion-order-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -163,6 +169,7 @@ fn test_embedded_arithmetic_expansion_interleaves_parameter_expansion() {
 
 #[test]
 fn test_let_builtin_evaluates_arithmetic_expressions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-let-arithmetic-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -189,6 +196,7 @@ fn test_let_builtin_evaluates_arithmetic_expressions() {
 
 #[test]
 fn test_integer_variables_evaluate_assignments_as_arithmetic() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-integer-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -211,6 +219,7 @@ fn test_integer_variables_evaluate_assignments_as_arithmetic() {
 
 #[test]
 fn test_integer_compound_assignment_evaluates_as_scalar_arithmetic() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-integer-compound-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -236,6 +245,7 @@ fn test_integer_compound_assignment_evaluates_as_scalar_arithmetic() {
 
 #[test]
 fn test_case_conversion_variables_transform_assignments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-conversion-vars-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -260,6 +270,7 @@ fn test_case_conversion_variables_transform_assignments() {
 
 #[test]
 fn test_declare_plus_attributes_clear_variable_flags() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-plus-attrs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

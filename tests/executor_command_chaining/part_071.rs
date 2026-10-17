@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_let_bitwise_assignment_operators() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-let-bitwise-assign-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -25,6 +26,7 @@ fn test_let_bitwise_assignment_operators() {
 
 #[test]
 fn test_arithmetic_command_bitwise_assignment_operators() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-bitwise-assign-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -47,6 +49,7 @@ fn test_arithmetic_command_bitwise_assignment_operators() {
 
 #[test]
 fn test_arithmetic_command_pipeline_stage_executes_and_feeds_next_stage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-pipeline-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -69,6 +72,7 @@ fn test_arithmetic_command_pipeline_stage_executes_and_feeds_next_stage() {
 
 #[test]
 fn test_arithmetic_command_exponentiation_operators() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-exponent-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -89,6 +93,7 @@ fn test_arithmetic_command_exponentiation_operators() {
 
 #[test]
 fn test_arithmetic_uses_bash_int64_overflow_semantics() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-overflow-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -115,6 +120,7 @@ fn test_arithmetic_uses_bash_int64_overflow_semantics() {
 
 #[test]
 fn test_arithmetic_expansion_expands_braced_parameter_operations() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-param-op-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -137,6 +143,7 @@ fn test_arithmetic_expansion_expands_braced_parameter_operations() {
 
 #[test]
 fn test_shellmath_decimal_divide_script_path() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-shellmath-divide-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -169,6 +176,7 @@ fn test_shellmath_decimal_divide_script_path() {
 
 #[test]
 fn test_arithmetic_expansion_rejects_invalid_octal_literal() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-invalid-octal-arithmetic-output.txt";
     let _ = std::fs::remove_file(output_path);
     let input = format!("printf 'before\\n'; echo $((08)) > {output_path}; echo after");
@@ -184,6 +192,7 @@ fn test_arithmetic_expansion_rejects_invalid_octal_literal() {
 
 #[test]
 fn test_arithmetic_expansion_rejects_invalid_based_literal() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-invalid-based-arithmetic-output.txt";
     let _ = std::fs::remove_file(output_path);
     let input = format!("echo $((2#2)) > {output_path}; echo after");
@@ -199,6 +208,7 @@ fn test_arithmetic_expansion_rejects_invalid_based_literal() {
 
 #[test]
 fn test_arithmetic_command_based_integer_constants() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-bases-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -221,6 +231,7 @@ fn test_arithmetic_command_based_integer_constants() {
 
 #[test]
 fn test_arithmetic_command_conditional_operator() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-command-conditional-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -240,6 +251,7 @@ fn test_arithmetic_command_conditional_operator() {
 
 #[test]
 fn test_arithmetic_conditional_operator_is_lazy() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-conditional-lazy-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -259,6 +271,7 @@ fn test_arithmetic_conditional_operator_is_lazy() {
 
 #[test]
 fn test_arithmetic_command_drives_if_conditions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-if-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -278,6 +291,7 @@ fn test_arithmetic_command_drives_if_conditions() {
 
 #[test]
 fn test_arithmetic_command_drives_loop_conditions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-loop-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -297,6 +311,7 @@ fn test_arithmetic_command_drives_loop_conditions() {
 
 #[test]
 fn test_nested_arithmetic_command_accepts_single_closer_before_subshell_separator() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-nested-arithmetic-single-closer-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("((echo abc; echo def;); echo ghi) > {output_path}");

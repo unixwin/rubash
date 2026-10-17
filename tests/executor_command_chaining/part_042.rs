@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_compgen_empty_state_redirects_no_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-output.txt";
     let status_path = "target/rubash-compgen-status.txt";
     let _ = fs::remove_file(output_path);
@@ -24,6 +25,7 @@ fn test_compgen_empty_state_redirects_no_output() {
 
 #[test]
 fn test_compgen_invalid_option_reports_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-compgen-error.txt";
     let status_path = "target/rubash-compgen-error-status.txt";
     let _ = fs::remove_file(error_path);
@@ -47,6 +49,7 @@ fn test_compgen_invalid_option_reports_usage() {
 
 #[test]
 fn test_compgen_wordlist_filters_prefix_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-wordlist-output.txt";
     let status_path = "target/rubash-compgen-wordlist-status.txt";
     let _ = fs::remove_file(output_path);
@@ -68,6 +71,7 @@ fn test_compgen_wordlist_filters_prefix_matches() {
 
 #[test]
 fn test_compgen_wordlist_prefix_suffix_and_no_match_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-prefix-suffix-output.txt";
     let status_path = "target/rubash-compgen-prefix-suffix-status.txt";
     let _ = fs::remove_file(output_path);
@@ -95,6 +99,7 @@ fn test_compgen_wordlist_prefix_suffix_and_no_match_status() {
 
 #[test]
 fn test_compgen_v_assigns_matches_to_indexed_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-v-output.txt";
     let status_path = "target/rubash-compgen-v-status.txt";
     let _ = fs::remove_file(output_path);
@@ -123,6 +128,7 @@ fn test_compgen_v_assigns_matches_to_indexed_array() {
 
 #[test]
 fn test_compgen_compact_v_assigns_matches_to_indexed_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-compact-v-output.txt";
     let status_path = "target/rubash-compgen-compact-v-status.txt";
     let _ = fs::remove_file(output_path);
@@ -148,6 +154,7 @@ fn test_compgen_compact_v_assigns_matches_to_indexed_array() {
 
 #[test]
 fn test_compgen_alias_flag_filters_alias_names() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-alias-output.txt";
     let status_path = "target/rubash-compgen-alias-status.txt";
     let _ = fs::remove_file(output_path);
@@ -179,6 +186,7 @@ fn test_compgen_alias_flag_filters_alias_names() {
 
 #[test]
 fn test_compgen_alias_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-alias-action-output.txt";
     let status_path = "target/rubash-compgen-alias-action-status.txt";
     let _ = fs::remove_file(output_path);
@@ -207,6 +215,7 @@ fn test_compgen_alias_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_arrayvar_action_filters_array_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-arrayvar-output.txt";
     let status_path = "target/rubash-compgen-arrayvar-status.txt";
     let _ = fs::remove_file(output_path);
@@ -238,6 +247,7 @@ fn test_compgen_arrayvar_action_filters_array_variables() {
 
 #[test]
 fn test_compgen_arrayvar_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-arrayvar-action-output.txt";
     let status_path = "target/rubash-compgen-arrayvar-action-status.txt";
     let _ = fs::remove_file(output_path);
@@ -266,6 +276,7 @@ fn test_compgen_arrayvar_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_binding_action_filters_readline_function_names() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-binding-output.txt";
     let status_path = "target/rubash-compgen-binding-status.txt";
     let _ = fs::remove_file(output_path);
@@ -296,6 +307,7 @@ fn test_compgen_binding_action_filters_readline_function_names() {
 
 #[test]
 fn test_compgen_binding_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-binding-action-output.txt";
     let status_path = "target/rubash-compgen-binding-action-status.txt";
     let _ = fs::remove_file(output_path);
@@ -323,6 +335,7 @@ fn test_compgen_binding_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_filter_pattern_excludes_matching_candidates() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-filter-output.txt";
     let status_path = "target/rubash-compgen-filter-status.txt";
     let _ = fs::remove_file(output_path);
@@ -345,6 +358,7 @@ fn test_compgen_filter_pattern_excludes_matching_candidates() {
 
 #[test]
 fn test_compgen_filter_pattern_inversion_keeps_matching_candidates() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-filter-invert-output.txt";
     let status_path = "target/rubash-compgen-filter-invert-status.txt";
     let _ = fs::remove_file(output_path);
@@ -372,6 +386,7 @@ fn test_compgen_filter_pattern_inversion_keeps_matching_candidates() {
 
 #[test]
 fn test_compgen_filter_pattern_all_filtered_keeps_generation_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-filter-empty-output.txt";
     let status_path = "target/rubash-compgen-filter-empty-status.txt";
     let _ = fs::remove_file(output_path);
@@ -392,6 +407,7 @@ fn test_compgen_filter_pattern_all_filtered_keeps_generation_status() {
 
 #[test]
 fn test_compgen_glob_pattern_outputs_path_matches() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = "target/rubash-compgen-glob";
     let output_path = "target/rubash-compgen-glob-output.txt";
     let status_path = "target/rubash-compgen-glob-status.txt";
@@ -429,6 +445,7 @@ fn test_compgen_glob_pattern_outputs_path_matches() {
 
 #[test]
 fn test_compgen_glob_pattern_uses_prefix_and_suffix() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = "target/rubash-compgen-glob-wrap";
     let output_path = "target/rubash-compgen-glob-wrap-output.txt";
     let status_path = "target/rubash-compgen-glob-wrap-status.txt";
@@ -460,6 +477,7 @@ fn test_compgen_glob_pattern_uses_prefix_and_suffix() {
 
 #[test]
 fn test_compgen_directory_flag_outputs_directory_matches() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = "target/rubash-compgen-directory";
     let output_path = "target/rubash-compgen-directory-output.txt";
     let status_path = "target/rubash-compgen-directory-status.txt";
@@ -496,6 +514,7 @@ fn test_compgen_directory_flag_outputs_directory_matches() {
 
 #[test]
 fn test_compgen_directory_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = "target/rubash-compgen-directory-action";
     let output_path = "target/rubash-compgen-directory-action-output.txt";
     let status_path = "target/rubash-compgen-directory-action-status.txt";
@@ -529,6 +548,7 @@ fn test_compgen_directory_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_file_flag_outputs_file_and_directory_matches() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = "target/rubash-compgen-file";
     let output_path = "target/rubash-compgen-file-output.txt";
     let status_path = "target/rubash-compgen-file-status.txt";
@@ -566,6 +586,7 @@ fn test_compgen_file_flag_outputs_file_and_directory_matches() {
 
 #[test]
 fn test_compgen_file_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = "target/rubash-compgen-file-action";
     let output_path = "target/rubash-compgen-file-action-output.txt";
     let status_path = "target/rubash-compgen-file-action-status.txt";
@@ -599,6 +620,7 @@ fn test_compgen_file_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_builtin_action_filters_prefix_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-builtin-output.txt";
     let status_path = "target/rubash-compgen-builtin-status.txt";
     let _ = fs::remove_file(output_path);
@@ -626,6 +648,7 @@ fn test_compgen_builtin_action_filters_prefix_matches() {
 
 #[test]
 fn test_compgen_builtin_flag_filters_prefix_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-builtin-flag-output.txt";
     let status_path = "target/rubash-compgen-builtin-flag-status.txt";
     let _ = fs::remove_file(output_path);
@@ -653,6 +676,7 @@ fn test_compgen_builtin_flag_filters_prefix_matches() {
 
 #[test]
 fn test_compgen_command_flag_combines_shell_and_path_commands() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = "target/rubash-compgen-command-bin";
     let output_path = "target/rubash-compgen-command-output.txt";
     let status_path = "target/rubash-compgen-command-status.txt";
@@ -689,6 +713,7 @@ fn test_compgen_command_flag_combines_shell_and_path_commands() {
 
 #[test]
 fn test_compgen_command_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let dir_path = "target/rubash-compgen-command-action-bin";
     let output_path = "target/rubash-compgen-command-action-output.txt";
     let status_path = "target/rubash-compgen-command-action-status.txt";
@@ -722,6 +747,7 @@ fn test_compgen_command_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_enabled_action_filters_prefix_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-enabled-output.txt";
     let status_path = "target/rubash-compgen-enabled-status.txt";
     let _ = fs::remove_file(output_path);
@@ -749,6 +775,7 @@ fn test_compgen_enabled_action_filters_prefix_matches() {
 
 #[test]
 fn test_compgen_enabled_action_omits_disabled_builtins() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-enabled-disabled-output.txt";
     let status_path = "target/rubash-compgen-enabled-disabled-status.txt";
     let _ = fs::remove_file(output_path);
@@ -773,6 +800,7 @@ fn test_compgen_enabled_action_omits_disabled_builtins() {
 
 #[test]
 fn test_compgen_disabled_action_filters_disabled_builtins() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-disabled-output.txt";
     let status_path = "target/rubash-compgen-disabled-status.txt";
     let _ = fs::remove_file(output_path);
@@ -804,6 +832,7 @@ fn test_compgen_disabled_action_filters_disabled_builtins() {
 
 #[test]
 fn test_compgen_variable_flag_filters_shell_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-variable-output.txt";
     let status_path = "target/rubash-compgen-variable-status.txt";
     let _ = fs::remove_file(output_path);
@@ -835,6 +864,7 @@ fn test_compgen_variable_flag_filters_shell_variables() {
 
 #[test]
 fn test_compgen_variable_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-variable-action-output.txt";
     let status_path = "target/rubash-compgen-variable-action-status.txt";
     let _ = fs::remove_file(output_path);
@@ -863,6 +893,7 @@ fn test_compgen_variable_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_export_action_filters_exported_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-export-output.txt";
     let status_path = "target/rubash-compgen-export-status.txt";
     let _ = fs::remove_file(output_path);
@@ -895,6 +926,7 @@ fn test_compgen_export_action_filters_exported_variables() {
 
 #[test]
 fn test_compgen_export_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-export-action-output.txt";
     let status_path = "target/rubash-compgen-export-action-status.txt";
     let _ = fs::remove_file(output_path);
@@ -923,6 +955,7 @@ fn test_compgen_export_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_readonly_action_filters_readonly_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-readonly-output.txt";
     let status_path = "target/rubash-compgen-readonly-status.txt";
     let _ = fs::remove_file(output_path);
@@ -959,6 +992,7 @@ fn test_compgen_readonly_action_filters_readonly_variables() {
 
 #[test]
 fn test_compgen_readonly_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-readonly-action-output.txt";
     let status_path = "target/rubash-compgen-readonly-action-status.txt";
     let _ = fs::remove_file(output_path);
@@ -986,6 +1020,7 @@ fn test_compgen_readonly_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_export_flag_filters_exported_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-export-flag-output.txt";
     let status_path = "target/rubash-compgen-export-flag-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1018,6 +1053,7 @@ fn test_compgen_export_flag_filters_exported_variables() {
 
 #[test]
 fn test_compgen_keyword_action_filters_prefix_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-keyword-output.txt";
     let status_path = "target/rubash-compgen-keyword-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1039,6 +1075,7 @@ fn test_compgen_keyword_action_filters_prefix_matches() {
 
 #[test]
 fn test_compgen_keyword_flag_filters_prefix_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-keyword-flag-output.txt";
     let status_path = "target/rubash-compgen-keyword-flag-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1060,6 +1097,7 @@ fn test_compgen_keyword_flag_filters_prefix_matches() {
 
 #[test]
 fn test_compgen_helptopic_action_filters_prefix_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-helptopic-output.txt";
     let status_path = "target/rubash-compgen-helptopic-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1087,6 +1125,7 @@ fn test_compgen_helptopic_action_filters_prefix_matches() {
 
 #[test]
 fn test_compgen_hostname_action_filters_host_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-hostname-output.txt";
     let status_path = "target/rubash-compgen-hostname-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1118,6 +1157,7 @@ fn test_compgen_hostname_action_filters_host_variables() {
 
 #[test]
 fn test_compgen_hostname_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-hostname-action-output.txt";
     let status_path = "target/rubash-compgen-hostname-action-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1146,6 +1186,7 @@ fn test_compgen_hostname_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_function_action_filters_function_names() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-function-output.txt";
     let status_path = "target/rubash-compgen-function-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1177,6 +1218,7 @@ fn test_compgen_function_action_filters_function_names() {
 
 #[test]
 fn test_compgen_function_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-function-action-output.txt";
     let status_path = "target/rubash-compgen-function-action-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1205,6 +1247,7 @@ fn test_compgen_function_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_group_action_filters_group_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-group-output.txt";
     let status_path = "target/rubash-compgen-group-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1236,6 +1279,7 @@ fn test_compgen_group_action_filters_group_variables() {
 
 #[test]
 fn test_compgen_group_flag_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-group-flag-output.txt";
     let status_path = "target/rubash-compgen-group-flag-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1264,6 +1308,7 @@ fn test_compgen_group_flag_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_service_action_filters_service_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-service-output.txt";
     let status_path = "target/rubash-compgen-service-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1295,6 +1340,7 @@ fn test_compgen_service_action_filters_service_variables() {
 
 #[test]
 fn test_compgen_service_flag_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-service-flag-output.txt";
     let status_path = "target/rubash-compgen-service-flag-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1323,6 +1369,7 @@ fn test_compgen_service_flag_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_job_flag_filters_background_jobs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-job-output.txt";
     let status_path = "target/rubash-compgen-job-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1352,6 +1399,7 @@ fn test_compgen_job_flag_filters_background_jobs() {
 
 #[test]
 fn test_compgen_job_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-job-action-output.txt";
     let status_path = "target/rubash-compgen-job-action-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1377,6 +1425,7 @@ fn test_compgen_job_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_running_action_filters_background_jobs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-running-output.txt";
     let status_path = "target/rubash-compgen-running-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1406,6 +1455,7 @@ fn test_compgen_running_action_filters_background_jobs() {
 
 #[test]
 fn test_compgen_running_action_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-running-action-output.txt";
     let status_path = "target/rubash-compgen-running-action-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1431,6 +1481,7 @@ fn test_compgen_running_action_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_stopped_action_succeeds_without_stopped_jobs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-stopped-output.txt";
     let status_path = "target/rubash-compgen-stopped-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1454,6 +1505,7 @@ fn test_compgen_stopped_action_succeeds_without_stopped_jobs() {
 
 #[test]
 fn test_compgen_user_action_filters_user_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-user-output.txt";
     let status_path = "target/rubash-compgen-user-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1485,6 +1537,7 @@ fn test_compgen_user_action_filters_user_variables() {
 
 #[test]
 fn test_compgen_user_flag_uses_prefix_suffix_and_filter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-user-flag-output.txt";
     let status_path = "target/rubash-compgen-user-flag-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1513,6 +1566,7 @@ fn test_compgen_user_flag_uses_prefix_suffix_and_filter() {
 
 #[test]
 fn test_compgen_signal_action_filters_prefix_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-signal-output.txt";
     let status_path = "target/rubash-compgen-signal-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1544,6 +1598,7 @@ fn test_compgen_signal_action_filters_prefix_matches() {
 
 #[test]
 fn test_compgen_shopt_action_filters_prefix_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-shopt-output.txt";
     let status_path = "target/rubash-compgen-shopt-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1565,6 +1620,7 @@ fn test_compgen_shopt_action_filters_prefix_matches() {
 
 #[test]
 fn test_compgen_setopt_action_filters_prefix_matches() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compgen-setopt-output.txt";
     let status_path = "target/rubash-compgen-setopt-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1592,6 +1648,7 @@ fn test_compgen_setopt_action_filters_prefix_matches() {
 
 #[test]
 fn test_compopt_outside_completion_function_fails() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-compopt-error.txt";
     let status_path = "target/rubash-compopt-status.txt";
     let _ = fs::remove_file(error_path);
@@ -1615,6 +1672,7 @@ fn test_compopt_outside_completion_function_fails() {
 
 #[test]
 fn test_builtin_compopt_invalid_option_reports_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-builtin-compopt-error.txt";
     let status_path = "target/rubash-builtin-compopt-status.txt";
     let _ = fs::remove_file(error_path);
@@ -1638,6 +1696,7 @@ fn test_builtin_compopt_invalid_option_reports_usage() {
 
 #[test]
 fn test_eval_redirects_loop_body_without_retruncating() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-eval-loop-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("eval 'for x in a b; do echo $x; done' > {output_path}");
@@ -1655,6 +1714,7 @@ fn test_eval_redirects_loop_body_without_retruncating() {
 
 #[test]
 fn test_type_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-type-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("type -t echo > {output_path}");
@@ -1672,6 +1732,7 @@ fn test_type_redirects_output() {
 
 #[test]
 fn test_type_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-type-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -1693,6 +1754,7 @@ fn test_type_appends_output() {
 
 #[test]
 fn test_type_prints_function_heredoc_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-type-function-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -1714,6 +1776,7 @@ fn test_type_prints_function_heredoc_body() {
 
 #[test]
 fn test_type_terminates_plain_commands_before_function_heredoc() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-type-function-heredoc-terminator-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("f()\n{{\necho\ncat <<EOF\nbody\nEOF\n}}\ntype f > {output_path}");
@@ -1734,6 +1797,7 @@ fn test_type_terminates_plain_commands_before_function_heredoc() {
 
 #[test]
 fn test_type_prints_compound_function_bodies() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-type-compound-function-bodies-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1761,6 +1825,7 @@ fn test_type_prints_compound_function_bodies() {
 
 #[test]
 fn test_type_prints_nested_function_definition_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-type-nested-function-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -1783,6 +1848,7 @@ fn test_type_prints_nested_function_definition_body() {
 
 #[test]
 fn test_type_prints_dynamic_fd_variables_with_bash_separators() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-type-dynamic-fd-variable-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1804,6 +1870,7 @@ fn test_type_prints_dynamic_fd_variables_with_bash_separators() {
 }
 #[test]
 fn test_type_prints_canonical_fd_duplication_and_combined_redirects() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-type-fd-render-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1826,6 +1893,7 @@ fn test_type_prints_canonical_fd_duplication_and_combined_redirects() {
 
 #[test]
 fn test_declare_pf_prints_condition_heredocs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-function-condition-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1852,6 +1920,7 @@ fn test_declare_pf_prints_condition_heredocs() {
 
 #[test]
 fn test_alias_heredoc_reads_following_lines_and_nested_alias_body() {
+    let _cwd_guard = CwdGuard::take();
     let first_output_path = "target/rubash-alias-heredoc-following-output.txt";
     let nested_output_path = "target/rubash-alias-heredoc-nested-output.txt";
     let _ = fs::remove_file(first_output_path);

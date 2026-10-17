@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_declare_g_inside_function_assigns_global() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-declare-global-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -27,6 +28,7 @@ fn test_declare_g_inside_function_assigns_global() {
 
 #[test]
 fn test_declare_g_inside_function_updates_global_behind_local() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-declare-global-behind-local-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -52,6 +54,7 @@ fn test_declare_g_inside_function_updates_global_behind_local() {
 
 #[test]
 fn test_declare_g_expanded_compound_assignment_updates_global_behind_local() {
+    let _cwd_guard = CwdGuard::take();
     let output_path =
         target_test_path("rubash-function-declare-global-expanded-compound-output.txt");
     let shell_output_path = shell_test_path(&output_path);
@@ -78,6 +81,7 @@ fn test_declare_g_expanded_compound_assignment_updates_global_behind_local() {
 
 #[test]
 fn test_declare_g_nested_function_updates_global_behind_outer_local() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-declare-global-nested-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -105,6 +109,7 @@ fn test_declare_g_nested_function_updates_global_behind_outer_local() {
 
 #[test]
 fn test_local_p_prints_without_reinitializing_local() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-local-p-preserves-attrs-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -129,6 +134,7 @@ fn test_local_p_prints_without_reinitializing_local() {
 
 #[test]
 fn test_local_without_assignment_unsets_shell_value_but_preserves_export_env() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-local-export-env-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
@@ -157,6 +163,7 @@ fn test_local_without_assignment_unsets_shell_value_but_preserves_export_env() {
 
 #[test]
 fn test_local_readonly_assignment_reports_local_builtin_name() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-local-readonly-error-output.txt");
     let error_path = target_test_path("rubash-local-readonly-error-stderr.txt");
     let shell_output_path = shell_test_path(&output_path);
@@ -186,6 +193,7 @@ fn test_local_readonly_assignment_reports_local_builtin_name() {
 
 #[test]
 fn test_local_compound_readonly_assignment_reports_underlying_error() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-local-compound-readonly-output.txt");
     let error_path = target_test_path("rubash-local-compound-readonly-stderr.txt");
     let shell_output_path = shell_test_path(&output_path);
@@ -216,6 +224,7 @@ fn test_local_compound_readonly_assignment_reports_underlying_error() {
 
 #[test]
 fn test_declare_g_inside_function_preserves_global_attributes_behind_locals() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-declare-global-attrs-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);

@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_local_outside_function_reports_error() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-local-outside-error.txt";
     let status_path = "target/rubash-local-outside-status.txt";
     let _ = fs::remove_file(error_path);
@@ -26,6 +27,7 @@ fn test_local_outside_function_reports_error() {
 
 #[test]
 fn test_local_assignment_is_restored_after_function() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-local-restore-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -49,6 +51,7 @@ fn test_local_assignment_is_restored_after_function() {
 
 #[test]
 fn test_nested_unset_removes_outer_local_and_preserves_global_assignment() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-nested-unset-local-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -73,6 +76,7 @@ fn test_nested_unset_removes_outer_local_and_preserves_global_assignment() {
 
 #[test]
 fn test_parenthesized_scalar_assignment_remains_scalar() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-parenthesized-scalar-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("pattern='([a-z]+)([0-9]+)'; echo \"$pattern\" > {output_path}");
@@ -93,6 +97,7 @@ fn test_parenthesized_scalar_assignment_remains_scalar() {
 
 #[test]
 fn test_local_assignment_expands_parameter_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-local-param-expansion-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -112,6 +117,7 @@ fn test_local_assignment_expands_parameter_value() {
 
 #[test]
 fn test_localvar_inherit_controls_unassigned_local_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-localvar-inherit-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -136,6 +142,7 @@ fn test_localvar_inherit_controls_unassigned_local_value() {
 
 #[test]
 fn test_local_new_variable_is_unset_after_function() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-local-unset-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -159,6 +166,7 @@ fn test_local_new_variable_is_unset_after_function() {
 
 #[test]
 fn test_local_invalid_option_reports_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-local-invalid-error.txt";
     let status_path = "target/rubash-local-invalid-status.txt";
     let _ = fs::remove_file(error_path);
@@ -182,6 +190,7 @@ fn test_local_invalid_option_reports_usage() {
 
 #[test]
 fn test_local_capital_i_inherits_outer_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-local-capital-i-output.txt";
     let error_path = "target/rubash-local-capital-i-error.txt";
     let _ = fs::remove_file(output_path);
@@ -211,6 +220,7 @@ fn test_local_capital_i_inherits_outer_value() {
 
 #[test]
 fn test_local_case_conversion_attributes_apply_to_assignments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-local-case-attrs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -236,6 +246,7 @@ fn test_local_case_conversion_attributes_apply_to_assignments() {
 
 #[test]
 fn test_local_plus_attributes_clear_conversion_and_integer_flags() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-local-plus-attrs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -256,6 +267,7 @@ fn test_local_plus_attributes_clear_conversion_and_integer_flags() {
 
 #[test]
 fn test_declare_inside_function_is_local_by_default() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-declare-local-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);

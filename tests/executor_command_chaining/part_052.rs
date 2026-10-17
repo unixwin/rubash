@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_arithmetic_command_and_or_short_circuits() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-and-or-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -25,6 +26,7 @@ fn test_arithmetic_command_and_or_short_circuits() {
 
 #[test]
 fn test_arithmetic_command_treats_newline_as_whitespace() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-newline-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("(( value = 1000 /\n10 )); echo $value > {output_path}");
@@ -42,6 +44,7 @@ fn test_arithmetic_command_treats_newline_as_whitespace() {
 
 #[test]
 fn test_if_condition_honors_arithmetic_and_or_list() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-if-arith-and-or-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -61,6 +64,7 @@ fn test_if_condition_honors_arithmetic_and_or_list() {
 
 #[test]
 fn test_arithmetic_for_loop_break_continue_and_empty_test() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-for-control-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -80,6 +84,7 @@ fn test_arithmetic_for_loop_break_continue_and_empty_test() {
 
 #[test]
 fn test_compact_arithmetic_for_empty_test_executes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compact-arithmetic-for-empty-test-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -99,6 +104,7 @@ fn test_compact_arithmetic_for_empty_test_executes() {
 
 #[test]
 fn test_arithmetic_for_loop_exit_status_matches_body_or_zero_iterations() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-for-status-output.txt";
     let _ = fs::remove_file(output_path);
     let loop_only_tokens = tokenize("for (( i = 0; i < 1; i++ )); do false; done");
@@ -125,6 +131,7 @@ fn test_arithmetic_for_loop_exit_status_matches_body_or_zero_iterations() {
 
 #[test]
 fn test_function_positional_count_expands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-count-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function argc {{ echo $# > {output_path}; }}; argc one two three");
@@ -142,6 +149,7 @@ fn test_function_positional_count_expands() {
 
 #[test]
 fn test_function_positional_star_expands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-star-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function argv {{ echo $* > {output_path}; }}; argv one two three");
@@ -159,6 +167,7 @@ fn test_function_positional_star_expands() {
 
 #[test]
 fn test_declare_capital_f_prints_function_names() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-F-output.txt";
     let status_path = "target/rubash-declare-F-status.txt";
     let _ = fs::remove_file(output_path);
@@ -183,6 +192,7 @@ fn test_declare_capital_f_prints_function_names() {
 
 #[test]
 fn test_declare_capital_f_lists_all_functions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-F-all-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("foo() {{ :; }}; bar() {{ :; }}; declare -F > {output_path}");
@@ -203,6 +213,7 @@ fn test_declare_capital_f_lists_all_functions() {
 
 #[test]
 fn test_declare_lower_f_redirects_function_definition() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-f-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("foo() {{ echo hi; }}; declare -f foo > {output_path}");
@@ -223,6 +234,7 @@ fn test_declare_lower_f_redirects_function_definition() {
 
 #[test]
 fn test_declare_lower_f_prints_compound_function_bodies() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-f-compound-bodies-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -249,6 +261,7 @@ fn test_declare_lower_f_prints_compound_function_bodies() {
 
 #[test]
 fn test_declare_lower_f_prints_nested_function_definition_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-f-nested-function-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -272,6 +285,7 @@ fn test_declare_lower_f_prints_nested_function_definition_body() {
 
 #[test]
 fn test_declare_prints_function_here_strings_like_bash() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-function-herestr-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -301,6 +315,7 @@ fn test_declare_prints_function_here_strings_like_bash() {
 
 #[test]
 fn test_declare_exported_functions_are_empty_without_function_exports() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-exported-functions-output.txt";
     let _ = fs::remove_file(output_path);
     let input =

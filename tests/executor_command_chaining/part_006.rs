@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_unquoted_command_substitution_word_splits_with_adjacent_text() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-comsub-word-split-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -27,6 +28,7 @@ fn test_unquoted_command_substitution_word_splits_with_adjacent_text() {
 
 #[test]
 fn test_cat_command_substitution_reads_files_and_strips_trailing_newlines() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-cat-command-substitution-input.txt";
     let output_path = "target/rubash-cat-command-substitution-output.txt";
     let _ = fs::remove_file(input_path);
@@ -50,6 +52,7 @@ fn test_cat_command_substitution_reads_files_and_strips_trailing_newlines() {
 
 #[test]
 fn test_cat_command_substitution_missing_file_sets_status() {
+    let _cwd_guard = CwdGuard::take();
     let missing_path = "target/rubash-cat-command-substitution-missing.txt";
     let output_path = "target/rubash-cat-command-substitution-missing-output.txt";
     let _ = fs::remove_file(missing_path);
@@ -71,6 +74,7 @@ fn test_cat_command_substitution_missing_file_sets_status() {
 
 #[test]
 fn test_read_file_command_substitution_strips_trailing_newlines() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-readfile-command-substitution-input.txt";
     let output_path = "target/rubash-readfile-command-substitution-output.txt";
     let _ = fs::remove_file(input_path);
@@ -94,6 +98,7 @@ fn test_read_file_command_substitution_strips_trailing_newlines() {
 
 #[test]
 fn test_read_file_command_substitution_expands_glob() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-readfile-command-substitution-glob-input.txt";
     let output_path = "target/rubash-readfile-command-substitution-glob-output.txt";
     let _ = fs::remove_file(input_path);
@@ -121,6 +126,7 @@ fn test_read_file_command_substitution_expands_glob() {
 
 #[test]
 fn test_read_file_command_substitution_removes_quotes_from_path() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-readfile-command-substitution-quoted-input.txt";
     let output_path = "target/rubash-readfile-command-substitution-quoted-output.txt";
     let _ = fs::remove_file(input_path);
@@ -147,6 +153,7 @@ fn test_read_file_command_substitution_removes_quotes_from_path() {
 
 #[test]
 fn test_quoted_read_file_command_substitution_does_not_expand_glob() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-readfile-command-substitution-quoted-glob-input.txt";
     let output_path = "target/rubash-readfile-command-substitution-quoted-glob-output.txt";
     let _ = fs::remove_file(input_path);
@@ -171,6 +178,7 @@ fn test_quoted_read_file_command_substitution_does_not_expand_glob() {
 
 #[test]
 fn test_read_file_command_substitution_missing_file_sets_status() {
+    let _cwd_guard = CwdGuard::take();
     let missing_path = "target/rubash-readfile-command-substitution-missing.txt";
     let output_path = "target/rubash-readfile-command-substitution-missing-output.txt";
     let _ = fs::remove_file(missing_path);
@@ -192,6 +200,7 @@ fn test_read_file_command_substitution_missing_file_sets_status() {
 
 #[test]
 fn test_external_command_substitution_captures_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-external-command-substitution-output.txt";
     let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
     let _ = fs::remove_file(output_path);
@@ -212,6 +221,7 @@ fn test_external_command_substitution_captures_stdout() {
 
 #[test]
 fn test_external_command_substitution_captures_stdin_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-command-substitution-stdin-bin";
     let helper_path = test_command_path(bin_dir, "rubash-comsub-stdin-helper");
     let input_path = target_test_path("rubash-external-command-substitution-stdin-input.txt");
@@ -248,6 +258,7 @@ fn test_external_command_substitution_captures_stdin_redirect() {
 }
 #[test]
 fn test_mktemp_command_substitution_prefers_external_with_stderr_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-command-substitution-mktemp-bin";
     let helper_path = test_command_path(bin_dir, "mktemp");
     let output_path = target_test_path("rubash-mktemp-command-substitution-external-output.txt");
@@ -288,6 +299,7 @@ fn test_mktemp_command_substitution_prefers_external_with_stderr_redirect() {
 
 #[test]
 fn test_printf_command_substitution_sets_failure_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-command-substitution-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -306,6 +318,7 @@ fn test_printf_command_substitution_sets_failure_status() {
 
 #[test]
 fn test_kill_command_substitution_sets_invalid_signal_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-command-substitution-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -325,6 +338,7 @@ fn test_kill_command_substitution_sets_invalid_signal_status() {
 
 #[test]
 fn test_mktemp_t_command_substitution_succeeds() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-mktemp-t-command-substitution-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -365,6 +379,7 @@ fn test_mktemp_t_command_substitution_succeeds() {
 #[ignore = "env: WSL GNU 5.3.0 image has no mktemp - no baseline available (probe wt37-374 K006); revisit when the GNU side can run mktemp"]
 #[test]
 fn test_mktemp_d_command_substitution_creates_directory() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-mktemp-d-command-substitution-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -404,6 +419,7 @@ fn test_mktemp_d_command_substitution_creates_directory() {
 
 #[test]
 fn test_cp_copies_file_to_mktemp_directory() {
+    let _cwd_guard = CwdGuard::take();
     let source_path = target_test_path("rubash-cp-source.txt");
     let output_path = target_test_path("rubash-cp-mktemp-directory-output.txt");
     let shell_source_path = shell_test_path(&source_path);
@@ -445,6 +461,7 @@ fn test_cp_copies_file_to_mktemp_directory() {
 
 #[test]
 fn test_multiline_brace_group_continues_until_closing_brace() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-multiline-brace-group-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -468,6 +485,7 @@ fn test_multiline_brace_group_continues_until_closing_brace() {
 
 #[test]
 fn test_command_substitution_quote_newline_regressions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-run-quote-command-substitution-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -496,6 +514,7 @@ fn test_command_substitution_quote_newline_regressions() {
 
 #[test]
 fn test_old_style_backtick_escape_regressions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-run-quote-backtick-escape-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -522,6 +541,7 @@ fn test_old_style_backtick_escape_regressions() {
 
 #[test]
 fn test_quoted_positional_at_with_empty_adjacent_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-positional-at-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

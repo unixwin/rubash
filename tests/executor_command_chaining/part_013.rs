@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_indirect_positional_count_after_ifs_split() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-indirect-positional-count-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -23,6 +24,7 @@ fn test_indirect_positional_count_after_ifs_split() {
 
 #[test]
 fn test_array_star_indices_expand() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-star-indices-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -42,6 +44,7 @@ fn test_array_star_indices_expand() {
 
 #[test]
 fn test_quoted_array_at_indices_expand_as_loop_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-array-indices-loop-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -64,6 +67,7 @@ fn test_quoted_array_at_indices_expand_as_loop_words() {
 
 #[test]
 fn test_quoted_array_star_indices_use_ifs_first_char() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-array-star-indices-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -86,6 +90,7 @@ fn test_quoted_array_star_indices_use_ifs_first_char() {
 
 #[test]
 fn test_quoted_prefix_star_names_use_ifs_first_char() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-prefix-star-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -108,6 +113,7 @@ fn test_quoted_prefix_star_names_use_ifs_first_char() {
 
 #[test]
 fn test_quoted_assoc_at_indices_expand_as_loop_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-assoc-indices-loop-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -135,6 +141,7 @@ fn test_quoted_assoc_at_indices_expand_as_loop_words() {
 
 #[test]
 fn test_array_numeric_subscript_expands_element() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("arr=(zero one two); echo ${{arr[1]}} > {output_path}");
@@ -152,6 +159,7 @@ fn test_array_numeric_subscript_expands_element() {
 
 #[test]
 fn test_array_negative_subscript_expands_from_end() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-negative-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -174,6 +182,7 @@ fn test_array_negative_subscript_expands_from_end() {
 
 #[test]
 fn test_array_negative_subscript_assignment_updates_from_end() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-negative-subscript-assign-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -196,6 +205,7 @@ fn test_array_negative_subscript_assignment_updates_from_end() {
 
 #[test]
 fn test_adjacent_braced_parameter_expansions_stay_in_one_word() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-adjacent-braced-param-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -218,6 +228,7 @@ fn test_adjacent_braced_parameter_expansions_stay_in_one_word() {
 
 #[test]
 fn test_sparse_array_numeric_subscript_expands_element() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-sparse-array-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -237,6 +248,7 @@ fn test_sparse_array_numeric_subscript_expands_element() {
 
 #[test]
 fn test_array_numeric_subscript_length_expands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-subscript-length-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -256,6 +268,7 @@ fn test_array_numeric_subscript_length_expands() {
 
 #[test]
 fn test_assoc_array_subscript_expands_element() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assoc-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -274,6 +287,7 @@ fn test_assoc_array_subscript_expands_element() {
 
 #[test]
 fn test_assoc_array_subscript_length_expands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assoc-subscript-length-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -292,6 +306,7 @@ fn test_assoc_array_subscript_length_expands() {
 
 #[test]
 fn test_assoc_array_indices_expand_keys() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assoc-indices-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -321,6 +336,7 @@ fn test_assoc_array_indices_expand_keys() {
 
 #[test]
 fn test_bash_cmds_reflects_hash_table() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-cmds-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -366,6 +382,7 @@ fn test_bash_cmds_reflects_hash_table() {
 
 #[test]
 fn test_bash_aliases_reflects_alias_table() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-aliases-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

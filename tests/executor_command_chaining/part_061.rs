@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_nounset_errors_for_unbound_assignment_prefix() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-nounset-assignment-prefix-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -19,6 +20,7 @@ fn test_nounset_errors_for_unbound_assignment_prefix() {
 
 #[test]
 fn test_braced_positional_parameters_expand() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-braced-positional-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -37,6 +39,7 @@ fn test_braced_positional_parameters_expand() {
 
 #[test]
 fn test_positional_parameter_lengths_expand() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-positional-length-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -56,6 +59,7 @@ fn test_positional_parameter_lengths_expand() {
 
 #[test]
 fn test_braced_positional_count_supports_pattern_removal() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-braced-positional-pattern-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -75,6 +79,7 @@ fn test_braced_positional_count_supports_pattern_removal() {
 
 #[test]
 fn test_parameter_plus_allows_newline_word() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-plus-newline-output.txt";
     let _ = fs::remove_file(output_path);
     let input = r#"exec > OUTPUT
@@ -102,6 +107,7 @@ echo Ok:$?"#
 
 #[test]
 fn test_special_parameter_length_expands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-special-length-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("false; echo ${{#?}} > {output_path}");
@@ -119,6 +125,7 @@ fn test_special_parameter_length_expands() {
 
 #[test]
 fn test_parameter_colon_plus_requires_non_empty_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-colon-plus-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -141,6 +148,7 @@ fn test_parameter_colon_plus_requires_non_empty_value() {
 
 #[test]
 fn test_parameter_plus_expands_for_empty_set_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-plus-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -163,6 +171,7 @@ fn test_parameter_plus_expands_for_empty_set_value() {
 
 #[test]
 fn test_default_ifs_is_set_for_parameter_plus_expansion() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-default-ifs-plus-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -186,6 +195,7 @@ fn test_default_ifs_is_set_for_parameter_plus_expansion() {
 
 #[test]
 fn test_parameter_colon_question_errors_for_unset_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-colon-question-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("unset v; echo ${{v:?boom}} > {output_path}; echo after > {output_path}");
@@ -200,6 +210,7 @@ fn test_parameter_colon_question_errors_for_unset_value() {
 
 #[test]
 fn test_array_element_parameter_colon_question_errors_for_unset_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-element-colon-question-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("arr=(ok); echo ${{arr[1]:?boom}} > {output_path}");
@@ -214,6 +225,7 @@ fn test_array_element_parameter_colon_question_errors_for_unset_value() {
 
 #[test]
 fn test_parameter_question_allows_empty_set_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-question-empty-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v=; echo ok:${{v?boom}} > {output_path}");
@@ -231,6 +243,7 @@ fn test_parameter_question_allows_empty_set_value() {
 
 #[test]
 fn test_parameter_dash_uses_default_only_when_unset() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-dash-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -253,6 +266,7 @@ fn test_parameter_dash_uses_default_only_when_unset() {
 
 #[test]
 fn test_parameter_colon_dash_uses_default_for_empty_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-colon-dash-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("v=; echo empty:${{v:-default}} > {output_path}");
@@ -270,6 +284,7 @@ fn test_parameter_colon_dash_uses_default_for_empty_value() {
 
 #[test]
 fn test_array_element_parameter_operators_use_element_state() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-element-param-operators-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

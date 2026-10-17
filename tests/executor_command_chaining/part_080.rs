@@ -5,6 +5,7 @@ use std::{env, fs, process::Command};
 
 #[test]
 fn test_numbered_redirect_is_visible_inside_subshell() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-numbered-redirect-subshell.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("exec 1>{output_path}; (echo OK >&22) 22>&1");
@@ -22,6 +23,7 @@ fn test_numbered_redirect_is_visible_inside_subshell() {
 
 #[test]
 fn test_combined_stdout_stderr_redirect_captures_brace_group() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-combined-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("{{ echo out; no_such_combined_redirect_cmd; }} &> {output_path}");
@@ -40,6 +42,7 @@ fn test_combined_stdout_stderr_redirect_captures_brace_group() {
 
 #[test]
 fn test_combined_stdout_stderr_append_captures_brace_group() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-combined-append-output.txt";
     fs::write(output_path, "first\n").unwrap();
     let input = format!("{{ echo out; no_such_combined_append_cmd; }} &>> {output_path}");
@@ -59,6 +62,7 @@ fn test_combined_stdout_stderr_append_captures_brace_group() {
 
 #[test]
 fn test_combined_output_process_substitution_captures_stdout_and_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-combined-process-substitution-output.txt");
     let helper_path = target_test_path(if cfg!(windows) {
         "rubash-combined-process-substitution.cmd"
@@ -95,6 +99,7 @@ fn test_combined_output_process_substitution_captures_stdout_and_stderr() {
 
 #[test]
 fn test_combined_append_process_substitution_captures_stdout_and_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-combined-append-process-substitution-output.txt");
     let helper_path = target_test_path(if cfg!(windows) {
         "rubash-combined-append-process-substitution.cmd"
@@ -132,6 +137,7 @@ fn test_combined_append_process_substitution_captures_stdout_and_stderr() {
 #[ignore = "rubash#378: see issue (probe wt37-374 K110)"]
 #[test]
 fn test_pipeline_stage_output_process_substitution_word_runs_on_stage_finish() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-pipeline-word-output-process-substitution.txt");
     let tee_path = target_test_path("rubash-pipeline-word-output-process-tee.txt");
     let shell_output_path = shell_test_path(&output_path);
@@ -155,6 +161,7 @@ fn test_pipeline_stage_output_process_substitution_word_runs_on_stage_finish() {
 
 #[test]
 fn test_function_argument_output_process_substitution_word_runs_on_return() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-arg-output-process-substitution.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -173,6 +180,7 @@ fn test_function_argument_output_process_substitution_word_runs_on_return() {
 
 #[test]
 fn test_input_process_substitution_captures_heredoc_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-process-substitution-heredoc-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -191,6 +199,7 @@ fn test_input_process_substitution_captures_heredoc_body() {
 
 #[test]
 fn test_input_process_substitution_runs_command_after_heredoc_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-process-substitution-heredoc-next-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -209,6 +218,7 @@ fn test_input_process_substitution_runs_command_after_heredoc_body() {
 
 #[test]
 fn test_input_process_substitution_uses_last_of_multiple_heredocs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-process-substitution-multiple-heredoc-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -227,6 +237,7 @@ fn test_input_process_substitution_uses_last_of_multiple_heredocs() {
 
 #[test]
 fn test_input_process_substitution_runs_sequential_heredoc_commands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-process-substitution-sequential-heredoc-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -245,6 +256,7 @@ fn test_input_process_substitution_runs_sequential_heredoc_commands() {
 
 #[test]
 fn test_input_process_substitution_command_list_keeps_output_and_cwd_isolated() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-process-substitution-command-list-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -275,6 +287,7 @@ fn test_input_process_substitution_command_list_keeps_output_and_cwd_isolated() 
 #[ignore = "rubash#394: see issue (probe wt37-374 K095)"]
 #[test]
 fn test_brace_group_combined_process_substitution_captures_whole_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-brace-combined-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("{{ echo out; read -u x value; }} &> >(cat > {output_path})");
@@ -294,6 +307,7 @@ fn test_brace_group_combined_process_substitution_captures_whole_body() {
 #[ignore = "rubash#394: see issue (probe wt37-374 K094)"]
 #[test]
 fn test_brace_group_combined_append_process_substitution_captures_whole_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-brace-combined-append-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("{{ echo out; read -u x value; }} &>> >(cat > {output_path})");
@@ -313,6 +327,7 @@ fn test_brace_group_combined_append_process_substitution_captures_whole_body() {
 #[ignore = "rubash#394: see issue (probe wt37-374 K117)"]
 #[test]
 fn test_subshell_combined_process_substitution_captures_whole_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-subshell-combined-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("( echo out; read -u x value ) &> >(cat > {output_path})");
@@ -332,6 +347,7 @@ fn test_subshell_combined_process_substitution_captures_whole_body() {
 #[ignore = "rubash#394: see issue (probe wt37-374 K116)"]
 #[test]
 fn test_subshell_combined_append_process_substitution_captures_whole_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-subshell-combined-append-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("( echo out; read -u x value ) &>> >(cat > {output_path})");
@@ -351,6 +367,7 @@ fn test_subshell_combined_append_process_substitution_captures_whole_body() {
 #[ignore = "rubash#394: see issue (probe wt37-374 K103)"]
 #[test]
 fn test_if_combined_process_substitution_captures_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-if-combined-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("if true; then echo out; read -u x value; fi &> >(cat > {output_path})");
@@ -370,6 +387,7 @@ fn test_if_combined_process_substitution_captures_body() {
 #[ignore = "rubash#394: see issue (probe wt37-374 K120)"]
 #[test]
 fn test_while_combined_append_process_substitution_captures_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-while-combined-append-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -390,6 +408,7 @@ fn test_while_combined_append_process_substitution_captures_body() {
 #[ignore = "rubash#394: see issue (probe wt37-374 K102)"]
 #[test]
 fn test_for_combined_process_substitution_captures_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-combined-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -410,6 +429,7 @@ fn test_for_combined_process_substitution_captures_body() {
 #[ignore = "rubash#394: see issue (probe wt37-374 K096)"]
 #[test]
 fn test_case_combined_append_process_substitution_captures_clause_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-combined-append-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -430,6 +450,7 @@ fn test_case_combined_append_process_substitution_captures_clause_body() {
 #[ignore = "rubash#394: see issue (probe wt37-374 K115)"]
 #[test]
 fn test_select_combined_process_substitution_captures_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-select-combined-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -451,6 +472,7 @@ fn test_select_combined_process_substitution_captures_body() {
 #[ignore = "rubash#394: see issue (probe wt37-374 K118)"]
 #[test]
 fn test_time_brace_group_combined_process_substitution_captures_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-brace-combined-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("time {{ echo out; read -u x value; }} &> >(cat > {output_path})");
@@ -469,6 +491,7 @@ fn test_time_brace_group_combined_process_substitution_captures_body() {
 
 #[test]
 fn test_stderr_fd_copy_after_stdout_redirect_captures_brace_group() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-fd-copy-after-stdout-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("{{ echo out; no_such_fd_copy_cmd; }} > {output_path} 2>&1");
@@ -488,6 +511,7 @@ fn test_stderr_fd_copy_after_stdout_redirect_captures_brace_group() {
 
 #[test]
 fn test_stderr_fd_copy_after_stdout_append_captures_brace_group() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-fd-copy-after-stdout-append-output.txt";
     fs::write(output_path, "first\n").unwrap();
     let input = format!("{{ echo out; no_such_fd_copy_append_cmd; }} >> {output_path} 2>&1");
@@ -508,6 +532,7 @@ fn test_stderr_fd_copy_after_stdout_append_captures_brace_group() {
 
 #[test]
 fn test_stderr_fd_close_does_not_run_dash_command_or_create_file() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-stderr-fd-close-output.txt";
     let closed_path = "&-";
     let _ = fs::remove_file(output_path);
@@ -528,6 +553,7 @@ fn test_stderr_fd_close_does_not_run_dash_command_or_create_file() {
 
 #[test]
 fn test_leading_redirects_apply_to_simple_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-leading-redirect-output.txt";
     let error_path = "target/rubash-leading-redirect-error.txt";
     let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
@@ -550,6 +576,7 @@ fn test_leading_redirects_apply_to_simple_command() {
 
 #[test]
 fn test_leading_combined_redirects_apply_to_simple_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-leading-combined-redirect-output.txt";
     let append_path = "target/rubash-leading-combined-append-output.txt";
     let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
@@ -578,6 +605,7 @@ fn test_leading_combined_redirects_apply_to_simple_command() {
 
 #[test]
 fn test_leading_process_substitution_redirects_apply_to_simple_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-leading-process-substitution-output.txt";
     let combined_path = "target/rubash-leading-combined-process-substitution-output.txt";
     let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
@@ -613,6 +641,7 @@ fn test_leading_process_substitution_redirects_apply_to_simple_command() {
 
 #[test]
 fn test_stdout_fd_close_does_not_create_file() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-stdout-fd-close-output.txt";
     let closed_path = "&-";
     let _ = fs::remove_file(output_path);
@@ -633,6 +662,7 @@ fn test_stdout_fd_close_does_not_create_file() {
 
 #[test]
 fn test_read_write_redirect_feeds_external_stdin() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-read-write-redirect-input.txt";
     let output_path = "target/rubash-read-write-redirect-output.txt";
     fs::write(input_path, "alpha\n").unwrap();
@@ -653,6 +683,7 @@ fn test_read_write_redirect_feeds_external_stdin() {
 
 #[test]
 fn test_read_write_redirect_on_colon_creates_file() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-read-write-redirect-create.txt";
     let output_path = "target/rubash-read-write-redirect-create-output.txt";
     let _ = fs::remove_file(input_path);
@@ -674,6 +705,7 @@ fn test_read_write_redirect_on_colon_creates_file() {
 #[ignore = "rubash#399: see issue (probe wt37-374 read -u fd family)"]
 #[test]
 fn test_read_write_redirect_fd_prefix_feeds_read_u() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-read-write-fd-prefix-input.txt";
     let output_path = "target/rubash-read-write-fd-prefix-output.txt";
     fs::write(input_path, "prefixed\n").unwrap();
@@ -694,6 +726,7 @@ fn test_read_write_redirect_fd_prefix_feeds_read_u() {
 
 #[test]
 fn test_stdin_redirect_fd_prefix_without_space_feeds_external_stdin() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-stdin-fd-prefix-input.txt";
     let output_path = "target/rubash-stdin-fd-prefix-output.txt";
     fs::write(input_path, "prefixed\n").unwrap();
@@ -715,6 +748,7 @@ fn test_stdin_redirect_fd_prefix_without_space_feeds_external_stdin() {
 #[ignore = "rubash#399: see issue (probe wt37-374 read -u fd family)"]
 #[test]
 fn test_read_u_uses_numbered_input_redirect_fd() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-read-u-numbered-fd-input.txt";
     let output_path = "target/rubash-read-u-numbered-fd-output.txt";
     fs::write(input_path, "fd-line\n").unwrap();
@@ -735,6 +769,7 @@ fn test_read_u_uses_numbered_input_redirect_fd() {
 
 #[test]
 fn test_read_combined_ru_reads_numbered_fd_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-ru-numbered-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -ru3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
@@ -752,6 +787,7 @@ fn test_read_combined_ru_reads_numbered_fd_raw() {
 
 #[test]
 fn test_read_combined_ru_consumes_separate_fd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-ru-separate-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -ru 3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
@@ -769,6 +805,7 @@ fn test_read_combined_ru_consumes_separate_fd() {
 
 #[test]
 fn test_read_combined_su_consumes_separate_fd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-su-separate-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -su 3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
@@ -786,6 +823,7 @@ fn test_read_combined_su_consumes_separate_fd() {
 
 #[test]
 fn test_read_combined_su_reads_numbered_fd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-su-numbered-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -su3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
@@ -803,6 +841,7 @@ fn test_read_combined_su_reads_numbered_fd() {
 
 #[test]
 fn test_read_combined_eu_consumes_separate_fd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-eu-separate-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -eu 3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
@@ -820,6 +859,7 @@ fn test_read_combined_eu_consumes_separate_fd() {
 
 #[test]
 fn test_read_combined_eu_reads_numbered_fd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-eu-numbered-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -eu3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
@@ -837,6 +877,7 @@ fn test_read_combined_eu_reads_numbered_fd() {
 
 #[test]
 fn test_read_combined_reu_consumes_separate_fd_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-reu-separate-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -reu 3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
@@ -854,6 +895,7 @@ fn test_read_combined_reu_consumes_separate_fd_raw() {
 
 #[test]
 fn test_read_combined_eru_reads_numbered_fd_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-eru-numbered-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -eru3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
@@ -871,6 +913,7 @@ fn test_read_combined_eru_reads_numbered_fd_raw() {
 
 #[test]
 fn test_read_combined_rsu_consumes_separate_fd_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rsu-separate-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -rsu 3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
@@ -888,6 +931,7 @@ fn test_read_combined_rsu_consumes_separate_fd_raw() {
 
 #[test]
 fn test_read_combined_sru_reads_numbered_fd_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sru-numbered-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -sru3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
@@ -905,6 +949,7 @@ fn test_read_combined_sru_reads_numbered_fd_raw() {
 
 #[test]
 fn test_read_combined_rseu_consumes_separate_fd_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rseu-separate-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -rseu 3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
@@ -922,6 +967,7 @@ fn test_read_combined_rseu_consumes_separate_fd_raw() {
 
 #[test]
 fn test_read_combined_sreu_reads_numbered_fd_raw() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sreu-numbered-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -sreu3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
@@ -939,6 +985,7 @@ fn test_read_combined_sreu_reads_numbered_fd_raw() {
 
 #[test]
 fn test_read_u_rejects_invalid_fd_specifications() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-u-invalid-fd-status.txt";
     let error_path = "target/rubash-read-u-invalid-fd-error.txt";
     let _ = fs::remove_file(output_path);
@@ -970,6 +1017,7 @@ fn test_read_u_rejects_invalid_fd_specifications() {
 
 #[test]
 fn test_read_u_missing_argument_reports_usage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-u-missing-status.txt";
     let error_path = "target/rubash-read-u-missing-error.txt";
     let _ = fs::remove_file(output_path);
@@ -993,6 +1041,7 @@ fn test_read_u_missing_argument_reports_usage() {
 
 #[test]
 fn test_read_u_reports_bad_fd_for_unopened_or_closed_fd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-u-bad-fd-status.txt";
     let error_path = "target/rubash-read-u-bad-fd-error.txt";
     let _ = fs::remove_file(output_path);
@@ -1026,6 +1075,7 @@ fn test_read_u_reports_bad_fd_for_unopened_or_closed_fd() {
 
 #[test]
 fn test_read_u_allows_open_fd_at_eof() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-u-open-empty-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -1044,6 +1094,7 @@ fn test_read_u_allows_open_fd_at_eof() {
 
 #[test]
 fn test_input_fd_copy_reads_virtual_fd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-input-fd-copy-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read first <&3 3<<EOF; echo $first > {output_path}\nfrom-fd\nEOF");
@@ -1059,6 +1110,7 @@ fn test_input_fd_copy_reads_virtual_fd() {
 
 #[test]
 fn test_exec_dynamic_output_fd_writes_through_named_fd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dynamic-output-fd.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1078,6 +1130,7 @@ fn test_exec_dynamic_output_fd_writes_through_named_fd() {
 
 #[test]
 fn test_exec_dynamic_output_fd_copies_persistent_stdout_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dynamic-output-fd-copy-stdout.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("exec > {output_path}; exec {{fd}}>&1; echo copied >&$fd; exec {{fd}}>&-");
@@ -1095,6 +1148,7 @@ fn test_exec_dynamic_output_fd_copies_persistent_stdout_redirect() {
 
 #[test]
 fn test_exec_dynamic_input_fd_reads_through_named_fd() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-dynamic-input-fd.txt";
     let output_path = "target/rubash-dynamic-input-fd-output.txt";
     let error_path = "target/rubash-dynamic-input-fd-error.txt";
@@ -1125,6 +1179,7 @@ fn test_exec_dynamic_input_fd_reads_through_named_fd() {
 
 #[test]
 fn test_exec_numeric_input_fd_reads_through_static_fd() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-static-input-fd.txt";
     let output_path = "target/rubash-static-input-fd-output.txt";
     fs::write(input_path, "alpha\nbeta\n").unwrap();
@@ -1145,6 +1200,7 @@ fn test_exec_numeric_input_fd_reads_through_static_fd() {
 
 #[test]
 fn test_exec_dynamic_input_fd_copies_persistent_stdin_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-dynamic-input-fd-copy-stdin.txt";
     let output_path = "target/rubash-dynamic-input-fd-copy-stdin-output.txt";
     fs::write(input_path, "alpha\nbeta\n").unwrap();
@@ -1168,6 +1224,7 @@ fn test_exec_dynamic_input_fd_copies_persistent_stdin_redirect() {
 
 #[test]
 fn test_external_command_reads_dynamic_input_fd() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-external-dynamic-input-fd.txt";
     let output_path = "target/rubash-external-dynamic-input-fd-output.txt";
     let status_path = "target/rubash-external-dynamic-input-fd-status.txt";
@@ -1195,6 +1252,7 @@ fn test_external_command_reads_dynamic_input_fd() {
 
 #[test]
 fn test_external_command_writes_dynamic_output_fd() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-external-dynamic-output-fd-input.txt";
     let output_path = "target/rubash-external-dynamic-output-fd.txt";
     fs::write(input_path, "from-cat\n").unwrap();
@@ -1219,6 +1277,7 @@ fn test_external_command_writes_dynamic_output_fd() {
 
 #[test]
 fn test_external_command_uses_fd_table_for_persistent_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-external-persistent-stdout-input.txt";
     let output_path = "target/rubash-external-persistent-stdout-output.txt";
     fs::write(input_path, "from-persistent-stdout\n").unwrap();
@@ -1242,6 +1301,7 @@ fn test_external_command_uses_fd_table_for_persistent_stdout() {
 
 #[test]
 fn test_exec_dynamic_read_write_fd_reads_and_writes() {
+    let _cwd_guard = CwdGuard::take();
     let data_path = "target/rubash-dynamic-read-write-fd.txt";
     let output_path = "target/rubash-dynamic-read-write-fd-output.txt";
     fs::write(data_path, "alpha\n").unwrap();
@@ -1266,6 +1326,7 @@ fn test_exec_dynamic_read_write_fd_reads_and_writes() {
 
 #[test]
 fn test_exec_dynamic_input_fd_does_not_gain_output_side() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dynamic-input-only-fd-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1289,6 +1350,7 @@ fn test_exec_dynamic_input_fd_does_not_gain_output_side() {
 #[ignore = "rubash#399: see issue (probe wt37-374 K100)"]
 #[test]
 fn test_exec_dynamic_input_fd_move_closes_source_and_reuses_slot() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dynamic-input-fd-move-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1315,6 +1377,7 @@ fn test_exec_dynamic_input_fd_move_closes_source_and_reuses_slot() {
 #[ignore = "rubash#399: see issue (probe wt37-374 K111)"]
 #[test]
 fn test_read_here_string_scalar_expansion_has_no_assignment_marker() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-here-string-scalar-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1331,6 +1394,7 @@ fn test_read_here_string_scalar_expansion_has_no_assignment_marker() {
 
 #[test]
 fn test_unquoted_array_field_split_preserves_each_element() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-field-split-marker-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("IFS=,; arr=(alpha beta); printf '<%s>\\n' ${{arr[@]}} > {output_path}");
@@ -1348,6 +1412,7 @@ fn test_unquoted_array_field_split_preserves_each_element() {
 
 #[test]
 fn test_exec_dynamic_fd_array_element_keeps_input_and_output_owners() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-dynamic-array-fd-input.txt";
     let output_path = "target/rubash-dynamic-array-fd-output.txt";
     fs::write(input_path, "array-input\n").unwrap();
@@ -1372,6 +1437,7 @@ fn test_exec_dynamic_fd_array_element_keeps_input_and_output_owners() {
 
 #[test]
 fn test_read_heredoc_overrides_earlier_input_fd_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-heredoc-overrides-fd.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1392,6 +1458,7 @@ fn test_read_heredoc_overrides_earlier_input_fd_redirect() {
 #[ignore = "rubash#399: see issue (probe wt37-374 K099)"]
 #[test]
 fn test_exec_dynamic_fd_here_string_persists_for_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dynamic-fd-here-string-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("exec {{fd}}<<<alpha; cat <&$fd > {output_path}; exec {{fd}}<&-");
@@ -1409,6 +1476,7 @@ fn test_exec_dynamic_fd_here_string_persists_for_external_command() {
 
 #[test]
 fn test_exec_dynamic_fd_heredoc_persists_for_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dynamic-fd-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -1427,6 +1495,7 @@ fn test_exec_dynamic_fd_heredoc_persists_for_external_command() {
 
 #[test]
 fn test_exec_fd_process_substitution_persists_for_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exec-fd-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("exec 3< <(printf 'alpha\\nbeta\\n'); cat <&3 > {output_path}; exec 3<&-");
@@ -1444,6 +1513,7 @@ fn test_exec_fd_process_substitution_persists_for_external_command() {
 
 #[test]
 fn test_exec_dynamic_fd_process_substitution_persists_for_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dynamic-fd-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1463,6 +1533,7 @@ fn test_exec_dynamic_fd_process_substitution_persists_for_external_command() {
 
 #[test]
 fn test_embedded_input_process_substitution_rewrites_external_argument() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-embedded-process-substitution-output.txt";
     let side_path = "target/rubash-embedded-process-substitution-side.txt";
     let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
@@ -1489,6 +1560,7 @@ fn test_embedded_input_process_substitution_rewrites_external_argument() {
 
 #[test]
 fn test_multiple_embedded_input_process_substitutions_rewrite_one_word() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-multiple-embedded-process-substitution-output.txt";
     let first_side_path = "target/rubash-multiple-embedded-process-substitution-first.txt";
     let second_side_path = "target/rubash-multiple-embedded-process-substitution-second.txt";
@@ -1518,6 +1590,7 @@ fn test_multiple_embedded_input_process_substitutions_rewrite_one_word() {
 
 #[test]
 fn test_assignment_stored_procsub_path_is_dead_after_the_assignment() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assignment-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     // rubash#545 cell 2 (scalar form): GNU reaps a command's process
@@ -1544,6 +1617,7 @@ fn test_assignment_stored_procsub_path_is_dead_after_the_assignment() {
 
 #[test]
 fn test_embedded_assignment_input_process_substitution_keeps_surrounding_text() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-embedded-assignment-process-substitution-output.txt";
     let side_path = "target/rubash-embedded-assignment-process-substitution-side.txt";
     let _ = fs::remove_file(output_path);
@@ -1567,6 +1641,7 @@ fn test_embedded_assignment_input_process_substitution_keeps_surrounding_text() 
 
 #[test]
 fn test_assignment_output_process_substitution_runs_after_redirect_write() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assignment-output-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("p=>(cat > {output_path}); printf alpha > \"$p\"");
@@ -1584,6 +1659,7 @@ fn test_assignment_output_process_substitution_runs_after_redirect_write() {
 
 #[test]
 fn test_embedded_assignment_output_process_substitution_keeps_surrounding_text() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-embedded-assignment-output-process-substitution-output.txt";
     let side_path = "target/rubash-embedded-assignment-output-process-substitution-side.txt";
     let _ = fs::remove_file(output_path);
@@ -1608,6 +1684,7 @@ fn test_embedded_assignment_output_process_substitution_keeps_surrounding_text()
 
 #[test]
 fn test_exec_fd_output_process_substitution_runs_on_close() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exec-fd-output-process-substitution.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1627,6 +1704,7 @@ fn test_exec_fd_output_process_substitution_runs_on_close() {
 
 #[test]
 fn test_exec_dynamic_fd_output_process_substitution_runs_on_close() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dynamic-fd-output-process-substitution.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1646,6 +1724,7 @@ fn test_exec_dynamic_fd_output_process_substitution_runs_on_close() {
 
 #[test]
 fn test_exec_stderr_process_substitution_runs_on_close() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-stderr-process-substitution.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1665,6 +1744,7 @@ fn test_exec_stderr_process_substitution_runs_on_close() {
 
 #[test]
 fn test_append_output_process_substitution_feeds_command_stdin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-append-output-process-substitution.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("echo appended >> >(cat > {output_path})");
@@ -1682,6 +1762,7 @@ fn test_append_output_process_substitution_feeds_command_stdin() {
 
 #[test]
 fn test_exec_fd_append_process_substitution_runs_on_close() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exec-fd-append-process-substitution.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1701,6 +1782,7 @@ fn test_exec_fd_append_process_substitution_runs_on_close() {
 
 #[test]
 fn test_exec_dynamic_fd_append_process_substitution_runs_on_close() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dynamic-fd-append-process-substitution.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1720,6 +1802,7 @@ fn test_exec_dynamic_fd_append_process_substitution_runs_on_close() {
 
 #[test]
 fn test_exec_stderr_append_process_substitution_runs_on_close() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-stderr-append-process-substitution.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1739,6 +1822,7 @@ fn test_exec_stderr_append_process_substitution_runs_on_close() {
 
 #[test]
 fn test_input_fd_close_makes_read_fail_without_hanging() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-input-fd-close-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read value <&-; echo status:$?:$value > {output_path}");
@@ -1756,6 +1840,7 @@ fn test_input_fd_close_makes_read_fail_without_hanging() {
 
 #[test]
 fn test_read_u_reads_fd_here_string() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-u-fd-here-string-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -u 3 value 3<<<alpha; echo $value > {output_path}");
@@ -1773,6 +1858,7 @@ fn test_read_u_reads_fd_here_string() {
 
 #[test]
 fn test_external_command_reads_fd_here_string() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-external-fd-here-string-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat <&3 3<<<alpha > {output_path}");
@@ -1790,6 +1876,7 @@ fn test_external_command_reads_fd_here_string() {
 
 #[test]
 fn test_exec_fd_here_string_persists_for_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exec-fd-here-string-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("exec 3<<<alpha; cat <&3 > {output_path}; exec 3<&-");
@@ -1807,6 +1894,7 @@ fn test_exec_fd_here_string_persists_for_external_command() {
 
 #[test]
 fn test_exec_fd_heredoc_persists_for_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exec-fd-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("exec 3<<EOF\nalpha\nbeta\nEOF\ncat <&3 > {output_path}; exec 3<&-");
@@ -1824,6 +1912,7 @@ fn test_exec_fd_heredoc_persists_for_external_command() {
 
 #[test]
 fn test_pipeline_feeds_while_command_stage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-while-stage-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -1842,6 +1931,7 @@ fn test_pipeline_feeds_while_command_stage() {
 
 #[test]
 fn test_pipeline_allows_newline_after_operator() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-newline-after-operator-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf 'alpha\\nbeta\\n' |\n grep beta > {output_path}");
@@ -1859,6 +1949,7 @@ fn test_pipeline_allows_newline_after_operator() {
 
 #[test]
 fn test_pipe_stderr_operator_feeds_next_stage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipe-stderr-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '%(bad)s\\n' |& grep warning > {output_path}");
@@ -1878,6 +1969,7 @@ fn test_pipe_stderr_operator_feeds_next_stage() {
 #[ignore = "rubash#396: see issue (probe wt37-374 K119)"]
 #[test]
 fn test_time_command_can_be_pipeline_stage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-pipeline-stage-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf 'alpha\\n' | time cat > {output_path}");
@@ -1898,6 +1990,7 @@ fn test_time_command_can_be_pipeline_stage() {
 #[ignore = "rubash#396: see issue (probe wt37-374 K106)"]
 #[test]
 fn test_inverted_time_command_pipeline_stage_flips_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-inverted-time-pipeline-stage-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1919,6 +2012,7 @@ fn test_inverted_time_command_pipeline_stage_flips_status() {
 
 #[test]
 fn test_pipeline_feeds_brace_group_stage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-brace-stage-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1938,6 +2032,7 @@ fn test_pipeline_feeds_brace_group_stage() {
 
 #[test]
 fn test_pipeline_brace_group_stage_keeps_cwd_isolated() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-pipeline-brace-stage-cwd-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -1967,6 +2062,7 @@ fn test_pipeline_brace_group_stage_keeps_cwd_isolated() {
 
 #[test]
 fn test_pipeline_function_stage_keeps_cwd_isolated() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-pipeline-function-stage-cwd-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -2000,6 +2096,7 @@ fn test_pipeline_function_stage_keeps_cwd_isolated() {
 
 #[test]
 fn test_lastpipe_final_read_updates_current_shell() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-lastpipe-read-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -2018,6 +2115,7 @@ fn test_lastpipe_final_read_updates_current_shell() {
 
 #[test]
 fn test_lastpipe_final_while_loop_updates_current_shell() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-lastpipe-while-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2037,6 +2135,7 @@ fn test_lastpipe_final_while_loop_updates_current_shell() {
 
 #[test]
 fn test_lastpipe_final_assignment_updates_current_shell() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-lastpipe-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2056,6 +2155,7 @@ fn test_lastpipe_final_assignment_updates_current_shell() {
 
 #[test]
 fn test_lastpipe_preserves_pipeline_statuses() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-lastpipe-pipestatus-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2078,6 +2178,7 @@ fn test_lastpipe_preserves_pipeline_statuses() {
 
 #[test]
 fn test_pipe_stderr_operator_feeds_brace_group_stage_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipe-stderr-brace-stage-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("{{ builtin nosuch; }} |& grep 'not a shell builtin' > {output_path}");
@@ -2096,6 +2197,7 @@ fn test_pipe_stderr_operator_feeds_brace_group_stage_stderr() {
 
 #[test]
 fn test_for_command_pipeline_stage_feeds_next_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-for-stage-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("for value in a b; do echo $value; done | wc -l > {output_path}");
@@ -2113,6 +2215,7 @@ fn test_for_command_pipeline_stage_feeds_next_command() {
 
 #[test]
 fn test_if_command_pipeline_stage_feeds_next_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-if-stage-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("if true; then echo yes; fi | grep yes > {output_path}");
@@ -2131,6 +2234,7 @@ fn test_if_command_pipeline_stage_feeds_next_command() {
 #[ignore = "rubash#385: see issue (probe wt37-374 K097)"]
 #[test]
 fn test_case_command_pipeline_stage_feeds_next_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-case-stage-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -2153,6 +2257,7 @@ fn test_case_command_pipeline_stage_feeds_next_command() {
 
 #[test]
 fn test_grouping_and_select_command_pipeline_stages_feed_next_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-grouping-select-stage-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2182,6 +2287,7 @@ fn test_grouping_and_select_command_pipeline_stages_feed_next_command() {
 
 #[test]
 fn test_inverted_compound_commands_flip_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-inverted-compound-status.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2206,6 +2312,7 @@ fn test_inverted_compound_commands_flip_status() {
 
 #[test]
 fn test_inverted_case_and_test_commands_flip_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-inverted-case-test-status.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2251,6 +2358,7 @@ fn test_inverted_case_and_test_commands_flip_status() {
 
 #[test]
 fn test_inverted_grouping_and_select_commands_flip_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-inverted-grouping-select-status.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2296,6 +2404,7 @@ fn test_inverted_grouping_and_select_commands_flip_status() {
 
 #[test]
 fn test_inverted_function_definitions_still_define_functions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-inverted-function-definition-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2330,6 +2439,7 @@ fn test_inverted_function_definitions_still_define_functions() {
 
 #[test]
 fn test_alias_introduced_inversion_flips_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-inversion-status.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2354,6 +2464,7 @@ fn test_alias_introduced_inversion_flips_status() {
 
 #[test]
 fn test_function_body_can_be_for_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-for-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("f() for x in a b; do echo $x >> {output_path}; done; f");
@@ -2371,6 +2482,7 @@ fn test_function_body_can_be_for_command() {
 
 #[test]
 fn test_function_definition_and_or_connector_executes_rhs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-and-or-connector-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("f() {{ echo body; }} && echo defined > {output_path}; f >> {output_path}");
@@ -2388,6 +2500,7 @@ fn test_function_definition_and_or_connector_executes_rhs() {
 
 #[test]
 fn test_function_body_can_be_arithmetic_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-arithmetic-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2411,6 +2524,7 @@ fn test_function_body_can_be_arithmetic_command() {
 
 #[test]
 fn test_function_body_can_be_case_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-case-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2430,6 +2544,7 @@ fn test_function_body_can_be_case_command() {
 
 #[test]
 fn test_case_body_can_contain_select_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-nested-select-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2451,6 +2566,7 @@ fn test_case_body_can_contain_select_command() {
 
 #[test]
 fn test_subshell_command_keeps_case_pattern_parentheses() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-subshell-case-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2470,6 +2586,7 @@ fn test_subshell_command_keeps_case_pattern_parentheses() {
 
 #[test]
 fn test_function_body_can_be_if_command_sequence() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-if-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -2488,6 +2605,7 @@ fn test_function_body_can_be_if_command_sequence() {
 
 #[test]
 fn test_function_body_can_be_while_command_sequence() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-while-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -2506,6 +2624,7 @@ fn test_function_body_can_be_while_command_sequence() {
 
 #[test]
 fn test_function_body_can_be_until_command_sequence() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-until-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -2524,6 +2643,7 @@ fn test_function_body_can_be_until_command_sequence() {
 
 #[test]
 fn test_function_body_can_be_select_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-select-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2543,6 +2663,7 @@ fn test_function_body_can_be_select_command() {
 
 #[test]
 fn test_function_body_can_be_coproc_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-coproc-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("f() coproc MYC (( 1 )); f; echo pid:${{MYC_PID:+set}} > {output_path}");
@@ -2560,6 +2681,7 @@ fn test_function_body_can_be_coproc_command() {
 
 #[test]
 fn test_function_body_can_be_time_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-time-body-output.txt";
     let error_path = "target/rubash-function-time-body-error.txt";
     let _ = fs::remove_file(output_path);
@@ -2583,6 +2705,7 @@ fn test_function_body_can_be_time_command() {
 
 #[test]
 fn test_function_body_can_be_subshell_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-subshell-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2605,6 +2728,7 @@ fn test_function_body_can_be_subshell_command() {
 
 #[test]
 fn test_function_keyword_can_use_subshell_body_without_signature_parentheses() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-keyword-subshell-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function f ( echo hi ); f > {output_path}");
@@ -2622,6 +2746,7 @@ fn test_function_keyword_can_use_subshell_body_without_signature_parentheses() {
 
 #[test]
 fn test_function_keyword_with_parentheses_can_use_subshell_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-keyword-paren-subshell-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function f () ( echo hi ); f > {output_path}");
@@ -2646,6 +2771,7 @@ fn test_function_keyword_with_parentheses_can_use_subshell_body() {
 
 #[test]
 fn test_function_subshell_body_keeps_case_pattern_parentheses() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-subshell-case-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2665,6 +2791,7 @@ fn test_function_subshell_body_keeps_case_pattern_parentheses() {
 
 #[test]
 fn test_function_assignment_arithmetic_expansion_accepts_base_hash() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-arithmetic-base-hash-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -2683,6 +2810,7 @@ fn test_function_assignment_arithmetic_expansion_accepts_base_hash() {
 
 #[test]
 fn test_function_body_can_be_conditional_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-conditional-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2702,6 +2830,7 @@ fn test_function_body_can_be_conditional_command() {
 
 #[test]
 fn test_unclosed_arithmetic_subscript_does_not_execute_tail_bracket() {
+    let _cwd_guard = CwdGuard::take();
     let tokens = tokenize("((X=([))]");
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -2714,6 +2843,7 @@ fn test_unclosed_arithmetic_subscript_does_not_execute_tail_bracket() {
 
 #[test]
 fn test_alias_introduced_function_defines_brace_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-function-brace-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2732,6 +2862,7 @@ fn test_alias_introduced_function_defines_brace_body() {
 
 #[test]
 fn test_alias_introduced_function_accepts_following_brace_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-function-following-brace-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2755,6 +2886,7 @@ fn test_alias_introduced_function_accepts_following_brace_body() {
 
 #[test]
 fn test_alias_function_prefix_accepts_following_if_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-function-prefix-if-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2776,6 +2908,7 @@ fn test_alias_function_prefix_accepts_following_if_body() {
 
 #[test]
 fn test_alias_function_prefix_accepts_following_for_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-function-prefix-for-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2794,6 +2927,7 @@ fn test_alias_function_prefix_accepts_following_for_body() {
 
 #[test]
 fn test_alias_introduced_brace_group_executes_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-brace-group-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2812,6 +2946,7 @@ fn test_alias_introduced_brace_group_executes_body() {
 
 #[test]
 fn test_alias_introduced_brace_group_collects_multiple_commands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-brace-group-multi-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2830,6 +2965,7 @@ fn test_alias_introduced_brace_group_collects_multiple_commands() {
 
 #[test]
 fn test_alias_introduced_subshell_executes_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-subshell-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2850,6 +2986,7 @@ fn test_alias_introduced_subshell_executes_body() {
 
 #[test]
 fn test_alias_introduced_subshell_collects_multiple_commands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-subshell-multi-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -2870,6 +3007,7 @@ fn test_alias_introduced_subshell_collects_multiple_commands() {
 
 #[test]
 fn test_alias_introduced_coproc_executes_brace_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-coproc-brace-output.txt";
     let status_path = "target/rubash-alias-coproc-brace-status.txt";
     let _ = fs::remove_file(output_path);
@@ -2904,6 +3042,7 @@ fn test_alias_introduced_coproc_executes_brace_body() {
 
 #[test]
 fn test_alias_introduced_coproc_executes_simple_command() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-alias-coproc-simple-status.txt";
     let _ = fs::remove_file(status_path);
     let input = format!(
@@ -2924,6 +3063,7 @@ fn test_alias_introduced_coproc_executes_simple_command() {
 
 #[test]
 fn test_unnamed_coproc_executes_simple_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-coproc-simple-output.txt";
     let status_path = "target/rubash-coproc-simple-status.txt";
     let _ = fs::remove_file(output_path);
@@ -2959,6 +3099,7 @@ fn test_unnamed_coproc_executes_simple_command() {
 
 #[test]
 fn test_unnamed_coproc_preserves_quoted_simple_arguments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-coproc-quoted-simple-output.txt";
     let status_path = "target/rubash-coproc-quoted-simple-status.txt";
     let _ = fs::remove_file(output_path);
@@ -2994,6 +3135,7 @@ fn test_unnamed_coproc_preserves_quoted_simple_arguments() {
 
 #[test]
 fn test_alias_introduced_coproc_preserves_simple_redirects() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-coproc-simple-redirect-output.txt";
     let status_path = "target/rubash-alias-coproc-simple-redirect-status.txt";
     let _ = fs::remove_file(output_path);
@@ -3030,6 +3172,7 @@ fn test_alias_introduced_coproc_preserves_simple_redirects() {
 
 #[test]
 fn test_coproc_quoted_format_has_no_assignment_marker() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-coproc-quoted-format-marker-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("coproc MYC {{ printf 'x=%s\\n' hi > {output_path}; }}; wait $MYC_PID");
@@ -3044,6 +3187,7 @@ fn test_coproc_quoted_format_has_no_assignment_marker() {
 
 #[test]
 fn test_named_coproc_executes_for_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-coproc-for-body-output.txt";
     let status_path = "target/rubash-coproc-for-body-status.txt";
     let _ = fs::remove_file(output_path);
@@ -3078,6 +3222,7 @@ fn test_named_coproc_executes_for_body() {
 
 #[test]
 fn test_named_coproc_executes_case_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-coproc-case-body-output.txt";
     let status_path = "target/rubash-coproc-case-body-status.txt";
     let _ = fs::remove_file(output_path);
@@ -3114,6 +3259,7 @@ fn test_named_coproc_executes_case_body() {
 
 #[test]
 fn test_named_coproc_executes_if_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-coproc-if-body-output.txt";
     let status_path = "target/rubash-coproc-if-body-status.txt";
     let _ = fs::remove_file(output_path);
@@ -3150,6 +3296,7 @@ fn test_named_coproc_executes_if_body() {
 
 #[test]
 fn test_named_coproc_executes_while_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-coproc-while-body-output.txt";
     let status_path = "target/rubash-coproc-while-body-status.txt";
     let _ = fs::remove_file(output_path);
@@ -3186,6 +3333,7 @@ fn test_named_coproc_executes_while_body() {
 
 #[test]
 fn test_named_coproc_executes_until_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-coproc-until-body-output.txt";
     let status_path = "target/rubash-coproc-until-body-status.txt";
     let _ = fs::remove_file(output_path);
@@ -3229,6 +3377,7 @@ fn test_named_coproc_executes_until_body() {
 #[ignore = "rubash#387: see issue (probe wt37-374 K107)"]
 #[test]
 fn test_named_coproc_executes_select_body() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-coproc-select-body-input.txt";
     let output_path = "target/rubash-coproc-select-body-output.txt";
     let status_path = "target/rubash-coproc-select-body-status.txt";
@@ -3269,6 +3418,7 @@ fn test_named_coproc_executes_select_body() {
 
 #[test]
 fn test_named_coproc_executes_time_prefixed_brace_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-coproc-time-brace-output.txt";
     let status_path = "target/rubash-coproc-time-brace-status.txt";
     let _ = fs::remove_file(output_path);
@@ -3303,6 +3453,7 @@ fn test_named_coproc_executes_time_prefixed_brace_body() {
 
 #[test]
 fn test_named_coproc_subshell_keeps_case_pattern_parentheses() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-coproc-subshell-case-output.txt";
     let status_path = "target/rubash-coproc-subshell-case-status.txt";
     let _ = fs::remove_file(output_path);
@@ -3337,6 +3488,7 @@ fn test_named_coproc_subshell_keeps_case_pattern_parentheses() {
 
 #[test]
 fn test_named_coproc_executes_arithmetic_body_without_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-coproc-arithmetic-status.txt";
     let error_path = "target/rubash-coproc-arithmetic-error.txt";
     let _ = fs::remove_file(status_path);
@@ -3368,6 +3520,7 @@ fn test_named_coproc_executes_arithmetic_body_without_stderr() {
 
 #[test]
 fn test_named_coproc_executes_conditional_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-coproc-conditional-body-output.txt";
     let status_path = "target/rubash-coproc-conditional-body-status.txt";
     let _ = fs::remove_file(output_path);
@@ -3404,6 +3557,7 @@ fn test_named_coproc_executes_conditional_body() {
 
 #[test]
 fn test_named_coproc_redirects_stderr_to_file() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-coproc-stderr-redirect-status.txt";
     let error_path = "target/rubash-coproc-stderr-redirect-error.txt";
     let _ = fs::remove_file(status_path);
@@ -3436,6 +3590,7 @@ fn test_named_coproc_redirects_stderr_to_file() {
 
 #[test]
 fn test_named_coproc_redirects_stdout_to_file() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-coproc-stdout-redirect-status.txt";
     let output_path = "target/rubash-coproc-stdout-redirect-output.txt";
     let _ = fs::remove_file(status_path);
@@ -3468,6 +3623,7 @@ fn test_named_coproc_redirects_stdout_to_file() {
 
 #[test]
 fn test_named_coproc_brace_body_uses_default_stdout_pipe_without_stdio_error() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-coproc-default-stdout-status.txt";
     let error_path = "target/rubash-coproc-default-stdout-error.txt";
     let _ = fs::remove_file(status_path);
@@ -3492,6 +3648,7 @@ fn test_named_coproc_brace_body_uses_default_stdout_pipe_without_stdio_error() {
 
 #[test]
 fn test_dynamic_fd_assignment_preserves_readonly_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-readonly-dynamic-fd.txt");
     let _ = fs::remove_file(&output_path);
     // wt37 (#374): run through the real CLI - probe wt37-374 K098 is
@@ -3512,6 +3669,7 @@ fn test_dynamic_fd_assignment_preserves_readonly_variable() {
 
 #[test]
 fn test_readonly_dynamic_fd_rejects_input_readwrite_and_append() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = target_test_path("rubash-readonly-dynamic-fd-input.txt");
     let append_path = target_test_path("rubash-readonly-dynamic-fd-append.txt");
     fs::write(&input_path, "input\n").unwrap();
@@ -3540,6 +3698,7 @@ fn test_readonly_dynamic_fd_rejects_input_readwrite_and_append() {
 
 #[test]
 fn test_readonly_dynamic_fd_cli_stderr_matches_gnu() {
+    let _cwd_guard = CwdGuard::take();
     let script_path = target_test_path("rubash-readonly-dynamic-fd-stderr.sh");
     let output_path = target_test_path("rubash-readonly-dynamic-fd-stderr-target.txt");
     let _ = fs::remove_file(&script_path);
@@ -3577,6 +3736,7 @@ fn test_readonly_dynamic_fd_cli_stderr_matches_gnu() {
 
 #[test]
 fn test_ifs_set_shift_pipeline_preserves_for_iteration_state() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-ifs-set-shift-pipeline.txt";
     let _ = std::fs::remove_file(output_path);
     let input = r#"split()

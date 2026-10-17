@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_case_fallthrough_executes_next_clause_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-fallthrough-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -23,6 +24,7 @@ fn test_case_fallthrough_executes_next_clause_body() {
 
 #[test]
 fn test_case_test_next_terminator_matches_later_clause() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-test-next-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -43,6 +45,7 @@ fn test_case_test_next_terminator_matches_later_clause() {
 
 #[test]
 fn test_case_test_next_preserves_status_when_later_clauses_do_not_match() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-test-next-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -62,6 +65,7 @@ fn test_case_test_next_preserves_status_when_later_clauses_do_not_match() {
 
 #[test]
 fn test_case_fallthrough_preserves_status_at_end_of_case() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-fallthrough-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("case beta in beta) false ;& esac; echo $? > {output_path}");
@@ -80,6 +84,7 @@ fn test_case_fallthrough_preserves_status_at_end_of_case() {
 
 #[test]
 fn test_case_empty_matching_clause_sets_success_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-empty-clause-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("false; case beta in beta) ;; esac; echo $? > {output_path}");
@@ -98,6 +103,7 @@ fn test_case_empty_matching_clause_sets_success_status() {
 
 #[test]
 fn test_case_empty_test_next_preserves_success_when_later_clauses_do_not_match() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-empty-test-next-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -117,6 +123,7 @@ fn test_case_empty_test_next_preserves_success_when_later_clauses_do_not_match()
 
 #[test]
 fn test_case_optional_pattern_list_paren_with_alternates() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-paren-alternates-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -137,6 +144,7 @@ fn test_case_optional_pattern_list_paren_with_alternates() {
 
 #[test]
 fn test_case_pattern_expands_variable_before_matching() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-expanded-pattern-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -157,6 +165,7 @@ fn test_case_pattern_expands_variable_before_matching() {
 
 #[test]
 fn test_case_extglob_pattern_expands_variable_before_matching() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-expanded-extglob-pattern-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -177,6 +186,7 @@ fn test_case_extglob_pattern_expands_variable_before_matching() {
 
 #[test]
 fn test_case_nocasematch_matches_literals_ranges_and_extglob() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-nocasematch-output.txt";
     let _ = fs::remove_file(output_path);
     // wt37 (#374): multi-line form (GNU 5.3.0 rejects the one-line
@@ -202,6 +212,7 @@ fn test_case_nocasematch_matches_literals_ranges_and_extglob() {
 
 #[test]
 fn test_case_nocasematch_preserves_posix_character_class_case() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-nocasematch-posix-class-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -226,6 +237,7 @@ fn test_case_nocasematch_preserves_posix_character_class_case() {
 
 #[test]
 fn test_function_keyword_definition_executes_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-keyword-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function greet {{ echo hi > {output_path}; }}; greet");
@@ -244,6 +256,7 @@ fn test_function_keyword_definition_executes_body() {
 
 #[test]
 fn test_parenthesized_function_definition_executes_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-parenthesized-function-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("greet() ( echo hi > {output_path} ); greet");
@@ -262,6 +275,7 @@ fn test_parenthesized_function_definition_executes_body() {
 
 #[test]
 fn test_parenthesized_function_body_runs_in_subshell() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-parenthesized-function-subshell-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -283,6 +297,7 @@ fn test_parenthesized_function_body_runs_in_subshell() {
 
 #[test]
 fn test_posix_return_keeps_prefix_assignment() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-posix-return-prefix-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -303,6 +318,7 @@ fn test_posix_return_keeps_prefix_assignment() {
 
 #[test]
 fn test_posix_function_prefix_assignment_restores_when_unchanged() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-posix-function-prefix-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -323,6 +339,7 @@ fn test_posix_function_prefix_assignment_restores_when_unchanged() {
 
 #[test]
 fn test_for_without_in_iterates_positional_params() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-default-positional-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -- alpha beta; for item; do echo $item >> {output_path}; done");
@@ -341,6 +358,7 @@ fn test_for_without_in_iterates_positional_params() {
 
 #[test]
 fn test_for_explicit_empty_in_does_not_iterate() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-empty-in-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -- alpha beta; for item in; do echo $item > {output_path}; done");
@@ -358,6 +376,7 @@ fn test_for_explicit_empty_in_does_not_iterate() {
 
 #[test]
 fn test_for_loop_exit_status_matches_body_or_zero_iterations() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-status-output.txt";
     let _ = fs::remove_file(output_path);
     let loop_only_tokens = tokenize("for item in one; do false; done");
@@ -384,6 +403,7 @@ fn test_for_loop_exit_status_matches_body_or_zero_iterations() {
 
 #[test]
 fn test_arithmetic_for_loop_executes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-for-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("for (( i = 0; i < 3; i++ )); do echo $i >> {output_path}; done");
@@ -406,6 +426,7 @@ fn test_arithmetic_for_loop_executes() {
 
 #[test]
 fn test_arithmetic_expands_positional_count() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-positional-count-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

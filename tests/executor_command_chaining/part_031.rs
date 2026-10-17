@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_disabled_pwd_builtin_uses_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-disabled-pwd-bin";
     let script_path = test_command_path(bin_dir, "pwd");
     let output_path = "target/rubash-disabled-pwd-output.txt";
@@ -38,6 +39,7 @@ fn test_disabled_pwd_builtin_uses_external_command() {
 
 #[test]
 fn test_command_uses_external_pwd_when_builtin_is_disabled() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-disabled-command-pwd-bin";
     let script_path = test_command_path(bin_dir, "pwd");
     let output_path = "target/rubash-disabled-command-pwd-output.txt";
@@ -73,6 +75,7 @@ fn test_command_uses_external_pwd_when_builtin_is_disabled() {
 
 #[test]
 fn test_command_cd_updates_pwd_for_physical_pwd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-command-cd-physical-pwd-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -96,6 +99,7 @@ fn test_command_cd_updates_pwd_for_physical_pwd() {
 
 #[test]
 fn test_disabled_status_and_state_builtins_use_external_commands() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-disabled-status-builtins-bin";
     let _ = fs::remove_dir_all(bin_dir);
     for path in [
@@ -181,6 +185,7 @@ fn test_disabled_status_and_state_builtins_use_external_commands() {
 
 #[test]
 fn test_builtin_command_respects_disabled_builtin_state() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-disabled-builtin-direct-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_source_option_errors_return_usage_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-source-option-errors-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -27,6 +28,7 @@ fn test_source_option_errors_return_usage_status() {
 
 #[test]
 fn test_source_option_errors_redirect_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-source-option-errors-redirect-status.txt";
     let error_path = "target/rubash-source-option-errors-redirect-error.txt";
     let _ = fs::remove_file(output_path);
@@ -58,6 +60,7 @@ fn test_source_option_errors_redirect_stderr() {
 
 #[test]
 fn test_source_missing_file_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-source-missing-redirect-status.txt";
     let error_path = "target/rubash-source-missing-redirect-error.txt";
     let _ = fs::remove_file(output_path);
@@ -81,6 +84,7 @@ fn test_source_missing_file_redirects_stderr() {
 
 #[test]
 fn test_source_redirects_body_stdout_and_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let script_path = "target/rubash-source-body-redirect.sh";
     let output_path = "target/rubash-source-body-redirect-output.txt";
     let error_path = "target/rubash-source-body-redirect-error.txt";
@@ -113,6 +117,7 @@ fn test_source_redirects_body_stdout_and_stderr() {
 
 #[test]
 fn test_source_appends_body_stdout_and_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let script_path = "target/rubash-source-body-append.sh";
     let output_path = "target/rubash-source-body-append-output.txt";
     let error_path = "target/rubash-source-body-append-error.txt";
@@ -150,6 +155,7 @@ fn test_source_appends_body_stdout_and_stderr() {
 #[ignore = "rubash#396: see issue (probe wt37-374 K030)"]
 #[test]
 fn test_source_process_substitution_updates_current_shell() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-source-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -170,6 +176,7 @@ fn test_source_process_substitution_updates_current_shell() {
 #[ignore = "rubash#396: see issue (probe wt37-374 K031)"]
 #[test]
 fn test_source_process_substitution_uses_source_arguments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-source-process-substitution-args-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("source <(printf 'echo sourced:$1 > {output_path}\\n') arg");
@@ -187,6 +194,7 @@ fn test_source_process_substitution_uses_source_arguments() {
 
 #[test]
 fn test_source_with_arguments_restores_caller_positional_params() {
+    let _cwd_guard = CwdGuard::take();
     let script_path = "target/rubash-source-args-restore.sh";
     let output_path = "target/rubash-source-args-restore-output.txt";
     let _ = fs::remove_file(script_path);
@@ -215,6 +223,7 @@ fn test_source_with_arguments_restores_caller_positional_params() {
 
 #[test]
 fn test_source_without_arguments_keeps_positional_param_changes() {
+    let _cwd_guard = CwdGuard::take();
     let script_path = "target/rubash-source-args-persist.sh";
     let output_path = "target/rubash-source-args-persist-output.txt";
     let _ = fs::remove_file(script_path);
@@ -241,6 +250,7 @@ fn test_source_without_arguments_keeps_positional_param_changes() {
 
 #[test]
 fn test_builtin_return_returns_from_function() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-return-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -260,6 +270,7 @@ fn test_builtin_return_returns_from_function() {
 
 #[test]
 fn test_caller_top_level_returns_failure() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-caller-top-output.txt";
     let status_path = "target/rubash-caller-top-status.txt";
     let _ = fs::remove_file(output_path);
@@ -281,6 +292,7 @@ fn test_caller_top_level_returns_failure() {
 
 #[test]
 fn test_caller_reports_current_function_call_site() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-caller-current-output.txt";
     let status_path = "target/rubash-caller-current-status.txt";
     let _ = fs::remove_file(output_path);
@@ -302,6 +314,7 @@ fn test_caller_reports_current_function_call_site() {
 
 #[test]
 fn test_caller_zero_reports_parent_function_frame() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-caller-zero-output.txt";
     let status_path = "target/rubash-caller-zero-status.txt";
     let _ = fs::remove_file(output_path);
@@ -327,6 +340,7 @@ fn test_caller_zero_reports_parent_function_frame() {
 
 #[test]
 fn test_caller_double_dash_ends_options() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-caller-double-dash-output.txt";
     let status_path = "target/rubash-caller-double-dash-status.txt";
     let _ = fs::remove_file(output_path);
@@ -358,6 +372,7 @@ fn test_caller_double_dash_ends_options() {
 
 #[test]
 fn test_caller_invalid_argument_returns_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-caller-invalid-error.txt";
     let status_path = "target/rubash-caller-invalid-status.txt";
     let _ = fs::remove_file(error_path);

@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_select_command_redirects_body_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-select-command-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -25,6 +26,7 @@ fn test_select_command_redirects_body_stdout() {
 
 #[test]
 fn test_select_command_accepts_brace_group_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-select-brace-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -47,6 +49,7 @@ fn test_select_command_accepts_brace_group_body() {
 
 #[test]
 fn test_select_command_redirect_creates_file_for_empty_word_list() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-select-command-redirect-empty-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("select item in; do echo bad; done > {output_path}");
@@ -67,6 +70,7 @@ fn test_select_command_redirect_creates_file_for_empty_word_list() {
 #[ignore = "rubash#407: see issue (probe wt37-374 K091)"]
 #[test]
 fn test_select_command_input_redirect_feeds_choice() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-select-command-input.txt";
     let output_path = "target/rubash-select-command-input-output.txt";
     fs::write(input_path, "2\n").unwrap();
@@ -92,6 +96,7 @@ fn test_select_command_input_redirect_feeds_choice() {
 #[ignore = "rubash#378: see issue (probe wt37-374 K092)"]
 #[test]
 fn test_select_command_materializes_input_process_substitution_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-select-input-process-substitution-word-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -111,6 +116,7 @@ fn test_select_command_materializes_input_process_substitution_words() {
 
 #[test]
 fn test_select_command_materializes_output_process_substitution_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-select-output-process-substitution-word-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -130,6 +136,7 @@ fn test_select_command_materializes_output_process_substitution_words() {
 
 #[test]
 fn test_select_without_in_uses_positional_params() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-select-default-positional-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("select item; do echo chosen:$item; break; done <<< '2' > {output_path}");
@@ -150,6 +157,7 @@ fn test_select_without_in_uses_positional_params() {
 
 #[test]
 fn test_select_brace_body_without_in_uses_positional_params() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-select-brace-body-positional-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("select item; {{ echo chosen:$item; break; }} <<< '2' > {output_path}");
@@ -170,6 +178,7 @@ fn test_select_brace_body_without_in_uses_positional_params() {
 
 #[test]
 fn test_select_explicit_empty_in_does_not_use_positional_params() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-select-empty-in-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("select item in; do echo bad; done <<< '1' > {output_path}");
@@ -190,6 +199,7 @@ fn test_select_explicit_empty_in_does_not_use_positional_params() {
 
 #[test]
 fn test_alias_introduced_select_command_executes_choice() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-select-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -211,6 +221,7 @@ fn test_alias_introduced_select_command_executes_choice() {
 
 #[test]
 fn test_alias_introduced_select_accepts_brace_group_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-select-brace-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -231,6 +242,7 @@ fn test_alias_introduced_select_accepts_brace_group_body() {
 
 #[test]
 fn test_alias_introduced_select_without_in_uses_positional_params() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-select-positional-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -250,6 +262,7 @@ fn test_alias_introduced_select_without_in_uses_positional_params() {
 
 #[test]
 fn test_time_pipeline_modifier_executes_full_pipeline() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-pipeline-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("time -p echo alpha | wc -l > {output_path}");
@@ -271,6 +284,7 @@ fn test_time_pipeline_modifier_executes_full_pipeline() {
 
 #[test]
 fn test_time_pipeline_modifier_preserves_pipeline_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-pipeline-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("time echo alpha | grep beta > {output_path}; echo $? >> {output_path}");
@@ -292,6 +306,7 @@ fn test_time_pipeline_modifier_preserves_pipeline_status() {
 #[ignore = "rubash#396: see issue (probe wt37-374 K093)"]
 #[test]
 fn test_time_pipeline_modifier_keeps_raw_word_metadata() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-pipeline-raw-metadata-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("time -p printf '<%s>\\n' a{{b\\,c,d}} | cat > {output_path}");
@@ -312,6 +327,7 @@ fn test_time_pipeline_modifier_keeps_raw_word_metadata() {
 
 #[test]
 fn test_time_command_redirects_timed_command_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-command-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("time -p echo hi > {output_path}");
@@ -332,6 +348,7 @@ fn test_time_command_redirects_timed_command_stdout() {
 
 #[test]
 fn test_time_command_heredoc_feeds_timed_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("time -p cat <<EOF > {output_path}\nalpha\nEOF");
@@ -355,6 +372,7 @@ fn test_time_command_heredoc_feeds_timed_command() {
 
 #[test]
 fn test_time_command_inverts_timed_status_with_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-command-invert-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("time ! false > {output_path}; echo $? >> {output_path}");
@@ -376,6 +394,7 @@ fn test_time_command_inverts_timed_status_with_redirect() {
 
 #[test]
 fn test_time_null_command_resets_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-null-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("false; time -p --; echo $? > {output_path}");
@@ -395,6 +414,7 @@ fn test_time_null_command_resets_status() {
 
 #[test]
 fn test_command_builtin_can_invoke_time_keyword_bridge() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-time-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -418,6 +438,7 @@ fn test_command_builtin_can_invoke_time_keyword_bridge() {
 
 #[test]
 fn test_outer_inversion_wraps_time_simple_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-inverted-time-simple-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("! time false; echo status:$? > {output_path}");
@@ -436,6 +457,7 @@ fn test_outer_inversion_wraps_time_simple_command() {
 
 #[test]
 fn test_outer_inversion_wraps_time_pipeline_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-inverted-time-pipeline-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("! time echo alpha | grep beta; echo status:$? > {output_path}");
@@ -454,6 +476,7 @@ fn test_outer_inversion_wraps_time_pipeline_command() {
 
 #[test]
 fn test_time_prefix_executes_for_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-for-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -476,6 +499,7 @@ fn test_time_prefix_executes_for_command() {
 
 #[test]
 fn test_time_inversion_prefix_executes_for_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-inverted-for-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -499,6 +523,7 @@ fn test_time_inversion_prefix_executes_for_command() {
 
 #[test]
 fn test_time_prefix_executes_if_command_sequence() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-if-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -520,6 +545,7 @@ fn test_time_prefix_executes_if_command_sequence() {
 
 #[test]
 fn test_time_prefix_if_condition_keeps_raw_word_metadata() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-if-raw-metadata-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -544,6 +570,7 @@ fn test_time_prefix_if_condition_keeps_raw_word_metadata() {
 
 #[test]
 fn test_time_inversion_prefix_executes_if_command_sequence() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-inverted-if-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -566,6 +593,7 @@ fn test_time_inversion_prefix_executes_if_command_sequence() {
 
 #[test]
 fn test_time_prefix_executes_while_command_sequence() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-while-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -587,6 +615,7 @@ fn test_time_prefix_executes_while_command_sequence() {
 
 #[test]
 fn test_time_prefix_executes_until_command_sequence() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-until-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -608,6 +637,7 @@ fn test_time_prefix_executes_until_command_sequence() {
 
 #[test]
 fn test_time_prefix_executes_case_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-case-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -629,6 +659,7 @@ fn test_time_prefix_executes_case_command() {
 
 #[test]
 fn test_time_prefix_executes_select_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-select-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -653,6 +684,7 @@ fn test_time_prefix_executes_select_command() {
 
 #[test]
 fn test_time_prefix_executes_arithmetic_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-arithmetic-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -678,6 +710,7 @@ fn test_time_prefix_executes_arithmetic_command() {
 
 #[test]
 fn test_time_prefix_executes_conditional_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-conditional-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -710,6 +743,7 @@ fn test_time_prefix_executes_conditional_command() {
 
 #[test]
 fn test_time_prefix_executes_brace_group() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-brace-group-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -734,6 +768,7 @@ fn test_time_prefix_executes_brace_group() {
 
 #[test]
 fn test_time_prefix_brace_group_pipeline_feeds_next_stage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-brace-pipeline-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("time {{ echo one; }} | wc -l > {output_path}");
@@ -754,6 +789,7 @@ fn test_time_prefix_brace_group_pipeline_feeds_next_stage() {
 
 #[test]
 fn test_time_inversion_prefix_executes_brace_group() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-inverted-brace-group-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("time -p ! {{ true; }}; echo status:$? > {output_path}");
@@ -774,6 +810,7 @@ fn test_time_inversion_prefix_executes_brace_group() {
 
 #[test]
 fn test_time_prefix_executes_subshell_group() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-subshell-group-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -800,6 +837,7 @@ fn test_time_prefix_executes_subshell_group() {
 
 #[test]
 fn test_time_prefix_executes_function_definition() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-function-definition-output.txt";
     let error_path = "target/rubash-time-function-definition-error.txt";
     let _ = fs::remove_file(output_path);
@@ -837,6 +875,7 @@ fn test_time_prefix_executes_function_definition() {
 
 #[test]
 fn test_time_prefix_executes_coproc_command() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-time-coproc-status.txt";
     let _ = fs::remove_file(status_path);
     let input =
@@ -855,6 +894,7 @@ fn test_time_prefix_executes_coproc_command() {
 
 #[test]
 fn test_time_inversion_prefix_executes_function_definition() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-inverted-function-definition-output.txt";
     let error_path = "target/rubash-time-inverted-function-definition-error.txt";
     let _ = fs::remove_file(output_path);
@@ -882,6 +922,7 @@ fn test_time_inversion_prefix_executes_function_definition() {
 
 #[test]
 fn test_time_inversion_prefix_executes_subshell_group() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-time-inverted-subshell-group-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("time -p ! ( true ); echo status:$? > {output_path}");
@@ -902,6 +943,7 @@ fn test_time_inversion_prefix_executes_subshell_group() {
 
 #[test]
 fn test_alias_introduced_time_executes_brace_group() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-time-brace-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -923,6 +965,7 @@ fn test_alias_introduced_time_executes_brace_group() {
 
 #[test]
 fn test_alias_introduced_time_preserves_brace_group_redirects() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-time-brace-redirect-output.txt";
     let status_path = "target/rubash-alias-time-brace-redirect-status.txt";
     let _ = fs::remove_file(output_path);
@@ -945,6 +988,7 @@ fn test_alias_introduced_time_preserves_brace_group_redirects() {
 
 #[test]
 fn test_alias_introduced_time_executes_if_sequence() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-time-if-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -967,6 +1011,7 @@ fn test_alias_introduced_time_executes_if_sequence() {
 
 #[test]
 fn test_alias_introduced_time_if_keeps_nested_if_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-time-nested-if-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -990,6 +1035,7 @@ fn test_alias_introduced_time_if_keeps_nested_if_body() {
 
 #[test]
 fn test_alias_introduced_time_executes_for_sequence_with_redirect() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-time-for-redirect-output.txt";
     let status_path = "target/rubash-alias-time-for-redirect-status.txt";
     let _ = fs::remove_file(output_path);
@@ -1013,6 +1059,7 @@ fn test_alias_introduced_time_executes_for_sequence_with_redirect() {
 
 #[test]
 fn test_alias_introduced_time_for_keeps_nested_while_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-time-nested-for-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1035,6 +1082,7 @@ fn test_alias_introduced_time_for_keeps_nested_while_body() {
 
 #[test]
 fn test_alias_introduced_time_executes_case_sequence() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-time-case-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1055,6 +1103,7 @@ fn test_alias_introduced_time_executes_case_sequence() {
 
 #[test]
 fn test_alias_introduced_time_executes_arithmetic_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-time-arithmetic-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -1077,6 +1126,7 @@ fn test_alias_introduced_time_executes_arithmetic_command() {
 
 #[test]
 fn test_alias_introduced_time_executes_coproc_command() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-alias-time-coproc-status.txt";
     let _ = fs::remove_file(status_path);
     let input = format!(

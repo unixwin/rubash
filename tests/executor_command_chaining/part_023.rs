@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_builtin_cd_invokes_cd_builtin() {
+    let _cwd_guard = CwdGuard::take();
     let original_dir = std::env::current_dir().unwrap();
     let original_pwd = std::env::var("PWD").ok();
     let original_oldpwd = std::env::var("OLDPWD").ok();
@@ -22,7 +23,6 @@ fn test_builtin_cd_invokes_cd_builtin() {
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
-    let _ = std::env::set_current_dir(&original_dir);
     match original_pwd {
         Some(value) => std::env::set_var("PWD", value),
         None => std::env::remove_var("PWD"),
@@ -46,6 +46,7 @@ fn test_builtin_cd_invokes_cd_builtin() {
 
 #[test]
 fn test_builtin_set_updates_shell_options() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-set-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -71,6 +72,7 @@ fn test_builtin_set_updates_shell_options() {
 
 #[test]
 fn test_builtin_set_replaces_positional_parameters() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-set-positionals-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin set -- alpha beta; echo $# $1 $2 > {output_path}");
@@ -88,6 +90,7 @@ fn test_builtin_set_replaces_positional_parameters() {
 
 #[test]
 fn test_cd_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-cd-stderr-output.txt";
     let status_path = "target/rubash-cd-stderr-status.txt";
     let missing_dir = "target/rubash-cd-no-such-dir";
@@ -113,6 +116,7 @@ fn test_cd_redirects_stderr() {
 
 #[test]
 fn test_cd_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-cd-stderr-append-output.txt";
     let missing_dir = "target/rubash-cd-no-such-dir";
     let _ = fs::remove_file(error_path);
@@ -136,6 +140,7 @@ fn test_cd_appends_stderr() {
 
 #[test]
 fn test_umask_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-umask-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("umask 077; umask > {output_path}");
@@ -153,6 +158,7 @@ fn test_umask_redirects_output() {
 
 #[test]
 fn test_umask_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-umask-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -171,6 +177,7 @@ fn test_umask_appends_output() {
 
 #[test]
 fn test_umask_symbolic_modes_update_mask() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-umask-symbolic-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -195,6 +202,7 @@ fn test_umask_symbolic_modes_update_mask() {
 
 #[test]
 fn test_umask_symbolic_modes_copy_permissions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-umask-symbolic-copy-output.txt";
     let _ = fs::remove_file(output_path);
     let status_path = "target/rubash-umask-symbolic-copy-status.txt";
@@ -222,6 +230,7 @@ fn test_umask_symbolic_modes_copy_permissions() {
 
 #[test]
 fn test_umask_combined_symbolic_reusable_options() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-umask-combined-options-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("umask 022; umask -Sp > {output_path}; umask -pS >> {output_path}");
@@ -240,6 +249,7 @@ fn test_umask_combined_symbolic_reusable_options() {
 
 #[test]
 fn test_umask_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-umask-stderr-output.txt";
     let status_path = "target/rubash-umask-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -264,6 +274,7 @@ fn test_umask_redirects_stderr() {
 
 #[test]
 fn test_umask_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-umask-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();

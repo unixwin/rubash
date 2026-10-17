@@ -12,6 +12,7 @@ fn make_fifo(path: &str) {
 
 #[test]
 fn test_conditional_string_order_operators_are_not_redirects() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-string-order-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -31,6 +32,7 @@ fn test_conditional_string_order_operators_are_not_redirects() {
 
 #[test]
 fn test_extglob_syntax_requires_extglob_option_for_simple_commands() {
+    let _cwd_guard = CwdGuard::take();
     let tokens = tokenize("echo @(x)");
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -43,6 +45,7 @@ fn test_extglob_syntax_requires_extglob_option_for_simple_commands() {
 
 #[test]
 fn test_unquoted_parentheses_are_rejected_in_simple_commands() {
+    let _cwd_guard = CwdGuard::take();
     let tokens = tokenize("echo foo$x()");
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -55,6 +58,7 @@ fn test_unquoted_parentheses_are_rejected_in_simple_commands() {
 
 #[test]
 fn test_conditional_cannot_start_with_closing_parenthesis() {
+    let _cwd_guard = CwdGuard::take();
     let tokens = tokenize("[[ ) ]]");
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -67,6 +71,7 @@ fn test_conditional_cannot_start_with_closing_parenthesis() {
 
 #[test]
 fn test_conditional_command_pipeline_stage_executes_and_feeds_next_stage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-command-pipeline-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -89,6 +94,7 @@ fn test_conditional_command_pipeline_stage_executes_and_feeds_next_stage() {
 
 #[test]
 fn test_conditional_string_equality_uses_shell_patterns() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-pattern-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -111,6 +117,7 @@ fn test_conditional_string_equality_uses_shell_patterns() {
 
 #[test]
 fn test_conditional_quoted_rhs_compares_literal_pattern_text() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-quoted-pattern-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -136,6 +143,7 @@ fn test_conditional_quoted_rhs_compares_literal_pattern_text() {
 
 #[test]
 fn test_conditional_quoted_rhs_inside_logical_expressions_stays_literal() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-quoted-logical-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -160,6 +168,7 @@ fn test_conditional_quoted_rhs_inside_logical_expressions_stays_literal() {
 
 #[test]
 fn test_conditional_string_equality_honors_nocasematch() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-nocasematch-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -186,6 +195,7 @@ fn test_conditional_string_equality_honors_nocasematch() {
 
 #[test]
 fn test_conditional_string_equality_uses_negated_extglob_patterns() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-negated-extglob-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -209,6 +219,7 @@ fn test_conditional_string_equality_uses_negated_extglob_patterns() {
 
 #[test]
 fn test_conditional_string_equality_uses_extglob_without_shopt() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-extglob-without-shopt-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -233,6 +244,7 @@ fn test_conditional_string_equality_uses_extglob_without_shopt() {
 
 #[test]
 fn test_conditional_single_word_tests_non_empty_expansion() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-single-word-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -259,6 +271,7 @@ fn test_conditional_single_word_tests_non_empty_expansion() {
 
 #[test]
 fn test_conditional_regex_match_sets_bash_rematch() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-regex-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -281,6 +294,7 @@ fn test_conditional_regex_match_sets_bash_rematch() {
 
 #[test]
 fn test_conditional_quoted_regex_rhs_matches_literal_text() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-quoted-regex-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -308,6 +322,7 @@ fn test_conditional_quoted_regex_rhs_matches_literal_text() {
 
 #[test]
 fn test_conditional_regex_honors_nocasematch() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-regex-nocasematch-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -334,6 +349,7 @@ fn test_conditional_regex_honors_nocasematch() {
 
 #[test]
 fn test_conditional_bare_regex_groups_set_bash_rematch() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-bare-regex-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -353,6 +369,7 @@ fn test_conditional_bare_regex_groups_set_bash_rematch() {
 
 #[test]
 fn test_if_conditional_regex_groups_set_bash_rematch() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-if-conditional-regex-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -372,6 +389,7 @@ fn test_if_conditional_regex_groups_set_bash_rematch() {
 
 #[test]
 fn test_if_conditional_regex_preserves_alternation() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-if-regex-alternation-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -391,6 +409,7 @@ fn test_if_conditional_regex_preserves_alternation() {
 
 #[test]
 fn test_conditional_logical_operators_stay_inside_expression() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-logical-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -410,6 +429,7 @@ fn test_conditional_logical_operators_stay_inside_expression() {
 
 #[test]
 fn test_conditional_parentheses_group_logical_expressions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-parentheses-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -429,6 +449,7 @@ fn test_conditional_parentheses_group_logical_expressions() {
 
 #[test]
 fn test_conditional_command_redirect_creates_output_file() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-redirect-output.txt";
     let status_path = "target/rubash-conditional-redirect-status.txt";
     let _ = fs::remove_file(output_path);
@@ -456,6 +477,7 @@ fn test_conditional_command_redirect_creates_output_file() {
 
 #[test]
 fn test_conditional_file_unary_checks_paths() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-file-unary-output.txt";
     let file_path = "target/rubash-conditional-file-unary.txt";
     let dir_path = "target/rubash-conditional-file-unary-dir";
@@ -487,6 +509,7 @@ fn test_conditional_file_unary_checks_paths() {
 
 #[test]
 fn test_conditional_file_unary_checks_process_substitution_operands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-process-substitution-file-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -521,6 +544,7 @@ fn test_conditional_file_unary_checks_process_substitution_operands() {
 
 #[test]
 fn test_conditional_modified_since_read_unary_checks_paths() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-n-unary-output.txt";
     let file_path = "target/rubash-conditional-n-unary.txt";
     let missing_path = "target/rubash-conditional-n-unary-missing.txt";
@@ -547,6 +571,7 @@ fn test_conditional_modified_since_read_unary_checks_paths() {
 
 #[test]
 fn test_conditional_ownership_unary_checks_paths() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-owner-unary-output.txt";
     let file_path = "target/rubash-conditional-owner-unary.txt";
     let missing_path = "target/rubash-conditional-owner-unary-missing.txt";
@@ -581,6 +606,7 @@ fn test_conditional_ownership_unary_checks_paths() {
 #[cfg(unix)]
 #[test]
 fn test_conditional_unix_file_unary_checks_paths() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-file-kind-output.txt";
     let fifo_path = "target/rubash-conditional-file-kind-fifo";
     let socket_path = "target/rubash-conditional-file-kind-socket";
@@ -632,6 +658,7 @@ fn test_conditional_unix_file_unary_checks_paths() {
 
 #[test]
 fn test_conditional_terminal_unary_checks_fds() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-terminal-unary-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -654,6 +681,7 @@ fn test_conditional_terminal_unary_checks_fds() {
 
 #[test]
 fn test_conditional_file_binary_checks_paths() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-file-binary-output.txt";
     let older_path = "target/rubash-conditional-file-binary-older.txt";
     let newer_path = "target/rubash-conditional-file-binary-newer.txt";
@@ -682,6 +710,7 @@ fn test_conditional_file_binary_checks_paths() {
 
 #[test]
 fn test_test_builtin_parenthesizes_logical_expressions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-test-parentheses-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -701,6 +730,7 @@ fn test_test_builtin_parenthesizes_logical_expressions() {
 
 #[test]
 fn test_conditional_negates_supported_expressions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-negation-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

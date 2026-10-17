@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_parameter_equals_assigns_default_only_when_unset() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-equals-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -25,6 +26,7 @@ fn test_parameter_equals_assigns_default_only_when_unset() {
 
 #[test]
 fn test_parameter_equals_assigns_before_regular_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-equals-command-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("unset v; echo ${{v=default}} $v > {output_path}");
@@ -45,6 +47,7 @@ fn test_parameter_equals_assigns_before_regular_command() {
 
 #[test]
 fn test_array_element_parameter_assignment_writes_element() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-element-param-assign-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -67,6 +70,7 @@ fn test_array_element_parameter_assignment_writes_element() {
 
 #[test]
 fn test_parameter_assignment_expansion_assigns_inside_quoted_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-assign-quoted-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -91,6 +95,7 @@ fn test_parameter_assignment_expansion_assigns_inside_quoted_words() {
 
 #[test]
 fn test_parameter_assignment_expansion_assigns_inside_assignment_values() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-assign-rhs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -114,6 +119,7 @@ fn test_parameter_assignment_expansion_assigns_inside_assignment_values() {
 
 #[test]
 fn test_nested_parameter_assignment_expansion_assigns_inner_word() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-assign-nested-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -137,6 +143,7 @@ fn test_nested_parameter_assignment_expansion_assigns_inner_word() {
 
 #[test]
 fn test_nested_parameter_assignment_expansion_assigns_outer_rhs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-assign-nested-rhs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -166,6 +173,7 @@ fn test_nested_parameter_assignment_expansion_assigns_outer_rhs() {
 // the next line observes $? 2. Probed byte-identical on WSL GNU 5.3.0.
 #[test]
 fn test_parameter_assignment_expansion_rejects_readonly_targets() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-param-assign-readonly-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -194,6 +202,7 @@ fn test_parameter_assignment_expansion_rejects_readonly_targets() {
 // and the next line observes $? 2.
 #[test]
 fn test_parameter_assignment_expansion_reports_readonly_nameref_target() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-param-assign-readonly-nameref-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -220,6 +229,7 @@ fn test_parameter_assignment_expansion_reports_readonly_nameref_target() {
 
 #[test]
 fn test_parameter_assignment_expansion_rejects_positional_parameters() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-param-assign-positional-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -235,6 +245,7 @@ fn test_parameter_assignment_expansion_rejects_positional_parameters() {
 
 #[test]
 fn test_parameter_assignment_expansion_uses_existing_positional_and_special_values() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-assign-special-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

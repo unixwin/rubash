@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_if_true_executes_then_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-if-true-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("if true; then echo yes > {output_path}; fi");
@@ -20,6 +21,7 @@ fn test_if_true_executes_then_body() {
 
 #[test]
 fn test_elif_true_executes_after_false_if() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-elif-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("if false; then echo no > {output_path}; elif true; then echo yes > {output_path}; else echo bad > {output_path}; fi");
@@ -37,6 +39,7 @@ fn test_elif_true_executes_after_false_if() {
 
 #[test]
 fn test_if_condition_command_runs_before_then() {
+    let _cwd_guard = CwdGuard::take();
     let condition_path = "target/rubash-if-condition-side-effect.txt";
     let output_path = "target/rubash-if-command-output.txt";
     let _ = fs::remove_file(condition_path);
@@ -60,6 +63,7 @@ fn test_if_condition_command_runs_before_then() {
 
 #[test]
 fn test_if_condition_command_status_selects_else() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-if-command-false-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -78,6 +82,7 @@ fn test_if_condition_command_status_selects_else() {
 
 #[test]
 fn test_if_flattened_arithmetic_comparison_selects_else() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-if-arith-false-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -96,6 +101,7 @@ fn test_if_flattened_arithmetic_comparison_selects_else() {
 
 #[test]
 fn test_if_command_redirects_then_body_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-if-command-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("if true; then echo yes; fi > {output_path}");
@@ -115,6 +121,7 @@ fn test_if_command_redirects_then_body_stdout() {
 
 #[test]
 fn test_if_command_redirect_creates_file_without_matching_branch() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-if-command-redirect-empty-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("if false; then echo bad; fi > {output_path}");
@@ -132,6 +139,7 @@ fn test_if_command_redirect_creates_file_without_matching_branch() {
 
 #[test]
 fn test_if_command_redirects_condition_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-if-command-redirect-condition-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("if printf cond; then echo yes; fi > {output_path}");
@@ -149,6 +157,7 @@ fn test_if_command_redirects_condition_stdout() {
 
 #[test]
 fn test_if_command_redirects_body_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-if-command-redirect-error.txt";
     let _ = fs::remove_file(error_path);
     let input = format!("if true; then echo err >&2; fi 2> {error_path}");
@@ -166,6 +175,7 @@ fn test_if_command_redirects_body_stderr() {
 
 #[test]
 fn test_if_command_input_redirect_feeds_condition_and_body() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-if-command-input.txt";
     let output_path = "target/rubash-if-command-input-output.txt";
     fs::write(input_path, "alpha\nbeta\n").unwrap();
@@ -188,6 +198,7 @@ fn test_if_command_input_redirect_feeds_condition_and_body() {
 
 #[test]
 fn test_if_command_here_string_feeds_condition() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-if-command-herestring-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("if read value; then echo got:$value; fi <<< alpha > {output_path}");
@@ -205,6 +216,7 @@ fn test_if_command_here_string_feeds_condition() {
 
 #[test]
 fn test_alias_introduced_if_executes_then_branch() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-if-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -222,6 +234,7 @@ fn test_alias_introduced_if_executes_then_branch() {
 
 #[test]
 fn test_alias_introduced_if_executes_else_branch() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-if-else-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -239,6 +252,7 @@ fn test_alias_introduced_if_executes_else_branch() {
 
 #[test]
 fn test_alias_introduced_if_prefix_with_then_executes_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-if-prefix-then-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -260,6 +274,7 @@ fn test_alias_introduced_if_prefix_with_then_executes_body() {
 
 #[test]
 fn test_alias_introduced_if_prefix_keeps_nested_if_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-if-prefix-nested-if-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

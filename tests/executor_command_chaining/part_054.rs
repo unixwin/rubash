@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_declare_plus_fx_clears_exported_function_attribute() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-clear-export-function-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -21,6 +22,7 @@ fn test_declare_plus_fx_clears_exported_function_attribute() {
 
 #[test]
 fn test_export_f_missing_function_reports_error() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-export-f-missing-error.txt";
     let status_path = "target/rubash-export-f-missing-status.txt";
     let _ = fs::remove_file(error_path);
@@ -44,6 +46,7 @@ fn test_export_f_missing_function_reports_error() {
 
 #[test]
 fn test_bash_func_environment_import_defines_function() {
+    let _cwd_guard = CwdGuard::take();
     let _env_guard = super::super::ENV_LOCK.lock().unwrap();
     let output_path = "target/rubash-imported-function-output.txt";
     let _ = fs::remove_file(output_path);
@@ -71,6 +74,7 @@ fn test_bash_func_environment_import_defines_function() {
 
 #[test]
 fn test_export_f_makes_function_available_to_child_rubash() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-exported-function-child-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -93,6 +97,7 @@ fn test_export_f_makes_function_available_to_child_rubash() {
 
 #[test]
 fn test_export_f_preserves_function_heredoc_in_child_rubash() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-exported-function-heredoc-child-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -119,6 +124,7 @@ fn test_export_f_preserves_function_heredoc_in_child_rubash() {
 
 #[test]
 fn test_function_call_redirects_entire_body_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-call-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -139,6 +145,7 @@ fn test_function_call_redirects_entire_body_output() {
 
 #[test]
 fn test_function_definition_redirect_applies_when_called() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-definition-redirect-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -161,6 +168,7 @@ fn test_function_definition_redirect_applies_when_called() {
 
 #[test]
 fn test_compact_function_definition_redirect_applies_when_called() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-compact-function-definition-redirect-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -182,6 +190,7 @@ fn test_compact_function_definition_redirect_applies_when_called() {
 
 #[test]
 fn test_short_function_definition_redirect_applies_when_called() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-short-function-definition-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("f(){{ echo hi; }} > {output_path}; f");
@@ -199,6 +208,7 @@ fn test_short_function_definition_redirect_applies_when_called() {
 
 #[test]
 fn test_function_definition_stdin_redirect_overrides_call_stdin() {
+    let _cwd_guard = CwdGuard::take();
     let definition_input = target_test_path("rubash-function-definition-stdin-input.txt");
     let call_input = target_test_path("rubash-function-call-stdin-override-input.txt");
     let output_path = target_test_path("rubash-function-definition-stdin-output.txt");
@@ -230,6 +240,7 @@ fn test_function_definition_stdin_redirect_overrides_call_stdin() {
 
 #[test]
 fn test_function_call_redirects_stdin_to_body_reads() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = target_test_path("rubash-function-call-stdin-input.txt");
     let output_path = target_test_path("rubash-function-call-stdin-output.txt");
     let _ = fs::remove_file(&input_path);
@@ -256,6 +267,7 @@ fn test_function_call_redirects_stdin_to_body_reads() {
 
 #[test]
 fn test_function_call_here_string_feeds_body_read() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-call-here-string-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -277,6 +289,7 @@ fn test_function_call_here_string_feeds_body_read() {
 
 #[test]
 fn test_function_definition_here_string_overrides_call_stdin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-definition-here-string-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -298,6 +311,7 @@ fn test_function_definition_here_string_overrides_call_stdin() {
 
 #[test]
 fn test_function_definition_heredoc_overrides_call_stdin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-function-definition-heredoc-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);

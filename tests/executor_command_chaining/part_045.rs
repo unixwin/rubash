@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_type_long_all_option_reports_all_matches() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-type-long-all-bin";
     let echo_path = format!("{bin_dir}/echo");
     let output_path = "target/rubash-type-long-all-output.txt";
@@ -29,6 +30,7 @@ fn test_type_long_all_option_reports_all_matches() {
 
 #[test]
 fn test_debug_trap_preserves_function_line_and_skips_on_status_two() {
+    let _cwd_guard = CwdGuard::take();
     let trap_log = "target/rubash-debug-trap-line-output.txt";
     let value_path = "target/rubash-debug-trap-skip-output.txt";
     let _ = fs::remove_file(trap_log);
@@ -61,6 +63,7 @@ fn test_debug_trap_preserves_function_line_and_skips_on_status_two() {
 
 #[test]
 fn test_err_trap_requires_errtrace_inside_functions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-err-trap-function-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -89,6 +92,7 @@ fn test_err_trap_requires_errtrace_inside_functions() {
 
 #[test]
 fn test_trap_p_redirects_saved_exit_trap() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-trap-p-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("trap 'echo bye' EXIT; trap -p EXIT > {output_path}");
@@ -109,6 +113,7 @@ fn test_trap_p_redirects_saved_exit_trap() {
 
 #[test]
 fn test_trap_reset_removes_saved_trap() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-trap-reset-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("trap 'echo bye' EXIT; trap - EXIT; trap -p EXIT > {output_path}");
@@ -126,6 +131,7 @@ fn test_trap_reset_removes_saved_trap() {
 
 #[test]
 fn test_trap_ignore_appends_saved_signal_trap() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-trap-ignore-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -147,6 +153,7 @@ fn test_trap_ignore_appends_saved_signal_trap() {
 
 #[test]
 fn test_trap_accepts_common_signal_names() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-trap-common-signals-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -169,6 +176,7 @@ fn test_trap_accepts_common_signal_names() {
 
 #[test]
 fn test_trap_accepts_realtime_signal_names() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-trap-realtime-signals-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("trap 'echo rt' RTMIN+1; trap -p SIGRTMIN+1 > {output_path}");
@@ -189,6 +197,7 @@ fn test_trap_accepts_realtime_signal_names() {
 
 #[test]
 fn test_exit_runs_exit_trap_and_preserves_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exit-trap-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("trap 'echo bye > {output_path}' EXIT; exit 7");
@@ -206,6 +215,7 @@ fn test_exit_runs_exit_trap_and_preserves_status() {
 
 #[test]
 fn test_exit_trap_exit_overrides_status() {
+    let _cwd_guard = CwdGuard::take();
     let input = "trap 'exit 3' EXIT; exit 7";
     let tokens = tokenize(input);
     let ast = parse(&tokens);
@@ -219,6 +229,7 @@ fn test_exit_trap_exit_overrides_status() {
 
 #[test]
 fn test_normal_completion_runs_exit_trap() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-normal-exit-trap-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("trap 'echo done > {output_path}' EXIT; true");
@@ -238,6 +249,7 @@ fn test_normal_completion_runs_exit_trap() {
 
 #[test]
 fn test_exit_trap_sees_last_status_on_normal_completion() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-normal-exit-trap-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("trap 'echo $? > {output_path}' EXIT; false");
@@ -257,6 +269,7 @@ fn test_exit_trap_sees_last_status_on_normal_completion() {
 
 #[test]
 fn test_trap_invalid_signal_returns_failure() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-trap-invalid-signal-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("trap 'echo bad' NO_SUCH_SIGNAL; echo $? > {output_path}");
@@ -274,6 +287,7 @@ fn test_trap_invalid_signal_returns_failure() {
 
 #[test]
 fn test_trap_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-trap-stderr-output.txt";
     let status_path = "target/rubash-trap-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -296,6 +310,7 @@ fn test_trap_redirects_stderr() {
 
 #[test]
 fn test_trap_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-trap-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();

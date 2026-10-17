@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_command_uses_external_test_when_builtin_is_disabled() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-disabled-command-test-bin";
     let script_path = test_command_path(bin_dir, "test");
     let output_path = "target/rubash-disabled-command-test-output.txt";
@@ -38,6 +39,7 @@ fn test_command_uses_external_test_when_builtin_is_disabled() {
 
 #[test]
 fn test_disabled_read_builtins_use_external_commands() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-disabled-read-bin";
     let read_path = test_command_path(bin_dir, "read");
     let mapfile_path = test_command_path(bin_dir, "mapfile");
@@ -115,6 +117,7 @@ fn test_disabled_read_builtins_use_external_commands() {
 
 #[test]
 fn test_disabled_echo_builtin_uses_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-disabled-echo-bin";
     let script_path = test_command_path(bin_dir, "echo");
     let output_path = "target/rubash-disabled-echo-output.txt";
@@ -155,6 +158,7 @@ fn test_disabled_echo_builtin_uses_external_command() {
 
 #[test]
 fn test_command_uses_external_echo_when_builtin_is_disabled() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-disabled-command-echo-bin";
     let script_path = test_command_path(bin_dir, "echo");
     let output_path = "target/rubash-disabled-command-echo-output.txt";
@@ -193,6 +197,7 @@ fn test_command_uses_external_echo_when_builtin_is_disabled() {
 
 #[test]
 fn test_disabled_printf_builtin_uses_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-disabled-printf-bin";
     let script_path = test_command_path(bin_dir, "printf");
     let output_path = "target/rubash-disabled-printf-output.txt";
@@ -233,6 +238,7 @@ fn test_disabled_printf_builtin_uses_external_command() {
 
 #[test]
 fn test_command_uses_external_printf_when_builtin_is_disabled() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-disabled-command-printf-bin";
     let script_path = test_command_path(bin_dir, "printf");
     let output_path = "target/rubash-disabled-command-printf-output.txt";

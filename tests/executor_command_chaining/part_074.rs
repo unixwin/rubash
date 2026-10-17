@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_case_command_redirects_clause_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-command-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -24,6 +25,7 @@ fn test_case_command_redirects_clause_stdout() {
 
 #[test]
 fn test_case_command_redirect_creates_file_without_match() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-command-redirect-empty-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("case z in x) echo missed ;; esac > {output_path}");
@@ -43,6 +45,7 @@ fn test_case_command_redirect_creates_file_without_match() {
 
 #[test]
 fn test_case_last_clause_can_omit_terminator() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-last-clause-no-terminator-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("case x in x) echo matched; esac > {output_path}");
@@ -63,6 +66,7 @@ fn test_case_last_clause_can_omit_terminator() {
 
 #[test]
 fn test_empty_case_command_redirect_creates_file() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-empty-case-command-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("case z in esac > {output_path}");
@@ -88,6 +92,7 @@ fn test_empty_case_command_redirect_creates_file() {
 
 #[test]
 fn test_case_command_input_redirect_feeds_clause_body() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-case-command-input.txt";
     let output_path = "target/rubash-case-command-input-output.txt";
     fs::write(input_path, "alpha\nbeta\n").unwrap();
@@ -112,6 +117,7 @@ fn test_case_command_input_redirect_feeds_clause_body() {
 
 #[test]
 fn test_case_command_here_string_feeds_clause_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-command-herestring-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -132,6 +138,7 @@ fn test_case_command_here_string_feeds_clause_body() {
 
 #[test]
 fn test_case_command_materializes_input_process_substitution_word() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-input-process-substitution-word-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -151,6 +158,7 @@ fn test_case_command_materializes_input_process_substitution_word() {
 
 #[test]
 fn test_case_quoted_patterns_treat_globs_as_literals() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-quoted-pattern-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -174,6 +182,7 @@ fn test_case_quoted_patterns_treat_globs_as_literals() {
 
 #[test]
 fn test_alias_introduced_case_command_redirects_clause_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-case-command-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -192,6 +201,7 @@ fn test_alias_introduced_case_command_redirects_clause_stdout() {
 
 #[test]
 fn test_alias_introduced_case_here_string_feeds_clause_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-case-herestring-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -211,6 +221,7 @@ fn test_alias_introduced_case_here_string_feeds_clause_body() {
 
 #[test]
 fn test_alias_introduced_case_keeps_multiple_clause_commands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-case-multiple-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -229,6 +240,7 @@ fn test_alias_introduced_case_keeps_multiple_clause_commands() {
 
 #[test]
 fn test_alias_introduced_case_keeps_multiple_clauses() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-case-multiple-clauses-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -247,6 +259,7 @@ fn test_alias_introduced_case_keeps_multiple_clauses() {
 
 #[test]
 fn test_alias_introduced_case_keeps_pattern_alternates() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-case-pattern-alternates-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -265,6 +278,7 @@ fn test_alias_introduced_case_keeps_pattern_alternates() {
 
 #[test]
 fn test_alias_introduced_case_keeps_extglob_pattern_alternates() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-case-extglob-alternates-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -283,6 +297,7 @@ fn test_alias_introduced_case_keeps_extglob_pattern_alternates() {
 
 #[test]
 fn test_alias_introduced_case_keeps_single_extglob_pattern() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-case-single-extglob-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -301,6 +316,7 @@ fn test_alias_introduced_case_keeps_single_extglob_pattern() {
 
 #[test]
 fn test_alias_introduced_case_keeps_nested_case_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-case-nested-case-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -320,6 +336,7 @@ fn test_alias_introduced_case_keeps_nested_case_body() {
 
 #[test]
 fn test_alias_case_prefix_keeps_nested_case_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-case-prefix-nested-case-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

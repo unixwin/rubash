@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_indirect_parameter_uses_positional_parameter_name() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-positional-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function p {{ target=value; echo ${{!1}} > {output_path}; }}; p target");
@@ -20,6 +21,7 @@ fn test_indirect_parameter_uses_positional_parameter_name() {
 
 #[test]
 fn test_indirect_prefix_expands_matching_variable_names() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-prefix-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -42,6 +44,7 @@ fn test_indirect_prefix_expands_matching_variable_names() {
 
 #[test]
 fn test_unquoted_indirect_prefix_expansion_splits_names() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-prefix-split-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -65,6 +68,7 @@ fn test_unquoted_indirect_prefix_expansion_splits_names() {
 
 #[test]
 fn test_quoted_indirect_prefix_at_expansion_splits_names() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-prefix-quoted-at-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -89,6 +93,7 @@ fn test_quoted_indirect_prefix_at_expansion_splits_names() {
 
 #[test]
 fn test_unquoted_indirect_array_indices_split_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-array-indices-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("arr=([2]=two [5]=five); printf '[%s]\\n' ${{!arr[@]}} > {output_path}");
@@ -106,6 +111,7 @@ fn test_unquoted_indirect_array_indices_split_words() {
 
 #[test]
 fn test_indirect_array_parameter_transform_expands_first_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-array-transform-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -124,6 +130,7 @@ fn test_indirect_array_parameter_transform_expands_first_value() {
 
 #[test]
 fn test_array_assignment_transform_matches_at_and_star_forms() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-array-assignment-transform-output.txt";
     let _ = fs::remove_file(output_path);
     for name in [
@@ -162,6 +169,7 @@ fn test_array_assignment_transform_matches_at_and_star_forms() {
 
 #[test]
 fn test_array_value_parameter_transforms_apply_to_elements() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-array-value-transform-output.txt";
     let _ = fs::remove_file(output_path);
     for name in [
@@ -206,6 +214,7 @@ fn test_array_value_parameter_transforms_apply_to_elements() {
 
 #[test]
 fn test_array_at_parameter_transform_expands_per_element() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-array-at-transform-words-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -232,6 +241,7 @@ fn test_array_at_parameter_transform_expands_per_element() {
 
 #[test]
 fn test_array_key_value_parameter_transforms_split_like_bash() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-array-key-value-transform-words-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -260,6 +270,7 @@ fn test_array_key_value_parameter_transforms_split_like_bash() {
 
 #[test]
 fn test_parameter_upper_first_transform_applies_to_values() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-upper-first-transform-output.txt";
     let _ = fs::remove_file(output_path);
     for name in ["RUBASH_UPPER_FIRST_ARRAY", "RUBASH_UPPER_FIRST_REF"] {
@@ -293,6 +304,7 @@ fn test_parameter_upper_first_transform_applies_to_values() {
 
 #[test]
 fn test_positional_parameter_transforms_split_like_bash() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-positional-transform-words-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -323,6 +335,7 @@ fn test_positional_parameter_transforms_split_like_bash() {
 
 #[test]
 fn test_parameter_prompt_transform_expands_version_escapes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-prompt-transform-version-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("p='v=\\v V=\\V s=\\s'; echo \"${{p@P}}\" > {output_path}");
@@ -344,6 +357,7 @@ fn test_parameter_prompt_transform_expands_version_escapes() {
 
 #[test]
 fn test_parameter_prompt_transform_expands_job_count_escape() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-prompt-transform-jobs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("p='jobs=\\j'; echo \"${{p@P}}\" > {output_path}");
@@ -361,6 +375,7 @@ fn test_parameter_prompt_transform_expands_job_count_escape() {
 
 #[test]
 fn test_parameter_prompt_transform_expands_time_escapes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-prompt-transform-time-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("p='t=\\t T=\\T at=\\@ A=\\A'; echo \"${{p@P}}\" > {output_path}");
@@ -383,6 +398,7 @@ fn test_parameter_prompt_transform_expands_time_escapes() {
 
 #[test]
 fn test_parameter_prompt_transform_expands_date_escapes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-prompt-transform-date-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("p='d=\\d D=\\D{{%Y-%m}}'; echo \"${{p@P}}\" > {output_path}");
@@ -403,6 +419,7 @@ fn test_parameter_prompt_transform_expands_date_escapes() {
 
 #[test]
 fn test_parameter_prompt_transform_expands_octal_escapes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-prompt-transform-octal-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -430,6 +447,7 @@ fn test_parameter_prompt_transform_expands_octal_escapes() {
 // history number: 1 with no history entries (new-exp.tests new-exp10).
 #[test]
 fn test_parameter_prompt_transform_expands_history_and_command_count_escapes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-prompt-transform-count-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("p='history=\\! command=\\#'; echo \"${{p@P}}\" > {output_path}");
@@ -450,6 +468,7 @@ fn test_parameter_prompt_transform_expands_history_and_command_count_escapes() {
 
 #[test]
 fn test_parameter_prompt_transform_expands_terminal_basename_escape() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-prompt-transform-terminal-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("TTY=/dev/pts/17 p='tty=\\l'; echo \"${{p@P}}\" > {output_path}");
@@ -467,6 +486,7 @@ fn test_parameter_prompt_transform_expands_terminal_basename_escape() {
 
 #[test]
 fn test_indirect_array_pattern_removes_prefixes_and_suffixes() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-array-pattern-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -486,6 +506,7 @@ fn test_indirect_array_pattern_removes_prefixes_and_suffixes() {
 
 #[test]
 fn test_indirect_array_star_pattern_and_case_use_ifs_first_char() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-array-star-ifs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -510,6 +531,7 @@ fn test_indirect_array_star_pattern_and_case_use_ifs_first_char() {
 
 #[test]
 fn test_indirect_array_reference_expands_target_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-array-reference-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -536,6 +558,7 @@ fn test_indirect_array_reference_expands_target_words() {
 
 #[test]
 fn test_indirect_groups_array_reference_expands_dynamic_values() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-groups-reference-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -557,6 +580,7 @@ fn test_indirect_groups_array_reference_expands_dynamic_values() {
 
 #[test]
 fn test_indirect_replacement_expands_target_values() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-replacement-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -581,6 +605,7 @@ fn test_indirect_replacement_expands_target_values() {
 
 #[test]
 fn test_indirect_substring_expands_target_values() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-substring-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -606,6 +631,7 @@ fn test_indirect_substring_expands_target_values() {
 
 #[test]
 fn test_indirect_word_operators_expand_target_values() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-word-operators-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -632,6 +658,7 @@ fn test_indirect_word_operators_expand_target_values() {
 
 #[test]
 fn test_indirect_array_element_target_expands_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-param-indirect-array-element-target-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -658,6 +685,7 @@ fn test_indirect_array_element_target_expands_value() {
 
 #[test]
 fn test_test_v_checks_array_subscripts() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-test-v-array-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -687,6 +715,7 @@ fn test_test_v_checks_array_subscripts() {
 
 #[test]
 fn test_conditional_v_checks_array_subscripts() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-v-array-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -716,6 +745,7 @@ fn test_conditional_v_checks_array_subscripts() {
 
 #[test]
 fn test_v_array_whole_subscript_checks_indexed_array_elements() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-v-array-whole-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -744,6 +774,7 @@ fn test_v_array_whole_subscript_checks_indexed_array_elements() {
 
 #[test]
 fn test_v_bare_array_name_checks_zero_element() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-v-bare-array-name-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -775,6 +806,7 @@ fn test_v_bare_array_name_checks_zero_element() {
 
 #[test]
 fn test_conditional_v_expands_dynamic_operand() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-v-dynamic-operand-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -802,6 +834,7 @@ fn test_conditional_v_expands_dynamic_operand() {
 
 #[test]
 fn test_v_checks_dynamic_bash_parameters() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-v-dynamic-parameters-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -829,6 +862,7 @@ fn test_v_checks_dynamic_bash_parameters() {
 
 #[test]
 fn test_conditional_r_checks_nameref_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-nameref-unary-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -851,6 +885,7 @@ fn test_conditional_r_checks_nameref_variables() {
 
 #[test]
 fn test_conditional_r_expands_dynamic_operand() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-nameref-dynamic-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -876,6 +911,7 @@ fn test_conditional_r_expands_dynamic_operand() {
 
 #[test]
 fn test_conditional_string_unary_checks_expanded_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-string-unary-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -895,6 +931,7 @@ fn test_conditional_string_unary_checks_expanded_value() {
 
 #[test]
 fn test_conditional_binary_checks_expand_values() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-conditional-binary-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

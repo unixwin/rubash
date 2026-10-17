@@ -17,6 +17,7 @@ fn run_alias_if_script(input: String, output_path: &str) {
 
 #[test]
 fn test_alias_introduced_elif_executes_branch() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-elif-output.txt";
     run_alias_if_script(
         format!(
@@ -28,6 +29,7 @@ fn test_alias_introduced_elif_executes_branch() {
 
 #[test]
 fn test_alias_introduced_else_executes_branch() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-else-output.txt";
     run_alias_if_script(
         format!(
@@ -39,6 +41,7 @@ fn test_alias_introduced_else_executes_branch() {
 
 #[test]
 fn test_alias_introduced_then_starts_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-then-output.txt";
     run_alias_if_script(
         format!("shopt -s expand_aliases\nalias t=then\nif true; t echo yes > {output_path}; fi"),
@@ -48,6 +51,7 @@ fn test_alias_introduced_then_starts_body() {
 
 #[test]
 fn test_alias_introduced_fi_closes_if() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-fi-output.txt";
     run_alias_if_script(
         format!("shopt -s expand_aliases\nalias f=fi\nif true; then echo yes > {output_path}; f"),
@@ -57,6 +61,7 @@ fn test_alias_introduced_fi_closes_if() {
 
 #[test]
 fn test_alias_introduced_nested_if_does_not_close_outer_if() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-nested-if-output.txt";
     run_alias_if_script(
         format!(

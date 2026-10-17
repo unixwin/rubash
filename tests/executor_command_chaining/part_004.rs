@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_printf_time_format_minus_two_uses_shell_start_time() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-time-shell-start-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("TZ=UTC printf '%(%s)T' -2 > {output_path}");
@@ -24,6 +25,7 @@ fn test_printf_time_format_minus_two_uses_shell_start_time() {
 
 #[test]
 fn test_printf_invalid_time_format_warns_and_outputs_raw_format() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-invalid-time-output.txt";
     let status_path = "target/rubash-printf-invalid-time-status.txt";
     let _ = fs::remove_file(output_path);
@@ -43,6 +45,7 @@ fn test_printf_invalid_time_format_warns_and_outputs_raw_format() {
 
 #[test]
 fn test_epochseconds_expands_to_current_epoch_time() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-epochseconds-output.txt";
     let _ = fs::remove_file(output_path);
     let before = std::time::SystemTime::now()
@@ -74,6 +77,7 @@ fn test_epochseconds_expands_to_current_epoch_time() {
 
 #[test]
 fn test_epochrealtime_expands_with_microseconds() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-epochrealtime-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '%s\\n' \"$EPOCHREALTIME\" > {output_path}");
@@ -96,6 +100,7 @@ fn test_epochrealtime_expands_with_microseconds() {
 
 #[test]
 fn test_seconds_assignment_resets_dynamic_counter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-seconds-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("SECONDS=7; printf '%s\\n' \"$SECONDS\" > {output_path}");
@@ -118,6 +123,7 @@ fn test_seconds_assignment_resets_dynamic_counter() {
 
 #[test]
 fn test_bash_argv0_assignment_updates_zero_parameter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-argv0-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -136,6 +142,7 @@ fn test_bash_argv0_assignment_updates_zero_parameter() {
 
 #[test]
 fn test_bash_argv0_defaults_to_shell_name() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-argv0-default-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '%s:%s\\n' \"$0\" \"$BASH_ARGV0\" > {output_path}");
@@ -153,6 +160,7 @@ fn test_bash_argv0_defaults_to_shell_name() {
 
 #[test]
 fn test_bash_argv0_reflects_script_name() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-argv0-script-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '%s:%s\\n' \"$0\" \"$BASH_ARGV0\" > {output_path}");
@@ -174,6 +182,7 @@ fn test_bash_argv0_reflects_script_name() {
 
 #[test]
 fn test_zero_parameter_supports_pattern_removal() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-zero-param-pattern-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '%s\\n' \"${{0##*/}}\" > {output_path}");
@@ -192,6 +201,7 @@ fn test_zero_parameter_supports_pattern_removal() {
 
 #[test]
 fn test_dynamic_bash_parameter_lengths_use_current_values() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dynamic-param-length-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -214,6 +224,7 @@ fn test_dynamic_bash_parameter_lengths_use_current_values() {
 
 #[test]
 fn test_bash_argv0_assignment_inside_function_updates_zero_parameter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-argv0-function-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -233,6 +244,7 @@ fn test_bash_argv0_assignment_inside_function_updates_zero_parameter() {
 
 #[test]
 fn test_random_expands_to_15_bit_values_and_advances() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-random-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '%s\\n' \"$RANDOM\" \"$RANDOM\" > {output_path}");
@@ -257,6 +269,7 @@ fn test_random_expands_to_15_bit_values_and_advances() {
 
 #[test]
 fn test_srandom_expands_to_32_bit_values_and_advances() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-srandom-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '%s\\n' \"$SRANDOM\" \"$SRANDOM\" > {output_path}");
@@ -280,6 +293,7 @@ fn test_srandom_expands_to_32_bit_values_and_advances() {
 
 #[test]
 fn test_srandom_assignment_keeps_dynamic_parameter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-srandom-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("SRANDOM=1; printf '%s\\n' \"$SRANDOM\" > {output_path}");

@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_pipefail_status_uses_rightmost_failing_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipefail-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -23,6 +24,7 @@ fn test_pipefail_status_uses_rightmost_failing_command() {
 
 #[test]
 fn test_pipeline_exit_builtins_publish_stage_statuses() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipeline-exit-status-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -o pipefail; exit 2 | exit 3 | exit 4; echo $? > {output_path}");
@@ -40,6 +42,7 @@ fn test_pipeline_exit_builtins_publish_stage_statuses() {
 
 #[test]
 fn test_pipefail_status_keeps_pipestatus_entries() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipefail-pipestatus-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -58,6 +61,7 @@ fn test_pipefail_status_keeps_pipestatus_entries() {
 
 #[test]
 fn test_pipefail_status_preserves_pipeline_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipefail-output-status.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -77,6 +81,7 @@ fn test_pipefail_status_preserves_pipeline_output() {
 
 #[test]
 fn test_inverted_pipeline_preserves_output_and_stage_statuses() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-inverted-pipeline-real-status.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -96,6 +101,7 @@ fn test_inverted_pipeline_preserves_output_and_stage_statuses() {
 
 #[test]
 fn test_inverted_pipeline_uses_pipefail_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pipefail-invert-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("set -o pipefail; ! false | true; echo $? > {output_path}");
@@ -115,6 +121,7 @@ fn test_inverted_pipeline_uses_pipefail_status() {
 
 #[test]
 fn test_if_condition_bang_inverts_command_without_running_bang() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-if-bang-condition-output.txt";
     let error_path = "target/rubash-if-bang-condition-error.txt";
     let _ = fs::remove_file(output_path);
@@ -138,6 +145,7 @@ fn test_if_condition_bang_inverts_command_without_running_bang() {
 
 #[test]
 fn test_inline_then_executes_if_body_tail() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-inline-then-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("if true; then echo yes > {output_path}; else echo no > {output_path}; fi");
@@ -155,6 +163,7 @@ fn test_inline_then_executes_if_body_tail() {
 
 #[test]
 fn test_nested_inline_if_scans_quoted_words_with_arithmetic_for() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-nested-inline-if-for-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -177,6 +186,7 @@ fn test_nested_inline_if_scans_quoted_words_with_arithmetic_for() {
 
 #[test]
 fn test_case_body_keeps_arithmetic_for_semicolons_inside_nested_if() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-case-arithmetic-for-semicolons-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -199,6 +209,7 @@ fn test_case_body_keeps_arithmetic_for_semicolons_inside_nested_if() {
 
 #[test]
 fn test_unquoted_parameter_array_assignment_preserves_quote_characters() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-assignment-quoted-fields-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -221,6 +232,7 @@ fn test_unquoted_parameter_array_assignment_preserves_quote_characters() {
 
 #[test]
 fn test_compound_array_assignment_preserves_quoted_fields() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compound-array-quoted-fields-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("foo=(a 'b c' d); printf '<%s>\\n' \"${{foo[@]}}\" > {output_path}");
@@ -241,6 +253,7 @@ fn test_compound_array_assignment_preserves_quoted_fields() {
 
 #[test]
 fn test_compound_array_assignment_preserves_quoted_array_at() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compound-array-quoted-at-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -263,6 +276,7 @@ fn test_compound_array_assignment_preserves_quoted_array_at() {
 
 #[test]
 fn test_compound_array_assignment_preserves_quoted_array_slice() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-compound-array-quoted-slice-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

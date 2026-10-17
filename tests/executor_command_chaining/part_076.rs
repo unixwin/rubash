@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_for_command_redirects_body_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-command-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -27,6 +28,7 @@ fn test_for_command_redirects_body_stdout() {
 
 #[test]
 fn test_for_command_expands_brace_range_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-brace-range-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("for item in {{1..3}}; do echo $item >> {output_path}; done");
@@ -45,6 +47,7 @@ fn test_for_command_expands_brace_range_words() {
 
 #[test]
 fn test_for_command_expands_stepped_and_padded_brace_ranges() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-stepped-brace-range-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -68,6 +71,7 @@ fn test_for_command_expands_stepped_and_padded_brace_ranges() {
 
 #[test]
 fn test_for_command_expands_negative_padded_brace_ranges() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-negative-padded-brace-range-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("for item in {{-03..01..2}}; do echo $item >> {output_path}; done");
@@ -86,6 +90,7 @@ fn test_for_command_expands_negative_padded_brace_ranges() {
 
 #[test]
 fn test_for_command_expands_brace_list_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-brace-list-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("for item in pre{{a,b}}; do echo $item >> {output_path}; done");
@@ -104,6 +109,7 @@ fn test_for_command_expands_brace_list_words() {
 
 #[test]
 fn test_simple_command_brace_expansion_keeps_escaped_commas() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-brace-escaped-comma-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '<%s>\\n' a{{b\\,c,d}} > {output_path}");
@@ -121,6 +127,7 @@ fn test_simple_command_brace_expansion_keeps_escaped_commas() {
 
 #[test]
 fn test_singleton_brace_group_performs_quote_removal() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-brace-singleton-quote-removal-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '<%s>\\n' {{abc\\,def}} > {output_path}");
@@ -138,6 +145,7 @@ fn test_singleton_brace_group_performs_quote_removal() {
 
 #[test]
 fn test_for_command_brace_expansion_keeps_escaped_commas() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-brace-escaped-comma-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -157,6 +165,7 @@ fn test_for_command_brace_expansion_keeps_escaped_commas() {
 
 #[test]
 fn test_for_command_accepts_brace_group_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-brace-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("for item in alpha beta; {{ echo $item; }} > {output_path}");
@@ -176,6 +185,7 @@ fn test_for_command_accepts_brace_group_body() {
 
 #[test]
 fn test_for_command_redirect_creates_file_without_iterations() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-command-redirect-empty-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("for item in; do echo bad; done > {output_path}");
@@ -195,6 +205,7 @@ fn test_for_command_redirect_creates_file_without_iterations() {
 
 #[test]
 fn test_arithmetic_for_command_redirect_creates_file_without_iterations() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-for-command-redirect-empty-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("for (( i = 0; i < 0; i++ )); do echo bad; done > {output_path}");
@@ -218,6 +229,7 @@ fn test_arithmetic_for_command_redirect_creates_file_without_iterations() {
 
 #[test]
 fn test_arithmetic_for_command_accepts_brace_group_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-for-brace-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("for (( i = 0; i < 3; i++ )); {{ echo $i; }} > {output_path}");
@@ -241,6 +253,7 @@ fn test_arithmetic_for_command_accepts_brace_group_body() {
 
 #[test]
 fn test_arithmetic_for_command_pipes_body_stdout() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-for-pipe-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("for (( i = 0; i < 2; i++ )); do echo $i; done | wc -l > {output_path}");
@@ -259,6 +272,7 @@ fn test_arithmetic_for_command_pipes_body_stdout() {
 
 #[test]
 fn test_for_command_input_redirect_feeds_body_reads() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-for-command-input.txt";
     let output_path = "target/rubash-for-command-input-output.txt";
     fs::write(input_path, "alpha\nbeta\n").unwrap();
@@ -287,6 +301,7 @@ fn test_for_command_input_redirect_feeds_body_reads() {
 #[ignore = "rubash#378: see issue (probe wt37-374 K088)"]
 #[test]
 fn test_for_command_materializes_input_process_substitution_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-input-process-substitution-word-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -306,6 +321,7 @@ fn test_for_command_materializes_input_process_substitution_words() {
 
 #[test]
 fn test_for_command_materializes_output_process_substitution_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-output-process-substitution-word-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("for path in >(cat > {output_path}); do printf alpha > \"$path\"; done");
@@ -323,6 +339,7 @@ fn test_for_command_materializes_output_process_substitution_words() {
 
 #[test]
 fn test_for_command_here_string_feeds_body_read() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-command-herestring-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -344,6 +361,7 @@ fn test_for_command_here_string_feeds_body_read() {
 
 #[test]
 fn test_for_command_keeps_brace_group_body_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-brace-group-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("for item in one; do {{ echo $item; }} done > {output_path}");
@@ -363,6 +381,7 @@ fn test_for_command_keeps_brace_group_body_command() {
 
 #[test]
 fn test_for_command_keeps_nested_select_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-for-nested-select-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -384,6 +403,7 @@ fn test_for_command_keeps_nested_select_body() {
 
 #[test]
 fn test_arithmetic_for_command_keeps_nested_select_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-arithmetic-for-nested-select-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -405,6 +425,7 @@ fn test_arithmetic_for_command_keeps_nested_select_body() {
 
 #[test]
 fn test_arithmetic_for_command_input_redirect_feeds_body_read() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-arithmetic-for-command-input.txt";
     let output_path = "target/rubash-arithmetic-for-command-input-output.txt";
     fs::write(input_path, "alpha\n").unwrap();
@@ -433,6 +454,7 @@ fn test_arithmetic_for_command_input_redirect_feeds_body_read() {
 
 #[test]
 fn test_alias_introduced_for_keeps_nested_alias_while_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-for-nested-while-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -454,6 +476,7 @@ fn test_alias_introduced_for_keeps_nested_alias_while_body() {
 
 #[test]
 fn test_alias_introduced_for_accepts_brace_group_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-for-brace-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -474,6 +497,7 @@ fn test_alias_introduced_for_accepts_brace_group_body() {
 
 #[test]
 fn test_alias_introduced_for_prefix_with_do_executes_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-for-prefix-do-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -491,6 +515,7 @@ fn test_alias_introduced_for_prefix_with_do_executes_body() {
 
 #[test]
 fn test_alias_introduced_for_prefix_keeps_nested_while_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-alias-for-prefix-nested-while-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

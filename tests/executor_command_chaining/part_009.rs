@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_bash_lineno_and_source_track_function_stack() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-lineno-source-stack-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -28,6 +29,7 @@ fn test_bash_lineno_and_source_track_function_stack() {
 
 #[test]
 fn test_bash_argc_and_argv_track_function_arguments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-argc-argv-stack-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -55,6 +57,7 @@ fn test_bash_argc_and_argv_track_function_arguments() {
 
 #[test]
 fn test_funcname_assignment_does_not_change_stack() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-funcname-noassign-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -77,6 +80,7 @@ fn test_funcname_assignment_does_not_change_stack() {
 
 #[test]
 fn test_funcname_assignment_does_not_override_dynamic_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-funcname-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("FUNCNAME=42; printf '<%s>\\n' \"$FUNCNAME\" > {output_path}");
@@ -94,6 +98,7 @@ fn test_funcname_assignment_does_not_override_dynamic_value() {
 
 #[test]
 fn test_groups_expands_as_dynamic_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-groups-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -113,6 +118,7 @@ fn test_groups_expands_as_dynamic_array() {
 
 #[test]
 fn test_groups_at_expands_as_dynamic_array_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-groups-at-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '<%s>\\n' \"${{GROUPS[@]}}\" \"${{GROUPS[*]}}\" > {output_path}");
@@ -130,6 +136,7 @@ fn test_groups_at_expands_as_dynamic_array_words() {
 
 #[test]
 fn test_groups_assignment_does_not_override_dynamic_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-groups-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -149,6 +156,7 @@ fn test_groups_assignment_does_not_override_dynamic_array() {
 
 #[test]
 fn test_lineno_expands_to_current_command_line() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-lineno-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf '%s:%s\\n' \"$LINENO\" \"$((LINENO))\" > {output_path}");
@@ -166,6 +174,7 @@ fn test_lineno_expands_to_current_command_line() {
 
 #[test]
 fn test_lineno_in_multiline_function_body_uses_body_line() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-lineno-function-body-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -184,6 +193,7 @@ fn test_lineno_in_multiline_function_body_uses_body_line() {
 
 #[test]
 fn test_unquoted_empty_parameter_removes_word() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-unquoted-empty-parameter-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("empty=; echo a $empty b > {output_path}");
@@ -201,6 +211,7 @@ fn test_unquoted_empty_parameter_removes_word() {
 
 #[test]
 fn test_cat_heredoc_redirects_to_output_file() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-cat-heredoc-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("cat > {output_path} <<'EOF'\nalpha\nbeta\nEOF");
@@ -218,6 +229,7 @@ fn test_cat_heredoc_redirects_to_output_file() {
 
 #[test]
 fn test_dev_null_output_redirect_allows_following_commands() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dev-null-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("echo hidden > /dev/null; echo visible > {output_path}");
@@ -236,6 +248,7 @@ fn test_dev_null_output_redirect_allows_following_commands() {
 #[ignore = "rubash#396: see issue (probe wt37-374 K010)"]
 #[test]
 fn test_touch_posix_literal_glob_filename_does_not_abort_script() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-touch-literal-glob-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("touch 'x*x'; echo ok > {output_path}; rm 'x*x'");
@@ -253,6 +266,7 @@ fn test_touch_posix_literal_glob_filename_does_not_abort_script() {
 
 #[test]
 fn test_unquoted_heredoc_expands_parameters() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-unquoted-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("value=expanded; cat > {output_path} <<EOF\n$value\nEOF");

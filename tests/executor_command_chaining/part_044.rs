@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_describe_disabled_builtin_uses_path_command() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-disabled-describe-bin";
     let script_path = format!("{bin_dir}/echo");
     let command_v_path = "target/rubash-disabled-command-v-output.txt";
@@ -65,6 +66,7 @@ fn test_describe_disabled_builtin_uses_path_command() {
 
 #[test]
 fn test_nested_command_describe_uses_shell_state() {
+    let _cwd_guard = CwdGuard::take();
     let builtin_function_path = "target/rubash-builtin-command-v-function-output.txt";
     let builtin_verbose_path = "target/rubash-builtin-command-v-verbose-output.txt";
     let nested_function_path = "target/rubash-nested-command-v-function-output.txt";
@@ -114,6 +116,7 @@ fn test_nested_command_describe_uses_shell_state() {
 
 #[test]
 fn test_command_without_p_uses_current_path_for_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-without-p-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("PATH=target/rubash-no-such-bin command sh -c 'echo bad' > {output_path}");
@@ -131,6 +134,7 @@ fn test_command_without_p_uses_current_path_for_external_command() {
 
 #[test]
 fn test_type_a_reports_builtin_and_path_matches() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-type-a-bin";
     let echo_path = format!("{bin_dir}/echo");
     let output_path = "target/rubash-type-a-output.txt";
@@ -157,6 +161,7 @@ fn test_type_a_reports_builtin_and_path_matches() {
 
 #[test]
 fn test_type_ap_reports_only_path_matches() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-type-ap-bin";
     let echo_path = format!("{bin_dir}/echo");
     let output_path = "target/rubash-type-ap-output.txt";
@@ -184,6 +189,7 @@ fn test_type_ap_reports_only_path_matches() {
 
 #[test]
 fn test_type_f_skips_shell_functions() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-type-f-function-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("function f {{ echo hi; }}; type -f f; echo $? > {output_path}");
@@ -201,6 +207,7 @@ fn test_type_f_skips_shell_functions() {
 
 #[test]
 fn test_type_f_still_reports_builtins() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-type-f-builtin-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("type -f echo > {output_path}");
@@ -221,6 +228,7 @@ fn test_type_f_still_reports_builtins() {
 
 #[test]
 fn test_type_long_type_option_reports_kind() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-type-long-type-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("type --type echo > {output_path}");

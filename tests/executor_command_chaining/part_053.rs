@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_export_f_marks_function_for_declare_export_listing() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-export-f-output.txt";
     let status_path = "target/rubash-export-f-status.txt";
     let _ = fs::remove_file(output_path);
@@ -30,6 +31,7 @@ fn test_export_f_marks_function_for_declare_export_listing() {
 
 #[test]
 fn test_hyphenated_function_name_can_be_called_and_exported() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-hyphen-function-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -52,6 +54,7 @@ fn test_hyphenated_function_name_can_be_called_and_exported() {
 
 #[test]
 fn test_export_f_rejects_nonexportable_function_names() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-export-nonexportable-function-output.txt";
     let error_path = "target/rubash-export-nonexportable-function-error.txt";
     let _ = fs::remove_file(output_path);
@@ -83,6 +86,7 @@ fn test_export_f_rejects_nonexportable_function_names() {
 
 #[test]
 fn test_export_nf_unmarks_exported_function() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-export-nf-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -101,6 +105,7 @@ fn test_export_nf_unmarks_exported_function() {
 
 #[test]
 fn test_unset_f_clears_exported_function_attribute() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-unset-exported-function-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -120,6 +125,7 @@ fn test_unset_f_clears_exported_function_attribute() {
 
 #[test]
 fn test_readonly_f_protects_function_from_unset_and_redefine() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-readonly-function-output.txt";
     let error_path = "target/rubash-readonly-function-error.txt";
     let _ = fs::remove_file(output_path);
@@ -150,6 +156,7 @@ fn test_readonly_f_protects_function_from_unset_and_redefine() {
 
 #[test]
 fn test_readonly_function_redefine_with_redirect_preserves_failure_status() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-readonly-function-redirect-status.txt";
     let error_path = "target/rubash-readonly-function-redirect-error.txt";
     let _ = fs::remove_file(status_path);
@@ -174,6 +181,7 @@ fn test_readonly_function_redefine_with_redirect_preserves_failure_status() {
 
 #[test]
 fn test_readonly_f_missing_function_reports_error() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-readonly-missing-function-error.txt";
     let status_path = "target/rubash-readonly-missing-function-status.txt";
     let _ = fs::remove_file(error_path);
@@ -197,6 +205,7 @@ fn test_readonly_f_missing_function_reports_error() {
 
 #[test]
 fn test_declare_fr_marks_function_readonly() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-readonly-function-output.txt";
     let error_path = "target/rubash-declare-readonly-function-error.txt";
     let _ = fs::remove_file(output_path);
@@ -227,6 +236,7 @@ fn test_declare_fr_marks_function_readonly() {
 
 #[test]
 fn test_declare_fx_exports_function_to_child_rubash() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-export-function-child-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -247,6 +257,7 @@ fn test_declare_fx_exports_function_to_child_rubash() {
 
 #[test]
 fn test_declare_fx_exports_nested_function_body_to_child_rubash() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-export-nested-function-child-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);

@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_local_compound_array_assignment_preserves_quoted_array_at() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-local-compound-array-quoted-at-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -25,6 +26,7 @@ fn test_local_compound_array_assignment_preserves_quoted_array_at() {
 
 #[test]
 fn test_function_pipeline_feeds_external_stage_stdin() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-pipeline-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -43,6 +45,7 @@ fn test_function_pipeline_feeds_external_stage_stdin() {
 
 #[test]
 fn test_function_definition_pipeline_stage_is_isolated() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-function-definition-pipeline-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -65,6 +68,7 @@ fn test_function_definition_pipeline_stage_is_isolated() {
 
 #[test]
 fn test_decimal_regex_does_not_match_negative_integer() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-decimal-regex-negative-integer-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -84,6 +88,7 @@ fn test_decimal_regex_does_not_match_negative_integer() {
 
 #[test]
 fn test_decimal_split_regex_keeps_literal_dot() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-decimal-split-regex-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -103,6 +108,7 @@ fn test_decimal_split_regex_keeps_literal_dot() {
 
 #[test]
 fn test_regex_no_match_clears_bash_rematch() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-regex-no-match-rematch-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -122,6 +128,7 @@ fn test_regex_no_match_clears_bash_rematch() {
 
 #[test]
 fn test_quoted_positional_slice_expands_to_multiple_arguments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-positional-slice-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -144,6 +151,7 @@ fn test_quoted_positional_slice_expands_to_multiple_arguments() {
 
 #[test]
 fn test_quoted_array_at_slice_expands_to_multiple_arguments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-array-at-slice-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -168,6 +176,7 @@ fn test_quoted_array_at_slice_expands_to_multiple_arguments() {
 
 #[test]
 fn test_quoted_array_star_slice_uses_ifs_first_char() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-array-star-slice-ifs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -191,6 +200,7 @@ fn test_quoted_array_star_slice_uses_ifs_first_char() {
 
 #[test]
 fn test_unquoted_array_expansion_field_splits_values() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-unquoted-array-field-split-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -216,6 +226,7 @@ fn test_unquoted_array_expansion_field_splits_values() {
 
 #[test]
 fn test_array_slice_negative_length_reports_error() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-array-negative-length-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -236,6 +247,7 @@ fn test_array_slice_negative_length_reports_error() {
 
 #[test]
 fn test_quoted_positional_at_expands_to_multiple_arguments() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-quoted-positional-at-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("f() {{ printf '<%s>\\n' \"$@\" > {output_path}; }}; f a 'b c' d");
@@ -256,6 +268,7 @@ fn test_quoted_positional_at_expands_to_multiple_arguments() {
 
 #[test]
 fn test_printf_percent_n_assigns_output_count() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-percent-n-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -274,6 +287,7 @@ fn test_printf_percent_n_assigns_output_count() {
 
 #[test]
 fn test_printf_percent_n_with_v_assignment() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-percent-n-v-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("printf -v OUT 'ab%ncd' COUNT; echo $OUT:$COUNT > {output_path}");
@@ -291,6 +305,7 @@ fn test_printf_percent_n_with_v_assignment() {
 
 #[test]
 fn test_printf_v_assigns_indexed_array_element() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-v-indexed-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -309,6 +324,7 @@ fn test_printf_v_assigns_indexed_array_element() {
 
 #[test]
 fn test_declare_indexed_array_state_is_shared_with_printf() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-printf-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -329,6 +345,7 @@ fn test_declare_indexed_array_state_is_shared_with_printf() {
 
 #[test]
 fn test_printf_v_indexed_array_target_uses_arithmetic_subscript() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-v-indexed-array-arith-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -349,6 +366,7 @@ fn test_printf_v_indexed_array_target_uses_arithmetic_subscript() {
 
 #[test]
 fn test_printf_v_indexed_array_target_resolves_negative_subscript() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-v-indexed-array-negative-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -369,6 +387,7 @@ fn test_printf_v_indexed_array_target_resolves_negative_subscript() {
 
 #[test]
 fn test_printf_v_assigns_associative_array_element() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-v-assoc-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -388,6 +407,7 @@ fn test_printf_v_assigns_associative_array_element() {
 
 #[test]
 fn test_printf_time_format_uses_posix_timezone_rules() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-time-format-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -410,6 +430,7 @@ fn test_printf_time_format_uses_posix_timezone_rules() {
 
 #[test]
 fn test_printf_time_format_honors_width_precision_and_embedded_parens() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-time-width-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -432,6 +453,7 @@ fn test_printf_time_format_honors_width_precision_and_embedded_parens() {
 
 #[test]
 fn test_printf_time_format_without_argument_uses_current_time() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-printf-time-current-output.txt";
     let status_path = "target/rubash-printf-time-current-status.txt";
     let _ = fs::remove_file(output_path);

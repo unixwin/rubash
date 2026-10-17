@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_type_invalid_option_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-type-invalid-option-status.txt";
     let error_path = "target/rubash-type-invalid-option-error.txt";
     let _ = fs::remove_file(status_path);
@@ -26,6 +27,7 @@ fn test_type_invalid_option_redirects_stderr() {
 
 #[test]
 fn test_type_missing_name_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-type-missing-name-status.txt";
     let error_path = "target/rubash-type-missing-name-error.txt";
     let _ = fs::remove_file(status_path);
@@ -49,6 +51,7 @@ fn test_type_missing_name_redirects_stderr() {
 
 #[test]
 fn test_command_v_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-v-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("command -v echo > {output_path}");
@@ -66,6 +69,7 @@ fn test_command_v_redirects_output() {
 
 #[test]
 fn test_command_invalid_option_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-command-invalid-option-status.txt";
     let error_path = "target/rubash-command-invalid-option-error.txt";
     let _ = fs::remove_file(status_path);
@@ -89,6 +93,7 @@ fn test_command_invalid_option_redirects_stderr() {
 
 #[test]
 fn test_command_verbose_missing_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-command-verbose-missing-status.txt";
     let error_path = "target/rubash-command-verbose-missing-error.txt";
     let _ = fs::remove_file(status_path);
@@ -112,6 +117,7 @@ fn test_command_verbose_missing_redirects_stderr() {
 
 #[test]
 fn test_command_p_uses_standard_path_for_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-p-output.txt";
     let _ = fs::remove_file(output_path);
     #[cfg(windows)]
@@ -138,6 +144,7 @@ fn test_command_p_uses_standard_path_for_external_command() {
 
 #[test]
 fn test_command_p_v_uses_standard_path_for_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-p-v-output.txt";
     let _ = fs::remove_file(output_path);
     #[cfg(windows)]
@@ -162,6 +169,7 @@ fn test_command_p_v_uses_standard_path_for_external_command() {
 
 #[test]
 fn test_command_v_without_p_uses_current_path_for_external_command() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = target_test_path("rubash-command-v-bin");
     let missing_bin_dir = target_test_path("rubash-no-such-bin");
     #[cfg(windows)]
@@ -221,6 +229,7 @@ fn test_command_v_without_p_uses_current_path_for_external_command() {
 
 #[test]
 fn test_path_tool_fast_paths_handle_simple_operands_without_external() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-path-tool-fast-path-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -244,6 +253,7 @@ fn test_path_tool_fast_paths_handle_simple_operands_without_external() {
 
 #[test]
 fn test_path_tool_option_calls_fall_back_to_external_commands() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-path-tool-fallback-bin";
     let basename_path = test_command_path(bin_dir, "basename");
     let dirname_path = test_command_path(bin_dir, "dirname");
@@ -292,6 +302,7 @@ fn test_path_tool_option_calls_fall_back_to_external_commands() {
 
 #[test]
 fn test_sleep_fast_path_forwards_option_and_invalid_args_to_external() {
+    let _cwd_guard = CwdGuard::take();
     let bin_dir = "target/rubash-sleep-fallback-bin";
     let sleep_path = test_command_path(bin_dir, "sleep");
     let output_path = "target/rubash-sleep-fallback-output.txt";

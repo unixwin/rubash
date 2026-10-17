@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_exit_help_redirects_output_and_exits_usage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exit-help-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("exit --help > {output_path}");
@@ -22,6 +23,7 @@ fn test_exit_help_redirects_output_and_exits_usage() {
 
 #[test]
 fn test_exit_help_appends_output_and_exits_usage() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exit-help-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -42,6 +44,7 @@ fn test_exit_help_appends_output_and_exits_usage() {
 
 #[test]
 fn test_exit_invalid_number_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-exit-invalid-number-status.txt";
     let error_path = "target/rubash-exit-invalid-number-error.txt";
     let _ = fs::remove_file(status_path);
@@ -65,6 +68,7 @@ fn test_exit_invalid_number_redirects_stderr() {
 
 #[test]
 fn test_exit_too_many_arguments_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-exit-too-many-status.txt";
     let error_path = "target/rubash-exit-too-many-error.txt";
     let _ = fs::remove_file(status_path);
@@ -88,6 +92,7 @@ fn test_exit_too_many_arguments_redirects_stderr() {
 
 #[test]
 fn test_eval_redirects_entire_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-eval-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "old\n").unwrap();
@@ -106,6 +111,7 @@ fn test_eval_redirects_entire_output() {
 
 #[test]
 fn test_eval_appends_entire_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-eval-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -127,6 +133,7 @@ fn test_eval_appends_entire_output() {
 
 #[test]
 fn test_eval_stdout_fd_copy_does_not_create_literal_target() {
+    let _cwd_guard = CwdGuard::take();
     let literal_fd_path = "&2";
     let _ = fs::remove_file(literal_fd_path);
     let tokens = tokenize("eval 'echo grouped' >&2");
@@ -143,6 +150,7 @@ fn test_eval_stdout_fd_copy_does_not_create_literal_target() {
 
 #[test]
 fn test_eval_expands_assignment_lhs_to_array_name() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-eval-array-lhs-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -166,6 +174,7 @@ fn test_eval_expands_assignment_lhs_to_array_name() {
 
 #[test]
 fn test_eval_invalid_option_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-eval-invalid-option-status.txt";
     let error_path = "target/rubash-eval-invalid-option-error.txt";
     let _ = fs::remove_file(status_path);
@@ -189,6 +198,7 @@ fn test_eval_invalid_option_redirects_stderr() {
 
 #[test]
 fn test_eval_body_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-eval-body-error-status.txt";
     let error_path = "target/rubash-eval-body-error.txt";
     let _ = fs::remove_file(status_path);
@@ -212,6 +222,7 @@ fn test_eval_body_redirects_stderr() {
 
 #[test]
 fn test_builtin_eval_redirects_entire_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-eval-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "old\n").unwrap();
@@ -230,6 +241,7 @@ fn test_builtin_eval_redirects_entire_output() {
 
 #[test]
 fn test_complete_empty_state_redirects_no_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-complete-output.txt";
     let status_path = "target/rubash-complete-status.txt";
     let _ = fs::remove_file(output_path);
@@ -251,6 +263,7 @@ fn test_complete_empty_state_redirects_no_output() {
 
 #[test]
 fn test_complete_invalid_option_reports_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-complete-error.txt";
     let status_path = "target/rubash-complete-error-status.txt";
     let _ = fs::remove_file(error_path);

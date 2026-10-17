@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_bind_warns_without_line_editing_and_succeeds() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-bind-error.txt";
     let status_path = "target/rubash-bind-status.txt";
     let _ = fs::remove_file(error_path);
@@ -25,6 +26,7 @@ fn test_bind_warns_without_line_editing_and_succeeds() {
 
 #[test]
 fn test_bind_invalid_option_returns_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-bind-invalid-error.txt";
     let status_path = "target/rubash-bind-invalid-status.txt";
     let _ = fs::remove_file(error_path);
@@ -49,6 +51,7 @@ fn test_bind_invalid_option_returns_usage() {
 
 #[test]
 fn test_bind_option_requires_argument() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-bind-missing-arg-error.txt";
     let status_path = "target/rubash-bind-missing-arg-status.txt";
     let _ = fs::remove_file(error_path);
@@ -72,6 +75,7 @@ fn test_bind_option_requires_argument() {
 
 #[test]
 fn test_bind_compact_argument_option_consumes_rest_of_word() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-bind-compact-arg-error.txt";
     let status_path = "target/rubash-bind-compact-arg-status.txt";
     let _ = fs::remove_file(error_path);
@@ -96,6 +100,7 @@ fn test_bind_compact_argument_option_consumes_rest_of_word() {
 
 #[test]
 fn test_fc_without_history_returns_success() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-fc-empty-output.txt";
     let status_path = "target/rubash-fc-empty-status.txt";
     let _ = fs::remove_file(output_path);
@@ -117,6 +122,7 @@ fn test_fc_without_history_returns_success() {
 
 #[test]
 fn test_fc_list_without_history_returns_success() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-fc-list-output.txt";
     let status_path = "target/rubash-fc-list-status.txt";
     let _ = fs::remove_file(output_path);
@@ -138,6 +144,7 @@ fn test_fc_list_without_history_returns_success() {
 
 #[test]
 fn test_fc_invalid_option_returns_usage() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-fc-invalid-error.txt";
     let status_path = "target/rubash-fc-invalid-status.txt";
     let _ = fs::remove_file(error_path);
@@ -161,6 +168,7 @@ fn test_fc_invalid_option_returns_usage() {
 
 #[test]
 fn test_fc_edit_option_requires_argument() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-fc-missing-edit-error.txt";
     let status_path = "target/rubash-fc-missing-edit-status.txt";
     let _ = fs::remove_file(error_path);
@@ -184,6 +192,7 @@ fn test_fc_edit_option_requires_argument() {
 
 #[test]
 fn test_fc_compact_editor_option_consumes_rest_of_word() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-fc-compact-editor-error.txt";
     let status_path = "target/rubash-fc-compact-editor-status.txt";
     let _ = fs::remove_file(error_path);
@@ -207,6 +216,7 @@ fn test_fc_compact_editor_option_consumes_rest_of_word() {
 
 #[test]
 fn test_builtin_break_breaks_loop() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-break-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -225,6 +235,7 @@ fn test_builtin_break_breaks_loop() {
 
 #[test]
 fn test_builtin_continue_continues_loop() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-continue-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -243,6 +254,7 @@ fn test_builtin_continue_continues_loop() {
 
 #[test]
 fn test_builtin_kill_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-kill-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin kill -l HUP > {output_path}");
@@ -260,6 +272,7 @@ fn test_builtin_kill_redirects_output() {
 
 #[test]
 fn test_exec_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exec-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("exec -a custom sh -c 'echo $0' > {output_path}");
@@ -277,6 +290,7 @@ fn test_exec_redirects_output() {
 
 #[test]
 fn test_exec_combined_options_set_login_argv0() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-exec-combined-options-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("exec -la custom sh -c 'echo $0' > {output_path}");

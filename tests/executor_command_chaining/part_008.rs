@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_bash_command_expands_to_current_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-command-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("echo $BASH_COMMAND > {output_path}");
@@ -23,6 +24,7 @@ fn test_bash_command_expands_to_current_command() {
 
 #[test]
 fn test_bash_command_assignment_does_not_override_dynamic_value() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-command-assignment-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("BASH_COMMAND=ignored; echo $BASH_COMMAND > {output_path}");
@@ -43,6 +45,7 @@ fn test_bash_command_assignment_does_not_override_dynamic_value() {
 
 #[test]
 fn test_indirect_bash_command_expands_to_current_command() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-command-indirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("ref=BASH_COMMAND; printf '%s\\n' \"${{!ref}}\" > {output_path}");
@@ -63,6 +66,7 @@ fn test_indirect_bash_command_expands_to_current_command() {
 
 #[test]
 fn test_bash_version_and_versinfo_are_initialized() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-version-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -96,6 +100,7 @@ fn test_bash_version_and_versinfo_are_initialized() {
 
 #[test]
 fn test_quoted_bash_versinfo_at_expands_to_words() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-versinfo-at-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -143,6 +148,7 @@ fn test_quoted_bash_versinfo_at_expands_to_words() {
 
 #[test]
 fn test_bash_versinfo_assignment_reports_readonly() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-versinfo-readonly-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("BASH_VERSINFO[0]=9; echo $? ${{BASH_VERSINFO[0]}} > {output_path}");
@@ -165,6 +171,7 @@ fn test_bash_versinfo_assignment_reports_readonly() {
 
 #[test]
 fn test_bash_call_stack_arrays_are_initialized() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-call-stack-arrays-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("declare -p BASH_ARGC BASH_ARGV BASH_LINENO BASH_SOURCE > {output_path}");
@@ -187,6 +194,7 @@ fn test_bash_call_stack_arrays_are_initialized() {
 
 #[test]
 fn test_bash_call_stack_arrays_ignore_assignment() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-call-stack-noassign-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -212,6 +220,7 @@ fn test_bash_call_stack_arrays_ignore_assignment() {
 
 #[test]
 fn test_call_stack_arrays_cannot_be_unset() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-call-stack-unset-output.txt";
     let error_path = "target/rubash-bash-call-stack-unset-error.txt";
     let _ = fs::remove_file(output_path);
@@ -243,6 +252,7 @@ fn test_call_stack_arrays_cannot_be_unset() {
 
 #[test]
 fn test_uid_and_euid_are_readonly_nonzero_ids() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-uid-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -273,6 +283,7 @@ fn test_uid_and_euid_are_readonly_nonzero_ids() {
 
 #[test]
 fn test_ppid_is_readonly_numeric_id() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-ppid-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -300,6 +311,7 @@ fn test_ppid_is_readonly_numeric_id() {
 
 #[test]
 fn test_funcname_expands_inside_function() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-funcname-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -318,6 +330,7 @@ fn test_funcname_expands_inside_function() {
 
 #[test]
 fn test_funcname_tracks_nested_function_stack() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-funcname-stack-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(

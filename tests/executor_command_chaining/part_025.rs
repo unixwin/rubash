@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_dirstack_expands_as_dynamic_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-dirstack-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -29,6 +30,7 @@ fn test_dirstack_expands_as_dynamic_array() {
 
 #[test]
 fn test_dirs_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-dirs-stderr-output.txt";
     let status_path = "target/rubash-dirs-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -55,6 +57,7 @@ fn test_dirs_redirects_stderr() {
 
 #[test]
 fn test_dirs_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-dirs-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -77,6 +80,7 @@ fn test_dirs_appends_stderr() {
 
 #[test]
 fn test_pushd_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-pushd-stderr-output.txt";
     let status_path = "target/rubash-pushd-stderr-status.txt";
     let _ = fs::remove_file(error_path);
@@ -99,6 +103,7 @@ fn test_pushd_redirects_stderr() {
 
 #[test]
 fn test_pushd_n_accepts_double_dash_before_directory() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pushd-n-double-dash-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("PWD=/; pushd -n -- /tmp > {output_path}; dirs -p >> {output_path}");
@@ -119,6 +124,7 @@ fn test_pushd_n_accepts_double_dash_before_directory() {
 
 #[test]
 fn test_pushd_accepts_existing_relative_directory() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-pushd-relative-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -151,6 +157,7 @@ fn test_pushd_accepts_existing_relative_directory() {
 
 #[test]
 fn test_popd_appends_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-popd-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);
     fs::write(error_path, "before\n").unwrap();
@@ -171,6 +178,7 @@ fn test_popd_appends_stderr() {
 
 #[test]
 fn test_popd_double_dash_ignores_following_stack_index() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-popd-double-dash-index-output.txt";
     let scratch_path = "target/rubash-popd-double-dash-index-scratch.txt";
     let _ = fs::remove_file(output_path);
@@ -194,6 +202,7 @@ fn test_popd_double_dash_ignores_following_stack_index() {
 
 #[test]
 fn test_popd_n_removes_next_directory_without_cd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-popd-n-output.txt";
     let scratch_path = "target/rubash-popd-n-scratch.txt";
     let _ = fs::remove_file(output_path);
@@ -216,6 +225,7 @@ fn test_popd_n_removes_next_directory_without_cd() {
 
 #[test]
 fn test_popd_n_empty_stack_returns_failure() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-popd-n-empty-error.txt";
     let status_path = "target/rubash-popd-n-empty-status.txt";
     let _ = fs::remove_file(error_path);
@@ -238,6 +248,7 @@ fn test_popd_n_empty_stack_returns_failure() {
 
 #[test]
 fn test_kill_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("kill -l HUP > {output_path}");
@@ -255,6 +266,7 @@ fn test_kill_redirects_output() {
 
 #[test]
 fn test_kill_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -273,6 +285,7 @@ fn test_kill_appends_output() {
 
 #[test]
 fn test_kill_translates_exit_signal() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-kill-exit-signal-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("kill -l 0 > {output_path}; kill -l EXIT >> {output_path}");

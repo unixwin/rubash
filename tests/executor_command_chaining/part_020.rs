@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_direct_readonly_assignment_stops_noninteractive_script() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-direct-readonly-fatal-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -32,6 +33,7 @@ fn test_direct_readonly_assignment_stops_noninteractive_script() {
 
 #[test]
 fn test_backtick_in_comment_does_not_swallow_temporary_export() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-comment-backtick-temp-export-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -60,6 +62,7 @@ fn test_backtick_in_comment_does_not_swallow_temporary_export() {
 
 #[test]
 fn test_child_environment_includes_exported_pwd() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-child-pwd-env-output.txt");
     #[cfg(windows)]
     let script_path = target_test_path("rubash-child-pwd-env.cmd");
@@ -105,6 +108,7 @@ fn test_child_environment_includes_exported_pwd() {
 
 #[test]
 fn test_initial_oldpwd_is_exported_but_unset() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-initial-oldpwd-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -135,6 +139,7 @@ fn test_initial_oldpwd_is_exported_but_unset() {
 
 #[test]
 fn test_shell_level_increments_inherited_environment() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-shlvl-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -164,6 +169,7 @@ fn test_shell_level_increments_inherited_environment() {
 
 #[test]
 fn test_child_rubash_increments_shell_level() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-child-shlvl-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -183,6 +189,7 @@ fn test_child_rubash_increments_shell_level() {
 
 #[test]
 fn test_readonly_p_redirects_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-readonly-p-redirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("readonly RUBASH_READONLY_REDIR=value; readonly -p > {output_path}");
@@ -203,6 +210,7 @@ fn test_readonly_p_redirects_output() {
 
 #[test]
 fn test_readonly_without_assignment_marks_unset_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-readonly-unset-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -232,6 +240,7 @@ fn test_readonly_without_assignment_marks_unset_variable() {
 
 #[test]
 fn test_builtin_export_assigns_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-export-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -252,6 +261,7 @@ fn test_builtin_export_assigns_variable() {
 
 #[test]
 fn test_builtin_readonly_assigns_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-builtin-readonly-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("builtin readonly RUBASH_BUILTIN_READONLY=value; echo $RUBASH_BUILTIN_READONLY > {output_path}");
@@ -270,6 +280,7 @@ fn test_builtin_readonly_assigns_variable() {
 
 #[test]
 fn test_export_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let error_path = "target/rubash-export-stderr-output.txt";
     let status_path = "target/rubash-export-stderr-status.txt";
     let _ = fs::remove_file(error_path);

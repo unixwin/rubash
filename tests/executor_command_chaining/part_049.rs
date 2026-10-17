@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_read_a_r_treats_backslash_as_literal() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-a-r-backslash-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -21,6 +22,7 @@ fn test_read_a_r_treats_backslash_as_literal() {
 
 #[test]
 fn test_read_combined_ra_treats_backslash_as_literal_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-ra-backslash-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -39,6 +41,7 @@ fn test_read_combined_ra_treats_backslash_as_literal_array() {
 
 #[test]
 fn test_read_combined_ra_compact_array_name_reads_raw_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-ra-compact-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -raarr <<< 'a\\ b c'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}");
@@ -56,6 +59,7 @@ fn test_read_combined_ra_compact_array_name_reads_raw_array() {
 
 #[test]
 fn test_read_combined_sa_reads_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sa-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -74,6 +78,7 @@ fn test_read_combined_sa_reads_array() {
 
 #[test]
 fn test_read_combined_sa_compact_array_name() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sa-compact-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -saarr <<< 'a\\ b c'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}");
@@ -91,6 +96,7 @@ fn test_read_combined_sa_compact_array_name() {
 
 #[test]
 fn test_read_combined_ea_reads_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-ea-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -109,6 +115,7 @@ fn test_read_combined_ea_reads_array() {
 
 #[test]
 fn test_read_combined_ea_compact_array_name() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-ea-compact-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("read -eaarr <<< 'a\\ b c'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}");
@@ -126,6 +133,7 @@ fn test_read_combined_ea_compact_array_name() {
 
 #[test]
 fn test_read_combined_rea_reads_raw_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rea-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -144,6 +152,7 @@ fn test_read_combined_rea_reads_raw_array() {
 
 #[test]
 fn test_read_combined_era_compact_array_name_reads_raw_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-era-compact-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -162,6 +171,7 @@ fn test_read_combined_era_compact_array_name_reads_raw_array() {
 
 #[test]
 fn test_read_combined_rsa_reads_raw_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rsa-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -180,6 +190,7 @@ fn test_read_combined_rsa_reads_raw_array() {
 
 #[test]
 fn test_read_combined_sra_compact_array_name_reads_raw_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-sra-compact-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -198,6 +209,7 @@ fn test_read_combined_sra_compact_array_name_reads_raw_array() {
 
 #[test]
 fn test_read_combined_rsea_reads_raw_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-rsea-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -216,6 +228,7 @@ fn test_read_combined_rsea_reads_raw_array() {
 
 #[test]
 fn test_read_combined_srea_compact_array_name_reads_raw_array() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-srea-compact-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -234,6 +247,7 @@ fn test_read_combined_srea_compact_array_name_reads_raw_array() {
 
 #[test]
 fn test_read_a_processes_backslash_escaped_custom_ifs() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-a-escaped-custom-ifs-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -252,6 +266,7 @@ fn test_read_a_processes_backslash_escaped_custom_ifs() {
 
 #[test]
 fn test_read_d_limits_array_input_before_delimiter() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-read-d-array-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -271,6 +286,7 @@ fn test_read_d_limits_array_input_before_delimiter() {
 
 #[test]
 fn test_while_false_skips_body() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-while-false-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("while false; do echo bad > {output_path}; done");
@@ -290,6 +306,7 @@ fn test_while_false_skips_body() {
 
 #[test]
 fn test_while_true_runs_until_break() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-while-break-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("while true; do echo loop > {output_path}; break; done");
@@ -310,6 +327,7 @@ fn test_while_true_runs_until_break() {
 
 #[test]
 fn test_while_read_consumes_done_redirect_input() {
+    let _cwd_guard = CwdGuard::take();
     let input_path = "target/rubash-while-read-input.txt";
     let output_path = "target/rubash-while-read-redirect-output.txt";
     let _ = fs::remove_file(input_path);
@@ -336,6 +354,7 @@ fn test_while_read_consumes_done_redirect_input() {
 
 #[test]
 fn test_while_read_or_nonempty_line_condition_list() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-while-read-or-line-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -365,6 +384,7 @@ fn test_while_read_or_nonempty_line_condition_list() {
 
 #[test]
 fn test_return_outside_function_sets_failure_status() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-return-outside-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("return; echo $? > {output_path}");
@@ -382,6 +402,7 @@ fn test_return_outside_function_sets_failure_status() {
 
 #[test]
 fn test_return_outside_function_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-return-outside-redirect-output.txt";
     let error_path = "target/rubash-return-outside-redirect-error.txt";
     let _ = fs::remove_file(output_path);
@@ -405,6 +426,7 @@ fn test_return_outside_function_redirects_stderr() {
 
 #[test]
 fn test_return_invalid_number_in_function_returns_two() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-return-invalid-output.txt";
     let _ = fs::remove_file(output_path);
     let input =
@@ -423,6 +445,7 @@ fn test_return_invalid_number_in_function_returns_two() {
 
 #[test]
 fn test_return_invalid_number_in_function_redirects_stderr() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-return-invalid-redirect-output.txt";
     let error_path = "target/rubash-return-invalid-redirect-error.txt";
     let _ = fs::remove_file(output_path);

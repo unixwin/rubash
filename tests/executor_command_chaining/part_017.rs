@@ -3,6 +3,7 @@ use std::fs;
 
 #[test]
 fn test_declare_p_appends_output() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-p-append-output.txt";
     let _ = fs::remove_file(output_path);
     fs::write(output_path, "before\n").unwrap();
@@ -24,6 +25,7 @@ fn test_declare_p_appends_output() {
 
 #[test]
 fn test_declare_p_without_names_lists_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-p-all-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("RUBASH_DECLARE_ALL=value; declare -p > {output_path}");
@@ -44,6 +46,7 @@ fn test_declare_p_without_names_lists_variables() {
 
 #[test]
 fn test_declare_without_names_lists_variables() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-all-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("RUBASH_DECLARE_BARE=value; declare > {output_path}");
@@ -68,6 +71,7 @@ fn test_declare_without_names_lists_variables() {
 
 #[test]
 fn test_declare_attribute_filters_without_names() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-attr-filter-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
@@ -96,6 +100,7 @@ fn test_declare_attribute_filters_without_names() {
 
 #[test]
 fn test_declare_marks_inherited_environment_as_exported() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-inherited-export-output.txt";
     let _ = fs::remove_file(output_path);
     let old_value = std::env::var("RUBASH_INHERITED_EXPORT").ok();
@@ -125,6 +130,7 @@ fn test_declare_marks_inherited_environment_as_exported() {
 
 #[test]
 fn test_declare_r_marks_readonly_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-readonly-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("declare -r RO=1; declare -p RO > {output_path}");
@@ -145,6 +151,7 @@ fn test_declare_r_marks_readonly_variable() {
 
 #[test]
 fn test_declare_rx_marks_exported_readonly_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-declare-readonly-export-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("declare -rx REX=2; declare -p REX > {output_path}");
@@ -166,6 +173,7 @@ fn test_declare_rx_marks_exported_readonly_variable() {
 
 #[test]
 fn test_declare_prefix_assignment_persists_as_exported_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-prefix-assignment-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
@@ -196,6 +204,7 @@ fn test_declare_prefix_assignment_persists_as_exported_variable() {
 
 #[test]
 fn test_declare_p_preserves_combined_attribute_order() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-combined-attrs-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
@@ -226,6 +235,7 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
 
 #[test]
 fn test_declare_rx_without_assignment_marks_unset_variable() {
+    let _cwd_guard = CwdGuard::take();
     let output_path = target_test_path("rubash-declare-rx-unset-output.txt");
     let _ = fs::remove_file(&output_path);
     let shell_output_path = shell_test_path(&output_path);
