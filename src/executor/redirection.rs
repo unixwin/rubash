@@ -713,7 +713,7 @@ impl Executor {
                 if builtin_output_write_is_unchecked(cmd) {
                     return Ok(true);
                 }
-                self.write_bad_output_fd_diagnostic(cmd, 1)?;
+                self.write_bad_output_fd_diagnostic(cmd, &state)?;
                 self.exit_code = 1;
                 self.last_builtin_write_failed.set(true);
                 return Ok(true);
@@ -723,9 +723,13 @@ impl Executor {
                     .fd_target(2)
                     .is_some_and(|target| *target == OutputTarget::Closed)
             {
-                self.write_bad_output_fd_diagnostic(cmd, 2)?;
-                self.exit_code = 1;
-                self.last_builtin_write_failed.set(true);
+                // A closed fd 2 drops diagnostics silently and leaves the
+                // command's status alone (GNU builtin_error writes to fd 2;
+                // with fd 2 closed the write is lost and sh_chkwrite folds
+                // only stdout's ferror — rubash#699 R1.3). Route stdout
+                // through the state first so it is not lost with stderr.
+                self.write_state_output_or_diagnostic(cmd, &state, 1, stdout)?;
+                let _ = self.write_state_output_or_diagnostic(cmd, &state, 2, stderr)?;
                 return Ok(true);
             }
             if !stdout.is_empty()
@@ -754,22 +758,17 @@ impl Executor {
             if builtin_output_write_is_unchecked(cmd) {
                 return Ok(true);
             }
-            self.write_bad_output_fd_diagnostic(cmd, 1)?;
+            self.write_bad_output_fd_diagnostic(cmd, &state)?;
             self.exit_code = 1;
             self.last_builtin_write_failed.set(true);
             return Ok(true);
         }
-        if !stderr.is_empty()
-            && state
-                .fd_target(2)
-                .is_some_and(|target| *target == OutputTarget::Closed)
-        {
-            self.write_bad_output_fd_diagnostic(cmd, 2)?;
-            self.exit_code = 1;
-            self.last_builtin_write_failed.set(true);
-            return Ok(true);
-        }
-
+        // A closed fd 2 (rubash#699 R1.3) is not special-cased here: the
+        // ordered walk below writes stdout, then re-visits fd 2 where the
+        // Closed target drops the bytes silently and leaves the status
+        // untouched. GNU builtins/common.c:320 sh_chkwrite folds only
+        // stdout's ferror into the builtin status; builtin_error's failed
+        // fd-2 write is lost.
         self.write_state_output_or_diagnostic(cmd, &state, 1, stdout)?;
         self.write_state_output_or_diagnostic(cmd, &state, 2, stderr)?;
         Ok(true)
@@ -812,10 +811,16 @@ impl Executor {
         match state.write_to_fd(self, fd, output) {
             Ok(()) => Ok(()),
             Err(error) if is_closed_output_error(&error) => {
-                if fd == 1 && builtin_output_write_is_unchecked(cmd) {
+                if fd == 2 {
+                    // A failed fd-2 write (closed descriptor / broken stderr
+                    // pipe) is lost like GNU's builtin_error: no diagnostic,
+                    // no status change (rubash#699 R1.3).
                     return Ok(());
                 }
-                self.write_bad_output_fd_diagnostic(cmd, fd)?;
+                if builtin_output_write_is_unchecked(cmd) {
+                    return Ok(());
+                }
+                self.write_bad_output_fd_diagnostic(cmd, state)?;
                 self.exit_code = 1;
                 self.last_builtin_write_failed.set(true);
                 Ok(())
@@ -1396,7 +1401,7 @@ impl Executor {
     fn write_bad_output_fd_diagnostic(
         &mut self,
         cmd: &CommandNode,
-        fd: u32,
+        state: &OutputFdState,
     ) -> Result<(), ExecuteError> {
         let command = cmd.words.first().map(String::as_str).unwrap_or("command");
         let mut stderr = Vec::new();
@@ -1405,11 +1410,14 @@ impl Executor {
             "{}{command}: write error: Bad file descriptor",
             self.diagnostic_prefix()
         )?;
-        if fd == 2 {
-            self.write_default_stdout(&stderr)
-        } else {
-            self.write_default_stderr(&stderr)
-        }
+        // GNU builtins/common.c:320-334 sh_chkwrite -> builtin_error: the
+        // write failure is reported to fd 2 *as this command's own redirects
+        // bound it* (redir.c do_redirections runs before the builtin), so
+        // `echo X >&4 2>err` puts the diagnostic in err (rubash#699 R1.2).
+        // A closed fd-2 target drops it silently — the other half of the
+        // same rule that makes `ls /no+ 2>&-` quiet (rubash#699 R1.3).
+        let _ = state.write_to_fd(self, 2, &stderr);
+        Ok(())
     }
 }
 

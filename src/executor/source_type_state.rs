@@ -79,7 +79,7 @@ impl Executor {
         if let Some(redirect) = command
             .redirect_out
             .as_ref()
-            .filter(|r| r.fd.unwrap_or(1) == 1)
+            .filter(|r| is_stdout_splice_redirect(command, r))
         {
             let target = self.expand_redirect_target(redirect);
             // subst.c:12663-12668 failglob: abort before creating or
@@ -97,7 +97,11 @@ impl Executor {
             apply_stdout_append_redirect(body, &append_redirect);
         }
 
-        if let Some(redirect) = command.append.as_ref().filter(|r| r.fd.unwrap_or(1) == 1) {
+        if let Some(redirect) = command
+            .append
+            .as_ref()
+            .filter(|r| is_stdout_write_redirect(r))
+        {
             let target = self.expand_redirect_target(redirect);
             // subst.c:12663-12668 failglob: abort before splicing.
             if self.redirect_failglob_aborted() {
@@ -112,7 +116,7 @@ impl Executor {
         if let Some(redirect) = command
             .redirect_err
             .as_ref()
-            .filter(|r| r.fd.unwrap_or(2) == 2)
+            .filter(|r| is_stderr_splice_redirect(command, r))
         {
             let target = self.expand_redirect_target(redirect);
             // subst.c:12663-12668 failglob: abort before creating or
@@ -133,7 +137,7 @@ impl Executor {
         if let Some(redirect) = command
             .redirect_err_append
             .as_ref()
-            .filter(|r| r.fd.unwrap_or(2) == 2)
+            .filter(|r| is_stderr_splice_redirect(command, r))
         {
             let target = self.expand_redirect_target(redirect);
             // subst.c:12663-12668 failglob: abort before splicing.

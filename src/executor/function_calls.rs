@@ -764,28 +764,6 @@ impl Executor {
         // must not be replayed as a stdout append on every inner command
         // (redir7.sub `stuff 4>&-' re-serialized the injected `>>&-' into a
         // spawned `-c' child and failed to parse it).
-        let is_stdout_write_redirect = |redirect: &Redirect| {
-            redirect.fd.unwrap_or(1) == 1
-                && matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::Output
-                        | crate::parser::RedirectKind::Append
-                        | crate::parser::RedirectKind::ClobberOutput
-                        | crate::parser::RedirectKind::CombinedOutput
-                        | crate::parser::RedirectKind::CombinedAppend
-                )
-        };
-        let is_stderr_write_redirect = |redirect: &Redirect| {
-            redirect.fd.unwrap_or(2) == 2
-                && matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::Output
-                        | crate::parser::RedirectKind::Append
-                        | crate::parser::RedirectKind::ClobberOutput
-                        | crate::parser::RedirectKind::CombinedOutput
-                        | crate::parser::RedirectKind::CombinedAppend
-                )
-        };
         if let Some(redirect) = call_cmd
             .redirect_out
             .as_ref()

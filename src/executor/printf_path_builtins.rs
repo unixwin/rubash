@@ -365,17 +365,19 @@ impl Executor {
         }
 
         let (status, stdout_buffer, stderr_buffer) = {
+            let mut stdout_default: Vec<u8> = Vec::new();
+            let mut stderr_default: Vec<u8> = Vec::new();
             let mut stdout_sink = match (&mut stdout_file, &stdout_dup, stdout_null) {
                 (Some(file), _, _) => CdOutSink::File(file),
                 (None, Some(_), _) => CdOutSink::Dup(Vec::new()),
                 (None, None, true) => CdOutSink::Null,
-                (None, None, false) => CdOutSink::Default,
+                (None, None, false) => CdOutSink::Default(&mut stdout_default),
             };
             let mut stderr_sink = match (&mut stderr_file, &stderr_dup, stderr_null) {
                 (Some(file), _, _) => CdErrSink::File(file),
                 (None, Some(_), _) => CdErrSink::Dup(Vec::new()),
                 (None, None, true) => CdErrSink::Null,
-                (None, None, false) => CdErrSink::Default,
+                (None, None, false) => CdErrSink::Default(&mut stderr_default),
             };
             let status = crate::builtins::cd::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
@@ -391,6 +393,36 @@ impl Executor {
                 CdErrSink::Dup(buffer) => Some(buffer),
                 _ => None,
             };
+            // A channel with no command-level redirect (Default) still must
+            // honour an ENCLOSING compound's binding — `( cd /no_such ) 2>&1`
+            // / `if ...; then cd ...; fi 2>&1` route fd 2 through the group's
+            // dup2. When the group's fd 2 is the LIVE fd-1 alias (`2>&1`),
+            // the bytes belong at the same live destination fd 1 writes —
+            // the pipeline stage capture, or the real stdout — exactly like
+            // OutputTarget::Stdout in the ordered walk. Routing the frozen
+            // dup2-generation snapshot instead sent them to the wrong capture
+            // (rubash#699 R1.4). File/Stderr/other bindings go through the
+            // same ordered machinery every other buffered builtin uses.
+            if !stdout_default.is_empty() {
+                if matches!(
+                    self.fd_table.write_endpoint(1),
+                    Some(FdWriteEndpoint::Stdout)
+                ) {
+                    self.write_default_stdout(&stdout_default)?;
+                } else {
+                    let _ = self.route_builtin_buffered_output(cmd, &stdout_default, &[])?;
+                }
+            }
+            if !stderr_default.is_empty() {
+                if matches!(
+                    self.fd_table.write_endpoint(2),
+                    Some(FdWriteEndpoint::Stdout)
+                ) {
+                    self.write_default_stdout(&stderr_default)?;
+                } else {
+                    let _ = self.route_builtin_buffered_output(cmd, &[], &stderr_default)?;
+                }
+            }
             (status, stdout_buffer, stderr_buffer)
         };
 
@@ -445,7 +477,7 @@ impl Executor {
 /// fd-dup target (`>&N` / `2>&N`) so they can be dispatched to the
 /// channel's rebound destination after the builtin returns.
 enum CdOutSink<'a> {
-    Default,
+    Default(&'a mut Vec<u8>),
     Null,
     File(&'a mut File),
     Dup(Vec<u8>),
@@ -454,7 +486,10 @@ enum CdOutSink<'a> {
 impl std::io::Write for CdOutSink<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
-            CdOutSink::Default => super::WriteFileStdout.write(buf),
+            CdOutSink::Default(buffer) => {
+                buffer.extend_from_slice(buf);
+                Ok(buf.len())
+            }
             CdOutSink::Null => Ok(buf.len()),
             CdOutSink::File(file) => file.write(buf),
             CdOutSink::Dup(buffer) => {
@@ -472,7 +507,7 @@ impl std::io::Write for CdOutSink<'_> {
 }
 
 enum CdErrSink<'a> {
-    Default,
+    Default(&'a mut Vec<u8>),
     Null,
     File(&'a mut File),
     Dup(Vec<u8>),
@@ -481,7 +516,10 @@ enum CdErrSink<'a> {
 impl std::io::Write for CdErrSink<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
-            CdErrSink::Default => super::WriteFileStderr.write(buf),
+            CdErrSink::Default(buffer) => {
+                buffer.extend_from_slice(buf);
+                Ok(buf.len())
+            }
             CdErrSink::Null => Ok(buf.len()),
             CdErrSink::File(file) => file.write(buf),
             CdErrSink::Dup(buffer) => {

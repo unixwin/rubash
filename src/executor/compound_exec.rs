@@ -1513,12 +1513,26 @@ impl Executor {
             || cmd.redirect_err.is_some()
             || cmd.redirect_err_append.is_some();
         let mut stdio_redirect_cmd = redirect_cmd.clone();
+        // Compound redirections on fd 0-2 keep their stdio mirror fields;
+        // only a genuinely NUMBERED redirect (fd > 2) is stripped, because
+        // those propagate exclusively through the ordered `redirects` list
+        // (the mirror fields are fd-blind — a `3>&1` can land in
+        // `redirect_out`). Treating the explicit fd digit of `2>`/`1>&2` as
+        // "numbered" stripped fd-1/fd-2 redirections too, defeating both the
+        // per-leaf splice and `cd`'s redirected-io binding: a subshell
+        // `( cd /no_such ) 2>e` leaked the diagnostic to the real stderr
+        // (rubash#699 R1.4).
         let is_numbered = |redirect: &Redirect| {
-            redirect
-                .operator
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_digit())
+            let fd = redirect.fd.unwrap_or_else(|| {
+                redirect
+                    .operator
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0)
+            });
+            fd > 2
         };
         if stdio_redirect_cmd
             .redirect_in
@@ -2628,7 +2642,11 @@ impl Executor {
         cmd: &CommandNode,
         case_command: &mut CaseCommand,
     ) -> Result<(), ExecuteError> {
-        if let Some(redirect) = &cmd.redirect_out {
+        if let Some(redirect) = cmd
+            .redirect_out
+            .as_ref()
+            .filter(|r| is_stdout_splice_redirect(cmd, r))
+        {
             let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_none() {
                 self.create_redirect_output(&target, redirect.clobber)?;
@@ -2640,7 +2658,7 @@ impl Executor {
             for clause in &mut case_command.clauses {
                 apply_stdout_append_redirect(&mut clause.body, &append_redirect);
             }
-        } else if let Some(redirect) = &cmd.append {
+        } else if let Some(redirect) = cmd.append.as_ref().filter(|r| is_stdout_write_redirect(r)) {
             let mut append_redirect = redirect.clone();
             append_redirect.target = self.expand_redirect_target(redirect);
             for clause in &mut case_command.clauses {
@@ -2648,7 +2666,11 @@ impl Executor {
             }
         }
 
-        if let Some(redirect) = &cmd.redirect_err {
+        if let Some(redirect) = cmd
+            .redirect_err
+            .as_ref()
+            .filter(|r| is_stderr_splice_redirect(cmd, r))
+        {
             let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
                 self.create_redirect_output(&target, redirect.clobber)?;
@@ -2660,7 +2682,11 @@ impl Executor {
             for clause in &mut case_command.clauses {
                 apply_stderr_append_redirect(&mut clause.body, &append_redirect);
             }
-        } else if let Some(redirect) = &cmd.redirect_err_append {
+        } else if let Some(redirect) = cmd
+            .redirect_err_append
+            .as_ref()
+            .filter(|r| is_stderr_splice_redirect(cmd, r))
+        {
             let mut append_redirect = redirect.clone();
             append_redirect.target = self.expand_redirect_target(redirect);
             for clause in &mut case_command.clauses {
