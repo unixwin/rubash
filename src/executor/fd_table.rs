@@ -574,6 +574,8 @@ impl FdTable {
         let mut result: Vec<u8> = Vec::new();
         let mut chars = 0usize;
         let mut consumed = false;
+        let mut delimiter_found = false;
+        let mut limit_reached = false;
         let mut rewind: Option<u64> = None;
         'chunks: loop {
             let scanned_from = buffer.len();
@@ -588,6 +590,7 @@ impl FdTable {
                 let mut keep = true;
                 if !exact && byte == delimiter {
                     keep = false;
+                    delimiter_found = true;
                 }
                 if byte & 0xc0 != 0x80 {
                     chars += 1;
@@ -601,6 +604,7 @@ impl FdTable {
                     break 'chunks;
                 }
                 if char_limit.is_some_and(|limit| chars >= limit) {
+                    limit_reached = true;
                     rewind = Some(origin + (absolute as u64) + 1);
                     break 'chunks;
                 }
@@ -612,6 +616,14 @@ impl FdTable {
         if !consumed {
             return None;
         }
+        // read.def:949 eof rule: the stream ended before the delimiter (a
+        // -n/-N limit ending the record is not EOF). The byte-wise path
+        // (:553) and the in-memory path (:454) both set this; the seekable
+        // fast path used to serve the trailing partial record with the flag
+        // still clear, so `{ read l; } < f` and `read l <&9` reported
+        // success at EOF-without-newline and `while read` ran one extra
+        // iteration (niubash#701).
+        self.read_eof_no_delimiter = !delimiter_found && !limit_reached && !self.read_timed_out;
         Some(result)
     }
 
