@@ -120,14 +120,46 @@ pub(in crate::executor) fn uid_value() -> String {
     std::env::var("UID")
         .ok()
         .filter(|value| !value.is_empty())
-        // Rubash emulates a root Unix session: the WSL GNU Bash 5.2.21
-        // comparison baseline runs as root (UID/EUID 0), and `\$` prompt
-        // decoding plus $UID/$EUID parity depend on the same identity.
-        .unwrap_or_else(|| "0".to_string())
+        // GNU variables.c:984 uidset binds the REAL uid (current_user.uid
+        // = getuid at startup), readonly; an inherited $UID is kept, but
+        // there is no root fallback — the old "0" emulated a dev baseline
+        // that ran as root and lied everywhere else (`\$` prompt decoding
+        // plus $UID/$EUID parity all key off this identity).
+        .unwrap_or_else(|| real_uid().to_string())
 }
 
 pub(in crate::executor) fn euid_value() -> String {
-    std::env::var("EUID").unwrap_or_else(|_| uid_value())
+    // GNU uidset: EUID is the real euid when it differs from uid, else the
+    // uid value. Same inherited-env rule as UID above.
+    std::env::var("EUID")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| real_euid().to_string())
+}
+
+/// Real process identities (GNU shell.c current_user uid/euid). libc is
+/// already a dependency on every Unix target in this tree.
+#[cfg(unix)]
+fn real_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+/// Windows has no uid/euid; the persona shell reports 0 there (unchanged).
+#[cfg(windows)]
+fn real_uid() -> u32 {
+    0
+}
+
+/// Real effective uid; same platform split as real_uid.
+#[cfg(unix)]
+fn real_euid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+/// Windows has no euid; keep the persona 0 (unchanged).
+#[cfg(windows)]
+fn real_euid() -> u32 {
+    0
 }
 
 pub(in crate::executor) fn ppid_value() -> String {

@@ -6,6 +6,29 @@ use std::fs;
 #[path = "parameter_transform_tests/arrays.rs"]
 mod arrays;
 
+/// Account name and root marker as THIS engine renders them: `\u` is the
+/// passwd account and `\$` is `#` for euid 0 (GNU variables.c:984 uidset)
+/// — both environment-dependent, so tests that pin prompt-expansion
+/// machinery (not identity) calibrate from a throwaway Executor instead
+/// of pinning the author's account. `\u` itself is pinned by the
+/// issue421 tests.
+fn prompt_identity() -> (String, String) {
+    fn probe(ps: &str) -> String {
+        let path = "target/rubash-param-transform-identity-probe.txt";
+        let _ = fs::remove_file(path);
+        let input = format!("PS='{ps}'; printf '%s' \"${{PS@P}}\" > {path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(result.is_ok());
+        let out = fs::read_to_string(path).unwrap();
+        let _ = fs::remove_file(path);
+        out
+    }
+    (probe("\\u"), probe("\\$"))
+}
+
 #[test]
 fn test_parameter_transform_quotes_value() {
     let output_path = "target/rubash-param-transform-quote-output.txt";
@@ -41,9 +64,10 @@ fn test_indirect_parameter_transform_applies_to_target_value() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
+    let (user, _) = prompt_identity();
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "<'two words'>\n<TWO WORDS>\n<'beta'>\n<declare -x value='two words'>\n<x>\n<declare -a arr='beta'>\n<alice>\n"
+        format!("<'two words'>\n<TWO WORDS>\n<'beta'>\n<declare -x value='two words'>\n<x>\n<declare -a arr='beta'>\n<{user}>\n")
     );
     let _ = fs::remove_file(output_path);
 }
@@ -213,9 +237,10 @@ fn test_parameter_transform_expands_prompt_escapes() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
+    let (user, mark) = prompt_identity();
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "<alice@box:~/project:project:$:\\>\n"
+        format!("<{user}@box:~/project:project:{mark}:\\>\n")
     );
     let _ = fs::remove_file(output_path);
 }
@@ -233,9 +258,10 @@ fn test_parameter_transform_prompt_expands_variables_and_commands() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
+    let (user, _) = prompt_identity();
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "<redbox ok alicereset>\n"
+        format!("<redbox ok {user}reset>\n")
     );
     let _ = fs::remove_file(output_path);
 }

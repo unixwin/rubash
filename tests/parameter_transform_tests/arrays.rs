@@ -58,9 +58,10 @@ fn test_parameter_transform_expands_prompt_array_elements() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
+    let (user, _) = super::prompt_identity();
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "<alice>\n<box>\n<alice>\n"
+        format!("<{user}>\n<box>\n<{user}>\n")
     );
     let _ = fs::remove_file(output_path);
 }
