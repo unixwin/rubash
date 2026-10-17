@@ -708,7 +708,21 @@ impl Executor {
             // advance by the form that matched.
             let delimiter_needle = read_delimiter_needle(delimiter);
             let delimiter_literal_len = delimiter.len_utf8();
-            for (index, ch) in slice.char_indices() {
+            // Count *decoded* units, not transport chars: a raw-byte marker
+            // pair (E000 + E001..=E100) is ONE input byte and consumes ONE
+            // unit of the -n/-N budget, and the pair is emitted whole so a
+            // limit break can never land inside it (#714). GNU counts one
+            // per character and stops at the limit: read.def:874
+            // `i += read_mbchar(...)` consumes a multibyte character whole,
+            // read.def:884 `nr++`, read.def:886
+            // `if (nchars > 0 && nr >= nchars) break;`. ESC is such a
+            // character here. This is the same pairing discipline as
+            // `read_split::logical_units`, the buffered splitter's unit walk.
+            let chars: Vec<(usize, char)> = slice.char_indices().collect();
+            let mut cursor = 0usize;
+            let mut units = 0usize;
+            while cursor < chars.len() {
+                let (index, ch) = chars[cursor];
                 if !exact_char_limit {
                     if slice[index..].starts_with(&delimiter_needle) {
                         consumed = index + delimiter_needle.len();
@@ -724,10 +738,25 @@ impl Executor {
                     }
                 }
 
-                output.push(ch);
-                consumed = index + ch.len_utf8();
+                let pair = ch as u32 == RAW_BYTE_MARKER_ESCAPE
+                    && chars.get(cursor + 1).is_some_and(|&(_, payload)| {
+                        let code = payload as u32;
+                        (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&code)
+                    });
+                if pair {
+                    let (payload_index, payload) = chars[cursor + 1];
+                    output.push(ch);
+                    output.push(payload);
+                    consumed = payload_index + payload.len_utf8();
+                    cursor += 2;
+                } else {
+                    output.push(ch);
+                    consumed = index + ch.len_utf8();
+                    cursor += 1;
+                }
                 took_any = true;
-                if char_limit.is_some_and(|limit| output.chars().count() >= limit) {
+                units += 1;
+                if char_limit.is_some_and(|limit| units >= limit) {
                     limit_reached = true;
                     break;
                 }

@@ -562,12 +562,40 @@ fn trim_read_input_literal(
 
     if let Some(limit) = char_limit {
         if crate::locale::is_multi_byte() {
-            return input.chars().take(limit).collect();
+            return truncate_read_units(&input, limit);
         }
         return truncate_read_input_bytes(input, limit);
     }
 
     input
+}
+
+/// Truncate transport text to `limit` decoded units. One raw-byte marker
+/// pair (E000 + E001..=E100) is a single input byte and must consume one
+/// unit and stay whole, so a `-n`/`-N` cut can never land inside the pair
+/// (rubash#714). GNU builtins/read.def counts one per decoded character —
+/// read.def:874 `read_mbchar` consumes a multibyte character whole,
+/// read.def:884 `nr++`, read.def:886 `if (nchars > 0 && nr >= nchars)
+/// break;` — so in a multibyte locale the tagged pair is one character.
+/// This matches `read_split::logical_units`, the buffered splitter's walk.
+fn truncate_read_units(input: &str, limit: usize) -> String {
+    let mut units = 0usize;
+    let mut chars = input.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if units == limit {
+            return input[..index].to_string();
+        }
+        if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
+            if let Some(&(_, payload)) = chars.peek() {
+                let code = payload as u32;
+                if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&code) {
+                    chars.next();
+                }
+            }
+        }
+        units += 1;
+    }
+    input.to_string()
 }
 
 /// `read -n N` caps the read at N *bytes* in a single-byte locale (GNU
