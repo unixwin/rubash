@@ -150,9 +150,15 @@ fn exit_trap_function_bare_exit_uses_saved_status() {
 /// action keeps its own status (GNU probe: rc 9).
 #[test]
 fn sourced_exit_inside_err_action_keeps_own_status() {
-    let (stdout, _, code) = rubash(
-        "echo 'echo INSIDE; exit 9' > /tmp/rubash524_inner.sh\ntrap '. /tmp/rubash524_inner.sh' ERR\nfalse\necho never",
+    // temp_dir-based probe path (/tmp is not writable on Android).
+    let inner = std::env::temp_dir().join("rubash524_inner.sh");
+    let script = format!(
+        "echo 'echo INSIDE; exit 9' > '{}'\ntrap '. \"{}\"' ERR\nfalse\necho never",
+        inner.to_string_lossy().replace('\\', "/"),
+        inner.to_string_lossy().replace('\\', "/")
     );
+    let (stdout, _, code) = rubash(&script);
+    let _ = std::fs::remove_file(&inner);
     assert_eq!(stdout, "INSIDE\n");
     assert_eq!(code, Some(9));
 }

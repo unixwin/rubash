@@ -99,6 +99,14 @@ fn pipeline_stage_single_quoted_word_reaches_script_child_verbatim() {
         "for a in \"$@\"; do printf 'ARG=[%s]\\n' \"$a\"; done\n",
     )
     .unwrap();
+    // Executable bit: without it every Unix exec fails EACCES (Windows
+    // doesn't care, which is why this only ever failed off-Windows).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dumper, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod +x dumper");
+    }
     let dumper = dumper.to_string_lossy().replace('\\', "/");
     let (stdout, stderr, ok) = run_script(&format!(
         "printf 'x\\n' | {dumper} 'a\\nb${{VAR}}c' '$s/^\\(.*\\)$/'"

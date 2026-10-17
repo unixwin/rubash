@@ -62,7 +62,9 @@ fn pwd_and_pwd_substitution_agree() {
 
 /// The self-injected TMPDIR default (parent env has no TMPDIR/TEMP/TMP) is
 /// POSIX form — the FFmpeg-configure corollary: backslash or drive forms
-/// corrupt scripts that interpolate `$TMPDIR` unquoted.
+/// corrupt scripts that interpolate `$TMPDIR` unquoted. Windows-only:
+/// the self-injection itself is cfg(windows).
+#[cfg(windows)]
 #[test]
 fn injected_tmpdir_default_is_posix_form() {
     let (stdout, stderr) = run(&["-c", "echo $TMPDIR"], true);
