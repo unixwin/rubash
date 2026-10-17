@@ -899,6 +899,11 @@ impl Executor {
                 }
                 Some('{') => {
                     chars.next();
+                    // A bad-substitution diagnostic raised while expanding
+                    // this fragment must name the whole enclosing word (GNU
+                    // subst.c:10278), not the `${...}` span (rubash#758).
+                    let _diag_word =
+                        crate::executor::expand_word::PendingDiagnosticWordGuard::new(word);
                     // GNU param_expand resolves one `${}` expansion once:
                     // memoize array-element fetches for this fragment so a
                     // subscript's side effects run once (AEPV_MEMO).

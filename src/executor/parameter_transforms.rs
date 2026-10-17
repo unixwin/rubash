@@ -12,14 +12,9 @@ impl Executor {
             // form (new-exp.tests new-exp15: `declare -rl VAR1`).
             let resolved = self.resolved_variable_name(array_name);
             if let Some(resolved_name) = resolved.as_deref() {
-                if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, resolved_name)
-                    || is_marked_array_var(&self.shell_state.env_vars, resolved_name)
-                    || self
-                        .shell_state
-                        .env_vars
-                        .get(resolved_name)
-                        .is_some_and(|value| is_array_storage(value))
-                {
+                // Cell type, not value text: a scalar `x='(a b c)'` must take
+                // the string path (rubash#755).
+                if self.parameter_is_array_variable(resolved_name) {
                     return self.array_assignment_transform(resolved_name);
                 }
             }
@@ -104,13 +99,9 @@ impl Executor {
             return format!("declare -{flags} {name}");
         }
 
-        if self
-            .shell_state
-            .env_vars
-            .get(name)
-            .is_some_and(|value| is_array_storage(value))
-            || is_marked_array_var(&self.shell_state.env_vars, name)
-        {
+        // Cell type, not value text: a scalar `x='(a b c)'` is the string
+        // path, so `${x@A}` renders the scalar assignment (rubash#755).
+        if self.parameter_is_array_variable(name) {
             let flags = self.variable_assignment_flags(name, true);
             return self
                 .shell_state
@@ -231,8 +222,11 @@ impl Executor {
                                 assoc_nbuckets(&self.shell_state.env_vars, &resolved),
                             )
                             .len()
-                        } else {
+                        } else if self.parameter_is_array_variable(&resolved) {
                             array_values(storage).len()
+                        } else {
+                            // Scalar base: one element (rubash#755).
+                            1
                         }
                     })
                     .unwrap_or(0);
@@ -280,13 +274,7 @@ impl Executor {
         let mut attrs = String::new();
         if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name) {
             attrs.push('A');
-        } else if self
-            .shell_state
-            .env_vars
-            .get(base_name)
-            .is_some_and(|value| is_array_storage(value))
-            || is_marked_array_var(&self.shell_state.env_vars, base_name)
-        {
+        } else if self.parameter_is_array_variable(base_name) {
             attrs.push('a');
         }
         if self.shell_state.functions.contains_key(base_name) {
@@ -394,7 +382,7 @@ impl Executor {
                     .map(|value| shell_reusable_quote(&value))
                     .unwrap_or_default();
             }
-            if is_marked_array_var(&self.shell_state.env_vars, &name) || is_array_storage(value) {
+            if self.parameter_is_array_variable(&name) {
                 return array_value_at(value, 0)
                     .map(|value| shell_reusable_quote(&value))
                     .unwrap_or_default();

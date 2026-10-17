@@ -298,9 +298,8 @@ impl Executor {
             return Some(apply_parameter_case_mod(&value, operation, pattern));
         }
         if let Some(value) = self.shell_state.env_vars.get(target_name) {
-            if is_marked_array_var(&self.shell_state.env_vars, target_name)
-                || is_array_storage(value)
-            {
+            // Cell type, not value text (rubash#755).
+            if self.parameter_is_array_variable(target_name) {
                 return Some(
                     array_value_at(value, 0)
                         .map(|value| apply_parameter_case_mod(&value, operation, pattern))

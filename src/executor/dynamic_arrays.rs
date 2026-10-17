@@ -896,6 +896,28 @@ impl Executor {
     }
 }
 
+/// The names GNU keeps as INIT_DYNAMIC_VAR arrays
+/// (variables.c:1844/1202): rendered by [`Executor::parameter_array_storage`]
+/// or [`Executor::dynamic_stack_array_values`] but not necessarily carrying
+/// an ARRAY/ASSOC mark, so the type-aware
+/// [`Executor::parameter_is_array_variable`] must name them explicitly
+/// rather than parse their rendered storage text (rubash#755).
+pub(in crate::executor) fn is_dynamic_array_name(name: &str) -> bool {
+    matches!(
+        name,
+        "PIPESTATUS"
+            | "FUNCNAME"
+            | "BASH_ARGC"
+            | "BASH_ARGV"
+            | "BASH_LINENO"
+            | "BASH_SOURCE"
+            | "GROUPS"
+            | "DIRSTACK"
+            | "BASH_ALIASES"
+            | "BASH_CMDS"
+    )
+}
+
 /// Element fetch over a dense dynamic-stack view with the storage path's
 /// subscript semantics (`resolve_indexed_array_subscript` +
 /// `array_value_at` over a contiguous 0..n render): non-negative indices

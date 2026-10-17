@@ -393,8 +393,9 @@ impl Executor {
             let resolved = self
                 .resolved_variable_name(array_name)
                 .unwrap_or_else(|| array_name.to_string());
-            let is_array = storage.as_deref().is_some_and(is_array_storage)
-                || is_marked_array_var(&self.shell_state.env_vars, &resolved);
+            // Cell type, not storage text: `${#x[@]}` on a scalar
+            // `x='(a b c)'` is 1, not 3 (rubash#755).
+            let is_array = self.parameter_is_array_variable(&resolved);
             // GNU subst.c:7502-7517 array_length_reference: with nounset
             // active, an absent (var == 0), declared-unset
             // (att_invisible -> DECLARED_UNSET_VARS), or non-array
@@ -618,7 +619,7 @@ impl Executor {
                     // Scalar variable: ${#scalar[$(( 0 ))]} is the length
                     // of the scalar value (GNU variables.c: a scalar is a
                     // one-element array at index 0).
-                    if !is_array_storage(value) && index == 0 {
+                    if !self.parameter_is_array_variable(array_name) && index == 0 {
                         if let Some(scalar) = self.scalar_parameter_value(array_name, value) {
                             return parameter_char_length(&scalar).to_string();
                         }
@@ -645,7 +646,7 @@ impl Executor {
                 .unwrap_or_default();
             if is_shell_name(&cell) {
                 if let Some(target_value) = self.shell_state.env_vars.get(&cell) {
-                    if is_array_storage(target_value) {
+                    if self.parameter_is_array_variable(&cell) {
                         let element_zero = if self.is_assoc_parameter_array(&cell) {
                             assoc_value_at(target_value, "0")
                         } else {
@@ -692,7 +693,10 @@ impl Executor {
             .env_vars
             .get(var_name)
             .map(|value| {
-                if is_array_storage(value) {
+                // Cell type, not storage text: `${#x}` is the whole-string
+                // length for a scalar `x='(a b c)'`, element 0's length for
+                // a genuine array (rubash#755).
+                if self.parameter_is_array_variable(var_name) {
                     let element_zero = if self.is_assoc_parameter_array(var_name) {
                         assoc_value_at(value, "0")
                     } else {

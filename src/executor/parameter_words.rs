@@ -319,7 +319,16 @@ impl Executor {
             }
             return self
                 .parameter_array_storage(array_name)
-                .map(|value| self.join_array_parameter_values(&value, name))
+                .map(|value| {
+                    // Scalar base: one element, the whole string, joined
+                    // with itself — never list storage re-parsed
+                    // (rubash#755).
+                    if self.parameter_is_array_variable(array_name) {
+                        self.join_array_parameter_values(&value, name)
+                    } else {
+                        shell_safe_value(&value)
+                    }
+                })
                 .unwrap_or_default();
         }
 
@@ -654,6 +663,12 @@ impl Executor {
                 return self.expand_quoted_parameter_word_mut(&resolved_word, context);
             }
         }
+        // The bad-substitution diagnostic names the ENCLOSING word GNU was
+        // expanding (subst.c:10278), recorded by the mutable walker; consume
+        // the one-shot record so a nested fragment keeps its own word
+        // (rubash#758).
+        let diagnostic_word = crate::executor::expand_word::take_pending_diagnostic_word()
+            .unwrap_or_else(|| word.to_string());
         // GNU subst.c:10272-10288 (parameter_brace_expand): a quote
         // terminating the parameter name matches no operator arm and lands
         // on the `bad substitution` default. Mirror of the same check in
@@ -663,7 +678,7 @@ impl Executor {
                 format!(
                     "{}{}: bad substitution\n",
                     self.diagnostic_prefix(),
-                    crate::executor::expand_word::bad_substitution_display(word)
+                    crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
                 )
                 .as_bytes(),
             );
@@ -680,7 +695,7 @@ impl Executor {
                 format!(
                     "{}{}: bad substitution\n",
                     self.diagnostic_prefix(),
-                    crate::executor::expand_word::bad_substitution_display(word)
+                    crate::executor::expand_word::bad_substitution_display(&diagnostic_word)
                 )
                 .as_bytes(),
             );
@@ -886,7 +901,16 @@ impl Executor {
             }
             return self
                 .parameter_array_storage(array_name)
-                .map(|value| self.join_array_parameter_values(&value, name))
+                .map(|value| {
+                    // Scalar base: one element, the whole string, joined
+                    // with itself — never list storage re-parsed
+                    // (rubash#755).
+                    if self.parameter_is_array_variable(array_name) {
+                        self.join_array_parameter_values(&value, name)
+                    } else {
+                        shell_safe_value(&value)
+                    }
+                })
                 .unwrap_or_default();
         }
 

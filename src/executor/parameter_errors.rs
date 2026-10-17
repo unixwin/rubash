@@ -354,7 +354,16 @@ impl Executor {
             }
             let values = self
                 .parameter_array_storage(array_name)
-                .map(|storage| array_values(&storage))
+                .map(|storage| {
+                    if self.parameter_is_array_variable(array_name) {
+                        array_values(&storage)
+                    } else {
+                        // Scalar base (`x[@]`/`x[*]` on VT_VARIABLE): one
+                        // element, the whole string — never re-parsed as
+                        // list storage (rubash#755).
+                        vec![shell_safe_value(&storage)]
+                    }
+                })
                 .unwrap_or_default();
             if values.is_empty() {
                 return None;

@@ -2296,8 +2296,11 @@ impl Executor {
         let storage = self.parameter_array_storage(base)?;
         let values = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base) {
             assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.shell_state.env_vars, base))
-        } else {
+        } else if self.parameter_is_array_variable(base) {
             array_values(&storage)
+        } else {
+            // Scalar base: one element, the whole string (rubash#755).
+            vec![shell_safe_value(&storage)]
         };
         Some((
             values

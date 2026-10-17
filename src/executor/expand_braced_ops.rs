@@ -130,6 +130,26 @@ impl Executor {
             if let Some(values) = self.dynamic_stack_array_values(array_name) {
                 return Some(dense_view_element(&values, index).unwrap_or_default());
             }
+            if !self.parameter_is_array_variable(array_name) {
+                // Scalar base is GNU VT_VARIABLE: element 0 holds the whole
+                // string, every other index is absent, an unresolvable
+                // negative reports `bad array subscript` (rubash#755).
+                if index == 0 {
+                    return Some(
+                        self.parameter_array_storage(array_name)
+                            .map(|value| shell_safe_value(&value))
+                            .unwrap_or_default(),
+                    );
+                }
+                if index < 0 {
+                    eprintln!(
+                        "{}{}: bad array subscript",
+                        self.diagnostic_prefix(),
+                        array_name
+                    );
+                }
+                return Some(String::new());
+            }
             return Some(
                 self.parameter_array_storage(array_name)
                     .and_then(|value| {
@@ -214,7 +234,17 @@ impl Executor {
             }
             return Some(
                 self.parameter_array_storage(array_name)
-                    .map(|value| self.join_array_parameter_values(&value, name))
+                    .map(|value| {
+                        // GNU subst.c get_var_and_type: a scalar base is
+                        // VT_VARIABLE — a one-element list whose element is
+                        // the whole string, never list storage re-parsed
+                        // (rubash#755).
+                        if self.parameter_is_array_variable(array_name) {
+                            self.join_array_parameter_values(&value, name)
+                        } else {
+                            shell_safe_value(&value)
+                        }
+                    })
                     .unwrap_or_default(),
             );
         }
@@ -226,6 +256,17 @@ impl Executor {
             // from the live view.
             if let Some(values) = self.dynamic_stack_array_values(array_name) {
                 return Some(dense_view_element(&values, index as i128).unwrap_or_default());
+            }
+            if !self.parameter_is_array_variable(array_name) {
+                // Scalar base: only element 0 exists (rubash#755).
+                if index == 0 {
+                    return Some(
+                        self.parameter_array_storage(array_name)
+                            .map(|value| shell_safe_value(&value))
+                            .unwrap_or_default(),
+                    );
+                }
+                return Some(String::new());
             }
             return Some(
                 self.parameter_array_storage(array_name)

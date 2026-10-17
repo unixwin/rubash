@@ -347,6 +347,24 @@ impl Executor {
                 }
             }
         }
+        if !assoc_marked
+            && dynamic_values.is_none()
+            && !self.parameter_is_array_variable(&storage_name)
+        {
+            // GNU subst.c get_var_and_type: a scalar base is VT_VARIABLE, so
+            // element 0 is the whole string and no other element exists.
+            // A negative subscript that cannot resolve yields empty
+            // (arrayfunc.c INDEX_ERROR) — the `bad array subscript`
+            // diagnostic is emitted once, by the braced-operator value arm
+            // that owns this reference (expand_braced_ops), so this
+            // lower-level fetcher stays silent to avoid a double report.
+            // The scalar text must never be re-parsed as a list
+            // (rubash#755).
+            if index == 0 {
+                return Some(crate::executor::shell_safe_value(&storage));
+            }
+            return None;
+        }
         let Some(index) = resolve_indexed_array_subscript(&storage, index) else {
             eprintln!(
                 "{}{}: bad array subscript",
@@ -406,6 +424,35 @@ impl Executor {
             .unwrap_or(0)
     }
 
+    /// GNU subst.c get_var_and_type / arrayfunc.c valid_array_reference:
+    /// whether `name` resolves to an ARRAY/ASSOC cell (VT_ARRAYVAR /
+    /// VT_ASSOCVAR) rather than a scalar (VT_VARIABLE). The verdict comes
+    /// from the cell's DECLARED type — the ARRAY/ASSOC mark tables, the
+    /// structured cell in `shell_state.variables`, or the dynamic-array
+    /// registry — never from the value's text. A scalar whose value merely
+    /// LOOKS like array storage (`x='(a b c)'`) is still a scalar, so
+    /// `"${x[@]}"` is one element and `${#x[@]}` is 1 (rubash#755); the old
+    /// textual `is_array_storage` test re-parsed the scalar as a list.
+    pub(in crate::executor) fn parameter_is_array_variable(&self, name: &str) -> bool {
+        let resolved = self
+            .resolved_variable_name(name)
+            .unwrap_or_else(|| name.to_string());
+        if is_marked_array_var(&self.shell_state.env_vars, &resolved) {
+            return true;
+        }
+        if matches!(
+            self.shell_state
+                .variables
+                .get(&resolved)
+                .map(|variable| &variable.value),
+            Some(crate::shell::ShellValue::IndexedArray(_))
+                | Some(crate::shell::ShellValue::AssociativeArray(_))
+        ) {
+            return true;
+        }
+        crate::executor::dynamic_arrays::is_dynamic_array_name(&resolved)
+    }
+
     /// GNU assoc_subrange (assoc.c:244): on an associative array the
     /// substring offset is a 1-based position into the hash-ordered word
     /// list — `${a[*]:0}` and `${a[*]:1}` both start at the first element,
@@ -426,9 +473,11 @@ impl Executor {
             // GNU subst.c:9064 get_var_and_type resolves / on
             // a scalar to VT_VARIABLE, so parameter_brace_substring
             // (subst.c:9083-9099) applies the offset/length to the string
-            // value itself rather than slicing an element list.
-            let is_array = is_marked_array_var(&self.shell_state.env_vars, &resolved)
-                || is_array_storage(&storage);
+            // value itself rather than slicing an element list. The
+            // array/scalar verdict is the CELL TYPE, not the value's text:
+            // a scalar `x='(a b c)'` must not be sliced as a list
+            // (rubash#755).
+            let is_array = self.parameter_is_array_variable(&resolved);
             if !is_array {
                 return Some(vec![crate::executor::parameter_substring(
                     &storage,
@@ -609,6 +658,10 @@ impl Executor {
                         assoc_nbuckets(&self.shell_state.env_vars, &storage_name),
                     ));
                 }
+                // A scalar base has exactly one index, 0 (rubash#755).
+                if !self.parameter_is_array_variable(&storage_name) {
+                    return Some(vec!["0".to_string()]);
+                }
                 return Some(array_indices(&storage));
             }
             if let Some(name) = word
@@ -622,8 +675,11 @@ impl Executor {
                         &storage,
                         assoc_nbuckets(&self.shell_state.env_vars, &storage_name),
                     )
-                } else {
+                } else if self.parameter_is_array_variable(&storage_name) {
                     array_indices(&storage)
+                } else {
+                    // Scalar base: the single index 0 (rubash#755).
+                    vec!["0".to_string()]
                 };
                 return Some(vec![keys.join(&self.ifs_first_char_separator())]);
             }
@@ -707,6 +763,11 @@ impl Executor {
                 &storage,
                 assoc_nbuckets(&self.shell_state.env_vars, name),
             ));
+        }
+        if !self.parameter_is_array_variable(name) {
+            // Scalar base: the list is the single whole-string element
+            // (rubash#755). The caller field-splits an unquoted form.
+            return Some(vec![crate::executor::shell_safe_value(&storage)]);
         }
         Some(array_values(&storage))
     }
@@ -805,7 +866,7 @@ impl Executor {
                         )
                         .len()
                     }
-                    Some(storage) => array_values(storage).len(),
+                    Some(storage) => self.array_base_element_values(array_name, storage).len(),
                     None => 0,
                 };
                 (0..count)
@@ -814,24 +875,10 @@ impl Executor {
             }
         } else {
             let storage = storage?;
-            if is_marked_var(
-                &self.shell_state.env_vars,
-                ASSOC_VARS,
-                &self.resolved_variable_name(array_name).unwrap_or_default(),
-            ) {
-                assoc_hash_ordered_values(
-                    &storage,
-                    assoc_nbuckets(
-                        &self.shell_state.env_vars,
-                        &self.resolved_variable_name(array_name).unwrap_or_default(),
-                    ),
-                )
-            } else {
-                array_values(&storage)
-            }
-            .into_iter()
-            .map(|value| self.apply_parameter_transform_value(&value, transform))
-            .collect::<Vec<_>>()
+            self.array_base_element_values(array_name, &storage)
+                .into_iter()
+                .map(|value| self.apply_parameter_transform_value(&value, transform))
+                .collect::<Vec<_>>()
         };
         if quoted_array_word && starred {
             // GNU string_list_pos_params (subst.c:3030): a quoted `*` joins
@@ -904,28 +951,36 @@ impl Executor {
             .map(|name| (name, false))
             .or_else(|| var_name.strip_suffix("[*]").map(|name| (name, true)))?;
         let storage = self.parameter_array_storage(array_name)?;
-        let values = if is_marked_var(
-            &self.shell_state.env_vars,
-            ASSOC_VARS,
-            &self.resolved_variable_name(array_name).unwrap_or_default(),
-        ) {
-            assoc_hash_ordered_values(
-                &storage,
-                assoc_nbuckets(
-                    &self.shell_state.env_vars,
-                    &self.resolved_variable_name(array_name).unwrap_or_default(),
-                ),
-            )
-        } else {
-            array_values(&storage)
-        }
-        .into_iter()
-        .map(|value| modify(&value))
-        .collect::<Vec<_>>();
+        let values = self
+            .array_base_element_values(array_name, &storage)
+            .into_iter()
+            .map(|value| modify(&value))
+            .collect::<Vec<_>>();
         if quoted_array_word && starred {
             return Some(vec![values.join(&self.ifs_first_char_separator())]);
         }
         Some(values)
+    }
+
+    /// The element list a `name[@]`/`name[*]` word expands to, honouring the
+    /// cell type: an array/assoc base reads its storage entries, a scalar
+    /// base is a one-element list holding the whole string (GNU subst.c
+    /// get_var_and_type VT_VARIABLE), so a value that merely LOOKS like list
+    /// storage is never re-parsed (rubash#755).
+    fn array_base_element_values(&self, array_name: &str, storage: &str) -> Vec<String> {
+        let resolved = self
+            .resolved_variable_name(array_name)
+            .unwrap_or_else(|| array_name.to_string());
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved) {
+            assoc_hash_ordered_values(
+                storage,
+                assoc_nbuckets(&self.shell_state.env_vars, &resolved),
+            )
+        } else if self.parameter_is_array_variable(array_name) {
+            array_values(storage)
+        } else {
+            vec![storage.to_string()]
+        }
     }
 
     fn array_key_value_split_transform_values(&self, array_name: &str) -> Option<Vec<String>> {

@@ -57,9 +57,8 @@ impl Executor {
                         .env_vars
                         .get(target_name)
                         .and_then(|value| {
-                            if is_array_storage(value)
-                                || is_marked_array_var(&self.shell_state.env_vars, target_name)
-                            {
+                            // Cell type, not value text (rubash#755).
+                            if self.parameter_is_array_variable(target_name) {
                                 array_value_at(value, 0)
                             } else {
                                 Some(value.clone())
@@ -85,9 +84,8 @@ impl Executor {
                 .env_vars
                 .get(target_name)
                 .and_then(|value| {
-                    if is_array_storage(value)
-                        || is_marked_array_var(&self.shell_state.env_vars, target_name)
-                    {
+                    // Cell type, not value text (rubash#755).
+                    if self.parameter_is_array_variable(target_name) {
                         array_value_at(value, 0)
                     } else {
                         Some(value.clone())

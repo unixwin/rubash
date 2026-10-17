@@ -467,7 +467,13 @@ impl Executor {
                         crate::executor::expand_braced_indices::SubSiteGuard::new(this_frag)
                     });
                     let name = collect_braced_parameter_name(&mut chars);
-                    let value = self.expand_word(&format!("${{{name}}}"));
+                    // A bad-substitution diagnostic inside this fragment must
+                    // name the whole enclosing word (GNU subst.c:10278),
+                    // not just the `${...}` span (rubash#758).
+                    let value =
+                        crate::executor::expand_word::with_pending_diagnostic_word(word, || {
+                            self.expand_word(&format!("${{{name}}}"))
+                        });
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {

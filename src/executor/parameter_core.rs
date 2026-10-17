@@ -507,7 +507,13 @@ impl Executor {
         // slice separator (Bash extracts nested `${...}` as one unit).
         let (offset_str, length_str, has_length) = split_top_level_colon(rest);
         let offset_str = offset_str.trim_start();
-        if offset_str.is_empty() && length_str.is_empty() && !has_length {
+        if rest.is_empty() {
+            // `${v:}`: an empty substring operand. The braced-name gate
+            // rejects this shape as a bad substitution
+            // (braced_name_has_empty_substring_operand); this layer keeps
+            // returning None so a stray call can never slice. A
+            // whitespace-only operand (`${v: }`) is NOT empty — GNU's
+            // evalexp reads it as offset 0 (rubash#758).
             return None;
         }
 
@@ -702,7 +708,13 @@ impl Executor {
 
         let (offset_str, length_str, has_length) = split_top_level_colon(rest);
         let offset_str = offset_str.trim_start();
-        if offset_str.is_empty() && length_str.is_empty() && !has_length {
+        if rest.is_empty() {
+            // `${v:}`: an empty substring operand. The braced-name gate
+            // rejects this shape as a bad substitution
+            // (braced_name_has_empty_substring_operand); this layer keeps
+            // returning None so a stray call can never slice. A
+            // whitespace-only operand (`${v: }`) is NOT empty — GNU's
+            // evalexp reads it as offset 0 (rubash#758).
             return None;
         }
 

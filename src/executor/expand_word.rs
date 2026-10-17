@@ -411,6 +411,12 @@ impl Executor {
             return self.expand_braced_parameter_word(word, &resolved);
         }
 
+        // The bad-substitution diagnostic reports the word GNU was expanding
+        // (subst.c:10278), which for a walked fragment is the ENCLOSING word
+        // the walker recorded. Consume the one-shot record here so a nested
+        // fragment cannot inherit it (rubash#758).
+        let diagnostic_word = take_pending_diagnostic_word().unwrap_or_else(|| word.to_string());
+
         // GNU subst.c:10272-10288 (parameter_brace_expand): the parameter
         // name is terminated by the first character that cannot be part of
         // it; when that character starts no operator the switch default
@@ -425,7 +431,7 @@ impl Executor {
                 format!(
                     "{}{}: bad substitution\n",
                     self.diagnostic_prefix(),
-                    bad_substitution_display(word)
+                    bad_substitution_display(&diagnostic_word)
                 )
                 .as_bytes(),
             );
@@ -444,7 +450,7 @@ impl Executor {
                 format!(
                     "{}{}: bad substitution\n",
                     self.diagnostic_prefix(),
-                    bad_substitution_display(word)
+                    bad_substitution_display(&diagnostic_word)
                 )
                 .as_bytes(),
             );
@@ -803,6 +809,56 @@ pub(in crate::executor) fn braced_name_ends_on_quote(name: &str) -> bool {
     i < bytes.len() && matches!(bytes[i], b'\'' | b'"' | 0x17 | 0x18)
 }
 
+thread_local! {
+    /// One-shot display word for the next bad-substitution diagnostic: the
+    /// ENCLOSING word a walked `${}` fragment belongs to. GNU's
+    /// `report_error (_("%s: bad substitution"), string)` names the whole
+    /// word `expand_word_internal` was expanding (subst.c:10278), so
+    /// `echo A${x[0]y}B` reports `A${x[0]y}B`, not the braced span
+    /// (rubash#758). Consumed by the first gate evaluation so a NESTED
+    /// fragment (`${x-${y[0]z}}`) keeps its own word.
+    static PENDING_DIAGNOSTIC_WORD: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `word` recorded as the enclosing word for a walked `${}`
+/// fragment's bad-substitution diagnostic. The record is one-shot (see
+/// [`take_pending_diagnostic_word`]) and always cleared on return so it can
+/// never leak past the fragment.
+pub(in crate::executor) fn with_pending_diagnostic_word<T>(word: &str, f: impl FnOnce() -> T) -> T {
+    PENDING_DIAGNOSTIC_WORD.with(|slot| *slot.borrow_mut() = Some(word.to_string()));
+    let result = f();
+    PENDING_DIAGNOSTIC_WORD.with(|slot| *slot.borrow_mut() = None);
+    result
+}
+
+/// Consume the pending enclosing word, if any. Evaluating a fragment that is
+/// itself valid consumes the record so a nested fragment cannot inherit the
+/// outer word.
+pub(in crate::executor) fn take_pending_diagnostic_word() -> Option<String> {
+    PENDING_DIAGNOSTIC_WORD.with(|slot| slot.borrow_mut().take())
+}
+
+/// RAII scope arm: records `word` as the enclosing word for the duration of
+/// one `${}` fragment in a walker, restoring the previous record on drop.
+pub(in crate::executor) struct PendingDiagnosticWordGuard {
+    previous: Option<String>,
+}
+
+impl PendingDiagnosticWordGuard {
+    pub(in crate::executor) fn new(word: &str) -> Self {
+        let previous =
+            PENDING_DIAGNOSTIC_WORD.with(|slot| slot.borrow_mut().replace(word.to_string()));
+        Self { previous }
+    }
+}
+
+impl Drop for PendingDiagnosticWordGuard {
+    fn drop(&mut self) {
+        PENDING_DIAGNOSTIC_WORD.with(|slot| *slot.borrow_mut() = self.previous.take());
+    }
+}
+
 /// Renders a `${...}` word for the bad-substitution diagnostic: operator
 /// words quote-decoded before re-expansion carry data sentinels that
 /// must read back as the source characters like GNU's diagnostic.
@@ -891,10 +947,33 @@ fn brace_subscript_end(bytes: &[u8], open: usize) -> Option<usize> {
     None
 }
 
-/// subst.c:7583 `valid_brace_expansion_word` minus its array arm: subscript
-/// content errors keep their current reporting in the indexed-parameter
-/// arms, so a head carrying a `[` is deferred there (both `x[0]` and the
-/// malformed `x[a` class).
+/// GNU arrayfunc.c:1290 `valid_array_reference` on a name HEAD: an
+/// identifier base followed by a well-formed `[subscript]` whose closing
+/// `]` is the FINAL byte and whose subscript is non-empty. Quote-aware
+/// through [`brace_subscript_end`] (skipsubscript). Junk after a
+/// well-formed subscript (`v[0]x`) is not an array reference, so the caller
+/// lands on the `bad substitution` default (rubash#758); the subscript
+/// CONTENT is still validated by the indexed arms (`v[a` keeps its own
+/// reporting).
+fn valid_brace_array_reference(head: &[u8]) -> bool {
+    let Some(open) = head.iter().position(|b| *b == b'[') else {
+        return false;
+    };
+    if !valid_brace_identifier(&head[..open]) {
+        return false;
+    }
+    match brace_subscript_end(head, open) {
+        Some(end) => end + 1 == head.len() && end > open + 1,
+        None => false,
+    }
+}
+
+/// subst.c:7583 `valid_brace_expansion_word` minus its length arm: an array
+/// reference is validated as `identifier[non-empty-subscript]` ending at the
+/// `]` (subst.c:10042-10046 -> arrayfunc.c valid_array_reference), so
+/// `v[0]x` fails the gate and takes the subst.c:10276 bad-substitution
+/// default. Subscript CONTENT errors keep their current reporting in the
+/// indexed-parameter arms (`x[a` stays deferred there).
 fn valid_brace_gate_word(head: &[u8]) -> bool {
     if !head.is_empty() && head.iter().all(|b| b.is_ascii_digit()) {
         return true;
@@ -903,7 +982,7 @@ fn valid_brace_gate_word(head: &[u8]) -> bool {
         return true;
     }
     if head.contains(&b'[') {
-        return true;
+        return valid_brace_array_reference(head);
     }
     valid_brace_identifier(head)
 }
@@ -922,9 +1001,28 @@ fn valid_length_operand(operand: &[u8]) -> bool {
         return true;
     }
     if operand.contains(&b'[') {
-        return true;
+        return valid_brace_array_reference(operand);
     }
     valid_brace_identifier(operand)
+}
+
+/// GNU parameter_brace_expand subst.c:9777 `case ':'`: the substring operand
+/// text handed to `verify_substring_values` must be non-empty. A body that
+/// is exactly `<param>:` — `${v:}`, `${@:}`, `${v2:}`, `${!v:}` — is the
+/// subst.c:10276 bad-substitution default, while `${v::}` (empty
+/// offset/length pair), `${v: }` (space offset) and `${v:0:}` stay valid
+/// (rubash#758). The check is anchored on the extracted name head, so a `:`
+/// inside an operator word (`${v+a:}`) is never mistaken for the substring
+/// separator.
+fn braced_name_has_empty_substring_operand(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let head = brace_name_head(bytes);
+    if !head.is_empty() {
+        return head.len() + 1 == bytes.len() && bytes[head.len()] == b':';
+    }
+    // A single special-parameter lead (`${@:}`, `${*:}`) extracts an empty
+    // head; the body is exactly `<special>:`.
+    bytes.len() == 2 && brace_special_single(bytes[0]) && bytes[1] == b':'
 }
 
 /// GNU subst.c:9777 `parameter_brace_expand` name gate, mapped 1:1:
@@ -957,6 +1055,14 @@ pub(in crate::executor) fn braced_name_is_bad_substitution(name: &str) -> bool {
     // `${#name}` with an identifier starter: whole-body length form.
     if bytes.first() == Some(&b'#') && bytes.get(1).is_some_and(|b| is_variable_starter(*b)) {
         return !valid_length_operand(&bytes[1..]);
+    }
+
+    // GNU parameter_brace_expand subst.c:9777 `case ':'`: a body that is
+    // exactly `<param>:` has an empty substring operand — the subst.c:10276
+    // bad-substitution default (`${v:}`, `${@:}`, `${v2:}`), while `${v::}`
+    // and `${v: }` stay valid (rubash#758).
+    if braced_name_has_empty_substring_operand(name) {
+        return true;
     }
 
     let head = brace_name_head(bytes);
