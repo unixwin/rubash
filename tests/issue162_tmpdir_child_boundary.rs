@@ -18,6 +18,12 @@
 //!    boundary rule as PATH (shell display form inside, process form at the
 //!    child boundary; docs/issue329-path-form-policy-analysis.md).
 
+//! Windows-only file: the engine boundary under test is cfg(windows)
+//! (external_inner.rs TMPDIR arms), and every fixture child is cmd.exe.
+//! Off Windows it compiles to zero tests (issue144 precedent).
+
+#![cfg(windows)]
+
 use std::process::Command;
 
 fn rubash(args: &[&str], env_clear: bool) -> (String, String) {
