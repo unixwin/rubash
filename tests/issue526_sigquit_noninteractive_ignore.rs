@@ -131,12 +131,15 @@ fn trapped_sigquit_still_fires_action() {
 }
 
 /// Guard against widening the ignore: untrapped SIGINT keeps its killing
-/// default in a non-interactive shell (GNU rc 130, no further output).
+/// default in a non-interactive shell — the shell dies BY the signal
+/// (GNU sig.c kill_shell; verified: GNU itself reports signaled under a
+/// direct waiter, and only a PARENT translates that to rc 130 per
+/// jobs.c:2960. The harness maps signaled to -1, so pin that).
 #[test]
 fn untrapped_sigint_still_terminates_shell() {
     let out = run_c("kill -INT $$; echo not-reached");
     assert_eq!(out.stdout, "", "nothing may run after a fatal SIGINT");
-    assert_eq!(out.status, 130, "128+SIGINT");
+    assert_eq!(out.status, -1, "signaled by SIGINT (see above)");
 }
 
 /// And SIGTERM likewise stays fatal (GNU rc 143).
@@ -144,5 +147,5 @@ fn untrapped_sigint_still_terminates_shell() {
 fn untrapped_sigterm_still_terminates_shell() {
     let out = run_c("kill -TERM $$; echo not-reached");
     assert_eq!(out.stdout, "", "nothing may run after a fatal SIGTERM");
-    assert_eq!(out.status, 143, "128+SIGTERM");
+    assert_eq!(out.status, -1, "signaled by SIGTERM (see above)");
 }
