@@ -32,6 +32,199 @@ pub const LONG_OPTIONS: &[&str] = &[
 /// shell.c:264,274).
 pub const LONG_OPTIONS_WITH_VALUE: &[&str] = &["init-file", "rcfile"];
 
+/// One GNU short invocation option (`shell.c` parse_shell_options):
+/// the accepted letter plus the product-help copy. `value_name` is `Some`
+/// for the letters that take the following argv word as their value
+/// (`-c <command>`, `-o <option>`, `-O <shopt>` — shell.c:919-958), and
+/// `long_alias` names an equivalent GNU long option when one exists
+/// (`-l, --login`). The table lives in the lib so the product help is
+/// generated from the same set the parser accepts instead of being
+/// hand-maintained next to it (niubash#385).
+pub struct ShellShortOption {
+    pub letter: char,
+    pub value_name: Option<&'static str>,
+    pub long_alias: Option<&'static str>,
+    pub description: &'static str,
+}
+
+/// The short options `parse_shell_options` accepts, in help order: the
+/// invocation-only letters first (`-ilrsD or -c command or -O shopt_option`,
+/// shell.c:2088), then the `set -o` single letters of the usage block
+/// (`-abefhkmnptuvxBCEHPT or -o option`, shell.c:2095). This is the single
+/// source of truth for `is_short_option_letter`, and therefore for the
+/// accepted set in both the engine's argv parser and the niu launcher help.
+pub const SHORT_OPTIONS: &[ShellShortOption] = &[
+    ShellShortOption {
+        letter: 'c',
+        value_name: Some("command"),
+        long_alias: None,
+        description: "Execute the next non-option argument as a command",
+    },
+    ShellShortOption {
+        letter: 'i',
+        value_name: None,
+        long_alias: None,
+        description: "Force the interactive shell",
+    },
+    ShellShortOption {
+        letter: 'l',
+        value_name: None,
+        long_alias: Some("--login"),
+        description: "Act as a login shell",
+    },
+    ShellShortOption {
+        letter: 'r',
+        value_name: None,
+        long_alias: Some("--restricted"),
+        description: "Restricted shell (restricts cd and PATH/ENV changes)",
+    },
+    ShellShortOption {
+        letter: 's',
+        value_name: None,
+        long_alias: None,
+        description: "Read commands from standard input",
+    },
+    ShellShortOption {
+        letter: 'D',
+        value_name: None,
+        long_alias: None,
+        description: "Dump locale-translatable strings and exit",
+    },
+    ShellShortOption {
+        letter: 'o',
+        value_name: Some("option"),
+        long_alias: None,
+        description: "Set a `set -o` option by name",
+    },
+    ShellShortOption {
+        letter: 'O',
+        value_name: Some("shopt"),
+        long_alias: None,
+        description: "Set a `shopt` option by name",
+    },
+    ShellShortOption {
+        letter: 'a',
+        value_name: None,
+        long_alias: None,
+        description: "allexport: export all new and modified variables",
+    },
+    ShellShortOption {
+        letter: 'b',
+        value_name: None,
+        long_alias: None,
+        description: "notify: report the status of terminated background jobs",
+    },
+    ShellShortOption {
+        letter: 'e',
+        value_name: None,
+        long_alias: None,
+        description: "errexit: exit immediately if a command fails",
+    },
+    ShellShortOption {
+        letter: 'f',
+        value_name: None,
+        long_alias: None,
+        description: "noglob: disable pathname expansion",
+    },
+    ShellShortOption {
+        letter: 'h',
+        value_name: None,
+        long_alias: None,
+        description: "hashall: remember the location of executed commands",
+    },
+    ShellShortOption {
+        letter: 'k',
+        value_name: None,
+        long_alias: None,
+        description: "keyword: keep keyword=value arguments in the environment",
+    },
+    ShellShortOption {
+        letter: 'm',
+        value_name: None,
+        long_alias: None,
+        description: "monitor: enable job control",
+    },
+    ShellShortOption {
+        letter: 'n',
+        value_name: None,
+        long_alias: None,
+        description: "noexec: read commands without executing them",
+    },
+    ShellShortOption {
+        letter: 'p',
+        value_name: None,
+        long_alias: None,
+        description: "privileged: do not reset the effective uid",
+    },
+    ShellShortOption {
+        letter: 't',
+        value_name: None,
+        long_alias: None,
+        description: "onecmd: exit after reading and executing one command",
+    },
+    ShellShortOption {
+        letter: 'u',
+        value_name: None,
+        long_alias: None,
+        description: "nounset: error when expanding an unset variable",
+    },
+    ShellShortOption {
+        letter: 'v',
+        value_name: None,
+        long_alias: Some("--verbose"),
+        description: "verbose: echo input lines as they are read",
+    },
+    ShellShortOption {
+        letter: 'x',
+        value_name: None,
+        long_alias: None,
+        description: "xtrace: trace expanded commands",
+    },
+    ShellShortOption {
+        letter: 'B',
+        value_name: None,
+        long_alias: None,
+        description: "braceexpand: enable brace expansion",
+    },
+    ShellShortOption {
+        letter: 'C',
+        value_name: None,
+        long_alias: None,
+        description: "noclobber: refuse to overwrite existing files with >",
+    },
+    ShellShortOption {
+        letter: 'E',
+        value_name: None,
+        long_alias: None,
+        description: "errtrace: inherit the ERR trap in functions and subshells",
+    },
+    ShellShortOption {
+        letter: 'H',
+        value_name: None,
+        long_alias: None,
+        description: "histexpand: enable ! history expansion",
+    },
+    ShellShortOption {
+        letter: 'P',
+        value_name: None,
+        long_alias: None,
+        description: "physical: do not resolve symlinks in cd",
+    },
+    ShellShortOption {
+        letter: 'T',
+        value_name: None,
+        long_alias: None,
+        description: "functrace: inherit DEBUG and RETURN traps",
+    },
+];
+
+/// Whether `flag` is a short invocation option GNU `parse_shell_options`
+/// accepts. Derived from `SHORT_OPTIONS`, so the parser's accepted set and
+/// the product help cannot drift apart.
+pub fn is_short_option_letter(flag: char) -> bool {
+    SHORT_OPTIONS.iter().any(|option| option.letter == flag)
+}
+
 /// The usage-contract shell name for this invocation, when `--help` must
 /// print the GNU usage form (issue #585). GNU keys the fork off argv[0]'s
 /// basename (shell.c set_shell_name): the `.exe` spelling is a Windows
@@ -115,4 +308,47 @@ pub fn show_shell_version(version: Option<&str>) {
     println!("This is free software; you are free to change and redistribute it.");
     println!("There is NO WARRANTY, to the extent permitted by law.");
     println!("{}", crate::build_info::version_appendix());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_option_table_covers_exactly_the_parser_letters() {
+        // The accepted set of shell.c parse_shell_options: the invocation-only
+        // letters `-ilrsD or -c command or -O shopt_option` plus the
+        // single-letter `set -o` flags `-abefhkmnptuvxBCEHPT`. `-e`, `-o`,
+        // `-u`, `-x` (rubash#382 / niubash#385) must be in it.
+        let mut expected: Vec<char> = "cilrsDoOabefhkmnptuvxBCEHPT".chars().collect();
+        let mut actual: Vec<char> = SHORT_OPTIONS.iter().map(|option| option.letter).collect();
+        expected.sort_unstable();
+        actual.sort_unstable();
+        assert_eq!(
+            actual, expected,
+            "short-option table drifted from the parser set"
+        );
+        for letter in expected {
+            assert!(is_short_option_letter(letter), "missing {letter}");
+        }
+        assert!(!is_short_option_letter('Z'));
+        assert!(!is_short_option_letter('d'));
+        assert!(!is_short_option_letter('q'));
+    }
+
+    #[test]
+    fn value_taking_short_options_name_their_argument() {
+        for (letter, name) in [('c', "command"), ('o', "option"), ('O', "shopt")] {
+            let option = SHORT_OPTIONS
+                .iter()
+                .find(|option| option.letter == letter)
+                .expect("value-taking option present");
+            assert_eq!(option.value_name, Some(name));
+        }
+        let login = SHORT_OPTIONS
+            .iter()
+            .find(|option| option.letter == 'l')
+            .expect("login option present");
+        assert_eq!(login.long_alias, Some("--login"));
+    }
 }

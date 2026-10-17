@@ -35,35 +35,80 @@ pub struct ShellInvocation {
 
 impl ShellInvocation {
     pub fn parse(args: &[String]) -> Result<Self, String> {
+        // GNU shell.c parse_shell_options walks the leading option words and
+        // treats each `-`/`+` word as a cluster of single-letter flags. Most
+        // letters are boolean flags, but `o` and `O` consume the NEXT argv
+        // word as their value — never the rest of the cluster (shell.c:931-
+        // 958; empirical GNU 5.3.0: `-eo pipefail` == `-e -o pipefail`,
+        // while `-eopipefail` takes `-c` as the option name and fails).
+        // Normalize each cluster into the token shapes the loop below
+        // consumes: one `-<letter>` / `+<letter>` per flag, with `-o`/`-O`
+        // immediately followed by the argv word they take. Long options
+        // (`--rcfile`) and the first non-option word are copied verbatim.
         let mut expanded = Vec::with_capacity(args.len());
-        for arg in args {
-            // Combined short flags ("-ne", "-lc", "-ilc") are a single-dash
-            // concept; long options ("--rcfile") must never be exploded even
-            // when every letter happens to be a whitelisted flag char.
-            if let Some(short_flags) = arg.strip_prefix('-').filter(|rest| !rest.starts_with('-')) {
-                if short_flags.len() > 1
-                    && !short_flags.contains('o')
-                    && !short_flags.contains('O')
-                    && short_flags.chars().all(|f| {
-                        f == 'c'
-                            || f == 's'
-                            || f == 'i'
-                            || f == 'l'
-                            || f == 'D'
-                            || cli_flag_name(f).is_some()
-                    })
-                {
-                    for flag in short_flags.chars() {
-                        expanded.push(if flag == 'c' {
-                            "-c".to_string()
-                        } else {
-                            format!("-{flag}")
-                        });
-                    }
-                    continue;
-                }
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if arg == "-" || arg == "--" {
+                // End of options (shell.c:905-911): the rest is the operand.
+                expanded.extend(args[i..].iter().cloned());
+                break;
             }
-            expanded.push(arg.clone());
+            if arg.starts_with("--") {
+                expanded.push(arg.to_string());
+                i += 1;
+                continue;
+            }
+            // A word that does not begin with `-`/`+` ends the option run
+            // (shell.c:899): copy it and everything after it untouched.
+            let Some(sign) = arg.chars().next().filter(|c| *c == '-' || *c == '+') else {
+                expanded.extend(args[i..].iter().cloned());
+                break;
+            };
+            let letters: Vec<char> = arg[1..].chars().collect();
+            if letters.is_empty() {
+                expanded.push(arg.to_string());
+                i += 1;
+                continue;
+            }
+            // A lone `-o`/`-O` takes the next argv word directly; a cluster
+            // that includes `o`/`O` takes the following words in turn. Only
+            // clusters made entirely of accepted letters are expanded — a
+            // cluster with an unknown letter is left for the loop below to
+            // report as GNU's invalid option.
+            let lone_value_option = letters.len() == 1 && (letters[0] == 'o' || letters[0] == 'O');
+            let known_cluster = letters.len() > 1
+                && letters
+                    .iter()
+                    .all(|flag| crate::usage::is_short_option_letter(*flag));
+            if lone_value_option || known_cluster {
+                let mut next_value = i + 1;
+                for &flag in &letters {
+                    if flag == 'o' || flag == 'O' {
+                        expanded.push(format!("{sign}{flag}"));
+                        if let Some(value) = args.get(next_value) {
+                            expanded.push(value.clone());
+                            next_value += 1;
+                        }
+                    } else if flag == 'c' {
+                        expanded.push("-c".to_string());
+                    } else if flag == 's' {
+                        expanded.push("-s".to_string());
+                    } else if flag == 'l' {
+                        expanded.push("-l".to_string());
+                    } else if flag == 'i' {
+                        expanded.push("-i".to_string());
+                    } else if flag == 'D' {
+                        expanded.push("-D".to_string());
+                    } else {
+                        expanded.push(format!("{sign}{flag}"));
+                    }
+                }
+                i = next_value;
+                continue;
+            }
+            expanded.push(arg.to_string());
+            i += 1;
         }
 
         let mut out = Self {
@@ -559,6 +604,98 @@ mod tests {
         let interactive = ShellInvocation::parse(&["-ilc".into(), "env -0".into()]).unwrap();
         assert_eq!(interactive.command.as_deref(), Some("env -0"));
         assert!(interactive.login && interactive.interactive);
+    }
+
+    // rubash#382: GNU shell.c parse_shell_options (shell.c:931-958) lets
+    // `o`/`O` in a combined option take the NEXT argv word as their value.
+    // `-eo pipefail -c ...` is a common CI/Makefile invocation, so the
+    // clustered form must match the separated one byte for byte.
+
+    #[test]
+    fn clustered_value_option_consumes_the_next_argv() {
+        let clustered =
+            ShellInvocation::parse(&["-eo".into(), "pipefail".into(), "-c".into(), "true".into()])
+                .unwrap();
+        let separated = ShellInvocation::parse(&[
+            "-e".into(),
+            "-o".into(),
+            "pipefail".into(),
+            "-c".into(),
+            "true".into(),
+        ])
+        .unwrap();
+        assert_eq!(clustered.shell_flags, separated.shell_flags);
+        assert!(clustered.shell_flags.contains(&("errexit".into(), true)));
+        assert!(clustered.shell_flags.contains(&("pipefail".into(), true)));
+        assert_eq!(clustered.command.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn clustered_value_option_after_other_flags_still_takes_next_argv() {
+        // `-euo pipefail`: `e` and `u` are boolean, `o` takes `pipefail`.
+        let parsed =
+            ShellInvocation::parse(&["-euo".into(), "pipefail".into(), "-c".into(), "true".into()])
+                .unwrap();
+        assert!(parsed.shell_flags.contains(&("errexit".into(), true)));
+        assert!(parsed.shell_flags.contains(&("nounset".into(), true)));
+        assert!(parsed.shell_flags.contains(&("pipefail".into(), true)));
+        assert_eq!(parsed.command.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn clustered_value_option_does_not_take_the_rest_of_the_cluster() {
+        // GNU takes the next ARGV word, not the cluster tail: the letters
+        // after `o` stay flags, so `-eopipefail` binds the following `-c`
+        // as the option name (and later fails) rather than setting
+        // pipefail. Pin the flag scanning shape.
+        let parsed =
+            ShellInvocation::parse(&["-eop".into(), "pipefail".into(), "-c".into(), "true".into()])
+                .unwrap();
+        // `p` is `privileged` (a flag), and the option name is `pipefail`
+        // from the next argv — the letters after `o` are not swallowed as
+        // the value.
+        assert!(parsed.shell_flags.contains(&("privileged".into(), true)));
+        assert_eq!(
+            parsed
+                .shell_flags
+                .iter()
+                .filter(|(name, _)| name == "pipefail")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn clustered_shopt_option_consumes_the_next_argv() {
+        let parsed =
+            ShellInvocation::parse(&["-eO".into(), "extglob".into(), "-c".into(), "true".into()])
+                .unwrap();
+        assert!(parsed.shell_flags.contains(&("errexit".into(), true)));
+        assert_eq!(parsed.shopt_flags, vec![("extglob".into(), true)]);
+        assert_eq!(parsed.command.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn clustered_plus_value_option_carries_the_sign() {
+        let parsed =
+            ShellInvocation::parse(&["+eo".into(), "pipefail".into(), "-c".into(), "true".into()])
+                .unwrap();
+        assert_eq!(
+            parsed.shell_flags,
+            vec![("errexit".into(), false), ("pipefail".into(), false),]
+        );
+        assert_eq!(parsed.command.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn cluster_after_the_script_is_a_positional_parameter() {
+        // GNU stops option parsing at the first non-option word: a
+        // `-`-looking word after the script name is an ordinary positional,
+        // not a flag cluster to expand.
+        let parsed =
+            ShellInvocation::parse(&["script.sh".into(), "-eo".into(), "pipefail".into()]).unwrap();
+        assert_eq!(parsed.script.as_deref(), Some("script.sh"));
+        assert_eq!(parsed.positional_params, vec!["-eo", "pipefail"]);
     }
 
     #[test]

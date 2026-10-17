@@ -453,10 +453,9 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                 // GNU invalid-option check first (`bash -c -Z ...`).
                 if script.starts_with('-') || script.starts_with('+') {
                     let sign = &script[..1];
-                    let invalid = script[1..].chars().find(|ch| {
-                        !matches!(*ch, 'i' | 'D' | 'o' | 'O' | 'c' | 's')
-                            && !GNU_SHORT_OPTIONS.contains(&ch)
-                    });
+                    let invalid = script[1..]
+                        .chars()
+                        .find(|ch| !rubash::usage::is_short_option_letter(*ch));
                     if let Some(ch) = invalid {
                         eprintln!("bash: {sign}{ch}: invalid option");
                         show_shell_usage();
@@ -660,10 +659,9 @@ struct LongOptionState {
 use rubash::usage::{LONG_OPTIONS, LONG_OPTIONS_WITH_VALUE};
 
 /// The set -o short-flag letters GNU's change_flag accepts
-/// (shell.c:966-971 reports any other character as an invalid option).
-const GNU_SHORT_OPTIONS: &[char] = &[
-    'a', 'b', 'e', 'f', 'h', 'k', 'm', 'n', 'p', 't', 'u', 'v', 'x', 'B', 'C', 'E', 'H', 'P', 'T',
-];
+/// (shell.c:966-971 reports any other character as an invalid option) now
+/// lives in `rubash::usage::SHORT_OPTIONS` / `is_short_option_letter`, the
+/// same table the product help is generated from.
 
 fn parse_long_options(
     executor: &mut Executor,
