@@ -12,6 +12,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use super::support_names::split_shell_path;
 use crate::executor::markers::DATA_DOLLAR;
@@ -36,6 +37,12 @@ struct CommandLookupCache {
     /// the PATH x PATHEXT per-candidate stat grid with one read_dir per
     /// directory (rubash#159).
     listings: HashMap<PathBuf, Arc<HashSet<String>>>,
+    /// When each listing was read (the directory mtime). A listing whose
+    /// directory mtime moved is dropped before a miss is concluded
+    /// (rubash#392): `wpm` replaces command links by unlink+create, so a
+    /// directory listed while a link was missing would otherwise keep
+    /// answering "absent" for the life of the process.
+    listing_stamps: HashMap<PathBuf, SystemTime>,
     /// `winuxcmd help NAME` dispatcher probe outcomes keyed by dispatch
     /// name (rubash#159). Each uncached probe is a child process; GNU has
     /// no analogue because findcmd.c:623 find_user_command_in_path is a
@@ -62,6 +69,7 @@ impl CommandLookupCache {
         self.fingerprint = fingerprint;
         self.results.clear();
         self.listings.clear();
+        self.listing_stamps.clear();
         self.probes.clear();
         self.path_dirs = None;
         self.path_extensions = None;
@@ -76,6 +84,7 @@ fn command_lookup_cache() -> &'static Mutex<CommandLookupCache> {
             fingerprint: String::new(),
             results: HashMap::new(),
             listings: HashMap::new(),
+            listing_stamps: HashMap::new(),
             probes: HashMap::new(),
             path_dirs: None,
             path_extensions: None,
@@ -287,18 +296,7 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
                 return None;
             }
         }
-        let result = find_user_command_uncached(name, env_vars, &fingerprint);
-        if result.is_none() {
-            let mut cache = command_lookup_cache()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if cache.fingerprint != fingerprint {
-                cache.reset(fingerprint);
-            } else {
-                cache.results.insert(name.to_string(), None);
-            }
-        }
-        return result;
+        return find_user_command_uncached(name, env_vars, &fingerprint);
     }
 
     let fingerprint = command_lookup_fingerprint(env_vars);
@@ -320,9 +318,10 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
                 } else {
                     return Some(path.clone());
                 }
-            } else {
-                return result.clone();
             }
+            // rubash#392: a memoized miss is no longer served — fall through
+            // to the PATH walk (GNU findcmd.c:623 re-walks for every unhashed
+            // lookup, so a command that appears mid-session stays findable).
         }
     }
 
@@ -337,7 +336,13 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
     if cache.results.len() >= 4096 {
         cache.results.clear();
     }
-    cache.results.insert(name.to_string(), result.clone());
+    // Only positive resolutions are memoized (rubash#392): a miss must stay
+    // re-checkable — the walk's directory listings validate themselves against
+    // the directory mtime, so a command that appears mid-session (the wpm
+    // unlink+create window) is found on the next lookup.
+    if result.is_some() {
+        cache.results.insert(name.to_string(), result.clone());
+    }
     result
 }
 
@@ -359,15 +364,16 @@ fn cached_path_still_valid(path: &Path) -> bool {
 /// grid. One read_dir per directory replaces the grid and is remembered
 /// for the life of the fingerprint.
 ///
-/// This is an in-process negative cache by design: bash has none (a miss
-/// re-walks and can observe a file that just appeared), so the divergence
-/// is bounded to "a file created inside an already-listed PATH directory
-/// after its listing was taken is not found until the fingerprint changes
-/// or `hash -r` (builtins/hash.def:150 phash_flush) clears the cache". An
-/// unreadable directory (missing PATH entry, permission denial) yields an
-/// empty listing -- exactly the set of names the per-candidate stat walk
-/// would have found there: none. `cache` must already be verified against
-/// the current fingerprint by the caller.
+/// The listing is a cache, not an oracle: rubash#392 validates it against
+/// the directory mtime before a miss is concluded (one stat per consulted
+/// directory, miss path only) and drops it when the directory's entry set
+/// moved -- `wpm` replaces command links by unlink+create (WinuxCmd#1188,
+/// #1206), so a listing read while a link was absent must not keep
+/// answering "absent". Inside a fingerprint, hits (`results`) stay
+/// memoized; misses do not. An unreadable directory (missing PATH entry,
+/// permission denial) yields an empty listing -- exactly the set of names
+/// the per-candidate stat walk would have found there: none. `cache` must
+/// already be verified against the current fingerprint by the caller.
 #[cfg(not(unix))]
 fn cached_dir_listing(cache: &mut CommandLookupCache, directory: &Path) -> Arc<HashSet<String>> {
     if let Some(listing) = cache.listings.get(directory) {
@@ -384,6 +390,10 @@ fn cached_dir_listing(cache: &mut CommandLookupCache, directory: &Path) -> Arc<H
     let listing = Arc::new(names);
     if cache.listings.len() >= 512 {
         cache.listings.clear();
+        cache.listing_stamps.clear();
+    }
+    if let Some(stamp) = dir_mtime(directory) {
+        cache.listing_stamps.insert(directory.to_path_buf(), stamp);
     }
     cache
         .listings
@@ -472,22 +482,67 @@ fn find_in_path_via_listings(
     // one contains() per PATH entry per PATHEXT candidate and no
     // allocation at all.
     let candidates = listed_candidates(name, &extensions);
-    for dir in dirs.iter() {
-        let listing = cached_dir_listing(&mut cache, dir);
-        for candidate in &candidates {
-            // HashSet<String>::contains(&str): no lookup-key allocation.
-            if !listing.contains(candidate.listing_key.as_str()) {
-                continue;
-            }
-            // The listing only proves the NAME exists; confirm the stat
-            // walk's exact semantics for directories and dangling symlinks.
-            let path = dir.join(&candidate.file);
-            if path.is_file() {
-                return Some(path);
+    for attempt in 0..2 {
+        for dir in dirs.iter() {
+            let listing = cached_dir_listing(&mut cache, dir);
+            for candidate in &candidates {
+                // HashSet<String>::contains(&str): no lookup-key allocation.
+                if !listing.contains(candidate.listing_key.as_str()) {
+                    continue;
+                }
+                // The listing only proves the NAME exists; confirm the stat
+                // walk's exact semantics for directories and dangling symlinks.
+                let path = dir.join(&candidate.file);
+                if path.is_file() {
+                    return Some(path);
+                }
             }
         }
+        // rubash#392: before concluding a miss, re-stat the consulted
+        // directories (one stat each, miss path only) and drop listings whose
+        // mtime moved — the wpm unlink+create window (WinuxCmd#1188/#1206) is
+        // exactly "the file appeared inside an already-listed directory".
+        if attempt == 0 && invalidate_stale_listings(&mut cache, &dirs) {
+            continue;
+        }
+        break;
     }
     None
+}
+
+/// Directory mtime — the cheap "did the entry set change" probe (rubash#392).
+#[cfg(not(unix))]
+fn dir_mtime(directory: &Path) -> Option<SystemTime> {
+    fs::metadata(directory)
+        .and_then(|meta| meta.modified())
+        .ok()
+}
+
+/// Drop every cached listing whose directory mtime moved since it was read,
+/// together with the dispatcher-probe outcomes (they ride the same
+/// directories). Returns true when anything was dropped so the caller
+/// re-walks exactly once. Cost: one stat per consulted directory, and only on
+/// the miss path (rubash#392).
+#[cfg(not(unix))]
+fn invalidate_stale_listings(cache: &mut CommandLookupCache, dirs: &[PathBuf]) -> bool {
+    let stale = dirs
+        .iter()
+        .filter(|dir| match cache.listing_stamps.get(*dir) {
+            Some(taken) => dir_mtime(dir).map(|now| now != *taken).unwrap_or(true),
+            // A listing without a stamp predates the stamp bookkeeping:
+            // treat it as stale so the first miss re-reads it.
+            None => cache.listings.contains_key(*dir),
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for dir in &stale {
+        cache.listings.remove(dir);
+        cache.listing_stamps.remove(dir);
+    }
+    if !stale.is_empty() {
+        cache.probes.clear();
+    }
+    !stale.is_empty()
 }
 
 #[cfg_attr(unix, allow(unused_variables))]
@@ -5264,15 +5319,14 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_listing_negative_cache_boundary_hash_r_and_path_change() {
-        // rubash#159 documented divergence boundary: the per-directory
-        // listing and the per-name negative result are process-internal
-        // caches keyed by the env fingerprint. A file created inside an
-        // already-listed PATH directory after the miss is NOT found --
-        // not for the original name (per-name negative result, pre-#159
-        // behavior) and not for a never-seen name either (listing
-        // staleness). `hash -r` (phash_flush, builtins/hash.def:150) and
-        // any PATH change must make it findable again.
+    fn windows_listing_cache_finds_files_that_appear_but_not_ghosts() {
+        // rubash#392: the per-directory listing is validated against the
+        // directory mtime before a miss is concluded, so a file created
+        // inside an already-listed PATH directory (the `wpm` unlink+create
+        // window, WinuxCmd#1188/#1206) is found on the next lookup instead
+        // of staying "command not found" for the life of the process. A
+        // name with no file behind it stays a miss, and `hash -r`
+        // (phash_flush, builtins/hash.def:150) still drops everything.
         let dir = std::env::temp_dir().join("rubash-listing-negative-boundary");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -5286,10 +5340,24 @@ mod tests {
         fs::write(dir.join("late_tool.exe"), b"").unwrap();
         fs::write(dir.join("late_tool2.exe"), b"").unwrap();
 
-        // Sanctioned staleness: both lookups consult cached negatives and
-        // a cached listing taken before the files existed.
-        assert_eq!(find_user_command("late_tool", &env_vars), None);
+        // The files appeared: both names resolve now, including the
+        // never-seen-before `late_tool2` -- the listing staleness is gone.
+        assert_eq!(
+            find_user_command("late_tool", &env_vars),
+            Some(dir.join("late_tool.exe"))
+        );
+        assert_eq!(
+            find_user_command("late_tool2", &env_vars),
+            Some(dir.join("late_tool2.exe"))
+        );
+        // ...while a name with no file behind it is still a miss, and
+        // stays findable the moment its file appears.
         assert_eq!(find_user_command("late_tool3", &env_vars), None);
+        fs::write(dir.join("late_tool3.exe"), b"").unwrap();
+        assert_eq!(
+            find_user_command("late_tool3", &env_vars),
+            Some(dir.join("late_tool3.exe"))
+        );
 
         // `hash -r` drops everything; the fresh listing sees the files.
         clear_command_lookup_cache();
@@ -5298,11 +5366,15 @@ mod tests {
             Some(dir.join("late_tool.exe"))
         );
 
-        // Re-arm the stale state, then change PATH: fingerprint mismatch
-        // resets listings along with results.
+        // A PATH change still resets the scan scaffold (fingerprint
+        // mismatch), and the newly created file is visible either way.
         clear_command_lookup_cache();
         assert_eq!(find_user_command("late_tool4", &env_vars), None);
         fs::write(dir.join("late_tool4.exe"), b"").unwrap();
+        assert_eq!(
+            find_user_command("late_tool4", &env_vars),
+            Some(dir.join("late_tool4.exe"))
+        );
         env_vars.insert(
             "PATH".to_string(),
             format!("{};{}", std::env::temp_dir().display(), dir.display()),
@@ -5317,13 +5389,13 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_nohash_mode_memorizes_misses_but_not_hits() {
+    fn windows_nohash_mode_memoizes_hits_but_not_misses() {
         // GNU findcmd.c:348-427 search_for_command with hashing disabled
         // (`set +h`): no phash_search / phash_insert, every lookup
-        // re-walks PATH. rubash#159 memoizes only the misses on that path
-        // (in-process, fingerprint-keyed); positives must keep GNU's
-        // re-scan semantics: a command that appears in an EARLIER PATH
-        // directory mid-session is found on the next lookup.
+        // re-walks PATH. rubash#159 memoized that walk per fingerprint;
+        // rubash#392 keeps the walk cache but stops memoizing MISSES, so
+        // GNU's re-scan semantics hold for a command that appears
+        // mid-session -- in a later directory or in the same one.
         let dir0 = std::env::temp_dir().join("rubash-nohash-memo-0");
         let dir1 = std::env::temp_dir().join("rubash-nohash-memo-1");
         let _ = fs::remove_dir_all(&dir0);
@@ -5374,12 +5446,14 @@ mod tests {
             Some(dir0.join("memo_hit.exe"))
         );
 
-        // Miss: memoized process-internally; the file created after the
-        // miss is only visible once the fingerprint changes (documented
-        // divergence; GNU would find it immediately).
+        // Miss: NOT memoized (rubash#392). GNU finds the file on the next
+        // lookup and so must we -- with or without a fingerprint change.
         assert_eq!(find_user_command("memo_missing", &env_vars), None);
         fs::write(dir1.join("memo_missing.exe"), b"").unwrap();
-        assert_eq!(find_user_command("memo_missing", &env_vars), None);
+        assert_eq!(
+            find_user_command("memo_missing", &env_vars),
+            Some(dir1.join("memo_missing.exe"))
+        );
         env_vars.insert(
             "PATH".to_string(),
             format!("{};{}", dir1.display(), dir0.display()),
