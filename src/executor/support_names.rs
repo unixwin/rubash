@@ -478,75 +478,37 @@ pub(in crate::executor) fn is_stderr_write_redirect(redirect: &Redirect) -> bool
         )
 }
 
-/// The stdio fd an output-side redirect writes (or dup2s/close onto), for
-/// the ordered-list scan below. Only 0-2 are considered: numbered fds live
-/// on the persistent fd-table path.
-fn stdio_output_target_fd(redirect: &Redirect) -> Option<u32> {
-    if redirect.fd_var.is_some() {
-        return None;
-    }
-    let fd = match redirect.kind {
-        crate::parser::RedirectKind::Output
-        | crate::parser::RedirectKind::Append
-        | crate::parser::RedirectKind::ClobberOutput
-        | crate::parser::RedirectKind::CombinedOutput
-        | crate::parser::RedirectKind::CombinedAppend
-        | crate::parser::RedirectKind::DuplicateOutput
-        | crate::parser::RedirectKind::CloseOutput => redirect.fd.unwrap_or(1),
-        _ => return None,
-    };
-    (fd <= 2).then_some(fd)
-}
-
-/// True when an injected stdio dup2 (`2>&1`, `1>&2`) replayed on a body leaf
-/// still resolves to the SAME descriptor the compound binding gave it. A
-/// LATER redirect in the compound's ordered list that rebinds the dup's
-/// SOURCE fd (e.g. the `>file` in `2>&1 >file`) makes the replay resolve
-/// against that new binding instead — the rubash#699 inversion. In that case
-/// open_compound_output_redirects' left-to-right binding is authoritative and
-/// the leaf replay must be skipped. A dup whose source is NOT rebound later
-/// (the `{ cmd; } 2>&1 | next` pipeline routing) still needs the replay.
-fn stdio_dup_replays_same(cmd: &CommandNode, redirect: &Redirect) -> bool {
-    let Some(source_fd) = redirect_target_fd(&redirect.target) else {
-        return true;
-    };
-    let key = |candidate: &Redirect| {
-        (
-            format!("{:?}", candidate.kind),
-            candidate.fd,
-            candidate.target.clone(),
-        )
-    };
-    let wanted = key(redirect);
-    let Some(position) = cmd.redirects.iter().position(|r| key(r) == wanted) else {
-        return true;
-    };
-    !cmd.redirects
-        .iter()
-        .skip(position + 1)
-        .any(|later| stdio_output_target_fd(later) == Some(source_fd))
-}
-
-/// Splice admission for an fd-1 output redirect: an open/append leg, or a
-/// dup2 whose replay still sees the compound's binding (see
-/// stdio_dup_replays_same).
+/// Splice admission for an fd-1 output redirect. Only an OPEN/APPEND leg is
+/// replayed on the body's leaves; a `DuplicateOutput` (`2>&1`, `1>&2`) is
+/// NEVER sliced here (rubash#726).
+///
+/// GNU applies a compound command's redirect list once to its real
+/// descriptors before the body runs (redir.c:767-955 do_redirection_internal,
+/// unwound at redir.c:949-955) — `open_compound_output_redirects` does the
+/// same on rubash's fd table, and that binding is authoritative for both
+/// builtins (`apply_ordered_output_redirects` seeds from the fd table) and
+/// spawned children (`plan_external_stdio` seeds its slots from it). Replaying
+/// the dup on every leaf re-resolves its SOURCE at leaf time, which is only
+/// correct while nothing has rebound the source since compound entry. A
+/// later static redirect (`2>&1 >file`) was already excluded by rubash#699;
+/// a body-level `exec` (`{ exec > f; echo x >&2; } 2>&1`) is invisible to
+/// static analysis and replayed the dup against the NEW fd 1, writing x into
+/// f instead of the stdout captured at group entry (rubash#726 R2, the
+/// pre-existing rubash#170 nest4 class). The dup splice was removed
+/// altogether; the fd-table binding alone produces GNU's result.
 pub(in crate::executor) fn is_stdout_splice_redirect(
-    cmd: &CommandNode,
+    _cmd: &CommandNode,
     redirect: &Redirect,
 ) -> bool {
     is_stdout_write_redirect(redirect)
-        || (matches!(redirect.kind, crate::parser::RedirectKind::DuplicateOutput)
-            && stdio_dup_replays_same(cmd, redirect))
 }
 
 /// fd-2 counterpart of `is_stdout_splice_redirect`.
 pub(in crate::executor) fn is_stderr_splice_redirect(
-    cmd: &CommandNode,
+    _cmd: &CommandNode,
     redirect: &Redirect,
 ) -> bool {
     is_stderr_write_redirect(redirect)
-        || (matches!(redirect.kind, crate::parser::RedirectKind::DuplicateOutput)
-            && stdio_dup_replays_same(cmd, redirect))
 }
 
 pub(in crate::executor) fn apply_stdout_append_redirect(
