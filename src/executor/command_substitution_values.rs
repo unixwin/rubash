@@ -79,13 +79,11 @@ impl Executor {
                     .iter()
                     .map(|word| self.expand_word(word))
                     .collect::<Vec<_>>();
-                // Byte mode has no line-count representation; the real head
-                // must run instead of silently emitting whole lines.
-                if args.iter().any(|a| a == "-c" || a == "--bytes") {
-                    return None;
-                }
-                let count = crate::executor::pipeline_exec::head_line_count(&args).unwrap_or(10);
-                Some((input.split_inclusive('\n').take(count).collect(), 0))
+                // Byte mode, unknown options, operands and malformed/missing
+                // counts must run the real head (niubash#708); only the plain
+                // line-count shapes are represented inline.
+                let spec = crate::executor::pipeline_exec::parse_head_line_count(&args)?;
+                Some((spec.apply(input), 0))
             }
             "grep" => {
                 // The inline fast path only represents the exact two-word
