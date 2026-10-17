@@ -17,6 +17,7 @@ fn run_script(script: &str) -> String {
     std::fs::write(&script_path, script).expect("write probe script");
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(&script_path)
+        .current_dir(&dir)
         .stdin(Stdio::null())
         .env_remove("BASH_ENV")
         .env_remove("WINUXSH_ROOT")
