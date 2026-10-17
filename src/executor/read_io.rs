@@ -1,5 +1,4 @@
 use super::*;
-use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::substitution_metadata::bytes_to_shell_text;
 
 /// Re-emit a consumed stdin unit to the terminal while a one-char console
@@ -185,52 +184,47 @@ impl Executor {
             }
 
             let expanded_target = self.expand_redirect_target(redirect);
-            if let Some(fd) = expanded_target.strip_prefix('&') {
-                let fd = fd.trim_matches(|ch| ch == '"' || ch == STORAGE_WORD_PREFIX);
-                // The move form `<&N-` (make_cmd.c:704-718) dups fd N onto
-                // fd 0 — the same open file description (redir.c:1153), so
-                // reading N's endpoint reads the dup.
-                let fd = fd.strip_suffix('-').unwrap_or(fd);
-                if let Ok(fd) = fd.parse::<u32>() {
-                    // `<&8` after `exec 8<&0` — a dup of the process stdin
-                    // reads from the same transports as fd 0 itself
-                    // (niubash#279: the console keystroke must reach the
-                    // dup descriptor's reader, not collapse to EOF).
-                    if fd != 0
-                        && matches!(
-                            self.fd_table.read_endpoint(fd),
-                            Some(FdReadEndpoint::InheritedProcessStdin)
-                        )
-                    {
-                        return self.read_dup_of_stdin(
-                            silent,
-                            delimiter,
-                            char_limit,
-                            exact_char_limit,
-                        );
-                    }
-                    if let Some(output) =
-                        self.read_coproc_stdout(fd, delimiter, char_limit, exact_char_limit)
-                    {
-                        return Some(output);
-                    }
-                    if let Some(line) = self.read_virtual_fd_stdin(
-                        fd,
-                        silent,
-                        delimiter,
-                        char_limit,
-                        exact_char_limit,
-                    ) {
-                        return Some(line);
-                    }
-                    return self.read_heredoc_fd_input(
-                        cmd,
-                        fd,
-                        delimiter,
-                        char_limit,
-                        exact_char_limit,
-                    );
+            // `<&N`, the move form `<&N-` (make_cmd.c:704-718), and the
+            // fd-alias paths (`/dev/stdin`, `/dev/fd/N`, `/proc/self/fd/N`)
+            // all name a descriptor. GNU redir.c opens the alias device
+            // file, which the kernel resolves to a dup of fd N — reading it
+            // reads that descriptor (redir.c:1153). Windows has no such
+            // filesystem (shell_path_to_windows maps `/dev/stdin` to CONIN$,
+            // so the builtin blocked on the console instead of the piped
+            // fd 0: niubash#700; `/dev/fd/N` opened a nonexistent path and
+            // read empty: niubash#701). Resolve the alias to its descriptor
+            // here and serve it through the same fd-table/dup machinery as
+            // `<&N`.
+            if let Some((fd, _move_fd)) = redirect_target_fd_and_move(&expanded_target) {
+                // `<&8` after `exec 8<&0` — a dup of the process stdin
+                // reads from the same transports as fd 0 itself
+                // (niubash#279: the console keystroke must reach the
+                // dup descriptor's reader, not collapse to EOF).
+                if fd != 0
+                    && matches!(
+                        self.fd_table.read_endpoint(fd),
+                        Some(FdReadEndpoint::InheritedProcessStdin)
+                    )
+                {
+                    return self.read_dup_of_stdin(silent, delimiter, char_limit, exact_char_limit);
                 }
+                if let Some(output) =
+                    self.read_coproc_stdout(fd, delimiter, char_limit, exact_char_limit)
+                {
+                    return Some(output);
+                }
+                if let Some(line) =
+                    self.read_virtual_fd_stdin(fd, silent, delimiter, char_limit, exact_char_limit)
+                {
+                    return Some(line);
+                }
+                return self.read_heredoc_fd_input(
+                    cmd,
+                    fd,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                );
             }
 
             // niubash#177: same operand resolution as open_input_redirect —
