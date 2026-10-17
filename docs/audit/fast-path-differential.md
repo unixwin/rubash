@@ -378,9 +378,12 @@ niubash#346 (closed, fixed by rubash#649 + niubash#371).
 
 ## 9. Unconfirmed / deliberately out of scope
 
-* **`command` builtin carrier leak** (`… | command sed …` leaks
-  `U+E000 U+E01C`): reproduced, but it is not a fast path and the absolute
-  WinuxCmd path is clean — flagged for a separate investigation, not filed.
+* **`command` builtin carrier leak** — **re-checked and cleared**: five shapes
+  (`command sed 's/a/A/'`, `command cat`, `command wc -c`,
+  `command tr a-z A-Z`, `a=$(command wc -c)`) on a `0x1B` payload are byte-exact
+  (`41 1b 62 0a` / `4`) on **both** current master and the installed 1.4.0
+  build, so the original `U+E000 U+E01C` observation does not reproduce. Recorded
+  here so nobody chases it again; the flag is withdrawn rather than a fix added.
 * **`env`, `trap`, `uname`, `arch` outputs** are environment-/persona-dependent
   and compared informationally; only identity divergence is recorded.
 * **`cat` reading real files** is covered for plain/control/`-n`, but not for
