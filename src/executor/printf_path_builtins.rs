@@ -531,6 +531,13 @@ fn simple_path_tool_operands(args: &[String]) -> Option<Vec<&str>> {
 
 fn basename_value(path: &str) -> String {
     let normalized = path.replace('\\', "/");
+    // niubash#709: an empty operand is the empty basename in GNU (`basename ''`
+    // prints a blank line), but an all-slash operand stays `/` here because
+    // that is the spelling the external WinuxCmd basename reports too
+    // (the `//` root divergence is shared, not a fast-path defect).
+    if normalized.is_empty() {
+        return String::new();
+    }
     let trimmed = trim_trailing_slashes(&normalized);
     if trimmed.is_empty() {
         return "/".to_string();
@@ -542,20 +549,55 @@ fn basename_value(path: &str) -> String {
         .to_string()
 }
 
+/// POSIX `dirname` (GNU lib/mdir_name + lib/dirname-lgpl.c dir_len): the final
+/// component and any redundant slashes before it are stripped, `.` is returned
+/// when nothing is left, and a leading `//` (exactly two slashes before a
+/// non-slash, or a two-slash path) is the one prefix preserved. niubash#709:
+/// the old `trim_trailing_slashes` collapsed both `//` and `''` to `/`.
+/// Backslashes are normalized first, matching the other fast-path tools.
 fn dirname_value(path: &str) -> String {
     let normalized = path.replace('\\', "/");
-    let trimmed = trim_trailing_slashes(&normalized);
-    if trimmed.is_empty() {
-        return "/".to_string();
-    }
-    let Some((dir, _)) = trimmed.rsplit_once('/') else {
-        return ".".to_string();
-    };
-    let dir = trim_trailing_slashes(dir);
-    if dir.is_empty() {
-        "/".to_string()
+    let bytes = normalized.as_bytes();
+    let len = bytes.len();
+    // GNU dir_len: only a leading `//`-but-not-`///` prefix survives.
+    let prefix_length = if len == 0 {
+        0
+    } else if bytes[0] == b'/' {
+        if bytes.get(1) == Some(&b'/') && bytes.get(2) != Some(&b'/') {
+            2
+        } else {
+            1
+        }
     } else {
-        dir
+        0
+    };
+    // GNU last_component: skip leading slashes, then track the start of the
+    // final non-slash run.
+    let mut base = 0usize;
+    while base < len && bytes[base] == b'/' {
+        base += 1;
+    }
+    let mut saw_slash = false;
+    let mut index = base;
+    while index < len {
+        if bytes[index] == b'/' {
+            saw_slash = true;
+        } else if saw_slash {
+            base = index;
+            saw_slash = false;
+        }
+        index += 1;
+    }
+    // Strip the basename and the redundant slashes before it, never eating
+    // into the preserved prefix.
+    let mut length = base;
+    while prefix_length < length && bytes[length - 1] == b'/' {
+        length -= 1;
+    }
+    if length == 0 {
+        ".".to_string()
+    } else {
+        normalized[..length].to_string()
     }
 }
 
