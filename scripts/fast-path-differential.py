@@ -8,28 +8,35 @@ the two implementations silently changes the result of `a | cmd` depending on
 whether the producer is a builtin.
 
 This harness fires every supported fast-path shape through three producers and
-compares stdout/stderr/exit status:
+compares **stdout and exit status** byte for byte.  stderr is additionally
+compared for the four cases that are expected to print a diagnostic
+(`sleep_missing`, `sleep_invalid`, `sleep_badunit`, `basename_extra`; the
+`stderr=True` flag).  Appendix A marks the stderr-compared rows `yes`.
 
   FAST    niu -c '<body>'                       (in-process fast path)
-  EXT     niu -c '<body with `command cmd`>'    (external winuxcmd fallback)
+  EXT     <WX_BIN>/<cmd>.exe                    (external winuxcmd fallback)
   GNU     D:/Git/bin/bash.exe -c '<body>'       (GNU coreutils reference)
 
 The primary signal is FAST vs EXT (the fast path is supposed to be a pure
 optimisation of the fallback).  GNU is reported for classification.  A case
-"passes" when FAST matches EXT byte for byte on stdout and on exit status.
+"passes" when FAST matches EXT byte for byte on stdout and on exit status (and
+on stderr when the case is flagged).
 
 Why a Python script instead of a Rust integration test: the matrix needs to
 spawn the installed `niu.exe`, WinuxCmd binaries and the Git-for-Windows GNU
 coreutils, and to compare raw child stdout bytes.  That is an out-of-process
 differential; a Rust #[test] would have to re-implement the process plumbing
 for no benefit and would only run on a machine with this exact tool layout.
-The script is safe to re-run and takes `--only`, `--list` and `--json`.
+The script is safe to re-run (and to run concurrently: fixtures are
+per-process) and takes `--only`, `--list`, `--json`, `--no-ext`.
 
 Exit status:
   0  every non-known case matches its fallback (and every known divergence
      still diverges -- a case that mysteriously starts passing is reported so
      expectations can be updated)
-  1  at least one case regressed, or a known divergence no longer diverges
+  1  at least one case regressed, a known divergence no longer diverges, or
+     `--only` matched no cases
+  2  a required toolchain is missing (see `NIU`, `WX_BIN`, `GNU_BASH` below)
 
 Add a case by appending one dict to CASES; `known` marks a confirmed,
 issue-tracked divergence that is expected to fail.
@@ -38,6 +45,7 @@ issue-tracked divergence that is expected to fail.
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -81,8 +89,15 @@ EXT_EXE = {
 # Commands with no external counterpart: compare against the GNU bash builtin.
 NO_EXT = {":", "trap"}
 
+# Set by --no-ext: run without any WinuxCmd reference (every case compares
+# against GNU instead).  When false, a missing WX_BIN is a fatal error rather
+# than a silent downgrade to the GNU reference.
+EXT_DISABLED = False
+
 
 def ext_cmd(prog):
+    if EXT_DISABLED:
+        return None
     exe = EXT_EXE.get(prog)
     if not exe or prog in NO_EXT:
         return None
@@ -141,7 +156,7 @@ CASES = []
 
 
 def add(cid, kind, prog, cmd_args, producer=None, known=None, note="", stderr=False,
-        informational=False):
+        informational=False, env=None, require_empty_stderr=False):
     CASES.append(
         {
             "id": cid,
@@ -153,6 +168,8 @@ def add(cid, kind, prog, cmd_args, producer=None, known=None, note="", stderr=Fa
             "note": note,
             "stderr": stderr,
             "informational": informational,
+            "env": env,
+            "require_empty_stderr": require_empty_stderr,
         }
     )
 
@@ -252,9 +269,12 @@ add("cat_noeol", "pipe", "cat", "", P(NOEOL))
 add("cat_utf8", "pipe", "cat", "", P(UTF8))
 add("cat_empty", "pipe", "cat", "", P(EMPTY))
 add("cat_crlf", "pipe", "cat", "", P(CRLF))
-add("cat_file", "pipe", "cat", "{PLAINFILE}", P(b"ignored\n"), note="file operand")
-add("cat_file_ctrl", "pipe", "cat", "{ESCFILE}", P(b"ignored\n"), note="file operand, carried bytes")
-add("cat_file_n", "pipe", "cat", "-n {PLAINFILE}", P(b"ignored\n"), note="file operand + numbering")
+add("cat_file", "pipe", "cat", "{PLAINFILE}", P(b"ignored\n"), note="file operand",
+    require_empty_stderr=True)
+add("cat_file_ctrl", "pipe", "cat", "{ESCFILE}", P(b"ignored\n"),
+    note="file operand, carried bytes", require_empty_stderr=True)
+add("cat_file_n", "pipe", "cat", "-n {PLAINFILE}", P(b"ignored\n"),
+    note="file operand + numbering", require_empty_stderr=True)
 
 # ---------------------------------------------------------------- sed (pipe)
 add("sed_s", "pipe", "sed", "s/a/A/", P(PLAIN))
@@ -286,7 +306,21 @@ add("grep_noeol_nomatch", "pipe", "grep", "zzz", P(NOEOL), note="rc 1")
 add("grep_empty", "pipe", "grep", "a", P(EMPTY))
 add("grep_ctrl", "pipe", "grep", "a", P(CTRL))
 add("grep_utf8", "pipe", "grep", "é", P(UTF8))
-add("grep_utf8_i", "pipe", "grep", "-i É", P(UTF8), note="unicode case fold")
+# The non-ASCII fold is locale- and build-dependent: GNU grep folds \xc3\xa9
+# only in a UTF-8 locale, WinuxCmd grep does not fold it at all, and the inline
+# arm uses Rust to_lowercase() (locale-independent).  Pin LC_ALL=C for all three
+# legs so the console locale cannot flip the verdict: under C none of the
+# external greps fold, so a build whose inline arm folds Unicode (ignoring the
+# locale) is a real, detectable divergence rather than console noise.
+add(
+    "grep_utf8_i",
+    "pipe",
+    "grep",
+    "-i É",
+    P(UTF8),
+    note="non-ASCII fold, LC_ALL=C pinned; external greps do not fold, inline must not either",
+    env={"LC_ALL": "C", "LANG": "C"},
+)
 add("grep_empty_pattern", "pipe", "grep", "''", P(PLAIN))
 add("grep_dot", "pipe", "grep", "x.", P(DOT), note="regex -> external fallback")
 add("grep_v_all", "pipe", "grep", "-v a", P(PLAIN), note="all match -> rc 1")
@@ -506,14 +540,6 @@ add(
     known="MSYS `/x` -> `X:` translation applied only on the fast path",
     note="path translation: FAST A:/b vs /a/b",
 )
-add(
-    "dirname_letter",
-    "plain",
-    "dirname",
-    "/a/b/c",
-    known="duplicate of dirname_simple, kept to show the shape is generic",
-    note="path translation",
-)
 add("dirname_noslash", "plain", "dirname", "foo")
 add("dirname_dot", "plain", "dirname", ".")
 add("dirname_root", "plain", "dirname", "/")
@@ -641,14 +667,16 @@ def build_body(case, cmd):
     raise ValueError(kind)
 
 
-def run(shell, body, env=None):
+def run(shell, body, extra_env=None):
     if shell == "gnu":
         argv = [GNU_BASH, "-c", body]
         run_env = dict(os.environ)
         run_env["PATH"] = GNU_PATH + ";" + run_env.get("PATH", "")
     else:
         argv = [NIU, "-c", body]
-        run_env = env or os.environ
+        run_env = dict(os.environ)
+    if extra_env:
+        run_env.update(extra_env)
     try:
         p = subprocess.run(
             argv, capture_output=True, timeout=120, env=run_env
@@ -656,15 +684,22 @@ def run(shell, body, env=None):
         return p.stdout, p.stderr, p.returncode
     except subprocess.TimeoutExpired:
         return b"<timeout>", b"", -1
+    except FileNotFoundError:
+        return b"", ("%s: not found" % argv[0]).encode(), 127
 
 
 def main():
-    global _LARGE_FILE
+    global _LARGE_FILE, _FIXTURES, EXT_DISABLED
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--only", action="append", default=[], help="run only matching id substrings")
     ap.add_argument("--list", action="store_true", help="list case ids and exit")
     ap.add_argument("--json", help="write full results as JSON to this path")
     ap.add_argument("--show-ok", action="store_true", help="print passing cases too")
+    ap.add_argument(
+        "--no-ext",
+        action="store_true",
+        help="run without the WinuxCmd reference (every case compared against GNU)",
+    )
     args = ap.parse_args()
 
     if args.list:
@@ -672,24 +707,69 @@ def main():
             print(c["id"])
         return 0
 
+    # Toolchain preflight: fail loudly rather than degrade.  A missing WX_BIN
+    # used to silently downgrade the reference to GNU, misattributing WinuxCmd
+    # gaps to rubash (e.g. wc_m).
+    def fatal(message):
+        print("fast-path-differential: " + message, file=sys.stderr)
+        return 2
+
+    if not os.path.isfile(NIU):
+        return fatal("NIU not found: %s (set NIU=...)" % NIU)
+    if not os.path.isfile(GNU_BASH):
+        # run() reports a clean "not found" for a missing shell, but the GNU
+        # reference is required for classification; warn, do not fail.
+        print("fast-path-differential: warning: GNU_BASH not found: %s" % GNU_BASH, file=sys.stderr)
+    EXT_DISABLED = args.no_ext
+    if not args.no_ext and not os.path.isdir(WX_BIN):
+        return fatal(
+            "WX_BIN not found: %s (set WX_BIN=... or pass --no-ext)" % WX_BIN
+        )
+
     os.makedirs(TMPDIR, exist_ok=True)
-    fd, _LARGE_FILE = tempfile.mkstemp(prefix="fpd-large-", suffix=".txt", dir=TMPDIR)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(b"y" * 200000 + b"\n")
-    global _FIXTURES
-    plain_fixture = os.path.join(TMPDIR, "fpd-plain.txt")
-    with open(plain_fixture, "wb") as fh:
-        fh.write(PLAIN)
-    esc_fixture = os.path.join(TMPDIR, "fpd-esc.txt")
-    with open(esc_fixture, "wb") as fh:
-        fh.write(CTRL)
-    _FIXTURES["PLAINFILE"] = plain_fixture
-    _FIXTURES["ESCFILE"] = esc_fixture
+    # Per-process scratch directory: two concurrent harness instances never see
+    # each other's fixtures, so a fixturing error cannot masquerade as
+    # FAST/EXT agreement (the B1 false-PASS mode).
+    scratch = tempfile.mkdtemp(prefix="fpd-%d-" % os.getpid(), dir=TMPDIR)
+    _LARGE_FILE = os.path.join(scratch, "large.txt")
+    plain_fixture = os.path.join(scratch, "plain.txt")
+    esc_fixture = os.path.join(scratch, "esc.txt")
+    _FIXTURES = {"PLAINFILE": plain_fixture, "ESCFILE": esc_fixture}
 
-    selected = [
-        c for c in CASES if not args.only or any(s in c["id"] for s in args.only)
-    ]
+    try:
+        with open(_LARGE_FILE, "wb") as fh:
+            fh.write(b"y" * 200000 + b"\n")
+        with open(plain_fixture, "wb") as fh:
+            fh.write(PLAIN)
+        with open(esc_fixture, "wb") as fh:
+            fh.write(CTRL)
+        # Integrity gate: a truncated/missing fixture must fail, not silently
+        # compare empty stdout on all three legs.
+        for path, expected in ((plain_fixture, PLAIN), (esc_fixture, CTRL)):
+            with open(path, "rb") as fh:
+                if fh.read() != expected:
+                    return fatal("fixture content mismatch: %s" % path)
 
+        selected = [
+            c for c in CASES if not args.only or any(s in c["id"] for s in args.only)
+        ]
+        if not selected:
+            print(
+                "fast-path-differential: --only %r matched no cases"
+                % (args.only,),
+                file=sys.stderr,
+            )
+            return 1
+
+        ext_ref = "DISABLED (--no-ext)" if EXT_DISABLED else WX_BIN
+        print("FAST=%s  EXT=%s  GNU=%s" % (NIU, ext_ref, GNU_BASH))
+
+        return run_matrix(args, selected)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def run_matrix(args, selected):
     results = []
     regressions = []
     quietly_fixed = []
@@ -700,9 +780,9 @@ def main():
         body_ext = build_body(case, ext) if ext else None
         body_gnu = build_body(case, case["prog"])
 
-        f = run("niu", body_fast)
-        e = run("niu", body_ext) if body_ext else None
-        g = run("gnu", body_gnu)
+        f = run("niu", body_fast, case["env"])
+        e = run("niu", body_ext, case["env"]) if body_ext else None
+        g = run("gnu", body_gnu, case["env"])
 
         if case["informational"]:
             results.append(
@@ -711,6 +791,8 @@ def main():
                     "status": "INFO",
                     "known": case["known"],
                     "note": case["note"],
+                    "stderr": case["stderr"],
+                    "require_empty_stderr": case["require_empty_stderr"],
                     "fast": {"out": f[0].decode("latin-1"), "err": f[1].decode("latin-1"), "rc": f[2]},
                     "ext": (
                         {"out": e[0].decode("latin-1"), "err": e[1].decode("latin-1"), "rc": e[2]}
@@ -732,6 +814,10 @@ def main():
         match = (f[0] == ref[0]) and (f[2] == ref[2])
         if case["stderr"]:
             match = match and (f[1] == ref[1])
+        if case["require_empty_stderr"]:
+            # Fixture-backed cases: a missing/unreadable operand must never be
+            # recorded as agreement, even if all legs agree on the error.
+            match = match and (f[1] == b"") and (ref[1] == b"")
         match_gnu = (f[0] == g[0]) and (f[2] == g[2])
         ext_gnu = ((e[0] == g[0]) and (e[2] == g[2])) if e else None
 
@@ -758,6 +844,8 @@ def main():
                 "reference": ref_name,
                 "known": case["known"],
                 "note": case["note"],
+                "stderr": case["stderr"],
+                "require_empty_stderr": case["require_empty_stderr"],
                 "match_external": match,
                 "match_gnu": match_gnu,
                 "external_matches_gnu": ext_gnu,
@@ -777,16 +865,18 @@ def main():
         if status in ("DIVERGE", "FIXED?", "EXTBUG"):
             print("    FAST  out=%r rc=%s" % (f[0][:120], f[2]))
             print("    %-4s  out=%r rc=%s" % (ref_name, ref[0][:120], ref[2]))
-            print("    GNU   out=%r rc=%s" % (g[0][:120], g[2]))
+            if e:
+                print("    GNU   out=%r rc=%s" % (g[0][:120], g[2]))
 
     print()
     print(
-        "cases=%d pass=%d known=%d extbugs=%d regressions=%d fixed=%d"
+        "cases=%d pass=%d known=%d extbugs=%d info=%d regressions=%d fixed=%d"
         % (
             len(results),
             sum(1 for r in results if r["status"] == "PASS"),
             sum(1 for r in results if r["status"] == "KNOWN"),
             sum(1 for r in results if r["status"] == "EXTBUG"),
+            sum(1 for r in results if r["status"] == "INFO"),
             len(regressions),
             len(quietly_fixed),
         )
@@ -800,15 +890,6 @@ def main():
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(results, fh, indent=2)
         print("wrote " + args.json)
-
-    # Scratch artifacts are regenerated on every run; remove them so repeated
-    # runs stay side-effect free.
-    for path in [_LARGE_FILE, plain_fixture, esc_fixture]:
-        try:
-            if path:
-                os.remove(path)
-        except OSError:
-            pass
 
     return 1 if (regressions or quietly_fixed) else 0
 

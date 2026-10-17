@@ -27,7 +27,13 @@ driven three ways on the same input bytes:
 * **GNU** — the same body under `D:/Git/bin/bash.exe` with GNU coreutils first
   on `PATH`.
 
-stdout, stderr and exit status are compared as raw bytes. The primary signal is
+**stdout and exit status are compared as raw bytes.** stderr is compared in
+addition only for the four cases that are expected to print a diagnostic
+(`sleep_missing`, `sleep_invalid`, `sleep_badunit`, `basename_extra`, marked
+`stderr=True` in the harness; Appendix A tags those rows in its `stderr`
+column), because fallback diagnostics legitimately differ in wording (e.g.
+WinuxCmd `head: invalid option -- 'x'` vs GNU `head: unknown option -- x`) and
+comparing them everywhere would drown the signal. The primary signal is
 **FAST vs EXT** (an optimisation must reproduce its fallback); GNU classifies
 whether the fallback or the fast path is the one that is wrong.
 
@@ -240,8 +246,9 @@ control, NUL, `-v`, `-A`, `-n`, `-b`, `-s`, `-E`, `-T`, `-e`, no-trailing-newlin
 UTF-8, empty, CRLF, file operands (plain/control/`-n`); `sed` (pipe) `s///`,
 `s///g`, `1d`, `2d`, `-e`, no-trailing-newline, CRLF, control, UTF-8, BRE `.`
 and `[...]`, empty, FF; `grep` (pipe) literal, `-c`, `-n`, `-i`, `-v`, `-q`,
-`-cn`, `^`-anchor, no-trailing-newline, empty, control, UTF-8, `-i` UTF-8,
-empty pattern, regex (falls back), all-match `-v`; `wc` `-c`/`-l`/`-w`/default
+`-cn`, `^`-anchor, no-trailing-newline, empty, control, UTF-8, `-i` UTF-8 with
+`LC_ALL=C` pinned (see below), empty pattern, regex (falls back), all-match
+`-v`; `wc` `-c`/`-l`/`-w`/default
 on ASCII, UTF-8, NUL, empty, no-trailing-newline, and 200 KB input; `tr` plain,
 ranges, `\n` special, `[:lower:]`/`[:upper:]`, `-d` fallback, non-ASCII
 fallback, empty, control; the `sort`/`sed`/`tr`/`head`/`grep`/`wc`/`tail`/`uniq`
@@ -258,6 +265,17 @@ Notable *non*-divergences worth recording:
   fast-path defect.
 * `sort`/`sed` on CRLF strip the CR in FAST, WinuxCmd **and** the Windows GNU
   build alike — a platform text-mode artifact, not a fast-path defect.
+
+**Locale pin for the non-ASCII fold case.** `grep_utf8_i`
+(`printf 'café…' | grep -i É`) is the only case whose verdict depends on the
+console locale, so the harness pins `LC_ALL=C` (and `LANG=C`) for all three legs.
+Measured on the installed toolchain: under `C`/unset none of the legs fold
+(FAST/EXT/GNU all rc 1 → PASS); under `C.UTF-8`/`en_US.UTF-8` GNU folds (rc 0)
+while WinuxCmd `grep` does not (still rc 1). The inline arm uses Rust
+`to_lowercase()` — locale-independent — so a build whose inline arm folds
+non-ASCII under `C` will (correctly) surface as a real FAST-vs-EXT divergence
+instead of console noise. This replaces the earlier "unicode case fold" label,
+which implied a fold that the installed legs do not perform.
 
 ## 5. External (WinuxCmd) defects observed via the fallback
 
@@ -310,27 +328,38 @@ not a Rust `#[test]`: the matrix must spawn the installed `niu.exe`, the
 WinuxCmd binaries and Git-for-Windows GNU coreutils, and diff raw child stdout
 bytes. That is inherently out-of-process and machine-specific — a Rust test
 would re-implement the plumbing for no gain and could not carry the external GNU
-reference. The script is idempotent, uses a scratch dir under the approved temp
-root, and takes `--only`, `--list`, `--json` and `--show-ok`.
+reference. The script is idempotent, uses a per-process scratch directory (so
+two concurrent runs cannot collide on fixtures), and takes `--only`, `--list`,
+`--json`, `--show-ok` and `--no-ext`.
 
 ```
 python scripts/fast-path-differential.py
 ```
 
+Toolchains are resolved through environment overrides with machine defaults:
+`NIU` (the shell under test; default `C:\Users\cmx\AppData\Local\Programs\Niubash\niu.exe`),
+`WX_BIN` (WinuxCmd `usr/bin`), `GNU_BASH` (`D:\Git\bin\bash.exe`), `GNU_PATH`
+(GNU coreutils search path) and `AUDIT_TMP` (scratch root). A missing `NIU` or
+`WX_BIN` is a fatal exit-2 diagnostic rather than a silent downgrade; passing
+`--no-ext` deliberately drops the WinuxCmd reference and compares every case
+against GNU instead (the run header records `EXT=DISABLED (--no-ext)`).
+
 Exit status is `0` when every non-`known` case reproduces its fallback and every
-`known` case still diverges; it is `1` when a case regresses **or** a `known`
-case starts matching (so expectations cannot silently rot). Add a case by
-appending one dict to `CASES`; mark a confirmed, tracked divergence with
-`known="<issue/why>"`.
+`known` case still diverges; it is `1` when a case regresses, a `known` case
+starts matching (so expectations cannot silently rot), or `--only` matches no
+cases; `2` on a missing toolchain. Add a case by appending one dict to `CASES`;
+mark a confirmed, tracked divergence with `known="<issue/why>"`.
 
 Recorded run on the installed toolchain (2026-10-17):
 
 ```
-cases=180 pass=146 known=28 extbugs=2 regressions=0 fixed=0
+cases=179 pass=146 known=27 extbugs=2 info=4 regressions=0 fixed=0
 ```
 
 `EXTBUG` marks a case where the fast path agrees with GNU and only the WinuxCmd
-fallback is wrong (§5); it is not a regression.
+fallback is wrong (§5); it is not a regression. `info=4` are the
+environment-dependent cases (`trap`×2, `env`×2) that are reported but not
+compared.
 
 ## 8. Issues filed
 
@@ -368,188 +397,190 @@ niubash#346 (closed, fixed by rubash#649 + niubash#371).
 
 ## Appendix A — full matrix
 
-Columns: `FAST`, `EXT` (absolute WinuxCmd), `GNU` stdout (raw, escaped; `rc` =
-exit status). `INFO` = environment-dependent, not compared.
+Columns: `case`, `result`, `stderr` (`yes` = stderr compared in addition to
+stdout/exit; `empty` = stderr asserted empty as a fixture guard; `-` =
+stdout/exit only), `FAST`/`EXT`/`GNU` stdout (raw bytes, every non-printable
+escaped as `\xNN`) and exit status. `INFO` = environment-dependent, not
+compared.
 
-| case | result | FAST stdout | EXT stdout | GNU stdout | note |
-|---|---|---|---|---|---|
-| `true_plain` | PASS | `` rc=0 | `` rc=0 | `` rc=0 | null command, rc 0 |
-| `colon_plain` | PASS | `` rc=0 | `-` rc=0 | `` rc=0 | null command, rc 0 |
-| `false_plain` | PASS | `` rc=1 | `` rc=1 | `` rc=1 | rc 1, no output |
-| `true_args` | EXTBUG | `` rc=0 | `` rc=1 | `` rc=0 | true accepts/ignores args |
-| `echo_basic` | PASS | `hello world\n` rc=0 | `hello world\n` rc=0 | `hello world\n` rc=0 |  |
-| `echo_n` | PASS | `hi` rc=0 | `hi` rc=0 | `hi` rc=0 | builtin vs winuxcmd echo |
-| `echo_e` | PASS | `a\tb\n\n` rc=0 | `a\tb\n\n` rc=0 | `a\tb\n\n` rc=0 | escape decoding |
-| `printf_s` | PASS | `a-b\n` rc=0 | `a-b\n` rc=0 | `a-b\n` rc=0 |  |
-| `printf_esc` | PASS | `x\ty\n` rc=0 | `x\ty\n` rc=0 | `x\ty\n` rc=0 |  |
-| `trap_list` | INFO | `` rc=0 | `-` rc=0 | `` rc=0 | shell state, informational |
-| `trap_l` | INFO | ` 1) SIGHUP\t 2) SIGINT\t 3) SIGQUIT\t 4)` rc=0 | `-` rc=0 | ` 1) SIGHUP\t 2) SIGINT\t 3) SIGQUIT\t 4)` rc=0 | signal table is platform-specific |
-| `head_default` | PASS | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 |  |
-| `head_n2` | PASS | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 |  |
-| `head_n2join` | PASS | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 |  |
-| `head_long` | PASS | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 |  |
-| `head_dash2` | PASS | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 |  |
-| `head_n0` | PASS | `` rc=0 | `` rc=0 | `` rc=0 |  |
-| `head_negn1` | KNOWN | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 | GNU -n -1 = all but last line |
-| `head_c` | PASS | `alp` rc=0 | `alp` rc=0 | `alp` rc=0 | byte mode falls back |
-| `head_q` | PASS | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 |  |
-| `head_badnum` | KNOWN | `alpha\nbeta\ngamma\n` rc=0 | `` rc=1 | `` rc=1 | flag parsing: accepted, rc 0 vs error rc 1 |
-| `head_unknown` | KNOWN | `alpha\nbeta\ngamma\n` rc=0 | `` rc=1 | `` rc=1 | flag parsing |
-| `head_missing_arg` | KNOWN | `alpha\nbeta\ngamma\n` rc=0 | `` rc=1 | `` rc=1 | flag parsing |
-| `head_long_missing` | KNOWN | `alpha\nbeta\ngamma\n` rc=0 | `` rc=1 | `` rc=1 | flag parsing |
-| `head_noeol` | PASS | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 |  |
-| `head_empty` | PASS | `` rc=0 | `` rc=0 | `` rc=0 |  |
-| `head_ctrl` | PASS | `ab\nc\n` rc=0 | `ab\nc\n` rc=0 | `ab\nc\n` rc=0 |  |
-| `head_ff` | PASS | `ab\n` rc=0 | `ab\n` rc=0 | `ab\n` rc=0 |  |
-| `head_utf8` | PASS | `cafÃ©\nÎ±Î²Î³\n` rc=0 | `cafÃ©\nÎ±Î²Î³\n` rc=0 | `cafÃ©\nÎ±Î²Î³\n` rc=0 |  |
-| `cat_plain` | PASS | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 |  |
-| `cat_ctrl` | PASS | `ab\nc\n` rc=0 | `ab\nc\n` rc=0 | `ab\nc\n` rc=0 | identity passthrough |
-| `cat_nul` | PASS | `a b\n` rc=0 | `a b\n` rc=0 | `a b\n` rc=0 |  |
-| `cat_v` | PASS | `a^[b\nc\n` rc=0 | `a^[b\nc\n` rc=0 | `a^[b\nc\n` rc=0 |  |
-| `cat_A` | PASS | `a^Ib  c$\n` rc=0 | `a^Ib  c$\n` rc=0 | `a^Ib  c$\n` rc=0 |  |
-| `cat_n` | PASS | `     1\talpha\n     2\tbeta\n     3\tgam` rc=0 | `     1\talpha\n     2\tbeta\n     3\tgam` rc=0 | `     1\talpha\n     2\tbeta\n     3\tgam` rc=0 |  |
-| `cat_b` | PASS | `     1\ta\n\n\n     2\tb\n` rc=0 | `     1\ta\n\n\n     2\tb\n` rc=0 | `     1\ta\n\n\n     2\tb\n` rc=0 |  |
-| `cat_s` | PASS | `a\n\nb\n` rc=0 | `a\n\nb\n` rc=0 | `a\n\nb\n` rc=0 |  |
-| `cat_E` | PASS | `alpha$\nbeta$\ngamma` rc=0 | `alpha$\nbeta$\ngamma` rc=0 | `alpha$\nbeta$\ngamma` rc=0 |  |
-| `cat_T` | PASS | `a^Ib  c\n` rc=0 | `a^Ib  c\n` rc=0 | `a^Ib  c\n` rc=0 |  |
-| `cat_e` | PASS | `a^[b$\nc$\n` rc=0 | `a^[b$\nc$\n` rc=0 | `a^[b$\nc$\n` rc=0 |  |
-| `cat_noeol` | PASS | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
-| `cat_utf8` | PASS | `cafÃ©\nÎ±Î²Î³\næ¥æ¬èª\n` rc=0 | `cafÃ©\nÎ±Î²Î³\næ¥æ¬èª\n` rc=0 | `cafÃ©\nÎ±Î²Î³\næ¥æ¬èª\n` rc=0 |  |
-| `cat_empty` | PASS | `` rc=0 | `` rc=0 | `` rc=0 |  |
-| `cat_crlf` | PASS | `a\r\nb\r\n` rc=0 | `a\r\nb\r\n` rc=0 | `a\r\nb\r\n` rc=0 |  |
-| `cat_file` | PASS | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 | file operand |
-| `cat_file_ctrl` | PASS | `ab\nc\n` rc=0 | `ab\nc\n` rc=0 | `ab\nc\n` rc=0 | file operand, carried bytes |
-| `cat_file_n` | PASS | `     1\talpha\n     2\tbeta\n     3\tgam` rc=0 | `     1\talpha\n     2\tbeta\n     3\tgam` rc=0 | `     1\talpha\n     2\tbeta\n     3\tgam` rc=0 | file operand + numbering |
-| `sed_s` | PASS | `Alpha\nbetA\ngAmma\n` rc=0 | `Alpha\nbetA\ngAmma\n` rc=0 | `Alpha\nbetA\ngAmma\n` rc=0 |  |
-| `sed_sg` | PASS | `AlphA\nbetA\ngAmmA\n` rc=0 | `AlphA\nbetA\ngAmmA\n` rc=0 | `AlphA\nbetA\ngAmmA\n` rc=0 |  |
-| `sed_1d` | PASS | `beta\ngamma\n` rc=0 | `beta\ngamma\n` rc=0 | `beta\ngamma\n` rc=0 |  |
-| `sed_2d` | PASS | `alpha\ngamma\n` rc=0 | `alpha\ngamma\n` rc=0 | `alpha\ngamma\n` rc=0 |  |
-| `sed_e` | PASS | `Alpha\nbetA\ngAmma\n` rc=0 | `Alpha\nbetA\ngAmma\n` rc=0 | `Alpha\nbetA\ngAmma\n` rc=0 |  |
-| `sed_noeol` | PASS | `Alpha\nbetA\ngAmma` rc=0 | `Alpha\nbetA\ngAmma` rc=0 | `Alpha\nbetA\ngAmma` rc=0 |  |
-| `sed_crlf` | PASS | `A\nb\n` rc=0 | `A\nb\n` rc=0 | `A\nb\n` rc=0 |  |
-| `sed_ctrl` | PASS | `Ab\nc\n` rc=0 | `Ab\nc\n` rc=0 | `Ab\nc\n` rc=0 |  |
-| `sed_utf8` | PASS | `cAfÃ©\nÎ±Î²Î³\næ¥æ¬èª\n` rc=0 | `cAfÃ©\nÎ±Î²Î³\næ¥æ¬èª\n` rc=0 | `cAfÃ©\nÎ±Î²Î³\næ¥æ¬èª\n` rc=0 |  |
-| `sed_dot` | PASS | `aY\n` rc=0 | `aY\n` rc=0 | `aY\n` rc=0 | BRE dot |
-| `sed_class` | PASS | `ZlphZ\nZetZ\ngZmmZ\n` rc=0 | `ZlphZ\nZetZ\ngZmmZ\n` rc=0 | `ZlphZ\nZetZ\ngZmmZ\n` rc=0 | BRE bracket |
-| `sed_empty` | PASS | `` rc=0 | `` rc=0 | `` rc=0 |  |
-| `sed_ff` | PASS | `Ab\n` rc=0 | `Ab\n` rc=0 | `Ab\n` rc=0 |  |
-| `grep_basic` | PASS | `beta\n` rc=0 | `beta\n` rc=0 | `beta\n` rc=0 |  |
-| `grep_c` | PASS | `3\n` rc=0 | `3\n` rc=0 | `3\n` rc=0 |  |
-| `grep_n` | PASS | `2:beta\n` rc=0 | `2:beta\n` rc=0 | `2:beta\n` rc=0 |  |
-| `grep_i` | PASS | `alpha\n` rc=0 | `alpha\n` rc=0 | `alpha\n` rc=0 |  |
-| `grep_v` | PASS | `beta\ngamma\n` rc=0 | `beta\ngamma\n` rc=0 | `beta\ngamma\n` rc=0 |  |
-| `grep_q` | PASS | `` rc=0 | `` rc=0 | `` rc=0 | quiet, rc 0 |
-| `grep_qmiss` | PASS | `` rc=1 | `` rc=1 | `` rc=1 | quiet miss, rc 1 |
-| `grep_cn` | PASS | `3\n` rc=0 | `3\n` rc=0 | `3\n` rc=0 | combined flags |
-| `grep_anchor` | PASS | `alpha\n` rc=0 | `alpha\n` rc=0 | `alpha\n` rc=0 |  |
-| `grep_noeol` | PASS | `gamma\n` rc=0 | `gamma\n` rc=0 | `gamma\n` rc=0 |  |
-| `grep_noeol_nomatch` | PASS | `` rc=1 | `` rc=1 | `` rc=1 | rc 1 |
-| `grep_empty` | PASS | `` rc=1 | `` rc=1 | `` rc=1 |  |
-| `grep_ctrl` | PASS | `ab\n` rc=0 | `ab\n` rc=0 | `ab\n` rc=0 |  |
-| `grep_utf8` | PASS | `cafÃ©\n` rc=0 | `cafÃ©\n` rc=0 | `cafÃ©\n` rc=0 |  |
-| `grep_utf8_i` | PASS | `` rc=1 | `` rc=1 | `` rc=1 | unicode case fold |
-| `grep_empty_pattern` | PASS | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 |  |
-| `grep_dot` | PASS | `axb\n` rc=0 | `axb\n` rc=0 | `axb\n` rc=0 | regex -> external fallback |
-| `grep_v_all` | PASS | `` rc=1 | `` rc=1 | `` rc=1 | all match -> rc 1 |
-| `wc_c` | PASS | `17\n` rc=0 | `17\n` rc=0 | `17\n` rc=0 |  |
-| `wc_c_ctrl` | KNOWN | `11\n` rc=0 | `6\n` rc=0 | `6\n` rc=0 | known byte-count class |
-| `wc_l` | PASS | `3\n` rc=0 | `3\n` rc=0 | `3\n` rc=0 |  |
-| `wc_l_ctrl` | PASS | `2\n` rc=0 | `2\n` rc=0 | `2\n` rc=0 |  |
-| `wc_w` | PASS | `3\n` rc=0 | `3\n` rc=0 | `3\n` rc=0 |  |
-| `wc_w_ff` | KNOWN | `1\n` rc=0 | `2\n` rc=0 | `2\n` rc=0 | payload decoding / counting unit |
-| `wc_default` | PASS | `      3       3      17\n` rc=0 | `      3       3      17\n` rc=0 | `      3       3      17\n` rc=0 |  |
-| `wc_default_ctrl` | KNOWN | `      2       2      11\n` rc=0 | `      2       2       6\n` rc=0 | `      2       2       6\n` rc=0 | known byte-count class |
-| `wc_default_ff` | KNOWN | `      1       1       9\n` rc=0 | `      1       2       4\n` rc=0 | `      1       2       4\n` rc=0 | payload decoding / counting unit |
-| `wc_noeol` | PASS | `16\n` rc=0 | `16\n` rc=0 | `16\n` rc=0 |  |
-| `wc_c_nul` | PASS | `4\n` rc=0 | `4\n` rc=0 | `4\n` rc=0 |  |
-| `wc_c_ff` | KNOWN | `9\n` rc=0 | `4\n` rc=0 | `4\n` rc=0 | payload decoding / byte count |
-| `wc_c_producer_echo` | KNOWN | `11\n` rc=0 | `6\n` rc=0 | `6\n` rc=0 | known byte-count class |
-| `wc_c_producer_printf` | KNOWN | `10\n` rc=0 | `5\n` rc=0 | `5\n` rc=0 | known byte-count class |
-| `wc_utf8_c` | PASS | `23\n` rc=0 | `23\n` rc=0 | `23\n` rc=0 |  |
-| `wc_utf8_w` | PASS | `3\n` rc=0 | `3\n` rc=0 | `3\n` rc=0 |  |
-| `wc_empty` | PASS | `      0       0       0\n` rc=0 | `      0       0       0\n` rc=0 | `      0       0       0\n` rc=0 |  |
-| `wc_m` | PASS | `13\n` rc=0 | `13\n` rc=0 | `23\n` rc=0 | chars -> external fallback |
-| `wc_lc` | PASS | `      3      17\n` rc=0 | `      3      17\n` rc=0 | `      3      17\n` rc=0 | combined -> external fallback |
-| `wc_large` | PASS | `200001\n` rc=0 | `200001\n` rc=0 | `200001\n` rc=0 | truncation/re-encode |
-| `tr_upper` | PASS | `ALPHA\nBETA\nGAMMA\n` rc=0 | `ALPHA\nBETA\nGAMMA\n` rc=0 | `ALPHA\nBETA\nGAMMA\n` rc=0 |  |
-| `tr_simple` | PASS | `xlphx\nyetx\ngxmmx\n` rc=0 | `xlphx\nyetx\ngxmmx\n` rc=0 | `xlphx\nyetx\ngxmmx\n` rc=0 |  |
-| `tr_nl` | PASS | `alpha_beta_gamma_` rc=0 | `alpha_beta_gamma_` rc=0 | `alpha_beta_gamma_` rc=0 | special \n operand |
-| `tr_class` | PASS | `ALPHA\nBETA\nGAMMA\n` rc=0 | `ALPHA\nBETA\nGAMMA\n` rc=0 | `ALPHA\nBETA\nGAMMA\n` rc=0 |  |
-| `tr_class_cntrl` | KNOWN | `abXcX` rc=0 | `aXbXcX` rc=0 | `aXbXcX` rc=0 | payload decoding |
-| `tr_class_space` | KNOWN | `ab_` rc=0 | `a_b_` rc=0 | `a_b_` rc=0 | payload decoding |
-| `tr_cntrl_mixed` | KNOWN | `aXbX` rc=0 | `aXXbX` rc=0 | `aXXbX` rc=0 | payload decoding: only carrier-set bytes escape |
-| `tr_d` | PASS | `lph\nbet\ngmm\n` rc=0 | `lph\nbet\ngmm\n` rc=0 | `lph\nbet\ngmm\n` rc=0 | option -> external fallback |
-| `tr_utf8` | PASS | `CAFÃ©\nÎ±Î²Î³\næ¥æ¬èª\n` rc=0 | `CAFÃ©\nÎ±Î²Î³\næ¥æ¬èª\n` rc=0 | `CAFÃ©\nÎ±Î²Î³\næ¥æ¬èª\n` rc=0 | non-ascii set -> fallback |
-| `tr_noeol` | PASS | `ALPHA\nBETA\nGAMMA` rc=0 | `ALPHA\nBETA\nGAMMA` rc=0 | `ALPHA\nBETA\nGAMMA` rc=0 |  |
-| `tr_empty` | PASS | `` rc=0 | `` rc=0 | `` rc=0 |  |
-| `tr_ctrl` | PASS | `AB\nC\n` rc=0 | `AB\nC\n` rc=0 | `AB\nC\n` rc=0 |  |
-| `sub_sort` | PASS | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
-| `sub_sort_u` | PASS | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
-| `sub_sort_noeol` | PASS | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
-| `sub_sort_empty` | PASS | `` rc=0 | `` rc=0 | `` rc=0 |  |
-| `sub_sort_crlf` | PASS | `a\nb` rc=0 | `a\nb` rc=0 | `a\r\nb` rc=0 | FAST==EXT drop CR, GNU keeps it: shared text-mode behaviour, not a fast-path divergence |
-| `sub_sort_utf8` | PASS | `cafÃ©\nÎ±Î²Î³\næ¥æ¬èª` rc=0 | `cafÃ©\nÎ±Î²Î³\næ¥æ¬èª` rc=0 | `cafÃ©\nÎ±Î²Î³\næ¥æ¬èª` rc=0 | locale/sort order |
-| `sub_sort_case` | PASS | `A\nB\na\nz` rc=0 | `A\nB\na\nz` rc=0 | `A\nB\na\nz` rc=0 | locale collation vs byte order |
-| `sub_sort_blank_last` | PASS | `\na\nb` rc=0 | `\na\nb` rc=0 | `\na\nb` rc=0 | trailing empty line ordering |
-| `sub_sed` | PASS | `Alpha\nbetA\ngAmma` rc=0 | `Alpha\nbetA\ngAmma` rc=0 | `Alpha\nbetA\ngAmma` rc=0 |  |
-| `sub_sed_1d` | PASS | `beta\ngamma` rc=0 | `beta\ngamma` rc=0 | `beta\ngamma` rc=0 |  |
-| `sub_sed_ctrl` | PASS | `Ab\nc` rc=0 | `Ab\nc` rc=0 | `Ab\nc` rc=0 |  |
-| `sub_tr` | PASS | `ALPHA\nBETA\nGAMMA` rc=0 | `ALPHA\nBETA\nGAMMA` rc=0 | `ALPHA\nBETA\nGAMMA` rc=0 |  |
-| `sub_tr_nl` | PASS | `alpha_beta_gamma_` rc=0 | `alpha_beta_gamma_` rc=0 | `alpha_beta_gamma_` rc=0 |  |
-| `sub_head` | PASS | `alpha\nbeta` rc=0 | `alpha\nbeta` rc=0 | `alpha\nbeta` rc=0 |  |
-| `sub_head_default` | PASS | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
-| `sub_head_negn1` | KNOWN | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta` rc=0 | `alpha\nbeta` rc=0 | GNU -n -1 = all but last line |
-| `sub_head_badnum` | KNOWN | `alpha\nbeta\ngamma` rc=0 | `` rc=1 | `` rc=1 | flag parsing |
-| `sub_head_noeol` | PASS | `alpha\nbeta` rc=0 | `alpha\nbeta` rc=0 | `alpha\nbeta` rc=0 |  |
-| `sub_grep` | PASS | `beta` rc=0 | `beta` rc=0 | `beta` rc=0 |  |
-| `sub_grep_miss` | PASS | `` rc=1 | `` rc=1 | `` rc=1 | rc 1 |
-| `sub_grep_ctrl` | PASS | `ab` rc=0 | `ab` rc=0 | `ab` rc=0 |  |
-| `sub_wc_c` | PASS | `17` rc=0 | `17` rc=0 | `17` rc=0 |  |
-| `sub_wc_c_ctrl` | KNOWN | `11` rc=0 | `6` rc=0 | `6` rc=0 | known byte-count class |
-| `sub_wc_l` | PASS | `3` rc=0 | `3` rc=0 | `3` rc=0 |  |
-| `sub_wc_default` | PASS | `      3       3      17` rc=0 | `      3       3      17` rc=0 | `      3       3      17` rc=0 | default is -l only |
-| `sub_tail` | PASS | `beta\ngamma` rc=0 | `beta\ngamma` rc=0 | `beta\ngamma` rc=0 |  |
-| `sub_tail_default` | PASS | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
-| `sub_tail_badnum` | PASS | `` rc=1 | `` rc=1 | `` rc=1 | falls back to external (values.rs tail arm dormant) |
-| `sub_tail_noeol` | PASS | `beta\ngamma` rc=0 | `beta\ngamma` rc=0 | `beta\ngamma` rc=0 |  |
-| `sub_tail_empty` | PASS | `` rc=0 | `` rc=0 | `` rc=0 |  |
-| `sub_uniq` | PASS | `a\nb\na` rc=0 | `a\nb\na` rc=0 | `a\nb\na` rc=0 |  |
-| `sub_uniq_plain` | PASS | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
-| `sub_uniq_noeol` | PASS | `a` rc=0 | `a` rc=0 | `a` rc=0 |  |
-| `sleep_zero` | PASS | `` rc=0 | `` rc=0 | `` rc=0 |  |
-| `sleep_missing` | PASS | `` rc=1 | `` rc=1 | `` rc=1 |  |
-| `sleep_invalid` | PASS | `` rc=1 | `` rc=1 | `` rc=1 |  |
-| `sleep_badunit` | PASS | `` rc=1 | `` rc=1 | `` rc=1 |  |
-| `sleep_unit_s` | PASS | `` rc=0 | `` rc=0 | `` rc=0 |  |
-| `sleep_unit_h` | PASS | `` rc=0 | `` rc=0 | `` rc=0 |  |
-| `sleep_dashdash` | PASS | `` rc=0 | `` rc=0 | `` rc=0 |  |
-| `dirname_simple` | KNOWN | `A:/b\n` rc=0 | `/a/b\n` rc=0 | `/a/b\n` rc=0 | path translation: FAST A:/b vs /a/b |
-| `dirname_letter` | KNOWN | `A:/b\n` rc=0 | `/a/b\n` rc=0 | `/a/b\n` rc=0 | path translation |
-| `dirname_noslash` | PASS | `.\n` rc=0 | `.\n` rc=0 | `.\n` rc=0 |  |
-| `dirname_dot` | PASS | `.\n` rc=0 | `.\n` rc=0 | `.\n` rc=0 |  |
-| `dirname_root` | PASS | `/\n` rc=0 | `/\n` rc=0 | `/\n` rc=0 |  |
-| `dirname_trailing` | KNOWN | `A:\n` rc=0 | `/a\n` rc=0 | `/a\n` rc=0 | path translation |
-| `dirname_doubleslash` | KNOWN | `/\n` rc=0 | `//\n` rc=0 | `//\n` rc=0 | FAST / vs // |
-| `dirname_tripleslash` | EXTBUG | `/\n` rc=0 | `//\n` rc=0 | `/\n` rc=0 | FAST and GNU ('/') agree; only winuxcmd EXT is wrong (//) |
-| `dirname_lead_double_letter` | KNOWN | `/\n` rc=0 | `//\n` rc=0 | `//\n` rc=0 | FAST / vs // |
-| `dirname_letter_double` | KNOWN | `A:\n` rc=0 | `/a\n` rc=0 | `/a\n` rc=0 | path translation |
-| `dirname_dotdot` | PASS | `..\n` rc=0 | `..\n` rc=0 | `..\n` rc=0 |  |
-| `dirname_multi` | PASS | `a\nc\n` rc=0 | `a\nc\n` rc=0 | `a\nc\n` rc=0 |  |
-| `dirname_dash` | PASS | `` rc=1 | `` rc=1 | `` rc=1 |  |
-| `dirname_dashdash` | PASS | `.\n` rc=0 | `.\n` rc=0 | `.\n` rc=0 |  |
-| `dirname_empty` | KNOWN | `/\n` rc=0 | `.\n` rc=0 | `.\n` rc=0 | FAST / vs . |
-| `basename_empty` | KNOWN | `/\n` rc=0 | `\n` rc=0 | `\n` rc=0 | FAST / vs empty |
-| `basename_simple` | PASS | `c.txt\n` rc=0 | `c.txt\n` rc=0 | `c.txt\n` rc=0 |  |
-| `basename_suffix` | PASS | `b\n` rc=0 | `b\n` rc=0 | `b\n` rc=0 |  |
-| `basename_suffix_partial` | PASS | `b.\n` rc=0 | `b.\n` rc=0 | `b.\n` rc=0 |  |
-| `basename_root` | PASS | `/\n` rc=0 | `/\n` rc=0 | `/\n` rc=0 |  |
-| `basename_trailing` | PASS | `b\n` rc=0 | `b\n` rc=0 | `b\n` rc=0 |  |
-| `basename_noslash` | PASS | `foo\n` rc=0 | `foo\n` rc=0 | `foo\n` rc=0 |  |
-| `basename_doubleslash` | PASS | `/\n` rc=0 | `/\n` rc=0 | `//\n` rc=0 | FAST==EXT ('/'), GNU ('//'): shared POSIX divergence |
-| `basename_dash` | PASS | `` rc=1 | `` rc=1 | `` rc=1 |  |
-| `basename_extra` | PASS | `` rc=1 | `` rc=1 | `` rc=1 |  |
-| `uname_s` | KNOWN | `MSYS_NT-10.0-19045\n` rc=0 | `Windows_NT\n` rc=0 | `MINGW64_NT-10.0-19045\n` rc=0 | identity tool, intentional divergence |
-| `uname_a` | KNOWN | `MSYS_NT-10.0-19045 DESKTOP-FDUJ7TN 10.0-` rc=0 | `Windows_NT DESKTOP-FDUJ7TN 10.0 19045 x8` rc=0 | `MINGW64_NT-10.0-19045 DESKTOP-FDUJ7TN 3.` rc=0 | identity tool, intentional divergence |
-| `arch_plain` | PASS | `x86_64\n` rc=0 | `x86_64\n` rc=0 | `x86_64\n` rc=0 | rubash persona x86_64 matches winuxcmd/GNU on this host |
-| `env_print` | INFO | `AGENT=1\nAI_AGENT=opencode\nALLUSERSPROF` rc=0 | `AGENT=1\nAI_AGENT=opencode\nALLUSERSPROF` rc=0 | `COMMONPROGRAMFILES(X86)=C:\Program Files` rc=0 | sorted env dump, informational |
-| `env_set` | INFO | `AGENT=1\nAI_AGENT=opencode\nALLUSERSPROF` rc=0 | `AGENT=1\nAI_AGENT=opencode\nALLUSERSPROF` rc=0 | `COMMONPROGRAMFILES(X86)=C:\Program Files` rc=0 |  |
+| case | result | stderr | FAST stdout | EXT stdout | GNU stdout | note |
+|---|---|---|---|---|---|---|
+| `true_plain` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 | null command, rc 0 |
+| `colon_plain` | PASS | - | `` rc=0 | - | `` rc=0 | null command, rc 0 |
+| `false_plain` | PASS | - | `` rc=1 | `` rc=1 | `` rc=1 | rc 1, no output |
+| `true_args` | EXTBUG | - | `` rc=0 | `` rc=1 | `` rc=0 | true accepts/ignores args |
+| `echo_basic` | PASS | - | `hello world\n` rc=0 | `hello world\n` rc=0 | `hello world\n` rc=0 |  |
+| `echo_n` | PASS | - | `hi` rc=0 | `hi` rc=0 | `hi` rc=0 | builtin vs winuxcmd echo |
+| `echo_e` | PASS | - | `a\tb\n\n` rc=0 | `a\tb\n\n` rc=0 | `a\tb\n\n` rc=0 | escape decoding |
+| `printf_s` | PASS | - | `a-b\n` rc=0 | `a-b\n` rc=0 | `a-b\n` rc=0 |  |
+| `printf_esc` | PASS | - | `x\ty\n` rc=0 | `x\ty\n` rc=0 | `x\ty\n` rc=0 |  |
+| `trap_list` | INFO | - | `` rc=0 | - | `` rc=0 | shell state, informational |
+| `trap_l` | INFO | - | ` 1) SIGHUP\t 2) SIGINT\t 3) SIGQUIT\t 4) SIGILL\t 5) SIGTRAP\n 6) SIGABRT\t 7) SIGBUS\t 8) SIGFPE\t 9) SIGKILL\t10) SIGUSR1\n11) SIGSEGV\t12) SIGUSR2\t13) SIGPIPE\t14) SIGALRM\t15) SIGTERM\n16) SIGSTKFLT\t17) SIGCHLD\t18) SIGCONT\t19) SIGSTOP\t20) SIGTSTP\n21) SIGTTIN\t22) SIGTTOU\t23) SIGURG\t24) SIGXCPU\t25) SIGXFSZ\n26) SIGVTALRM\t27) SIGPROF\t28) SIGWINCH\t29) SIGIO\t30) SIGPWR\n31) SIGSYS\t34) SIGRTMIN\t35) SIGRTMIN+1\t36) SIGRTMIN+2\t37) SIGRTMIN+3\n38) SIGRTMIN+4\t39) SIGRTMIN+5\t40) SIGRTMIN+6\t41) SIGRTMIN+7\t42) SIGRTMIN+8\n43) SIGRTMIN+9\t44) SIGRTMIN+10\t45) SIGRTMIN+11\t46) SIGRTMIN+12\t47) SIGRTMIN+13\n48) SIGRTMIN+14\t49) SIGRTMIN+15\t50) SIGRTMAX-14\t51) SIGRTMAX-13\t52) SIGRTMAX-12\n53) SIGRTMAX-11\t54) SIGRTMAX-10\t55) SIGRTMAX-9\t56) SIGRTMAX-8\t57) SIGRTMAX-7\n58) SIGRTMAX-6\t59) SIGRTMAX-5\t60) SIGRTMAX-4\t61) SIGRTMAX-3\t62) SIGRTMAX-2\n63) SIGRTMAX-1\t64) SIGRTMAX\t\n` rc=0 | - | ` 1) SIGHUP\t 2) SIGINT\t 3) SIGQUIT\t 4) SIGILL\t 5) SIGTRAP\n 6) SIGABRT\t 7) SIGEMT\t 8) SIGFPE\t 9) SIGKILL\t10) SIGBUS\n11) SIGSEGV\t12) SIGSYS\t13) SIGPIPE\t14) SIGALRM\t15) SIGTERM\n16) SIGURG\t17) SIGSTOP\t18) SIGTSTP\t19) SIGCONT\t20) SIGCHLD\n21) SIGTTIN\t22) SIGTTOU\t23) SIGIO\t24) SIGXCPU\t25) SIGXFSZ\n26) SIGVTALRM\t27) SIGPROF\t28) SIGWINCH\t29) SIGPWR\t30) SIGUSR1\n31) SIGUSR2\t32) SIGRTMIN\t33) SIGRTMIN+1\t34) SIGRTMIN+2\t35) SIGRTMIN+3\n36) SIGRTMIN+4\t37) SIGRTMIN+5\t38) SIGRTMIN+6\t39) SIGRTMIN+7\t40) SIGRTMIN+8\n41) SIGRTMIN+9\t42) SIGRTMIN+10\t43) SIGRTMIN+11\t44) SIGRTMIN+12\t45) SIGRTMIN+13\n46) SIGRTMIN+14\t47) SIGRTMIN+15\t48) SIGRTMIN+16\t49) SIGRTMAX-15\t50) SIGRTMAX-14\n51) SIGRTMAX-13\t52) SIGRTMAX-12\t53) SIGRTMAX-11\t54) SIGRTMAX-10\t55) SIGRTMAX-9\n56) SIGRTMAX-8\t57) SIGRTMAX-7\t58) SIGRTMAX-6\t59) SIGRTMAX-5\t60) SIGRTMAX-4\n61) SIGRTMAX-3\t62) SIGRTMAX-2\t63) SIGRTMAX-1\t64) SIGRTMAX\t\n` rc=0 | signal table is platform-specific |
+| `head_default` | PASS | - | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 |  |
+| `head_n2` | PASS | - | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 |  |
+| `head_n2join` | PASS | - | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 |  |
+| `head_long` | PASS | - | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 |  |
+| `head_dash2` | PASS | - | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 |  |
+| `head_n0` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 |  |
+| `head_negn1` | KNOWN | - | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 | GNU -n -1 = all but last line |
+| `head_c` | PASS | - | `alp` rc=0 | `alp` rc=0 | `alp` rc=0 | byte mode falls back |
+| `head_q` | PASS | - | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 |  |
+| `head_badnum` | KNOWN | - | `alpha\nbeta\ngamma\n` rc=0 | `` rc=1 | `` rc=1 | flag parsing: accepted, rc 0 vs error rc 1 |
+| `head_unknown` | KNOWN | - | `alpha\nbeta\ngamma\n` rc=0 | `` rc=1 | `` rc=1 | flag parsing |
+| `head_missing_arg` | KNOWN | - | `alpha\nbeta\ngamma\n` rc=0 | `` rc=1 | `` rc=1 | flag parsing |
+| `head_long_missing` | KNOWN | - | `alpha\nbeta\ngamma\n` rc=0 | `` rc=1 | `` rc=1 | flag parsing |
+| `head_noeol` | PASS | - | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 | `alpha\nbeta\n` rc=0 |  |
+| `head_empty` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 |  |
+| `head_ctrl` | PASS | - | `a\x1bb\nc\n` rc=0 | `a\x1bb\nc\n` rc=0 | `a\x1bb\nc\n` rc=0 |  |
+| `head_ff` | PASS | - | `a\x0cb\n` rc=0 | `a\x0cb\n` rc=0 | `a\x0cb\n` rc=0 |  |
+| `head_utf8` | PASS | - | `caf\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n` rc=0 | `caf\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n` rc=0 | `caf\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n` rc=0 |  |
+| `cat_plain` | PASS | - | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 |  |
+| `cat_ctrl` | PASS | - | `a\x1bb\nc\n` rc=0 | `a\x1bb\nc\n` rc=0 | `a\x1bb\nc\n` rc=0 | identity passthrough |
+| `cat_nul` | PASS | - | `a\x00b\n` rc=0 | `a\x00b\n` rc=0 | `a\x00b\n` rc=0 |  |
+| `cat_v` | PASS | - | `a^[b\nc\n` rc=0 | `a^[b\nc\n` rc=0 | `a^[b\nc\n` rc=0 |  |
+| `cat_A` | PASS | - | `a^Ib  c$\n` rc=0 | `a^Ib  c$\n` rc=0 | `a^Ib  c$\n` rc=0 |  |
+| `cat_n` | PASS | - | `     1\talpha\n     2\tbeta\n     3\tgamma\n` rc=0 | `     1\talpha\n     2\tbeta\n     3\tgamma\n` rc=0 | `     1\talpha\n     2\tbeta\n     3\tgamma\n` rc=0 |  |
+| `cat_b` | PASS | - | `     1\ta\n\n\n     2\tb\n` rc=0 | `     1\ta\n\n\n     2\tb\n` rc=0 | `     1\ta\n\n\n     2\tb\n` rc=0 |  |
+| `cat_s` | PASS | - | `a\n\nb\n` rc=0 | `a\n\nb\n` rc=0 | `a\n\nb\n` rc=0 |  |
+| `cat_E` | PASS | - | `alpha$\nbeta$\ngamma` rc=0 | `alpha$\nbeta$\ngamma` rc=0 | `alpha$\nbeta$\ngamma` rc=0 |  |
+| `cat_T` | PASS | - | `a^Ib  c\n` rc=0 | `a^Ib  c\n` rc=0 | `a^Ib  c\n` rc=0 |  |
+| `cat_e` | PASS | - | `a^[b$\nc$\n` rc=0 | `a^[b$\nc$\n` rc=0 | `a^[b$\nc$\n` rc=0 |  |
+| `cat_noeol` | PASS | - | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
+| `cat_utf8` | PASS | - | `caf\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\n` rc=0 | `caf\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\n` rc=0 | `caf\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\n` rc=0 |  |
+| `cat_empty` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 |  |
+| `cat_crlf` | PASS | - | `a\r\nb\r\n` rc=0 | `a\r\nb\r\n` rc=0 | `a\r\nb\r\n` rc=0 |  |
+| `cat_file` | PASS | empty | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 | file operand |
+| `cat_file_ctrl` | PASS | empty | `a\x1bb\nc\n` rc=0 | `a\x1bb\nc\n` rc=0 | `a\x1bb\nc\n` rc=0 | file operand, carried bytes |
+| `cat_file_n` | PASS | empty | `     1\talpha\n     2\tbeta\n     3\tgamma\n` rc=0 | `     1\talpha\n     2\tbeta\n     3\tgamma\n` rc=0 | `     1\talpha\n     2\tbeta\n     3\tgamma\n` rc=0 | file operand + numbering |
+| `sed_s` | PASS | - | `Alpha\nbetA\ngAmma\n` rc=0 | `Alpha\nbetA\ngAmma\n` rc=0 | `Alpha\nbetA\ngAmma\n` rc=0 |  |
+| `sed_sg` | PASS | - | `AlphA\nbetA\ngAmmA\n` rc=0 | `AlphA\nbetA\ngAmmA\n` rc=0 | `AlphA\nbetA\ngAmmA\n` rc=0 |  |
+| `sed_1d` | PASS | - | `beta\ngamma\n` rc=0 | `beta\ngamma\n` rc=0 | `beta\ngamma\n` rc=0 |  |
+| `sed_2d` | PASS | - | `alpha\ngamma\n` rc=0 | `alpha\ngamma\n` rc=0 | `alpha\ngamma\n` rc=0 |  |
+| `sed_e` | PASS | - | `Alpha\nbetA\ngAmma\n` rc=0 | `Alpha\nbetA\ngAmma\n` rc=0 | `Alpha\nbetA\ngAmma\n` rc=0 |  |
+| `sed_noeol` | PASS | - | `Alpha\nbetA\ngAmma` rc=0 | `Alpha\nbetA\ngAmma` rc=0 | `Alpha\nbetA\ngAmma` rc=0 |  |
+| `sed_crlf` | PASS | - | `A\nb\n` rc=0 | `A\nb\n` rc=0 | `A\nb\n` rc=0 |  |
+| `sed_ctrl` | PASS | - | `A\x1bb\nc\n` rc=0 | `A\x1bb\nc\n` rc=0 | `A\x1bb\nc\n` rc=0 |  |
+| `sed_utf8` | PASS | - | `cAf\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\n` rc=0 | `cAf\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\n` rc=0 | `cAf\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\n` rc=0 |  |
+| `sed_dot` | PASS | - | `aY\n` rc=0 | `aY\n` rc=0 | `aY\n` rc=0 | BRE dot |
+| `sed_class` | PASS | - | `ZlphZ\nZetZ\ngZmmZ\n` rc=0 | `ZlphZ\nZetZ\ngZmmZ\n` rc=0 | `ZlphZ\nZetZ\ngZmmZ\n` rc=0 | BRE bracket |
+| `sed_empty` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 |  |
+| `sed_ff` | PASS | - | `A\x0cb\n` rc=0 | `A\x0cb\n` rc=0 | `A\x0cb\n` rc=0 |  |
+| `grep_basic` | PASS | - | `beta\n` rc=0 | `beta\n` rc=0 | `beta\n` rc=0 |  |
+| `grep_c` | PASS | - | `3\n` rc=0 | `3\n` rc=0 | `3\n` rc=0 |  |
+| `grep_n` | PASS | - | `2:beta\n` rc=0 | `2:beta\n` rc=0 | `2:beta\n` rc=0 |  |
+| `grep_i` | PASS | - | `alpha\n` rc=0 | `alpha\n` rc=0 | `alpha\n` rc=0 |  |
+| `grep_v` | PASS | - | `beta\ngamma\n` rc=0 | `beta\ngamma\n` rc=0 | `beta\ngamma\n` rc=0 |  |
+| `grep_q` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 | quiet, rc 0 |
+| `grep_qmiss` | PASS | - | `` rc=1 | `` rc=1 | `` rc=1 | quiet miss, rc 1 |
+| `grep_cn` | PASS | - | `3\n` rc=0 | `3\n` rc=0 | `3\n` rc=0 | combined flags |
+| `grep_anchor` | PASS | - | `alpha\n` rc=0 | `alpha\n` rc=0 | `alpha\n` rc=0 |  |
+| `grep_noeol` | PASS | - | `gamma\n` rc=0 | `gamma\n` rc=0 | `gamma\n` rc=0 |  |
+| `grep_noeol_nomatch` | PASS | - | `` rc=1 | `` rc=1 | `` rc=1 | rc 1 |
+| `grep_empty` | PASS | - | `` rc=1 | `` rc=1 | `` rc=1 |  |
+| `grep_ctrl` | PASS | - | `a\x1bb\n` rc=0 | `a\x1bb\n` rc=0 | `a\x1bb\n` rc=0 |  |
+| `grep_utf8` | PASS | - | `caf\xc3\xa9\n` rc=0 | `caf\xc3\xa9\n` rc=0 | `caf\xc3\xa9\n` rc=0 |  |
+| `grep_utf8_i` | PASS | - | `` rc=1 | `` rc=1 | `` rc=1 | non-ASCII fold, LC_ALL=C pinned; external greps do not fold, inline must not either |
+| `grep_empty_pattern` | PASS | - | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 | `alpha\nbeta\ngamma\n` rc=0 |  |
+| `grep_dot` | PASS | - | `axb\n` rc=0 | `axb\n` rc=0 | `axb\n` rc=0 | regex -> external fallback |
+| `grep_v_all` | PASS | - | `` rc=1 | `` rc=1 | `` rc=1 | all match -> rc 1 |
+| `wc_c` | PASS | - | `17\n` rc=0 | `17\n` rc=0 | `17\n` rc=0 |  |
+| `wc_c_ctrl` | KNOWN | - | `11\n` rc=0 | `6\n` rc=0 | `6\n` rc=0 | known byte-count class |
+| `wc_l` | PASS | - | `3\n` rc=0 | `3\n` rc=0 | `3\n` rc=0 |  |
+| `wc_l_ctrl` | PASS | - | `2\n` rc=0 | `2\n` rc=0 | `2\n` rc=0 |  |
+| `wc_w` | PASS | - | `3\n` rc=0 | `3\n` rc=0 | `3\n` rc=0 |  |
+| `wc_w_ff` | KNOWN | - | `1\n` rc=0 | `2\n` rc=0 | `2\n` rc=0 | payload decoding / counting unit |
+| `wc_default` | PASS | - | `      3       3      17\n` rc=0 | `      3       3      17\n` rc=0 | `      3       3      17\n` rc=0 |  |
+| `wc_default_ctrl` | KNOWN | - | `      2       2      11\n` rc=0 | `      2       2       6\n` rc=0 | `      2       2       6\n` rc=0 | known byte-count class |
+| `wc_default_ff` | KNOWN | - | `      1       1       9\n` rc=0 | `      1       2       4\n` rc=0 | `      1       2       4\n` rc=0 | payload decoding / counting unit |
+| `wc_noeol` | PASS | - | `16\n` rc=0 | `16\n` rc=0 | `16\n` rc=0 |  |
+| `wc_c_nul` | PASS | - | `4\n` rc=0 | `4\n` rc=0 | `4\n` rc=0 |  |
+| `wc_c_ff` | KNOWN | - | `9\n` rc=0 | `4\n` rc=0 | `4\n` rc=0 | payload decoding / byte count |
+| `wc_c_producer_echo` | KNOWN | - | `11\n` rc=0 | `6\n` rc=0 | `6\n` rc=0 | known byte-count class |
+| `wc_c_producer_printf` | KNOWN | - | `10\n` rc=0 | `5\n` rc=0 | `5\n` rc=0 | known byte-count class |
+| `wc_utf8_c` | PASS | - | `23\n` rc=0 | `23\n` rc=0 | `23\n` rc=0 |  |
+| `wc_utf8_w` | PASS | - | `3\n` rc=0 | `3\n` rc=0 | `3\n` rc=0 |  |
+| `wc_empty` | PASS | - | `      0       0       0\n` rc=0 | `      0       0       0\n` rc=0 | `      0       0       0\n` rc=0 |  |
+| `wc_m` | PASS | - | `13\n` rc=0 | `13\n` rc=0 | `23\n` rc=0 | chars -> external fallback |
+| `wc_lc` | PASS | - | `      3      17\n` rc=0 | `      3      17\n` rc=0 | `      3      17\n` rc=0 | combined -> external fallback |
+| `wc_large` | PASS | - | `200001\n` rc=0 | `200001\n` rc=0 | `200001\n` rc=0 | truncation/re-encode |
+| `tr_upper` | PASS | - | `ALPHA\nBETA\nGAMMA\n` rc=0 | `ALPHA\nBETA\nGAMMA\n` rc=0 | `ALPHA\nBETA\nGAMMA\n` rc=0 |  |
+| `tr_simple` | PASS | - | `xlphx\nyetx\ngxmmx\n` rc=0 | `xlphx\nyetx\ngxmmx\n` rc=0 | `xlphx\nyetx\ngxmmx\n` rc=0 |  |
+| `tr_nl` | PASS | - | `alpha_beta_gamma_` rc=0 | `alpha_beta_gamma_` rc=0 | `alpha_beta_gamma_` rc=0 | special \n operand |
+| `tr_class` | PASS | - | `ALPHA\nBETA\nGAMMA\n` rc=0 | `ALPHA\nBETA\nGAMMA\n` rc=0 | `ALPHA\nBETA\nGAMMA\n` rc=0 |  |
+| `tr_class_cntrl` | KNOWN | - | `a\x1bbXcX` rc=0 | `aXbXcX` rc=0 | `aXbXcX` rc=0 | payload decoding |
+| `tr_class_space` | KNOWN | - | `a\x0cb_` rc=0 | `a_b_` rc=0 | `a_b_` rc=0 | payload decoding |
+| `tr_cntrl_mixed` | KNOWN | - | `aX\x0cbX` rc=0 | `aXXbX` rc=0 | `aXXbX` rc=0 | payload decoding: only carrier-set bytes escape |
+| `tr_d` | PASS | - | `lph\nbet\ngmm\n` rc=0 | `lph\nbet\ngmm\n` rc=0 | `lph\nbet\ngmm\n` rc=0 | option -> external fallback |
+| `tr_utf8` | PASS | - | `CAF\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\n` rc=0 | `CAF\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\n` rc=0 | `CAF\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\n` rc=0 | non-ascii set -> fallback |
+| `tr_noeol` | PASS | - | `ALPHA\nBETA\nGAMMA` rc=0 | `ALPHA\nBETA\nGAMMA` rc=0 | `ALPHA\nBETA\nGAMMA` rc=0 |  |
+| `tr_empty` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 |  |
+| `tr_ctrl` | PASS | - | `A\x1bB\nC\n` rc=0 | `A\x1bB\nC\n` rc=0 | `A\x1bB\nC\n` rc=0 |  |
+| `sub_sort` | PASS | - | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
+| `sub_sort_u` | PASS | - | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
+| `sub_sort_noeol` | PASS | - | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
+| `sub_sort_empty` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 |  |
+| `sub_sort_crlf` | PASS | - | `a\nb` rc=0 | `a\nb` rc=0 | `a\r\nb` rc=0 | FAST==EXT drop CR, GNU keeps it: shared text-mode behaviour, not a fast-path divergence |
+| `sub_sort_utf8` | PASS | - | `caf\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e` rc=0 | `caf\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e` rc=0 | `caf\xc3\xa9\n\xce\xb1\xce\xb2\xce\xb3\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e` rc=0 | locale/sort order |
+| `sub_sort_case` | PASS | - | `A\nB\na\nz` rc=0 | `A\nB\na\nz` rc=0 | `A\nB\na\nz` rc=0 | locale collation vs byte order |
+| `sub_sort_blank_last` | PASS | - | `\na\nb` rc=0 | `\na\nb` rc=0 | `\na\nb` rc=0 | trailing empty line ordering |
+| `sub_sed` | PASS | - | `Alpha\nbetA\ngAmma` rc=0 | `Alpha\nbetA\ngAmma` rc=0 | `Alpha\nbetA\ngAmma` rc=0 |  |
+| `sub_sed_1d` | PASS | - | `beta\ngamma` rc=0 | `beta\ngamma` rc=0 | `beta\ngamma` rc=0 |  |
+| `sub_sed_ctrl` | PASS | - | `A\x1bb\nc` rc=0 | `A\x1bb\nc` rc=0 | `A\x1bb\nc` rc=0 |  |
+| `sub_tr` | PASS | - | `ALPHA\nBETA\nGAMMA` rc=0 | `ALPHA\nBETA\nGAMMA` rc=0 | `ALPHA\nBETA\nGAMMA` rc=0 |  |
+| `sub_tr_nl` | PASS | - | `alpha_beta_gamma_` rc=0 | `alpha_beta_gamma_` rc=0 | `alpha_beta_gamma_` rc=0 |  |
+| `sub_head` | PASS | - | `alpha\nbeta` rc=0 | `alpha\nbeta` rc=0 | `alpha\nbeta` rc=0 |  |
+| `sub_head_default` | PASS | - | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
+| `sub_head_negn1` | KNOWN | - | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta` rc=0 | `alpha\nbeta` rc=0 | GNU -n -1 = all but last line |
+| `sub_head_badnum` | KNOWN | - | `alpha\nbeta\ngamma` rc=0 | `` rc=1 | `` rc=1 | flag parsing |
+| `sub_head_noeol` | PASS | - | `alpha\nbeta` rc=0 | `alpha\nbeta` rc=0 | `alpha\nbeta` rc=0 |  |
+| `sub_grep` | PASS | - | `beta` rc=0 | `beta` rc=0 | `beta` rc=0 |  |
+| `sub_grep_miss` | PASS | - | `` rc=1 | `` rc=1 | `` rc=1 | rc 1 |
+| `sub_grep_ctrl` | PASS | - | `a\x1bb` rc=0 | `a\x1bb` rc=0 | `a\x1bb` rc=0 |  |
+| `sub_wc_c` | PASS | - | `17` rc=0 | `17` rc=0 | `17` rc=0 |  |
+| `sub_wc_c_ctrl` | KNOWN | - | `11` rc=0 | `6` rc=0 | `6` rc=0 | known byte-count class |
+| `sub_wc_l` | PASS | - | `3` rc=0 | `3` rc=0 | `3` rc=0 |  |
+| `sub_wc_default` | PASS | - | `      3       3      17` rc=0 | `      3       3      17` rc=0 | `      3       3      17` rc=0 | default is -l only |
+| `sub_tail` | PASS | - | `beta\ngamma` rc=0 | `beta\ngamma` rc=0 | `beta\ngamma` rc=0 |  |
+| `sub_tail_default` | PASS | - | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
+| `sub_tail_badnum` | PASS | - | `` rc=1 | `` rc=1 | `` rc=1 | falls back to external (values.rs tail arm dormant) |
+| `sub_tail_noeol` | PASS | - | `beta\ngamma` rc=0 | `beta\ngamma` rc=0 | `beta\ngamma` rc=0 |  |
+| `sub_tail_empty` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 |  |
+| `sub_uniq` | PASS | - | `a\nb\na` rc=0 | `a\nb\na` rc=0 | `a\nb\na` rc=0 |  |
+| `sub_uniq_plain` | PASS | - | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 | `alpha\nbeta\ngamma` rc=0 |  |
+| `sub_uniq_noeol` | PASS | - | `a` rc=0 | `a` rc=0 | `a` rc=0 |  |
+| `sleep_zero` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 |  |
+| `sleep_missing` | PASS | yes | `` rc=1 | `` rc=1 | `` rc=1 |  |
+| `sleep_invalid` | PASS | yes | `` rc=1 | `` rc=1 | `` rc=1 |  |
+| `sleep_badunit` | PASS | yes | `` rc=1 | `` rc=1 | `` rc=1 |  |
+| `sleep_unit_s` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 |  |
+| `sleep_unit_h` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 |  |
+| `sleep_dashdash` | PASS | - | `` rc=0 | `` rc=0 | `` rc=0 |  |
+| `dirname_simple` | KNOWN | - | `A:/b\n` rc=0 | `/a/b\n` rc=0 | `/a/b\n` rc=0 | path translation: FAST A:/b vs /a/b |
+| `dirname_noslash` | PASS | - | `.\n` rc=0 | `.\n` rc=0 | `.\n` rc=0 |  |
+| `dirname_dot` | PASS | - | `.\n` rc=0 | `.\n` rc=0 | `.\n` rc=0 |  |
+| `dirname_root` | PASS | - | `/\n` rc=0 | `/\n` rc=0 | `/\n` rc=0 |  |
+| `dirname_trailing` | KNOWN | - | `A:\n` rc=0 | `/a\n` rc=0 | `/a\n` rc=0 | path translation |
+| `dirname_doubleslash` | KNOWN | - | `/\n` rc=0 | `//\n` rc=0 | `//\n` rc=0 | FAST / vs // |
+| `dirname_tripleslash` | EXTBUG | - | `/\n` rc=0 | `//\n` rc=0 | `/\n` rc=0 | FAST and GNU ('/') agree; only winuxcmd EXT is wrong (//) |
+| `dirname_lead_double_letter` | KNOWN | - | `/\n` rc=0 | `//\n` rc=0 | `//\n` rc=0 | FAST / vs // |
+| `dirname_letter_double` | KNOWN | - | `A:\n` rc=0 | `/a\n` rc=0 | `/a\n` rc=0 | path translation |
+| `dirname_dotdot` | PASS | - | `..\n` rc=0 | `..\n` rc=0 | `..\n` rc=0 |  |
+| `dirname_multi` | PASS | - | `a\nc\n` rc=0 | `a\nc\n` rc=0 | `a\nc\n` rc=0 |  |
+| `dirname_dash` | PASS | - | `` rc=1 | `` rc=1 | `` rc=1 |  |
+| `dirname_dashdash` | PASS | - | `.\n` rc=0 | `.\n` rc=0 | `.\n` rc=0 |  |
+| `dirname_empty` | KNOWN | - | `/\n` rc=0 | `.\n` rc=0 | `.\n` rc=0 | FAST / vs . |
+| `basename_empty` | KNOWN | - | `/\n` rc=0 | `\n` rc=0 | `\n` rc=0 | FAST / vs empty |
+| `basename_simple` | PASS | - | `c.txt\n` rc=0 | `c.txt\n` rc=0 | `c.txt\n` rc=0 |  |
+| `basename_suffix` | PASS | - | `b\n` rc=0 | `b\n` rc=0 | `b\n` rc=0 |  |
+| `basename_suffix_partial` | PASS | - | `b.\n` rc=0 | `b.\n` rc=0 | `b.\n` rc=0 |  |
+| `basename_root` | PASS | - | `/\n` rc=0 | `/\n` rc=0 | `/\n` rc=0 |  |
+| `basename_trailing` | PASS | - | `b\n` rc=0 | `b\n` rc=0 | `b\n` rc=0 |  |
+| `basename_noslash` | PASS | - | `foo\n` rc=0 | `foo\n` rc=0 | `foo\n` rc=0 |  |
+| `basename_doubleslash` | PASS | - | `/\n` rc=0 | `/\n` rc=0 | `//\n` rc=0 | FAST==EXT ('/'), GNU ('//'): shared POSIX divergence |
+| `basename_dash` | PASS | - | `` rc=1 | `` rc=1 | `` rc=1 |  |
+| `basename_extra` | PASS | yes | `` rc=1 | `` rc=1 | `` rc=1 |  |
+| `uname_s` | KNOWN | - | `MSYS_NT-10.0-19045\n` rc=0 | `Windows_NT\n` rc=0 | `MINGW64_NT-10.0-19045\n` rc=0 | identity tool, intentional divergence |
+| `uname_a` | KNOWN | - | `MSYS_NT-10.0-19045 DESKTOP-FDUJ7TN 10.0-19045 2026-10-14 03:32 UTC x86_64 Msys\n` rc=0 | `Windows_NT DESKTOP-FDUJ7TN 10.0 19045 x86_64 unknown PC Windows_NT\n` rc=0 | `MINGW64_NT-10.0-19045 DESKTOP-FDUJ7TN 3.6.3-7674c51e.x86_64 2025-07-01 09:13 UTC x86_64 Msys\n` rc=0 | identity tool, intentional divergence |
+| `arch_plain` | PASS | - | `x86_64\n` rc=0 | `x86_64\n` rc=0 | `x86_64\n` rc=0 | rubash persona x86_64 matches winuxcmd/GNU on this host |
+| `env_print` | INFO | - | `AGENT=1\nAI_AGENT=opencode\nALLUSERSPROFILE=C:\\ProgramData\nAPPDATA=C:\\Users\\cmx\\AppData\\Roaming\nBASH=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nCAPON_LLVM_BIN=D:\\CaponAVIS_toolchain\\llvm-21.1.8\\bin\nCAPON_TOOLCHAIN_BIN=D:\\CaponAVIS_toolchain\\bin\nCOLUMNS=80\nCOMMONPROGRAMFILES=C:\\Program Files\\Common Files\nCOMMONPROGRAMFILES(X86)=C:\\Program Files (x86)\\Common Files\nCOMMONPROGRAMW6432=C:\\Program Files\\Common Files\nCOMPUTERNAME=DESKTOP-FDUJ7TN\nCOMSPEC=C:\\Windows\\system32\\cmd.exe\nCONAN_HOME=K:\\conan2\nComSpec=C:\\Windows\\system32\\cmd.exe\nDRIVERDATA=C:\\Windows\\System32\\Drivers\\DriverData\nHOME=C:/Users/cmx\nHOMEDRIVE=C:\nHOMEPATH=\\Users\\cmx\nINTERNINKSTORE_API_KEY=sk-dc57eb0cdf3e5757438ecdc745e7bdc6fe9b9a5db52a6d3a5f6187d20a13ec8d\nLOCALAPPDATA=C:\\Users\\cmx\\AppData\\Local\nLOGONSERVER=\\\\DESKTOP-FDUJ7TN\nNIU_SHELL=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\niu.exe\nNUMBER_OF_PROCESSORS=32\nOLDPWD=/c/Users/cmx\nONEDRIVE=C:\\Users\\cmx\\OneDrive\nOPENCODE=1\nOPENCODE_SESSION_ID=ses_eb8672eebffeowu113VAnlGxZO\nOPENCODE_TERMINAL=1\nOS=Windows_NT\nPATH=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\\usr/local/bin;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\\usr/bin;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\\bin;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd;C:\\Program Files\\SqlCmd\\;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit\\;C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\;C:\\Program Files (x86)\\Microsoft SQL Server\\150\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\150\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\150\\DTS\\Binn\\;C:\\Program Files\\nodejs\\;C:\\Users\\cmx\\.cargo\\bin;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Fastfetch-cli.Fastfetch_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Links;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Packages\\AlDanial.Cloc_Microsoft.Winget.Source_8wekyb3d8bbwe;K:\\Zed\\bin;C:\\Users\\cmx\\AppData\\Roaming\\npm;C:\\Users\\cmx\\AppData\\Local\\Programs\\codex\\bin\nPATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC\nPROCESSOR_ARCHITECTURE=AMD64\nPROCESSOR_IDENTIFIER=Intel64 Family 6 Model 143 Stepping 6, GenuineIntel\nPROCESSOR_LEVEL=6\nPROCESSOR_REVISION=8f06\nPROGRAMDATA=C:\\ProgramData\nPROGRAMFILES=C:\\Program Files\nPROGRAMFILES(X86)=C:\\Program Files (x86)\nPROGRAMW6432=C:\\Program Files\nPROMPT=$P$G\nPSMODULEPATH=C:\\Program Files\\WindowsPowerShell\\Modules;C:\\Windows\\system32\\WindowsPowerShell\\v1.0\\Modules;C:\\Program Files (x86)\\Microsoft SQL Server\\150\\Tools\\PowerShell\\Modules\\\nPUBLIC=C:\\Users\\Public\nPWD=/d/repo/rubash-wt-audit-fastpaths\nSESSIONNAME=Console\nSHELL=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nSHLVL=4\nSYSTEMDRIVE=C:\nSYSTEMROOT=C:\\Windows\nSystemRoot=C:\\Windows\nTEMP=C:\\Users\\cmx\\AppData\\Local\\Temp\nTERM=xterm-256color\nTHIS_SH=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nTMP=C:\\Users\\cmx\\AppData\\Local\\Temp\nUSERDOMAIN=DESKTOP-FDUJ7TN\nUSERDOMAIN_ROAMINGPROFILE=DESKTOP-FDUJ7TN\nUSERNAME=cmx\nUSERPROFILE=C:\\Users\\cmx\nWINDIR=C:\\Windows\nWINUXCMD_HOME=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\nWINUXCMD_PATH=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd/usr/bin/winuxcmd.exe\nWINUXSH_ROOT=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\nWINUXSH_SHELL=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\niu.exe\nWSLENV=WT_SESSION:WT_PROFILE_ID:\nWT_PROFILE_ID={d434181a-8d38-4f78-89bd-bdef5b5d48b6}\nWT_SESSION=185f336f-9ff6-40af-adc1-a33947be23eb\n` rc=0 | `AGENT=1\nAI_AGENT=opencode\nALLUSERSPROFILE=C:\\ProgramData\nAPPDATA=C:\\Users\\cmx\\AppData\\Roaming\nBASH=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nCAPON_LLVM_BIN=D:\\CaponAVIS_toolchain\\llvm-21.1.8\\bin\nCAPON_TOOLCHAIN_BIN=D:\\CaponAVIS_toolchain\\bin\nCOLUMNS=80\nCOMMONPROGRAMFILES=C:\\Program Files\\Common Files\nCOMMONPROGRAMFILES(X86)=C:\\Program Files (x86)\\Common Files\nCOMMONPROGRAMW6432=C:\\Program Files\\Common Files\nCOMPUTERNAME=DESKTOP-FDUJ7TN\nCOMSPEC=C:\\Windows\\system32\\cmd.exe\nCONAN_HOME=K:\\conan2\nDRIVERDATA=C:\\Windows\\System32\\Drivers\\DriverData\nHOME=C:/Users/cmx\nHOMEDRIVE=C:\nHOMEPATH=\\Users\\cmx\nINTERNINKSTORE_API_KEY=sk-dc57eb0cdf3e5757438ecdc745e7bdc6fe9b9a5db52a6d3a5f6187d20a13ec8d\nLOCALAPPDATA=C:\\Users\\cmx\\AppData\\Local\nLOGONSERVER=\\\\DESKTOP-FDUJ7TN\nNIU_SHELL=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\niu.exe\nNUMBER_OF_PROCESSORS=32\nOLDPWD=/c/Users/cmx\nONEDRIVE=C:\\Users\\cmx\\OneDrive\nOPENCODE=1\nOPENCODE_SESSION_ID=ses_eb8672eebffeowu113VAnlGxZO\nOPENCODE_TERMINAL=1\nOS=Windows_NT\nPATH=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\\usr\\local\\bin;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\\usr\\bin;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\\bin;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd;C:\\Program Files\\SqlCmd\\;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit\\;C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\;C:\\Program Files (x86)\\Microsoft SQL Server\\150\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\150\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\150\\DTS\\Binn\\;C:\\Program Files\\nodejs\\;C:\\Users\\cmx\\.cargo\\bin;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Fastfetch-cli.Fastfetch_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Links;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Packages\\AlDanial.Cloc_Microsoft.Winget.Source_8wekyb3d8bbwe;K:\\Zed\\bin;C:\\Users\\cmx\\AppData\\Roaming\\npm;C:\\Users\\cmx\\AppData\\Local\\Programs\\codex\\bin\nPATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC\nPROCESSOR_ARCHITECTURE=AMD64\nPROCESSOR_IDENTIFIER=Intel64 Family 6 Model 143 Stepping 6, GenuineIntel\nPROCESSOR_LEVEL=6\nPROCESSOR_REVISION=8f06\nPROGRAMDATA=C:\\ProgramData\nPROGRAMFILES=C:\\Program Files\nPROGRAMFILES(X86)=C:\\Program Files (x86)\nPROGRAMW6432=C:\\Program Files\nPROMPT=$P$G\nPSMODULEPATH=C:\\Program Files\\WindowsPowerShell\\Modules;C:\\Windows\\system32\\WindowsPowerShell\\v1.0\\Modules;C:\\Program Files (x86)\\Microsoft SQL Server\\150\\Tools\\PowerShell\\Modules\\\nPUBLIC=C:\\Users\\Public\nPWD=/d/repo/rubash-wt-audit-fastpaths\nSESSIONNAME=Console\nSHELL=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nSHLVL=4\nSYSTEMDRIVE=C:\nSYSTEMROOT=C:\\Windows\nTEMP=C:\\Users\\cmx\\AppData\\Local\\Temp\nTERM=xterm-256color\nTHIS_SH=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nTMP=C:\\Users\\cmx\\AppData\\Local\\Temp\nUSERDOMAIN=DESKTOP-FDUJ7TN\nUSERDOMAIN_ROAMINGPROFILE=DESKTOP-FDUJ7TN\nUSERNAME=cmx\nUSERPROFILE=C:\\Users\\cmx\nWINDIR=C:\\Windows\nWINUXCMD_HOME=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\nWINUXCMD_PATH=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd/usr/bin/winuxcmd.exe\nWINUXSH_ROOT=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\nWINUXSH_SHELL=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\niu.exe\nWSLENV=WT_SESSION:WT_PROFILE_ID:\nWT_PROFILE_ID={d434181a-8d38-4f78-89bd-bdef5b5d48b6}\nWT_SESSION=185f336f-9ff6-40af-adc1-a33947be23eb\n` rc=0 | `COMMONPROGRAMFILES(X86)=C:\\Program Files (x86)\\Common Files\nPROGRAMFILES(X86)=C:\\Program Files (x86)\nSHELL=/c/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nNUMBER_OF_PROCESSORS=32\nPSMODULEPATH=C:\\Program Files\\WindowsPowerShell\\Modules;C:\\Windows\\system32\\WindowsPowerShell\\v1.0\\Modules;C:\\Program Files (x86)\\Microsoft SQL Server\\150\\Tools\\PowerShell\\Modules\\\nPROCESSOR_LEVEL=6\nAI_AGENT=opencode\nUSERDOMAIN_ROAMINGPROFILE=DESKTOP-FDUJ7TN\nWT_SESSION=185f336f-9ff6-40af-adc1-a33947be23eb\nPROGRAMFILES=C:\\Program Files\nMSYSTEM=MINGW64\nPATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC\nWINUXSH_ROOT=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\nPROGRAMDATA=C:\\ProgramData\nOS=Windows_NT\nAGENT=1\nHOMEDRIVE=C:\nCOMMONPROGRAMW6432=C:\\Program Files\\Common Files\nUSERDOMAIN=DESKTOP-FDUJ7TN\nPWD=/d/repo/rubash-wt-audit-fastpaths\nUSERPROFILE=C:\\Users\\cmx\nINTERNINKSTORE_API_KEY=sk-dc57eb0cdf3e5757438ecdc745e7bdc6fe9b9a5db52a6d3a5f6187d20a13ec8d\nOPENCODE_SESSION_ID=ses_eb8672eebffeowu113VAnlGxZO\nBASH=/usr/bin/bash\nALLUSERSPROFILE=C:\\ProgramData\nHOME=/c/Users/cmx\nUSERNAME=cmx\nOPENCODE=1\nPLINK_PROTOCOL=ssh\nCOLUMNS=80\nTHIS_SH=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nCOMSPEC=C:\\Windows\\system32\\cmd.exe\nAPPDATA=C:\\Users\\cmx\\AppData\\Roaming\nSYSTEMROOT=C:\\Windows\nLOCALAPPDATA=C:\\Users\\cmx\\AppData\\Local\nPROMPT=$P$G\nCOMPUTERNAME=DESKTOP-FDUJ7TN\nDRIVERDATA=C:\\Windows\\System32\\Drivers\\DriverData\nTERM=xterm-256color\nLOGONSERVER=\\\\DESKTOP-FDUJ7TN\nPROGRAMW6432=C:\\Program Files\nONEDRIVE=C:\\Users\\cmx\\OneDrive\nTEMP=/tmp\nWINUXCMD_HOME=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\nCAPON_TOOLCHAIN_BIN=D:\\CaponAVIS_toolchain\\bin\nSHLVL=3\nPROCESSOR_REVISION=8f06\nCONAN_HOME=K:\\conan2\nCOMMONPROGRAMFILES=C:\\Program Files\\Common Files\nEXEPATH=D:\\Git\\bin\nPROCESSOR_IDENTIFIER=Intel64 Family 6 Model 143 Stepping 6, GenuineIntel\nNIU_SHELL=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\niu.exe\nSESSIONNAME=Console\nWINUXSH_SHELL=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\niu.exe\nWSLENV=WT_SESSION:WT_PROFILE_ID:\nHOMEPATH=\\Users\\cmx\nTMP=/tmp\nPATH=/mingw64/bin:/usr/bin:/c/Users/cmx/bin:/usr/bin:/bin:/c/Users/cmx/AppData/Local/Programs/Niubash/winuxcmd/usr/local/bin:/c/Users/cmx/AppData/Local/Programs/Niubash/winuxcmd/usr/bin:/c/Users/cmx/AppData/Local/Programs/Niubash/winuxcmd/bin:/c/Users/cmx/AppData/Local/Programs/Niubash/winuxcmd:/c/Program Files/SqlCmd:/c/Windows/system32:/c/Windows:/c/Windows/System32/Wbem:/c/Windows/System32/WindowsPowerShell/v1.0:/c/Windows/System32/OpenSSH:/c/Program Files (x86)/Windows Kits/10/Windows Performance Toolkit:/c/Program Files/Microsoft SQL Server/Client SDK/ODBC/170/Tools/Binn:/c/Program Files (x86)/Microsoft SQL Server/150/Tools/Binn:/c/Program Files/Microsoft SQL Server/150/Tools/Binn:/c/Program Files/Microsoft SQL Server/150/DTS/Binn:/c/Program Files/nodejs:/c/Users/cmx/.cargo/bin:/c/Users/cmx/AppData/Local/Microsoft/WindowsApps:/c/Users/cmx/AppData/Local/Programs/Niubash:/c/Users/cmx/AppData/Local/Microsoft/WinGet/Packages/Fastfetch-cli.Fastfetch_Microsoft.Winget.Source_8wekyb3d8bbwe:/c/Users/cmx/AppData/Local/Microsoft/WinGet/Packages/Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe:/c/Users/cmx/AppData/Local/Microsoft/WinGet/Links:/c/Users/cmx/AppData/Local/Microsoft/WinGet/Packages/AlDanial.Cloc_Microsoft.Winget.Source_8wekyb3d8bbwe:/k/Zed/bin:/c/Users/cmx/AppData/Roaming/npm:/c/Users/cmx/AppData/Local/Programs/codex/bin\nOPENCODE_TERMINAL=1\nWINUXCMD_PATH=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd/usr/bin/winuxcmd.exe\nCAPON_LLVM_BIN=D:\\CaponAVIS_toolchain\\llvm-21.1.8\\bin\nWINDIR=C:\\Windows\nPROCESSOR_ARCHITECTURE=AMD64\nWT_PROFILE_ID={d434181a-8d38-4f78-89bd-bdef5b5d48b6}\nPUBLIC=C:\\Users\\Public\nSYSTEMDRIVE=C:\nOLDPWD=/c/Users/cmx\n_=/usr/bin/env\n` rc=0 | sorted env dump, informational |
+| `env_set` | INFO | - | `AGENT=1\nAI_AGENT=opencode\nALLUSERSPROFILE=C:\\ProgramData\nAPPDATA=C:\\Users\\cmx\\AppData\\Roaming\nBASH=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nCAPON_LLVM_BIN=D:\\CaponAVIS_toolchain\\llvm-21.1.8\\bin\nCAPON_TOOLCHAIN_BIN=D:\\CaponAVIS_toolchain\\bin\nCOLUMNS=80\nCOMMONPROGRAMFILES=C:\\Program Files\\Common Files\nCOMMONPROGRAMFILES(X86)=C:\\Program Files (x86)\\Common Files\nCOMMONPROGRAMW6432=C:\\Program Files\\Common Files\nCOMPUTERNAME=DESKTOP-FDUJ7TN\nCOMSPEC=C:\\Windows\\system32\\cmd.exe\nCONAN_HOME=K:\\conan2\nComSpec=C:\\Windows\\system32\\cmd.exe\nDRIVERDATA=C:\\Windows\\System32\\Drivers\\DriverData\nFOO=bar\nHOME=C:/Users/cmx\nHOMEDRIVE=C:\nHOMEPATH=\\Users\\cmx\nINTERNINKSTORE_API_KEY=sk-dc57eb0cdf3e5757438ecdc745e7bdc6fe9b9a5db52a6d3a5f6187d20a13ec8d\nLOCALAPPDATA=C:\\Users\\cmx\\AppData\\Local\nLOGONSERVER=\\\\DESKTOP-FDUJ7TN\nNIU_SHELL=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\niu.exe\nNUMBER_OF_PROCESSORS=32\nOLDPWD=/c/Users/cmx\nONEDRIVE=C:\\Users\\cmx\\OneDrive\nOPENCODE=1\nOPENCODE_SESSION_ID=ses_eb8672eebffeowu113VAnlGxZO\nOPENCODE_TERMINAL=1\nOS=Windows_NT\nPATH=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\\usr/local/bin;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\\usr/bin;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\\bin;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd;C:\\Program Files\\SqlCmd\\;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit\\;C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\;C:\\Program Files (x86)\\Microsoft SQL Server\\150\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\150\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\150\\DTS\\Binn\\;C:\\Program Files\\nodejs\\;C:\\Users\\cmx\\.cargo\\bin;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Fastfetch-cli.Fastfetch_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Links;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Packages\\AlDanial.Cloc_Microsoft.Winget.Source_8wekyb3d8bbwe;K:\\Zed\\bin;C:\\Users\\cmx\\AppData\\Roaming\\npm;C:\\Users\\cmx\\AppData\\Local\\Programs\\codex\\bin\nPATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC\nPROCESSOR_ARCHITECTURE=AMD64\nPROCESSOR_IDENTIFIER=Intel64 Family 6 Model 143 Stepping 6, GenuineIntel\nPROCESSOR_LEVEL=6\nPROCESSOR_REVISION=8f06\nPROGRAMDATA=C:\\ProgramData\nPROGRAMFILES=C:\\Program Files\nPROGRAMFILES(X86)=C:\\Program Files (x86)\nPROGRAMW6432=C:\\Program Files\nPROMPT=$P$G\nPSMODULEPATH=C:\\Program Files\\WindowsPowerShell\\Modules;C:\\Windows\\system32\\WindowsPowerShell\\v1.0\\Modules;C:\\Program Files (x86)\\Microsoft SQL Server\\150\\Tools\\PowerShell\\Modules\\\nPUBLIC=C:\\Users\\Public\nPWD=/d/repo/rubash-wt-audit-fastpaths\nSESSIONNAME=Console\nSHELL=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nSHLVL=4\nSYSTEMDRIVE=C:\nSYSTEMROOT=C:\\Windows\nSystemRoot=C:\\Windows\nTEMP=C:\\Users\\cmx\\AppData\\Local\\Temp\nTERM=xterm-256color\nTHIS_SH=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nTMP=C:\\Users\\cmx\\AppData\\Local\\Temp\nUSERDOMAIN=DESKTOP-FDUJ7TN\nUSERDOMAIN_ROAMINGPROFILE=DESKTOP-FDUJ7TN\nUSERNAME=cmx\nUSERPROFILE=C:\\Users\\cmx\nWINDIR=C:\\Windows\nWINUXCMD_HOME=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\nWINUXCMD_PATH=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd/usr/bin/winuxcmd.exe\nWINUXSH_ROOT=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\nWINUXSH_SHELL=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\niu.exe\nWSLENV=WT_SESSION:WT_PROFILE_ID:\nWT_PROFILE_ID={d434181a-8d38-4f78-89bd-bdef5b5d48b6}\nWT_SESSION=185f336f-9ff6-40af-adc1-a33947be23eb\n` rc=0 | `AGENT=1\nAI_AGENT=opencode\nALLUSERSPROFILE=C:\\ProgramData\nAPPDATA=C:\\Users\\cmx\\AppData\\Roaming\nBASH=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nCAPON_LLVM_BIN=D:\\CaponAVIS_toolchain\\llvm-21.1.8\\bin\nCAPON_TOOLCHAIN_BIN=D:\\CaponAVIS_toolchain\\bin\nCOLUMNS=80\nCOMMONPROGRAMFILES=C:\\Program Files\\Common Files\nCOMMONPROGRAMFILES(X86)=C:\\Program Files (x86)\\Common Files\nCOMMONPROGRAMW6432=C:\\Program Files\\Common Files\nCOMPUTERNAME=DESKTOP-FDUJ7TN\nCOMSPEC=C:\\Windows\\system32\\cmd.exe\nCONAN_HOME=K:\\conan2\nDRIVERDATA=C:\\Windows\\System32\\Drivers\\DriverData\nFOO=bar\nHOME=C:/Users/cmx\nHOMEDRIVE=C:\nHOMEPATH=\\Users\\cmx\nINTERNINKSTORE_API_KEY=sk-dc57eb0cdf3e5757438ecdc745e7bdc6fe9b9a5db52a6d3a5f6187d20a13ec8d\nLOCALAPPDATA=C:\\Users\\cmx\\AppData\\Local\nLOGONSERVER=\\\\DESKTOP-FDUJ7TN\nNIU_SHELL=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\niu.exe\nNUMBER_OF_PROCESSORS=32\nOLDPWD=/c/Users/cmx\nONEDRIVE=C:\\Users\\cmx\\OneDrive\nOPENCODE=1\nOPENCODE_SESSION_ID=ses_eb8672eebffeowu113VAnlGxZO\nOPENCODE_TERMINAL=1\nOS=Windows_NT\nPATH=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\\usr\\local\\bin;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\\usr\\bin;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\\bin;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd;C:\\Program Files\\SqlCmd\\;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit\\;C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\;C:\\Program Files (x86)\\Microsoft SQL Server\\150\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\150\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\150\\DTS\\Binn\\;C:\\Program Files\\nodejs\\;C:\\Users\\cmx\\.cargo\\bin;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Fastfetch-cli.Fastfetch_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Links;C:\\Users\\cmx\\AppData\\Local\\Microsoft\\WinGet\\Packages\\AlDanial.Cloc_Microsoft.Winget.Source_8wekyb3d8bbwe;K:\\Zed\\bin;C:\\Users\\cmx\\AppData\\Roaming\\npm;C:\\Users\\cmx\\AppData\\Local\\Programs\\codex\\bin\nPATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC\nPROCESSOR_ARCHITECTURE=AMD64\nPROCESSOR_IDENTIFIER=Intel64 Family 6 Model 143 Stepping 6, GenuineIntel\nPROCESSOR_LEVEL=6\nPROCESSOR_REVISION=8f06\nPROGRAMDATA=C:\\ProgramData\nPROGRAMFILES=C:\\Program Files\nPROGRAMFILES(X86)=C:\\Program Files (x86)\nPROGRAMW6432=C:\\Program Files\nPROMPT=$P$G\nPSMODULEPATH=C:\\Program Files\\WindowsPowerShell\\Modules;C:\\Windows\\system32\\WindowsPowerShell\\v1.0\\Modules;C:\\Program Files (x86)\\Microsoft SQL Server\\150\\Tools\\PowerShell\\Modules\\\nPUBLIC=C:\\Users\\Public\nPWD=/d/repo/rubash-wt-audit-fastpaths\nSESSIONNAME=Console\nSHELL=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nSHLVL=4\nSYSTEMDRIVE=C:\nSYSTEMROOT=C:\\Windows\nTEMP=C:\\Users\\cmx\\AppData\\Local\\Temp\nTERM=xterm-256color\nTHIS_SH=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nTMP=C:\\Users\\cmx\\AppData\\Local\\Temp\nUSERDOMAIN=DESKTOP-FDUJ7TN\nUSERDOMAIN_ROAMINGPROFILE=DESKTOP-FDUJ7TN\nUSERNAME=cmx\nUSERPROFILE=C:\\Users\\cmx\nWINDIR=C:\\Windows\nWINUXCMD_HOME=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\nWINUXCMD_PATH=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd/usr/bin/winuxcmd.exe\nWINUXSH_ROOT=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\nWINUXSH_SHELL=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\niu.exe\nWSLENV=WT_SESSION:WT_PROFILE_ID:\nWT_PROFILE_ID={d434181a-8d38-4f78-89bd-bdef5b5d48b6}\nWT_SESSION=185f336f-9ff6-40af-adc1-a33947be23eb\n` rc=0 | `COMMONPROGRAMFILES(X86)=C:\\Program Files (x86)\\Common Files\nPROGRAMFILES(X86)=C:\\Program Files (x86)\nSHELL=/c/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nNUMBER_OF_PROCESSORS=32\nPSMODULEPATH=C:\\Program Files\\WindowsPowerShell\\Modules;C:\\Windows\\system32\\WindowsPowerShell\\v1.0\\Modules;C:\\Program Files (x86)\\Microsoft SQL Server\\150\\Tools\\PowerShell\\Modules\\\nPROCESSOR_LEVEL=6\nAI_AGENT=opencode\nUSERDOMAIN_ROAMINGPROFILE=DESKTOP-FDUJ7TN\nWT_SESSION=185f336f-9ff6-40af-adc1-a33947be23eb\nPROGRAMFILES=C:\\Program Files\nMSYSTEM=MINGW64\nPATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC\nWINUXSH_ROOT=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\nPROGRAMDATA=C:\\ProgramData\nOS=Windows_NT\nAGENT=1\nHOMEDRIVE=C:\nCOMMONPROGRAMW6432=C:\\Program Files\\Common Files\nUSERDOMAIN=DESKTOP-FDUJ7TN\nPWD=/d/repo/rubash-wt-audit-fastpaths\nUSERPROFILE=C:\\Users\\cmx\nINTERNINKSTORE_API_KEY=sk-dc57eb0cdf3e5757438ecdc745e7bdc6fe9b9a5db52a6d3a5f6187d20a13ec8d\nOPENCODE_SESSION_ID=ses_eb8672eebffeowu113VAnlGxZO\nBASH=/usr/bin/bash\nALLUSERSPROFILE=C:\\ProgramData\nHOME=/c/Users/cmx\nUSERNAME=cmx\nOPENCODE=1\nPLINK_PROTOCOL=ssh\nCOLUMNS=80\nTHIS_SH=C:/Users/cmx/AppData/Local/Programs/Niubash/niu.exe\nCOMSPEC=C:\\Windows\\system32\\cmd.exe\nAPPDATA=C:\\Users\\cmx\\AppData\\Roaming\nSYSTEMROOT=C:\\Windows\nLOCALAPPDATA=C:\\Users\\cmx\\AppData\\Local\nPROMPT=$P$G\nCOMPUTERNAME=DESKTOP-FDUJ7TN\nDRIVERDATA=C:\\Windows\\System32\\Drivers\\DriverData\nTERM=xterm-256color\nLOGONSERVER=\\\\DESKTOP-FDUJ7TN\nPROGRAMW6432=C:\\Program Files\nONEDRIVE=C:\\Users\\cmx\\OneDrive\nTEMP=/tmp\nWINUXCMD_HOME=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd\nCAPON_TOOLCHAIN_BIN=D:\\CaponAVIS_toolchain\\bin\nSHLVL=3\nPROCESSOR_REVISION=8f06\nCONAN_HOME=K:\\conan2\nCOMMONPROGRAMFILES=C:\\Program Files\\Common Files\nEXEPATH=D:\\Git\\bin\nPROCESSOR_IDENTIFIER=Intel64 Family 6 Model 143 Stepping 6, GenuineIntel\nNIU_SHELL=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\niu.exe\nSESSIONNAME=Console\nWINUXSH_SHELL=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\niu.exe\nWSLENV=WT_SESSION:WT_PROFILE_ID:\nHOMEPATH=\\Users\\cmx\nTMP=/tmp\nPATH=/mingw64/bin:/usr/bin:/c/Users/cmx/bin:/usr/bin:/bin:/c/Users/cmx/AppData/Local/Programs/Niubash/winuxcmd/usr/local/bin:/c/Users/cmx/AppData/Local/Programs/Niubash/winuxcmd/usr/bin:/c/Users/cmx/AppData/Local/Programs/Niubash/winuxcmd/bin:/c/Users/cmx/AppData/Local/Programs/Niubash/winuxcmd:/c/Program Files/SqlCmd:/c/Windows/system32:/c/Windows:/c/Windows/System32/Wbem:/c/Windows/System32/WindowsPowerShell/v1.0:/c/Windows/System32/OpenSSH:/c/Program Files (x86)/Windows Kits/10/Windows Performance Toolkit:/c/Program Files/Microsoft SQL Server/Client SDK/ODBC/170/Tools/Binn:/c/Program Files (x86)/Microsoft SQL Server/150/Tools/Binn:/c/Program Files/Microsoft SQL Server/150/Tools/Binn:/c/Program Files/Microsoft SQL Server/150/DTS/Binn:/c/Program Files/nodejs:/c/Users/cmx/.cargo/bin:/c/Users/cmx/AppData/Local/Microsoft/WindowsApps:/c/Users/cmx/AppData/Local/Programs/Niubash:/c/Users/cmx/AppData/Local/Microsoft/WinGet/Packages/Fastfetch-cli.Fastfetch_Microsoft.Winget.Source_8wekyb3d8bbwe:/c/Users/cmx/AppData/Local/Microsoft/WinGet/Packages/Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe:/c/Users/cmx/AppData/Local/Microsoft/WinGet/Links:/c/Users/cmx/AppData/Local/Microsoft/WinGet/Packages/AlDanial.Cloc_Microsoft.Winget.Source_8wekyb3d8bbwe:/k/Zed/bin:/c/Users/cmx/AppData/Roaming/npm:/c/Users/cmx/AppData/Local/Programs/codex/bin\nOPENCODE_TERMINAL=1\nWINUXCMD_PATH=C:\\Users\\cmx\\AppData\\Local\\Programs\\Niubash\\winuxcmd/usr/bin/winuxcmd.exe\nCAPON_LLVM_BIN=D:\\CaponAVIS_toolchain\\llvm-21.1.8\\bin\nWINDIR=C:\\Windows\nPROCESSOR_ARCHITECTURE=AMD64\nWT_PROFILE_ID={d434181a-8d38-4f78-89bd-bdef5b5d48b6}\nPUBLIC=C:\\Users\\Public\nSYSTEMDRIVE=C:\nOLDPWD=/c/Users/cmx\n_=/usr/bin/env\nFOO=bar\n` rc=0 |  |
