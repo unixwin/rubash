@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(windows)]
+use crate::executor::fd_table::FdEntry;
+
 fn timed_read_value(input: &TimedPipelineInput, start: f64, timeout: f64) -> (String, i32) {
     if timeout == 0.0 {
         let ready = input.chunks.iter().any(|(at, _)| *at <= start) || input.eof_at <= start;
@@ -526,6 +529,22 @@ impl Executor {
         commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
+        // rubash#761: `pipeline_stdin_stream` is armed only for the single
+        // streaming tail stage; a NESTED pipeline inside that tail (e.g. a
+        // compound/builtin body that itself pipelines) must not propagate the
+        // outer consumer's pipe to its own stages. Clear it across the whole
+        // nested pipeline and restore afterwards.
+        let saved_stdin_stream = self.pipeline_stdin_stream.take();
+        let result = self.execute_simple_pipeline_inner(commands, index);
+        self.pipeline_stdin_stream = saved_stdin_stream;
+        result
+    }
+
+    fn execute_simple_pipeline_inner(
+        &mut self,
+        commands: &[CommandNode],
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
         let Some(first) = commands.get(index) else {
             return Ok(None);
         };
@@ -580,6 +599,22 @@ impl Executor {
         // so an unbounded writer dies on the broken pipe instead of being
         // slurped into memory by the sequential loop.
         if self.execute_shell_writer_pipeline(&commands)?.is_some() {
+            return Ok(Some(end + 1));
+        }
+
+        // rubash#761: an UNBOUNDED external producer feeding a pipeline whose
+        // rightmost stage is served in-shell (a builtin tail such as
+        // `true`/`:`/`read`/`echo`). The sequential loop would materialize the
+        // producer's whole stream (`yes | true` drained into RAM forever) and
+        // the materializing prefix path cannot stop an unbounded producer
+        // either. Run the producer chain on real OS pipes and let the tail
+        // read fd 0 directly; when the tail stops reading its read end closes
+        // and the producers are terminated with the SIGPIPE shape (141). See
+        // `execute_external_prefix_streaming_tail`.
+        if self
+            .execute_external_prefix_streaming_tail(&commands)?
+            .is_some()
+        {
             return Ok(Some(end + 1));
         }
 
@@ -1967,6 +2002,242 @@ impl Executor {
         Ok(results)
     }
 
+    /// rubash#761: an unbounded external producer chain feeding a pipeline
+    /// whose RIGHTMOST stage is served in-shell (a builtin tail). GNU
+    /// execute_cmd.c:2620 execute_pipeline forks every element on real
+    /// pipe(2)s, so when the rightmost element exits its read end closes and
+    /// the producer dies of SIGPIPE (`yes | true` -> PIPESTATUS 141 0). The
+    /// sequential stage loop instead materialized the producer's WHOLE stream
+    /// (`execute_external_pipeline_stage_inner` -> `wait_with_output`) before
+    /// the tail ever ran — an unbounded `yes` never reaches EOF, so the shell
+    /// drained it into RAM forever (~250 MB/s; rubash#761, root of #723's
+    /// inline-arm-last-stage freeze). `execute_external_prefix_concurrently`
+    /// has the same defect one level up: its `spawn_wait_concurrent_external_stages`
+    /// drains the last prefix member to completion before the tail starts, so
+    /// `yes | cat | true` still never terminates.
+    ///
+    /// This path runs the maximum plain-external prefix on real OS pipes and
+    /// hands the LAST pipe's read end to the in-shell tail as fd 0 (via
+    /// `pipeline_stdin_stream`), so the tail pulls the stream on demand. When
+    /// the tail stops reading (it exits, or reads one record), its read end is
+    /// dropped, the producers meet EPIPE, and each lingering member is reaped
+    /// with the SIGPIPE-shaped status 141 (`wait_for_windows_pipeline_member`).
+    /// Admission is a WHITELIST: the tail must be a literal builtin from
+    /// `streaming_builtin_tail` and every prefix member a plain external, so a
+    /// shape this path cannot faithfully stream keeps the existing executor.
+    #[cfg(windows)]
+    fn execute_external_prefix_streaming_tail(
+        &mut self,
+        commands: &[&CommandNode],
+    ) -> Result<Option<()>, ExecuteError> {
+        if commands.len() < 2
+            || self.stderr_capture.is_some()
+            // A live DEBUG trap fires per element inside the forked child
+            // (execute_cmd.c:4506); this fast path would bypass those fires.
+            || (self.debug_trap_in_scope()
+                && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
+                    .is_some_and(|action| !action.is_empty()))
+        {
+            return Ok(None);
+        }
+        let tail_index = commands.len() - 1;
+        let tail = commands[tail_index];
+        if !self.streaming_builtin_tail(tail) {
+            return Ok(None);
+        }
+        // Every prefix member must be a plain external: the OS-pipe spawner
+        // below wires only stdio, so any redirect/tempenv/heredoc/procsub/time
+        // shape has to keep the shell-aware sequential machine.
+        let mut specs = Vec::with_capacity(tail_index);
+        for (index, command) in commands[..tail_index].iter().enumerate() {
+            if !pipeline_streaming_plain_external(command) {
+                return Ok(None);
+            }
+            let Some(spec) = self.concurrent_external_stage_spec(command, index, false) else {
+                return Ok(None);
+            };
+            specs.push(spec);
+        }
+        // Stage 0's fd 0 is the shell's inherited stdin (GNU forks every
+        // element with the shell's own descriptors). A staged FUNCTION_STDIN
+        // payload would need the writer-thread dance; such shapes keep the
+        // sequential path.
+        let (stage0_input, _stage0_stdin_base) = self.initial_pipeline_input(commands[0]);
+        if !stage0_input.is_empty() {
+            return Ok(None);
+        }
+        let stage0_inherits = self.stdin_string_for_command(commands[0]).is_none()
+            && match self.fd_table.entries.get(&0) {
+                Some(entry) => {
+                    !entry.closed
+                        && matches!(entry.read, Some(FdReadEndpoint::InheritedProcessStdin))
+                }
+                None => true,
+            };
+
+        // pipe[i] connects prefix member i to member i+1; the LAST pipe feeds
+        // the in-shell tail (i.e. commands.len() - 1 pipes for `prefix_len`
+        // members, the final one being the tail's stdin).
+        let mut pipes: Vec<(Option<os_pipe::PipeReader>, Option<os_pipe::PipeWriter>)> =
+            Vec::with_capacity(tail_index);
+        for _ in 0..tail_index {
+            let (read, write) = os_pipe::pipe().map_err(ExecuteError::IoError)?;
+            pipes.push((Some(read), Some(write)));
+        }
+
+        let mut processes = Vec::with_capacity(tail_index);
+        for (index, (program, expanded_name, args)) in specs.iter().enumerate() {
+            let (mut process, _) = if let Some(name) = internal_pipeline_program_name(program) {
+                let mut process = std::process::Command::new(std::env::current_exe()?);
+                process.arg(format!("--internal-{name}")).args(args);
+                (process, false)
+            } else {
+                external_command_for_named_program(
+                    program,
+                    Some(expanded_name),
+                    args,
+                    &self.shell_state.env_vars,
+                )
+            };
+            self.apply_external_environment(commands[index], &mut process);
+            if index == 0 {
+                if stage0_inherits {
+                    process.stdin(Stdio::inherit());
+                } else {
+                    process.stdin(Stdio::null());
+                }
+            } else {
+                let (read, _) = &mut pipes[index - 1];
+                process.stdin(stdio_from_transferred_handle(
+                    read.take().expect("producer reader already transferred"),
+                ));
+            }
+            let (_, write) = &mut pipes[index];
+            process.stdout(stdio_from_transferred_handle(
+                write.take().expect("producer writer already transferred"),
+            ));
+            let mut child = process.spawn().map_err(|error| {
+                ExecuteError::IoError(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{}: {}",
+                        program
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("external"),
+                        crate::posix_errors::message(&error)
+                    ),
+                ))
+            })?;
+            processes.push(child);
+        }
+
+        // The tail's fd 0 is the last pipe's read end. Wrap it as a file
+        // endpoint so the in-shell readers (`read`, ...) pull the real stream
+        // through the fd table (read_io.rs read_file_bytes blocks on the
+        // handle); `pipeline_stdin_stream` tells the stage dispatcher to leave
+        // FUNCTION_STDIN absent so `read` does not short-circuit to the
+        // buffered mirror.
+        use std::os::windows::io::IntoRawHandle;
+        let tail_reader = pipes[tail_index - 1]
+            .0
+            .take()
+            .expect("tail reader already transferred");
+        let tail_handle = tail_reader.into_raw_handle() as crate::fd::HANDLE;
+        let saved_fd0 = self.fd_table.entries.insert(
+            0,
+            FdEntry {
+                read: Some(FdReadEndpoint::File(std::rc::Rc::new(FileFd {
+                    handle: tail_handle,
+                    path: std::path::PathBuf::from("<rubash-pipeline-stdin>"),
+                }))),
+                write: None,
+                closed: false,
+                dynamic: false,
+            },
+        );
+        let saved_stdin_stream = self.pipeline_stdin_stream;
+        self.pipeline_stdin_stream = Some(tail_handle);
+        self.set_current_command(tail);
+        let tail_result = self.execute_pipeline_stage(tail, "", false);
+        self.pipeline_stdin_stream = saved_stdin_stream;
+        // Restoring fd 0 drops the File endpoint's read handle (FileFd::drop
+        // -> close_handle): the producers' next write is a broken pipe.
+        match saved_fd0 {
+            Some(entry) => {
+                self.fd_table.entries.insert(0, entry);
+            }
+            None => {
+                self.fd_table.entries.remove(&0);
+            }
+        }
+
+        // Reap the producer chain BEFORE propagating any tail error: each
+        // member is waited against its immediate downstream, and the last
+        // member against nothing (the tail is already gone), so a lingering
+        // producer is SIGPIPE-shaped after the natural exit window
+        // (wait_for_windows_pipeline_member -> 141).
+        let mut statuses: Vec<i32> = Vec::with_capacity(tail_index + 1);
+        for index in 0..tail_index {
+            let (head, downstream) = processes.split_at_mut(index + 1);
+            let member = head.last_mut().expect("member index inside pipeline");
+            let status = wait_for_windows_pipeline_member(member, downstream.first_mut())?;
+            statuses.push(crate::executor::wait_status::process_exit_status(&status));
+        }
+
+        let (tail_out, tail_err, tail_status) = match tail_result? {
+            Some(triple) => triple,
+            None => (String::new(), String::new(), 0),
+        };
+        statuses.push(tail_status);
+
+        self.write_pipeline_output(tail, &tail_out, false)?;
+        if !tail_err.is_empty() {
+            std::io::stderr().write_all(
+                &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&tail_err),
+            )?;
+        }
+        self.exit_code = self.pipeline_exit_status(&statuses);
+        self.set_pipestatus(statuses);
+        Ok(Some(()))
+    }
+
+    /// Unix port: the OS-pipe streaming machinery is Windows-only for now (the
+    /// os_pipe spawn plumbing); on Unix the sequential stage loop keeps
+    /// handling mixed pipelines. rubash#761 follow-up.
+    #[cfg(not(windows))]
+    fn execute_external_prefix_streaming_tail(
+        &mut self,
+        _commands: &[&CommandNode],
+    ) -> Result<Option<()>, ExecuteError> {
+        Ok(None)
+    }
+
+    /// rubash#761: a pipeline tail this executor can serve from a live OS pipe
+    /// as fd 0. Either a WHITELIST of literal builtin names whose reads pull
+    /// fd 0 and whose other semantics are unaffected by the channel (`true`,
+    /// `:`, `false`, `echo`, `printf`, `read`), or a compound body (a loop, a
+    /// brace group, an `if`/`case`, a subshell) whose inner readers pull the
+    /// same fd 0 — so `yes | while read; do break; done` stops the producer
+    /// exactly when `break` ends the body. Redirects/tempenv/heredocs/procsubs
+    /// on the tail force the existing executor.
+    #[cfg(windows)]
+    fn streaming_builtin_tail(&self, command: &CommandNode) -> bool {
+        if !pipeline_streaming_plain_stage(command) {
+            return false;
+        }
+        if command_is_compound_pipeline_stage(command) {
+            return true;
+        }
+        let Some(word) = command.words.first() else {
+            return false;
+        };
+        matches!(
+            word.as_str(),
+            "true" | ":" | "false" | "echo" | "printf" | "read"
+        ) && !self.command_first_word_is_function(command)
+    }
+
     /// Run the maximal leading run of concurrent-eligible external stages
     /// on real OS pipes and hand its captured output to the sequential
     /// stage loop for the shell-side remainder (issue #206).
@@ -2498,12 +2769,24 @@ impl Executor {
             .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .cloned();
-        self.shell_state
-            .env_vars
-            .insert(FUNCTION_STDIN.to_string(), input.to_string());
-        self.shell_state
-            .env_vars
-            .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        // rubash#761: a streaming tail reads fd 0 directly (a real OS pipe
+        // bound by `execute_external_prefix_streaming_tail`), so the
+        // FUNCTION_STDIN mirror must stay ABSENT — a present mirror (even an
+        // empty one) short-circuits `read` back to the buffered channel and
+        // it would see EOF instead of the producer's stream
+        // (read_io.rs:361-363).
+        let streaming_stdin = self.pipeline_stdin_stream.is_some();
+        if streaming_stdin {
+            self.shell_state.env_vars.remove(FUNCTION_STDIN);
+            self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
+        } else {
+            self.shell_state
+                .env_vars
+                .insert(FUNCTION_STDIN.to_string(), input.to_string());
+            self.shell_state
+                .env_vars
+                .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        }
         self.pipeline_stdin_consumed.set(None);
         let result = if command_has_pipeline_process_substitution(command) {
             // The substitution child inherits the stage's stdin — the
@@ -2515,12 +2798,14 @@ impl Executor {
                 .env_vars
                 .get(FUNCTION_STDIN_OFFSET)
                 .cloned();
-            self.shell_state
-                .env_vars
-                .insert(FUNCTION_STDIN.to_string(), input.to_string());
-            self.shell_state
-                .env_vars
-                .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+            if !streaming_stdin {
+                self.shell_state
+                    .env_vars
+                    .insert(FUNCTION_STDIN.to_string(), input.to_string());
+                self.shell_state
+                    .env_vars
+                    .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+            }
             let materialized = self.command_with_process_substitution_files(command);
             restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
             restore_optional_env_var(
@@ -2530,8 +2815,12 @@ impl Executor {
             );
             match materialized {
                 Ok((materialized, process_substitutions)) => {
-                    let inner =
-                        self.execute_pipeline_stage_inner(&materialized, input, stdin_inherit);
+                    let inner = self.execute_pipeline_stage_inner(
+                        &materialized,
+                        input,
+                        stdin_inherit,
+                        streaming_stdin,
+                    );
                     match self.finish_process_substitutions(process_substitutions) {
                         Err(error) => Err(error),
                         Ok(()) => inner,
@@ -2540,7 +2829,7 @@ impl Executor {
                 Err(error) => Err(error),
             }
         } else {
-            self.execute_pipeline_stage_inner(command, input, stdin_inherit)
+            self.execute_pipeline_stage_inner(command, input, stdin_inherit, streaming_stdin)
         };
         // Inline stage arms that ran on `self` consumed FUNCTION_STDIN
         // directly; subshell/child stages report through the cell. Whichever
@@ -2578,6 +2867,7 @@ impl Executor {
         command: &CommandNode,
         input: &str,
         stdin_inherit: bool,
+        streaming_stdin: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         if let Some(time_command) = &command.time_command {
             let started = time_command_started();
@@ -2601,7 +2891,7 @@ impl Executor {
 
         if command_is_compound_pipeline_stage(command) {
             return self
-                .execute_compound_pipeline_stage(command, input)
+                .execute_compound_pipeline_stage(command, input, streaming_stdin)
                 .map(Some);
         }
 
@@ -2646,7 +2936,7 @@ impl Executor {
         let command = &command;
         let Some(name) = command.words.first().map(String::as_str) else {
             return self
-                .execute_compound_pipeline_stage(command, input)
+                .execute_compound_pipeline_stage(command, input, streaming_stdin)
                 .map(Some);
         };
 
@@ -3237,7 +3527,9 @@ impl Executor {
                 if let Some(output) = self.execute_function_pipeline_stage(command, input)? {
                     Ok(Some(output))
                 } else {
-                    if let Some(output) = self.execute_builtin_pipeline_stage(command, input)? {
+                    if let Some(output) =
+                        self.execute_builtin_pipeline_stage(command, input, streaming_stdin)?
+                    {
                         Ok(Some(output))
                     } else {
                         self.execute_external_pipeline_stage(command, input, stdin_inherit)
@@ -3642,6 +3934,45 @@ mod inline_tr_tests {
         assert!(inline_expand_tr_set("[:upper:]").is_some());
         assert!(inline_expand_tr_set("abc").is_some());
     }
+}
+
+/// rubash#761: a pipeline stage the streaming-tail OS-pipe spawner can serve
+/// with stdio alone — no shell-side redirect, tempenv, heredoc, process
+/// substitution, time prefix, inversion, or background/coproc modifier.
+/// Anything else keeps the shell-aware sequential machine.
+#[cfg(windows)]
+fn pipeline_streaming_plain_stage(command: &CommandNode) -> bool {
+    command.time_command.is_none()
+        && command.redirect_out.is_none()
+        && command.append.is_none()
+        && command.redirect_in.is_none()
+        && command.redirect_err.is_none()
+        && command.redirect_err_append.is_none()
+        && command.heredoc.is_none()
+        && command.heredoc_redirects.is_empty()
+        && command.here_string.is_none()
+        && command.redirects.is_empty()
+        && command.assignments.is_empty()
+        && command.process_substitutions.is_empty()
+        && !command.inverted
+        && command.inverted_command.is_none()
+        && command.background_command.is_none()
+        && command.coproc_command.is_none()
+        && !command_has_pipeline_process_substitution(command)
+}
+
+/// rubash#761: a streaming-tail PREFIX member — a plain external command (no
+/// compound/subshel/brace shape, non-empty words). Prefix members are spawned
+/// as real external children, so only `pipeline_streaming_plain_stage` plus
+/// the external shape qualifies.
+#[cfg(windows)]
+fn pipeline_streaming_plain_external(command: &CommandNode) -> bool {
+    !command.words.is_empty()
+        && command.brace_group.is_none()
+        && !command.subshell
+        && command.subshell_command.is_none()
+        && !command_is_compound_pipeline_stage(command)
+        && pipeline_streaming_plain_stage(command)
 }
 
 fn command_has_non_concurrent_pipeline_redirects(

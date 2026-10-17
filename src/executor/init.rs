@@ -415,6 +415,7 @@ impl Executor {
             stdout_capture: None,
             stderr_capture: None,
             pipeline_stdout_stream: None,
+            pipeline_stdin_stream: None,
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,

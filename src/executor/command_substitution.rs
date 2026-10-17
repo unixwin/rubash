@@ -1550,6 +1550,7 @@ impl Executor {
             // function/builtin_pipeline_stage) opt in explicitly after this
             // boundary.
             pipeline_stdout_stream: None,
+            pipeline_stdin_stream: None,
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,

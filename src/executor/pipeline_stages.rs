@@ -102,6 +102,7 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
+        streaming_stdin: bool,
     ) -> Result<(String, String, i32), ExecuteError> {
         let saved_dir = env::current_dir().ok();
         let mut subshell = self.command_substitution_executor();
@@ -125,6 +126,16 @@ impl Executor {
             .shell_state
             .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        // rubash#761: a streaming tail's body reads fd 0 (the real OS pipe
+        // bound by `execute_external_prefix_streaming_tail`). Leave
+        // FUNCTION_STDIN ABSENT so `read`/`mapfile` inside the body pull the
+        // live pipe instead of short-circuiting to an empty mirror
+        // (read_io.rs:361-363); the subshell inherits the fd-0 file endpoint
+        // through the cloned fd table.
+        if streaming_stdin {
+            subshell.shell_state.env_vars.remove(FUNCTION_STDIN);
+            subshell.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
+        }
         let raws_aligned = command.assignment_raws.len() == command.assignments.len();
         for (index, (name, value)) in command.assignments.iter().enumerate() {
             let (base_name, _) = assignment_name_and_append(name);
@@ -351,6 +362,7 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
+        streaming_stdin: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         let Some(name) = command.words.first() else {
             return Ok(None);
@@ -402,14 +414,21 @@ impl Executor {
         }
 
         let mut subshell = self.command_substitution_executor();
-        subshell
-            .shell_state
-            .env_vars
-            .insert(FUNCTION_STDIN.to_string(), input.to_string());
-        subshell
-            .shell_state
-            .env_vars
-            .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        // rubash#761: a streaming tail's reader pulls fd 0 (the real OS pipe
+        // bound by `execute_external_prefix_streaming_tail`); leave
+        // FUNCTION_STDIN ABSENT so `read` does not short-circuit to the
+        // buffered mirror and report EOF (read_io.rs:361-363). The subshell
+        // inherits the fd-0 file endpoint through the cloned fd table.
+        if !streaming_stdin {
+            subshell
+                .shell_state
+                .env_vars
+                .insert(FUNCTION_STDIN.to_string(), input.to_string());
+            subshell
+                .shell_state
+                .env_vars
+                .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        }
 
         subshell.stderr_capture = Some(Vec::new());
         let result = subshell.execute_command(&call);

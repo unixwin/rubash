@@ -975,6 +975,19 @@ pub struct Executor {
     /// so an unbounded shell-side writer stops exactly like GNU's
     /// SIGPIPE-killed pipeline element, instead of buffering forever.
     pipeline_stdout_stream: Option<crate::fd::HANDLE>,
+    /// rubash#761: while a shell-side pipeline CONSUMER (a builtin tail such
+    /// as `true`/`:`/`read`/`echo`) reads the NEXT upstream external
+    /// producer's stream from a real OS pipe instead of the in-memory
+    /// FUNCTION_STDIN mirror. Set by
+    /// `execute_external_prefix_streaming_tail` around the consuming stage;
+    /// the stage's readers (`read`, ...) then pull fd 0 = this raw pipe
+    /// handle, so an unbounded producer (`yes`, ...) is closed/terminated the
+    /// moment the consumer stops reading, exactly like GNU's forked element
+    /// whose read end closes when the rightmost command exits. Without it the
+    /// sequential loop materialized the producer's whole stream and never
+    /// reached the consumer (`yes | true` drained into RAM forever).
+    /// Mirrors `pipeline_stdout_stream` for the consumer side.
+    pipeline_stdin_stream: Option<crate::fd::HANDLE>,
     /// niubash#144: outcome of the external stdio plan from the last
     /// `apply_external_redirects` (ordered-walk shared handles), consumed
     /// by the immediately following `spawn_external_process`. `Some(..)`
