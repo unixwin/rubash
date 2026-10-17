@@ -259,6 +259,54 @@ mod builtin_doc_sync {
         }
     }
 
+    /// Pipeline-stage arms matched by `execute_pipeline_stage_inner`
+    /// (`pipeline_exec.rs`, `match name`). Frozen set: these arms are inline
+    /// match branches, not table entries the test can derive, so the doc list
+    /// is compared against this constant and the test fails on any arm
+    /// addition, removal or rename until `docs/builtins.md` §3.1 is updated.
+    #[test]
+    fn doc_pipeline_fastpath_list_matches_pipeline_arms() {
+        let mut expected: Vec<String> = [
+            "true", ":", "false", "echo", "printf", "trap", "head", "cat", "sed", "grep", "wc",
+            "tr",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        expected.sort();
+
+        let mut doc_names = machine_list("pipeline-fastpath-list");
+        doc_names.sort();
+        assert_eq!(
+            expected, doc_names,
+            "docs/builtins.md pipeline-fastpath-list is out of sync with the \
+             pipeline-stage arms in execute_pipeline_stage_inner (pipeline_exec.rs, `match name`)"
+        );
+    }
+
+    /// Command-substitution filter arms matched by
+    /// `command_substitution_pipeline_filter` (`command_substitution_values.rs`).
+    /// Same frozen-set rationale as the pipeline list. Note `sort`/`tail`/`uniq`
+    /// exist only here while `sed`/`tr`/`head`/`grep`/`wc` also have pipeline
+    /// arms — the overlap is expected and asserted only against this list.
+    #[test]
+    fn doc_substitution_fastpath_list_matches_substitution_filter_arms() {
+        let mut expected: Vec<String> = ["sort", "sed", "tr", "head", "grep", "wc", "tail", "uniq"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        expected.sort();
+
+        let mut doc_names = machine_list("substitution-fastpath-list");
+        doc_names.sort();
+        assert_eq!(
+            expected, doc_names,
+            "docs/builtins.md substitution-fastpath-list is out of sync with the \
+             filter arms in command_substitution_pipeline_filter \
+             (command_substitution_values.rs)"
+        );
+    }
+
     #[test]
     fn whitelist_never_leaks_fast_path_names() {
         for name in ["dirname", "basename", "sleep"] {
