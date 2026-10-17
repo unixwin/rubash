@@ -28,6 +28,13 @@ pub struct ShellInvocation {
     pub positional_params: Vec<String>,
     pub script: Option<String>,
     pub read_stdin: bool,
+    /// `-o`/`+o` with no following option word (GNU shell.c:931-938): the
+    /// argument-less form is the LIST request, not a usage error. `Some(false)`
+    /// is the `-o` name/state table, `Some(true)` the `+o` recreate list; the
+    /// listing is emitted by `apply_to_executor_before_startup` so every host
+    /// that applies the invocation gets the same output. `None` means a normal
+    /// `-o <name>` / `+o <name>` pair (recorded in `shell_flags`).
+    pub list_shell_options: Option<bool>,
     pub restricted: bool,
     pub shell_flags: Vec<(String, bool)>,
     pub shopt_flags: Vec<(String, bool)>,
@@ -128,6 +135,7 @@ impl ShellInvocation {
             positional_params: Vec::new(),
             script: None,
             read_stdin: false,
+            list_shell_options: None,
             restricted: false,
             shell_flags: Vec::new(),
             shopt_flags: Vec::new(),
@@ -217,11 +225,21 @@ impl ShellInvocation {
                     i += 1;
                 }
                 "-o" | "+o" => {
-                    let name = expanded
-                        .get(i + 1)
-                        .ok_or_else(|| format!("{arg}: option requires an argument"))?;
-                    out.shell_flags.push((name.clone(), arg == "-o"));
-                    i += 2;
+                    match expanded.get(i + 1) {
+                        Some(name) => {
+                            out.shell_flags.push((name.clone(), arg == "-o"));
+                            i += 2;
+                        }
+                        // GNU shell.c:933-938: `-o`/`+o` with no following
+                        // argv word is the LIST form (list_minus_o_opts),
+                        // not a usage error. Parsing continues; the table is
+                        // emitted while options are applied (see
+                        // apply_to_executor_before_startup).
+                        None => {
+                            out.list_shell_options = Some(arg == "+o");
+                            i += 1;
+                        }
+                    }
                 }
                 "-O" | "+O" => {
                     let name = expanded
@@ -230,13 +248,22 @@ impl ShellInvocation {
                     out.shopt_flags.push((name.clone(), arg == "-O"));
                     i += 2;
                 }
-                "--" => {
+                "-" | "--" => {
+                    // GNU shell.c:905-911: a lone `-' or `--' ends option
+                    // parsing (next_arg returned). A following word is the
+                    // script file; with none the shell reads standard input
+                    // (shell.c:780-786 read_from_stdin) — the previous
+                    // `--: option requires a script` rejection diverged from
+                    // `bash --` on stdin. Positional parameters start after
+                    // the script name.
                     i += 1;
-                    let script = expanded
-                        .get(i)
-                        .ok_or_else(|| "--: option requires a script".to_string())?;
-                    out.script = Some(script.clone());
-                    out.positional_params = expanded[i + 1..].to_vec();
+                    match expanded.get(i) {
+                        Some(script) => {
+                            out.script = Some(script.clone());
+                            out.positional_params = expanded[i + 1..].to_vec();
+                        }
+                        None => out.read_stdin = true,
+                    }
                     return Ok(out);
                 }
                 option if option.starts_with('-') || option.starts_with('+') => {
@@ -312,6 +339,15 @@ impl ShellInvocation {
             // __RUBASH_POSIX_MODE sync) live in set::set_shell_option.
             executor.set_shell_option(name, *enabled);
         }
+        if let Some(recreate) = self.list_shell_options {
+            // GNU shell.c:933-938: `-o`/`+o` with no operand printed the
+            // set -o table during option parsing (options.c
+            // print_all_shell_options) and parsing continued. The shell
+            // flags parsed before the request are already applied above, so
+            // the table renders their live state exactly as GNU's
+            // left-to-right walk does; `+o` selects the recreate list.
+            let _ = self.write_shell_options_listing(executor, &mut std::io::stdout());
+        }
         for (name, enabled) in &self.shopt_flags {
             if !executor.set_shopt_option(name, *enabled) {
                 return Err(format!("{name}: invalid shell option name"));
@@ -364,6 +400,25 @@ impl ShellInvocation {
         if self.restricted {
             executor.set_shell_option("restricted", true);
         }
+    }
+
+    /// GNU shell.c:933-938 (`list_minus_o_opts`): write the argument-less
+    /// `-o`/`+o` listing. `-o` renders the `name\tstate` table, `+o` the
+    /// `set +o name` / `set -o name` recreate list (options.c
+    /// print_all_shell_options; the same bytes the engine's `set -o`
+    /// builtin prints). A no-op when the invocation used `-o <name>`
+    /// (`shell_flags`) rather than the list form, so hosts may call it
+    /// unconditionally. Exposed as a writer method so the exact output is
+    /// testable without capturing the process stdout.
+    pub fn write_shell_options_listing<W: std::io::Write>(
+        &self,
+        executor: &Executor,
+        out: &mut W,
+    ) -> std::io::Result<()> {
+        if let Some(recreate) = self.list_shell_options {
+            executor.print_shell_options_listing(recreate, out)?;
+        }
+        Ok(())
     }
 }
 
