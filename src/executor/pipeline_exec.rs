@@ -3480,16 +3480,33 @@ pub(in crate::executor) fn translate_tr(input: &str, source: &str, target: &str)
     else {
         return input.to_string();
     };
-    input
-        .chars()
-        .map(|ch| {
-            source_chars
+    // niubash#707 (same class as niubash#383): `input` is transport text, so
+    // carrier bytes such as 0x0C and 0x1B travel as U+E000+U+E0xx marker
+    // pairs. A set built from the real characters (`[:cntrl:]`, `[:space:]`)
+    // never matches those pairs, so carried control bytes escaped translation.
+    // Decode to exactly the bytes the external `tr` would receive, run set
+    // membership on bytes, then re-encode so the output boundary decodes once.
+    let decoded = crate::executor::substitution_metadata::shell_text_to_raw_bytes(input);
+    // `inline_expand_tr_set` returns only ASCII for a representable set, so the
+    // char->byte narrowing is exact.
+    let source_bytes: Vec<u8> = source_chars.iter().map(|ch| *ch as u8).collect();
+    let target_bytes: Vec<u8> = target_chars.iter().map(|ch| *ch as u8).collect();
+    if source_bytes.is_empty() || target_bytes.is_empty() {
+        // `tr a ''` is a coreutils usage error and `tr '' x` a no-op; the
+        // guards keep the index arithmetic below panic-free either way.
+        return crate::executor::substitution_metadata::bytes_to_shell_text(&decoded);
+    }
+    let translated: Vec<u8> = decoded
+        .into_iter()
+        .map(|byte| {
+            source_bytes
                 .iter()
-                .position(|source_ch| *source_ch == ch)
-                .map(|index| target_chars[index.min(target_chars.len() - 1)])
-                .unwrap_or(ch)
+                .position(|source_byte| *source_byte == byte)
+                .map(|index| target_bytes[index.min(target_bytes.len() - 1)])
+                .unwrap_or(byte)
         })
-        .collect()
+        .collect();
+    crate::executor::substitution_metadata::bytes_to_shell_text(&translated)
 }
 
 /// Expands a `tr` set for the inline pipeline fast path. Returns `None` for
