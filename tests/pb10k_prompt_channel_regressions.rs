@@ -25,8 +25,19 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+fn empty_home() -> std::path::PathBuf {
+    // Hermetic HOME (issue419 class): a themed ~/.bashrc would override
+    // the PS1 under test. Empty dir = default prompt everywhere.
+    let dir = std::env::temp_dir().join(format!("rubash-pb10k-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("empty HOME");
+    dir
+}
+
 fn run_stdin(stdin: &[u8], env: &[(&str, &str)]) -> (String, Vec<u8>) {
+    let home = empty_home();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    cmd.env("HOME", &home);
     cmd.arg("-i")
         .env_remove("PS1")
         .env_remove("PROMPT_DIRTRIM")
@@ -45,6 +56,7 @@ fn run_stdin(stdin: &[u8], env: &[(&str, &str)]) -> (String, Vec<u8>) {
         .expect("write stdin");
     drop(child.stdin.take());
     let output = child.wait_with_output().expect("wait rubash");
+    let _ = std::fs::remove_dir_all(&home);
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         output.stderr,
@@ -87,20 +99,22 @@ fn interactive_prompt_renders_dirtrimmed_w() {
         .join("rubash-pb10k-dirtrim")
         .join("a/bb/ccc/dddd/eeeee");
     std::fs::create_dir_all(&deep).expect("mkdir deep");
-    let deep_msys = format!(
-        "/c{}",
-        deep.to_string_lossy()
-            .replace('\\', "/")
-            .trim_start_matches("C:")
-    );
+    // Depth is what matters, not the drive prefix: cd to the real
+    // deep dir (the old /c-anchored construction cannot exist off
+    // Windows).
+    let deep_shell = deep.to_string_lossy().replace('\\', "/");
     let (_stdout, stderr) = run_stdin(
-        format!("cd '{deep_msys}'\nexit\n").as_bytes(),
+        format!("cd '{deep_shell}'\nexit\n").as_bytes(),
         &[("PS1", "left <\\w> right "), ("PROMPT_DIRTRIM", "2")],
     );
     let text = String::from_utf8_lossy(&stderr);
+    // The LAST matching line: the startup prompt (for the test runner's
+    // own cwd) renders first and may itself trim on a deep checkout —
+    // the post-cd prompt is the one under test.
     let rendered = text
         .lines()
-        .find(|line| line.contains("left <..."))
+        .filter(|line| line.contains("left <..."))
+        .last()
         .unwrap_or_else(|| text.lines().last().unwrap_or(""));
     let inner = rendered
         .split_once("left <")
