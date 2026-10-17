@@ -10,6 +10,7 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn run_stdin(args: &[&str], stdin: &[u8]) -> (String, String, Option<i32>) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
@@ -87,8 +88,20 @@ IFS= read -r k <&8; echo \"rc=$? k=[$k]\"
 ";
     let path = std::env::temp_dir().join(format!("rubash-279-{}.sh", std::process::id()));
     std::fs::write(&path, script).expect("write script");
+    // Sandbox the child: the script creates f279.txt with a relative name,
+    // which must not land in the repository root (it had been committed).
+    let sandbox = std::env::temp_dir().join(format!(
+        "rubash-279-dir-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&sandbox).expect("create sandbox");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
-    cmd.arg(&path)
+    cmd.current_dir(&sandbox)
+        .arg(&path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -102,6 +115,7 @@ IFS= read -r k <&8; echo \"rc=$? k=[$k]\"
     drop(child.stdin.take());
     let output = child.wait_with_output().expect("wait rubash");
     let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&sandbox);
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert_eq!(stdout, "rc=0 k=[Z]\n", "stderr: {stderr:?}");

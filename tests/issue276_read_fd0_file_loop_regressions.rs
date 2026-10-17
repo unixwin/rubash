@@ -23,8 +23,21 @@ fn run_script(script: &str, stdin: &[u8]) -> (String, String, Option<i32>) {
             .as_nanos()
     ));
     std::fs::write(&path, script).expect("write script");
+    // The scripts below create probe files with relative names (f276*.txt).
+    // Run the child in its own sandbox so those never land in the repository
+    // root — three such leftovers had been committed by accident.
+    let sandbox = std::env::temp_dir().join(format!(
+        "rubash-276-dir-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&sandbox).expect("create sandbox");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
-    cmd.arg(&path)
+    cmd.current_dir(&sandbox)
+        .arg(&path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -38,6 +51,7 @@ fn run_script(script: &str, stdin: &[u8]) -> (String, String, Option<i32>) {
     drop(child.stdin.take());
     let output = child.wait_with_output().expect("wait rubash");
     let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&sandbox);
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
