@@ -1,0 +1,28 @@
+case	issue	expected	note
+issue-702	702	must-match	errexit in until/break — fixed, closed 2026-10-17
+issue-756	756	diverges	history -w w/ HISTFILE unset — behaviour fixed, stderr wording only
+issue-703	703	diverges	herdoc + pipeline inside quoted $( )
+issue-704	704	diverges	printf numeric / command -v multi / ~+ assignment / BASH_ARGC
+issue-733	733	diverges	compound-assignment quote leak between entries
+issue-734	734	diverges	assoc subscript via ANSI-C quoting
+issue-735	735	diverges	user-typed PUA collides with the marker registry
+issue-737	737	diverges	kill does not reach background shell children (stderr)
+issue-738	738	diverges	heredoc delimiter dequoted by dropping quotes
+issue-742	742	diverges	unbraced $name swallows a following backslash-escape
+issue-743	743	diverges	partially-quoted word treated as wholly quoted (argc)
+issue-744	744	diverges	here-string inside quoted whole-word $( )
+issue-745	745	diverges	old-style backtick: word-final \ dropped
+issue-753	753	diverges	failglob abort scope
+issue-754	754	diverges	path model: cd ~ HOME, ~260-char path
+issue-755	755	diverges	scalar re-parsed as array by ${x[@]}
+issue-757	757	diverges	prompt expansion / promptvars / compgen -A signal
+issue-758	758	diverges	malformed expansion swallowed, status 0
+issue-759	759	diverges	dirs -l shape, shift bad-operand rc, extra builtins
+issue-761	761	diverges	unbounded producer + shell-side tail HANGS
+issue-761b	761	diverges	'yes | :' — same class, second shape
+loc-l1-substring	772	diverges	issue #769: ${x:off:len} fabricates PUA marker bytes on invalid UTF-8
+loc-l2-comsub	772	diverges	issue #769: $(cat FILE) on non-UTF-8 content -> empty + bogus 'No such file'
+loc-l5-read-cr	772	diverges	issue #769: read -r strips a trailing CR
+lim-f5-fd-cap	773	diverges	issue #770: fd table caps at 1014 with 'cannot duplicate fd: Invalid argument'
+lim-f6-nul	773	diverges	issue #770: read counts NUL bytes (8 vs 6); comsub does not warn
+lim-f7-closed-fd0	773	diverges	issue #770: closed fd 0 then re-redirect -> Bad file descriptor
