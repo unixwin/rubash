@@ -28,6 +28,10 @@
 //! and the read builtin's own mode guards save/restore AROUND it, so they
 //! never clobber the script's chosen mode (niubash#280's per-read guards
 //! capture the mode at read entry).
+//!
+//! On Unix the same operand set maps onto termios on stdin (`raw` clears
+//! ICANON/ECHO/ISIG; `cooked`/`sane`/`-raw` restore them) and `size`
+//! reports `rows cols` via TIOCGWINSZ (GNU coreutils stty behavior).
 
 use crate::builtins::uname::IdentityToolOutput;
 
@@ -49,7 +53,11 @@ pub fn execute_stty(args: &[String]) -> IdentityToolOutput {
     {
         stty_windows(args)
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        stty_unix(args)
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = args;
         IdentityToolOutput {
@@ -58,6 +66,85 @@ pub fn execute_stty(args: &[String]) -> IdentityToolOutput {
             stderr: Vec::new(),
         }
     }
+}
+
+#[cfg(unix)]
+fn stty_unix(args: &[String]) -> IdentityToolOutput {
+    // GNU coreutils stty behavior (not bash source): a non-terminal
+    // standard input fails every operand form, including bare `stty` and
+    // `stty size`, with this diagnostic and status 1. isatty(0) is the
+    // probe; no ioctl is needed for the diagnostic itself.
+    let mut out = IdentityToolOutput {
+        status: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    };
+    if unsafe { libc::isatty(0) } != 1 {
+        out.stderr
+            .extend_from_slice(b"stty: 'standard input': Inappropriate ioctl for device\n");
+        out.status = 1;
+        return out;
+    }
+    for arg in args {
+        let outcome = match arg.as_str() {
+            "size" => stty_size_unix(&mut out.stdout),
+            "raw" => set_termios_lflag_bits(!(libc::ICANON | libc::ECHO | libc::ISIG)),
+            "-raw" | "cooked" | "sane" => {
+                set_termios_lflag_bits_add(libc::ICANON | libc::ECHO | libc::ISIG)
+            }
+            "-echo" => set_termios_lflag_bits(!libc::ECHO),
+            "echo" => set_termios_lflag_bits_add(libc::ECHO),
+            other => {
+                out.stderr
+                    .extend_from_slice(format!("stty: invalid argument '{other}'\n").as_bytes());
+                out.status = 1;
+                return out;
+            }
+        };
+        if outcome.is_err() {
+            out.stderr
+                .extend_from_slice(b"stty: 'standard input': Inappropriate ioctl for device\n");
+            out.status = 1;
+            return out;
+        }
+    }
+    out
+}
+
+#[cfg(unix)]
+fn set_termios_lflag_bits(keep_mask: libc::tcflag_t) -> Result<(), ()> {
+    let mut term: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(0, &mut term) } != 0 {
+        return Err(());
+    }
+    term.c_lflag &= keep_mask;
+    if unsafe { libc::tcsetattr(0, libc::TCSANOW, &term) } != 0 {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_termios_lflag_bits_add(set_mask: libc::tcflag_t) -> Result<(), ()> {
+    let mut term: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(0, &mut term) } != 0 {
+        return Err(());
+    }
+    term.c_lflag |= set_mask;
+    if unsafe { libc::tcsetattr(0, libc::TCSANOW, &term) } != 0 {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stty_size_unix(stdout: &mut Vec<u8>) -> Result<(), ()> {
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    if unsafe { libc::ioctl(0, libc::TIOCGWINSZ as _, &mut ws) } != 0 {
+        return Err(());
+    }
+    stdout.extend_from_slice(format!("{} {}\n", ws.ws_row, ws.ws_col).as_bytes());
+    Ok(())
 }
 
 #[cfg(windows)]
