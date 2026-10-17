@@ -363,6 +363,13 @@ fn system_timezone() -> Option<TimeZoneRule> {
 }
 
 #[cfg(unix)]
+// `libc::time_t` is marked deprecated for musl/ohos targets (musl 1.2 switched
+// it to 64-bit) and this crate compiles with `-D warnings` on the cross-target
+// checks, so the deprecation broke niubash's CI for every PR. The value domain
+// here is an epoch second count that `localtime_r` consumes unchanged, so the
+// switch itself is not a behaviour change for us; allow it locally rather than
+// inventing a target-specific alias.
+#[allow(deprecated)]
 fn system_local_time(epoch: i64) -> LocalTimeParts {
     let stamp = epoch as libc::time_t;
     let mut broken: libc::tm = unsafe { std::mem::zeroed() };
