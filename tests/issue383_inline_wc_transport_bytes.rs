@@ -10,9 +10,11 @@
 // The payload from the issue report is 10 bytes, not 9: ESC [ 3 1 m X ESC
 // [ 0 m. The "expected 9" in the report title was a miscount.
 //
-// Byte counts must decode to the bytes the external wc would receive
-// (shell_text_to_raw_bytes), and word counts must decode to visible text so a
-// carrier-encoded whitespace byte (0x0C) still delimits words.
+// Byte and word counts must both run over the payload bytes the external wc
+// would receive (shell_text_to_raw_bytes): there, a carrier-encoded
+// whitespace byte (0x0C) still delimits words; payload itself must never be
+// fed to decode_to_visible_text, because a payload control byte maps to
+// CTLESC and trips that decoder's postcondition (panic in debug builds).
 
 use std::process::Command;
 
@@ -78,6 +80,31 @@ fn command_substitution_byte_count() {
 fn word_count_decodes_carrier_whitespace() {
     let (out, rc) = run("printf 'a\\014b' | wc -w");
     assert_eq!((out.as_str(), rc), ("2\n", 0));
+}
+
+/// `read` review R1 on PR #695: `-w` used to pipe payload through
+/// `decode_to_visible_text`, whose postcondition panics when a payload
+/// control byte (`0x11` here) decodes to CTLESC. Word counting now runs over
+/// `shell_text_to_raw_bytes` and must neither panic (debug) nor miscount.
+#[test]
+fn word_count_control_payload_no_panic() {
+    let (out, rc) = run("printf '\\021' | wc -w");
+    assert_eq!((out.as_str(), rc), ("1\n", 0));
+}
+
+/// Same payload through the flagless form: the words field must agree.
+#[test]
+fn default_form_word_field_no_panic() {
+    let (out, rc) = run("printf '\\021' | wc");
+    assert_eq!((out.as_str(), rc), ("      0       1       1\n", 0));
+}
+
+/// Tab, form feed, and newline are all word delimiters over payload bytes,
+/// while a carrier like ESC stays inside a word.
+#[test]
+fn word_count_payload_whitespace_mix() {
+    let (out, rc) = run("printf 'a\\tb\\014c\\nd' | wc -w");
+    assert_eq!((out.as_str(), rc), ("4\n", 0));
 }
 
 /// `-l` counts `\n`; 0x0A is not a carrier so it needs no decode and must not

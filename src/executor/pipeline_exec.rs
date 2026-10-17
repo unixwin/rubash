@@ -3161,12 +3161,16 @@ impl Executor {
                 // pairs (locale.rs:352). A bare `input.as_bytes().len()` or
                 // `input.bytes()` therefore measures the CARRIER encoding,
                 // not the payload: `printf '\033' | wc -c` reported 6. Byte
-                // counts must decode to exactly the bytes the external wc
-                // would receive (`shell_text_to_raw_bytes`, the same boundary
-                // its child-stdin write uses), and word counts must decode to
-                // visible text first or a carrier-encoded whitespace byte
-                // (0x0C) stops delimiting words (`printf 'a\014b' | wc -w`
-                // reported 1, GNU 2). The line-count arm needs no decode:
+                // and word counts must therefore run over exactly the payload
+                // bytes the external wc would receive
+                // (`shell_text_to_raw_bytes`, the same boundary its
+                // child-stdin write uses). The carrier encoding hides a
+                // whitespace byte (0x0C) inside U+E000+U+E0xx, so splitting on
+                // transport text counts `printf 'a\014b' | wc -w` as 1 where
+                // GNU reports 2, and payload must never be fed to
+                // `decode_to_visible_text` (internal-text decoder: a payload
+                // control byte maps to CTLESC and trips its postcondition,
+                // locale.rs:545). The line-count arm needs no decode:
                 // 0x0A is not a carrier byte, so every `\n` is already real.
                 // Only the single-flag fast paths are emulated inline; every
                 // other invocation (-L, -m, --words, combined flags, file
@@ -3180,9 +3184,14 @@ impl Executor {
                                 .len()
                         }
                         "-l" => input.bytes().filter(|byte| *byte == b'\n').count(),
-                        "-w" => crate::locale::decode_to_visible_text(input)
-                            .split_whitespace()
-                            .count(),
+                        "-w" => {
+                            const ASCII_WHITESPACE: [u8; 6] =
+                                [b' ', b'\t', b'\n', 0x0B, 0x0C, b'\r'];
+                            crate::executor::substitution_metadata::shell_text_to_raw_bytes(input)
+                                .split(|byte| ASCII_WHITESPACE.contains(byte))
+                                .filter(|word| !word.is_empty())
+                                .count()
+                        }
                         _ => {
                             return self.execute_external_pipeline_stage(
                                 command,
