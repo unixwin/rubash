@@ -936,6 +936,24 @@ fn trap_key(signal: &str) -> String {
 /// entry and record the reset dispositions so get_trap_action/take_exit_trap
 /// skip firing them while the listing still shows them.
 pub(crate) fn reset_for_subshell(env_vars: &mut HashMap<String, String>) {
+    reset_for_subshell_inner(env_vars, false);
+}
+
+/// Reset caught signal traps when entering a forked `( )` / `f() ( )`
+/// subshell child. Identical to [`reset_for_subshell`] except that the ERR
+/// trap follows GNU's error_trace_mode (`set -E`) inheritance, the way
+/// DEBUG/RETURN follow functrace: a subshell child keeps the parent's ERR
+/// trap when `-E` is on, so `set -E; trap 'echo ERR' ERR; ( false )` fires
+/// ERR for the inner `false` and again for the failing subshell command
+/// (rubash#702). The command-substitution, pipeline-element and `read`
+/// builtin copy paths keep the unconditional [`reset_for_subshell`]; their
+/// ERR inheritance is modeled at their own call sites, so this variant is
+/// used only by the true `( )` subshell paths.
+pub(crate) fn reset_for_subshell_child(env_vars: &mut HashMap<String, String>) {
+    reset_for_subshell_inner(env_vars, true);
+}
+
+fn reset_for_subshell_inner(env_vars: &mut HashMap<String, String>, inherit_errtrace: bool) {
     let mut reset = reset_trap_signals(env_vars);
     for signal in trap_list(env_vars) {
         // DEBUG and RETURN are tracing hooks, not OS signal dispositions;
@@ -957,6 +975,20 @@ pub(crate) fn reset_for_subshell(env_vars: &mut HashMap<String, String>) {
                 .get(&trap_key(&signal))
                 .is_some_and(|action| !action.is_empty())
             {
+                reset.insert(signal);
+            }
+            continue;
+        }
+        // ERR inherits under `set -E` exactly as DEBUG/RETURN inherit under
+        // `set -T`: the child keeps the parent's ERR action live, so its
+        // failing commands fire the trap. An ERR trap armed inside the
+        // subshell re-arms through set_trap regardless (rubash#702).
+        if signal == "ERR" && inherit_errtrace {
+            if crate::builtins::set::shell_option_enabled(env_vars, "errtrace") {
+                continue;
+            }
+            let key = trap_key(&signal);
+            if env_vars.get(&key).is_some_and(|action| !action.is_empty()) {
                 reset.insert(signal);
             }
             continue;

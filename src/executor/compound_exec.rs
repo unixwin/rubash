@@ -1457,7 +1457,7 @@ impl Executor {
         // `(x=${!bad})` still fires the parent's ERR trap.
         let saved_expansion_failed = self.command_expansion_failed.get();
         self.command_expansion_failed.set(false);
-        crate::builtins::trap::reset_for_subshell(&mut self.shell_state.env_vars);
+        crate::builtins::trap::reset_for_subshell_child(&mut self.shell_state.env_vars);
         self.shell_state.subshell_depth.set(saved_depth + 1);
         self.shell_state.loop_depth = 0;
 
