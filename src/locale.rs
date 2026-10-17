@@ -633,6 +633,38 @@ pub fn strcoll(a: &str, b: &str) -> std::cmp::Ordering {
     platform_collate(a, b, &host).unwrap_or_else(|| a.cmp(b))
 }
 
+/// Whether the active collation is the C/POSIX family, where strcoll is
+/// plain byte order (glibc defines C.UTF-8 as code-point order; verified
+/// against WSL GNU Bash 5.3.0 — see host_collate_name). Lets sort call
+/// sites resolve the locale ONCE per sort instead of paying
+/// collate_locale_name's three env lookups + name mapping per COMPARISON
+/// inside strcoll_posixcmp. Result-identical: under C collation
+/// strcoll_posixcmp(a, b) == a.cmp(b) exactly, because strcoll never ties
+/// distinct strings there so the first-byte/strcmp tie-break never fires
+/// (rubash#681 slice b).
+pub fn collation_is_c() -> bool {
+    host_collate_name(&collate_locale_name()).is_none()
+}
+
+/// Sort with byte order under the C collation, host collation otherwise —
+/// one locale resolution per sort (see collation_is_c).
+pub fn sort_collated(names: &mut [String]) {
+    if collation_is_c() {
+        names.sort_by(|a, b| a.cmp(b));
+    } else {
+        names.sort_by(|a, b| strcoll_posixcmp(a, b));
+    }
+}
+
+/// Reverse variant of sort_collated.
+pub fn sort_collated_reverse(names: &mut [String]) {
+    if collation_is_c() {
+        names.sort_by(|a, b| b.cmp(a));
+    } else {
+        names.sort_by(|a, b| strcoll_posixcmp(b, a));
+    }
+}
+
 /// GNU strvec_posixcmp (lib/sh/stringvec.c:152-165): strcoll() first, then a
 /// bytewise tie-break on the first byte, then strcmp. This is the comparator
 /// used for glob result ordering via pathexp.c globsort_namecmp().
@@ -726,6 +758,33 @@ mod tests {
         if let Some(v) = saved {
             std::env::set_var("LC_ALL", v);
         }
+    }
+
+    /// rubash#681 slice b: the hoisted sort must match the per-comparison
+    /// comparator exactly (byte order under C collation, host collation
+    /// otherwise) — forward and reverse, on collation-tricky data.
+    #[test]
+    fn sort_collated_matches_per_comparison_sort() {
+        let data = vec![
+            ".a".to_string(),
+            "a".to_string(),
+            ".aa".to_string(),
+            "aa".to_string(),
+            "B".to_string(),
+            "a".to_string(),
+            "".to_string(),
+            "z".to_string(),
+        ];
+        let mut hoisted = data.clone();
+        super::sort_collated(&mut hoisted);
+        let mut reference = data.clone();
+        reference.sort_by(|a, b| strcoll_posixcmp(a, b));
+        assert_eq!(hoisted, reference);
+        let mut hoisted_rev = data.clone();
+        super::sort_collated_reverse(&mut hoisted_rev);
+        let mut reference_rev = data;
+        reference_rev.sort_by(|a, b| strcoll_posixcmp(b, a));
+        assert_eq!(hoisted_rev, reference_rev);
     }
 
     #[cfg(windows)]

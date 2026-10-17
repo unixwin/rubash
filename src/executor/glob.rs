@@ -702,7 +702,7 @@ fn expand_multi_globstar(
         globskipdots,
         env_vars,
     );
-    matches.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
+    crate::locale::sort_collated(&mut matches);
     let matches = apply_globignore(matches, env_vars);
     if matches.is_empty() {
         return unmatched_expansion(word, nullglob, failglob);
@@ -726,7 +726,7 @@ fn star_descend(
         Err(_) => return,
     };
     let mut names: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
-    names.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
+    crate::locale::sort_collated(&mut names);
     for name in names {
         if name.starts_with('.') && !dotglob {
             continue;
@@ -800,7 +800,7 @@ fn collect_multi_globstar_paths(
             Err(_) => return,
         };
         let mut names: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
-        names.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
+        crate::locale::sort_collated(&mut names);
         for name in names {
             if (name.starts_with('.') && !dotglob) || name == "." || name == ".." {
                 continue;
@@ -851,7 +851,7 @@ fn collect_multi_globstar_paths(
         Err(_) => return,
     };
     let mut names: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
-    names.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
+    crate::locale::sort_collated(&mut names);
     for name in names {
         if (name.starts_with('.') && !dotglob) || name == "." || name == ".." {
             continue;
@@ -943,7 +943,7 @@ fn collect_multi_globstar(
                 };
                 let mut names: Vec<String> =
                     entries.iter().map(|entry| entry.name.clone()).collect();
-                names.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
+                crate::locale::sort_collated(&mut names);
                 for name in names {
                     if name.starts_with('.') && !dotglob {
                         continue;
@@ -1028,7 +1028,7 @@ fn collect_globstar_matches(
     // GNU glob.c sorts each directory's entries during the depth-first
     // walk; the single-** caller re-sorts the full list globally via
     // sh_sortglob, so `builtins.o` orders beside `builtins/...`.
-    names.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
+    crate::locale::sort_collated(&mut names);
     let include_dotfiles =
         dotglob || suffix.starts_with('.') || globignore_patterns(env_vars).is_some();
     for name in names {
@@ -1899,9 +1899,9 @@ fn globsort_matches(
     if spec.kind == SORT_NONE || spec.kind == SORT_NAME || spec.kind == (SORT_NAME | SORT_REVERSE) {
         let reverse = spec.kind & SORT_REVERSE != 0;
         if reverse {
-            matches.sort_by(|a, b| crate::locale::strcoll_posixcmp(b, a));
+            crate::locale::sort_collated_reverse(matches);
         } else {
-            matches.sort_by(|a, b| crate::locale::strcoll_posixcmp(a, b));
+            crate::locale::sort_collated(matches);
         }
         return;
     }
@@ -1940,8 +1940,18 @@ fn globsort_matches(
             }
         })
         .collect();
+    // One locale resolution for the whole tie-break sort (rubash#681
+    // slice b): byte order under the C collation, host collation
+    // otherwise — identical results either way (see collation_is_c).
+    let c_locale = crate::locale::collation_is_c();
     let name_cmp = |a: &str, b: &str| {
-        if reverse {
+        if c_locale {
+            if reverse {
+                b.cmp(a)
+            } else {
+                a.cmp(b)
+            }
+        } else if reverse {
             crate::locale::strcoll_posixcmp(b, a)
         } else {
             crate::locale::strcoll_posixcmp(a, b)
