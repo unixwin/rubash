@@ -80,12 +80,27 @@ fn rubash(script: &str) -> (String, String, Option<i32>) {
     rubash_script(script)
 }
 
+/// Writable probe dir for these tests: Termux has no /tmp and no
+/// /usr/bin/env, so hardcoded Linux paths fail the spawn before any
+/// isolation semantics run (rubash#655 class). Exported as $I363_PROBE
+/// for the scripts (same value every call — parallel-safe);
+/// pre-created so the scripts only cd. Fixture stubs keep distinct
+/// names per test. Fixture shebangs use /bin/sh (present on Linux and
+/// Termux): the property under test is "has a shebang", and all stub
+/// bodies are POSIX.
+fn i363_probe() {
+    let dir = std::env::temp_dir().join("i363-probe");
+    std::fs::create_dir_all(&dir).expect("probe dir");
+    std::env::set_var("I363_PROBE", &dir);
+}
+
 /// A shebang script's plain assignment does not leak into the caller
 /// (the issue's minimal reproducer).
 #[test]
 fn shebang_script_assignment_does_not_leak() {
-    let script = "mkdir -p /tmp/i363-probe\ncd /tmp/i363-probe\n\
-                  printf '#!/usr/bin/env bash\\nMARKER_FROM_STUB=set-by-stub\\n' > stub\n\
+    i363_probe();
+    let script = "cd \"$I363_PROBE\"\n\
+                  printf '#!/bin/sh\nMARKER_FROM_STUB=set-by-stub\\n' > stub\n\
                   chmod +x stub\n./stub\necho \"after: MARKER=[${MARKER_FROM_STUB:-unset}]\"\n";
     let (stdout, stderr, code) = rubash(script);
     assert_eq!(stderr, "");
@@ -97,8 +112,9 @@ fn shebang_script_assignment_does_not_leak() {
 /// (GNU: the child process's environment dies with it).
 #[test]
 fn shebang_script_export_does_not_leak() {
-    let script = "mkdir -p /tmp/i363-probe\ncd /tmp/i363-probe\n\
-                  printf '#!/usr/bin/env bash\\nexport EXP_STUB=yes\\n' > stub2\n\
+    i363_probe();
+    let script = "cd \"$I363_PROBE\"\n\
+                  printf '#!/bin/sh\nexport EXP_STUB=yes\\n' > stub2\n\
                   chmod +x stub2\n./stub2\necho \"exp=[${EXP_STUB:-unset}]\"\n";
     let (stdout, stderr, code) = rubash(script);
     assert_eq!(stderr, "");
@@ -109,8 +125,9 @@ fn shebang_script_export_does_not_leak() {
 /// The script sees only the caller's EXPORTED variables (fresh shell).
 #[test]
 fn shebang_script_sees_only_exported_caller_vars() {
-    let script = "mkdir -p /tmp/i363-probe\ncd /tmp/i363-probe\n\
-                  printf '#!/usr/bin/env bash\\necho \"sees PLOCAL=[${PLOCAL:-unset}] PEXP=[${PEXP:-unset}]\"\\n' > stub3\n\
+    i363_probe();
+    let script = "cd \"$I363_PROBE\"\n\
+                  printf '#!/bin/sh\necho \"sees PLOCAL=[${PLOCAL:-unset}] PEXP=[${PEXP:-unset}]\"\\n' > stub3\n\
                   chmod +x stub3\nPLOCAL=hidden\nexport PEXP=shown\n./stub3\n";
     let (stdout, stderr, code) = rubash(script);
     assert_eq!(stderr, "");
@@ -122,7 +139,8 @@ fn shebang_script_sees_only_exported_caller_vars() {
 /// assignments do not leak and it sees only exported caller variables.
 #[test]
 fn shebangless_script_is_also_fresh() {
-    let script = "mkdir -p /tmp/i363-probe\ncd /tmp/i363-probe\n\
+    i363_probe();
+    let script = "cd \"$I363_PROBE\"\n\
                   printf 'CHILD_NSB=leakme\\necho \"nosb-sees PLOCAL=[${PLOCAL:-unset}]\"\\n' > nosb\n\
                   chmod +x nosb\nPLOCAL=hidden\n./nosb\necho \"parent CHILD_NSB=[${CHILD_NSB:-unset}]\"\n";
     let (stdout, stderr, code) = rubash(script);
@@ -137,8 +155,9 @@ fn shebangless_script_is_also_fresh() {
 /// A `readonly` bound inside the script does not constrain the caller.
 #[test]
 fn shebang_script_readonly_does_not_leak() {
-    let script = "mkdir -p /tmp/i363-probe\ncd /tmp/i363-probe\n\
-                  printf '#!/usr/bin/env bash\\nreadonly RV_STUB=ro\\n' > stub4\n\
+    i363_probe();
+    let script = "cd \"$I363_PROBE\"\n\
+                  printf '#!/bin/sh\nreadonly RV_STUB=ro\\n' > stub4\n\
                   chmod +x stub4\n./stub4\nRV_STUB=ok && echo \"overwrite-ok [${RV_STUB}]\"\n";
     let (stdout, stderr, code) = rubash(script);
     assert_eq!(stderr, "");
@@ -151,8 +170,9 @@ fn shebang_script_readonly_does_not_leak() {
 /// m2 probe verified).
 #[test]
 fn shebang_script_exit_is_contained() {
-    let script = "mkdir -p /tmp/i363-probe\ncd /tmp/i363-probe\n\
-                  printf '#!/usr/bin/env bash\\ncd /tmp\\nexit 3\\n' > side\n\
+    i363_probe();
+    let script = "cd \"$I363_PROBE\"\n\
+                  printf '#!/bin/sh\ncd \"$I363_PROBE\"\nexit 3\n' > side\n\
                   chmod +x side\n./side\necho \"rc=$? still-here\"\n";
     let (stdout, stderr, code) = rubash(script);
     assert_eq!(stderr, "");
@@ -163,8 +183,9 @@ fn shebang_script_exit_is_contained() {
 /// A function defined inside the script does not leak into the caller.
 #[test]
 fn shebang_script_function_does_not_leak() {
-    let script = "mkdir -p /tmp/i363-probe\ncd /tmp/i363-probe\n\
-                  printf '#!/usr/bin/env bash\\nstub_fn() { echo from-stub; }\\n' > stub5\n\
+    i363_probe();
+    let script = "cd \"$I363_PROBE\"\n\
+                  printf '#!/bin/sh\nstub_fn() { echo from-stub; }\\n' > stub5\n\
                   chmod +x stub5\n./stub5\nstub_fn 2>/dev/null || echo \"fn-gone rc=$?\"\n";
     let (stdout, stderr, code) = rubash(script);
     assert_eq!(stderr, "");
@@ -176,8 +197,9 @@ fn shebang_script_function_does_not_leak() {
 /// probed both direct and PATH lookup).
 #[test]
 fn path_lookup_script_isolated() {
-    let script = "d=/tmp/i363-path-$$\nmkdir -p \"$d/bin\"\ncd \"$d\"\n\
-                  printf '#!/usr/bin/env bash\\nMARKER_FROM_STUB=set-by-stub\\n' > bin/stub-p\n\
+    i363_probe();
+    let script = "d=\"$I363_PROBE/i363-path-$$\"\nmkdir -p \"$d/bin\"\ncd \"$d\"\n\
+                  printf '#!/bin/sh\nMARKER_FROM_STUB=set-by-stub\\n' > bin/stub-p\n\
                   chmod +x bin/stub-p\nPATH=\"$d/bin:$PATH\"\nstub-p\necho \"PATHlookup=[${MARKER_FROM_STUB:-unset}]\"\n";
     let (stdout, stderr, code) = rubash(script);
     assert_eq!(stderr, "");
@@ -189,8 +211,9 @@ fn path_lookup_script_isolated() {
 /// clobber the caller's local `cmd` (the use_log: command not found chain).
 #[test]
 fn direnv_use_shape_cmd_not_clobbered() {
-    let script = "mkdir -p /tmp/i363-probe\ncd /tmp/i363-probe\n\
-                  printf '#!/usr/bin/env bash\\ncmd=corrupted\\n' > stub6\n\
+    i363_probe();
+    let script = "cd \"$I363_PROBE\"\n\
+                  printf '#!/bin/sh\ncmd=corrupted\\n' > stub6\n\
                   chmod +x stub6\nuse_fn() {\n  local cmd=$1\n  ./stub6\n  echo \"cmd-survived=[$cmd]\"\n}\nuse_fn julia 2.1\n";
     let (stdout, stderr, code) = rubash(script);
     assert_eq!(stderr, "");
