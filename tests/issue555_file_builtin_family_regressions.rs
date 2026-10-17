@@ -24,6 +24,8 @@
 //! are pre-existing wrapper contracts, NOT this issue, and the assertions
 //! below pin the re-expansion invariant within those contracts.
 //!
+//! Windows-only rows (literal $FIX\d paths) carry #[cfg(windows)]; the rest pin portable no-re-expansion on every host.
+//!
 //! The family helper: every case below is a row of one table run through
 //! `assert_literal_operand_contract` — the next wrapper added to
 //! external_file_builtins.rs gets its row here and cannot quietly
@@ -221,6 +223,7 @@ fn quoted_cases() -> Vec<Case> {
 
 /// The shared-helper sweep: all five wrappers against the same
 /// single-quoted `$VAR` operand contract.
+#[cfg(windows)]
 #[test]
 fn family_table_covers_every_wrapper_in_external_file_builtins() {
     for case in quoted_cases() {
@@ -230,6 +233,7 @@ fn family_table_covers_every_wrapper_in_external_file_builtins() {
 
 /// mkdir: the exact repro from the issue — `mkdir '$FIX/d'` must build the
 /// literal path, never `zz/d`.
+#[cfg(windows)]
 #[test]
 fn mkdir_single_quoted_variable_operand_is_not_re_expanded() {
     assert_literal_operand_contract(&Case {
@@ -246,6 +250,7 @@ fn mkdir_single_quoted_variable_operand_is_not_re_expanded() {
 
 /// mkdir: the escaped form `\$FIX/d` decodes to the same literal text
 /// after the first pass — it must not re-expand either.
+#[cfg(windows)]
 #[test]
 fn mkdir_escaped_dollar_operand_is_literal() {
     assert_literal_operand_contract(&Case {
@@ -262,6 +267,7 @@ fn mkdir_escaped_dollar_operand_is_literal() {
 
 /// mkdir: an unset variable stays literal — the operand names a directory
 /// literally called `$NOSUCHVAR555/d` in the cwd, not `/d` at the fs root.
+#[cfg(windows)]
 #[test]
 fn mkdir_unset_variable_operand_stays_literal() {
     assert_literal_operand_contract(&Case {
@@ -412,6 +418,7 @@ fn cp_target_directory_option_value_is_argv_too() {
 /// cannot remove '$FIX/r': No such file or directory`, exit 1) and the
 /// existing `zz/r` must survive — silent deletion is the worst member of
 /// this family.
+#[cfg(windows)]
 #[test]
 fn rm_single_quoted_variable_operand_is_not_re_expanded() {
     assert_literal_operand_contract(&Case {
@@ -427,6 +434,7 @@ fn rm_single_quoted_variable_operand_is_not_re_expanded() {
 }
 
 /// rm: the escaped form is the same literal text.
+#[cfg(windows)]
 #[test]
 fn rm_escaped_dollar_operand_is_literal() {
     assert_literal_operand_contract(&Case {
@@ -442,6 +450,7 @@ fn rm_escaped_dollar_operand_is_literal() {
 }
 
 /// rm: an unset variable keeps its literal name in the diagnostic.
+#[cfg(windows)]
 #[test]
 fn rm_unset_variable_operand_error_keeps_literal_name() {
     assert_literal_operand_contract(&Case {
@@ -481,6 +490,7 @@ fn rm_failing_quoted_operand_does_not_stop_later_operands() {
 /// rmdir: `rmdir '$FIX/rd'` must never remove the re-expanded neighbor
 /// `zz/rd` (the wrapper swallows per-operand errors and exits 0 — its
 /// pre-existing contract; the survival invariant is this test).
+#[cfg(windows)]
 #[test]
 fn rmdir_single_quoted_variable_operand_is_not_re_expanded() {
     assert_literal_operand_contract(&Case {
@@ -496,6 +506,7 @@ fn rmdir_single_quoted_variable_operand_is_not_re_expanded() {
 }
 
 /// rmdir: the escaped form is the same literal text.
+#[cfg(windows)]
 #[test]
 fn rmdir_escaped_dollar_operand_is_literal() {
     assert_literal_operand_contract(&Case {
@@ -512,6 +523,7 @@ fn rmdir_escaped_dollar_operand_is_literal() {
 
 /// rmdir: an unset variable stays unexpanded — nothing named by the
 /// literal text exists, so the guard directory must survive untouched.
+#[cfg(windows)]
 #[test]
 fn rmdir_unset_variable_operand_stays_unexpanded() {
     assert_literal_operand_contract(&Case {
@@ -528,6 +540,7 @@ fn rmdir_unset_variable_operand_stays_unexpanded() {
 
 /// Quote fidelity must not swallow live expansions: every wrapper still
 /// honors the unquoted `$VAR` form (GNU parity both ways).
+#[cfg(windows)]
 #[test]
 fn unquoted_operands_still_expand_for_the_whole_family() {
     let (out, dir) = run_in_fixture_dir(
