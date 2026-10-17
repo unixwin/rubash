@@ -1049,6 +1049,25 @@ impl Executor {
     /// Windows-form path in an existing directory. Shared by the process
     /// substitution materialization and the niubash#362 respawn transport so
     /// the TMPDIR resolution and existence handling live in one place.
+    ///
+    /// Writability probe (not just existence): a present-but-unwritable
+    /// directory (Android's /tmp) must fall through to the next candidate.
+    /// Probe files carry pid + counter so parallel spawns never share one.
+    fn dir_usable_for_scratch(dir: &std::path::Path) -> bool {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static PROBE_SEQ: AtomicU64 = AtomicU64::new(0);
+        if std::fs::create_dir_all(dir).is_err() {
+            return false;
+        }
+        let probe = dir.join(format!(
+            ".rubash-write-probe-{}-{}",
+            std::process::id(),
+            PROBE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let usable = std::fs::write(&probe, b"").is_ok();
+        let _ = std::fs::remove_file(&probe);
+        usable
+    }
     fn shell_temp_path(&self, prefix: &str, suffix: &str) -> Result<PathBuf, ExecuteError> {
         let dir_value = self
             .shell_state
@@ -1057,8 +1076,26 @@ impl Executor {
             .cloned()
             .unwrap_or_else(safe_temp_dir_string);
         let mut dir = shell_path_to_windows(&dir_value, &self.shell_state.env_vars);
-        if !dir.exists() {
-            fs::create_dir_all(&dir)?;
+        if !Self::dir_usable_for_scratch(&dir) {
+            // The configured/platform directory may exist but be
+            // unwritable (Android ships an unwritable /tmp) or
+            // uncreatable: fall back to the process temp dir instead of
+            // failing the transport (whose only fallback is an inline
+            // -c string that dies E2BIG past MAX_ARG_STRLEN —
+            // background_command_with_large_function_table_runs).
+            // std::env::temp_dir honors TMPDIR/TEMP/TMP first, so an
+            // explicitly configured value still wins. As a last resort
+            // use the shell cwd (uniquely named file, removed after the
+            // child reads it) — an airtight test env may leave no temp
+            // variable set at all.
+            let fallback = std::env::temp_dir();
+            if Self::dir_usable_for_scratch(&fallback) {
+                dir = fallback;
+            } else if let Ok(cwd) = std::env::current_dir() {
+                dir = cwd;
+            } else {
+                fs::create_dir_all(&dir)?;
+            }
         }
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
