@@ -817,9 +817,41 @@ pub(in crate::executor) fn compound_field_split_transport(
     // rewrote, e.g. IFS_GLUE protection) degrades the rest to synthetic
     // tag+space separators — identical boundaries for the indexed consumer.
     let mut tracking = true;
-    for (index, field) in fields.iter().enumerate() {
+    // A body was already emitted (a separator needs a leader); empty
+    // fields since the last located field, held for the next gap.
+    let mut started = false;
+    let mut pending: usize = 0;
+    // Synthetic fallback for one held/degraded body: the historical
+    // tag+space separator (correct under whitespace IFS; degraded
+    //-identical elsewhere).
+    let mut synthetic_body = |out: &mut String, started: &mut bool, body: &str| {
+        if *started {
+            out.push(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG);
+            out.push(' ');
+        }
+        out.push_str(body);
+        *started = true;
+    };
+    for field in fields.iter() {
+        if field.is_empty() {
+            if tracking {
+                // An empty field contributes no searchable text, so its
+                // `""` body waits for the next located field's gap, which
+                // carries every separator surrounding it. GNU keeps empty
+                // fields under a non-whitespace IFS (subst.c list_string);
+                // the old code emitted a synthetic tag+space here, which
+                // the re-splitter only honors under whitespace IFS — off
+                // it the `""` glued to its neighbor (`A=($1)` with
+                // `a.b..b` stored `b" "`).
+                pending += 1;
+                continue;
+            }
+            let body = quote_compound_field_value(field);
+            synthetic_body(&mut out, &mut started, &body);
+            continue;
+        }
         let mut separator: Option<&str> = None;
-        if tracking && !field.is_empty() {
+        if tracking {
             if let Some(offset) = value[pos..].find(field.as_str()) {
                 let gap = &value[pos..pos + offset];
                 if !gap.contains('"') {
@@ -834,18 +866,71 @@ pub(in crate::executor) fn compound_field_split_transport(
         }
         match separator {
             Some(gap) => {
-                for ch in gap.chars() {
-                    out.push(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG);
-                    out.push(ch);
+                if !gap.is_empty() {
+                    // Boundaries between the last emitted body and this
+                    // field: one per held empty plus this field's own.
+                    let need = pending + usize::from(started);
+                    let chars: Vec<char> = gap.chars().collect();
+                    if need > 0 && chars.len() >= need {
+                        // Faithful distribution in gap order: held empties
+                        // take the first separators, this field's boundary
+                        // takes the rest (a whitespace run stays a single
+                        // collapsing boundary, as before).
+                        let mut k = 0usize;
+                        if started {
+                            out.push(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG);
+                            out.push(chars[0]);
+                            k = 1;
+                        }
+                        for _ in 0..pending {
+                            out.push_str(&quote_compound_field_value(""));
+                            out.push(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG);
+                            out.push(chars[k]);
+                            k += 1;
+                        }
+                        while k < chars.len() {
+                            out.push(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG);
+                            out.push(chars[k]);
+                            k += 1;
+                        }
+                    } else if need > 0 {
+                        // A gap shorter than its boundaries: the tracking
+                        // assumption failed — synthetic fallback.
+                        tracking = false;
+                        for _ in 0..pending {
+                            let body = quote_compound_field_value("");
+                            synthetic_body(&mut out, &mut started, &body);
+                        }
+                        let body = quote_compound_field_value(field);
+                        synthetic_body(&mut out, &mut started, &body);
+                        pending = 0;
+                        continue;
+                    }
                 }
+                pending = 0;
             }
-            None if index > 0 => {
-                out.push(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG);
-                out.push(' ');
+            None => {
+                // Degraded location: flush held empties synthetically,
+                // then the historical synthetic separator for this field.
+                for _ in 0..pending {
+                    let body = quote_compound_field_value("");
+                    synthetic_body(&mut out, &mut started, &body);
+                }
+                pending = 0;
+                let body = quote_compound_field_value(field);
+                synthetic_body(&mut out, &mut started, &body);
+                continue;
             }
-            None => {}
         }
         out.push_str(&quote_compound_field_value(field));
+        started = true;
+    }
+    // Trailing held empties (defensive: the splitter drops trailing empty
+    // fields, so a located field always flushes — historical synthetic).
+    while pending > 0 {
+        let body = quote_compound_field_value("");
+        synthetic_body(&mut out, &mut started, &body);
+        pending -= 1;
     }
     vec![out]
 }
