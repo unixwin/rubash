@@ -73,6 +73,18 @@ impl Executor {
         match loop_control_level(&cmd.words[1..]) {
             Ok(level) => {
                 let level = level.min(self.shell_state.loop_depth);
+                // GNU break.def/continue.def return EXECUTION_SUCCESS for an
+                // in-range count — the builtin has no user-visible status of
+                // its own. Establish that status before unwinding (rubash#702):
+                // the loop's CONDITION status is still in self.exit_code here
+                // (it ran with errexit suppressed and nothing replaced it), and
+                // the dispatcher's post-command errexit / ERR-trap gate reads
+                // self.exit_code — so an `until` whose condition failed would
+                // otherwise attribute that failure to a body whose first
+                // command is `break`/`continue` (or a group starting with one).
+                // `until false; do break; done` must leave $? = 0, and
+                // `until (exit 7); do break; done` must not leak the 7.
+                self.exit_code = 0;
                 match kind {
                     LoopControlKind::Break => Err(ExecuteError::Break(level)),
                     LoopControlKind::Continue => Err(ExecuteError::Continue(level)),
