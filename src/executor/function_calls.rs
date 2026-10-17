@@ -312,6 +312,35 @@ impl Executor {
             .as_ref()
             .is_some_and(function_redirects_affect_body)
             || function_redirects_affect_body(call_cmd);
+        // The stdio slots (1/2) the definition redirect list rebinds. Those
+        // bindings are applied to the fd table AFTER the call-site ones, so
+        // the call-site's per-leaf stdio splice for such a slot is moot —
+        // and harmful, because the splice re-applies at every leaf after the
+        // definition binding (rubash#726: `f(){ echo ERR >&2; } 2>&1; f 2>e`
+        // must print ERR, not write e).
+        let definition_stdio_fds: Vec<u32> = definition_redirects
+            .as_ref()
+            .map(|definition| {
+                definition
+                    .redirects
+                    .iter()
+                    .filter(|redirect| redirect.fd_var.is_none())
+                    .flat_map(|redirect| match redirect.kind {
+                        crate::parser::RedirectKind::Output
+                        | crate::parser::RedirectKind::Append
+                        | crate::parser::RedirectKind::ClobberOutput
+                        | crate::parser::RedirectKind::DuplicateOutput
+                        | crate::parser::RedirectKind::CloseOutput => {
+                            let fd = redirect.fd.unwrap_or(1);
+                            (fd <= 2).then_some(fd).into_iter().collect::<Vec<_>>()
+                        }
+                        crate::parser::RedirectKind::CombinedOutput
+                        | crate::parser::RedirectKind::CombinedAppend => vec![1, 2],
+                        _ => Vec::new(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let redirected_body = if body_needs_redirects {
             let mut commands = body.commands.clone();
             // GNU applies the invocation's redirects first
@@ -325,9 +354,9 @@ impl Executor {
             // `fn 5<&-' therefore keeps fd 5 open in the body (fatal.sh
             // FTL_FNREDIR); splicing in the definition redirects first let
             // the call-site `5<&-' close what the body still needed.
-            self.apply_function_call_redirects(&mut commands, call_cmd)?;
+            self.apply_function_call_redirects(&mut commands, call_cmd, &definition_stdio_fds)?;
             if let Some(definition_redirects) = &definition_redirects {
-                self.apply_function_call_redirects(&mut commands, definition_redirects)?;
+                self.apply_function_call_redirects(&mut commands, definition_redirects, &[])?;
             }
             Some(Ast { commands })
         } else {
@@ -564,23 +593,49 @@ impl Executor {
         // the DEFINITION's redirect list when that body command runs —
         // after the invocation's redirects (execute_builtin_or_function's
         // do_redirections at execute_cmd.c:5606) — so the definition-level
-        // numbered bindings are the innermost ones and win for the body:
+        // bindings are the innermost ones and win for the body:
         // `fn() { command : <&5; } 5</dev/null' called as `fn 5<&-' keeps
         // fd 5 open inside the body (modernish fatal.sh FTL_FNREDIR).
-        // The wrap carries only the numbered (>2) entries: the stdio legs
-        // of the definition are already spliced per-leaf by
-        // apply_function_call_redirects.
-        let definition_numbered_only = definition_redirects.as_ref().map(|definition| {
-            let mut numbered = CommandNode::new();
-            numbered.redirects = definition
+        //
+        // Bind the definition's whole ordered output list — stdio slots
+        // included, not only the numbered (>2) entries — on the real fd
+        // table. The per-leaf stdio splice in apply_function_call_redirects
+        // carries at most one stdout/stderr leg and is skipped once the
+        // call-site splice claimed the slot, so a definition-level
+        // `2>&1 >err' never reached the body (rubash#726: `f(){ echo OUT;
+        // echo ERR >&2; } 2>&1 >err; f 1>out' sent OUT to stdout). Only the
+        // stdout/stderr OPEN/APPEND legs are spliced per-leaf (a dup leg is
+        // never spliced — see is_stdout_splice_redirect), and the definition
+        // is spliced AFTER the call site, so the ordered fd-table binding is
+        // what makes the definition authoritative. open_compound_output_
+        // redirects walks left to right like redir.c:767-955; an injected
+        // call-site splice on a slot it rebinds is then skipped because the
+        // fd-table binding wins (injected_redirect_fd_is_bound).
+        // Numbered INPUT legs keep their existing binding path.
+        let is_output_leg = |redirect: &Redirect| {
+            matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Output
+                    | crate::parser::RedirectKind::Append
+                    | crate::parser::RedirectKind::ClobberOutput
+                    | crate::parser::RedirectKind::DuplicateOutput
+                    | crate::parser::RedirectKind::CloseOutput
+                    | crate::parser::RedirectKind::CombinedOutput
+                    | crate::parser::RedirectKind::CombinedAppend
+            )
+        };
+        let definition_body_redirects = definition_redirects.as_ref().map(|definition| {
+            let mut selected = CommandNode::new();
+            selected.redirects = definition
                 .redirects
                 .iter()
                 .filter(|redirect| {
-                    redirect.fd_var.is_none() && redirect.fd.is_some_and(|fd| fd > 2)
+                    redirect.fd_var.is_none()
+                        && (is_output_leg(redirect) || redirect.fd.is_some_and(|fd| fd > 2))
                 })
                 .cloned()
                 .collect();
-            numbered
+            selected
         });
         // A body flagged UNSTREAMED_FUNCTION_BODIES still holds
         // unexpanded alias words; lift the ambient streamed marker so the
@@ -608,7 +663,7 @@ impl Executor {
                         executor.execute_ast_inner(&body_ast.commands)
                     })
                 };
-                match &definition_numbered_only {
+                match &definition_body_redirects {
                     Some(definition) => executor.with_numbered_fd_bindings(definition, body_run),
                     None => body_run(executor),
                 }
@@ -742,11 +797,24 @@ impl Executor {
         }
     }
 
+    ///
+    /// `suppress_stdio_fds` names stdio slots (1/2) that a LATER, inner
+    /// redirect layer — the function definition list — rebinds. Their legs
+    /// must not be spliced here: the definition binding, applied to the fd
+    /// table after this call, is the one the body must see. Splicing the
+    /// call-site leg would re-apply it at every leaf AFTER that binding, so a
+    /// definition `2>&1` (whose fd-2 endpoint is the live-stdout marker, not
+    /// a File) would be clobbered by an injected `2>>e` from the call site
+    /// (`f(){ echo ERR >&2; } 2>&1; f 2>e` must print ERR, not write e —
+    /// rubash#726).
     pub(in crate::executor) fn apply_function_call_redirects(
         &self,
         body: &mut [CommandNode],
         call_cmd: &CommandNode,
+        suppress_stdio_fds: &[u32],
     ) -> Result<(), ExecuteError> {
+        let suppress_stdout = suppress_stdio_fds.contains(&1);
+        let suppress_stderr = suppress_stdio_fds.contains(&2);
         // GNU execute_cmd.c execute_function applies the call's redirections
         // to the shell's descriptors around the body (redir.c
         // do_redirections, undone on return), so `f &> out` routes BOTH
@@ -764,31 +832,36 @@ impl Executor {
         // must not be replayed as a stdout append on every inner command
         // (redir7.sub `stuff 4>&-' re-serialized the injected `>>&-' into a
         // spawned `-c' child and failed to parse it).
-        if let Some(redirect) = call_cmd
-            .redirect_out
-            .as_ref()
-            .filter(|r| is_stdout_write_redirect(r))
-        {
-            let target = self.expand_redirect_target(redirect);
-            if redirect_target_fd(&target).is_none() {
-                self.create_redirect_output(&target, redirect.clobber)?;
+        if !suppress_stdout {
+            if let Some(redirect) = call_cmd
+                .redirect_out
+                .as_ref()
+                .filter(|r| is_stdout_write_redirect(r))
+            {
+                let target = self.expand_redirect_target(redirect);
+                if redirect_target_fd(&target).is_none() {
+                    self.create_redirect_output(&target, redirect.clobber)?;
+                }
+                let mut append_redirect = redirect.clone();
+                append_redirect.target = target;
+                append_redirect.append = true;
+                append_redirect.clobber = false;
+                apply_stdout_append_redirect(body, &append_redirect);
             }
-            let mut append_redirect = redirect.clone();
-            append_redirect.target = target;
-            append_redirect.append = true;
-            append_redirect.clobber = false;
-            apply_stdout_append_redirect(body, &append_redirect);
-        }
-        if let Some(redirect) = call_cmd
-            .append
-            .as_ref()
-            .filter(|r| is_stdout_write_redirect(r))
-        {
-            let mut append_redirect = redirect.clone();
-            append_redirect.target = self.expand_redirect_target(redirect);
-            apply_stdout_append_redirect(body, &append_redirect);
+            if let Some(redirect) = call_cmd
+                .append
+                .as_ref()
+                .filter(|r| is_stdout_write_redirect(r))
+            {
+                let mut append_redirect = redirect.clone();
+                append_redirect.target = self.expand_redirect_target(redirect);
+                apply_stdout_append_redirect(body, &append_redirect);
+            }
         }
 
+        if suppress_stderr {
+            return Ok(());
+        }
         if let Some(redirect) = call_cmd
             .redirect_err
             .as_ref()
