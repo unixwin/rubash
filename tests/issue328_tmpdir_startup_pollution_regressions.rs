@@ -88,7 +88,8 @@ fn working_commands_do_not_create_var_subtree() {
 
 /// The /var/tmp mapping still works — materialized lazily on first use
 /// (GNU suites like vredir.tests default TMPDIR:=/var/tmp and rely on
-/// writes succeeding).
+/// writes succeeding). Windows-only: the mapping itself is cfg(windows).
+#[cfg(windows)]
 #[test]
 fn var_tmp_backing_created_lazily_on_use() {
     let dir = tmp_probe_dir("lazy");
