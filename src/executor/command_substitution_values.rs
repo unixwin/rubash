@@ -119,7 +119,14 @@ impl Executor {
             "wc" => {
                 let option = words.get(1).map(String::as_str).unwrap_or("-l");
                 let value = match option {
-                    "-c" => input.as_bytes().len(),
+                    // niubash#383: the substitution input is transport text,
+                    // so a byte count must decode the carrier pairs first
+                    // (0x1B is stored as U+E000 U+E01B, six bytes) instead of
+                    // measuring the encoding. `-l` needs no decode: 0x0A is
+                    // not a carrier byte.
+                    "-c" => {
+                        crate::executor::substitution_metadata::shell_text_to_raw_bytes(input).len()
+                    }
                     "-l" => input.bytes().filter(|byte| *byte == b'\n').count(),
                     _ => return None,
                 };
