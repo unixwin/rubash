@@ -135,6 +135,27 @@ fn genuine_array_with_parenthesised_elements_stays_two_elements() {
     assert_eq!(out.status, Some(0));
 }
 
+/// Guard: copying a genuine array into a declared local/global array with the
+/// quoted `"${foo[@]}"` idiom still fans out per element — the declared cell
+/// carries the prefixed storage, so it must not be mistaken for the
+/// rubash#755 scalar shape.
+#[test]
+fn declared_compound_copy_of_array_still_fans_out() {
+    let out = run(concat!(
+        "f() {\n",
+        "  foo=(a 'b c' d)\n",
+        "  local v=(\"${foo[@]}\")\n",
+        "  printf '<%s>\\n' \"${v[@]}\"\n",
+        "}\n",
+        "f\n",
+        "declare d=(\"${foo[@]}\")\n",
+        "printf 'd<%s>\\n' \"${d[@]}\"\n",
+    ));
+    assert_eq!(out.stdout, "<a>\n<b c>\n<d>\nd<a>\nd<b c>\nd<d>\n");
+    assert_eq!(out.stderr, "");
+    assert_eq!(out.status, Some(0));
+}
+
 /// Guard: the plain control (`y='plain'`) was already correct and stays so.
 #[test]
 fn plain_scalar_control_unchanged() {
