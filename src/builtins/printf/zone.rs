@@ -5,6 +5,7 @@ pub(super) struct TimeZoneRule {
     daylight_offset: i32,
     start_rule: Option<MonthWeekdayRule>,
     end_rule: Option<MonthWeekdayRule>,
+    system_local: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +47,7 @@ impl TimeZoneRule {
                 daylight_offset: 0,
                 start_rule: None,
                 end_rule: None,
+                system_local: false,
             },
             Some(_) => tz.and_then(parse_posix_timezone).unwrap_or_else(Self::utc),
             None => system_timezone().unwrap_or_else(Self::utc),
@@ -60,10 +62,19 @@ impl TimeZoneRule {
             daylight_offset: 0,
             start_rule: None,
             end_rule: None,
+            system_local: false,
         }
     }
 
     pub(super) fn local_time(&self, epoch: i64) -> LocalTimeParts {
+        // GNU printf.def:633 formats `localtime(&secs)`; with TZ unset libc
+        // resolves the system zone (/etc/localtime), so delegate per-epoch
+        // to localtime_r — a fixed snapshot offset would misrender DST
+        // history. strftime %z then prints tm_gmtoff exactly like GNU.
+        #[cfg(unix)]
+        if self.system_local {
+            return system_local_time(epoch);
+        }
         let daylight = self.is_daylight_time(epoch);
         let offset = if daylight {
             self.daylight_offset
@@ -111,6 +122,7 @@ fn parse_posix_timezone(value: &str) -> Option<TimeZoneRule> {
             daylight_offset: 0,
             start_rule: None,
             end_rule: None,
+            system_local: false,
         });
     }
 
@@ -165,6 +177,7 @@ fn parse_posix_timezone(value: &str) -> Option<TimeZoneRule> {
         daylight_offset,
         start_rule,
         end_rule,
+        system_local: false,
     })
 }
 
@@ -322,12 +335,64 @@ fn system_timezone() -> Option<TimeZoneRule> {
         daylight_offset,
         start_rule: has_dst.then(|| rule(&info.DaylightDate)).flatten(),
         end_rule: has_dst.then(|| rule(&info.StandardDate)).flatten(),
+        system_local: false,
     })
 }
 
 #[cfg(not(windows))]
 fn system_timezone() -> Option<TimeZoneRule> {
-    None
+    // GNU localtime with TZ unset reads the system zone; libc owns that
+    // database (/etc/localtime, Android tzdata), so mark the rule and let
+    // local_time() delegate per-epoch to localtime_r (tm_gmtoff/tm_zone).
+    #[cfg(unix)]
+    {
+        return Some(TimeZoneRule {
+            standard_name: String::new(),
+            daylight_name: None,
+            standard_offset: 0,
+            daylight_offset: 0,
+            start_rule: None,
+            end_rule: None,
+            system_local: true,
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        return None;
+    }
+}
+
+#[cfg(unix)]
+fn system_local_time(epoch: i64) -> LocalTimeParts {
+    let stamp = epoch as libc::time_t;
+    let mut broken: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: `stamp` and `broken` are valid owned values; localtime_r only
+    // reads the first and writes the second, returning null on failure.
+    let ok = unsafe { libc::localtime_r(&stamp, &mut broken) };
+    if ok.is_null() {
+        let mut fallback = epoch_to_parts(epoch);
+        fallback.epoch = epoch;
+        return fallback;
+    }
+    let zone_name = if broken.tm_zone.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(broken.tm_zone) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    LocalTimeParts {
+        year: broken.tm_year + 1900,
+        month: (broken.tm_mon + 1) as u8,
+        day: broken.tm_mday as u8,
+        hour: broken.tm_hour as u8,
+        minute: broken.tm_min as u8,
+        second: broken.tm_sec as u8,
+        weekday: (broken.tm_wday as u8) % 7,
+        zone_name,
+        offset: broken.tm_gmtoff as i32,
+        epoch,
+    }
 }
 
 fn days_in_month(year: i32, month: u8) -> u8 {
