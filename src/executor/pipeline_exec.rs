@@ -4445,3 +4445,13 @@ fn tput_inline_stage(command: &CommandNode) -> bool {
         Some("tput") | Some("/bin/tput") | Some("/usr/bin/tput")
     )
 }
+
+/// Non-Windows stub so `cfg!(windows) && tput_inline_stage(command)` at the
+/// call sites compiles on Linux/macOS — the arm is Windows-only by design
+/// (the whitelist exists to dodge the ~300ms Windows spawn floor), and the
+/// predicate is always false off Windows.
+#[cfg(not(windows))]
+#[allow(dead_code)]
+fn tput_inline_stage(_command: &CommandNode) -> bool {
+    false
+}
