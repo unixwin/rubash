@@ -89,3 +89,34 @@ fn prompt_transform_restore_is_value_preserving() {
     assert_eq!(exec.get_env("r1"), Some("ab"));
     assert_eq!(exec.get_env("r2"), Some("ab"));
 }
+
+/// rubash#858: the word-internal comsub `$?` overlay must also be restored.
+/// `PS1='$(exit 7)p '; echo ${PS1@P} $?` — GNU prints `p 0` (the `true`
+/// before it), not `p 7` (the transform's embedded comsub status leaking
+/// into the same command's later `$?`). dollar_question_status reads
+/// word_expansion_comsub_exit first, so the bracket must cover that cell
+/// too, not only last_command_substitution_status.
+#[test]
+fn prompt_transform_does_not_leak_into_word_level_dollar_question() {
+    let mut exec = Executor::new();
+
+    // Capture `echo ${PS1@P} $?` output via a substitution: the value the
+    // reader's $? sees must be the pre-command 0, not the embedded 7.
+    run(
+        &mut exec,
+        "PS1='$(exit 7)p '; true; captured=$(echo ${PS1@P} $?)",
+    );
+    assert_eq!(
+        exec.get_env("captured"),
+        Some("p 0"),
+        "embedded comsub status must not reach the same command's $?"
+    );
+
+    // The standalone-word `$?` form and the `case ${PS1@P}` word form agree.
+    run(
+        &mut exec,
+        "PS1='$(exit 4)zzz'; true; echo ${PS1@P}; case ${PS1@P} in zzz) hit=1;; *) hit=0;; esac",
+    );
+    assert_eq!(exec.get_env("hit"), Some("1"));
+    assert_eq!(exec.last_exit_code(), 0);
+}

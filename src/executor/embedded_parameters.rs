@@ -132,9 +132,19 @@ impl Executor {
         let arith_nonfatal_before = self.shell_state.arithmetic_nonfatal_error.replace(false);
         // The parse.y:6684-6697 status bracket (see the doc comment).
         let comsub_status_before = self.last_command_substitution_status.replace(None);
+        // rubash#858: the `$?` read side consults word_expansion_comsub_exit
+        // FIRST (parameter_core.rs dollar_question_status — issue #485's
+        // word-internal comsub overlay). Restoring only the subst-status
+        // cell leaves an @P pass whose embedded `$(exit N)` latched onto
+        // the overlay visible to a later `$?` in the SAME command line:
+        // `echo ${PS1@P} $?` printed N under rubash where GNU prints the
+        // prior command's status. Snapshot and restore the overlay too so
+        // the prompt pass is transparent to both read paths.
+        let word_comsub_exit_before = self.word_expansion_comsub_exit.replace(None);
         let result = self.expand_embedded_parameters_inner(word, false, false, false, true);
         self.last_command_substitution_status
             .set(comsub_status_before);
+        self.word_expansion_comsub_exit.set(word_comsub_exit_before);
         let failed = self
             .shell_state
             .parameter_bad_substitution
