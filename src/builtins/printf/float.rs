@@ -1,4 +1,6 @@
-use super::longdouble::{exact_parts, mantissa_nibbles, FloatVal};
+use super::longdouble::{
+    decimal_digit_char, exact_parts, hex_digit_char, mantissa_nibbles, FloatVal,
+};
 use super::FormatSpec;
 
 /// Format a printf float operand, already converted through the 80-bit
@@ -151,11 +153,11 @@ fn format_fixed(mant: u64, exp: i32, precision: usize) -> String {
     let int_len = digits.len() - precision;
     let mut rendered = digits[..int_len]
         .iter()
-        .map(|d| (b'0' + d) as char)
+        .map(|d| decimal_digit_char(*d))
         .collect::<String>();
     if precision > 0 {
         rendered.push('.');
-        rendered.extend(digits[int_len..].iter().map(|d| (b'0' + d) as char));
+        rendered.extend(digits[int_len..].iter().map(|d| decimal_digit_char(*d)));
     }
     rendered
 }
@@ -173,10 +175,10 @@ fn format_exp(mant: u64, exp: i32, precision: usize, uppercase: bool) -> String 
         rendered.push_str(&format_exp_suffix(0, uppercase));
         return rendered;
     };
-    let mut rendered = ((b'0' + digits[0]) as char).to_string();
+    let mut rendered = decimal_digit_char(digits[0]).to_string();
     if precision > 0 {
         rendered.push('.');
-        rendered.extend(digits[1..=precision].iter().map(|d| (b'0' + d) as char));
+        rendered.extend(digits[1..=precision].iter().map(|d| decimal_digit_char(*d)));
     }
     rendered.push_str(&format_exp_suffix(x, uppercase));
     rendered
@@ -215,10 +217,10 @@ fn format_general(
         return String::from("0");
     };
     let mut rendered = if x < -4 || x >= precision as i64 {
-        let mut body = ((b'0' + digits[0]) as char).to_string();
+        let mut body = decimal_digit_char(digits[0]).to_string();
         if precision > 1 {
             body.push('.');
-            body.extend(digits[1..].iter().map(|d| (b'0' + d) as char));
+            body.extend(digits[1..].iter().map(|d| decimal_digit_char(*d)));
         }
         body.push_str(&format_exp_suffix(x, uppercase));
         body
@@ -226,17 +228,17 @@ fn format_general(
         let int_len = x as usize + 1;
         let mut body: String = digits[..int_len]
             .iter()
-            .map(|d| (b'0' + d) as char)
+            .map(|d| decimal_digit_char(*d))
             .collect();
         if digits.len() > int_len {
             body.push('.');
-            body.extend(digits[int_len..].iter().map(|d| (b'0' + d) as char));
+            body.extend(digits[int_len..].iter().map(|d| decimal_digit_char(*d)));
         }
         body
     } else {
         let mut body = String::from("0.");
         body.extend(std::iter::repeat('0').take(-(x + 1) as usize));
-        body.extend(digits.iter().map(|d| (b'0' + d) as char));
+        body.extend(digits.iter().map(|d| decimal_digit_char(*d)));
         body
     };
     if alternate {
@@ -254,13 +256,7 @@ fn format_general(
 /// `%.2a` of 4.2 -> `0x8.66p-1`).
 fn format_hex_ld(mant: u64, exp: i32, spec: &FormatSpec, uppercase: bool) -> String {
     let (prefix, exponent_marker) = if uppercase { ("0X", 'P') } else { ("0x", 'p') };
-    let hex = |nibble: u8| {
-        (if nibble < 10 {
-            b'0' + nibble
-        } else {
-            (if uppercase { b'A' - 10 } else { b'a' - 10 }) + nibble
-        }) as char
-    };
+    let hex = |nibble: u8| hex_digit_char(nibble, uppercase);
     let nibbles = mantissa_nibbles(mant);
     let mut lead = nibbles[0];
     let mut frac: Vec<u8> = nibbles[1..].to_vec();

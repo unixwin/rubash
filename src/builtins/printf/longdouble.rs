@@ -671,7 +671,7 @@ pub(super) fn exact_parts(mant: u64, exp: i32) -> (String, String) {
         let mut drop = BigUint::from_u64(digit);
         drop.shl(shift);
         rem.sub_assign(&drop);
-        frac.push((b'0' + digit as u8) as char);
+        frac.push(decimal_digit_char(digit as u8));
     }
     (int_part, frac)
 }
@@ -683,4 +683,27 @@ pub(super) fn mantissa_nibbles(mant: u64) -> [u8; 16] {
         *slot = ((mant >> (60 - 4 * i)) & 0xF) as u8;
     }
     nibbles
+}
+
+/// Render a decimal digit value (0-9) as a char. The reviewed byte->char
+/// widening for the printf float engines (see the allowlist in
+/// scripts/check-utf8-boundary-hygiene.sh): the operand is a digit by
+/// construction, never a UTF-8 continuation byte.
+pub(super) fn decimal_digit_char(digit: u8) -> char {
+    debug_assert!(digit < 10);
+    (b'0' + digit) as char
+}
+
+/// Render a hex nibble (0-15) as a char (same reviewed-widening story as
+/// `decimal_digit_char`).
+pub(super) fn hex_digit_char(nibble: u8, uppercase: bool) -> char {
+    debug_assert!(nibble < 16);
+    let base = if nibble < 10 {
+        b'0'
+    } else if uppercase {
+        b'A' - 10
+    } else {
+        b'a' - 10
+    };
+    (base + nibble) as char
 }

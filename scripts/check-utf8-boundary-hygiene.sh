@@ -47,7 +47,12 @@ src/builtins/bind.rs::delimiter: Some\(d as char\)
 # never a UTF-8 continuation byte (bind -x \C-x keyspec lowering).
 src/builtins/bind.rs::\(upper as u8 & 0x1f\) as char
 src/builtins/cd/paths.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
-src/builtins/printf/float.rs::digits\[value as usize\] as char
+# printf/longdouble.rs: `decimal_digit_char` widens a decimal digit value
+# (0-9 by construction, debug_asserted) — never a UTF-8 continuation byte.
+src/builtins/printf/longdouble.rs::\(b'0' \+ digit\) as char
+# printf/longdouble.rs: `hex_digit_char` widens a hex nibble (0-15 by
+# construction, debug_asserted) plus an ASCII base — never >= 0x80.
+src/builtins/printf/longdouble.rs::\(base \+ nibble\) as char
 src/builtins/pwd.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
 src/executor/alias_helpers.rs::for ch in &text\[cursor\.\.start\]
 src/executor/alias_helpers.rs::for ch in &text\[cursor\.min\(text\.len\(\)\)\.\.\]
