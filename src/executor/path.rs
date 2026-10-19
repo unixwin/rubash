@@ -2537,6 +2537,35 @@ fn shell_path_to_windows_inner(path: &str, env_vars: &HashMap<String, String>) -
         }
     }
 
+    // Map /cygdrive/X drive paths to Windows drive letters (Cygwin-style
+    // convention), exactly parallel to the /mnt/ branch above.
+    // rubash#850: rubash's in-shell normalization had a /mnt arm but no
+    // /cygdrive arm, so `cd`/`test`/`[[ ]]`/`source`/redirects reported
+    // ENOENT for a path the bundled winuxcmd applets (ls/cat/cp, whose
+    // normalize_api_operand_w already folds /cygdrive/d/... into /d/...)
+    // resolved fine — the same path answered two ways depending on which
+    // layer handled it. `/cygdrive/d/repo` folds to `D:\repo`.
+    // Must be exactly /cygdrive/X or /cygdrive/X/... to avoid false
+    // matches like /cygdrive/cfoo.
+    if cfg!(windows) && normalized.starts_with("/cygdrive/") && normalized.len() >= 11 {
+        let bytes = normalized.as_bytes();
+        if bytes[10].is_ascii_alphabetic() && (normalized.len() == 11 || bytes[11] == b'/') {
+            let drive = bytes[10] as char;
+            let rest = if normalized.len() > 11 {
+                normalized[12..].trim_start_matches('/')
+            } else {
+                ""
+            };
+            if rest.is_empty() {
+                return PathBuf::from(format!("{}:\\", drive.to_ascii_uppercase()));
+            } else {
+                return PathBuf::from(
+                    format!("{}:\\{}", drive.to_ascii_uppercase(), rest).replace('/', "\\"),
+                );
+            }
+        }
+    }
+
     // /tmp is a per-user temporary namespace, not part of the simulated
     // install tree. Resolve it through TMPDIR (or the process temp dir)
     // even when a shell root is configured: a root below a non-user-writable

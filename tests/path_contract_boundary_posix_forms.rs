@@ -316,3 +316,40 @@ fn env_channel_pwd_reaches_native_child_verbatim() {
     );
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+/// B① POSITIVE (rubash#850): `/cygdrive/<letter>/...` folds to the drive
+/// letter for the in-shell faces too — cd, `test -d`, `[[ -d ]]`,
+/// `test -f`, and redirect targets all resolve the Cygwin dialect the same
+/// way the winuxcmd applets already did. Previously normalization had a
+/// /mnt arm but no /cygdrive arm, so the same path answered ENOENT for
+/// builtins while `ls`/`cat` resolved it — "one path, two answers". Runs
+/// against a scratch dir so it is self-contained (no D:\ dependence).
+#[test]
+fn cygdrive_forms_resolve_across_in_shell_faces() {
+    if !cfg!(windows) {
+        return;
+    }
+    let scratch = scratch_dir("cygdrive");
+    let posix = to_posix_form(&scratch); // "/c/<rest>"
+                                         // Re-roots the /c/<rest> shell spelling as /cygdrive/c/<rest>.
+    let cyg = format!("/cygdrive{}", posix);
+    let script = format!(
+        "cd '{cyg}' || exit 9; \
+         test -d '{cyg}' || exit 10; \
+         [[ -d '{cyg}' ]] || exit 11; \
+         echo w > '{cyg}/probe.txt'; \
+         test -f '{cyg}/probe.txt' || exit 12; \
+         cat '{cyg}/probe.txt'"
+    );
+    let (code, stdout, stderr) = run_rubash(&script, &[]);
+    assert_eq!(
+        code,
+        Some(0),
+        "cygdrive path must resolve in every in-shell face; stderr: {stderr}"
+    );
+    assert!(
+        stdout.trim_end().ends_with('w'),
+        "redirect target must land through the cygdrive fold: {stdout:?}"
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+}
