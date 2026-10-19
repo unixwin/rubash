@@ -281,16 +281,41 @@ fn scan_float_subject(value: &str) -> Option<FloatSubject> {
     let rest = &body[offset..];
     let rest_bytes = rest.as_bytes();
 
-    // inf / infinity / nan[(n-char-sequence)] -- C99 7.20.1.3; the parenthesised
-    // part belongs to the subject only when it closes.
+    // inf / infinity / nan[(n-char-sequence)] -- C99 7.20.1.3. These are
+    // word PREFIXES in glibc strtod: the leading letters are consumed as the
+    // subject and any trailing alphabetic run is left to *ep, so `infin`,
+    // `infx`, `nann`, `nanx`, `inff`, `nana` all convert to inf/nan while
+    // the tail is reported as the unparsed suffix (rubash#871 — the scanner
+    // used to require the exact words `inf`/`infinity`/`nan`, so the
+    // letter-suffixed forms fell through to the decimal path and printed
+    // 0.000000). The parenthesised nan(n-char-sequence) part belongs to the
+    // subject only when it closes.
     let word_end = rest_bytes
         .iter()
         .position(|byte| !byte.is_ascii_alphabetic())
         .unwrap_or(rest_bytes.len());
-    match rest[..word_end].to_ascii_lowercase().as_str() {
-        "inf" | "infinity" | "nan" => {
-            let mut end = leading + offset + word_end;
-            if rest.as_bytes().get(word_end) == Some(&b'(') {
+    let lower_word = rest[..word_end].to_ascii_lowercase();
+    // glibc strtod tries `infinity` as a WHOLE word first and falls back to
+    // the `inf` prefix when the letters run past it (`infinitY` is `inf` +
+    // the suffix `initY`, NOT infinity — the oracle reports
+    // `infinitY: invalid number`). `nan` is always a bare prefix.
+    let prefix_len = if lower_word == "infinity" {
+        Some("infinity".len())
+    } else if lower_word.starts_with("inf") {
+        Some("inf".len())
+    } else if lower_word.starts_with("nan") {
+        Some("nan".len())
+    } else {
+        None
+    };
+    if let Some(prefix_len) = prefix_len {
+        // For the nan family, an immediately-following `(n-char-sequence)`
+        // that closes is also part of the subject (C99 nan(n-char-seq)).
+        let is_nan = lower_word.starts_with("nan");
+        let mut end = leading + offset + prefix_len;
+        if is_nan {
+            if let Some(open) = rest.as_bytes().get(word_end).filter(|b| **b == b'(') {
+                let _ = open;
                 let close = rest_bytes[word_end..]
                     .iter()
                     .position(|byte| *byte == b')')
@@ -299,9 +324,8 @@ fn scan_float_subject(value: &str) -> Option<FloatSubject> {
                     end = leading + offset + close + 1;
                 }
             }
-            return Some(FloatSubject { start: 0, end });
         }
-        _ => {}
+        return Some(FloatSubject { start: 0, end });
     }
 
     // Hexadecimal significand: 0x/0X plus at least one hex digit with the

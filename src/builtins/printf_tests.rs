@@ -529,6 +529,43 @@ mod numeric_validation_704 {
         assert!(stderr.contains("printf: nan : invalid number"));
     }
 
+    /// rubash#871: glibc strtod treats `inf`/`infinity`/`nan` as word
+    /// prefixes — a trailing alphabetic run is left to *ep while the
+    /// leading letters still convert (`infin`, `infx`, `nann`, `nanx`,
+    /// `inff`, `nana` all print inf/nan). The scanner used to require the
+    // exact words, so letter-suffixed operands printed 0.000000.
+    #[test]
+    fn nonfinite_word_prefixes_convert() {
+        let (status, stdout, stderr, _) = run(&[
+            "%f|%f|%f|%f|%f|%f|%f|%f",
+            "infin",
+            "infx",
+            "nann",
+            "nanx",
+            "inff",
+            "nana",
+            "infinitY",
+            "nanx2",
+        ]);
+        assert_eq!(status, EXECUTION_FAILURE);
+        assert_eq!(stdout, "inf|inf|nan|nan|inf|nan|inf|nan");
+        // Each letter-suffixed operand reports the WHOLE original word as
+        // invalid (chk_converror sees *ep != NUL after the prefix). The one
+        // exception is `infinitY`: a case-insensitive exact `infinity`, so
+        // strtod consumes it fully and no diagnostic is emitted (verified
+        // against the GNU oracle — `infinit` and `infinitZ` do report).
+        for operand in ["infin", "infx", "nann", "nanx", "inff", "nana", "nanx2"] {
+            assert!(
+                stderr.contains(&format!("{operand}: invalid number")),
+                "missing suffix diagnostic for {operand}: {stderr:?}"
+            );
+        }
+        assert!(
+            !stderr.contains("infinitY"),
+            "infinitY is a complete case-insensitive infinity: {stderr:?}"
+        );
+    }
+
     #[test]
     fn nan_parenthesised_sequence_is_part_of_the_subject() {
         let (status, stdout, stderr, _) = run(&["%f|%f", "nan(123)", "infinity"]);
