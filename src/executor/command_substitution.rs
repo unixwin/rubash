@@ -1578,6 +1578,7 @@ impl Executor {
             backtick_body_diagnostic: Cell::new(false),
             parser_error_errexited: Cell::new(false),
             last_command_inverted: Cell::new(false),
+            compound_redirect_failure: Cell::new(false),
             exit_jump_pending: Cell::new(false),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),

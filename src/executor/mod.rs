@@ -934,6 +934,13 @@ pub struct Executor {
     /// last executed top-level command carried `!`; the drivers consult it
     /// before breaking (set-e1.sub `! true` under `set -o posix`).
     pub(crate) last_command_inverted: Cell<bool>,
+    /// A compound command's own redirection failed at pre-execution time
+    /// (GNU execute_cmd.c:854 do_redirections before the body runs —
+    /// EXECUTION_FAILURE is not part of the command's result, so `!` does
+    /// not invert it). Set by the brace-group / subshell / loop / if / case
+    /// redirect failure paths; `execute_inverted_ast_command` reads and
+    /// clears it to suppress the exit-status flip (rubash#846).
+    pub(crate) compound_redirect_failure: Cell<bool>,
     /// The group's execute_ast ended by unwinding (`exit`, errexit, POSIX
     /// special-builtin failure, fatal expansion — GNU's
     /// jump_to_top_level(EXITPROG/ERREXIT/FORCE_EOF)). run_source converts

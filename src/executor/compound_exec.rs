@@ -328,7 +328,16 @@ impl Executor {
             commands: vec![(*inverted_command.command).clone()],
         };
         self.with_errexit_suppressed(|executor| executor.execute_ast(&commands))?;
+        // GNU execute_cmd.c:854-883: a shell control structure's own
+        // redirections run in do_redirections BEFORE the body, and a failure
+        // there is EXECUTION_FAILURE — `invert` only gates errexit/the ERR
+        // trap (:868), it does NOT flip the return status. A simple
+        // command's redirect failure, by contrast, is part of the command's
+        // result and `!` inverts it. `compound_redirect_failure` marks the
+        // former case so the flip is skipped (rubash#846).
+        if !self.compound_redirect_failure.replace(false) {
         self.exit_code = invert_exit_status(self.exit_code);
+        }
         Ok(())
     }
 
@@ -1908,7 +1917,16 @@ impl Executor {
             let mut body_ast = Ast {
                 commands: subshell_command.body.clone(),
             };
-            self.apply_command_output_redirects(&stdio_redirect_cmd, &mut body_ast)?;
+            if let Err(error) =
+                self.apply_command_output_redirects(&stdio_redirect_cmd, &mut body_ast)
+            {
+                // rubash#846: subshell's own pre-execution redirect failure —
+                // GNU EXECUTION_FAILURE; `!` must not invert it.
+                if matches!(error, ExecuteError::IoError(_)) {
+                    self.compound_redirect_failure.set(true);
+                }
+                return Err(error);
+            }
             body_owned = Some(body_ast.commands);
         }
         let body: &[CommandNode] = body_owned.as_deref().unwrap_or(&subshell_command.body);
@@ -2994,6 +3012,11 @@ impl Executor {
             let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
             self.exit_code = status;
             finish_result?;
+            // rubash#846: compound's own pre-execution redirect failure —
+            // GNU EXECUTION_FAILURE; `!` must not invert it.
+            if matches!(error, ExecuteError::IoError(_)) {
+                self.compound_redirect_failure.set(true);
+            }
             return Err(error);
         }
         // GNU execute_cmd.c:3653 `line_number = case_command->line`: the
@@ -3200,7 +3223,16 @@ fn apply_redirects_to_commands(
     let mut ast = Ast {
         commands: std::mem::take(commands),
     };
-    executor.apply_command_output_redirects(cmd, &mut ast)?;
+    if let Err(error) = executor.apply_command_output_redirects(cmd, &mut ast) {
+        // rubash#846: this is a compound command's own pre-execution
+        // redirect failure (if/while/for/until/select via this helper) —
+        // GNU EXECUTION_FAILURE, not a command result; `!` must not invert.
+        if matches!(error, ExecuteError::IoError(_)) {
+            executor.compound_redirect_failure.set(true);
+        }
+        *commands = ast.commands;
+        return Err(error);
+    }
     *commands = ast.commands;
     Ok(())
 }

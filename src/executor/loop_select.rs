@@ -287,6 +287,11 @@ impl Executor {
             let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
             self.exit_code = status;
             finish_result?;
+            // rubash#846: compound's own pre-execution redirect failure —
+            // GNU EXECUTION_FAILURE; `!` must not invert it.
+            if matches!(error, ExecuteError::IoError(_)) {
+                self.compound_redirect_failure.set(true);
+            }
             return Err(error);
         }
         for_command.body = body.commands;

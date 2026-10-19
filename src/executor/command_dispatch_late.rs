@@ -257,7 +257,16 @@ impl Executor {
                 // like any other missing command.
                 match cmd.conditional_command.as_ref() {
                     Some(command) => {
-                        self.apply_no_output_builtin_redirects(cmd)?;
+                        if let Err(error) = self.apply_no_output_builtin_redirects(cmd) {
+                            // rubash#846: `[[ ]]` is a shell control
+                            // structure — its own redirect failure is
+                            // GNU EXECUTION_FAILURE, not a command
+                            // result; `!` must not invert it.
+                            if matches!(error, ExecuteError::IoError(_)) {
+                                self.compound_redirect_failure.set(true);
+                            }
+                            return Err(error);
+                        }
                         self.exit_code = self.execute_conditional_command(command);
                         Ok(())
                     }
@@ -265,7 +274,15 @@ impl Executor {
                 }
             }
             "((" => {
-                self.apply_no_output_builtin_redirects(cmd)?;
+                if let Err(error) = self.apply_no_output_builtin_redirects(cmd) {
+                    // rubash#846: `(( ))` is a shell control structure —
+                    // its own redirect failure is GNU EXECUTION_FAILURE,
+                    // not a command result; `!` must not invert it.
+                    if matches!(error, ExecuteError::IoError(_)) {
+                        self.compound_redirect_failure.set(true);
+                    }
+                    return Err(error);
+                }
                 self.exit_code = self.execute_arithmetic_command(cmd);
                 // GNU expr.c:1190-1216: an unbound variable under `set -u`
                 // inside `(( ))` raises FORCE_EOF and terminates the

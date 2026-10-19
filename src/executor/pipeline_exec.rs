@@ -365,7 +365,14 @@ impl Executor {
                     // the leaf path, printing the diagnostic twice, rubash#826
                     // faces 1-2).
                     return match error {
-                        ExecuteError::IoError(_) => self.finish_brace_redirect_failure(command),
+                        ExecuteError::IoError(_) => {
+                            // rubash#846: this is the compound's own
+                            // pre-execution redirect failure — GNU
+                            // EXECUTION_FAILURE, NOT a command result.
+                            // `!` must not invert it.
+                            self.compound_redirect_failure.set(true);
+                            self.finish_brace_redirect_failure(command)
+                        }
                         // A failglob abort was reported at the expansion;
                         // keep the existing dispatch contract for it.
                         other => Err(other),
