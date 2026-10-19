@@ -1918,6 +1918,7 @@ pub fn has_unclosed_input_syntax(input: &str) -> bool {
 /// skip.rs) — re-exported for the executor's copies of the case word
 /// machine.
 pub(crate) use skip::esac_prev_token_char;
+pub(crate) use skip::update_command_substitution_case_depth;
 
 /// POSIX-aware variant: `set -o posix` changes how `'` inside `"${...}"`
 /// scans (Interp 221), so the unclosed-delimiter probe must know the mode.

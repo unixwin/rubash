@@ -1219,7 +1219,11 @@ fn remove_double_quoted_into(
             '`' if preserve_backticks => {
                 pending_name = false;
                 out.push(quoted);
-                copy_backtick_body_preserving_syntax(out, chars);
+                // Inside the double-quoted span the dq rule applies: GNU
+                // consumed the escape while scanning the quotes
+                // (subst.c:921-931 string_extract_double_quoted stripdq),
+                // so `\"` reaches the backtick body as a bare `"`.
+                copy_backtick_body_preserving_syntax_dq(out, chars, true);
             }
             '\\' => {
                 pending_name = false;
@@ -1590,6 +1594,20 @@ fn copy_backtick_body_preserving_syntax(
     out: &mut String,
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) {
+    copy_backtick_body_preserving_syntax_dq(out, chars, false);
+}
+
+/// `dq` mirrors `copy_backtick_body_cursor`'s dq flag: when the backtick
+/// sits inside a double-quoted word, GNU has already folded `\"` to a bare
+/// `"` while scanning the quotes (subst.c:921-931
+/// string_extract_double_quoted stripdq arm; the same rule the cursor
+/// variant documents for rubash#745). Outside quotes the body is copied
+/// verbatim — `\` is preserved except before a newline it elides.
+fn copy_backtick_body_preserving_syntax_dq(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    dq: bool,
+) {
     while let Some(ch) = chars.next() {
         if ch == '`' {
             out.push(ch);
@@ -1600,6 +1618,14 @@ fn copy_backtick_body_preserving_syntax(
                 Some('\n') => {}
                 Some('\r') if chars.peek().copied() == Some('\n') => {
                     chars.next();
+                }
+                // DQ fold: the escape was already consumed by the double
+                // quote scan, so the body sees a bare `"`. Only `"` is
+                // folded — `\$`, `\\`, `\`` reach the same result either
+                // way through the backtick decoder, and folding them here
+                // would de-escape twice.
+                Some('"') if dq => {
+                    out.push('"');
                 }
                 Some(escaped) => {
                     out.push(ch);

@@ -1268,7 +1268,10 @@ fn brace_close_acceptable_word(word: &str) -> bool {
 /// Only the same-line whitespace-separated chain is modeled: `case x\nin`
 /// already reaches IN through the newline separator granting a boundary
 /// (reserved_word_acceptable('\n'), parse.y:5903).
-pub(super) fn update_command_substitution_case_depth(
+// `pub(crate)`: besides the lexer quote walkers, the executor's
+// IFS-marking simulator (`command_prepare.rs`) replays the same machine so
+// its verbatim `$(...)` copy finds the true span end (rubash#880).
+pub(crate) fn update_command_substitution_case_depth(
     ch: char,
     single: bool,
     double: bool,

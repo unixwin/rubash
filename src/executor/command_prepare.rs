@@ -4086,6 +4086,228 @@ fn mark_literal_ifs_chars(word: &str, ifs: &str) -> String {
 /// expansion; the field splitter (subst.c:3119 list_string) skips them.
 /// This is the rubash port for the mixed-quote case: `"a b"$w` must protect
 /// the quoted space while the unquoted `$w` result still splits.
+/// Verbatim `"..."` span copy for the IFS-marking simulator (arm-for-arm
+/// with lexer/quotes.rs copy_double_quoted_raw): `\` pairs through, an
+/// unquoted `"` closes, and a nested `$(...)` recurses into
+/// copy_comsub_body_verbatim_for_ifs_marking so a `"` inside it cannot close
+/// the outer span (rubash#880). `*index` enters just past the opening `"`.
+fn copy_dquote_span_verbatim_for_ifs_marking(
+    simulated: &mut String,
+    raw_chars: &[char],
+    index: &mut usize,
+) {
+    while *index < raw_chars.len() {
+        let ch = raw_chars[*index];
+        simulated.push(ch);
+        *index += 1;
+        match ch {
+            '"' => break,
+            '\\' => {
+                if let Some(escaped) = raw_chars.get(*index).copied() {
+                    simulated.push(escaped);
+                    *index += 1;
+                }
+            }
+            '$' if raw_chars.get(*index).copied() == Some('(') => {
+                simulated.push('(');
+                *index += 1;
+                copy_comsub_body_verbatim_for_ifs_marking(simulated, raw_chars, index);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Verbatim `$(...)` body copy for the IFS-marking simulator, case-aware
+/// (arm-for-arm with lexer/quotes.rs copy_dollar_paren_body_raw; GNU
+/// parse.y:4451 parse_comsub + parse.y:3465-3468 special_case_tokens via
+/// lexer::skip::update_command_substitution_case_depth). `*index` enters
+/// just past the opening `$(`.
+///
+/// Every byte is pushed verbatim — inner quotes are syntax, so no IFS marks
+/// are recorded inside — and the loop only determines the true span end: a
+/// pattern `)` while `case_depth > 0` never touches the paren depth, and
+/// quote/comment spans are skipped opaquely so a `)` inside them cannot
+/// close early either (rubash#880). On an unclosed body the loop runs to the
+/// end; the equality guard below then bails exactly as before (safe
+/// direction).
+fn copy_comsub_body_verbatim_for_ifs_marking(
+    simulated: &mut String,
+    raw_chars: &[char],
+    index: &mut usize,
+) {
+    use crate::lexer::{esac_prev_token_char, update_command_substitution_case_depth};
+
+    let mut depth = 1usize;
+    let mut case_depth = 0usize;
+    let mut word = String::new();
+    let mut word_boundary = true;
+    let mut current_word_boundary = true;
+    // `case WORD in' chain tracker (GNU special_case_tokens,
+    // parse.y:3369-3386 + 3433-3441); see skip.rs (rubash#284).
+    let mut case_in_stage = 0u8;
+    let mut case_pattern_region = false;
+    // rubash#380: previous significant char fed to the case word machine
+    // (the `esac` previous-token witness, parse.y:3181/3183).
+    let mut prev_sig: Option<char> = None;
+    // GNU read_token (parse.y:3630-3643): `#` opens a comment only at a
+    // token boundary (issue #513). The verbatim copy carries its bytes.
+    let mut token_boundary = true;
+    while *index < raw_chars.len() {
+        let ch = raw_chars[*index];
+        simulated.push(ch);
+        *index += 1;
+        if ch == '\\' {
+            // A backslash-quoted character is word text, never a reserved
+            // word (`c\ase` is not `case`); push the same placeholder the
+            // authoritative copy feeds the tracker.
+            if let Some(escaped) = raw_chars.get(*index).copied() {
+                simulated.push(escaped);
+                *index += 1;
+                word.push('\u{1}');
+            }
+            token_boundary = false;
+            continue;
+        }
+        if ch == '#' && token_boundary {
+            while *index < raw_chars.len() {
+                let comment = raw_chars[*index];
+                simulated.push(comment);
+                *index += 1;
+                if comment == '\n' {
+                    break;
+                }
+            }
+            word.clear();
+            word_boundary = true;
+            current_word_boundary = true;
+            token_boundary = true;
+            continue;
+        }
+        // The machine only needs the char after `ch` (the `;;`/`;&`
+        // pattern-list re-arm of parse.y:3710/3759).
+        let next = raw_chars.get(*index).copied();
+        update_command_substitution_case_depth(
+            ch,
+            false,
+            false,
+            &mut word,
+            &mut case_depth,
+            &mut word_boundary,
+            &mut current_word_boundary,
+            next,
+            &mut case_in_stage,
+            &mut case_pattern_region,
+            prev_sig,
+        );
+        if esac_prev_token_char(ch) {
+            prev_sig = Some(ch);
+        }
+        match ch {
+            '$' if next == Some('\'') => {
+                simulated.push('\'');
+                *index += 1;
+                // ANSI-C span: `\` pairs through, an unescaped `'` closes
+                // (copy_ansi_c_single_quoted_raw).
+                let mut escaped = false;
+                while *index < raw_chars.len() {
+                    let c = raw_chars[*index];
+                    simulated.push(c);
+                    *index += 1;
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if c == '\'' {
+                        break;
+                    }
+                }
+                word.clear();
+                word_boundary = false;
+                token_boundary = false;
+            }
+            '$' if next == Some('(') => {
+                simulated.push('(');
+                *index += 1;
+                depth += 1;
+                token_boundary = false;
+            }
+            '\'' => {
+                // Single-quoted span: through the closing `'` with no
+                // backslash processing (copy_single_quoted_raw).
+                while *index < raw_chars.len() {
+                    let c = raw_chars[*index];
+                    simulated.push(c);
+                    *index += 1;
+                    if c == '\'' {
+                        break;
+                    }
+                }
+                word.clear();
+                word_boundary = false;
+                token_boundary = false;
+            }
+            '"' => {
+                copy_dquote_span_verbatim_for_ifs_marking(simulated, raw_chars, index);
+                word.clear();
+                word_boundary = false;
+                token_boundary = false;
+            }
+            '`' => {
+                // Backtick span: verbatim except `\<newline>` / `\<CRLF>`
+                // elision (copy_backtick_raw — the non-dq behavior; inside a
+                // comsub body PST_NOEXPAND keeps the backslash, so no `"`
+                // fold unlike a directly dquote-wrapped backtick, rubash#880).
+                while *index < raw_chars.len() {
+                    let c = raw_chars[*index];
+                    if c == '`' {
+                        simulated.push(c);
+                        *index += 1;
+                        break;
+                    }
+                    if c == '\\' {
+                        match raw_chars.get(*index + 1).copied() {
+                            Some('\n') => {
+                                *index += 2;
+                                continue;
+                            }
+                            Some('\r')
+                                if raw_chars.get(*index + 2).copied() == Some('\n') =>
+                            {
+                                *index += 3;
+                                continue;
+                            }
+                            _ => {
+                                simulated.push(c);
+                                *index += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    simulated.push(c);
+                    *index += 1;
+                }
+                word.clear();
+                word_boundary = false;
+                token_boundary = false;
+            }
+            '(' if case_depth == 0 => {
+                depth += 1;
+                token_boundary = true;
+            }
+            ')' if case_depth == 0 => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+                token_boundary = true;
+            }
+            _ => {}
+        }
+        token_boundary =
+            ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+    }
+}
 fn mark_quoted_ifs_from_raw(raw: &str, cooked_with_marks: &str, ifs: &str) -> String {
     use crate::executor::markers::{
         ANSI_C_IFS_GUARD, CTLESC, DATA_BACKSLASH, DATA_BACKTICK, DATA_DOLLAR, DATA_DQUOTE,
@@ -4270,23 +4492,22 @@ fn mark_quoted_ifs_from_raw(raw: &str, cooked_with_marks: &str, ifs: &str) -> St
                     continue;
                 }
                 Some('(') => {
-                    // $(...) — copy span verbatim.
-                    let mut depth = 1usize;
+                    // $(...) — verbatim span copy, case-aware (arm-for-arm
+                    // with lexer/quotes.rs copy_dollar_paren_body_raw; GNU
+                    // parse.y:4451 parse_comsub + parse.y:3465-3468
+                    // special_case_tokens via update_command_substitution_case_depth).
+                    // The naive depth count closed early on pattern parens in
+                    // `$(case x in ...)` (rubash#880): the tail was re-walked
+                    // as outer text, so a `\`/`"`/`'` there desynced the cook
+                    // and the equality guard bailed, splitting quoted IFS.
                     simulated.push(ch);
                     simulated.push('(');
                     index += 2;
-                    while index < raw_chars.len() && depth > 0 {
-                        if raw_chars[index] == '(' {
-                            depth += 1;
-                        } else if raw_chars[index] == ')' {
-                            depth -= 1;
-                        } else if raw_chars[index] == '\\' && index + 1 < raw_chars.len() {
-                            simulated.push(raw_chars[index]);
-                            index += 1;
-                        }
-                        simulated.push(raw_chars[index]);
-                        index += 1;
-                    }
+                    copy_comsub_body_verbatim_for_ifs_marking(
+                        &mut simulated,
+                        &raw_chars,
+                        &mut index,
+                    );
                     continue;
                 }
                 // $'...' — the cook decodes the span through the ANSI-C
@@ -4394,6 +4615,52 @@ fn mark_quoted_ifs_from_raw(raw: &str, cooked_with_marks: &str, ifs: &str) -> St
                 if raw_chars[index] == '\\' && index + 1 < raw_chars.len() {
                     simulated.push(raw_chars[index]);
                     index += 1;
+                }
+                simulated.push(raw_chars[index]);
+                index += 1;
+            }
+            if index < raw_chars.len() {
+                simulated.push(raw_chars[index]);
+                index += 1;
+            }
+            continue;
+        }
+        if ch == '`' && !in_single && in_double {
+            // Double-quoted backtick span — the dquote walker
+            // (remove_double_quoted_into_cursor preserve_backticks arm)
+            // routes through copy_backtick_body_cursor(dq=true), which
+            // folds `\"` to `"` and elides `\<newline>`. Simulate both
+            // rewrites so the equality guard below sees the same cooked
+            // bytes the walker produced (rubash#880).
+            pending_name = false;
+            simulated.push(ch);
+            index += 1;
+            while index < raw_chars.len() && raw_chars[index] != '`' {
+                if raw_chars[index] == '\\' && index + 1 < raw_chars.len() {
+                    match raw_chars[index + 1] {
+                        '"' => {
+                            // dq fold: \" → " (the dquote arm already
+                            // consumed the escape; the backtick body sees
+                            // a bare quote, matching DATA_DQUOTE's decode).
+                            simulated.push(crate::executor::markers::DATA_DQUOTE);
+                            index += 2;
+                            continue;
+                        }
+                        '\n' => {
+                            // \<newline> elision (copy_backtick_body_cursor
+                            // swallows both bytes).
+                            index += 2;
+                            continue;
+                        }
+                        '\r' if raw_chars.get(index + 2) == Some(&'\n') => {
+                            index += 3;
+                            continue;
+                        }
+                        _ => {
+                            simulated.push(raw_chars[index]);
+                            index += 1;
+                        }
+                    }
                 }
                 simulated.push(raw_chars[index]);
                 index += 1;
