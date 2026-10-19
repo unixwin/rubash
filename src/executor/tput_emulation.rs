@@ -240,8 +240,9 @@ pub(crate) fn resolve_admitted_tput(term: &str, args: &[String]) -> Option<TputO
             };
             // Admission bound keeps the +1 arithmetic inside the verified
             // shape (i32::MAX would overflow). 0 is admitted — verified
-            // `cup 0 0` → `\e[1;1H`; digits_only rules out negatives, whose
-            // getopt error surface stays with the real binary.
+            // `cup 0 0` → `\e[1;1H`; the canonical-decimal gate rules out
+            // negatives and strtol base-0 spellings, whose getopt/error
+            // surface stays with the real binary.
             if row > 255 || column > 255 {
                 return None;
             }
@@ -259,19 +260,39 @@ pub(crate) fn resolve_admitted_tput(term: &str, args: &[String]) -> Option<TputO
     outcome
 }
 
-/// The setaf/setab numeric operand: ncurses formats N verbatim, and the
-/// oracle wraps out-of-i32 values (`4294967296` → `\e[30m`), so only the
-/// verified 0..=255 window is admitted; `+7` and `007` parse the same way
-/// GNU's operand parsing answers (both verified → `\e[37m`).
+/// The setaf/setab numeric operand. GNU's tparm parameter parsing is
+/// strtol base-0: `010` is OCTAL 8 (`\e[38m`), `+010` octal with a sign,
+/// `009`/`08` truncate at the first illegal octal digit (`\e[30m`), and
+/// `000000000010` is octal 10 — every one of these byte-diverges from a
+/// decimal read (CR #884 B1). Replicating strtol inside the arm is exactly
+/// the re-implementation shape #117 forbids, so the arm NARROWS instead:
+/// only plain canonical decimal (`0`, `7`, `255`) is admitted; a leading
+/// `0` (beyond the lone zero), a `+`/`-` sign, or any non-decimal text
+/// falls through to the real binary, which answers with its own
+/// strtol-faithful value.
 #[cfg(windows)]
 fn admitted_color_number(arg: &str) -> Option<i32> {
+    if !canonical_decimal(arg) {
+        return None;
+    }
     let n: i32 = arg.parse().ok()?;
     (0..=255).contains(&n).then_some(n)
 }
 
+/// Canonical decimal only: optional nothing — no sign, and a leading zero
+/// only for the literal `"0"` itself. `strtol`-shaped inputs (`010`,
+/// `+7`, `007`, `08`, `000000000010`) are rejected so the real binary's
+/// base-0 semantics keep answering.
+#[cfg(windows)]
+fn canonical_decimal(arg: &str) -> bool {
+    !arg.is_empty()
+        && arg.bytes().all(|byte| byte.is_ascii_digit())
+        && (arg == "0" || !arg.starts_with('0'))
+}
+
 #[cfg(windows)]
 fn digits_only_i32(arg: &str) -> Option<i32> {
-    if arg.is_empty() || !arg.bytes().all(|byte| byte.is_ascii_digit()) {
+    if !canonical_decimal(arg) {
         return None;
     }
     arg.parse().ok()
@@ -348,6 +369,20 @@ mod tests {
             &["setaf", "300"][..],
             &["setaf", "-1"][..],
             &["setaf", "4294967296"][..],
+            // CR #884 B1: strtol base-0 operand spellings — octal
+            // (`010`, `017`, `000000000010`), signed (`+010`, `+7`), and
+            // illegal-octal truncations (`009`, `08`) — all fall through;
+            // a decimal read would byte-diverge from GNU.
+            &["setaf", "010"][..],
+            &["setaf", "017"][..],
+            &["setaf", "009"][..],
+            &["setaf", "08"][..],
+            &["setaf", "+010"][..],
+            &["setaf", "+7"][..],
+            &["setaf", "000000000010"][..],
+            &["setab", "010"][..],
+            &["cup", "010", "010"][..],
+            &["cup", "008", "010"][..],
             &["cup", "3"][..],
             &["cup", "-1", "5"][..],
             &["cup", "5", "10", "9"][..],

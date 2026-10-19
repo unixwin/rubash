@@ -157,8 +157,6 @@ fn issue800_admitted_setaf_setab_boundaries() {
         ("xterm-256color", "setab 255", "\x1b[48;5;255m"),
         ("screen-256color", "setaf 8", "\x1b[90m"),
         ("tmux-256color", "setaf 16", "\x1b[38;5;16m"),
-        ("xterm", "setaf +7", "\x1b[37m"),
-        ("xterm", "setaf 007", "\x1b[37m"),
     ];
     for (index, (term, invocation, expected)) in rows.iter().enumerate() {
         assert_admitted(
@@ -198,7 +196,6 @@ fn issue800_child_visible_term_sources() {
     // winuxcmd 1, msys 4, missing 127 — all non-zero).
     let output = run_script("TERM=xterm; tput setaf 300", "unexported");
     assert_ne!(output.status, 0, "unexported TERM must not be admitted");
-    // TERM unset/empty: GNU errors (rc 2); the arm stands down.
     // TERM unset/empty: GNU errors (rc 2); the arm stands down and the
     // host binary answers. setaf 300 errors on every vendor (winuxcmd
     // unknown-capability rc 1, msys no-TERM rc 2, missing 127), so the
@@ -207,6 +204,54 @@ fn issue800_child_visible_term_sources() {
     // pre-arm behavior the stand-down preserves.)
     let output = run_script("tput setaf 300", "no-term");
     assert_ne!(output.status, 0, "missing TERM must not be admitted");
+}
+
+#[test]
+#[cfg(windows)]
+fn issue800_strtol_base0_operands_never_answer_from_the_table() {
+    // CR #884 B1: GNU parses numeric operands with strtol base-0 — `010`
+    // is octal 8 (`\e[38m`), `+010` signed octal, `009`/`08` truncate at
+    // the first illegal octal digit (`\e[30m`), `000000000010` is octal
+    // 10. The arm must NOT read them as decimal (`\e[310m`, `\e[39m`,
+    // `\e[38m`): the narrowed admission rejects every non-canonical
+    // decimal spelling and the real binary answers instead. Each row
+    // pins the invariant "stdout is never the decimal misread" — the one
+    // shape that holds on every host (winuxcmd errors with empty stdout,
+    // msys answers its own strtol-faithful bytes, missing 127).
+    let rows: &[(&str, &str)] = &[
+        ("tput setaf 010", "\x1b[310m"),
+        ("tput setaf 017", "\x1b[317m"),
+        ("tput setaf 009", "\x1b[39m"),
+        ("tput setaf 08", "\x1b[38m"),
+        ("tput setaf +010", "\x1b[310m"),
+        ("tput setaf +7", "\x1b[37m"),
+        ("tput setaf 000000000010", "\x1b[310m"),
+        ("tput setab 010", "\x1b[410m"),
+        ("TERM=tmux-256color tput setaf 010", "\x1b[38;5;10m"),
+    ];
+    for (index, (invocation, decimal_misread)) in rows.iter().enumerate() {
+        let output = run_script(
+            &format!("export TERM=xterm; {invocation}"),
+            &format!("strtol-{index}"),
+        );
+        assert_ne!(
+            output.stdout, *decimal_misread,
+            "[{invocation}] answered the DECIMAL misread from the table \
+             (strtol base-0 operands must fall through)"
+        );
+    }
+    // cup with octal-shaped operands: GNU `cup 010 010` → \e[9;9H; the
+    // decimal misread would be \e[11;11H.
+    let output = run_script("export TERM=xterm; tput cup 010 010", "strtol-cup");
+    assert_ne!(
+        output.stdout, "\x1b[11;11H",
+        "[cup 010 010] answered the DECIMAL misread from the table"
+    );
+    let output = run_script("export TERM=xterm; tput cup 008 010", "strtol-cup2");
+    assert_ne!(
+        output.stdout, "\x1b[9;11H",
+        "[cup 008 010] answered the DECIMAL misread from the table"
+    );
 }
 
 #[test]
