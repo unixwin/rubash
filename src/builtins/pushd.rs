@@ -179,6 +179,20 @@ where
                         return Ok(EXECUTION_FAILURE);
                     }
                 }
+                PushdOperand::Noop => {
+                    // GNU pushd.def:288 `if (list == 0) return
+                    // (EXECUTION_SUCCESS)`: consumed options with no operand
+                    // left (`pushd -n`, `pushd -n --`) are a silent success —
+                    // the stack is untouched and nothing prints.
+                    return Ok(EXECUTION_SUCCESS);
+                }
+                PushdOperand::TooManyArgs => {
+                    // GNU cd.def:326-330 CD_COMPLAINS via pushd.def:298, whose
+                    // non-zero verdict pushd maps to EXECUTION_FAILURE
+                    // (:310-315): the message only, no usage line, rc 1.
+                    writeln!(stderr, "{diagnostic_prefix}pushd: too many arguments")?;
+                    return Ok(EXECUTION_FAILURE);
+                }
                 PushdOperand::Index {
                     index,
                     from_right,
@@ -228,6 +242,41 @@ where
                         writeln!(stderr, "{diagnostic_prefix}pushd: null directory")?;
                         return Ok(EXECUTION_FAILURE);
                     }
+                    // GNU pushd.def:223-225: a lone `-` breaks the option walk
+                    // as a verbatim Dir operand, and pushd.def:298 routes it
+                    // through cd_builtin — whose `cd -` arm (cd.def:339-349)
+                    // substitutes $OLDPWD. An unset OLDPWD is `OLDPWD not set`
+                    // (rc 1); a set-but-empty one canonicalizes to the cwd
+                    // (change_to_directory("") via make_absolute + canon), a
+                    // no-op success. LCD_PRINTPATH (cd.def:371-374) echoes the
+                    // RAW value on success only — a stale OLDPWD prints no
+                    // echo — and the failure diagnostic names the raw value
+                    // too (cd.def:427), e.g. `pushd: /gone: No such file...`.
+                    // With -n the word stays a raw push (`pushd -n -`
+                    // stores "-"), never an OLDPWD lookup.
+                    let resolved_dir = if dir == "-" && !no_cd {
+                        let Some(oldpwd) = env_vars.get("OLDPWD").cloned() else {
+                            writeln!(stderr, "{diagnostic_prefix}pushd: OLDPWD not set")?;
+                            return Ok(EXECUTION_FAILURE);
+                        };
+                        let resolved = if oldpwd.is_empty() {
+                            stack
+                                .first()
+                                .cloned()
+                                .or_else(|| env_vars.get("PWD").cloned())
+                                .unwrap_or_else(|| "/".to_string())
+                        } else {
+                            normalize_stack_dir(&oldpwd, env_vars)
+                        };
+                        if !logical_dir_exists(&resolved, env_vars) {
+                            writeln!(
+                                stderr,
+                                "{diagnostic_prefix}pushd: {oldpwd}: No such file or directory"
+                            )?;
+                            return Ok(EXECUTION_FAILURE);
+                        }
+                        writeln!(stdout, "{oldpwd}")?;
+                        resolved
                     // pushd.def:301: with -n, cd_builtin is never called and
                     // `add_dirstack_element (savestring (list->word->word))`
                     // pushes the RAW operand word unconditionally — no
@@ -235,7 +284,7 @@ where
                     // the cd path only). An empty expansion therefore stays
                     // "" on the stack (`HOME=; pushd -n ~` yields
                     // `<cwd> ""`), and `pushd -n ./sub` stores "./sub".
-                    let resolved_dir = if no_cd {
+                    } else if no_cd {
                         dir.clone()
                     } else {
                         let resolved = normalize_stack_dir(&dir, env_vars);
