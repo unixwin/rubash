@@ -11,6 +11,7 @@ use crate::shell::VariableStore;
 mod escape;
 mod float;
 mod identifier;
+mod longdouble;
 mod number;
 mod spec;
 pub(crate) mod time;

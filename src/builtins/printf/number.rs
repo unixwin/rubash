@@ -1,3 +1,4 @@
+use super::longdouble::{parse_long_double_subject, FloatVal};
 use super::ParsedNumber;
 
 pub(super) fn parse_i64(value: &str) -> ParsedNumber<i64> {
@@ -73,37 +74,56 @@ pub(super) fn parse_u64(value: &str) -> ParsedNumber<u64> {
     }
 }
 
-pub(super) fn parse_f64(value: &str) -> ParsedNumber<f64> {
+/// GNU printf.def:208-213 floatmax_t/strtofltmax (strtold on this
+/// platform), printf.def:774-798 float conversions via getfloatmax, and
+/// printf.def:1387-1398 chk_converror: the operand converts through the
+/// 80-bit extended format, and a fully-consumed subject that overflows (or
+/// underflows inexactly) raises ERANGE. A trailing suffix beats ERANGE
+/// (`1e9999x` is a plain invalid number, not an overflow).
+pub(super) fn parse_long_double(value: &str) -> ParsedNumber<FloatVal> {
     if let Some(ch) = printf_char_constant(value) {
         return ParsedNumber {
-            value: ch as u32 as f64,
+            value: longdouble_char_constant(ch),
             invalid: None,
         };
     }
     if value.is_empty() {
         return ParsedNumber {
-            value: 0.0,
+            value: FloatVal::zero(),
             invalid: None,
         };
     }
     match scan_float_subject(value) {
         Some(subject) => {
             let end = subject.end;
-            let parsed = convert_float_subject(&value[subject.start..end]);
+            let (parsed, erange) = parse_long_double_subject(&value[subject.start..end]);
             // printf.def:1472-1495 getdouble(): strtod accumulates the
             // longest valid subject sequence and getdouble RETURNS it even
             // when chk_converror rejects the trailing bytes, so `printf %f
             // '5 '` prints 5.000000 (status 1) instead of 0.000000.
             ParsedNumber {
                 value: parsed,
-                invalid: (end < value.len()).then(|| value.to_string()),
+                invalid: if end < value.len() {
+                    Some(value.to_string())
+                } else if erange {
+                    Some(format!("__rubash_printf_overflow__:{value}"))
+                } else {
+                    None
+                },
             }
         }
         None => ParsedNumber {
-            value: 0.0,
+            value: FloatVal::zero(),
             invalid: Some(value.to_string()),
         },
     }
+}
+
+/// printf.def:1519-1544 asciicode(): a quote operand yields arg[1]
+/// converted with mbrtowc — a single BMP char is its own code point, so a
+/// quoted char is the exact small integer of that code point.
+fn longdouble_char_constant(ch: char) -> FloatVal {
+    FloatVal::from_small_int(ch as u32 as u64, false)
 }
 
 /// GNU printf.def:834-838 printf_erange()/1391-1398 chk_converror(): the
@@ -382,72 +402,4 @@ fn scan_float_subject(value: &str) -> Option<FloatSubject> {
         start: 0,
         end: leading + offset + index,
     })
-}
-
-fn convert_float_subject(subject: &str) -> f64 {
-    let body = skip_leading_space(subject);
-    let negative = body.starts_with('-');
-    let unsigned = body.trim_start_matches(['-', '+']);
-    let lower = unsigned.to_ascii_lowercase();
-
-    let value = if let Some(digits) = lower.strip_prefix("0x") {
-        hex_significand_to_f64(digits)
-    } else if lower.starts_with("infinity") || lower.starts_with("inf") {
-        f64::INFINITY
-    } else if lower.starts_with("nan") {
-        f64::NAN
-    } else {
-        unsigned.parse::<f64>().unwrap_or(0.0)
-    };
-    if negative {
-        -value
-    } else {
-        value
-    }
-}
-
-/// Convert the hex digit run (integer digits, an optional dot, fraction
-/// digits) into an f64. Mantissa bits beyond f64's 53-bit precision round
-/// through the u128 -> f64 conversion; the binary exponent is applied as
-/// exact power-of-two scaling. ERANGE is deliberately not modelled: the
-/// oracle's conversion goes through strtofltmax into long double, so even
-/// `1e999`-scale decimal input produces no diagnostic (WSL GNU bash 5.3.0
-/// probe: `printf '%f\n' 1e999` -> the expanded value, rc=0).
-fn hex_significand_to_f64(digits: &str) -> f64 {
-    let mut mantissa: u128 = 0;
-    let mut fraction_digits: i32 = 0;
-    let mut seen_dot = false;
-    for ch in digits.chars().take_while(|ch| *ch != 'p' && *ch != 'P') {
-        if ch == '.' {
-            seen_dot = true;
-            continue;
-        }
-        let digit = ch.to_digit(16).unwrap_or(0) as u128;
-        if mantissa < (1_u128 << 120) {
-            mantissa = mantissa * 16 + digit;
-        }
-        if seen_dot {
-            fraction_digits += 4;
-        }
-    }
-    let mut exponent: i32 = 0;
-    if let Some(position) = digits.find(['p', 'P']) {
-        let parsed = digits[position + 1..].trim().parse::<i32>().unwrap_or(0);
-        exponent = parsed;
-    }
-    let mut value = mantissa as f64;
-    let mut shift = exponent - fraction_digits;
-    // Scale in bounded steps so intermediate products stay finite; powers
-    // of two are exact in binary floating point.
-    while shift > 0 {
-        let step = shift.min(1023);
-        value *= 2_f64.powi(step);
-        shift -= step;
-    }
-    while shift < 0 {
-        let step = (-shift).min(1022);
-        value /= 2_f64.powi(step);
-        shift += step;
-    }
-    value
 }

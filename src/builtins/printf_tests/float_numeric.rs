@@ -52,6 +52,9 @@ fn alternate_general_float_formats_keep_decimal_zeroes() {
 
 #[test]
 fn hex_float_formats_match_bash_precision_and_flags() {
+    // Oracle (WSL GNU bash 5.3, issue #879): `%a` prints the 64-bit
+    // long-double mantissa nibble-style (printf.def:774-798 `%La`), so
+    // 4.2 renders leading-nibble 8, not the f64-style 1.x.
     assert_eq!(
         run(&[
             "<%.0a><%.2a><%10.2a><%+.2a><% .2a><%.2A>",
@@ -63,15 +66,17 @@ fn hex_float_formats_match_bash_precision_and_flags() {
             "4.2"
         ])
         .1,
-        "<0x1p+2><0x1.0dp+2>< 0x1.0dp+2><+0x1.0dp+2>< 0x1.0dp+2><0X1.0DP+2>"
+        "<0x8p-1><0x8.66p-1>< 0x8.66p-1><+0x8.66p-1>< 0x8.66p-1><0X8.66P-1>"
     );
 }
 
 #[test]
 fn hex_float_formats_handle_zero_integer_and_alternate_form() {
+    // Oracle (WSL GNU bash 5.3, issue #879): 1 -> `0x8p-3` (8 * 2^-3),
+    // `%#a` of 4 -> `0x8.p-1`.
     assert_eq!(
         run(&["<%a><%a><%a><%#a>", "0", "-0", "1", "4"]).1,
-        "<0x0p+0><-0x0p+0><0x1p+0><0x1.p+2>"
+        "<0x0p+0><-0x0p+0><0x8p-3><0x8.p-1>"
     );
 }
 

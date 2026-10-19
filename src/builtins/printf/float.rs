@@ -1,53 +1,59 @@
+use super::longdouble::{exact_parts, mantissa_nibbles, FloatVal};
 use super::FormatSpec;
 
-pub(super) fn format_float(value: f64, spec: &FormatSpec, mode: char) -> String {
+/// Format a printf float operand, already converted through the 80-bit
+/// extended format (GNU printf.def:208-213 floatmax_t, printf.def:774-798
+/// float conversions via getfloatmax with the `L' modifier, so the C
+/// library formats a long double).
+///
+/// Every finite engine works from the operand's EXACT decimal expansion
+/// (`exact_parts`: binary fractions expand finitely) and rounds once to
+/// the requested digits with round-half-even — the C library converts the
+/// long double correctly rounded under the default rounding mode, so
+/// ties break towards even (oracle: `%.0f` of 0.5/1.5/2.5 -> 0/2/2).
+pub(super) fn format_float(value: FloatVal, spec: &FormatSpec, mode: char) -> String {
     // glibc printf renders non-finite values as inf/nan spelled per
     // conversion case (%f/%e/%g/%a -> "inf"/"nan", %F/%E/%G/%A -> "INF"/
     // "NAN"), keeps the sign bit as a literal minus ("-nan"), ignores
     // precision and the alternate-form decimal point, and still applies
-    // the '+'/space sign flags ("%+f" inf -> "+inf"). Rust spells NaN as
-    // "NaN" and has no uppercase inf, so the words are produced here
-    // instead of via format! (issue #704 R6.1: getdouble's strtod subject
-    // scan newly delivers nan operands to the renderer).
-    let nonfinite = value.is_nan() || value.is_infinite();
-    let mut rendered = if nonfinite {
-        let uppercase = matches!(mode, 'E' | 'F' | 'G' | 'A');
-        let word = if value.is_nan() {
-            if uppercase {
-                "NAN"
+    // the '+/space sign flags ("%+f" inf -> "+inf").
+    let mut rendered = match value {
+        FloatVal::Infinite { neg } | FloatVal::Nan { neg } => {
+            let uppercase = matches!(mode, 'E' | 'F' | 'G' | 'A');
+            let word = match value {
+                FloatVal::Nan { .. } if uppercase => "NAN",
+                FloatVal::Nan { .. } => "nan",
+                _ if uppercase => "INF",
+                _ => "inf",
+            };
+            if neg {
+                format!("-{word}")
             } else {
-                "nan"
+                word.to_string()
             }
-        } else if uppercase {
-            "INF"
-        } else {
-            "inf"
-        };
-        if value.is_sign_negative() {
-            format!("-{word}")
-        } else {
-            word.to_string()
         }
-    } else {
-        match mode {
-            'e' | 'E' => {
-                let precision = spec.precision.unwrap_or(6);
-                let rendered = if mode == 'E' {
-                    format!("{value:.precision$E}")
-                } else {
-                    format!("{value:.precision$e}")
-                };
-                normalize_float_exponent(rendered, mode == 'E')
-            }
-            'g' | 'G' => format_general_float(value, spec, mode == 'G'),
-            'a' | 'A' => format_hex_float(value, spec, mode == 'A'),
-            _ => {
-                let precision = spec.precision.unwrap_or(6);
-                format!("{value:.precision$}")
+        FloatVal::Finite { neg, mant, exp } => {
+            let body = match mode {
+                'e' | 'E' => format_exp(mant, exp, spec.precision.unwrap_or(6), mode == 'E'),
+                'g' | 'G' => format_general(
+                    mant,
+                    exp,
+                    spec.precision.unwrap_or(6).max(1),
+                    mode == 'G',
+                    spec.alternate_form,
+                ),
+                'a' | 'A' => format_hex_ld(mant, exp, spec, mode == 'A'),
+                _ => format_fixed(mant, exp, spec.precision.unwrap_or(6)),
+            };
+            if neg {
+                format!("-{body}")
+            } else {
+                body
             }
         }
     };
 
+    let nonfinite = !matches!(value, FloatVal::Finite { .. });
     if spec.alternate_form && !nonfinite && matches!(mode, 'f' | 'e' | 'E') {
         ensure_float_decimal_point(&mut rendered);
     }
@@ -72,174 +78,253 @@ pub(super) fn format_float(value: f64, spec: &FormatSpec, mode: char) -> String 
     rendered
 }
 
-fn format_hex_float(value: f64, spec: &FormatSpec, uppercase: bool) -> String {
-    let bits = value.to_bits();
-    let negative = bits >> 63 != 0;
-    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
-    let fraction_bits = bits & ((1_u64 << 52) - 1);
-
-    let (prefix, exponent_marker) = if uppercase { ("0X", 'P') } else { ("0x", 'p') };
-    let digit_case = if uppercase {
-        HexCase::Upper
-    } else {
-        HexCase::Lower
-    };
-
-    if exponent_bits == 0 && fraction_bits == 0 {
-        let mut rendered = format!("{prefix}0");
-        if spec.alternate_form {
-            rendered.push('.');
-        }
-        rendered.push(exponent_marker);
-        rendered.push_str("+0");
-        if negative {
-            rendered.insert(0, '-');
-        }
-        return rendered;
-    }
-
-    let mut exponent = if exponent_bits == 0 {
-        -1022
-    } else {
-        exponent_bits - 1023
-    };
-    let mantissa = if exponent_bits == 0 {
-        fraction_bits
-    } else {
-        (1_u64 << 52) | fraction_bits
-    };
-
-    let precision = spec.precision;
-    let (leading, mut fraction) =
-        rounded_hex_mantissa(mantissa, precision, &mut exponent, digit_case);
-
-    if precision.is_none() {
-        while fraction.ends_with('0') {
-            fraction.pop();
+/// Round the digit run in place, keeping the first `keep` digits and
+/// folding `digits[keep..]` plus the `sticky` bit (value dropped before
+/// this call, e.g. a capped digit window) into the decision, breaking
+/// ties towards even. The caller guarantees at least `keep + 1` digits.
+/// A carry past the most significant digit inserts a leading 1, so the
+/// caller detects overflow as `digits.len() > keep` and renormalizes.
+fn round_half_even(digits: &mut Vec<u8>, keep: usize, sticky: bool) {
+    debug_assert!(digits.len() > keep);
+    let guard = digits[keep];
+    let rest_nonzero = sticky || digits[keep + 1..].iter().any(|&d| d != 0);
+    let kept_odd = keep > 0 && digits[keep - 1] % 2 == 1;
+    let round_up = guard > 5 || (guard == 5 && (rest_nonzero || kept_odd));
+    digits.truncate(keep);
+    if round_up {
+        let mut i = keep;
+        loop {
+            if i == 0 {
+                digits.insert(0, 1);
+                break;
+            }
+            i -= 1;
+            if digits[i] < 9 {
+                digits[i] += 1;
+                break;
+            }
+            digits[i] = 0;
         }
     }
+}
 
-    let mut rendered = format!("{prefix}{leading}");
-    if !fraction.is_empty() || spec.alternate_form || precision.unwrap_or(0) > 0 {
+/// The `precision` significant decimal digits of `mant * 2^exp` (rounded
+/// once, half-even) plus `x`, the decimal exponent of the first digit.
+/// `None` is an exact zero. The returned run holds exactly `p` digits.
+fn significant_digits(mant: u64, exp: i32, precision: usize) -> Option<(Vec<u8>, i64)> {
+    if mant == 0 {
+        return None;
+    }
+    let p = precision.max(1);
+    let (int_s, frac_s) = exact_parts(mant, exp);
+    let mut digits: Vec<u8> = Vec::new();
+    let mut x: i64;
+    if int_s != "0" {
+        x = int_s.len() as i64 - 1;
+        digits.extend(int_s.bytes().map(|b| b - b'0'));
+        digits.extend(frac_s.bytes().map(|b| b - b'0'));
+    } else {
+        let zeros = frac_s.bytes().take_while(|&b| b == b'0').count();
+        x = -(zeros as i64) - 1;
+        digits.extend(frac_s[zeros..].bytes().map(|b| b - b'0'));
+    }
+    // Beyond the guard digit the exact tail folds into the sticky bit.
+    let sticky = digits.len() > p + 1 && digits[p + 1..].iter().any(|&d| d != 0);
+    digits.resize(p + 1, 0);
+    round_half_even(&mut digits, p, sticky);
+    if digits.len() > p {
+        digits.truncate(p);
+        x += 1;
+    }
+    Some((digits, x))
+}
+
+/// `%f`/`%F`: full integer part plus exactly `precision` fraction digits.
+fn format_fixed(mant: u64, exp: i32, precision: usize) -> String {
+    let (int_s, frac_s) = exact_parts(mant, exp);
+    let mut digits: Vec<u8> = Vec::with_capacity(int_s.len() + precision + 1);
+    digits.extend(int_s.bytes().map(|b| b - b'0'));
+    digits.extend(frac_s.bytes().map(|b| b - b'0'));
+    // Exact expansion, so the tail past the guard digit is all zeros.
+    digits.resize(int_s.len() + precision + 1, 0);
+    round_half_even(&mut digits, int_s.len() + precision, false);
+    let int_len = digits.len() - precision;
+    let mut rendered = digits[..int_len]
+        .iter()
+        .map(|d| (b'0' + d) as char)
+        .collect::<String>();
+    if precision > 0 {
         rendered.push('.');
-        rendered.push_str(&fraction);
-    }
-    rendered.push(exponent_marker);
-    if exponent >= 0 {
-        rendered.push('+');
-    }
-    rendered.push_str(&exponent.to_string());
-
-    if negative {
-        rendered.insert(0, '-');
+        rendered.extend(digits[int_len..].iter().map(|d| (b'0' + d) as char));
     }
     rendered
 }
 
-#[derive(Clone, Copy)]
-enum HexCase {
-    Lower,
-    Upper,
-}
-
-fn rounded_hex_mantissa(
-    mantissa: u64,
-    precision: Option<usize>,
-    exponent: &mut i32,
-    digit_case: HexCase,
-) -> (char, String) {
-    let precision = precision.unwrap_or(13);
-
-    if precision <= 13 {
-        let shift = 52 - precision * 4;
-        let mut rounded = if shift == 0 {
-            mantissa
-        } else {
-            (mantissa + (1_u64 << (shift - 1))) >> shift
-        };
-        let overflow = 1_u64 << (precision * 4 + 1);
-        if rounded == overflow {
-            rounded >>= 1;
-            *exponent += 1;
+/// `%e`/`%E`: one leading digit, `precision` fraction digits, `e+-XX`.
+fn format_exp(mant: u64, exp: i32, precision: usize, uppercase: bool) -> String {
+    // One extra significant digit feeds the rounding; only `precision`
+    // fraction digits render.
+    let Some((digits, x)) = significant_digits(mant, exp, precision + 1) else {
+        let mut rendered = String::from("0");
+        if precision > 0 {
+            rendered.push('.');
+            rendered.extend(std::iter::repeat('0').take(precision));
         }
-
-        let leading = hex_digit((rounded >> (precision * 4)) as u8, digit_case);
-        let fraction_value = rounded & ((1_u64 << (precision * 4)) - 1);
-        let fraction = if precision == 0 {
-            String::new()
-        } else {
-            format_hex_fraction(fraction_value, precision, digit_case)
-        };
-        return (leading, fraction);
+        rendered.push_str(&format_exp_suffix(0, uppercase));
+        return rendered;
+    };
+    let mut rendered = ((b'0' + digits[0]) as char).to_string();
+    if precision > 0 {
+        rendered.push('.');
+        rendered.extend(digits[1..=precision].iter().map(|d| (b'0' + d) as char));
     }
-
-    let leading = hex_digit((mantissa >> 52) as u8, digit_case);
-    let mut fraction = format_hex_fraction(mantissa & ((1_u64 << 52) - 1), 13, digit_case);
-    fraction.extend(std::iter::repeat('0').take(precision - 13));
-    (leading, fraction)
+    rendered.push_str(&format_exp_suffix(x, uppercase));
+    rendered
 }
 
-fn format_hex_fraction(value: u64, width: usize, digit_case: HexCase) -> String {
-    let raw = match digit_case {
-        HexCase::Lower => format!("{value:0width$x}"),
-        HexCase::Upper => format!("{value:0width$X}"),
-    };
-    raw
-}
-
-fn hex_digit(value: u8, digit_case: HexCase) -> char {
-    let digits = match digit_case {
-        HexCase::Lower => b"0123456789abcdef",
-        HexCase::Upper => b"0123456789ABCDEF",
-    };
-    digits[value as usize] as char
-}
-
-fn format_general_float(value: f64, spec: &FormatSpec, uppercase: bool) -> String {
-    let precision = spec.precision.unwrap_or(6).max(1);
-    let exponent = decimal_exponent(value);
-    let use_exponent = exponent < -4 || exponent >= precision as i32;
-
-    let mut rendered = if use_exponent {
-        let exponent_precision = precision.saturating_sub(1);
-        let rendered = if uppercase {
-            format!("{value:.exponent_precision$E}")
-        } else {
-            format!("{value:.exponent_precision$e}")
-        };
-        normalize_float_exponent(rendered, uppercase)
+/// The `e+-XX` suffix: sign always, at least two exponent digits.
+fn format_exp_suffix(x: i64, uppercase: bool) -> String {
+    let marker = if uppercase { 'E' } else { 'e' };
+    let sign = if x < 0 { '-' } else { '+' };
+    let mag = x.unsigned_abs().to_string();
+    if mag.len() < 2 {
+        format!("{marker}{sign}0{mag}")
     } else {
-        let fractional_precision = (precision as i32 - (exponent + 1)).max(0) as usize;
-        format!("{value:.fractional_precision$}")
-    };
+        format!("{marker}{sign}{mag}")
+    }
+}
 
-    if spec.alternate_form {
+/// `%g`/`%G`: `precision` significant digits, `%e` style when the decimal
+/// exponent is below -4 or at/above the precision, else `%f` style; the
+/// style decision uses the ROUNDED exponent, so a carry can flip it
+/// (oracle: `%.2g` of 99.9 -> `1e+02`).
+fn format_general(
+    mant: u64,
+    exp: i32,
+    precision: usize,
+    uppercase: bool,
+    alternate: bool,
+) -> String {
+    let Some((digits, x)) = significant_digits(mant, exp, precision) else {
+        // Oracle: `%g` of 0 -> `0`, `%#g` of 0 -> `0.00000` (precision 6).
+        if alternate {
+            let mut rendered = String::from("0.");
+            rendered.extend(std::iter::repeat('0').take(precision - 1));
+            return rendered;
+        }
+        return String::from("0");
+    };
+    let mut rendered = if x < -4 || x >= precision as i64 {
+        let mut body = ((b'0' + digits[0]) as char).to_string();
+        if precision > 1 {
+            body.push('.');
+            body.extend(digits[1..].iter().map(|d| (b'0' + d) as char));
+        }
+        body.push_str(&format_exp_suffix(x, uppercase));
+        body
+    } else if x >= 0 {
+        let int_len = x as usize + 1;
+        let mut body: String = digits[..int_len]
+            .iter()
+            .map(|d| (b'0' + d) as char)
+            .collect();
+        if digits.len() > int_len {
+            body.push('.');
+            body.extend(digits[int_len..].iter().map(|d| (b'0' + d) as char));
+        }
+        body
+    } else {
+        let mut body = String::from("0.");
+        body.extend(std::iter::repeat('0').take(-(x + 1) as usize));
+        body.extend(digits.iter().map(|d| (b'0' + d) as char));
+        body
+    };
+    if alternate {
         ensure_general_alternate_form(&mut rendered, precision);
     } else {
         trim_general_trailing_zeroes(&mut rendered);
     }
-
     rendered
 }
 
-fn decimal_exponent(value: f64) -> i32 {
-    if value == 0.0 {
-        return 0;
-    }
-    value.abs().log10().floor() as i32
-}
-
-fn normalize_float_exponent(mut rendered: String, uppercase: bool) -> String {
-    let marker = if uppercase { 'E' } else { 'e' };
-    let Some(index) = rendered.find(marker) else {
-        return rendered;
+/// `%a`/`%A`: the 64-bit long-double mantissa as hex nibbles (glibc `%La`
+/// style) — point after the first nibble, trailing-zero nibbles stripped
+/// unless a precision is given, exponent `D = exp + 60` so that
+/// `lead.rest * 2^D` is the value (oracle: `%a` of 5 -> `0xap-1`,
+/// `%.2a` of 4.2 -> `0x8.66p-1`).
+fn format_hex_ld(mant: u64, exp: i32, spec: &FormatSpec, uppercase: bool) -> String {
+    let (prefix, exponent_marker) = if uppercase { ("0X", 'P') } else { ("0x", 'p') };
+    let hex = |nibble: u8| {
+        (if nibble < 10 {
+            b'0' + nibble
+        } else {
+            (if uppercase { b'A' - 10 } else { b'a' - 10 }) + nibble
+        }) as char
     };
-
-    let mantissa = rendered[..index].to_string();
-    let exponent = &rendered[index + 1..];
-    let value = exponent.parse::<i32>().unwrap_or_default();
-    let sign = if value < 0 { '-' } else { '+' };
-    rendered = format!("{mantissa}{marker}{sign}{:02}", value.unsigned_abs());
+    let nibbles = mantissa_nibbles(mant);
+    let mut lead = nibbles[0];
+    let mut frac: Vec<u8> = nibbles[1..].to_vec();
+    // D is guard-bounded: exp in [-16445, ~16321] keeps D in i64 range.
+    // An exact zero prints exponent +0 (glibc %La of 0.0L -> 0x0p+0).
+    let mut d = if mant == 0 { 0 } else { exp as i64 + 60 };
+    match spec.precision {
+        None => {
+            while frac.last() == Some(&0) {
+                frac.pop();
+            }
+        }
+        Some(n) => {
+            if frac.len() > n {
+                let guard = frac[n];
+                let sticky = frac[n + 1..].iter().any(|&x| x != 0);
+                let kept_odd = if n == 0 {
+                    lead % 2 == 1
+                } else {
+                    frac[n - 1] % 2 == 1
+                };
+                let round_up = guard > 8 || (guard == 8 && (sticky || kept_odd));
+                frac.truncate(n);
+                if round_up {
+                    let mut carry = true;
+                    for slot in frac.iter_mut().rev() {
+                        if !carry {
+                            break;
+                        }
+                        if *slot < 0xF {
+                            *slot += 1;
+                            carry = false;
+                        } else {
+                            *slot = 0;
+                        }
+                    }
+                    if carry {
+                        lead += 1;
+                        if lead == 0x10 {
+                            // Carried past the leading nibble:
+                            // renormalize (0x1.0 * 2^(D+4)).
+                            lead = 1;
+                            frac = vec![0; n];
+                            d += 4;
+                        }
+                    }
+                }
+            } else {
+                while frac.len() < n {
+                    frac.push(0);
+                }
+            }
+        }
+    }
+    let mut rendered = format!("{prefix}{}", hex(lead));
+    if !frac.is_empty() || spec.alternate_form || spec.precision.unwrap_or(0) > 0 {
+        rendered.push('.');
+        rendered.extend(frac.iter().map(|&nibble| hex(nibble)));
+    }
+    rendered.push(exponent_marker);
+    if d >= 0 {
+        rendered.push('+');
+    }
+    rendered.push_str(&d.to_string());
     rendered
 }
 

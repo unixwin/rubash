@@ -385,10 +385,10 @@ mod numeric_validation_704 {
         // chk_converror suffix. The pre-fix engine dropped the value to 0.
         let (status, stdout, stderr, _) = run(&["%f|%e|%g|%a", "5 ", "5 ", "5 ", "5 "]);
         assert_eq!(status, EXECUTION_FAILURE);
-        // The %a rendering keeps the engine's own mantissa style (a separate
-        // pre-existing divergence from glibc's "0xap-1"); what this facet
-        // owns is that the VALUE survives: it must not collapse to 0x0p+0.
-        assert_eq!(stdout, "5.000000|5.000000e+00|5|0x1.4p+2");
+        // What this facet owns is that the VALUE survives: it must not
+        // collapse to 0x0p+0. The nibble-style `%a` (`0xap-1`) is the
+        // glibc %La form owned by issue #879.
+        assert_eq!(stdout, "5.000000|5.000000e+00|5|0xap-1");
         assert_eq!(stderr.matches("printf: 5 : invalid number").count(), 4);
 
         let (status, stdout, stderr, _) = run(&["%f", "5.5 "]);

@@ -1,6 +1,6 @@
 use super::escape::{expand_percent_b, shell_quote_form};
 use super::float::format_float;
-use super::number::{invalid_number_error, parse_f64, parse_i64, parse_u64};
+use super::number::{invalid_number_error, parse_i64, parse_long_double, parse_u64};
 use super::FormatSpec;
 
 /// One queued diagnostic: the bare builtin_error body plus whether it is
@@ -84,27 +84,27 @@ pub(super) fn format_value(
             format_unsigned_integer(parsed.value, 8, false, spec)
         }
         'f' | 'F' => {
-            let parsed = parse_f64(value);
+            let parsed = parse_long_double(value);
             invalid_number = parsed.invalid;
             format_float(parsed.value, spec, spec.specifier)
         }
         'e' => {
-            let parsed = parse_f64(value);
+            let parsed = parse_long_double(value);
             invalid_number = parsed.invalid;
             format_float(parsed.value, spec, 'e')
         }
         'E' => {
-            let parsed = parse_f64(value);
+            let parsed = parse_long_double(value);
             invalid_number = parsed.invalid;
             format_float(parsed.value, spec, 'E')
         }
         'g' | 'G' => {
-            let parsed = parse_f64(value);
+            let parsed = parse_long_double(value);
             invalid_number = parsed.invalid;
             format_float(parsed.value, spec, spec.specifier)
         }
         'a' | 'A' => {
-            let parsed = parse_f64(value);
+            let parsed = parse_long_double(value);
             invalid_number = parsed.invalid;
             format_float(parsed.value, spec, spec.specifier)
         }
@@ -208,11 +208,26 @@ fn apply_width_locale(value: String, spec: &FormatSpec, byte_mode: bool) -> Stri
 
     if spec.left_adjust {
         format!("{value}{padding}")
-    } else if spec.zero_pad && matches!(value.chars().next(), Some('+' | '-' | ' ')) {
-        let mut chars = value.chars();
-        let sign = chars.next().unwrap_or_default();
-        let rest: String = chars.collect();
-        format!("{sign}{padding}{rest}")
+    } else if spec.zero_pad {
+        // glibc pads a zero-padded number after its sign and any 0x/0X
+        // prefix: `%015a` of 5 is `0x000000000ap-1`, `%#010x` of 255 is
+        // `0x000000ff` (oracle probes, issue #879). Only the hex-prefix
+        // conversions can carry such a prefix here, so every other
+        // specifier keeps the previous sign-only split byte-for-byte.
+        let (sign, rest) = match value.chars().next() {
+            Some('+' | '-' | ' ') => value.split_at(1),
+            _ => ("", value.as_str()),
+        };
+        let (prefix, digits) = match spec.specifier {
+            'x' | 'X' | 'a' | 'A' => {
+                match rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+                    Some(stripped) => (&rest[..2], stripped),
+                    None => ("", rest),
+                }
+            }
+            _ => ("", rest),
+        };
+        format!("{sign}{prefix}{padding}{digits}")
     } else {
         format!("{padding}{value}")
     }
