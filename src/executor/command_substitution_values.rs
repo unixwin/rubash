@@ -711,6 +711,30 @@ impl Executor {
         {
             return None;
         }
+        // #800A: the same inline stand-in the simple-command path uses
+        // (external_file_builtins::external_tput). The harvest assets pay
+        // ~32 `$(tput …)` calls per source, and without this arm each one
+        // spawned the real child (~17ms host, ~300ms on the harvest
+        // runner). Admission is the byte-exact whitelist; a non-admitted
+        // shape (option forms, unlisted TERM, unknown caps) falls through
+        // to the external spawner below, unchanged. Like the tty arm this
+        // &self path records no hash-table entry (`$(tty)` has the same
+        // introspection face).
+        #[cfg(windows)]
+        if matches!(first_word, "tput" | "/bin/tput" | "/usr/bin/tput") {
+            if let Some(outcome) = self.admitted_tput_outcome_for_words(&stdio.expanded_words) {
+                let (output, status) = match outcome {
+                    crate::executor::tput_emulation::TputOutcome::Bytes(bytes) => {
+                        (bytes.into_owned(), 0)
+                    }
+                    // ncurses: an absent capability prints nothing, exits 1
+                    // (verified `TERM=vt100 tput setaf 1`).
+                    crate::executor::tput_emulation::TputOutcome::Absent => (String::new(), 1),
+                };
+                self.last_command_substitution_status.set(Some(status));
+                return Some(output);
+            }
+        }
         let Some(program) = find_user_command(&stdio.expanded_words[0], &self.shell_state.env_vars)
         else {
             if stdio.expanded_words.first().map(String::as_str) == Some("mktemp") {

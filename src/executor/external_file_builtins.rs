@@ -85,7 +85,178 @@ impl Executor {
             "sed" => self.external_sed(cmd),
             "mkfifo" => self.external_mkfifo(cmd),
             "tty" | "/bin/tty" | "/usr/bin/tty" => self.external_tty(cmd),
+            // #800A: the tput arm is Windows-only (unix keeps the real
+            // ncurses binary, which reads the authoritative system terminfo).
+            // It ADMITS only (TERM, invocation) pairs verified byte-for-byte
+            // against the GNU oracle and falls through to the real PATH
+            // binary for everything else, so non-admitted behavior is
+            // unchanged (src/executor/tput_emulation.rs header).
+            #[cfg(windows)]
+            "tput" | "/bin/tput" | "/usr/bin/tput" => self.external_tput(cmd),
             _ => Ok(false),
+        }
+    }
+
+    /// #800A (eco-harvest SLOW list): the harvest runner paid ~300ms per
+    /// `$(tput …)` spawn — kiddae/dotfiles hermine `.bashrc` sources in 9.7s
+    /// across ~32 calls. Rubash's spawn floor is at parity (~0.5ms/spawn,
+    /// benchmarks/29); the delta lives inside the tput child, so the arm
+    /// answers admitted shapes in-process and falls through to the real
+    /// binary otherwise. Admission = `resolve_admitted_tput`'s whitelist;
+    /// the CHILD-VISIBLE TERM is what decides, i.e. a tempenv `TERM=x
+    /// tput …` override (apply_external_environment order: last assignment
+    /// wins) over the exported shell-state value — a TERM the spawned
+    /// child could not see (unexported shell variable) must not be
+    /// answered here either.
+    #[cfg(windows)]
+    fn external_tput(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
+        let Some(outcome) = self.admitted_tput_outcome(cmd) else {
+            return Ok(false);
+        };
+        self.record_tput_resolution(cmd);
+        match outcome {
+            crate::executor::tput_emulation::TputOutcome::Bytes(bytes) => {
+                self.write_cat_output(cmd, bytes.as_bytes())?;
+                self.exit_code = 0;
+            }
+            // ncurses: an absent capability prints nothing, exits 1
+            // (verified `TERM=vt100 tput setaf 1`, `TERM=linux tput smcup`).
+            crate::executor::tput_emulation::TputOutcome::Absent => {
+                self.exit_code = 1;
+            }
+        }
+        Ok(true)
+    }
+
+    /// The TERM value the spawned child would actually see: a tempenv
+    /// `TERM=… tput …` override (expanded exactly like
+    /// apply_external_environment expands it — last assignment wins,
+    /// append-assignments skip like the child-env pass skips them) over
+    /// the EXPORTED shell-state value. `None` = no child-visible TERM or
+    /// an empty one: GNU errors (rc 2) and the real binary keeps that
+    /// face, so the arm stands down.
+    #[cfg(windows)]
+    fn child_visible_term(&mut self, cmd: &CommandNode) -> Option<String> {
+        let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
+        let mut override_term: Option<String> = None;
+        let mut saw_append = false;
+        for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
+            let (base_name, append) = assignment_name_and_append(var_name);
+            if base_name != "TERM" {
+                continue;
+            }
+            let raw = raws_aligned
+                .then(|| cmd.assignment_raws.get(index))
+                .flatten()
+                .map(String::as_str);
+            let expanded_value = self.expand_assignment_value_with_raw(var_name, var_value, raw);
+            let expanded_value = match expanded_value
+                .strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
+            {
+                Some(rest) => rest.to_string(),
+                None => expanded_value,
+            };
+            // A nameref redirecting TERM elsewhere binds the target, not
+            // TERM (variables.c assign_in_env) — treat as no TERM visible.
+            let Some(env_name) = self.tempenv_export_name(base_name) else {
+                continue;
+            };
+            if env_name != "TERM" {
+                continue;
+            }
+            if append {
+                saw_append = true;
+                continue;
+            }
+            if is_valid_process_env(&env_name, &expanded_value) {
+                override_term = Some(expanded_value);
+            }
+        }
+        if saw_append {
+            // `TERM+=x` semantics differ from a plain spawn's inheritance;
+            // leave the whole question to the real binary.
+            return None;
+        }
+        if let Some(term) = override_term {
+            return (!term.is_empty()).then_some(term);
+        }
+        // Exported shell state only: apply_child_environment crosses the
+        // process boundary for EXPORTED_VARS (readonly_functions.rs), so
+        // an unexported `TERM=xterm` never reaches a spawned tput.
+        let term = self.shell_state.env_vars.get("TERM")?;
+        crate::executor::parse_helpers::is_marked_var(
+            &self.shell_state.env_vars,
+            crate::executor::types::EXPORTED_VARS,
+            "TERM",
+        )
+        .then(|| term.clone())
+        .filter(|value| !value.is_empty())
+    }
+
+    /// Admission for one invocation shape, shared by the simple-command arm
+    /// (`external_tput`) and the pipeline-stage inline arm: `Some(outcome)`
+    /// answers in-process, `None` falls through to the real PATH binary.
+    #[cfg(windows)]
+    pub(in crate::executor) fn admitted_tput_outcome(
+        &mut self,
+        command: &CommandNode,
+    ) -> Option<crate::executor::tput_emulation::TputOutcome> {
+        let term = self.child_visible_term(command)?;
+        crate::executor::tput_emulation::resolve_admitted_tput(&term, &command.words[1..])
+    }
+
+    /// The `&self` variant for the command-substitution external fast path
+    /// (`run_external_command_substitution`): that route carries no tempenv
+    /// assignments, so the child-visible TERM is the EXPORTED shell-state
+    /// value alone — the same value `apply_child_environment` would hand
+    /// the spawned child below.
+    #[cfg(windows)]
+    pub(in crate::executor) fn admitted_tput_outcome_for_words(
+        &self,
+        words: &[String],
+    ) -> Option<crate::executor::tput_emulation::TputOutcome> {
+        let term = self.shell_state.env_vars.get("TERM")?;
+        let exported = crate::executor::parse_helpers::is_marked_var(
+            &self.shell_state.env_vars,
+            crate::executor::types::EXPORTED_VARS,
+            "TERM",
+        ) && !term.is_empty();
+        if !exported {
+            return None;
+        }
+        crate::executor::tput_emulation::resolve_admitted_tput(term, &words[1..])
+    }
+
+    /// Hash-table parity with the emulated family: an admitted invocation
+    /// stands in for the PATH binary, so the same record_command_resolution
+    /// the `emulated` list applies must run for it (builtins9.sub
+    /// introspection via `hash -l`/BASH_CMDS). The fall-through records
+    /// nothing — the real spawn path does it.
+    #[cfg(windows)]
+    pub(in crate::executor) fn record_tput_resolution(&mut self, command: &CommandNode) {
+        if command.words[0].contains('/')
+            || command.words[0].contains('\\')
+            || !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "hashall")
+            || self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_TEMP_PATH")
+                .map(String::as_str)
+                == Some("1")
+        {
+            return;
+        }
+        if let Some(program) =
+            crate::executor::path::find_user_command("tput", &self.shell_state.env_vars)
+        {
+            let display = super::execution_misc::shell_display_path(
+                &program.to_string_lossy().replace('\\', "/"),
+            );
+            crate::builtins::hash::record_command_resolution(
+                &mut self.shell_state.env_vars,
+                "tput",
+                &display,
+            );
         }
     }
 

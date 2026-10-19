@@ -112,6 +112,8 @@ mod mapfile_helpers;
 pub(crate) mod markers;
 mod option_builtins;
 mod parameter_core;
+// Windows-only stand-in (see the module header): unix builds never see it,
+// so no cross-target dead-code surface.
 mod parameter_errors;
 mod parameter_patterns;
 mod parameter_transforms;
@@ -128,6 +130,8 @@ mod readonly_functions;
 mod shell_options;
 #[cfg(windows)]
 mod sudo_builtin;
+#[cfg(windows)]
+mod tput_emulation;
 
 pub(crate) use shell_options::{write_stderr_bytes, write_stdout_bytes, GlobalStdout};
 

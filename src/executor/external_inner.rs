@@ -705,7 +705,7 @@ impl Executor {
     /// (`ref -> a[1]`) has no env representation, so nothing is exported.
     /// Unresolvable namerefs keep the literal name (nameref11.sub `r=/ f`
     /// exports `r` as a plain variable).
-    fn tempenv_export_name(&self, base_name: &str) -> Option<String> {
+    pub(in crate::executor) fn tempenv_export_name(&self, base_name: &str) -> Option<String> {
         match self.nameref_resolution(base_name) {
             NamerefResolution::Target(target) => {
                 if target.contains('[') {

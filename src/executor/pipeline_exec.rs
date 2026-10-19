@@ -1241,6 +1241,10 @@ impl Executor {
                 command.time_command.is_some()
                     || command.brace_group.is_some()
                     || command.subshell
+                    // #800A: a tput head answers inline on the sequential
+                    // path (the byte-exact whitelist stage arm); see
+                    // concurrent_external_stage_spec's matching clause.
+                    || (cfg!(windows) && tput_inline_stage(command))
                     || command_has_non_concurrent_pipeline_redirects(command, index, commands.len())
                     || command.redirect_in.is_some()
                     || command.redirect_err.is_some()
@@ -1739,6 +1743,14 @@ impl Executor {
         if command.time_command.is_some()
             || command.brace_group.is_some()
             || command.subshell
+            // #800A: a tput head answers inline on the sequential path (the
+            // byte-exact whitelist stage arm below); the concurrent paths
+            // spawn members directly and would bypass it. tput is a
+            // millisecond terminal query — never a long-running producer —
+            // so declining concurrency for it costs nothing, and a
+            // non-admitted shape still spawns the real binary on the
+            // sequential path exactly as this one would.
+            || (cfg!(windows) && tput_inline_stage(command))
             || command_has_non_concurrent_pipeline_redirects(
                 command,
                 index,
@@ -3655,6 +3667,37 @@ impl Executor {
                     self.execute_external_pipeline_stage(command, input, stdin_inherit)
                 }
             }
+            // #800A: the same inline stand-in the simple-command path uses
+            // (external_file_builtins::external_tput). The harvest assets'
+            // `$(tput …)` bodies are single-command pipelines, so without
+            // this arm the stage spawner paid the full child spawn per call
+            // (~17ms host, ~300ms on the harvest runner). Admission stays
+            // the byte-exact whitelist; anything else falls through to the
+            // real binary exactly as before.
+            #[cfg(windows)]
+            "tput" => {
+                // Stage argv is pre-expansion here (the arms expand their
+                // own arguments), so resolve against the expanded operands
+                // — a non-admitted expansion falls through below.
+                let args = self.expand_pipeline_stage_arg_words(command, 1);
+                let mut probe = command.clone();
+                probe.words = vec![command.words[0].clone()];
+                probe.words.extend(args);
+                if let Some(outcome) = self.admitted_tput_outcome(&probe) {
+                    self.record_tput_resolution(&probe);
+                    let (output, status) = match outcome {
+                        crate::executor::tput_emulation::TputOutcome::Bytes(bytes) => {
+                            (bytes.into_owned(), 0)
+                        }
+                        // ncurses: an absent capability prints nothing,
+                        // exits 1 (verified `TERM=vt100 tput setaf 1`).
+                        crate::executor::tput_emulation::TputOutcome::Absent => (String::new(), 1),
+                    };
+                    Ok(Some((output, String::new(), status)))
+                } else {
+                    self.execute_external_pipeline_stage(command, input, stdin_inherit)
+                }
+            }
             _ => {
                 if let Some(output) = self.execute_function_pipeline_stage(command, input)? {
                     Ok(Some(output))
@@ -4387,4 +4430,18 @@ struct InlineGrepSpec {
     quiet: bool,
     line_numbers: bool,
     ignore_case: bool,
+}
+
+/// #800A: the raw head word of a pipeline stage that should answer through
+/// the inline tput arm instead of the direct-spawn concurrent paths. Raw
+/// word on purpose: a quoted or function-shadowed shape reaches the
+/// sequential dispatcher anyway, where function shadowing wins before the
+/// arm (GNU execute_cmd.c classify order), so over-matching here only
+/// costs concurrency, never correctness.
+#[cfg(windows)]
+fn tput_inline_stage(command: &CommandNode) -> bool {
+    matches!(
+        command.words.first().map(String::as_str),
+        Some("tput") | Some("/bin/tput") | Some("/usr/bin/tput")
+    )
 }
