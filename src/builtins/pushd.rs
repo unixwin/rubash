@@ -179,11 +179,12 @@ where
                         return Ok(EXECUTION_FAILURE);
                     }
                 }
-                PushdOperand::Noop => {
-                    // GNU pushd.def:288 `if (list == 0) return
+                PushdOperand::NoOp => {
+                    // GNU pushd.def:288-291 `if (list == 0) return
                     // (EXECUTION_SUCCESS)`: consumed options with no operand
                     // left (`pushd -n`, `pushd -n --`) are a silent success —
                     // the stack is untouched and nothing prints.
+                    // rubash#859, #896.
                     return Ok(EXECUTION_SUCCESS);
                 }
                 PushdOperand::TooManyArgs => {

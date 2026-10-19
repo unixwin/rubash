@@ -4,10 +4,13 @@ use std::io::{self, Write};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PushdOperand {
     Swap,
-    /// GNU pushd.def:288 `if (list == 0) return (EXECUTION_SUCCESS)`:
-    /// option words with no operand left (`pushd -n`, `pushd -n --`) are a
-    /// silent no-op, never the no-argument swap (issue #896).
-    Noop,
+    /// Option words with nothing left (`pushd -n`, `pushd -n --`) are a
+    /// silent no-op: GNU's option walk consumes the flags and leaves
+    /// `list == 0`, reaching pushd.def:288-291 `return
+    /// EXECUTION_SUCCESS` — never the bare-`pushd` swap arm (:195-213,
+    /// which errors "no other directory" when the stack is short).
+    /// rubash#859, #896.
+    NoOp,
     Index {
         index: usize,
         from_right: bool,
@@ -69,6 +72,9 @@ where
         }
     }
     if args.is_empty() {
+        // Bare `pushd` (no words at all; a leading `--` returned above) is
+        // the no-argument swap. Consumed-options no-ops (`pushd -n`,
+        // `pushd -n --`) are judged after the walk via `rest.is_empty()`.
         return Ok(Some(PushdOperand::Swap));
     }
 
@@ -96,7 +102,7 @@ where
     let rest = &args[index..];
     if rest.is_empty() {
         // pushd.def:288: options with nothing left are a silent success.
-        return Ok(Some(PushdOperand::Noop));
+        return Ok(Some(PushdOperand::NoOp));
     }
     let arg = rest[0];
     // A ±N word rotates only straight out of the option walk: past `--`

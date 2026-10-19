@@ -508,3 +508,22 @@ fn popd_range_error_on_empty_stack_says_empty() {
     assert!(!stderr.contains("index out of range"), "stderr: {stderr:?}");
     assert_eq!(lines(&stdout).first().copied(), Some("rc=1"));
 }
+
+// ---------------------------------------------------------------- #859 ----
+
+/// `pushd -n` with no operand is a silent no-op rc 0 in GNU
+/// (pushd.def:290-291 — the option walk consumes `-n`, leaves `list == 0`,
+/// and returns EXECUTION_SUCCESS). It must NOT fall into the bare-`pushd`
+/// swap arm, which errors "no other directory" when the stack is short.
+/// rubash#859.
+#[test]
+fn pushd_no_cd_with_no_operand_is_a_silent_noop() {
+    let sandbox = Sandbox::new("pd-n-noop");
+    let (stdout, stderr, code) = sandbox.run("pushd -n\necho rc=$?\n");
+    assert_eq!(code, Some(0), "script rc; stderr: {stderr:?}");
+    assert_eq!(lines(&stdout).first().copied(), Some("rc=0"));
+    assert!(
+        !stderr.contains("no other directory"),
+        "no swap diagnostic on -n no-op: {stderr:?}"
+    );
+}
