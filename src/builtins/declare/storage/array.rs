@@ -305,7 +305,12 @@ pub(in crate::builtins) fn fold_indexed_storage_dupes(value: &str, rendered: &st
             .unwrap_or(&folded)
             .to_string();
     }
-    rendered.to_string()
+    // rubash#840 divergence 1: the stored mirror may still carry `E400 + c`
+    // literal-char pairs for typed registry-zone data (`a=($'\uE314')`).
+    // The display string is user-visible text, so the pair resolves to the
+    // char itself here — a cell-side decode would violate the
+    // transport-text parity the typed-read debug_assert checks.
+    crate::executor::markers::decode_bare_sentinels(rendered, &[])
 }
 
 fn array_assignment_index(left: &str, entries: &BTreeMap<usize, String>) -> ArrayAssignmentIndex {

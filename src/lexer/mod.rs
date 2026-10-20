@@ -59,8 +59,8 @@ use crate::executor::markers::DATA_DOLLAR;
 pub(crate) use ansi::decode_ansi_c_quoted;
 pub(crate) use quotes::remove_shell_quotes;
 pub(crate) use quotes::{
-    escape_decoded_ansi_c_quotes, ANSI_C_DQUOTE_MARKER, ANSI_C_DQUOTE_MARKER_STR,
-    ANSI_C_QUOTE_MARKER, ANSI_C_QUOTE_MARKER_STR, PARAM_NAME_END_MARKER,
+    escape_decoded_ansi_c_quotes, ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER,
+    ANSI_C_QUOTE_MARKER_STR, PARAM_NAME_END_MARKER,
 };
 pub use token::{Token, TokenKind};
 pub(crate) use word::{raw_has_ansi_u_escape, word_value_from_raw};

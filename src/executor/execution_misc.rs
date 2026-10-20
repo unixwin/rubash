@@ -817,9 +817,19 @@ pub(in crate::executor) fn eval_source_for_reparse(source: &str) -> String {
         // here; otherwise eval re-parses the marker as literal data.
         // niubash #124: `eval 'd='\''x'\''; mkdir -p "$d"'` handed the quotes
         // to the child (`mkdir: cannot create directory '"/x"'`).
-        .replace(crate::executor::markers::DATA_DQUOTE, "\"")
-        .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
-        .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
+        .replace(crate::executor::markers::DATA_DQUOTE, "\"");
+    // The ANSI-C markers are registry-zone sentinels — a typed
+    // `$'\uE010'`/`$'\uE011'` arrives as the escaped member of an E400
+    // pair and is user data, so only BARE carriers restore; the pair
+    // rides through verbatim (keep-pair: the re-parse source is still
+    // transport text, rubash#840).
+    let source = crate::executor::markers::restore_bare_sentinels(
+        &source,
+        &[
+            (crate::executor::markers::ANSI_C_QUOTE_MARKER, "'"),
+            (crate::executor::markers::ANSI_C_DQUOTE_MARKER, "\""),
+        ],
+    );
     protect_unmatched_double_quoted_backticks(&source)
 }
 
@@ -989,10 +999,13 @@ pub(in crate::executor) fn command_substitution_word_split(value: &str) -> Strin
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-const COMMAND_SUBSTITUTION_PAYLOAD_PREFIX: &str = crate::executor::markers::COMSUB_PAYLOAD_PREFIX;
+const COMSUB_PAYLOAD_SENTINEL: char = crate::executor::markers::COMSUB_PAYLOAD_SENTINEL;
 
 pub(in crate::executor) fn contains_command_substitution_payload(value: &str) -> bool {
-    value.contains(COMMAND_SUBSTITUTION_PAYLOAD_PREFIX)
+    // E400-aware: a user U+E319 char rides transport as the E400 pair and
+    // is not a payload (rubash#840 — the admission question is "is the
+    // protocol already present", which only a bare sentinel answers).
+    crate::executor::markers::contains_bare_sentinel(value, COMSUB_PAYLOAD_SENTINEL)
 }
 
 pub(in crate::executor) fn command_substitution_value_needs_payload_protection(
@@ -1001,23 +1014,26 @@ pub(in crate::executor) fn command_substitution_value_needs_payload_protection(
 ) -> bool {
     source.contains('$')
         && !source.contains('`')
-        && !value.contains(COMMAND_SUBSTITUTION_PAYLOAD_PREFIX)
+        && !contains_command_substitution_payload(value)
         && value.chars().any(|ch| {
             (crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER..=DATA_DOLLAR).contains(&ch)
         })
 }
 
 pub(in crate::executor) fn protect_command_substitution_output(value: &str) -> String {
-    let escaped_value = value.replace(
-        COMMAND_SUBSTITUTION_PAYLOAD_PREFIX,
-        &format!("{COMMAND_SUBSTITUTION_PAYLOAD_PREFIX}{COMMAND_SUBSTITUTION_PAYLOAD_PREFIX}"),
-    );
-    let mut output = String::with_capacity(escaped_value.len());
-    for ch in escaped_value.chars() {
+    // `U+E319` + two hex chars + `;` carries one byte. No introducer
+    // escaping is needed: the sentinel is a registry-zone PUA char, so the
+    // only way it reaches `value` at all is a bare (already-protocol)
+    // occurrence or the escaped member of an E400 literal-char pair —
+    // both ride through verbatim (user zone chars are E400-escaped at
+    // entry, rubash#840).
+    let mut output = String::with_capacity(value.len());
+    for ch in value.chars() {
         match ch {
-            crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER..=DATA_DOLLAR => output.push_str(
-                &format!("{COMMAND_SUBSTITUTION_PAYLOAD_PREFIX}{:02x};", ch as u32),
-            ),
+            crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER..=DATA_DOLLAR => {
+                output.push(COMSUB_PAYLOAD_SENTINEL);
+                output.push_str(&format!("{:02x};", ch as u32));
+            }
             '`' => output.push(crate::executor::markers::DATA_BACKTICK),
             '$' => output.push(DATA_DOLLAR),
             '\\' => output.push(crate::executor::markers::PROTECTED_BACKSLASH),
@@ -1117,37 +1133,61 @@ pub(in crate::executor) fn substitution_result_visible_text(value: &str) -> Stri
 }
 
 pub(in crate::executor) fn decode_command_substitution_payload(value: &str) -> String {
-    let mut output = String::new();
-    let mut rest = value;
-    while let Some(index) = rest.find(COMMAND_SUBSTITUTION_PAYLOAD_PREFIX) {
-        output.push_str(&rest[..index]);
-        rest = &rest[index + COMMAND_SUBSTITUTION_PAYLOAD_PREFIX.len()..];
-        if let Some(escaped) = rest.strip_prefix(COMMAND_SUBSTITUTION_PAYLOAD_PREFIX) {
-            output.push_str(COMMAND_SUBSTITUTION_PAYLOAD_PREFIX);
-            rest = escaped;
-        } else if rest.len() >= 3 && rest.as_bytes()[2] == b';' {
-            if let Ok(byte) = u8::from_str_radix(&rest[..2], 16) {
-                output.push(char::from(byte));
-                rest = &rest[3..];
-            } else {
-                output.push_str(COMMAND_SUBSTITUTION_PAYLOAD_PREFIX);
+    if !value.contains(COMSUB_PAYLOAD_SENTINEL) {
+        return value.to_string();
+    }
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        // E400 + c is the literal-char escape: the pair is user data
+        // riding transport and the escaped member must never satisfy the
+        // payload grammar below — a typed `$'\uE319'` is U+E319 data, not
+        // an introducer (rubash#840; same contract as
+        // markers::restore_bare_sentinels).
+        if ch == crate::executor::markers::LITERAL_CHAR_ESCAPE {
+            output.push(ch);
+            if let Some(next) = chars.next() {
+                output.push(next);
             }
-        } else {
-            output.push_str(COMMAND_SUBSTITUTION_PAYLOAD_PREFIX);
+            continue;
+        }
+        if ch != COMSUB_PAYLOAD_SENTINEL {
+            output.push(ch);
+            continue;
+        }
+        // `U+E319` <hex><hex> `;` decodes to the carried byte. A sentinel
+        // without the full tail is malformed protocol — emit it verbatim.
+        let mut probe = chars.clone();
+        let byte = match (probe.next(), probe.next(), probe.next()) {
+            (Some(high), Some(low), Some(';'))
+                if high.is_ascii_hexdigit() && low.is_ascii_hexdigit() =>
+            {
+                u8::from_str_radix(&format!("{high}{low}"), 16).ok()
+            }
+            _ => None,
+        };
+        match byte {
+            Some(byte) => {
+                output.push(char::from(byte));
+                chars.next();
+                chars.next();
+                chars.next();
+            }
+            None => output.push(ch),
         }
     }
-    output.push_str(rest);
     output
 }
 
 #[cfg(test)]
 mod command_substitution_payload_tests {
     use super::decode_command_substitution_payload;
+    use crate::executor::markers::{COMSUB_PAYLOAD_SENTINEL, LITERAL_CHAR_ESCAPE};
 
     #[test]
     fn decodes_c0_payload_without_utf8_loss() {
         assert_eq!(
-            decode_command_substitution_payload("a__RUBASH_CSB1_15;b"),
+            decode_command_substitution_payload(&format!("a{}15;b", COMSUB_PAYLOAD_SENTINEL)),
             format!(
                 "{}{}{}",
                 "a",
@@ -1157,19 +1197,28 @@ mod command_substitution_payload_tests {
         );
     }
 
+    /// rubash#840 divergence 2: the former ASCII prefix was typeable text;
+    /// a user-literal `__RUBASH_CSB1_<hex>;` is now pure data and passes
+    /// the decode boundary verbatim where GNU prints it literally.
     #[test]
-    fn preserves_escaped_payload_prefix() {
+    fn typed_ascii_lookalike_passes_through_verbatim() {
         assert_eq!(
-            decode_command_substitution_payload("__RUBASH_CSB1___RUBASH_CSB1_"),
-            "__RUBASH_CSB1_"
+            decode_command_substitution_payload("a__RUBASH_CSB1_15;b"),
+            "a__RUBASH_CSB1_15;b"
         );
+    }
+
+    /// A user U+E319 char reaches the boundary as the E400 literal-char
+    /// pair — the pair is data and survives verbatim (rubash#840).
+    #[test]
+    fn escaped_sentinel_char_is_user_data() {
+        let input = format!("{LITERAL_CHAR_ESCAPE}{COMSUB_PAYLOAD_SENTINEL}41;");
+        assert_eq!(decode_command_substitution_payload(&input), input);
     }
 
     #[test]
     fn leaves_malformed_payload_literal() {
-        assert_eq!(
-            decode_command_substitution_payload("x__RUBASH_CSB1_no_semicolon"),
-            "x__RUBASH_CSB1_no_semicolon"
-        );
+        let input = format!("x{COMSUB_PAYLOAD_SENTINEL}no_semicolon");
+        assert_eq!(decode_command_substitution_payload(&input), input);
     }
 }

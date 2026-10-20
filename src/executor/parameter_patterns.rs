@@ -16,14 +16,21 @@ use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 /// silently does nothing -- the quote1.sub failure where `'weferfds'\''dsfsdf'`
 /// came out as `'weferfds'dsfsdf'`.
 fn dequote_storage_marks(value: &str) -> String {
-    value
-        .replace(DATA_DOLLAR, "$")
-        .replace(crate::executor::markers::DATA_BACKTICK, "`")
-        .replace(crate::executor::markers::DATA_SQUOTE, "'")
-        .replace(crate::executor::markers::DATA_DQUOTE, "\"")
-        .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
-        .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
-        .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
+    // The ANSI-C markers are registry-zone sentinels: a typed
+    // `$'\uE010'`/`$'\uE011'` arrives as the escaped member of an E400
+    // pair and is user data — only BARE carriers restore (rubash#840).
+    crate::executor::markers::restore_bare_sentinels(
+        &value
+            .replace(DATA_DOLLAR, "$")
+            .replace(crate::executor::markers::DATA_BACKTICK, "`")
+            .replace(crate::executor::markers::DATA_SQUOTE, "'")
+            .replace(crate::executor::markers::DATA_DQUOTE, "\"")
+            .replace(crate::executor::markers::DATA_BACKSLASH, "\\"),
+        &[
+            (crate::executor::markers::ANSI_C_QUOTE_MARKER, "'"),
+            (crate::executor::markers::ANSI_C_DQUOTE_MARKER, "\""),
+        ],
+    )
 }
 
 impl Executor {

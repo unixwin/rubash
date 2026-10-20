@@ -859,13 +859,20 @@ fn expand_compound_array_value(
 
     // Restore marker characters (array.tests:408 declare -a x=(\$0)
     // stores \x1f0 literally without this restore).
-    result
-        .replace(DATA_DOLLAR, "$")
-        .replace(crate::executor::markers::DATA_BACKTICK, "`")
-        .replace(crate::executor::markers::DATA_SQUOTE, "'")
-        .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
-        .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
-        .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
+    crate::executor::markers::restore_bare_sentinels(
+        &result
+            .replace(DATA_DOLLAR, "$")
+            .replace(crate::executor::markers::DATA_BACKTICK, "`")
+            .replace(crate::executor::markers::DATA_SQUOTE, "'")
+            .replace(crate::executor::markers::DATA_BACKSLASH, "\\"),
+        // Registry-zone sentinels: a typed `$'\uE010'`/`$'\uE011'`
+        // arrives E400-escaped and is user data — only BARE carriers
+        // restore (rubash#840).
+        &[
+            (crate::executor::markers::ANSI_C_QUOTE_MARKER, "'"),
+            (crate::executor::markers::ANSI_C_DQUOTE_MARKER, "\""),
+        ],
+    )
 }
 
 /// Expand `${var[@]}` or `${var[*]}` using the variables HashMap.

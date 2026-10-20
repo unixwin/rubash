@@ -74,7 +74,10 @@ pub(in crate::executor) fn append_assoc_value(
         .first()
         .map(|token| {
             token.starts_with('[')
-                && !token.contains(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG)
+                && !crate::executor::markers::contains_bare_sentinel(
+                    token,
+                    crate::executor::markers::COMPOUND_EXPANSION_WS_TAG,
+                )
         })
         .unwrap_or(false);
 
@@ -180,7 +183,10 @@ pub(in crate::executor) fn assoc_bare_elements(value: &str) -> Vec<String> {
         .first()
         .map(|token| {
             token.starts_with('[')
-                && !token.contains(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG)
+                && !crate::executor::markers::contains_bare_sentinel(
+                    token,
+                    crate::executor::markers::COMPOUND_EXPANSION_WS_TAG,
+                )
         })
         .unwrap_or(false);
     if !strict_mode {
@@ -208,7 +214,10 @@ pub(crate) fn assoc_empty_key_words(value: &str) -> Vec<String> {
         .first()
         .map(|token| {
             token.starts_with('[')
-                && !token.contains(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG)
+                && !crate::executor::markers::contains_bare_sentinel(
+                    token,
+                    crate::executor::markers::COMPOUND_EXPANSION_WS_TAG,
+                )
         })
         .unwrap_or(false);
     if strict_mode {
@@ -739,6 +748,16 @@ pub(in crate::executor) fn split_indexed_tagged_token(
         chars.next();
     }
     while let Some(ch) = chars.next() {
+        // E400 + c is the literal-char escape — user data riding
+        // transport; the escaped member never satisfies the E309/IFS_GLUE
+        // arms below (rubash#840).
+        if ch == crate::executor::markers::LITERAL_CHAR_ESCAPE {
+            current.push(ch);
+            if let Some(next) = chars.next() {
+                current.push(next);
+            }
+            continue;
+        }
         if ch == crate::executor::COMPOUND_EXPANSION_WS_TAG
             && chars.peek().is_some_and(|next| is_boundary(*next))
         {
@@ -960,6 +979,16 @@ impl Iterator for StorageWordIter<'_> {
             if escaped {
                 word.push(ch);
                 escaped = false;
+                continue;
+            }
+            // E400 + c is the literal-char escape — user data riding
+            // transport; the escaped member never satisfies the E309 /
+            // IFS_GLUE arms below (rubash#840).
+            if ch == crate::executor::markers::LITERAL_CHAR_ESCAPE {
+                word.push(ch);
+                if let Some((_, next)) = chars.next() {
+                    word.push(next);
+                }
                 continue;
             }
             if ch == '\\' && in_double {
@@ -1195,35 +1224,42 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
     }
 
     fn restore_quote_markers(value: &str) -> String {
-        value
-            .replace(DATA_DOLLAR, "$")
-            .replace(crate::executor::markers::DATA_BACKTICK, "`")
-            .replace(crate::executor::markers::DATA_SQUOTE, "'")
-            .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
-            // The \x1c expansion-whitespace tag (embedded_mutations
-            // expansion_ws_marked) marks the whitespace itself as data;
-            // strip the tag and keep the character it protected.
-            .replace(crate::executor::markers::IFS_GLUE, "")
-            .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
-            .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
-            .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
+        // The registry-zone sentinels restore in ONE E400-aware scan: a
+        // typed `$'\uE0xx'`/`$'\uE3xx'` arrives as the escaped member of
+        // an E400 literal-char pair and is user data — only BARE carriers
+        // decode, and the pair rides through (rubash#840). C0 carriers
+        // stay plain replaces — typed C0 bytes never arrive bare (they
+        // ride raw-byte marker pairs).
+        crate::executor::markers::restore_bare_sentinels(
+            &value
+                .replace(DATA_DOLLAR, "$")
+                .replace(crate::executor::markers::DATA_BACKTICK, "`")
+                .replace(crate::executor::markers::DATA_SQUOTE, "'")
+                .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
+                // The \x1c expansion-whitespace tag (embedded_mutations
+                // expansion_ws_marked) marks the whitespace itself as
+                // data; strip the tag and keep the character it protected.
+                .replace(crate::executor::markers::IFS_GLUE, "")
+                // PARAM_NAME_END_MARKER is transport-only (a quote boundary
+                // terminating an unbraced `$name`); a stored value never
+                // keeps it.
+                .replace(crate::executor::markers::PARAM_NAME_END_MARKER, ""),
             // Expansion-result protection carriers (GNU subst.c:11862
-            // add_quoted_string port of the preserve walker): decode after
-            // the quote removal so no earlier pass read their backslash/$/
-            // backtick/quote data as syntax (rubash#295).
-            .replace(
-                crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
-                "\\",
-            )
-            .replace(crate::executor::markers::ASSIGN_SQ_DOLLAR_STR, "$")
-            .replace(crate::executor::markers::ASSIGN_SQ_BACKTICK_STR, "`")
-            .replace(crate::executor::markers::ASSIGN_SQ_BACKSLASH_STR, "\\")
-            .replace(crate::executor::markers::ASSIGN_EXPANSION_DQUOTE_STR, "\"")
-            .replace(crate::executor::markers::ASSIGN_EXPANSION_SQUOTE_STR, "'")
-            // PARAM_NAME_END_MARKER is transport-only (a quote boundary
-            // terminating an unbraced `$name`); a stored value never keeps
-            // it.
-            .replace(crate::executor::markers::PARAM_NAME_END_MARKER, "")
+            // add_quoted_string port of the preserve walker) decode after
+            // the quote removal so no earlier pass read their
+            // backslash/$/backtick/quote data as syntax (rubash#295).
+            &[
+                (crate::executor::markers::COMPOUND_EXPANSION_WS_TAG, ""),
+                (crate::executor::markers::ANSI_C_QUOTE_MARKER, "'"),
+                (crate::executor::markers::ANSI_C_DQUOTE_MARKER, "\""),
+                (crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH, "\\"),
+                (crate::executor::markers::ASSIGN_SQ_DOLLAR, "$"),
+                (crate::executor::markers::ASSIGN_SQ_BACKTICK, "`"),
+                (crate::executor::markers::ASSIGN_SQ_BACKSLASH, "\\"),
+                (crate::executor::markers::ASSIGN_EXPANSION_DQUOTE, "\""),
+                (crate::executor::markers::ASSIGN_EXPANSION_SQUOTE, "'"),
+            ],
+        )
     }
 
     if value == "\\\"\\" {
@@ -1307,20 +1343,24 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
         // from ANSI-C decoding that must survive remove_shell_quotes.
         // The markers are restored to actual quotes at output time.
         // \x1c is the expansion-whitespace tag (expansion_ws_marked): the
-        // whitespace it precedes is data, the tag itself is not.
-        return decoded
-            .replace(crate::executor::markers::IFS_GLUE, "")
-            .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
-            .replace(
-                crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
-                "\\",
-            )
-            .replace(crate::executor::markers::ASSIGN_SQ_DOLLAR_STR, "$")
-            .replace(crate::executor::markers::ASSIGN_SQ_BACKTICK_STR, "`")
-            .replace(crate::executor::markers::ASSIGN_SQ_BACKSLASH_STR, "\\")
-            .replace(crate::executor::markers::ASSIGN_EXPANSION_DQUOTE_STR, "\"")
-            .replace(crate::executor::markers::ASSIGN_EXPANSION_SQUOTE_STR, "'")
-            .replace(crate::executor::markers::PARAM_NAME_END_MARKER, "");
+        // whitespace it precedes is data, the tag itself is not. The
+        // registry-zone sentinels restore in one E400-aware scan so a
+        // typed `$'\uE3xx'` riding an E400 pair survives as user data —
+        // only BARE carriers decode (rubash#840).
+        return crate::executor::markers::restore_bare_sentinels(
+            &decoded
+                .replace(crate::executor::markers::IFS_GLUE, "")
+                .replace(crate::executor::markers::PARAM_NAME_END_MARKER, ""),
+            &[
+                (crate::executor::markers::COMPOUND_EXPANSION_WS_TAG, ""),
+                (crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH, "\\"),
+                (crate::executor::markers::ASSIGN_SQ_DOLLAR, "$"),
+                (crate::executor::markers::ASSIGN_SQ_BACKTICK, "`"),
+                (crate::executor::markers::ASSIGN_SQ_BACKSLASH, "\\"),
+                (crate::executor::markers::ASSIGN_EXPANSION_DQUOTE, "\""),
+                (crate::executor::markers::ASSIGN_EXPANSION_SQUOTE, "'"),
+            ],
+        );
     };
 
     let mut unquoted = String::new();

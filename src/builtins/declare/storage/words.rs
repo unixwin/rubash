@@ -292,10 +292,13 @@ pub(in crate::builtins::declare) fn unquote_storage_value(value: &str) -> String
             }
         }
         // \x1c is the expansion-whitespace tag (expansion_ws_marked): the
-        // whitespace it precedes is data, the tag itself is not.
-        return decoded
-            .replace(crate::executor::markers::IFS_GLUE, "")
-            .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "");
+        // whitespace it precedes is data, the tag itself is not. E309 is
+        // registry-zone — a typed `$'\uE309'` arrives E400-escaped and is
+        // user data; strip only the BARE tag (rubash#840).
+        return crate::executor::markers::restore_bare_sentinels(
+            &decoded.replace(crate::executor::markers::IFS_GLUE, ""),
+            &[(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG, "")],
+        );
     };
 
     let mut unquoted = String::new();
@@ -313,9 +316,12 @@ pub(in crate::builtins::declare) fn unquote_storage_value(value: &str) -> String
     if escaped {
         unquoted.push('\\');
     }
-    unquoted
-        .replace(crate::executor::markers::IFS_GLUE, "")
-        .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
+    // E309 is registry-zone — a typed `$'\uE309'` arrives E400-escaped
+    // and is user data; strip only the BARE tag (rubash#840).
+    crate::executor::markers::restore_bare_sentinels(
+        &unquoted.replace(crate::executor::markers::IFS_GLUE, ""),
+        &[(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG, "")],
+    )
 }
 
 fn unquote_ansi_c_storage(value: &str) -> String {

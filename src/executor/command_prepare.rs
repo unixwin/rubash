@@ -5,12 +5,14 @@ use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 fn materialize_expanded_command_word(word: &str) -> String {
     // rubash#237 perf: when no carrier-family byte is present, every marker
     // replace below (CTLESC, carriers, protected/data backslash, ANSI-C
-    // markers) is an identity copy, and restore_pathname_escape_markers'
-    // \u{1c}-prefix strips cannot match — only the comsub payload decode,
-    // whose `__RUBASH_CSB1_` prefix is plain ASCII, still has work to do.
-    // One scan replaces ten allocations per plain word.
+    // markers) is an identity copy, restore_pathname_escape_markers'
+    // \u{1c}-prefix strips cannot match, and the comsub payload decode
+    // cannot fire either — its U+E319 introducer is a registry-zone PUA
+    // char the marker-byte probe covers (rubash#840 moved it off the
+    // typeable ASCII prefix). One scan replaces ten allocations per plain
+    // word.
     if !crate::executor::markers::contains_word_marker_bytes(word) {
-        return decode_command_substitution_payload(word);
+        return word.to_string();
     }
     // Strip CTLESC (\x11) markers — they protect glob metacharacters during
     // expansion and must not reach argv (find -name "*.txt" received \x11*
@@ -32,11 +34,19 @@ fn materialize_expanded_command_word(word: &str) -> String {
         // ordinary word data. E400-aware: user U+E401 (E400 E401) survives
         // (rubash#735).
         &crate::executor::markers::strip_ansi_c_ifs_guard(
-            &word
-                .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
-                .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
-                .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
-                .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\""),
+            // E400-aware (rubash#840): the ANSI-C markers are registry-zone
+            // sentinels — a typed `$'\uE010'`/`$'\uE011'` arrives as the
+            // escaped member of an E400 pair and is user data, so only
+            // BARE carriers restore here.
+            &crate::executor::markers::restore_bare_sentinels(
+                &word,
+                &[
+                    (crate::executor::markers::PROTECTED_BACKSLASH, "\\"),
+                    (crate::executor::markers::DATA_BACKSLASH, "\\"),
+                    (crate::executor::markers::ANSI_C_QUOTE_MARKER, "'"),
+                    (crate::executor::markers::ANSI_C_DQUOTE_MARKER, "\""),
+                ],
+            ),
         ),
     ))
 }
@@ -1232,8 +1242,7 @@ impl Executor {
                 // the expanded word instead of copying it twice more. Literal
                 // words take this on every loop iteration.
                 let plain_materializes_to_self = !arrayref_marked
-                    && !crate::executor::markers::contains_word_marker_bytes(word_text)
-                    && !word_text.contains(crate::executor::markers::COMSUB_PAYLOAD_PREFIX);
+                    && !crate::executor::markers::contains_word_marker_bytes(word_text);
                 if suppress_glob {
                     if plain_materializes_to_self {
                         words.push(remark(word));
@@ -3750,10 +3759,17 @@ fn field_split_values_with_quoted_nulls(value: &str, ifs: Option<&str>) -> Vec<S
     field_split_values_with_ifs(value, ifs)
         .into_iter()
         .map(|field| {
-            let had_quoted_null =
-                field.contains(crate::executor::embedded_mutations::QUOTED_NULL_MARKER);
-            let stripped =
-                field.replace(crate::executor::embedded_mutations::QUOTED_NULL_MARKER, "");
+            // BARE carriers only: a typed `$'\uE002'` arrives E400-escaped
+            // and is user data — the escaped member neither marks an empty
+            // field nor strips here (rubash#840).
+            let had_quoted_null = crate::executor::markers::contains_bare_sentinel(
+                &field,
+                crate::executor::embedded_mutations::QUOTED_NULL_MARKER,
+            );
+            let stripped = crate::executor::markers::restore_bare_sentinels(
+                &field,
+                &[(crate::executor::embedded_mutations::QUOTED_NULL_MARKER, "")],
+            );
             match stripped.is_empty() {
                 true if had_quoted_null => String::new(),
                 _ => stripped,

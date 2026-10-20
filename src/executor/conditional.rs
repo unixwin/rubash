@@ -251,9 +251,13 @@ impl Executor {
         // operands compare as their real text (rubash#379).
         // E400-aware: user U+E401 data (E400 E401) must survive.
         crate::executor::markers::strip_ansi_c_ifs_guard(
-            &self
-                .expand_word_mut(word)
-                .replace(crate::executor::embedded_mutations::QUOTED_NULL_MARKER, ""),
+            // E002 is registry-zone: a typed `$'\uE002'` arrives
+            // E400-escaped and is user data — strip only the BARE
+            // carrier (rubash#840).
+            &crate::executor::markers::restore_bare_sentinels(
+                &self.expand_word_mut(word),
+                &[(crate::executor::embedded_mutations::QUOTED_NULL_MARKER, "")],
+            ),
         )
     }
 

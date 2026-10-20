@@ -614,9 +614,17 @@ pub(in crate::executor) fn quote_array_value(value: &str) -> String {
     // decode_rendered_array_value still hands readers the real quote
     // (issue #109: `x=($'a"b')` then `declare -p x` printed the E011
     // carrier bytes instead of "a\"b").
-    let value = value
-        .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
-        .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
+    // E400-aware (rubash#840): a typed `$'\uE010'`/`$'\uE011'` arrives
+    // as the escaped member of an E400 pair and is user data — only BARE
+    // carriers restore; the pair stays transport for the read-back
+    // boundary (cell/mirror parity).
+    let value = crate::executor::markers::restore_bare_sentinels(
+        value,
+        &[
+            (crate::executor::markers::ANSI_C_QUOTE_MARKER, "'"),
+            (crate::executor::markers::ANSI_C_DQUOTE_MARKER, "\""),
+        ],
+    );
     // GNU expand_string_assignment (subst.c:4345-4353) ends every expanded
     // assignment RHS word with dequote_list -> dequote_string
     // (subst.c:4807), stripping the CTLESC carrier pairs that the walker
