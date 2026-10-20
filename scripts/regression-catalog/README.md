@@ -153,7 +153,7 @@ a `diverges` row points at live work.
 | #860/#861 | closed/fixed (PR #883) | manifest rows added — the case files shipped unscored |
 | #868/#876 | closed/fixed | manifest rows added — the case files shipped unscored |
 | #871 | closed; residual matches | `issue-871` (must-match): `infin`/`nann`/`infx`/`nanx` print the value and emit `invalid number` + rc 1 — byte-identical to GNU (promoted from diverges per PR #944 review) |
-| #879 | open | `issue-879` (diverges): `%f 1e999`/`%a 1e999` expand as `inf` vs long-double |
+| #879 | open; case faces match | `issue-879` (must-match): `%f 1e999`/`%a 1e999` long-double expansion + glibc `%La` mantissa style — byte-identical to GNU (promoted from diverges per #949) |
 
 Residuals found while building this batch and filed for the record:
 #938 (read empty via `</dev/stdin` / `<&0` in pipeline context) and #940
