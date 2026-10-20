@@ -4271,13 +4271,25 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
                                 *index += 2;
                                 continue;
                             }
-                            Some('\r')
-                                if raw_chars.get(*index + 2).copied() == Some('\n') =>
-                            {
+                            Some('\r') if raw_chars.get(*index + 2).copied() == Some('\n') => {
                                 *index += 3;
                                 continue;
                             }
-                            _ => {
+                            // Any other escaped char travels as a verbatim
+                            // pair (copy_backtick_body_preserving_syntax /
+                            // copy_backtick_body_cursor): consumed together
+                            // so an escaped `` ` `` cannot close the span
+                            // early and an escaped `\\` cannot re-arm as a
+                            // new escape (rubash#880 review: single-stepping
+                            // here let `\`` early-close the backtick and the
+                            // tail then early-closed the `$()`).
+                            Some(escaped) => {
+                                simulated.push(c);
+                                simulated.push(escaped);
+                                *index += 2;
+                                continue;
+                            }
+                            None => {
                                 simulated.push(c);
                                 *index += 1;
                                 continue;
@@ -4605,60 +4617,55 @@ fn mark_quoted_ifs_from_raw(raw: &str, cooked_with_marks: &str, ifs: &str) -> St
             index += 1;
             continue;
         }
-        if ch == '`' && !in_single && !in_double {
-            // Backtick span — copy verbatim (walk outer `` ` `` arm, no
-            // PARAM_NAME_END_MARKER emission).
+        if ch == '`' && !in_single {
+            // Backtick span — the walker routes both the outer `` ` `` arm
+            // and the dquote preserve_backticks arm through
+            // copy_backtick_body_cursor(dq=in_double): `\<newline>` and
+            // `\<CRLF>` elide under either flag, and `\"` folds to a bare
+            // `"` only in the dquote arm (GNU subst.c:921-931
+            // string_extract_double_quoted stripdq; rubash#880). Simulate
+            // the same rewrites so the equality guard below sees the cooked
+            // bytes the walker produced (no PARAM_NAME_END_MARKER emission).
             pending_name = false;
             simulated.push(ch);
             index += 1;
             while index < raw_chars.len() && raw_chars[index] != '`' {
-                if raw_chars[index] == '\\' && index + 1 < raw_chars.len() {
-                    simulated.push(raw_chars[index]);
-                    index += 1;
-                }
-                simulated.push(raw_chars[index]);
-                index += 1;
-            }
-            if index < raw_chars.len() {
-                simulated.push(raw_chars[index]);
-                index += 1;
-            }
-            continue;
-        }
-        if ch == '`' && !in_single && in_double {
-            // Double-quoted backtick span — the dquote walker
-            // (remove_double_quoted_into_cursor preserve_backticks arm)
-            // routes through copy_backtick_body_cursor(dq=true), which
-            // folds `\"` to `"` and elides `\<newline>`. Simulate both
-            // rewrites so the equality guard below sees the same cooked
-            // bytes the walker produced (rubash#880).
-            pending_name = false;
-            simulated.push(ch);
-            index += 1;
-            while index < raw_chars.len() && raw_chars[index] != '`' {
-                if raw_chars[index] == '\\' && index + 1 < raw_chars.len() {
-                    match raw_chars[index + 1] {
-                        '"' => {
-                            // dq fold: \" → " (the dquote arm already
-                            // consumed the escape; the backtick body sees
-                            // a bare quote, matching DATA_DQUOTE's decode).
-                            simulated.push(crate::executor::markers::DATA_DQUOTE);
+                if raw_chars[index] == '\\' {
+                    match raw_chars.get(index + 1).copied() {
+                        // dq fold: \" → " (the dquote scan already consumed
+                        // the escape; the cooked body holds a bare 0x22, not
+                        // a DATA_DQUOTE carrier — the fold produced real
+                        // data, so the simulator must push the same byte).
+                        Some('"') if in_double => {
+                            simulated.push('"');
                             index += 2;
                             continue;
                         }
-                        '\n' => {
-                            // \<newline> elision (copy_backtick_body_cursor
-                            // swallows both bytes).
+                        // \<newline> / \<CRLF> elision
+                        // (copy_backtick_body_cursor swallows the bytes
+                        // under either dq flag).
+                        Some('\n') => {
                             index += 2;
                             continue;
                         }
-                        '\r' if raw_chars.get(index + 2) == Some(&'\n') => {
+                        Some('\r') if raw_chars.get(index + 2) == Some(&'\n') => {
                             index += 3;
                             continue;
                         }
-                        _ => {
+                        // Any other escaped char travels as a verbatim
+                        // pair — consumed together so an escaped `` ` ``
+                        // cannot close the span early.
+                        Some(escaped) => {
+                            simulated.push(raw_chars[index]);
+                            simulated.push(escaped);
+                            index += 2;
+                            continue;
+                        }
+                        // Trailing backslash: pushed verbatim.
+                        None => {
                             simulated.push(raw_chars[index]);
                             index += 1;
+                            continue;
                         }
                     }
                 }

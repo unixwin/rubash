@@ -286,7 +286,18 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                     }
                     Some(&b'"') => {
                         rest = &rest[2..];
-                        rest = remove_double_quoted_into_cursor(&mut out, rest, false, posix);
+                        // `$"..."` cooks by the same rules as `"..."` —
+                        // including preserve_backticks so a backtick body's
+                        // `\"` folds the same way (the locale prefix is
+                        // translation markup only; the dquote scan and
+                        // subst.c:925-932 backquote mode apply identically).
+                        // The `false` left over from d59517c8 routed the
+                        // body through the plain dquote triggers and shipped
+                        // `\"` as DATA_DQUOTE data — `$"a`echo \"x\"`"$w`
+                        // printed `"x"` (PR#898 review, rubash#880 Face 2
+                        // family). The assignment walk's `$"` arm already
+                        // passes `true`.
+                        rest = remove_double_quoted_into_cursor(&mut out, rest, true, posix);
                     }
                     Some(&b'{') => {
                         rest = copy_braced_parameter_unquoted_cursor(&mut out, rest);

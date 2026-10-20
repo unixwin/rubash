@@ -57,18 +57,63 @@ fn assert_script(script: &str, expected_stdout: &str) {
 /// its mark instead of bailing.
 #[test]
 fn backtick_line_continuation_elision_keeps_quoted_space() {
-    assert_script(
-        "printf '<%s>\\n' \"a b\"`echo x\\\ny`\n",
-        "<a bxy>\n",
-    );
+    assert_script("printf '<%s>\\n' \"a b\"`echo x\\\ny`\n", "<a bxy>\n");
 }
 
 /// Face 2: dquote-wrapped backtick `\"` folds to `"` (subst.c:921-931).
 #[test]
 fn dquote_wrapped_backtick_escaped_quote_folds() {
+    assert_script("a=\"`echo \\\"x\\\"`\"\nprintf '[%s]\\n' \"$a\"\n", "[x]\n");
+}
+
+/// Face 2 (command-word form): the `\"` fold inside a dquote-wrapped
+/// backtick must also replay when the word carries an unquoted expansion
+/// sibling — only then does the raw word reach mark_quoted_ifs_from_raw.
+/// The simulator used to push DATA_DQUOTE where the cook holds a bare `"`
+/// (0x22), so the equality guard bailed on 100% of this shape (PR#898
+/// review blocker 1; GNU 5.3.0 prints `<a bxp>` + `<q>`).
+#[test]
+fn dquote_wrapped_backtick_escaped_quote_folds_in_command_word() {
     assert_script(
-        "a=\"`echo \\\"x\\\"`\"\nprintf '[%s]\\n' \"$a\"\n",
-        "[x]\n",
+        "w=\"p q\"\nprintf '<%s>\\n' \"a b`echo \\\"x\\\"`\"$w\n",
+        "<a bxp>\n<q>\n",
+    );
+}
+
+/// Face 2 locale-quote form: `$"..."` cooks by the same double-quote rules
+/// as `"..."` — the command-word walk routed it through
+/// preserve_backticks=false, shipping the backtick body's `\"` as
+/// DATA_DQUOTE data so the inner echo printed `"x"` (PR#898 review point 4;
+/// GNU 5.3.0 prints `<a bxp>` + `<q>`).
+#[test]
+fn locale_dquote_wrapped_backtick_escaped_quote_folds() {
+    assert_script(
+        "w=\"p q\"\nprintf '<%s>\\n' $\"a b`echo \\\"x\\\"`\"$w\n",
+        "<a bxp>\n<q>\n",
+    );
+}
+
+/// Face 2 `$(...)`-sibling form: same fold when the unquoted sibling is a
+/// command substitution rather than a parameter (PR#898 review point 4;
+/// GNU 5.3.0 prints `<a bxp>` + `<q>`).
+#[test]
+fn dquote_wrapped_backtick_escaped_quote_folds_before_comsub_sibling() {
+    assert_script(
+        "printf '<%s>\\n' \"a b`echo \\\"x\\\"`\"$(echo p q)\n",
+        "<a bxp>\n<q>\n",
+    );
+}
+
+/// Face 1 nested form: inside `$(...)`, a `\`` in a nested backtick body
+/// must be consumed as a `\x` pair — single-stepping let the escaped
+/// backtick close the span early, the leftover `)` then closed the `$()`,
+/// and the tail re-walked as outer text desynced the cook into a bail
+/// (PR#898 review blocker 2; GNU 5.3.0 prints `<a b)>` + `<$y>`).
+#[test]
+fn comsub_nested_backtick_escaped_backtick_pairs_through() {
+    assert_script(
+        "printf '<%s>\\n' \"a b\"$(echo `echo \\`echo \\\\)\\`` \\$y)\n",
+        "<a b)>\n<$y>\n",
     );
 }
 
