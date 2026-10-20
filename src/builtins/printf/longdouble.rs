@@ -61,9 +61,14 @@ const LD_MAX_UNBIASED_EXP: i64 = 16383;
 const LD_MIN_NORMAL_UNBIASED_EXP: i64 = -16382;
 /// Denormal value = `mant * 2^LD_DENORM_EXP` with `mant < 2^63`.
 const LD_DENORM_EXP: i32 = -16445;
-/// Significant digits kept for decimal conversion (100 bits of margin over
-/// the 66 bits the rounder needs; the dropped tail folds into `sticky`).
-const DECIMAL_KEEP_DIGITS: usize = 32;
+/// Significant digits kept for decimal conversion. Unlike hex nibbles a
+/// dropped decimal digit is not bit-aligned, so truncating the tail can
+/// shift the value across a binary rounding boundary that `sticky` alone
+/// cannot rescue (only `low3 == 0b100` consults it): the window is wide
+/// enough that a boundary counterexample needs a >2048-significant-digit
+/// literal, while still bounding the bignum. The dropped tail folds into
+/// `sticky`.
+const DECIMAL_KEEP_DIGITS: usize = 2048;
 /// Significant hex digits kept for hex conversion (same rationale).
 const HEX_KEEP_DIGITS: usize = 100;
 
@@ -473,7 +478,7 @@ fn parse_decimal_subject(unsigned: &str, neg: bool) -> (FloatVal, bool) {
     // Digit-count magnitude guards (plain i128 arithmetic, no bignum).
     let digits = full_digits - zeros;
     let k_lo = digits as i128 - 1 + exp10;
-    if (k_lo >= 0 && 3 * k_lo >= 16384) || (k_lo < 0 && 4 * k_lo >= 16384) {
+    if k_lo >= 0 && 3 * k_lo >= 16384 {
         return (FloatVal::Infinite { neg }, true);
     }
     let k_hi = digits as i128 + exp10;
@@ -487,7 +492,7 @@ fn parse_decimal_subject(unsigned: &str, neg: bool) -> (FloatVal, bool) {
             true,
         );
     }
-    // Bounded digit window plus sticky bit (100 bits of margin).
+    // Bounded digit window plus sticky bit (see DECIMAL_KEEP_DIGITS).
     let (sig, exp10, sticky) = if sig.len() > DECIMAL_KEEP_DIGITS {
         let drop = sig.len() - DECIMAL_KEEP_DIGITS;
         let sticky = sig.as_bytes()[DECIMAL_KEEP_DIGITS..]
@@ -564,7 +569,10 @@ fn parse_hex_subject(unsigned: &str, neg: bool) -> (FloatVal, bool) {
     if 4 * (digits - 1) + pexp >= 16384 {
         return (FloatVal::Infinite { neg }, true);
     }
-    if 4 * digits + pexp <= -16445 {
+    // Below half the minimum denormal (2^-16446) always rounds to zero;
+    // the exact half must reach the rounder, where tie-to-even keeps it
+    // zero on its own.
+    if 4 * digits + pexp <= -16446 {
         return (
             FloatVal::Finite {
                 neg,
@@ -574,12 +582,15 @@ fn parse_hex_subject(unsigned: &str, neg: bool) -> (FloatVal, bool) {
             true,
         );
     }
-    // Bounded digit window plus sticky bit.
-    let (sig, sticky) = if sig.len() > HEX_KEEP_DIGITS {
+    // Bounded digit window plus sticky bit. Dropped hex nibbles are exact
+    // 4-bit groups, so the exponent compensates (`pexp += 4 * drop`) and
+    // the tail can only contribute to `sticky`.
+    let (sig, pexp, sticky) = if sig.len() > HEX_KEEP_DIGITS {
+        let drop = sig.len() - HEX_KEEP_DIGITS;
         let sticky = sig.as_bytes()[HEX_KEEP_DIGITS..].iter().any(|&b| b != b'0');
-        (&sig[..HEX_KEEP_DIGITS], sticky)
+        (&sig[..HEX_KEEP_DIGITS], pexp + 4 * drop as i128, sticky)
     } else {
-        (sig, false)
+        (sig, pexp, false)
     };
     let mut num = BigUint::zero();
     for byte in sig.bytes() {

@@ -205,6 +205,99 @@ fn denormals_format_and_flag_inexact() {
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 
+/// PR #900 review (finding 1): a >100-significant-hex-digit literal kept
+/// the 100-digit window but lost `4 * drop` of exponent compensation, so
+/// the value came out 16^drop times too small. 101 hex digits here is
+/// 16^100 + 1 = 2^400 + 1: `%f` expands 2^400 exactly, `%a` reads 0x8p+397.
+#[test]
+fn hex_window_truncation_compensates_exponent() {
+    let literal = format!("0x1{}1p0", "0".repeat(99));
+    let (code, stdout, stderr) = run_script(&format!(
+        "printf '%a\\n' {literal}\nprintf '%f\\n' {literal}\n"
+    ));
+    assert_eq!(code, Some(0));
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+    assert_eq!(
+        stdout,
+        "0x8p+397\n\
+         2582249878086908589655919172003011874329705792829223512830659356540647622016841194629645353280137831435903171972747493376.000000\n"
+    );
+}
+
+/// PR #900 review (finding 2): the hex underflow guard `4 * digits + pexp
+/// <= -16445` zeroed the (2^-16446, 2^-16445) band an octave too early;
+/// glibc rounds anything above half the minimum denormal up to it
+/// (inexact -> ERANGE). The exact half still ties to even -> zero.
+#[test]
+fn hex_underflow_guard_stops_below_half_min_denormal() {
+    for (operand, expected) in [
+        ("0xFp-16449", "0x0.000000000000001p-16385\n"),
+        ("0x9p-16449", "0x0.000000000000001p-16385\n"),
+        ("0x8p-16449", "0x0p+0\n"),
+        ("0x7p-16449", "0x0p+0\n"),
+    ] {
+        let (code, stdout, stderr) = run_script(&format!("printf '%a\\n' {operand}\n"));
+        assert_eq!(code, Some(1), "{operand}");
+        assert_eq!(stdout, expected, "{operand}");
+        assert!(
+            stderr.contains("Numerical result out of range"),
+            "{operand}: {stderr}"
+        );
+    }
+}
+
+/// PR #900 review (finding 3): DECIMAL_KEEP_DIGITS = 32 truncated long
+/// decimal literals below binary tie boundaries the true value sits at or
+/// above (10 = 2 * 5 is not a power of two, so the dropped tail is not
+/// bit-aligned and `sticky` cannot rescue a crossing). The widened window
+/// keeps these literals on the exact path.
+#[test]
+fn decimal_window_preserves_tie_boundaries() {
+    let (code, stdout, stderr) = run_script(
+        "printf '%a\\n' 1.00000000000000000005421010862427523\n\
+         printf '%.21f\\n' 1.00000000000000000005421010862427523\n\
+         printf '%a\\n' 1.0000000000000000001626303258728256651011179201304912567138671875\n\
+         printf '%.21f\\n' 1.0000000000000000001626303258728256651011179201304912567138671875\n",
+    );
+    assert_eq!(code, Some(0));
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+    // First literal: just above the 1 + 2^-64 half-point. Second: the
+    // exact half-point 1 + 3*2^-64, kept mantissa odd -> tie to even up.
+    assert_eq!(
+        stdout,
+        "0x8.000000000000001p-3\n\
+         1.000000000000000000108\n\
+         0x8.000000000000002p-3\n\
+         1.000000000000000000217\n"
+    );
+}
+
+/// PR #900 review (finding 4): the '0' flag has no effect on a non-finite
+/// result (glibc) — inf/nan pad with spaces and any sign stays adjacent
+/// to the word.
+#[test]
+fn zero_flag_is_ignored_for_nonfinite() {
+    let (code, stdout, stderr) = run_script(
+        "printf '%010a\\n' nan\nprintf '%010a\\n' inf\n\
+         printf '%010A\\n' NAN\nprintf '%015a\\n' nan\n\
+         printf '%010f\\n' inf\nprintf '%010e\\n' nan\n\
+         printf '%+010a\\n' nan\nprintf '%010a\\n' -nan\n",
+    );
+    assert_eq!(code, Some(0));
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+    assert_eq!(
+        stdout,
+        "       nan\n\
+         \x20      inf\n\
+         \x20      NAN\n\
+         \x20           nan\n\
+         \x20      inf\n\
+         \x20      nan\n\
+         \x20     +nan\n\
+         \x20     -nan\n"
+    );
+}
+
 /// Zero padding goes after the sign and the 0x/0X prefix.
 #[test]
 fn zero_padding_follows_sign_and_hex_prefix() {

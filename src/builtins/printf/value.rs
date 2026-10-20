@@ -1,5 +1,6 @@
 use super::escape::{expand_percent_b, shell_quote_form};
 use super::float::format_float;
+use super::longdouble::FloatVal;
 use super::number::{invalid_number_error, parse_i64, parse_long_double, parse_u64};
 use super::FormatSpec;
 
@@ -17,6 +18,7 @@ pub(super) fn format_value(
     let mut stop_output = false;
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     let mut invalid_number: Option<String> = None;
+    let mut nonfinite = false;
     // GNU printf.def units model (printf_builtin + printstr/printwidestr):
     //   * `%ls`/`%S`/`%lc`/`%C` (longform or the uppercase conversion) go
     //     through printwidestr and count CHARACTERS, but only when the
@@ -83,29 +85,10 @@ pub(super) fn format_value(
             invalid_number = parsed.invalid;
             format_unsigned_integer(parsed.value, 8, false, spec)
         }
-        'f' | 'F' => {
+        'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' => {
             let parsed = parse_long_double(value);
             invalid_number = parsed.invalid;
-            format_float(parsed.value, spec, spec.specifier)
-        }
-        'e' => {
-            let parsed = parse_long_double(value);
-            invalid_number = parsed.invalid;
-            format_float(parsed.value, spec, 'e')
-        }
-        'E' => {
-            let parsed = parse_long_double(value);
-            invalid_number = parsed.invalid;
-            format_float(parsed.value, spec, 'E')
-        }
-        'g' | 'G' => {
-            let parsed = parse_long_double(value);
-            invalid_number = parsed.invalid;
-            format_float(parsed.value, spec, spec.specifier)
-        }
-        'a' | 'A' => {
-            let parsed = parse_long_double(value);
-            invalid_number = parsed.invalid;
+            nonfinite = !matches!(parsed.value, FloatVal::Finite { .. });
             format_float(parsed.value, spec, spec.specifier)
         }
         other => {
@@ -117,6 +100,12 @@ pub(super) fn format_value(
 
     let mut width_spec = spec.clone();
     if spec.precision.is_some() && matches!(spec.specifier, 'd' | 'i' | 'u' | 'x' | 'X' | 'o') {
+        width_spec.zero_pad = false;
+    }
+    // The '0' flag has no effect on a non-finite result: glibc pads
+    // inf/nan with spaces and keeps any sign adjacent to the word
+    // (`%010a` of nan is `       nan`, not `0000000nan`).
+    if nonfinite {
         width_spec.zero_pad = false;
     }
     // GNU getintmax/getuintmax (printf.def:1416+): a PRESENT but empty
