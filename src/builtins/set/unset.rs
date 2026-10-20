@@ -229,9 +229,10 @@ where
         crate::builtins::shopt::set_option(env_vars, "dotglob", false);
     }
     env_vars.remove(&unset_name);
-    // Gated mirror removal (#916): ordinary names were never mirrored,
-    // so only special names can need unbinding here. Runs before the
-    // unmark calls below.
+    // Process-env removal is existence-gated, not name-gated (#916/#917):
+    // ordinary names were never mirrored by writes, but an inherited copy
+    // predates the mirror and must be dropped so table-miss fallbacks do
+    // not resurrect it. Runs before the unmark calls below.
     crate::executor::local_helpers::unset_process_env(&unset_name);
     // #916: one attrs.remove clears all SHELL_VAR bits instead of ten
     // attr_of + write_flag round-trips (ASSOC_128 string dropped inside).

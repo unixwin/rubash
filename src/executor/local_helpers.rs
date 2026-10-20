@@ -161,10 +161,18 @@ pub(crate) fn set_process_env(name: &str, value: impl AsRef<str>) {
     }
 }
 
-/// Gated counterpart of `set_process_env` for unbinding: removes the name
-/// from the process env only if it could have been mirrored there.
+/// Unbinding counterpart of `set_process_env`. The #916 mirror gate only
+/// governs WRITES: a name that entered the process env by inheritance
+/// predates the mirror, so the special-name gate can never see it, yet the
+/// stale copy is read back by every fallback that still consults the
+/// process env (exact_case_env_var bare-$NAME reads, the nounset
+/// existence checks, the fork+exec env_map base — the #182 revival class,
+/// rubash#917). GNU variables.c:3839 unbind_variable drops the name from
+/// the export environment unconditionally, so the mirror must too: the
+/// existence check is a single non-locking getenv that keeps the common
+/// "never mirrored" unset off the locked environ mutation path.
 pub(crate) fn unset_process_env(name: &str) {
-    if shell_assignment_needs_process_env(name) {
+    if is_valid_process_env(name, "") && env::var_os(name).is_some() {
         env::remove_var(name);
     }
 }

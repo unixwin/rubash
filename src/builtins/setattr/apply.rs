@@ -114,9 +114,9 @@ where
             mark_exported(env_vars, name);
         }
         ExportMode::Unset => {
-            // Gated mirror removal (#916): only special names were ever
-            // mirrored. Plain `unset FOO` on an ordinary var skips the
-            // locked O(n) environ scan entirely.
+            // Existence-gated process-env removal (#916/#917): the name
+            // gate only applies to writes; an inherited copy must be
+            // dropped so table-miss fallbacks do not resurrect it.
             crate::executor::local_helpers::unset_process_env(name);
             unmark_exported(env_vars, name);
         }

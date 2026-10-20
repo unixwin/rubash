@@ -1612,8 +1612,19 @@ impl Drop for Executor {
         }
 
         for (name, value) in &self.process_env_snapshot {
+            // A fork-time snapshot restore is not an assignment mirror, so
+            // the #916 special-name gate in set_process_env must not apply:
+            // a comsub child that unbound an ordinary inherited name
+            // removed the real process-env copy (unset_process_env removes
+            // it now — rubash#917), and the parent's copy must come back
+            // exactly as the snapshot recorded it. TMPDIR keeps its
+            // pre-#916 exclusion (never mirrored, so leave it alone rather
+            // than restoring or removing it).
+            if name == "TMPDIR" {
+                continue;
+            }
             if is_valid_process_env(name, value) {
-                set_process_env(name, value);
+                env::set_var(name, value);
             } else {
                 env::remove_var(name);
             }
