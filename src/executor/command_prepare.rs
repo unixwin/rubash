@@ -2289,8 +2289,8 @@ impl Executor {
             &decode_command_substitution_payload(&expanded),
         ) {
             // Command-substitution output arrives payload-protected (control
-            // bytes such as \n are encoded as __RUBASH_CSB1_ markers). Field
-            // splitting must see the real IFS bytes — GNU subst.c splits the
+            // bytes such as \n ride U+E319<hex>; sentinel payloads, rubash#840).
+            // Field splitting must see the real IFS bytes — GNU subst.c splits the
             // expanded word before any of this protection is undone — so
             // decode here for the split decision and the split itself. The
             // no-split path keeps the protected form and decodes later.
@@ -4717,10 +4717,26 @@ mod command_word_materialization_tests {
     use super::materialize_expanded_command_word;
 
     #[test]
-    fn materializes_legacy_payload_at_single_boundary() {
+    fn materializes_payload_at_single_boundary() {
+        // The payload introducer is the registry-zone sentinel U+E319
+        // (rubash#840): <sentinel><hex><hex>`;` decodes to the byte.
+        assert_eq!(
+            materialize_expanded_command_word(&format!(
+                "prefix{}41;suffix",
+                crate::executor::markers::COMSUB_PAYLOAD_SENTINEL
+            )),
+            "prefixAsuffix"
+        );
+    }
+
+    /// rubash#840 divergence 2: the retired ASCII `__RUBASH_CSB1_<hex>;`
+    /// form is plain typeable text — a typed lookalike is user data and
+    /// passes this boundary verbatim where GNU prints it literally.
+    #[test]
+    fn typed_ascii_lookalike_passes_verbatim() {
         assert_eq!(
             materialize_expanded_command_word("prefix__RUBASH_CSB1_41;suffix"),
-            "prefixAsuffix"
+            "prefix__RUBASH_CSB1_41;suffix"
         );
     }
 
@@ -4741,10 +4757,11 @@ mod command_word_materialization_tests {
     fn materializes_pathname_marker_before_payload_decode() {
         assert_eq!(
             materialize_expanded_command_word(&format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 "prefix",
                 crate::executor::markers::PROTECTED_BACKSLASH_STR,
-                "__RUBASH_CSB1_41;suffix"
+                crate::executor::markers::COMSUB_PAYLOAD_SENTINEL,
+                "41;suffix"
             )),
             "prefix\\Asuffix"
         );

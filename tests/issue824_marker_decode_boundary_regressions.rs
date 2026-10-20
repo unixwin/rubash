@@ -159,15 +159,28 @@ fn registry_zone_pua_user_data_roundtrips_declare_p() {
 }
 
 /// The echo path must keep printing the literal marker text (GNU 5.3.0
-/// captured). NOTE: the printf `%s` arm decodes a typed `__RUBASH_CSB1_<hex>;`
-/// payload prefix into its byte (`aA` instead of GNU's literal) — a
-/// pre-existing non-debug divergence of the comsub-payload decode, out of
-/// #824's zero-non-debug-change scope and left unpinned here.
+/// captured). The printf `%s` arm's typed-`__RUBASH_CSB1_<hex>;` decode
+/// divergence noted here at #824 time (`aA` instead of GNU's literal) was
+/// fixed by #840 — the payload introducer moved off typeable ASCII to the
+/// registry-zone U+E319 sentinel — and is pinned below.
 #[test]
 fn echo_prints_marker_text_verbatim() {
     let run = run("echo '__RUBASH_HD1__'\n");
     assert_clean(&run, "echo HD1");
     assert_eq!(run.stdout, b"__RUBASH_HD1__\n".to_vec());
+}
+
+/// rubash#840 divergence 2 end-to-end: a typed `__RUBASH_CSB1_<hex>;` is
+/// pure user data at printf/echo — GNU 5.3.0 prints it verbatim.
+#[test]
+fn typed_csb1_lookalike_prints_verbatim() {
+    let run = run("printf '%s\n' '__RUBASH_CSB1_41;'\necho '__RUBASH_CSB1_42;'\n");
+    assert_clean(&run, "CSB1 printf/echo");
+    assert_eq!(
+        run.stdout,
+        b"__RUBASH_CSB1_41;\n__RUBASH_CSB1_42;\n".to_vec(),
+        "GNU oracle: the typed lookalike is literal text"
+    );
 }
 
 /// The #802 reserved-string stance is unchanged by the #824 sweep: the

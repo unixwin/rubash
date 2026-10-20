@@ -778,7 +778,7 @@ fn restore_quote_carriers(value: &str) -> String {
 /// word into the value cell verbatim), or the literal `$`/backtick/backslash
 /// bytes vanish from the stored element (issue #249: COMPREPLY=($(compgen -P
 /// "$ "...)) dropped the prefix `$`). Control bytes travel as
-/// `__RUBASH_CSB1_XX;` payload escapes and decode here too.
+/// U+E319<hex>; sentinel payloads (rubash#840) and decode here too.
 fn finalize_comsub_element(value: &str) -> String {
     crate::executor::execution_misc::decode_command_substitution_payload(
         &crate::executor::execution_misc::restore_command_substitution_output(value),

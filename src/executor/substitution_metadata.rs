@@ -1112,7 +1112,7 @@ mod tests {
         ));
         assert!(!command_substitution_value_needs_payload_protection(
             "$x",
-            "__RUBASH_CSB1_1a;",
+            &format!("{}1a;", crate::executor::markers::COMSUB_PAYLOAD_SENTINEL),
         ));
         assert!(!command_substitution_value_needs_payload_protection(
             "literal",

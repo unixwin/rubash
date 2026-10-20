@@ -404,11 +404,13 @@ pub fn init_locale() {
 /// | `__RUBASH_CA1__` | COMPOUND_ASSIGNMENT_MARKER (named-string compound
 /// assignment tag; whitelisted carrier — the interactive line-editing
 /// boundary delivers it inside pre-execution AST words, #802) | nothing |
-/// | `__RUBASH_HD1__`/`__RUBASH_CSB1_` | QUOTED_HEREDOC_MARKER /
-/// COMSUB_PAYLOAD_PREFIX (named-string heredoc/comsub tags) | passes
-/// through verbatim — plain typeable ASCII with no entry-side encoding;
-/// the live tags are consumed at their execution boundaries before
-/// anything is displayed, so an occurrence here is user data (#824) |
+/// | `__RUBASH_HD1__`/`__RUBASH_CSB1_` | QUOTED_HEREDOC_MARKER and the
+/// retired (pre-#840) ASCII comsub payload prefix — the live payload
+/// introducer is the U+E319 sentinel | passes through verbatim — plain
+/// typeable ASCII with no entry-side encoding; HD1's live tag is consumed
+/// at its execution boundary before anything is displayed, and CSB1 has
+/// no live producer at all, so an occurrence here is user data (#824,
+/// #840) |
 /// | `U+E100`..=`U+E1FF` | conditional-pattern byte-chars | byte `(cp - E100)` as char |
 ///
 /// Ordering follows the storage-boundary contract documented in
@@ -572,10 +574,11 @@ pub fn decode_to_visible_text(text: &str) -> String {
     //     `out` is restored user data, never a live guard.
     //   - Named ASCII markers: `__RUBASH_HD1__` / `__RUBASH_CSB1_` are
     //     simply typeable text with no entry-side encoding to tell them
-    //     apart; their live producers are consumed at their execution
-    //     boundaries (heredoc body execution, comsub payload decode) before
-    //     anything is stored or displayed, so an occurrence on this boundary
-    //     is user data by contract — GNU prints it verbatim, and so do the
+    //     apart; HD1's live producer is consumed at the heredoc-body
+    //     execution boundary and CSB1 is the retired (pre-#840) payload
+    //     prefix whose introducer moved to the U+E319 sentinel, so an
+    //     occurrence on this boundary is user data by contract — GNU
+    //     prints it verbatim, and so do the
     //     scan's `_`-fallthrough arms. (`__RUBASH_CA1__` is the one reserved
     //     exception: consumed by the probe above, the #802 stance.)
     // Output-side debug_asserts over these codepoints could therefore only

@@ -448,8 +448,6 @@ fn logical_posix_test_dir<'a>(
 mod tests {
     #[cfg(windows)]
     use super::resolve_target;
-    #[cfg(windows)]
-    use std::collections::HashMap;
 
     #[test]
     fn cd_d_remains_invalid_bash_option() {
@@ -473,7 +471,7 @@ mod tests {
             std::env::temp_dir().join(format!("rubash-cd-logical-root-{}", std::process::id()));
         std::fs::create_dir_all(root.join("bin")).unwrap();
         let previous = std::env::current_dir().unwrap();
-        let mut env_vars = HashMap::new();
+        let mut env_vars = crate::shell::var_table::VarTable::default();
         env_vars.insert(
             "RUBASH_ROOT".to_string(),
             root.to_string_lossy().to_string(),
@@ -500,7 +498,7 @@ mod tests {
     #[test]
     fn cd_dash_resolves_oldpwd_through_configured_shell_root() {
         let root = std::env::temp_dir().join("rubash-cd-oldpwd-root");
-        let mut env_vars = HashMap::new();
+        let mut env_vars = crate::shell::var_table::VarTable::default();
         env_vars.insert(
             "RUBASH_ROOT".to_string(),
             root.to_string_lossy().to_string(),
