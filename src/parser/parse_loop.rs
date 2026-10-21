@@ -72,6 +72,7 @@ pub(super) struct ParseState {
 
 /// Parse tokens into an AST
 pub fn parse(tokens: &[Token]) -> Ast {
+    crate::executor::bash_command_lazy::bump_bash_command_seq();
     parse_with_options(tokens, ParseLoopOptions::default())
 }
 
@@ -81,6 +82,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
 /// (comsub-posix.tests), and `pending_comsub` lets the guard distinguish
 /// that case from a real syntax error such as `echo x)`.
 pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
+    crate::executor::bash_command_lazy::bump_bash_command_seq();
     let mut state = ParseState {
         ast: Ast {
             commands: Vec::new(),

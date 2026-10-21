@@ -1257,6 +1257,7 @@ impl Executor {
             let carrier = crate::parser::StdinBody::Preexpanded(self.expand_here_string_mut(&word));
             cmd.here_string = Some(carrier.to_string());
             cmd.here_string_carrier = Some(carrier);
+            super::bash_command_lazy::touch_bash_command_pending();
         }
     }
 

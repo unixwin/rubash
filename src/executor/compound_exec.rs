@@ -120,6 +120,7 @@ fn strip_consumed_redirects(command: &mut CommandNode, consumed: &[bool]) {
     if !consumed.iter().any(|consumed| *consumed) {
         return;
     }
+    super::bash_command_lazy::touch_bash_command_pending();
     // Capture the consumed heredoc/here-string descriptors before retain
     // mutates the list: (fd, here_string) pairs in redirect order, matching
     // the ordinal correlation materialize_async_stdin_body uses against

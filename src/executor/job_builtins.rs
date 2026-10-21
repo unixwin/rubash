@@ -589,15 +589,13 @@ impl Executor {
     /// falls into the single-quote fallback), so prefer it and keep
     /// bash_command_source_text as the shape-preserving fallback.
     pub(crate) fn signal_notice_command_text(&self, cmd: &CommandNode) -> String {
-        let text = if let Some(text) = self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_LAST_COMMAND")
-            .filter(|text| !text.is_empty())
-        {
-            text.clone()
-        } else {
-            bash_command_source_text(cmd)
+        let text = {
+            let flushed = self.bash_command_value();
+            if !flushed.is_empty() {
+                flushed
+            } else {
+                bash_command_source_text(cmd)
+            }
         };
         // GNU's job for a `( ... )` is the subshell pipeline itself, so the
         // notice prints `( <inner text> )` (jobs.c pretty_print_job wraps

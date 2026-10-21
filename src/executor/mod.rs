@@ -182,6 +182,7 @@ mod windows_drive;
 mod alias_helpers;
 pub(crate) mod assignment_helpers;
 mod ast_exec;
+pub(crate) mod bash_command_lazy;
 mod builtin_names;
 mod command_subst_helpers;
 mod command_text;
@@ -563,6 +564,14 @@ pub struct Executor {
     /// to the spliced text (trap re-set, alias-table change feeding the
     /// splice) misses and re-parses.
     debug_trap_action_cache: std::cell::RefCell<Option<(String, crate::parser::Ast)>>,
+    /// Lazy BASH_COMMAND pending marker + materialization cache (see
+    /// `bash_command_lazy::BashCommandLazyState`). Interior-mutable so
+    /// `&self` readers (parameter expansion, declare -p, signal notices)
+    /// can flush without `&mut`. Fork-like children get a fresh default;
+    /// the shared-executor `$( )` fast path saves/restores it alongside
+    /// `InteriorSnapshot`.
+    pub(crate) bash_command_lazy:
+        std::cell::RefCell<crate::executor::bash_command_lazy::BashCommandLazyState>,
     return_trap_running: bool,
     signal_trap_running: bool,
     /// The last value written to the OS environment's

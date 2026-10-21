@@ -1304,6 +1304,7 @@ impl CommandNode {
 }
 impl CommandNode {
     pub fn new() -> Self {
+        crate::executor::bash_command_lazy::bump_bash_command_seq();
         Self {
             words: Vec::new(),
             word_metadata: Vec::new(),

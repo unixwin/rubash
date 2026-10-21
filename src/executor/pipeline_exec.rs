@@ -547,6 +547,9 @@ impl Executor {
         {
             outputs.push(output);
         }
+        if !outputs.is_empty() {
+            super::bash_command_lazy::touch_bash_command_pending();
+        }
         Ok(outputs)
     }
 

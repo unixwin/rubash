@@ -742,12 +742,10 @@ impl Executor {
         let saved_trap_command = self.shell_state.debug_trap_command.borrow().clone();
         let has_command = self.shell_state.debug_trap_command.borrow().is_none();
         if has_command {
-            *self.shell_state.debug_trap_command.borrow_mut() = self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_LAST_COMMAND")
-                .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_COMMAND"))
-                .cloned();
+            let flushed = self.bash_command_value();
+            if !flushed.is_empty() {
+                *self.shell_state.debug_trap_command.borrow_mut() = Some(flushed);
+            }
         }
         let saved_alias_streamed = self.mark_alias_streamed();
         // GNU trap.c run_exit_trap runs the action while the subshell's
@@ -1381,19 +1379,16 @@ impl Executor {
         // overrides with the region's own `( list )` text: GNU's
         // except_trap at the :769 wait still holds make_command_string of
         // the subshell from the fork preamble, not the body's last command.
-        *self.shell_state.debug_trap_command.borrow_mut() = command_text_override
-            .or_else(|| {
-                self.shell_state
-                    .env_vars
-                    .get("__RUBASH_LAST_COMMAND")
-                    .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_COMMAND"))
-                    .cloned()
-            })
-            .or_else(|| {
+        *self.shell_state.debug_trap_command.borrow_mut() = command_text_override.or_else(|| {
+            let flushed = self.bash_command_value();
+            if !flushed.is_empty() {
+                Some(flushed)
+            } else {
                 Some(crate::executor::command_text::bash_command_source_text(
                     command,
                 ))
-            });
+            }
+        });
         // GNU executes the ERR trap action with LINENO bound to the failed
         // command's line (trap3.sub: `false | false | false` on line 8 makes
         // the ERR action's $LINENO print 8). The action AST re-parses with

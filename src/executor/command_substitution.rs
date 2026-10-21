@@ -1546,6 +1546,10 @@ impl Executor {
             command_builtin_depth: self.command_builtin_depth,
             debug_trap_running: false,
             debug_trap_action_cache: std::cell::RefCell::new(None),
+            // Lazy BASH_COMMAND: a forked child starts clean (its first
+            // set_current_command installs its own marker; nothing leaks
+            // to the parent, whose Executor keeps its own cache).
+            bash_command_lazy: std::cell::RefCell::new(Default::default()),
             line_env_os_value: std::cell::RefCell::new(None),
             expansion_probe_active: std::cell::Cell::new(false),
             return_trap_running: false,

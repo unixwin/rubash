@@ -1257,6 +1257,7 @@ impl Executor {
 }
 
 fn sync_ordered_redirect_targets(command: &mut CommandNode) {
+    let mut touched = false;
     for redirect in &mut command.redirects {
         if !redirect.target.starts_with(">(") {
             continue;
@@ -1270,9 +1271,15 @@ fn sync_ordered_redirect_targets(command: &mut CommandNode) {
             command.redirect_out.as_ref().or(command.append.as_ref())
         };
         if let Some(source) = source {
+            if redirect.target != source.target {
+                touched = true;
+            }
             redirect.target = source.target.clone();
             redirect.target_metadata = source.target_metadata.clone();
         }
+    }
+    if touched {
+        super::bash_command_lazy::touch_bash_command_pending();
     }
 }
 

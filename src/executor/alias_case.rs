@@ -214,6 +214,7 @@ fn push_case_body_words(command: &CommandNode, words: &[String], body: &mut Vec<
 }
 
 fn clear_command_redirects(command: &mut CommandNode) {
+    super::bash_command_lazy::touch_bash_command_pending();
     command.redirect_in = None;
     command.redirect_out = None;
     command.append = None;

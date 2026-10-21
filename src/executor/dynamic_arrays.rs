@@ -171,19 +171,7 @@ impl Executor {
                     .cloned()
                     .unwrap_or_else(|| "1".to_string()),
             ),
-            "BASH_COMMAND" => Some(
-                self.shell_state
-                    .debug_trap_command
-                    .borrow()
-                    .clone()
-                    .or_else(|| {
-                        self.shell_state
-                            .env_vars
-                            .get("__RUBASH_CURRENT_COMMAND")
-                            .cloned()
-                    })
-                    .unwrap_or_default(),
-            ),
+            "BASH_COMMAND" => Some(self.bash_command_value()),
             // GNU has no per-read re-render for SHELLOPTS/BASHOPTS: they are
             // ordinary (readonly) variables whose VALUES are rewritten at
             // every option change (builtins/set.def set_option ->

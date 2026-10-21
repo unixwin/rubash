@@ -811,6 +811,7 @@ fn alias_timed_case_command(
 }
 
 fn copy_command_redirects(from: &CommandNode, to: &mut CommandNode) {
+    super::bash_command_lazy::touch_bash_command_pending();
     to.redirects = from.redirects.clone();
     to.redirect_in = from.redirect_in.clone();
     to.redirect_out = from.redirect_out.clone();

@@ -83,6 +83,7 @@ pub(in crate::executor) fn normalize_leading_assignment_words(cmd: &mut CommandN
     }
     if count > 0 {
         cmd.words.drain(0..count);
+        super::bash_command_lazy::touch_bash_command_pending();
     }
 }
 

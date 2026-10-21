@@ -583,15 +583,14 @@ impl Executor {
             // word_metadata), which loses that quoting. __RUBASH_LAST_COMMAND
             // is recorded by set_current_command from the pre-expansion node,
             // so it carries the same raw source text GNU prints.
-            let command_text = self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_LAST_COMMAND")
-                .cloned()
-                .filter(|text| !text.is_empty() && !call_cmd.words.is_empty())
-                .unwrap_or_else(|| {
+            let command_text = {
+                let flushed = self.bash_command_value();
+                if !flushed.is_empty() && !call_cmd.words.is_empty() {
+                    flushed
+                } else {
                     crate::executor::command_text::bash_command_source_text(call_cmd)
-                });
+                }
+            };
             self.run_debug_trap(&command_text)?.is_some()
         } else {
             false

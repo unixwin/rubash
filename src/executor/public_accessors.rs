@@ -957,6 +957,15 @@ impl Executor {
         if let Some(dir) = saved_cwd {
             let _ = env::set_current_dir(dir);
         }
+        // Lazy BASH_COMMAND: discard the flat region body's pending marker.
+        // The body's `set_current_command` writes went to this Executor's
+        // cache, while `restore_shell_env` above already restored the env
+        // mirror (`__RUBASH_*_COMMAND`) to the pre-region text (region stamp
+        // when an ERR trap is armed, outer text otherwise). Clearing forces
+        // the next read-side flush to return that restored env text instead
+        // of re-rendering the dead body node (always correct; the next real
+        // command overwrites the marker anyway).
+        *self.bash_command_lazy.borrow_mut() = Default::default();
     }
 
     pub fn aliases_snapshot(&self) -> HashMap<String, String> {
@@ -1258,44 +1267,29 @@ impl Executor {
         // the verbose echo lives here (rubash#348); the rendered command
         // text is the physical line for simple and pipeline commands
         // (compound bodies re-enter through their per-command stages).
+        // Timing is observable: with verbose on, render + materialize NOW.
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "verbose") {
             let echo_text = bash_command_source_text(cmd);
             let _ = writeln!(std::io::stderr(), "{echo_text}");
+            self.materialize_bash_command_for_node(cmd);
+            return;
         }
-        // GNU the_printed_command is produced by print_command
-        // (print_cmd.c), which covers every command form — a `[[ ]]`
-        // node must record `[[ -n $unset ]]`, not a word-list dump
-        // (`'[[' '-n' '$unset' ']]'`); pipelines record the full
-        // `a | b` text. bash_command_source_text is that renderer;
-        // bash_command_text only knows simple commands.
-        // GNU `case` is the exception: execute_cmd.c:3655 prints only the
-        // HEAD (`print_case_command_head` -> `case WORD in `), never the
-        // clause list, so `$BASH_COMMAND` during the case word expansion is
-        // the head. Rendering all N arms per execution here was also the
-        // dominant per-arm cost of a literal-arm `case` loop.
-        let command = if let Some(case_command) = &cmd.case_command {
-            crate::executor::command_text::case_command_head_source_text(case_command)
-        } else {
-            bash_command_source_text(cmd)
-        };
-        // Same equality gate as the line stamps: GNU keeps
-        // the_printed_command in a C global, so recording it is a pointer
-        // store; inserting a byte-identical value into both env keys for
-        // every repeated command in a loop is pure churn.
-        if self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_LAST_COMMAND")
-            .map(String::as_str)
-            != Some(command.as_str())
-        {
-            self.shell_state
-                .env_vars
-                .insert("__RUBASH_LAST_COMMAND".to_string(), command.clone());
-            self.shell_state
-                .env_vars
-                .insert("__RUBASH_CURRENT_COMMAND".to_string(), command);
-        }
+        // Lazy write side: store only the lightweight marker
+        // (ptr + seq + words_len/meta_len/is_case_head) and set the dirty
+        // bit. No rendering, no env writes — the ~27% sampling cost of the
+        // old per-command `bash_command_source_text` is deferred to the
+        // rare actual BASH_COMMAND reads (dynamic expansion, declare -p,
+        // signal notices, function-entry DEBUG text, ERR fallback), which
+        // flush first (hit: zero-render reuse; miss: render_now, always
+        // correct).
+        let ptr = cmd as *const CommandNode as usize;
+        let mut lazy = self.bash_command_lazy.borrow_mut();
+        lazy.ptr = ptr;
+        lazy.seq = super::bash_command_lazy::current_bash_command_seq();
+        lazy.words_len = cmd.words.len();
+        lazy.meta_len = cmd.word_metadata.len();
+        lazy.is_case_head = cmd.case_command.is_some();
+        lazy.dirty = true;
     }
 
     pub(in crate::executor) fn set_pipestatus<I>(&mut self, statuses: I)
