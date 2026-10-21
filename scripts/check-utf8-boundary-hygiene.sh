@@ -46,6 +46,10 @@ src/builtins/bind.rs::delimiter: Some\(d as char\)
 # bind.rs: `upper & 0x1f` is <= 0x1F by construction — a C0 control char,
 # never a UTF-8 continuation byte (bind -x \C-x keyspec lowering).
 src/builtins/bind.rs::\(upper as u8 & 0x1f\) as char
+# cd.rs: `windows_bare_drive_operand` folds a bare `D:` operand to the `/d/`
+# slash-drive form (niubash#481); `bytes[0].is_ascii_alphabetic()` on the same
+# condition pins the widened byte to ASCII, never a UTF-8 continuation byte.
+src/builtins/cd.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
 src/builtins/cd/paths.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
 # printf/longdouble.rs: `decimal_digit_char` widens a decimal digit value
 # (0-9 by construction, debug_asserted) — never a UTF-8 continuation byte.
@@ -73,6 +77,10 @@ src/executor/parameter_core.rs::bytes\[index\] as char
 src/executor/path.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
 src/executor/pipeline_exec.rs::\|byte\| byte as char
 src/executor/shift_echo_builtins.rs::\+ 0x40\) as char
+# windows_drive.rs: bare `D:` command rewritten to the `D:/` drive root
+# (niubash#481/#483); the same `bytes[0].is_ascii_alphabetic()` guard pins the
+# widened byte to ASCII, never a UTF-8 continuation byte.
+src/executor/windows_drive.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
 src/expand/braces.rs::\(byte as char\)\.to_string\(\)
 src/lexer/word.rs::as_bytes\(\)\[name_start - 1\] as char
 src/parser/ast_print.rs::bytes\[index\] as char
