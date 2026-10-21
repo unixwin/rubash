@@ -177,6 +177,7 @@ mod type_describe;
 mod type_functions;
 mod unset_arrays;
 mod variable_state;
+mod windows_drive;
 
 mod alias_helpers;
 pub(crate) mod assignment_helpers;

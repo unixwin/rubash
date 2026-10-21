@@ -80,6 +80,17 @@ impl Executor {
             return Ok(());
         }
 
+        // unixwin/niubash#481: the host REPL's bare-drive normalizer runs
+        // only on its fast path; the grouped reader (`D:; pwd`), the
+        // engine's own piped `-i` stdin driver (niubash#483), and nested
+        // contexts the host AST pass does not descend into all reach this
+        // dispatch with `D:` still a bare command word. Rewrite it to the
+        // same `cd D:/` node the host pass emits — one semantic owner at
+        // the funnel every route shares.
+        if let Some(drive_root) = windows_drive::bare_windows_drive_command_root(cmd) {
+            return self.execute_bare_windows_drive_command(cmd, drive_root);
+        }
+
         let _t_dispatch = PhaseTimer::new(&super::exec_profile::P_DISPATCH);
         if let Some(result) = self.execute_initial_command_node(cmd) {
             // Compound commands run through execute_initial_command_node and

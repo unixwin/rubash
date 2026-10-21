@@ -352,11 +352,26 @@ where
                 Ok(None)
             }
         },
-        Some(dir) => Ok(Some(Target {
-            path: filesystem_path_for_display(dir, env_vars),
-            display: Some(PathBuf::from(dir)),
-            print: PrintPath::Never,
-        })),
+        Some(dir) => {
+            // unixwin/niubash#481: a bare drive designator (`D:` — letter
+            // + colon, no separator) is the same drive-root operand the
+            // host fast-path normalizer rewrites `cd D:` into (`/d/` —
+            // niubash-runtime shell.rs windows_drive_path_to_slash_drive).
+            // GNU has no drive designators — cd.def's dirname reaches
+            // make_absolute/chdir verbatim — so this is persona territory
+            // owned by the Windows `/x/` funnel arm (executor/path.rs
+            // shell_path_to_windows_inner). Folding the operand here keeps
+            // the grouped-reader and stdin drivers — which never run the
+            // host normalizers (niubash#483) — on the same resolution.
+            // `D:rel` drive-relative spellings stay untouched: a mid-word
+            // colon past position 1 is filename data, not a designator.
+            let dir = windows_bare_drive_operand(dir);
+            Ok(Some(Target {
+                path: filesystem_path_for_display(&dir, env_vars),
+                display: Some(PathBuf::from(dir)),
+                print: PrintPath::Never,
+            }))
+        }
     }
 }
 
@@ -412,6 +427,19 @@ fn resolve_cdable_vars(target: &Target, env_vars: &HashMap<String, String>) -> O
         display: Some(PathBuf::from(value)),
         print: PrintPath::Always,
     })
+}
+
+/// unixwin/niubash#481/#483: on Windows the bare `D:` operand spells the
+/// drive root; fold it to the `/d/` slash-drive form the rest of the cd
+/// machinery (and the host fast-path normalizer) already produces.
+fn windows_bare_drive_operand(dir: &str) -> String {
+    if cfg!(windows) {
+        let bytes = dir.as_bytes();
+        if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return format!("/{}/", (bytes[0] as char).to_ascii_lowercase());
+        }
+    }
+    dir.to_string()
 }
 
 fn is_shell_name(name: &str) -> bool {
