@@ -666,10 +666,14 @@ impl Executor {
         );
         crate::lexer::set_parse_extended_glob(saved_extglob);
         self.apply_command_output_redirects(cmd, &mut ast)?;
-        // rubash#1138: parse_and_execute parses a whole reader unit
-        // before executing any of it — a syntax error in the eval
-        // string voids the valid commands sharing its line.
         crate::script_driver::apply_parse_error_unit_voiding(&mut ast);
+        // GNU builtins/evalstring.c:351 parse_and_execute: last_result starts
+        // at EXECUTION_SUCCESS, so a string that parses to zero commands
+        // (empty, blank, or comment-only) returns 0 instead of preserving $?
+        // (rubash#1013: `false; eval ""; echo $?` -> 0).
+        if ast.commands.is_empty() {
+            self.exit_code = 0;
+        }
         // A syntax error inside the eval string makes eval return 2;
         // it does not abort the calling script the way a top-level
         // parse error does. An inner exit still exits the shell, so
