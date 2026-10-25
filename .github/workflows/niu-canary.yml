@@ -1,0 +1,79 @@
+name: niu-canary
+
+# rubash#595 (1.5.0 Session API RFC, step M-0): the API ledger
+# (docs/api-ledger.md) freezes the engine surface niubash consumes.
+# This workflow is the freeze's mechanical enforcer on the engine
+# side, so a vanished or re-signed symbol fails here -- in the
+# engine's CI, before merge -- instead of breaking the consumer's
+# master the way the lost builtins::kill console hook once did.
+#
+# This file only ADDS jobs; no existing job's gates change.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: niu-canary-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ledger:
+    name: API ledger tripwire
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The checker must itself be able to fail; the self-test keeps
+      # it honest (a bogus symbol has to be reported missing).
+      - name: Checker self-test
+        run: python3 scripts/check-api-ledger.py --self-test
+
+      - name: Ledger symbols still present
+        run: python3 scripts/check-api-ledger.py
+
+  pairing:
+    name: niubash builds against this tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # Sibling layout: niubash's [patch] resolves rubash to
+      # ../rubash, so the two checkouts must sit side by side.
+      - uses: actions/checkout@v4
+        with:
+          path: rubash
+
+      - uses: actions/checkout@v4
+        with:
+          repository: unixwin/niubash
+          ref: master
+          path: niubash
+
+      # The ledger is one document in two repos (docs/api-ledger.md
+      # in both). If the copies diverge, there is no ledger.
+      - name: Ledger copies are identical
+        run: cmp rubash/docs/api-ledger.md niubash/docs/api-ledger.md
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # --locked, and no `cargo update -p rubash`: under the [patch]
+      # path override the sibling checkout IS the engine under test,
+      # and re-resolving rewires transitive deps (see niubash's own
+      # CI notes). cargo check is the compile signal; niubash's own
+      # CI runs its full build/test against master separately.
+      - name: cargo check niubash against this rubash tree
+        working-directory: niubash
+        run: cargo check --workspace --locked
