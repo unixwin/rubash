@@ -1413,19 +1413,35 @@ impl Executor {
     }
 
     fn retire_completed_coproc(&mut self, pid: u32) {
-        let is_coproc = self.fd_table.entries.values().any(|entry| {
-            matches!(
-                entry.read.as_ref(),
-                Some(FdReadEndpoint::CoprocStdout { pid: endpoint_pid, .. }) if *endpoint_pid == pid
-            ) || matches!(
-                entry.write.as_ref(),
-                Some(FdWriteEndpoint::CoprocStdin { pid: endpoint_pid, .. }) if *endpoint_pid == pid
-            )
-        });
+        // GNU coproc_reap (execute_cmd.c) finds the dying child on the
+        // coproc list and runs coproc_unsetvars for it; the fd table's
+        // current contents play no part. Keying recognition on live
+        // fd_table endpoints alone leaked the whole family whenever both
+        // endpoints had already left the table before the reap — the
+        // write end closed by `exec {NAME[1]}>&-` and the read end closed
+        // by an EOF read — so the array and <name>_PID survived forever
+        // (rubash#1624). coproc_names is the spawn-time registry
+        // coproc_unset_vars itself consumes; it is the authoritative
+        // test, with the endpoint scan kept for endpoints that outlived
+        // their registry entry.
+        let is_coproc = self.shell_state.coproc_names.contains_key(&pid)
+            || self.fd_table.entries.values().any(|entry| {
+                matches!(
+                    entry.read.as_ref(),
+                    Some(FdReadEndpoint::CoprocStdout { pid: endpoint_pid, .. }) if *endpoint_pid == pid
+                ) || matches!(
+                    entry.write.as_ref(),
+                    Some(FdWriteEndpoint::CoprocStdin { pid: endpoint_pid, .. }) if *endpoint_pid == pid
+                )
+            });
         if !is_coproc {
             return;
         }
 
+        // rubash#1632: the displaced stdout writer's lifetime ends with
+        // the coproc (on Unix the child's own copy already died with
+        // it; this drops the parent-held copy where one was kept).
+        self.coproc_displaced_stdout_writers.remove(&pid);
         self.close_coproc_endpoints(pid);
 
         let endpoint_fds = self
