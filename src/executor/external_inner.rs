@@ -741,6 +741,17 @@ impl Executor {
         assignments_applied: bool,
     ) -> Option<HostExternalCommandOutput> {
         let mut env_vars = self.shell_state.env_vars.clone();
+        // rubash#1766, adjudication (c): a nameref cell's plain text is
+        // the TARGET NAME, not a value — handing it to the host as an
+        // env entry leaks an internal representation. GNU measured:
+        // `declare -n ref=var; var=orig; ref+=x env` -> var=origx and
+        // no ref= line. Drop nameref alias cells from the base clone,
+        // selected by the NAMEREF_VARS attribute set (never by name);
+        // the target cell itself stays, so no information is lost.
+        // The prefix composition below is untouched.
+        for name in marked_env_names(&self.shell_state.env_vars, NAMEREF_VARS) {
+            env_vars.remove(&name);
+        }
         let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
         for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
