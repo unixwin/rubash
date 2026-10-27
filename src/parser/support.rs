@@ -895,7 +895,16 @@ fn word_command_open_brace(tokens: &[Token], index: usize) -> bool {
                     saw_prefix = true;
                     j -= 1;
                 }
-                _ => return false,
+                // Any other keyword directly before a consumed prefix
+                // chain (`{`, `then`, `do`, `else`, ...) is itself a
+                // command-position boundary, so the chain stands: the
+                // falsifying predecessor is a WORD (handled in the Word
+                // arm — `echo coproc a {` keeps `{` a plain argument),
+                // never a keyword. Returning false here made the `}` of
+                // `coproc FC2 { cat; }` inside an outer brace group or
+                // function body close the OUTER group instead
+                // (rubash#1625).
+                _ => return saw_prefix,
             },
             TokenKind::Word => match prev.value.as_str() {
                 // `time -p` / `time --` options (TIMEOPT/TIMEIGN) —
