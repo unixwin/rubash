@@ -1051,6 +1051,18 @@ impl Executor {
                                 views.push(("PIPESTATUS".to_string(), text));
                             }
                         }
+                        // rubash#1872: GNU's listing includes the
+                        // BASH_SOURCE/BASH_LINENO arrays with their LIVE
+                        // contents; the env cells for these two only
+                        // refresh at source-frame push/pop and would
+                        // list a returned function's frozen frame.
+                        for name in ["BASH_SOURCE", "BASH_LINENO"] {
+                            if !underlay.contains_key(name) {
+                                if let Some(text) = self.dynamic_declaration_view(name) {
+                                    views.push((name.to_string(), text));
+                                }
+                            }
+                        }
                     }
                     views
                 } else {

@@ -294,6 +294,19 @@ fn command_word_needs_process_line_env(word: &str) -> bool {
     )
 }
 
+/// GNU print_cmd.c prints the command node's OWN redirection list. A
+/// redirect cloned into this node by an enclosing compound's splice
+/// (support_names::injected_group_redirect — the mark's own contract is
+/// "NOT the command's own redirect") is fd-routing state, not text:
+/// rendering it made trap-visible text inside `{ ...; } >>f 2>>f` read
+/// `body_fn >> f 2>> f` where GNU reports `body_fn` (rubash#1872).
+/// Every redirect-to-text funnel filters through here so no render of
+/// the node can re-attach an ancestor's redirections.
+fn own_redirect(redirect: Option<&Redirect>) -> Option<&Redirect> {
+    redirect
+        .filter(|redirect| !crate::executor::support_names::is_injected_group_redirect(redirect))
+}
+
 pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
     let mut parts = Vec::new();
     let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
@@ -336,22 +349,22 @@ pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
         parts.push(words);
     }
 
-    if let Some(redirect) = &cmd.redirect_in {
+    if let Some(redirect) = own_redirect(cmd.redirect_in.as_ref()) {
         parts.push(format_redirect("<", redirect));
     }
-    if let Some(redirect) = &cmd.redirect_out {
+    if let Some(redirect) = own_redirect(cmd.redirect_out.as_ref()) {
         parts.push(format_redirect(
             if redirect.clobber { ">|" } else { ">" },
             redirect,
         ));
     }
-    if let Some(redirect) = &cmd.append {
+    if let Some(redirect) = own_redirect(cmd.append.as_ref()) {
         parts.push(format_redirect(">>", redirect));
     }
-    if let Some(redirect) = &cmd.redirect_err {
+    if let Some(redirect) = own_redirect(cmd.redirect_err.as_ref()) {
         parts.push(format_redirect("2>", redirect));
     }
-    if let Some(redirect) = &cmd.redirect_err_append {
+    if let Some(redirect) = own_redirect(cmd.redirect_err_append.as_ref()) {
         parts.push(err_append_source_text(cmd, redirect));
     }
     if let Some(here_string) = &cmd.here_string {
@@ -1010,10 +1023,8 @@ fn function_command_source_text(function_command: &crate::parser::FunctionComman
 }
 
 pub(in crate::executor) fn append_source_redirects(text: &mut String, cmd: &CommandNode) {
-    append_function_redirect(text, cmd.redirect_in.as_ref(), "<");
-    let combined = cmd
-        .redirect_out
-        .as_ref()
+    append_function_redirect(text, own_redirect(cmd.redirect_in.as_ref()), "<");
+    let combined = own_redirect(cmd.redirect_out.as_ref())
         .filter(|redirect| {
             matches!(
                 redirect.kind,
@@ -1022,7 +1033,7 @@ pub(in crate::executor) fn append_source_redirects(text: &mut String, cmd: &Comm
             )
         })
         .or_else(|| {
-            cmd.redirect_err_append.as_ref().filter(|redirect| {
+            own_redirect(cmd.redirect_err_append.as_ref()).filter(|redirect| {
                 matches!(
                     redirect.kind,
                     crate::parser::RedirectKind::CombinedOutput
@@ -1040,16 +1051,15 @@ pub(in crate::executor) fn append_source_redirects(text: &mut String, cmd: &Comm
     } else {
         append_function_redirect(
             text,
-            cmd.redirect_out.as_ref(),
-            cmd.redirect_out
-                .as_ref()
+            own_redirect(cmd.redirect_out.as_ref()),
+            own_redirect(cmd.redirect_out.as_ref())
                 .filter(|redirect| redirect.clobber)
                 .map(|_| ">|")
                 .unwrap_or(">"),
         );
-        append_function_redirect(text, cmd.append.as_ref(), ">>");
-        append_function_redirect(text, cmd.redirect_err.as_ref(), "2>");
-        if let Some(redirect) = &cmd.redirect_err_append {
+        append_function_redirect(text, own_redirect(cmd.append.as_ref()), ">>");
+        append_function_redirect(text, own_redirect(cmd.redirect_err.as_ref()), "2>");
+        if let Some(redirect) = own_redirect(cmd.redirect_err_append.as_ref()) {
             text.push(' ');
             text.push_str(&err_append_source_text(cmd, redirect));
         }

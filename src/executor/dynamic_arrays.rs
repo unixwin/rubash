@@ -278,6 +278,7 @@ impl Executor {
                 | "BASH_SUBSHELL"
                 | "BASH_ARGV0"
                 | "FUNCNAME"
+                | "BASH_SOURCE"
                 | "GROUPS"
                 | "LINENO"
                 | "BASH_COMMAND"
@@ -318,6 +319,23 @@ impl Executor {
             "FUNCNAME" if self.shell_state.function_depth > 0 => {
                 Some(self.funcname_stack().first().cloned().unwrap_or_default())
             }
+            // GNU variables.c:1892: BASH_SOURCE is an INIT_DYNAMIC_VAR
+            // whose get_self reads the live ARRAY object — a scalar read
+            // is element 0 of the same array element reads see. Rubash's
+            // env mirror cell is only refreshed where the stack is pushed
+            // for a `source` frame or a script-name bind, NOT on function
+            // entry/exit, so after any function call the scalar read kept
+            // returning the frame the cell last froze (rubash#1872:
+            // bats' DEBUG trap argument "$BASH_SOURCE" stuck at the
+            // loader's file for the whole run). Read the composed view,
+            // exactly like the element/storage arms below.
+            "BASH_SOURCE" => Some(
+                self.dynamic_stack_array_values("BASH_SOURCE")
+                    .unwrap_or_default()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default(),
+            ),
             "GROUPS" => self.group_value_at(0),
             "LINENO" => Some(
                 self.shell_state
@@ -514,6 +532,40 @@ impl Executor {
                 self.bash_argc_view()
             } else {
                 self.bash_argv_view()
+            };
+            let elements = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| format!("[{index}]={}", sh_double_quote_text(value)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Some(format!(
+                "declare -a{readonly}{exported} {name}=({elements})"
+            ));
+        }
+        // rubash#1872: BASH_SOURCE/BASH_LINENO are the same class —
+        // dynamic stack arrays (variables.c push_source / execute_
+        // function array_push) whose env mirror cells only refresh at
+        // source-frame push/pop, so a declare after any function call
+        // printed the frozen cell (a returned function's frame on top,
+        // the pushed call line missing). Render from the composed
+        // views element reads use, before the scalar gate below.
+        if matches!(name, "BASH_SOURCE" | "BASH_LINENO") {
+            let exported = if is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, name) {
+                "x"
+            } else {
+                ""
+            };
+            let readonly = if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name) {
+                "r"
+            } else {
+                ""
+            };
+            let values = if name == "BASH_SOURCE" {
+                self.dynamic_stack_array_values("BASH_SOURCE")
+                    .unwrap_or_default()
+            } else {
+                self.bash_lineno_view()
             };
             let elements = values
                 .iter()
