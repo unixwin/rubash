@@ -577,6 +577,33 @@ fn process_substitution_source(tokens: &[Token]) -> String {
     let mut pending_heredoc_delimiters: VecDeque<String> = VecDeque::new();
     let mut skip_next_semicolon = false;
 
+    // Whether a line-break separator at `from` is one the canonical
+    // reprint joins with the `;' spelling rather than a verbatim
+    // newline: the end of the body (a trailing separator separates
+    // nothing) and the closer/continuation keywords (esac / fi / done /
+    // then / else / elif / do / `}' / `)'). The #1024 newline fold below
+    // is owed only BETWEEN two commands; before a closer there is no
+    // second command, so those positions keep the `;' spelling the
+    // #373/#381/#390 adjudication pins (`case esac in ; esac`,
+    // `echo bye ;` — rubash#1859). `in` is deliberately absent from the
+    // list: `case x ; in` is a GNU syntax error (oracle-verified), so a
+    // break before `in` keeps the verbatim newline.
+    let next_keeps_semicolon_spelling = |from: usize| -> bool {
+        match tokens[from + 1..]
+            .iter()
+            .find(|t| t.kind != TokenKind::Semicolon)
+        {
+            None => true,
+            Some(t) => {
+                t.kind == TokenKind::Keyword
+                    && matches!(
+                        t.value.as_str(),
+                        "esac" | "fi" | "done" | "then" | "else" | "elif" | "do" | "}" | ")"
+                    )
+            }
+        }
+    };
+
     for (index, token) in tokens.iter().enumerate() {
         if skip_next_semicolon && token.kind == TokenKind::Semicolon {
             skip_next_semicolon = false;
@@ -601,7 +628,10 @@ fn process_substitution_source(tokens: &[Token]) -> String {
             && token.line_break
             && (source.is_empty() || source.ends_with(';') || source.ends_with('\n'))
         {
-            if !source.is_empty() && !source.ends_with('\n') {
+            if !source.is_empty()
+                && !source.ends_with('\n')
+                && !next_keeps_semicolon_spelling(index)
+            {
                 source.push('\n');
             }
             continue;
@@ -634,11 +664,16 @@ fn process_substitution_source(tokens: &[Token]) -> String {
         // of collapsing to line 1. An explicit `;` before the newline
         // (`a;\nb`) keeps the `;` spelling above — the canonical model
         // numbers that shape like GNU without a second separator.
+        // rubash#1859: "mid-body" means between two commands — a break
+        // before a closer/continuation keyword or at the body's end is
+        // not between commands and keeps the `;` spelling (see
+        // next_keeps_semicolon_spelling).
         if token.kind == TokenKind::Semicolon
             && token.line_break
             && !source.is_empty()
             && !source.ends_with(';')
             && !source.ends_with('\n')
+            && !next_keeps_semicolon_spelling(index)
         {
             source.push('\n');
             continue;
