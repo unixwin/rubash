@@ -117,6 +117,7 @@ impl Executor {
         command: &CommandNode,
         input: &str,
         streaming_stdin: bool,
+        live_stdin: bool,
     ) -> Result<(String, String, i32), ExecuteError> {
         // G-02: no process-cwd save/restore — the stage subshell is a clone
         // with its own session cwd field.
@@ -174,7 +175,11 @@ impl Executor {
         // live pipe instead of short-circuiting to an empty mirror
         // (read_io.rs:361-363); the subshell inherits the fd-0 file endpoint
         // through the cloned fd table.
-        if streaming_stdin {
+        // rubash#1873: the same absence when the element is stage 0 and
+        // its fd 0 is the shell's live fd 0 (live_stdin) — the body's
+        // readers pull the inherited handle / file endpoint the clone's
+        // fd table carries.
+        if streaming_stdin || live_stdin {
             subshell.shell_state.env_vars.remove(FUNCTION_STDIN);
             subshell.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
         }
@@ -325,6 +330,7 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
+        live_stdin: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         let Some(name) = command.words.first() else {
             return Ok(Some((String::new(), String::new(), 0)));
@@ -399,14 +405,25 @@ impl Executor {
         // (execute_cmd.c execute_function: the body inherits the element's
         // CMD_IGNORE_RETURN), so the subshell keeps the parent's
         // suppress_errexit like the compound-stage path above.
-        subshell
-            .shell_state
-            .env_vars
-            .insert(FUNCTION_STDIN.to_string(), input.to_string());
-        subshell
-            .shell_state
-            .env_vars
-            .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        // rubash#1873: when the element is stage 0 and its fd 0 is the
+        // shell's live fd 0 (live_stdin), the mirror stays ABSENT — the
+        // body's readers pull the inherited handle / file endpoint the
+        // clone's fd table carries (the #761 streaming treatment). Any
+        // ambient mirror the clone inherited is removed with it: in
+        // this state the live descriptor, not the buffer, is fd 0.
+        if live_stdin {
+            subshell.shell_state.env_vars.remove(FUNCTION_STDIN);
+            subshell.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
+        } else {
+            subshell
+                .shell_state
+                .env_vars
+                .insert(FUNCTION_STDIN.to_string(), input.to_string());
+            subshell
+                .shell_state
+                .env_vars
+                .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        }
 
         // rubash#1605: same final-member rule as the compound stage
         // above — a final function element whose fd 1 IS the shell's own
@@ -579,6 +596,7 @@ impl Executor {
         command: &CommandNode,
         input: &str,
         streaming_stdin: bool,
+        live_stdin: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         let Some(name) = command.words.first() else {
             return Ok(None);
@@ -691,7 +709,12 @@ impl Executor {
         // FUNCTION_STDIN ABSENT so `read` does not short-circuit to the
         // buffered mirror and report EOF (read_io.rs:361-363). The subshell
         // inherits the fd-0 file endpoint through the cloned fd table.
-        if !streaming_stdin {
+        // rubash#1873: the same absence when the element is stage 0 and
+        // its fd 0 is the shell's live fd 0 (live_stdin).
+        if streaming_stdin || live_stdin {
+            subshell.shell_state.env_vars.remove(FUNCTION_STDIN);
+            subshell.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
+        } else {
             subshell
                 .shell_state
                 .env_vars

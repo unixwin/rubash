@@ -1271,23 +1271,50 @@ impl Executor {
                 .unwrap_or(command);
             let mut stage0_stdin_base = None;
             let mut stage0_stdin_inherit = false;
+            let mut stage0_stdin_live = false;
             if stage_index == 0 {
-                let (stage_input, base) = self.initial_pipeline_input(stage);
-                // GNU execute_pipeline forks the child with the shell's own
-                // fd 0 — with no fd-0 binding on the stage and fd 0 being the
-                // inherited process stdin, the child reads that handle
-                // directly instead of an empty payload pipe.
-                stage0_stdin_inherit = stage_input.is_empty()
-                    && self.stdin_string_for_command(stage).is_none()
-                    && match self.fd_table.entries.get(&0) {
+                if self.pipeline_stage0_stdin_live(stage) {
+                    // rubash#1873: element 0's fd 0 IS the shell's current
+                    // fd 0 (see pipeline_stage0_stdin_live) — there is no
+                    // payload to compute, and computing one would drain a
+                    // file endpoint through the shared-offset dup. Flush
+                    // the pending comsub writeback exactly as
+                    // initial_pipeline_input would, then hand the stage
+                    // machinery the live classification; the external
+                    // arm's inherit flag keeps its baseline meaning (the
+                    // process-stdin handle only — a file endpoint's child
+                    // is served by the spawn machinery's own fd-0
+                    // resolution).
+                    self.apply_comsub_stdin_writeback();
+                    stage0_stdin_live = true;
+                    stage0_stdin_inherit = match self.fd_table.entries.get(&0) {
                         Some(entry) => {
                             !entry.closed
                                 && matches!(entry.read, Some(FdReadEndpoint::InheritedProcessStdin))
                         }
                         None => true,
                     };
-                input = stage_input;
-                stage0_stdin_base = base;
+                } else {
+                    let (stage_input, base) = self.initial_pipeline_input(stage);
+                    // GNU execute_pipeline forks the child with the shell's own
+                    // fd 0 — with no fd-0 binding on the stage and fd 0 being the
+                    // inherited process stdin, the child reads that handle
+                    // directly instead of an empty payload pipe.
+                    stage0_stdin_inherit = stage_input.is_empty()
+                        && self.stdin_string_for_command(stage).is_none()
+                        && match self.fd_table.entries.get(&0) {
+                            Some(entry) => {
+                                !entry.closed
+                                    && matches!(
+                                        entry.read,
+                                        Some(FdReadEndpoint::InheritedProcessStdin)
+                                    )
+                            }
+                            None => true,
+                        };
+                    input = stage_input;
+                    stage0_stdin_base = base;
+                }
             }
             self.set_current_command(stage);
             let last_stage = stage_index + 1 == commands.len();
@@ -1373,7 +1400,12 @@ impl Executor {
                     if last_stage && executor.lastpipe_enabled() {
                         executor.execute_lastpipe_stage(stage, &input).map(Some)
                     } else {
-                        executor.execute_pipeline_stage(stage, &input, stage0_stdin_inherit)
+                        executor.execute_pipeline_stage(
+                            stage,
+                            &input,
+                            stage0_stdin_inherit,
+                            stage0_stdin_live,
+                        )
                     }
                 })?
             } else if last_stage && self.lastpipe_enabled() {
@@ -1386,13 +1418,18 @@ impl Executor {
                 // element, so `! { false; echo A $?; } | cat` reaches the
                 // echo while top-level `{ false; echo x; } | cat` still
                 // dies on `false` under -e.
-                self.execute_pipeline_stage(stage, &input, stage0_stdin_inherit)?
+                self.execute_pipeline_stage(stage, &input, stage0_stdin_inherit, stage0_stdin_live)?
             } else {
                 // Non-final simple pipeline stages never trigger errexit
                 // (bash manual: "any command in a pipeline but the
                 // last").
                 self.with_errexit_suppressed(|executor| {
-                    executor.execute_pipeline_stage(stage, &input, stage0_stdin_inherit)
+                    executor.execute_pipeline_stage(
+                        stage,
+                        &input,
+                        stage0_stdin_inherit,
+                        stage0_stdin_live,
+                    )
                 })?
             }) else {
                 super::shell_options::end_capture_timing();
@@ -1898,7 +1935,7 @@ impl Executor {
         let _ = self.apply_shell_assignment_command("read", name, value.to_string());
         self.exit_code = status;
         let result = self
-            .execute_pipeline_stage(command, "", false)
+            .execute_pipeline_stage(command, "", false, false)
             .ok()
             .flatten();
         self.exit_code = saved_status;
@@ -2346,20 +2383,43 @@ impl Executor {
         let stream_handle = producer_writer
             .as_ref()
             .map(|writer| writer.as_raw_fd() as crate::fd::HANDLE);
-        let (stage0_input, stage0_stdin_base) = self.initial_pipeline_input(commands[0]);
-        let stage0_stdin_inherit = stage0_input.is_empty()
-            && self.stdin_string_for_command(commands[0]).is_none()
-            && match self.fd_table.entries.get(&0) {
+        // rubash#1873: same stage-0 classification as the sequential
+        // driver — a producer whose fd 0 is the shell's live fd 0 gets
+        // no payload (computing one would drain a file endpoint).
+        let stage0_stdin_live = self.pipeline_stage0_stdin_live(commands[0]);
+        let (stage0_input, stage0_stdin_base) = if stage0_stdin_live {
+            self.apply_comsub_stdin_writeback();
+            (String::new(), None)
+        } else {
+            self.initial_pipeline_input(commands[0])
+        };
+        let stage0_stdin_inherit = if stage0_stdin_live {
+            match self.fd_table.entries.get(&0) {
                 Some(entry) => {
                     !entry.closed
                         && matches!(entry.read, Some(FdReadEndpoint::InheritedProcessStdin))
                 }
                 None => true,
-            };
+            }
+        } else {
+            stage0_input.is_empty()
+                && self.stdin_string_for_command(commands[0]).is_none()
+                && match self.fd_table.entries.get(&0) {
+                    Some(entry) => {
+                        !entry.closed
+                            && matches!(entry.read, Some(FdReadEndpoint::InheritedProcessStdin))
+                    }
+                    None => true,
+                }
+        };
         let saved_pipeline_stream = self.pipeline_stdout_stream;
         self.pipeline_stdout_stream = stream_handle;
-        let producer_result =
-            self.execute_pipeline_stage(commands[0], &stage0_input, stage0_stdin_inherit);
+        let producer_result = self.execute_pipeline_stage(
+            commands[0],
+            &stage0_input,
+            stage0_stdin_inherit,
+            stage0_stdin_live,
+        );
         self.pipeline_stdout_stream = saved_pipeline_stream;
 
         let (mut producer_status, producer_out, producer_err, mut producer_error) =
@@ -3227,7 +3287,7 @@ impl Executor {
         let saved_stdin_stream = self.pipeline_stdin_stream;
         self.pipeline_stdin_stream = Some(tail_handle);
         self.set_current_command(tail);
-        let tail_result = self.execute_pipeline_stage(tail, "", false);
+        let tail_result = self.execute_pipeline_stage(tail, "", false, false);
         self.pipeline_stdin_stream = saved_stdin_stream;
         // Restoring fd 0 drops the File endpoint's read handle (FileFd::drop
         // -> close_handle): the producers' next write is a broken pipe.
@@ -3928,6 +3988,7 @@ impl Executor {
         command: &CommandNode,
         input: &str,
         stdin_inherit: bool,
+        live_stdin: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         // rubash#1333/niubash#345: SIGPIPE is SIG_DFL for the shell
         // process (GNU parity), but a pipeline member executed in
@@ -4053,8 +4114,12 @@ impl Executor {
         // empty one) short-circuits `read` back to the buffered channel and
         // it would see EOF instead of the producer's stream
         // (read_io.rs:361-363).
+        // rubash#1873: the same absence for a stage-0 element whose fd 0
+        // is the shell's live fd 0 (live_stdin, classified by the
+        // drivers): its readers must reach the fd-table transports, not
+        // an empty payload mirror.
         let streaming_stdin = self.pipeline_stdin_stream.is_some();
-        if streaming_stdin {
+        if streaming_stdin || live_stdin {
             self.shell_state.env_vars.remove(FUNCTION_STDIN);
             self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
         } else {
@@ -4076,7 +4141,7 @@ impl Executor {
                 .env_vars
                 .get(FUNCTION_STDIN_OFFSET)
                 .cloned();
-            if !streaming_stdin {
+            if !streaming_stdin && !live_stdin {
                 self.shell_state
                     .env_vars
                     .insert(FUNCTION_STDIN.to_string(), input.to_string());
@@ -4098,6 +4163,7 @@ impl Executor {
                         input,
                         stdin_inherit,
                         streaming_stdin,
+                        live_stdin,
                     );
                     match self.finish_process_substitutions(process_substitutions) {
                         Err(error) => Err(error),
@@ -4107,7 +4173,13 @@ impl Executor {
                 Err(error) => Err(error),
             }
         } else {
-            self.execute_pipeline_stage_inner(command, input, stdin_inherit, streaming_stdin)
+            self.execute_pipeline_stage_inner(
+                command,
+                input,
+                stdin_inherit,
+                streaming_stdin,
+                live_stdin,
+            )
         };
         // Restore the parent's job table (rubash#1349 swap above).
         if let Some(saved) = saved_job_table {
@@ -4201,6 +4273,7 @@ impl Executor {
         input: &str,
         stdin_inherit: bool,
         streaming_stdin: bool,
+        live_stdin: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         // rubash#1540: entry snapshot for the post-scan adjudication
         // below — the no-fields scan expands every word with the full
@@ -4212,7 +4285,7 @@ impl Executor {
         if let Some(time_command) = &command.time_command {
             let started = time_command_started();
             let Some((output, stderr, status)) =
-                self.execute_pipeline_stage(&time_command.command, input, false)?
+                self.execute_pipeline_stage(&time_command.command, input, false, live_stdin)?
             else {
                 return Ok(None);
             };
@@ -4234,7 +4307,7 @@ impl Executor {
 
         if command_is_compound_pipeline_stage(command) {
             return self
-                .execute_compound_pipeline_stage(command, input, streaming_stdin)
+                .execute_compound_pipeline_stage(command, input, streaming_stdin, live_stdin)
                 .map(Some);
         }
 
@@ -4247,7 +4320,7 @@ impl Executor {
         // runs the mixed-statement arm.
         if mixed_assignment_statement_admission(command) {
             return self
-                .execute_compound_pipeline_stage(command, input, streaming_stdin)
+                .execute_compound_pipeline_stage(command, input, streaming_stdin, live_stdin)
                 .map(Some);
         }
 
@@ -4336,7 +4409,7 @@ impl Executor {
         let command = &command;
         let Some(name) = command.words.first().map(String::as_str) else {
             return self
-                .execute_compound_pipeline_stage(command, input, streaming_stdin)
+                .execute_compound_pipeline_stage(command, input, streaming_stdin, live_stdin)
                 .map(Some);
         };
 
@@ -4570,7 +4643,7 @@ impl Executor {
             let function_shadows = !(self.posix_mode_enabled() && is_posix_special_builtin(word))
                 && self.function_name_for_command_word(word).is_some();
             if function_shadows {
-                return self.execute_function_pipeline_stage(command, input);
+                return self.execute_function_pipeline_stage(command, input, live_stdin);
             }
         }
 
@@ -4691,7 +4764,12 @@ impl Executor {
                 // command, so DEBUG/RETURN/ERR installs have nothing left to
                 // fire at, and resets are no-ops on the reset table.
                 if trap_stage_installs_exit(command) {
-                    return self.execute_builtin_pipeline_stage(command, input, streaming_stdin);
+                    return self.execute_builtin_pipeline_stage(
+                        command,
+                        input,
+                        streaming_stdin,
+                        live_stdin,
+                    );
                 }
                 let args = command.words[1..]
                     .iter()
@@ -5129,12 +5207,17 @@ impl Executor {
                 }
             }
             _ => {
-                if let Some(output) = self.execute_function_pipeline_stage(command, input)? {
+                if let Some(output) =
+                    self.execute_function_pipeline_stage(command, input, live_stdin)?
+                {
                     Ok(Some(output))
                 } else {
-                    if let Some(output) =
-                        self.execute_builtin_pipeline_stage(command, input, streaming_stdin)?
-                    {
+                    if let Some(output) = self.execute_builtin_pipeline_stage(
+                        command,
+                        input,
+                        streaming_stdin,
+                        live_stdin,
+                    )? {
                         Ok(Some(output))
                     } else {
                         self.execute_external_pipeline_stage(command, input, stdin_inherit)
@@ -5290,6 +5373,64 @@ impl Executor {
         // `set -m; shopt -s lastpipe` stays inert (rubash#1476).
         crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "lastpipe")
             && !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor")
+    }
+
+    /// rubash#1873: whether pipeline element 0's stdin is the shell's
+    /// CURRENT fd 0 rather than a payload the stage machinery computes.
+    /// GNU execute_pipeline (execute_cmd.c:2620) starts prev at pipe_in
+    /// — NO_PIPE unless the enclosing context itself piped into this
+    /// pipeline — and do_piping (execute_cmd.c:6375) replaces fd 0 only
+    /// when pipe_in != NO_PIPE, so the first element is forked with the
+    /// shell's own fd 0, whatever it designates. The element qualifies
+    /// when it carries no fd-0 binding of its own (no `<`/`<<`/`<<<`/
+    /// `<&` winner and no legacy redirect/heredoc fields) and fd 0 is a
+    /// live descriptor: the inherited process stdin, or a file
+    /// description an `exec < file` / compound bind installed. For such
+    /// an element there is NO payload: the string channel declines the
+    /// inherited handle by design (stdin_string_for_command serves
+    /// redirects, virtual endpoints, file endpoints and the
+    /// FUNCTION_STDIN mirror — never the process stdin), and slurping a
+    /// file endpoint through open_fd_read_endpoint's shared-offset dup
+    /// would drain the very descriptor the element must read. The stage
+    /// machinery therefore keeps the FUNCTION_STDIN mirror ABSENT (the
+    /// #761 streaming treatment) and the element's readers use the
+    /// fd-table transports, whose offsets are the descriptor's own — a
+    /// stage that reads one line leaves the next for the shell, exactly
+    /// GNU's shared open file description. An ambient FUNCTION_STDIN
+    /// mirror still wins over the inherited endpoint (in that state the
+    /// mirror IS fd 0 and initial_pipeline_input serves its remainder);
+    /// a file endpoint wins over the mirror (an `exec` rebind shadows
+    /// the ambient buffer, #1102/#1103).
+    fn pipeline_stage0_stdin_live(&self, command: &CommandNode) -> bool {
+        if self.function_stdin_is_command_source(command) {
+            return false;
+        }
+        if crate::executor::shell_options::fd0_stdin_redirect_winner(command).is_some()
+            || command.redirect_in.is_some()
+            || command.heredoc.is_some()
+            || command.heredoc_body.is_some()
+            || command.here_string.is_some()
+            || command.here_string_carrier.is_some()
+            || command
+                .heredoc_redirects
+                .iter()
+                .any(|redirect| redirect.fd.is_none() || redirect.fd == Some(0))
+        {
+            return false;
+        }
+        match self.fd_table.entries.get(&0) {
+            None => !self.shell_state.env_vars.contains_key(FUNCTION_STDIN),
+            Some(entry) => {
+                !entry.closed
+                    && match entry.read {
+                        Some(FdReadEndpoint::InheritedProcessStdin) => {
+                            !self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
+                        }
+                        Some(FdReadEndpoint::File(_)) => true,
+                        _ => false,
+                    }
+            }
+        }
     }
 
     /// Computes the first pipeline element's fd-0 payload. GNU gives every
