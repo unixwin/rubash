@@ -453,8 +453,20 @@ impl Executor {
         // A -d/-t value this emulation cannot evaluate exactly.
         let mut unevaluated_date: Option<String> = None;
         let mut info_request = false;
-        let mut ref_failed = false;
+        // The first -r failure's diagnostic text, held back instead of
+        // printed on sight (rubash#1846): coreutils touch evaluates
+        // the reference file before the date grammar, so when both
+        // fail the reference line is the only one GNU prints, and a
+        // delegated invocation lets the real binary report its own.
+        let mut ref_error: Option<String> = None;
         let mut operands: Vec<String> = Vec::new();
+        // coreutils diagnostics are the emulated command's own stderr
+        // (rubash#1846): buffered and routed through the command's
+        // redirections via write_buffered_builtin_output, never
+        // straight to the terminal with eprintln!. A getopt failure
+        // is terminal in GNU (message + Try line, nothing touched),
+        // so the option-error arms flush and return at once.
+        let mut stderr: Vec<u8> = Vec::new();
         let mut no_more_options = false;
         let mut index = 1;
         while let Some(word) = cmd.words.get(index) {
@@ -489,7 +501,7 @@ impl Executor {
                                 &value,
                                 &mut stamp,
                                 &mut unevaluated_date,
-                                &mut ref_failed,
+                                &mut ref_error,
                             ),
                             None => failed = true,
                         }
@@ -509,8 +521,13 @@ impl Executor {
                     "no-create" => create_missing = false,
                     "version" | "help" => info_request = true,
                     _ => {
-                        failed = true;
-                        eprintln!("touch: unrecognized option '--{}'", name);
+                        // glibc getopt_long reports the whole word,
+                        // an attached `=value` included.
+                        writeln!(stderr, "touch: unrecognized option '--{}'", long)?;
+                        writeln!(stderr, "Try 'touch --help' for more information.")?;
+                        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                        self.exit_code = 1;
+                        return Ok(true);
                     }
                 }
                 continue;
@@ -542,16 +559,18 @@ impl Executor {
                                 &value,
                                 &mut stamp,
                                 &mut unevaluated_date,
-                                &mut ref_failed,
+                                &mut ref_error,
                             ),
                             None => failed = true,
                         }
                         break;
                     }
                     bad => {
-                        failed = true;
-                        eprintln!("touch: invalid option -- '{}'", bad);
-                        break;
+                        writeln!(stderr, "touch: invalid option -- '{}'", bad)?;
+                        writeln!(stderr, "Try 'touch --help' for more information.")?;
+                        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                        self.exit_code = 1;
+                        return Ok(true);
                     }
                 }
             }
@@ -563,14 +582,17 @@ impl Executor {
         if (info_request || unevaluated_date.is_some()) && !failed && real_touch.is_some() {
             return Ok(false);
         }
-        if let Some(value) = &unevaluated_date {
-            eprintln!("touch: invalid date format '{}'", value);
+        // GNU evaluates the reference file before the date grammar:
+        // a failed -r is the only diagnostic when both are wrong.
+        if let Some(line) = &ref_error {
+            writeln!(stderr, "{line}")?;
             failed = true;
-        }
-        if ref_failed {
+        } else if let Some(value) = &unevaluated_date {
+            writeln!(stderr, "touch: invalid date format '{}'", value)?;
             failed = true;
         }
         if failed {
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             self.exit_code = 1;
             return Ok(true);
         }
@@ -608,14 +630,16 @@ impl Executor {
                 Err(error) => Err(error),
             };
             if let Err(error) = outcome {
-                eprintln!(
+                writeln!(
+                    stderr,
                     "touch: cannot touch '{}': {}",
                     expanded,
                     crate::posix_errors::message(&error)
-                );
+                )?;
                 failed = true;
             }
         }
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         self.exit_code = if failed { 1 } else { 0 };
         Ok(true)
     }
@@ -629,7 +653,7 @@ impl Executor {
         value: &str,
         stamp: &mut Option<(SystemTime, SystemTime)>,
         unevaluated_date: &mut Option<String>,
-        ref_failed: &mut bool,
+        ref_error: &mut Option<String>,
     ) {
         match flag {
             'r' => {
@@ -642,12 +666,11 @@ impl Executor {
                         *stamp = Some((atime, mtime));
                     }
                     Err(error) => {
-                        eprintln!(
+                        *ref_error = Some(format!(
                             "touch: failed to get attributes of '{}': {}",
                             value,
                             crate::posix_errors::message(&error)
-                        );
-                        *ref_failed = true;
+                        ));
                     }
                 }
             }
@@ -1355,8 +1378,15 @@ impl Executor {
         let mut remove_empty_dir = false;
         let mut verbose = false;
         let mut no_more_options = false;
-        let mut usage_error = false;
         let mut operands: Vec<&str> = Vec::new();
+        // coreutils diagnostics are the emulated command's own stderr
+        // (rubash#1846): they go through the command's redirections
+        // via write_buffered_builtin_output, never straight to the
+        // terminal with eprintln!. GNU's getopt failure is terminal:
+        // the first bad option prints its line plus the Try line and
+        // the invocation ends before any operand is touched, so the
+        // error arms below flush this buffer and return at once.
+        let mut stderr: Vec<u8> = Vec::new();
 
         for word in cmd.words.iter().skip(1) {
             // argv as-is — no second expand_word pass (issue #555, see
@@ -1381,9 +1411,14 @@ impl Executor {
                     "dir" => remove_empty_dir = true,
                     "verbose" => verbose = true,
                     "interactive" | "one-file-system" | "preserve-root" | "no-preserve-root" => {}
-                    other => {
-                        eprintln!("rm: unrecognized option '--{other}'");
-                        usage_error = true;
+                    _ => {
+                        // glibc getopt_long reports the whole word,
+                        // an attached `=value` included.
+                        writeln!(stderr, "rm: unrecognized option '--{long}'")?;
+                        writeln!(stderr, "Try 'rm --help' for more information.")?;
+                        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                        self.exit_code = 1;
+                        return Ok(true);
                     }
                 }
                 continue;
@@ -1398,28 +1433,26 @@ impl Executor {
                     // is accepted so -i/-I never deletes a literal `-i`.
                     'i' | 'I' => {}
                     other => {
-                        eprintln!("rm: invalid option -- '{other}'");
-                        usage_error = true;
+                        writeln!(stderr, "rm: invalid option -- '{other}'")?;
+                        writeln!(stderr, "Try 'rm --help' for more information.")?;
+                        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                        self.exit_code = 1;
+                        return Ok(true);
                     }
                 }
             }
         }
 
-        if usage_error {
-            eprintln!("Try 'rm --help' for more information.");
-            self.exit_code = 1;
-            return Ok(true);
-        }
         if operands.is_empty() {
-            eprintln!("rm: missing operand");
-            eprintln!("Try 'rm --help' for more information.");
+            writeln!(stderr, "rm: missing operand")?;
+            writeln!(stderr, "Try 'rm --help' for more information.")?;
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             self.exit_code = 1;
             return Ok(true);
         }
 
         let mut status = 0;
         let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
         for expanded in operands {
             let target =
                 self.session_path(shell_path_to_windows(expanded, &self.shell_state.env_vars));
