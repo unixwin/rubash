@@ -199,6 +199,27 @@ pub fn duplicate_handle_inheritable(h: HANDLE) -> std::io::Result<HANDLE> {
     Ok(n)
 }
 
+/// rubash#1838: duplicate an inherited descriptor for adoption into an
+/// executor's fd table. The table's FileFd drop closes the handle it
+/// holds, so the adopted handle must be the executor's own duplicate —
+/// never the host process's original descriptor: an Executor embedded
+/// in a host process (the test harness, niubash) does not own the
+/// host's descriptors, and closing one out from under a host-side
+/// owner aborts the process on std's IO-safety check when that owner
+/// drops. The duplicate names the same open file description (shared
+/// offset and status flags), so shell-visible semantics are unchanged.
+/// F_DUPFD_CLOEXEC matches this module's other executor-owned
+/// descriptors — the spawn path arranges child layouts explicitly, so
+/// table handles are never inherited raw.
+pub fn dup_adopted_fd(fd: u32) -> Option<HANDLE> {
+    let n = unsafe { libc::fcntl(fd as HANDLE, libc::F_DUPFD_CLOEXEC, 0) };
+    if n < 0 {
+        None
+    } else {
+        Some(n)
+    }
+}
+
 fn set_inheritable(fd: HANDLE, on: bool) -> std::io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {

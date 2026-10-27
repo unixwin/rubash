@@ -364,19 +364,24 @@ impl FdTable {
     /// (`fcntl (redirector, F_GETFD, 0) != -1`, redir.c:1160), so an
     /// inherited descriptor is simply usable (`rubash -c 'echo x >&3'
     /// 3>file`). The virtual table must therefore be seeded from kernel
-    /// state: each inherited fd becomes a File endpoint over its own
-    /// raw descriptor, the read/write arms following the F_GETFL access
-    /// mode, both arms sharing ONE FileFd for O_RDWR (a single open
-    /// file description — the offset is shared, as dup requires).
+    /// state: each inherited fd becomes a File endpoint over the
+    /// executor's own duplicate of the descriptor (see
+    /// `crate::fd::dup_adopted_fd`), the read/write arms following the
+    /// F_GETFL access mode, both arms sharing ONE FileFd for O_RDWR (a
+    /// single open file description — the offset is shared, as dup
+    /// requires).
     ///
     /// Slots already claimed (the `__RUBASH_FD_*` respawn restore in
     /// init.rs runs first) keep their restored endpoints. A snapshotted
     /// fd is re-validated before adoption: a transient descriptor that
     /// has since closed is skipped, and the live direction wins over
-    /// the snapshot's. The FileFd drop closes the raw descriptor when
-    /// the slot's last reference goes away — exactly the `exec N>&-`
-    /// contract (GNU closes the kernel descriptor, and later references
-    /// report Bad file descriptor).
+    /// the snapshot's. The FileFd drop closes the duplicate when the
+    /// slot's last reference goes away — exactly the `exec N>&-`
+    /// contract from the shell's point of view (GNU closes the kernel
+    /// descriptor, and later references report Bad file descriptor),
+    /// while the host process's original descriptor is never closed
+    /// by the executor (rubash#1838: an embedded Executor does not own
+    /// the host's descriptors).
     ///
     /// On Windows the snapshot is always empty (handle inheritance is
     /// opt-in per handle; see the annotated stubs in
@@ -389,8 +394,11 @@ impl FdTable {
             let Some((readable, writable)) = crate::fd::fd_directions(fd) else {
                 continue;
             };
+            let Some(handle) = crate::fd::dup_adopted_fd(fd) else {
+                continue;
+            };
             let file = Rc::new(FileFd {
-                handle: fd as crate::fd::HANDLE,
+                handle,
                 path: crate::fd::inherited_fd_path(fd),
             });
             if readable {

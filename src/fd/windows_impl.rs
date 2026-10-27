@@ -1157,6 +1157,14 @@ pub fn inherited_open_fds() -> Vec<(u32, bool, bool)> {
     Vec::new()
 }
 
+/// rubash#1838: Windows never snapshots inherited descriptors (handle
+/// inheritance is opt-in per handle, so `inherited_open_fds` is always
+/// empty), hence there is nothing to adopt. Returning None also keeps
+/// the adoption site from ever taking ownership of a raw host handle.
+pub fn dup_adopted_fd(_fd: u32) -> Option<HANDLE> {
+    None
+}
+
 pub fn inherited_fd_path(fd: u32) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/dev/fd/{fd}"))
 }
