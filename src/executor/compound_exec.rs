@@ -1337,6 +1337,17 @@ impl Executor {
     /// returned `consumed` map as false so it stays in the child's `-c`
     /// source, where the child re-runs it and reports the same diagnostic
     /// GNU's subshell would.
+    ///
+    /// rubash#1862: one class is NOT resolved here even when its open
+    /// would succeed — FIFO targets. GNU's async child applies the
+    /// redirections on its own descriptors after the fork
+    /// (execute_cmd.c:1761-1763 execute_in_subshell), so a FIFO open's
+    /// rendezvous wait happens in the child; resolving it in this
+    /// parent walk deadlocks the shell's own execution thread when the
+    /// peer is a command that has not run yet (`( ... ) > fifo &` with
+    /// the reader still to come). A FIFO redirect therefore defers its
+    /// whole fd (background_stdio_defer_fifo_fds), and the child
+    /// replays that fd's redirect subsequence in order.
     fn resolve_background_stdio(
         &mut self,
         command: &CommandNode,
@@ -1354,13 +1365,15 @@ impl Executor {
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor");
         let subshell_environment = self.shell_state.subshell_depth.get() > 0
             || self.shell_state.in_command_substitution.get();
-        let mut fd0 =
+        let mut stdio: [BackgroundStdio; 3] = [
             if (subshell_environment || !job_control) && !self.shell_state.stdin_redir.get() {
                 BackgroundStdio::Null
             } else {
                 self.inherited_async_stdin()
-            };
-        let mut fd1 = BackgroundStdio::Inherit;
+            },
+            BackgroundStdio::Inherit,
+            BackgroundStdio::Inherit,
+        ];
         // rubash#169: GNU's substitution child holds a real capture pipe as
         // fd 1 (subst.c:7143 command_substitute), and an async child forked
         // inside (`{ ...; } & wait` — nvm `nvm ls`) inherits THAT pipe, so
@@ -1376,24 +1389,25 @@ impl Executor {
         // forked GNU child would apply on top of the inherited pipe.
         let mut captured_pipe_writer = false;
         if let Some(write) = crate::executor::shell_options::background_capture_write_end() {
-            fd1 = BackgroundStdio::File(write);
+            stdio[1] = BackgroundStdio::File(write);
             // Registration is conservative: a later fd-1 redirect may drop
             // the pipe for THIS child, but reaping it then only drains an
             // empty pipe — never another child's bytes (the drain fires when
             // the whole writer set is reaped).
             captured_pipe_writer = true;
         }
-        let mut fd2 = BackgroundStdio::Inherit;
+        // rubash#1862 bookkeeping for the FIFO deferral further down:
+        // the stdio the child spawns with before any of the command's
+        // own redirects (base_stdio), plus per-slot stacks of the
+        // redirects this walk has consumed — (redirect index, slot
+        // value after the write, dup source fd, staged-heredoc flag) —
+        // so a deferral can roll each slot back to exactly the value
+        // its surviving writes imply.
+        let base_stdio = stdio.clone();
+        let mut slot_writes: [Vec<(usize, BackgroundStdio, Option<u32>, bool)>; 3] =
+            [Vec::new(), Vec::new(), Vec::new()];
+        let mut deferred_fd = [false; 3];
         let mut consumed = vec![false; command.redirects.len()];
-
-        let target_of =
-            |fd: u32, fd0: &BackgroundStdio, fd1: &BackgroundStdio, fd2: &BackgroundStdio| match fd
-            {
-                0 => fd0.clone(),
-                1 => fd1.clone(),
-                2 => fd2.clone(),
-                _ => BackgroundStdio::Inherit,
-            };
 
         for (index, redirect) in command.redirects.iter().enumerate() {
             match redirect.kind {
@@ -1408,14 +1422,18 @@ impl Executor {
                     if fd > 2 || redirect.fd_var.is_some() {
                         continue;
                     }
+                    // rubash#1862: a heredoc on an already-deferred fd
+                    // stays in the child's source with the rest of that
+                    // fd's redirect subsequence.
+                    if deferred_fd[fd as usize] {
+                        continue;
+                    }
                     match self.materialize_async_stdin_body(command, index) {
                         Some(file) => {
+                            let value = BackgroundStdio::File(file);
+                            stdio[fd as usize] = value.clone();
+                            slot_writes[fd as usize].push((index, value, None, true));
                             consumed[index] = true;
-                            match fd {
-                                0 => fd0 = BackgroundStdio::File(file),
-                                1 => fd1 = BackgroundStdio::File(file),
-                                _ => fd2 = BackgroundStdio::File(file),
-                            }
                         }
                         None => continue,
                     }
@@ -1442,12 +1460,34 @@ impl Executor {
             if fd > 2 {
                 continue;
             }
+            // rubash#1862: once an fd is deferred to the child (a FIFO
+            // redirect below), every later redirect on that fd stays
+            // unconsumed as well — the child replays the fd's whole
+            // redirect subsequence in order on top of the spawn stdio,
+            // which is the only ordering that stays GNU-faithful.
+            if deferred_fd[fd as usize] {
+                continue;
+            }
+            let mut dup_source: Option<u32> = None;
             let resolved = match redirect.kind {
                 RedirectKind::Input => {
                     let target = self.expand_redirect_target(redirect);
                     if is_closed_redirect_target(&target) {
                         BackgroundStdio::Null
                     } else if redirect_target_fd(&target).is_some() {
+                        continue;
+                    } else if self.background_redirect_target_is_fifo(&target)
+                        && Self::background_stdio_defer_fifo_fds(
+                            &mut stdio,
+                            &base_stdio,
+                            &mut slot_writes,
+                            &mut consumed,
+                            &mut deferred_fd,
+                            &[fd as usize],
+                        )
+                    {
+                        // rubash#1862: the FIFO open belongs to the
+                        // child; this redirect stays in its source.
                         continue;
                     } else {
                         match self.open_input_redirect(&target) {
@@ -1468,7 +1508,15 @@ impl Executor {
                         if source_fd > 2 {
                             continue;
                         }
-                        target_of(source_fd, &fd0, &fd1, &fd2)
+                        // rubash#1862: a dup OF a deferred fd is
+                        // replayed by the child too — this walk's slot
+                        // for the source still holds the spawn value,
+                        // not the FIFO the child will open onto it.
+                        if deferred_fd[source_fd as usize] {
+                            continue;
+                        }
+                        dup_source = Some(source_fd);
+                        stdio[source_fd as usize].clone()
                     } else {
                         continue;
                     }
@@ -1482,6 +1530,19 @@ impl Executor {
                         continue;
                     } else if is_null_device(&target) {
                         BackgroundStdio::Null
+                    } else if self.background_redirect_target_is_fifo(&target)
+                        && Self::background_stdio_defer_fifo_fds(
+                            &mut stdio,
+                            &base_stdio,
+                            &mut slot_writes,
+                            &mut consumed,
+                            &mut deferred_fd,
+                            &[fd as usize],
+                        )
+                    {
+                        // rubash#1862: the FIFO open belongs to the
+                        // child; this redirect stays in its source.
+                        continue;
                     } else {
                         match self.create_redirect_output(&target, redirect.clobber) {
                             Ok(file) => BackgroundStdio::File(file),
@@ -1497,6 +1558,19 @@ impl Executor {
                         continue;
                     } else if is_null_device(&target) {
                         BackgroundStdio::Null
+                    } else if self.background_redirect_target_is_fifo(&target)
+                        && Self::background_stdio_defer_fifo_fds(
+                            &mut stdio,
+                            &base_stdio,
+                            &mut slot_writes,
+                            &mut consumed,
+                            &mut deferred_fd,
+                            &[fd as usize],
+                        )
+                    {
+                        // rubash#1862: the FIFO open belongs to the
+                        // child; this redirect stays in its source.
+                        continue;
                     } else {
                         match open_redirect_append(&self.session_path(shell_path_to_windows(
                             &target,
@@ -1511,6 +1585,21 @@ impl Executor {
                     let target = self.expand_redirect_target(redirect);
                     let path = self
                         .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    // rubash#1862: keep the parent's hands off FIFO
+                    // opens uniformly, even though `<>` itself would
+                    // not block — the open belongs to the child.
+                    if super::shell_options::redirect_path_is_fifo(&path)
+                        && Self::background_stdio_defer_fifo_fds(
+                            &mut stdio,
+                            &base_stdio,
+                            &mut slot_writes,
+                            &mut consumed,
+                            &mut deferred_fd,
+                            &[fd as usize],
+                        )
+                    {
+                        continue;
+                    }
                     // niubash#519: CON rejects a read+write handle; the
                     // stdin side needs only its CONIN$ half.
                     let opened = if is_con_device_path(&path) {
@@ -1529,10 +1618,31 @@ impl Executor {
                 }
                 RedirectKind::CombinedOutput | RedirectKind::CombinedAppend => {
                     // `&>file` / `&>>file`: one open, both fds share it.
+                    // rubash#1862: fd 2 already deferred (fd 1 is gated
+                    // by the loop-top check) defers the pair as well.
+                    if deferred_fd[2] {
+                        continue;
+                    }
                     let target = self.expand_redirect_target(redirect);
+                    if self.background_redirect_target_is_fifo(&target)
+                        && Self::background_stdio_defer_fifo_fds(
+                            &mut stdio,
+                            &base_stdio,
+                            &mut slot_writes,
+                            &mut consumed,
+                            &mut deferred_fd,
+                            &[1, 2],
+                        )
+                    {
+                        // The FIFO open belongs to the child; this
+                        // redirect stays in its source.
+                        continue;
+                    }
                     let file = if is_null_device(&target) {
-                        fd1 = BackgroundStdio::Null;
-                        fd2 = BackgroundStdio::Null;
+                        stdio[1] = BackgroundStdio::Null;
+                        stdio[2] = BackgroundStdio::Null;
+                        slot_writes[1].push((index, BackgroundStdio::Null, None, false));
+                        slot_writes[2].push((index, BackgroundStdio::Null, None, false));
                         consumed[index] = true;
                         continue;
                     } else {
@@ -1549,25 +1659,83 @@ impl Executor {
                             Err(_) => continue,
                         }
                     };
-                    fd1 = match file.try_clone() {
+                    stdio[1] = match file.try_clone() {
                         Ok(clone) => BackgroundStdio::File(clone),
                         Err(_) => continue,
                     };
-                    fd2 = BackgroundStdio::File(file);
+                    stdio[2] = BackgroundStdio::File(file);
+                    slot_writes[1].push((index, stdio[1].clone(), None, false));
+                    slot_writes[2].push((index, stdio[2].clone(), None, false));
                     consumed[index] = true;
                     continue;
                 }
                 _ => continue,
             };
+            stdio[fd as usize] = resolved.clone();
+            slot_writes[fd as usize].push((index, resolved, dup_source, false));
             consumed[index] = true;
-            match fd {
-                0 => fd0 = resolved,
-                1 => fd1 = resolved,
-                _ => fd2 = resolved,
-            }
         }
 
-        ([fd0, fd1, fd2], consumed, captured_pipe_writer)
+        (stdio, consumed, captured_pipe_writer)
+    }
+
+    /// True when a background redirect target resolves to an existing
+    /// FIFO (rubash#1862): the one real open of such a target carries
+    /// rendezvous semantics, so it must happen in the async child,
+    /// never in the parent walk of resolve_background_stdio.
+    fn background_redirect_target_is_fifo(&self, target: &str) -> bool {
+        let path = self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars));
+        super::shell_options::redirect_path_is_fifo(&path)
+    }
+
+    /// Defer fds to the background child (rubash#1862): mark them
+    /// deferred and roll back every redirect this walk already
+    /// consumed for them — plus every consumed dup whose SOURCE is one
+    /// of them — so the child replays each deferred fd's whole
+    /// redirect subsequence, in order, on top of the spawn stdio, and
+    /// performs the FIFO open itself. Slots keep the value their
+    /// surviving writes imply (base_stdio when none survive). Returns
+    /// false — deferring nothing — when a target fd already carries a
+    /// staged heredoc: its parent-materialized temp file cannot be
+    /// replayed from the child's source, so that fd mix keeps today's
+    /// parent resolution.
+    fn background_stdio_defer_fifo_fds(
+        stdio: &mut [BackgroundStdio; 3],
+        base_stdio: &[BackgroundStdio; 3],
+        slot_writes: &mut [Vec<(usize, BackgroundStdio, Option<u32>, bool)>; 3],
+        consumed: &mut [bool],
+        deferred_fd: &mut [bool; 3],
+        fds: &[usize],
+    ) -> bool {
+        for &fd in fds {
+            if slot_writes[fd].iter().any(|entry| entry.3) {
+                return false;
+            }
+        }
+        for &fd in fds {
+            deferred_fd[fd] = true;
+        }
+        for slot in 0..3 {
+            let writes = &mut slot_writes[slot];
+            let mut i = 0;
+            while i < writes.len() {
+                let entry_index = writes[i].0;
+                let entry_source = writes[i].2;
+                if fds.contains(&slot)
+                    || entry_source.is_some_and(|source| fds.contains(&(source as usize)))
+                {
+                    consumed[entry_index] = false;
+                    writes.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+            stdio[slot] = writes
+                .last()
+                .map(|entry| entry.1.clone())
+                .unwrap_or_else(|| base_stdio[slot].clone());
+        }
+        true
     }
 
     /// GNU make_child fork semantics for an async command that inherits
