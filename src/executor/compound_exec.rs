@@ -3942,9 +3942,12 @@ impl Executor {
                 stdout_displaced = true;
             }
         }
-        if !stdout_displaced {
+        let displaced_writer = if stdout_displaced {
+            Some(stdout_writer)
+        } else {
             child.stdout(stdout_writer);
-        }
+            None
+        };
 
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_redirect_target(redirect);
@@ -3973,11 +3976,7 @@ impl Executor {
             child.stdin(stdio);
         }
 
-        Ok(if stdout_displaced {
-            Some(stdout_writer)
-        } else {
-            None
-        })
+        Ok(displaced_writer)
     }
 
     pub(in crate::executor) fn execute_case_command(
