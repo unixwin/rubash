@@ -262,13 +262,12 @@ echo \"F rc=$?\" >> rc.txt
         std::fs::read_to_string(dir.join("e_e.txt")).expect("write-missing stderr"),
         ""
     );
-    // Read failure: a builtin outcome (rc=1 above), reported through
-    // the builtin's diagnostic surface like the session path — never a
-    // bare `No such file or directory` executor error.
+    // Read failure: a builtin outcome (rc=1 above) and SILENT —
+    // rubash#1852 superseded the #1289-era `cannot open` orientation
+    // this pin originally asserted: GNU's read-error report is
+    // compiled out (builtins/history.def #if 0 at :303/:322), so the
+    // read face prints nothing at all on either path.
     let e_f = std::fs::read_to_string(dir.join("e_f.txt")).expect("read-missing stderr");
-    assert!(
-        e_f.contains("history:") && e_f.contains("cannot open"),
-        "read-missing stderr must carry the builtin frame, got: {e_f:?}"
-    );
+    assert_eq!(e_f, "", "read-missing stderr must be empty (rubash#1852)");
     let _ = std::fs::remove_dir_all(&dir);
 }

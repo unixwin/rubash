@@ -2799,23 +2799,21 @@ impl Executor {
                     }
                 }
                 if do_read_new {
-                    if let Err(err) = p.read_new_history(&file) {
-                        writeln!(
-                            stderr,
-                            "{}history: {file}: cannot open: {err}",
-                            self.diagnostic_prefix()
-                        )?;
+                    if p.read_new_history(&file).is_err() {
+                        // GNU read failures are silent: the
+                        // read-error report in builtins/history.def
+                        // is wrapped in `#if 0' in both the RFLAG
+                        // branch (history.def:303) and the NFLAG
+                        // branch (history.def:322), so -r/-n return
+                        // EXECUTION_FAILURE with no diagnostic
+                        // (rubash#1852).
                         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                         return Ok(1);
                     }
                 }
                 if do_read {
-                    if let Err(err) = p.read_history(&file) {
-                        writeln!(
-                            stderr,
-                            "{}history: {file}: cannot open: {err}",
-                            self.diagnostic_prefix()
-                        )?;
+                    if p.read_history(&file).is_err() {
+                        // Silent, like -n above (rubash#1852).
                         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                         return Ok(1);
                     }

@@ -495,20 +495,26 @@ pub(in crate::executor) fn execute_history_session(
                 _ => Ok(0),
             };
             if let Err(err) = outcome {
-                // GNU's diagnostic surface for -w/-a file errors is
-                // narrow (rubash#1289, verified on GNU bash 5.3.20):
-                // -w failures are silent; -a prints exactly one
-                // `cannot create' line and only when the target does
-                // not exist — bashhist.c:450 maybe_append_history runs
-                // its pre-create open exactly on the stat-ENOENT branch,
-                // and every later append failure (a directory target,
-                // EISDIR) stays silent. The portable form of that
-                // condition is the error's NotFound kind: std maps both
-                // ENOENT and Windows' ERROR_PATH_NOT_FOUND to it, and
-                // posix_errors renders both with the same GNU text —
-                // the old raw_os_error()==2 gate dropped the line on
-                // Windows (rubash#1830). Read modes keep the existing
-                // `cannot open' report.
+                // GNU's diagnostic surface for history file errors
+                // is narrow (rubash#1289, verified on GNU bash
+                // 5.3.20): -w failures are silent; -a prints exactly
+                // one `cannot create' line and only when the target
+                // does not exist — bashhist.c:450 maybe_append_history
+                // runs its pre-create open exactly on the stat-ENOENT
+                // branch, and every later append failure (a directory
+                // target, EISDIR) stays silent. The portable form of
+                // that condition is the error's NotFound kind: std
+                // maps both ENOENT and Windows' ERROR_PATH_NOT_FOUND
+                // to it, and posix_errors renders both with the same
+                // GNU text — the old raw_os_error()==2 gate dropped
+                // the line on Windows (rubash#1830). Read modes (-r
+                // and -n) are silent too: builtins/history.def wraps
+                // the read-error report in `#if 0' in both the RFLAG
+                // branch (history.def:303) and the NFLAG branch
+                // (history.def:322), so a failed read returns
+                // EXECUTION_FAILURE with no diagnostic at all
+                // (rubash#1852 — this supersedes the #1289-era
+                // `cannot open' report the read modes used to keep).
                 match mode {
                     HistoryMode::Write => {}
                     HistoryMode::Append => {
@@ -521,13 +527,7 @@ pub(in crate::executor) fn execute_history_session(
                             );
                         }
                     }
-                    _ => {
-                        let _ = writeln!(
-                            stderr,
-                            "{}history: {path}: cannot open: {err}",
-                            executor.diagnostic_prefix()
-                        );
-                    }
+                    _ => {}
                 }
                 return Ok(1);
             }
