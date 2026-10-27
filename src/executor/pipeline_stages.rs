@@ -121,6 +121,27 @@ impl Executor {
         // G-02: no process-cwd save/restore — the stage subshell is a clone
         // with its own session cwd field.
         let mut subshell = self.command_substitution_executor();
+        // GNU execute_cmd.c:6373 do_piping: an element that is not the
+        // rightmost is forked with dup2(pipe_out, 1) — the pipe REPLACES
+        // whatever fd 1 the enclosing context bound (a group/function
+        // call's `>file` redirect included). The stage clone inherits
+        // the context's fd-1 entry verbatim, so without this rebind the
+        // body's writes follow the enclosing binding and never reach
+        // the stage capture — the same rebind the command-substitution
+        // child performs (command_substitution.rs, subst.c:7320). The
+        // rightmost element gets NO_PIPE: its fd 1 stays the context
+        // binding, which is the pipeline's own stdout (rubash#1807).
+        if !self.pipeline_final_stage.get() {
+            subshell.fd_table.entries.insert(
+                1,
+                crate::executor::fd_table::FdEntry {
+                    read: None,
+                    write: Some(FdWriteEndpoint::Stdout),
+                    closed: false,
+                    dynamic: false,
+                },
+            );
+        }
         // A compound pipeline element passes execute_in_subshell, which
         // resets loop_level to 0 (execute_cmd.c:1642, Posix interp 842):
         // break/continue inside `{ break; } | cat` are "only meaningful"
@@ -349,6 +370,27 @@ impl Executor {
 
         // G-02: no process-cwd save/restore (stage subshell clone, as above).
         let mut subshell = self.command_substitution_executor();
+        // GNU execute_cmd.c:6373 do_piping: an element that is not the
+        // rightmost is forked with dup2(pipe_out, 1) — the pipe REPLACES
+        // whatever fd 1 the enclosing context bound (a function/group
+        // call's `>file` redirect included). The stage clone inherits
+        // the context's fd-1 entry verbatim, so without this rebind the
+        // body's writes follow the enclosing binding and never reach
+        // the stage capture — the same rebind the command-substitution
+        // child performs (command_substitution.rs, subst.c:7320). The
+        // rightmost element gets NO_PIPE: its fd 1 stays the context
+        // binding, which is the pipeline's own stdout (rubash#1807).
+        if !self.pipeline_final_stage.get() {
+            subshell.fd_table.entries.insert(
+                1,
+                crate::executor::fd_table::FdEntry {
+                    read: None,
+                    write: Some(FdWriteEndpoint::Stdout),
+                    closed: false,
+                    dynamic: false,
+                },
+            );
+        }
         // A pipeline member runs in a subshell: caught signal traps reset to
         // the inherited disposition (execute_cmd.c subshell trap reset), so
         // only traps the function body itself installs run at its exit.
