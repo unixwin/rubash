@@ -194,11 +194,12 @@ fn issue1806_env_ignore_environment_prints_and_passes_nothing() {
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "");
     // `env -i A=1 prog`: the child sees exactly the given assignment.
-    // (Run in non-tail position: the exec-replace tail seam currently
-    // re-asserts an adjusted SHLVL over the composed environment after
-    // composition — a separate residual recorded in the cluster
-    // REPORT, not part of this issue's composition contract.)
-    let (stdout, _, code) = rubash("env -i A=1 /usr/bin/env; true", &[]);
+    // (Run in the -c tail position itself: the exec-replace seam used
+    // to re-assert an adjusted SHLVL over the composed environment
+    // after composition — that residual was rubash#1832, fixed by
+    // folding the adjustment into the composition, so the tail form
+    // now asserts the same contract directly.)
+    let (stdout, _, code) = rubash("env -i A=1 /usr/bin/env", &[]);
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "A=1\n");
 }

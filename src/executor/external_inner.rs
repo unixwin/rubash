@@ -189,7 +189,10 @@ impl Executor {
             process.current_dir(directory);
         }
         self.apply_external_redirects(cmd, &mut process)?;
-        self.spawn_external_process(cmd, &program, process, used_shell, dev_ops)
+        // rubash#1832: the environment was composed to finality by
+        // the env emulation above — the seam must not stamp SHLVL
+        // over it (env_composed_final).
+        self.spawn_external_process(cmd, &program, process, used_shell, dev_ops, true)
     }
 
     fn parse_env_command_args(
@@ -495,6 +498,38 @@ impl Executor {
                     "_".to_string(),
                     env_program.to_string_lossy().into_owned(),
                 );
+            }
+        }
+
+        // rubash#1832: GNU's SHLVL adjustment is a mutation of the
+        // shell variable BEFORE the export environment is built
+        // (execute_cmd.c:5813-5817: on the nofork path
+        // adjust_shell_level(-1) runs first, then
+        // maybe_make_export_env), so when this env command is the
+        // exec-replace tail, the environment env RECEIVES already
+        // carries the adjusted level. Fold it into the composed base
+        // here — after the base blocks above, before env's own
+        // file/unset/assignment processing below, which must govern
+        // the final value (a `-u SHLVL` removes the entry, an explicit
+        // `SHLVL=` assignment supersedes it, a file entry wins over
+        // the base). A prefix SHLVL word on the env command itself is
+        // part of the base blocks and is superseded like on the
+        // direct path (oracle: `SHLVL=99 env ...` prints the adjusted
+        // level). Under `-i` there is no received environment to
+        // adjust — the base blocks were skipped and nothing is
+        // folded. The spawn seam must not stamp over this composition
+        // afterwards (see spawn_external_process's env_composed_final).
+        #[cfg(unix)]
+        if !config.ignore_environment && self.exec_replace_tail_state_ready() {
+            let adjusted = self.exec_replace_adjusted_shlvl();
+            if ordered_env_contains(&env_vars, "SHLVL") {
+                ordered_env_insert(&mut env_vars, "SHLVL".to_string(), adjusted);
+            } else if let Some(pos) = env_vars.iter().position(|(name, _)| name == "_") {
+                // Keep `_` the final entry (the composition invariant
+                // above); the adjusted level joins the globals block.
+                env_vars.insert(pos, ("SHLVL".to_string(), adjusted));
+            } else {
+                env_vars.push(("SHLVL".to_string(), adjusted));
             }
         }
 
@@ -808,7 +843,7 @@ impl Executor {
         process.current_dir(&self.shell_state.cwd);
         self.apply_external_environment(cmd, &mut process, &program);
         self.apply_external_redirects(cmd, &mut process)?;
-        self.spawn_external_process(cmd, &program, process, used_shell, dev_ops)
+        self.spawn_external_process(cmd, &program, process, used_shell, dev_ops, false)
     }
 
     fn handle_host_external_command(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
@@ -1158,35 +1193,19 @@ impl Executor {
     /// before the command, in the shell), and neither does a RETURN
     /// trap at top level (variable_context == 0 there).
     #[cfg(unix)]
-    fn exec_replace_tail_ready(
-        &self,
-        cmd: &CommandNode,
-        program: &PathBuf,
-        dev_ops: &crate::executor::dev_fd_operands::DevOperandMaterialization,
-    ) -> bool {
+    /// rubash#1832: the state-only half of the exec-replace tail
+    /// conditions — everything `exec_replace_tail_ready` checks that
+    /// depends on the dispatch stamp and shell state alone, not on
+    /// the resolved program, the stdio plan, or the dev-fd
+    /// materialization. The env emulation folds the SHLVL adjustment
+    /// into its composition under this gate (the composition is what
+    /// env receives, and GNU adjusts before building it); the spawn
+    /// seam still re-checks the full predicate before replacing.
+    fn exec_replace_tail_state_ready(&self) -> bool {
         if self.exec_replace_dispatch_stamp.get() == 0 {
             return false;
         }
         if self.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
-            return false;
-        }
-        if !crate::executor::path::program_execs_directly(program) {
-            return false;
-        }
-        // CapturePipe means the parent must drain the child's output
-        // itself — impossible after a process replacement.
-        // LiveHandles is the opposite shape: the prepared Command
-        // already carries the real destination handles (files, pipes,
-        // fd-table bindings), which an exec inherits unchanged, and
-        // the parent's only post-spawn duty was the wait.
-        if matches!(
-            self.external_stdio_outcome,
-            Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(_))
-        ) || self.external_needs_fd_copy_capture(cmd)
-        {
-            return false;
-        }
-        if dev_ops.has_deferred_flushes() {
             return false;
         }
         if self
@@ -1221,6 +1240,38 @@ impl Executor {
                 _ if reset.split(':').any(|name| name == signal) => {}
                 _ => return false,
             }
+        }
+        true
+    }
+
+    #[cfg(unix)]
+    fn exec_replace_tail_ready(
+        &self,
+        cmd: &CommandNode,
+        program: &PathBuf,
+        dev_ops: &crate::executor::dev_fd_operands::DevOperandMaterialization,
+    ) -> bool {
+        if !self.exec_replace_tail_state_ready() {
+            return false;
+        }
+        if !crate::executor::path::program_execs_directly(program) {
+            return false;
+        }
+        // CapturePipe means the parent must drain the child's output
+        // itself — impossible after a process replacement.
+        // LiveHandles is the opposite shape: the prepared Command
+        // already carries the real destination handles (files, pipes,
+        // fd-table bindings), which an exec inherits unchanged, and
+        // the parent's only post-spawn duty was the wait.
+        if matches!(
+            self.external_stdio_outcome,
+            Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(_))
+        ) || self.external_needs_fd_copy_capture(cmd)
+        {
+            return false;
+        }
+        if dev_ops.has_deferred_flushes() {
+            return false;
         }
         true
     }
@@ -1361,6 +1412,14 @@ impl Executor {
         mut process: Command,
         used_shell: bool,
         dev_ops: crate::executor::dev_fd_operands::DevOperandMaterialization,
+        // rubash#1832: true when the caller composed the process
+        // environment to finality itself (the `env` emulation — its
+        // composition already folded the tail SHLVL adjustment in and
+        // applied env's own -i/-u/assignments). The exec-replace seam
+        // must not stamp SHLVL over such an environment after the
+        // fact; the direct disk-command path composes from shell
+        // state and passes false.
+        env_composed_final: bool,
     ) -> Result<(), ExecuteError> {
         // rubash#180: GNU's forked disk-command child inherits every fd >= 3
         // the command opened (`"$SH" -c 'echo hi >&3' 3>f` writes f) or that
@@ -1573,7 +1632,18 @@ impl Executor {
             use std::io::Write;
             let _ = std::io::stdout().flush();
             let _ = std::io::stderr().flush();
-            process.env("SHLVL", self.exec_replace_adjusted_shlvl());
+            // rubash#1832: the direct path composed this process
+            // environment from the shell state, whose SHLVL is the
+            // live level — stamp the adjusted one (GNU's
+            // adjust_shell_level(-1) before maybe_make_export_env,
+            // execute_cmd.c:5813-5817). An env-emulation process
+            // (env_composed_final) already carries the composition's
+            // final value: stamping here would resurrect a variable
+            // env's -i/-u deliberately removed or supersede an
+            // explicit assignment.
+            if !env_composed_final {
+                process.env("SHLVL", self.exec_replace_adjusted_shlvl());
+            }
             use std::os::unix::process::CommandExt;
             let error = process.exec();
             let _ = self.report_external_spawn_error(cmd, program, error);
@@ -1818,6 +1888,7 @@ impl Executor {
                             shell_process,
                             true,
                             dev_ops,
+                            env_composed_final,
                         );
                     }
                 }
