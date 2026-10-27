@@ -326,8 +326,13 @@ impl Executor {
                 escape_aware,
                 raw,
             ) {
-                self.read_eof_no_delimiter |=
-                    !record_contains_delimiter(&output, delimiter, escape_aware);
+                // read.def:949 EOF accounting is owned by
+                // read_coproc_stdout itself: it sets read_eof_no_delimiter
+                // only when the pipe ended before the delimiter arrived.
+                // Re-deriving EOF here from the TRIMMED record inverted
+                // every success case — trim_read_input has already removed
+                // the delimiter, so a full line (or a -n/-N limit stop)
+                // always looked like EOF (rubash#1623).
                 return Some(trim_read_input(
                     output,
                     delimiter,
