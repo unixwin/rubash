@@ -588,6 +588,10 @@ impl Executor {
             }
         };
         if builtin_stage_output_redirect_failed {
+            // rubash#1844: same pre-wired contract as the stage
+            // preflight in pipeline_exec.rs — the element died at
+            // do_redirections; the driver must not re-apply its list.
+            self.pipeline_stage_fds_pre_wired.set(true);
             let captured = crate::executor::shell_options::take_stdout_capture();
             crate::executor::shell_options::restore_stdout_capture(saved_capture);
             return Ok(Some((

@@ -4393,6 +4393,13 @@ impl Executor {
             }
         };
         if stage_output_redirect_failed {
+            // rubash#1844: the stage died at its own do_redirections,
+            // before running — its pipe bytes are final, so mark it
+            // pre-wired like the rejection arm above (issue #514): the
+            // driver's stream routing must not re-apply the same
+            // redirect list, which would open the targets a second
+            // time and print the failure diagnostic twice.
+            self.pipeline_stage_fds_pre_wired.set(true);
             let captured = crate::executor::shell_options::take_stdout_capture();
             crate::executor::shell_options::restore_stdout_capture(saved_capture);
             return Ok(Some((

@@ -82,6 +82,20 @@ struct OutputFdState {
     /// routing leave this false — their state is discarded or belongs to
     /// a child shell, so nothing may persist from them.
     persist_move_closes: bool,
+    /// Speculative admission probes (pipeline_stage_stdio_targets)
+    /// walk the same list only to resolve fd targets; the state is
+    /// discarded and the executing path owns the failure report, so
+    /// diagnostic writes through this state are muted — an unmuted
+    /// probe reported a stage's failed open once speculatively and
+    /// the real execution then reported it again (rubash#1844).
+    diagnostics_muted: bool,
+    /// Buffered-builtin route mode: a failed open is recorded in
+    /// first_open_error and handed back through the ExecuteError::
+    /// IoError channel (whose top-level handler renders and routes
+    /// it — the route's long-standing behaviour) instead of being
+    /// written through this walk state (rubash#1844).
+    open_failure_via_error: bool,
+    first_open_error: std::cell::RefCell<Option<(std::io::ErrorKind, String)>>,
 }
 
 impl Executor {
@@ -867,7 +881,18 @@ impl Executor {
         // Same defer as route_pipeline_stage_streams: a diagnostic the walk
         // emits against the seeded Stdout must not leak to the real stdout.
         state.defer_stdout_writes = true;
+        // This walk is an admission probe — it only resolves targets
+        // and its state is discarded. The executing path reports a
+        // failed open itself; a report here double-prints (rubash#1844).
+        state.diagnostics_muted = true;
         if !self.apply_ordered_output_redirects(cmd, &mut state)? {
+            return Ok(None);
+        }
+        // A stage whose own output open failed is not routable from the
+        // resolved targets (the failed fd never bound): decline so the
+        // sequential stage executor reports the failure per element
+        // (rubash#1844).
+        if state.redirect_failed {
             return Ok(None);
         }
         let stdout = state.fd_target(1).cloned().unwrap_or(OutputTarget::Stdout);
@@ -1007,6 +1032,11 @@ impl Executor {
         // move-close whose target was closed persists past the command
         // (GNU redir.c add_undo_redirect; rubash#1235).
         state.persist_move_closes = true;
+        // A failed open in THIS route keeps its historical channel:
+        // the error returns as ExecuteError::IoError and the top-level
+        // handler renders/routes it (rubash#1844 keeps the walk's
+        // per-element report for the pipeline consumers only).
+        state.open_failure_via_error = true;
         if !self.apply_ordered_output_redirects(cmd, &mut state)? {
             // A persistent `exec >&N-` closes the shell fd without adding a
             // redirect to the current command. Buffered builtins still need
@@ -1051,6 +1081,9 @@ impl Executor {
                 return Ok(true);
             }
             return Ok(false);
+        }
+        if let Some((kind, message)) = state.first_open_error.borrow_mut().take() {
+            return Err(ExecuteError::IoError(std::io::Error::new(kind, message)));
         }
         if state.redirect_failed {
             return Ok(true);
@@ -1178,6 +1211,9 @@ impl Executor {
             defer_stdout_writes: false,
             deferred_stdout: std::cell::RefCell::new(Vec::new()),
             persist_move_closes: false,
+            diagnostics_muted: false,
+            open_failure_via_error: false,
+            first_open_error: std::cell::RefCell::new(None),
         };
         state.fds.insert(1, OutputTarget::Stdout);
         state.fds.insert(2, OutputTarget::Stderr);
@@ -1389,6 +1425,12 @@ impl Executor {
                         continue;
                     }
                     self.open_command_output_target(state, fd, &target, redirect)?;
+                    // GNU do_redirections stops at the first failing
+                    // redirect (redir.c:246): later targets must not
+                    // open once one failed (rubash#1844).
+                    if state.redirect_failed {
+                        return Ok(true);
+                    }
                 }
                 crate::parser::RedirectKind::CombinedOutput
                 | crate::parser::RedirectKind::CombinedAppend => {
@@ -1400,6 +1442,9 @@ impl Executor {
                         return Ok(true);
                     }
                     self.open_command_output_target(state, 1, &target, redirect)?;
+                    if state.redirect_failed {
+                        return Ok(true);
+                    }
                     let stdout_target = state.fd_target(1).cloned().unwrap_or(OutputTarget::Stdout);
                     state.fds.insert(2, stdout_target);
                 }
@@ -1493,6 +1538,9 @@ impl Executor {
                             return Ok(true);
                         }
                         self.open_command_output_target(state, target_fd, path, redirect)?;
+                        if state.redirect_failed {
+                            return Ok(true);
+                        }
                         // GNU redir.c:832-838: `>&word` and `1>&word` alike
                         // (redirector == 1, no varassign) become
                         // r_err_and_out — stderr follows stdout to word.
@@ -1632,7 +1680,7 @@ impl Executor {
             }
         } else {
             let target = self.redirect_output_path_target(target);
-            if redirect.append {
+            let open_result: Result<(), std::io::Error> = if redirect.append {
                 // GNU redir.c redirection_error (redir.c:149-176) carries the
                 // failed open's target word (`$FIX/b: No such file or
                 // directory`, issue #518); a bare OS error renders
@@ -1640,9 +1688,39 @@ impl Executor {
                 open_redirect_append(
                     &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
                 )
-                .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                .map(|_| ())
+                .map_err(|e| crate::posix_errors::path_error(&target, e))
             } else {
-                self.create_redirect_output(&target, redirect.clobber)?;
+                self.create_redirect_output(&target, redirect.clobber)
+                    .map(|_| ())
+            };
+            if let Err(error) = open_result {
+                // GNU redir.c:149-176 redirection_error, reached from
+                // do_redirections (redir.c:246): a failed open reports
+                // through the fd 2 binding in force and fails only THIS
+                // command — the walk's redirect_failed protocol the
+                // sibling arms (ambiguous, failglob, bad-fd) already
+                // follow. Propagating the io error as an executor error
+                // instead unwound the WHOLE pipeline around the element:
+                // later stages never ran, earlier stages' captured
+                // output was dropped, the pipeline status collapsed to
+                // the error's 1 and PIPESTATUS was never written
+                // (rubash#1844). The io error's Display already carries
+                // `{target}: {reason}` (path_error / the noclobber
+                // wording inside create_redirect_output).
+                if state.open_failure_via_error {
+                    let mut slot = state.first_open_error.borrow_mut();
+                    if slot.is_none() {
+                        *slot = Some((error.kind(), error.to_string()));
+                    }
+                } else {
+                    let mut stderr = Vec::new();
+                    writeln!(&mut stderr, "{}{error}", self.error_prefix())?;
+                    state.write_to_fd(self, 2, &stderr)?;
+                }
+                self.exit_code = 1;
+                state.redirect_failed = true;
+                return Ok(());
             }
             state.fds.insert(fd, OutputTarget::Path(target));
         }
@@ -1979,6 +2057,9 @@ impl OutputFdState {
         fd: u32,
         output: &[u8],
     ) -> Result<(), ExecuteError> {
+        if self.diagnostics_muted {
+            return Ok(());
+        }
         if output.is_empty() {
             return Ok(());
         }
