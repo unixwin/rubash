@@ -3946,6 +3946,16 @@ impl Executor {
         // this idempotent pass covers the recursion entry points that bypass
         // the gather (the `time` prefix arm and the timed-read followup).
         let command = &normalize_pipeerr_stage(command);
+        // rubash#1843: GNU stamps every simple element's own line
+        // before it runs (execute_cmd.c:936 SET_LINE_NUMBER in
+        // execute_simple_command) — execute_pipeline forks each
+        // element into that same funnel. This stage funnel never
+        // re-entered the command_execute stamping seam, so an element
+        // inside a function body reported the body's ambient
+        // (definition) line for its diagnostics instead of its own.
+        // set_current_line's fallback keeps wrapper/compound elements
+        // on the ambient line per the command_sets_own_line table.
+        self.set_current_line(command);
         // rubash#1115: GNU forks every pipeline element
         // (execute_cmd.c:2620 execute_pipeline -> execute_simple_command
         // in the child), so the element's word expansion and body draw
