@@ -599,6 +599,16 @@ pub struct Executor {
     /// while it blocks, jobs.c:3064 — an observation point).
     foreground_wait_count: Cell<u64>,
     coproc_stderr_forwarders: HashMap<u32, std::thread::JoinHandle<Result<(), std::io::Error>>>,
+    /// rubash#1632: pipe writers displaced from a coproc child's stdout
+    /// by the coproc command's own `>file`/`>>file` redirection, held for
+    /// the coproc's lifetime keyed by child pid. GNU applies such a
+    /// redirect in the forked child, where the displaced pipe end
+    /// survives in a redirect save slot — so the parent's read end sees
+    /// no EOF while the coproc lives. On Unix the writer rides into the
+    /// child itself (pre_exec dup to a free high fd) and this map stays
+    /// empty; where no fd can be injected, the parent holds the writer
+    /// and drops it when the coproc retires.
+    coproc_displaced_stdout_writers: HashMap<u32, std::io::PipeWriter>,
     /// Assignment-RHS output process substitutions awaiting their
     /// finish, in materialization order (GNU forks left-to-right
     /// and the bodies' observable effects order the same way,

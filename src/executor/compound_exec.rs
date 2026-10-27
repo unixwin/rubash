@@ -3498,7 +3498,6 @@ impl Executor {
             (stdin_result, stdout_result)
         {
             child.stdin(stdin_reader);
-            child.stdout(stdout_writer);
             let coproc_stderr_target = self.coproc_stderr_forward_target();
             if coproc_stderr_target.is_some() {
                 child.stderr(Stdio::piped());
@@ -3509,11 +3508,55 @@ impl Executor {
             // coproc child's own redirect failure exits inverted and the
             // parent flips it back — net status 1, no flip. Mark it so an
             // enclosing `!` suppresses its flip.
-            if let Err(error) = self.apply_coproc_redirects(cmd, &mut child) {
-                if matches!(error, ExecuteError::IoError(_)) {
-                    self.note_compound_redirect_failure();
+            let displaced_stdout_writer =
+                match self.apply_coproc_redirects(cmd, &mut child, stdout_writer) {
+                    Ok(writer) => writer,
+                    Err(error) => {
+                        if matches!(error, ExecuteError::IoError(_)) {
+                            self.note_compound_redirect_failure();
+                        }
+                        return Err(error);
+                    }
+                };
+            // rubash#1632: a coproc-level `>file`/`>>file` (or `>&-`)
+            // displaced the pipe writer from the child's stdout. GNU
+            // applies the redirect in the forked child, where the
+            // displaced end survives in a redirect save slot for the
+            // child's whole life — the parent's read end therefore sees
+            // no EOF while the coproc lives (a `read -t` times out
+            // instead of reporting EOF, and the file receives the data).
+            // On Unix the writer rides into the child at the first free
+            // fd in the save-slot range (dup2 clears CLOEXEC on the
+            // target, so it survives the exec); elsewhere the parent
+            // holds it in coproc_displaced_stdout_writers until the
+            // coproc retires.
+            #[cfg(unix)]
+            if let Some(writer) = &displaced_stdout_writer {
+                use std::os::unix::io::AsRawFd as _;
+                let writer_fd = writer.as_raw_fd();
+                unsafe {
+                    use std::os::unix::process::CommandExt as _;
+                    child.pre_exec(move || {
+                        let mut slot = -1;
+                        for candidate in 10..64 {
+                            if libc::fcntl(candidate, libc::F_GETFD) == -1 {
+                                slot = candidate;
+                                break;
+                            }
+                        }
+                        if slot == -1 {
+                            return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+                        }
+                        if slot == writer_fd {
+                            if libc::fcntl(writer_fd, libc::F_SETFD, 0) == -1 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                        } else if libc::dup2(writer_fd, slot) == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
                 }
-                return Err(error);
             }
 
             suppress_orphan_console(&mut child);
@@ -3525,6 +3568,16 @@ impl Executor {
                     // the correct pipe direction on all hosts.
                     let pid = child_proc.id();
                     adopt_orphan_console(pid);
+                    // rubash#1632: settle the displaced stdout writer —
+                    // on Unix the child holds its own copy (pre_exec) and
+                    // the parent's copy closes here; elsewhere the parent
+                    // holds it until the coproc retires.
+                    #[cfg(unix)]
+                    drop(displaced_stdout_writer);
+                    #[cfg(not(unix))]
+                    if let Some(writer) = displaced_stdout_writer {
+                        self.coproc_displaced_stdout_writers.insert(pid, writer);
+                    }
                     if let Some(target) = coproc_stderr_target {
                         if let Some(stderr) = child_proc.stderr.take() {
                             let forwarder =
@@ -3802,7 +3855,8 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         child: &mut Command,
-    ) -> Result<(), ExecuteError> {
+        stdout_writer: std::io::PipeWriter,
+    ) -> Result<Option<std::io::PipeWriter>, ExecuteError> {
         // rubash#1651: a memory-backed stdin body (here-string,
         // heredoc) that wins fd 0 replaces the coproc pipe as the
         // child's stdin. GNU redir.c do_redirections binds fd 0
@@ -3857,24 +3911,39 @@ impl Executor {
             }
         }
 
+        // rubash#1632: the coproc command's own stdout redirections
+        // displace the pipe writer instead of replacing-and-dropping it:
+        // the writer is handed back to the caller, which keeps it alive
+        // for the coproc's lifetime (GNU's redirect save slot in the
+        // forked child) so the parent's read end cannot see EOF early.
+        // A dup target (`>&2`) replaces nothing — the pipe stays the
+        // child's stdout and the writer is consumed here as before.
+        let mut stdout_displaced = false;
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_redirect_target(redirect);
             if is_closed_redirect_target(&target) {
                 child.stdout(Stdio::null());
+                stdout_displaced = true;
             } else if redirect_target_fd(&target).is_none() {
                 child.stdout(Stdio::from(
                     self.create_redirect_output(&target, redirect.clobber)?,
                 ));
+                stdout_displaced = true;
             }
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
             if is_closed_redirect_target(&target) {
                 child.stdout(Stdio::null());
+                stdout_displaced = true;
             } else if redirect_target_fd(&target).is_none() {
                 child.stdout(Stdio::from(open_redirect_append(&self.session_path(
                     shell_path_to_windows(&target, &self.shell_state.env_vars),
                 ))?));
+                stdout_displaced = true;
             }
+        }
+        if !stdout_displaced {
+            child.stdout(stdout_writer);
         }
 
         if let Some(redirect) = &cmd.redirect_err {
@@ -3904,7 +3973,11 @@ impl Executor {
             child.stdin(stdio);
         }
 
-        Ok(())
+        Ok(if stdout_displaced {
+            Some(stdout_writer)
+        } else {
+            None
+        })
     }
 
     pub(in crate::executor) fn execute_case_command(
