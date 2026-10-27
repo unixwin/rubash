@@ -1034,6 +1034,19 @@ pub fn register_signal_mailbox_async(_pid: u32) {
     kernel_signals::capture_entry_and_policy();
 }
 
+/// rubash#1882: the fd-free startup policy capture WITHOUT the mailbox
+/// registration, for executor children that must not own a TERM mailbox
+/// (coproc children — a blocked coprocess reader cannot consume a queued
+/// TERM) but must still run under the shell's signal policy: entry
+/// dispositions captured, SIGPIPE reset to SIG_DFL (#1333), SIGQUIT
+/// policy applied. Off Unix there is no kernel-disposition capture to
+/// run (the mailbox marker is the only registration artifact), so this
+/// is a no-op there.
+pub fn capture_entry_policy_without_mailbox() {
+    #[cfg(unix)]
+    kernel_signals::capture_entry_and_policy();
+}
+
 #[cfg(not(unix))]
 fn parse_signal_lines(content: &str) -> Vec<i32> {
     content

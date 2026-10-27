@@ -340,7 +340,18 @@ impl Executor {
         });
         let owns_signal_mailbox =
             if env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str) == Some("1") {
-                // A blocked coprocess reader cannot consume a queued TERM.
+                // A blocked coprocess reader cannot consume a queued TERM,
+                // so the child never owns the mailbox registration. The
+                // startup signal-policy capture is a separate step and
+                // must still run: on Unix the registration call is the
+                // only other trigger for capture_entry_and_policy, and
+                // skipping it left the exec image's runtime SIG_IGN for
+                // SIGPIPE in place — the child's writes to a dead coproc
+                // pipe then surfaced as reported-and-continued io errors
+                // where GNU's forked child dies silently on the signal
+                // (rubash#1882; the #1333 disposition reset is part of
+                // the capture).
+                crate::builtins::kill::capture_entry_policy_without_mailbox();
                 false
             } else {
                 // startup21: registration moved off the critical path —

@@ -147,12 +147,32 @@ pub(in crate::executor) fn respawn_source_needs_file(
     false
 }
 
+/// Pipe + forwarder targets (rubash#1882): only endpoints that could
+/// not be handed to the child as a descriptor — the process
+/// substitution carrier path, plus the dup-failure fallbacks for the
+/// process-stdout and file endpoints.
 enum CoprocStderrForwardTarget {
     Stdout,
-    Stderr,
     File(PathBuf),
-    Discard,
-    CoprocStdin(std::fs::File),
+}
+
+/// How a coproc child's fd 2 is provided at spawn (rubash#1882).
+enum CoprocStderrPlan {
+    /// The child holds the resolved endpoint itself (GNU fork model):
+    /// its diagnostics survive this shell's exit.
+    Direct(std::process::Stdio),
+    /// Pipe + forwarder transport, kept for endpoints with no portable
+    /// child handle (process-substitution carrier) and dup failures.
+    Forward(CoprocStderrForwardTarget),
+}
+
+/// Duplicate one of this process's std descriptors (0/1/2) into an
+/// inheritable file a spawned child can hold as its own stdio.
+fn dup_process_std_handle(fd: u32) -> Option<std::fs::File> {
+    let handle = crate::fd::process_std_handle(fd);
+    crate::fd::duplicate_handle_inheritable(handle)
+        .ok()
+        .map(crate::fd::handle_to_file)
 }
 
 /// Resolved stdio disposition for one of a background child's fds 0-2,
@@ -280,18 +300,9 @@ fn forward_coproc_stderr(
                 std::io::stdout().write_all(&buffer[..count])?;
                 std::io::stdout().flush()?;
             }
-            CoprocStderrForwardTarget::Stderr => {
-                std::io::stderr().write_all(&buffer[..count])?;
-                std::io::stderr().flush()?;
-            }
             CoprocStderrForwardTarget::File(path) => {
                 let mut file = open_redirect_append(path)?;
                 file.write_all(&buffer[..count])?;
-            }
-            CoprocStderrForwardTarget::Discard => {}
-            CoprocStderrForwardTarget::CoprocStdin(ref mut writer) => {
-                writer.write_all(&buffer[..count])?;
-                writer.flush()?;
             }
         }
     }
@@ -3679,12 +3690,25 @@ impl Executor {
             (stdin_result, stdout_result)
         {
             child.stdin(stdin_reader);
-            let coproc_stderr_target = self.coproc_stderr_forward_target();
-            if coproc_stderr_target.is_some() {
-                child.stderr(Stdio::piped());
-            } else {
-                child.stderr(Stdio::inherit());
-            }
+            // rubash#1882: GNU's coproc child is a fork (execute_cmd.c
+            // make_child): its fd 2 IS the shell's resolved fd-2 endpoint,
+            // held as a real descriptor, so diagnostics keep flowing after
+            // the parent shell exits. The old pipe + forwarder transport
+            // died with the parent process and took every late diagnostic
+            // with it. Handle-backed endpoints are therefore handed to
+            // the child directly; only the process-substitution carrier
+            // (a rendezvous path, no portable child handle) keeps the
+            // forwarding thread.
+            let coproc_stderr_target = match self.coproc_stderr_plan() {
+                CoprocStderrPlan::Direct(stdio) => {
+                    child.stderr(stdio);
+                    None
+                }
+                CoprocStderrPlan::Forward(target) => {
+                    child.stderr(Stdio::piped());
+                    Some(target)
+                }
+            };
             // rubash#846 (GNU execute_cmd.c:1759-1762 + :2583): the
             // coproc child's own redirect failure exits inverted and the
             // parent flips it back — net status 1, no flip. Mark it so an
@@ -4010,24 +4034,52 @@ impl Executor {
         Ok(())
     }
 
-    fn coproc_stderr_forward_target(&mut self) -> Option<CoprocStderrForwardTarget> {
+    /// rubash#1882: resolve the coproc child's fd 2 the way GNU's fork
+    /// leaves it — a dup of the shell's current fd-2 endpoint, held by
+    /// the child as a real descriptor (execute_cmd.c make_child applies
+    /// the coproc's own redirections inside the child, on top of the
+    /// inherited set). Handle-backed endpoints are handed over directly
+    /// (`CoprocStderrPlan::Direct`), so a diagnostic the child writes
+    /// after this shell has exited still lands; the pipe + forwarder
+    /// transport survives only for the process-substitution carrier,
+    /// whose endpoint is a rendezvous path with no portable child
+    /// handle, and as a fallback when a dup fails.
+    fn coproc_stderr_plan(&mut self) -> CoprocStderrPlan {
         if self.fd_table.is_closed(2) {
-            return Some(CoprocStderrForwardTarget::Discard);
+            // GNU's forked child inherits the closed fd; /dev/null is
+            // the spawn-level equivalent — writes can neither block on
+            // a dead reader nor kill the writer with SIGPIPE.
+            return CoprocStderrPlan::Direct(Stdio::null());
         }
 
-        match self.fd_table.write_endpoint(2)? {
-            FdWriteEndpoint::Stdout => Some(CoprocStderrForwardTarget::Stdout),
-            FdWriteEndpoint::Stderr => Some(CoprocStderrForwardTarget::Stderr),
-            FdWriteEndpoint::File(file_fd) => {
-                Some(CoprocStderrForwardTarget::File(file_fd.path.clone()))
+        match self.fd_table.write_endpoint(2) {
+            None | Some(FdWriteEndpoint::Stderr) => CoprocStderrPlan::Direct(Stdio::inherit()),
+            Some(FdWriteEndpoint::Stdout) => match dup_process_std_handle(1) {
+                Some(file) => CoprocStderrPlan::Direct(Stdio::from(file)),
+                None => CoprocStderrPlan::Forward(CoprocStderrForwardTarget::Stdout),
+            },
+            Some(FdWriteEndpoint::File(file_fd)) => {
+                match crate::fd::duplicate_handle_inheritable(file_fd.handle) {
+                    Ok(handle) => {
+                        CoprocStderrPlan::Direct(Stdio::from(crate::fd::handle_to_file(handle)))
+                    }
+                    Err(_) => CoprocStderrPlan::Forward(CoprocStderrForwardTarget::File(
+                        file_fd.path.clone(),
+                    )),
+                }
             }
-            FdWriteEndpoint::ProcessSubstitution { path, .. } => {
-                Some(CoprocStderrForwardTarget::File(path))
+            Some(FdWriteEndpoint::ProcessSubstitution { path, .. }) => {
+                CoprocStderrPlan::Forward(CoprocStderrForwardTarget::File(path))
             }
-            FdWriteEndpoint::CoprocStdin { fd, .. } => {
-                crate::fd::duplicate_handle_inheritable(fd.handle)
-                    .ok()
-                    .map(|h| CoprocStderrForwardTarget::CoprocStdin(crate::fd::handle_to_file(h)))
+            Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => {
+                match crate::fd::duplicate_handle_inheritable(fd.handle) {
+                    Ok(handle) => {
+                        CoprocStderrPlan::Direct(Stdio::from(crate::fd::handle_to_file(handle)))
+                    }
+                    // The pre-#1882 resolution fell through to inherit
+                    // when this dup failed; keep that floor.
+                    Err(_) => CoprocStderrPlan::Direct(Stdio::inherit()),
+                }
             }
         }
     }
