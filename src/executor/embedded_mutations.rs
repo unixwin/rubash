@@ -178,9 +178,26 @@ impl Executor {
             return crate::executor::execution_misc::decode_stdin_body_enq(pre);
         }
         let expanded = self.expand_here_string_segments(word);
-        crate::executor::execution_misc::decode_stdin_body_enq(
+        // GNU redir.c:373-374 (heredoc_expand): the expanded here-string
+        // word is final data — heredoc_write emits it verbatim, and a
+        // substitution's output bytes are never re-interpreted
+        // (subst.c:7143 command_substitute yields raw stdout bytes). The
+        // walker splices substitution output with its backslashes
+        // re-protected as PROTECTED_BACKSLASH (0x15); both backslash
+        // carriers are Boundary::Output in the marker registry, so this
+        // final-value boundary must restore them — the sibling heredoc
+        // boundary does it via restore_command_substitution_output
+        // (expand_heredoc_body_mut). decode_word_position_carriers alone
+        // restores only the quote/dollar carriers, so `<<<"$(<file)"`
+        // staged the file's backslashes as raw 0x15 bytes (rubash#1842).
+        let decoded = crate::executor::markers::restore_bare_sentinels(
             &crate::executor::markers::decode_word_position_carriers(&expanded),
-        )
+            &[
+                (crate::executor::markers::DATA_BACKSLASH, "\\"),
+                (crate::executor::markers::PROTECTED_BACKSLASH, "\\"),
+            ],
+        );
+        crate::executor::execution_misc::decode_stdin_body_enq(&decoded)
     }
 
     /// Segment walker for the here-string word: a top-level `'...'` span is
