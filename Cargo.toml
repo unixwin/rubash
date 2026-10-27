@@ -35,6 +35,20 @@ os_pipe = "1.2"
 # rubash#1801: on-demand stack growth for the recursive parser/executor
 # walkers (src/stack_growth.rs) — same mechanism rustc uses for its own
 # recursive descent on host threads.
+#
+# Gated to the targets psm 0.1.32 (stacker's assembly backend) actually
+# supports: the architectures with an assembly implementation in psm's
+# build.rs `find_assembly`, crossed with the operating systems psm's
+# README platform table / assembly sources cover, crossed with the
+# target environments those platforms use. The env factor is what keeps
+# OpenHarmony out: its triples report target_os = "linux" with
+# target_env = "ohos" — psm knows nothing of that environment, and its
+# SDK assembler rejects psm's aarch64 assembly (which broke niubash's
+# aarch64-unknown-linux-ohos cross-check). Outside this set stacker/psm
+# are not pulled in at all, and src/stack_growth.rs falls back to
+# invoking the closure directly (the pre-#1801 behavior). Keep this cfg
+# expression in sync with the one in src/stack_growth.rs.
+[target.'cfg(all(any(target_arch = "x86", target_arch = "x86_64", target_arch = "arm", target_arch = "aarch64", target_arch = "powerpc", target_arch = "powerpc64", target_arch = "s390x", target_arch = "mips", target_arch = "mips64", target_arch = "sparc", target_arch = "sparc64", target_arch = "riscv32", target_arch = "riscv64", target_arch = "loongarch64"), any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos", target_os = "visionos", target_os = "windows", target_os = "cygwin", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly", target_os = "solaris", target_os = "illumos", target_os = "haiku", target_os = "aix", target_os = "fuchsia", target_os = "redox"), any(target_env = "", target_env = "gnu", target_env = "musl", target_env = "msvc", target_env = "uclibc", target_env = "sim", target_env = "macabi")))'.dependencies]
 stacker = "0.1"
 
 [target.'cfg(windows)'.dependencies]
