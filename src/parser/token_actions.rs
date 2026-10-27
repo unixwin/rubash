@@ -1003,6 +1003,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             }
 
             if token.value == "!"
+                && command_is_empty(&state.current_cmd)
                 && state
                     .ast
                     .commands
@@ -1016,6 +1017,14 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 // unexpected token `!'`, rubash#360). The Pipe action
                 // pushed the previous stage with its pipe flag set, so a
                 // pending pipe on the last command marks this position.
+                // The current command must also be EMPTY: a standalone
+                // `!` is the BANG token only in command position, and
+                // once this stage has consumed anything — a word
+                // (`time ! cat`: `!` is time's argument, 127), an
+                // assignment or a redirection (`x=1 ! cat`, `>f ! cat`:
+                // `!` is the command NAME, 127) — GNU reads it as an
+                // ordinary word (rubash#1840). command_is_empty is
+                // exactly that nothing-consumed predicate.
                 let mut error = CommandNode::new();
                 error.line = Some(token.position);
                 error.insert_assignment(
