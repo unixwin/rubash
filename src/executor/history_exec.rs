@@ -417,6 +417,19 @@ pub(in crate::executor) fn execute_history_session(
             // history.def:159,273: filename is the first non-option argument
             // (loptend); fall back to $HISTFILE when none is given.
             let from_histfile = operands.is_empty();
+            // builtins/history.def history_builtin: the null-filename
+            // block (unset/empty $HISTFILE, or an explicitly empty
+            // operand) prints its diagnostic and returns
+            // `interactive ? EXECUTION_SUCCESS : EXECUTION_FAILURE'.
+            // `interactive' is shell.c:143's global — set together with
+            // interactive_shell, and clear for a -c unit even under -i
+            // (shell.c init_noninteractive) — which is the engine's
+            // interactive_reader_session predicate (rubash#1830).
+            let null_filename_status = if executor.interactive_reader_session() {
+                0
+            } else {
+                1
+            };
             let Some(path) = operands
                 .first()
                 .cloned()
@@ -425,14 +438,13 @@ pub(in crate::executor) fn execute_history_session(
                 // builtins/history.def history_builtin file branch: with
                 // no operand the filename comes from $HISTFILE, and an
                 // unset $HISTFILE draws the `parameter null or not set'
-                // diagnostic with EXECUTION_FAILURE — for -a/-n/-r/-w
-                // alike (rubash#1633).
+                // diagnostic — for -a/-n/-r/-w alike (rubash#1633).
                 let _ = writeln!(
                     stderr,
                     "{}history: HISTFILE: parameter null or not set",
                     executor.diagnostic_prefix()
                 );
-                return Ok(1);
+                return Ok(null_filename_status);
             };
             // GNU history.def: a null $HISTFILE is its own diagnostic
             // (rubash#1289 B3), for both -w and -a.
@@ -442,7 +454,7 @@ pub(in crate::executor) fn execute_history_session(
                     "{}history: HISTFILE: parameter null or not set",
                     executor.diagnostic_prefix()
                 );
-                return Ok(1);
+                return Ok(null_filename_status);
             }
             // builtins/history.def: an explicitly empty operand is the
             // separate `empty filename' diagnostic (rubash#1633).
@@ -452,7 +464,7 @@ pub(in crate::executor) fn execute_history_session(
                     "{}history: empty filename",
                     executor.diagnostic_prefix()
                 );
-                return Ok(1);
+                return Ok(null_filename_status);
             }
             // Translate Git-Bash/POSIX spellings (/c/..., /dev/null) to the
             // Windows forms the file APIs need; children see the same file.
@@ -486,14 +498,21 @@ pub(in crate::executor) fn execute_history_session(
                 // GNU's diagnostic surface for -w/-a file errors is
                 // narrow (rubash#1289, verified on GNU bash 5.3.20):
                 // -w failures are silent; -a prints exactly one
-                // `cannot create' line and only when the open fails
-                // with ENOENT (missing parent) — a directory target
-                // (EISDIR) stays silent there too. Read modes keep the
-                // existing `cannot open' report.
+                // `cannot create' line and only when the target does
+                // not exist — bashhist.c:450 maybe_append_history runs
+                // its pre-create open exactly on the stat-ENOENT branch,
+                // and every later append failure (a directory target,
+                // EISDIR) stays silent. The portable form of that
+                // condition is the error's NotFound kind: std maps both
+                // ENOENT and Windows' ERROR_PATH_NOT_FOUND to it, and
+                // posix_errors renders both with the same GNU text —
+                // the old raw_os_error()==2 gate dropped the line on
+                // Windows (rubash#1830). Read modes keep the existing
+                // `cannot open' report.
                 match mode {
                     HistoryMode::Write => {}
                     HistoryMode::Append => {
-                        if err.raw_os_error() == Some(2) {
+                        if err.kind() == std::io::ErrorKind::NotFound {
                             let _ = writeln!(
                                 stderr,
                                 "{}history: {path}: cannot create: {}",

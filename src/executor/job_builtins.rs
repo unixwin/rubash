@@ -2725,14 +2725,28 @@ impl Executor {
 
             if has_io {
                 let from_histfile = file_arg.is_none();
+                // builtins/history.def history_builtin: the
+                // null-filename block prints its diagnostic and returns
+                // `interactive ? EXECUTION_SUCCESS : EXECUTION_FAILURE'
+                // (shell.c:143 `interactive'; rubash#1830) — the
+                // engine's interactive_reader_session predicate.
+                let null_filename_status = if self.interactive_reader_session() {
+                    0
+                } else {
+                    1
+                };
                 let Some(file) = file_arg.or_else(|| self.get_env("HISTFILE").map(String::from))
                 else {
                     // builtins/history.def history_builtin file branch:
                     // no operand and $HISTFILE unset is the `parameter
                     // null or not set' diagnostic (rubash#1633).
-                    writeln!(stderr, "history: HISTFILE: parameter null or not set")?;
+                    writeln!(
+                        stderr,
+                        "{}history: HISTFILE: parameter null or not set",
+                        self.diagnostic_prefix()
+                    )?;
                     self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
-                    return Ok(1);
+                    return Ok(null_filename_status);
                 };
                 if file.is_empty() {
                     // builtins/history.def: a null $HISTFILE and an
@@ -2740,32 +2754,80 @@ impl Executor {
                     // (rubash#1289 B3, rubash#1633).
                     writeln!(
                         stderr,
-                        "{}",
+                        "{}history: {}",
+                        self.diagnostic_prefix(),
                         if from_histfile {
-                            "history: HISTFILE: parameter null or not set"
+                            "HISTFILE: parameter null or not set"
                         } else {
-                            "history: empty filename"
+                            "empty filename"
                         }
                     )?;
                     self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
-                    return Ok(1);
+                    return Ok(null_filename_status);
                 }
                 let mut p = provider.borrow_mut();
                 if do_clear {
                     p.clear()?;
                     let _ = std::fs::write(&file, "");
                 }
+                // The file modes report through the builtin's own
+                // diagnostic surface, exactly like the session path in
+                // history_exec.rs: an io failure is a builtin outcome
+                // with status 1, never an executor error leaking the
+                // bare io text out of the builtin (rubash#1830 —
+                // `history -a <missing-dir>/f` through a host provider
+                // surfaced as just `No such file or directory`).
                 if do_append {
-                    p.append_history(&file)?;
+                    if let Err(err) = p.append_history(&file) {
+                        // bashhist.c:450 maybe_append_history: the
+                        // `cannot create' line belongs to the branch
+                        // where the target does not exist (stat ->
+                        // ENOENT, the pre-create open fails); every
+                        // other append failure stays silent. The
+                        // portable form of that condition is the
+                        // error's NotFound kind.
+                        if err.kind() == std::io::ErrorKind::NotFound {
+                            writeln!(
+                                stderr,
+                                "{}history: {file}: cannot create: {}",
+                                self.diagnostic_prefix(),
+                                crate::posix_errors::message(&err)
+                            )?;
+                        }
+                        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                        return Ok(1);
+                    }
                 }
                 if do_read_new {
-                    p.read_new_history(&file)?;
+                    if let Err(err) = p.read_new_history(&file) {
+                        writeln!(
+                            stderr,
+                            "{}history: {file}: cannot open: {err}",
+                            self.diagnostic_prefix()
+                        )?;
+                        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                        return Ok(1);
+                    }
                 }
                 if do_read {
-                    p.read_history(&file)?;
+                    if let Err(err) = p.read_history(&file) {
+                        writeln!(
+                            stderr,
+                            "{}history: {file}: cannot open: {err}",
+                            self.diagnostic_prefix()
+                        )?;
+                        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                        return Ok(1);
+                    }
                 }
                 if do_write {
-                    p.write_history(&file)?;
+                    if p.write_history(&file).is_err() {
+                        // GNU write_history failures are silent
+                        // (histfile.c history_do_write returns the
+                        // errno unreported).
+                        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                        return Ok(1);
+                    }
                 }
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 return Ok(0);
