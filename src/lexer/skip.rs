@@ -678,6 +678,8 @@ impl<'a> Lexer<'a> {
                 // GNU function_def is FUNCTION WORD with no newline between;
                 // a line break drops any pending `function' chain.
                 scan.function_chain = 0;
+                scan.coproc_chain = 0;
+                scan.word_began_acceptable = true;
             } else if c.is_whitespace() {
                 if !scan.word_start {
                     scan.prev_accepts_close =
@@ -693,10 +695,29 @@ impl<'a> Lexer<'a> {
                     } else {
                         scan.function_chain = 0;
                     }
+                    // The `coproc NAME' chain advances the same way,
+                    // except stage 1 additionally requires the `coproc'
+                    // word to have begun at a command position
+                    // (word_began_acceptable): an argument-position
+                    // `coproc' is data, not the COPROC token
+                    // (rubash#1625).
+                    if scan.close_word == "coproc"
+                        && scan.word_plain
+                        && scan.word_began_acceptable
+                    {
+                        scan.coproc_chain = 1;
+                    } else if scan.coproc_chain == 1 && scan.word_plain {
+                        scan.coproc_chain = 2;
+                    } else {
+                        scan.coproc_chain = 0;
+                    }
                 }
                 scan.word_start = true;
                 scan.word_plain = true;
                 scan.close_word.clear();
+                // The next word begins at the position this completed
+                // word leaves behind.
+                scan.word_began_acceptable = scan.prev_accepts_close;
             } else if !matches!(c, '{' | '}') {
                 // Word content and operators. `{'/`}' are classified by
                 // the match arms below (they may be tokens or word text).
@@ -708,6 +729,9 @@ impl<'a> Lexer<'a> {
                     if scan.function_chain == 2 {
                         scan.function_chain = 0;
                     }
+                    if scan.coproc_chain == 2 {
+                        scan.coproc_chain = 0;
+                    }
                 } else {
                     match c {
                         ';' | '&' | '|' | '(' | ')' => {
@@ -716,6 +740,8 @@ impl<'a> Lexer<'a> {
                             scan.word_plain = true;
                             scan.close_word.clear();
                             scan.function_chain = 0;
+                            scan.coproc_chain = 0;
+                            scan.word_began_acceptable = true;
                         }
                         // GNU parse.y:2378 alist `{"!", BANG}` +
                         // reserved_word_acceptable (parse.y:5913 BANG): a
@@ -738,6 +764,8 @@ impl<'a> Lexer<'a> {
                             scan.word_plain = true;
                             scan.close_word.clear();
                             scan.function_chain = 0;
+                            scan.coproc_chain = 0;
+                            scan.word_began_acceptable = true;
                         }
                         // Quotes, substitutions, backslash and the rest of
                         // the word's own characters keep the word in
@@ -801,7 +829,11 @@ impl<'a> Lexer<'a> {
                             // body's `{' is read at command position, after a
                             // WORD — reserved_word_acceptable does not gate it
                             // (rubash#465).
-                            || scan.function_chain == 2)
+                            || scan.function_chain == 2
+                            // parse.y:1125-1175 `COPROC [WORD]
+                            // shell_command': same shape for the coproc
+                            // body's `{' after its NAME word (rubash#1625).
+                            || scan.coproc_chain == 2)
                         && self
                             .peek()
                             .is_none_or(|next| "()<>;&| \t\n\r".contains(next));
@@ -812,6 +844,8 @@ impl<'a> Lexer<'a> {
                         scan.word_start = true;
                         scan.word_plain = true;
                         scan.function_chain = 0;
+                        scan.coproc_chain = 0;
+                        scan.word_began_acceptable = true;
                     } else {
                         scan.word_start = false;
                         scan.word_plain = false;
@@ -853,6 +887,7 @@ impl<'a> Lexer<'a> {
                     scan.prev_accepts_close = true;
                     scan.word_start = true;
                     scan.word_plain = true;
+                    scan.word_began_acceptable = true;
                     if scan.depth == 0 {
                         match self.peek() {
                             // A close decided without consulting past the
@@ -1070,6 +1105,25 @@ struct SkipBraceScan {
     /// `{ function i { :; } }' closed one `}' early and the enclosing
     /// definition's close was misattributed (rubash#465, mirkop.sh).
     function_chain: u8,
+    /// `coproc NAME` chain, the `function NAME' chain's sibling for
+    /// the coproc productions (parse.y:1125-1175 `COPROC [WORD]
+    /// shell_command`): 0 = idle, 1 = the plain word `coproc'
+    /// completed at a command position, 2 = the NAME word completed
+    /// after it. The body's `{' is a group opener at command
+    /// position, but reserved_word_acceptable is false after the
+    /// NAME word, so without this chain the scan treats the body's
+    /// `{' as word text while its `}' still counts as a closer —
+    /// `{ coproc FC2 { cat; }; ... }' folded one `}' early and the
+    /// enclosing group's close was stolen (rubash#1625). Stage 1 is
+    /// gated on `word_began_acceptable`: GNU produces COPROC only
+    /// where a reserved word is acceptable (parse.y:5899
+    /// CHECK_FOR_RESERVED_WORD), so an argument-position `coproc'
+    /// (`echo coproc FC2 {') arms nothing.
+    coproc_chain: u8,
+    /// Whether the word now accumulating began at a close-acceptable
+    /// position (the `prev_accepts_close` value in force at its
+    /// first character). Refreshed at every word boundary.
+    word_began_acceptable: bool,
 }
 
 impl SkipBraceScan {
@@ -1093,6 +1147,8 @@ impl SkipBraceScan {
             word_plain: true,
             close_word: String::new(),
             function_chain: 0,
+            coproc_chain: 0,
+            word_began_acceptable: true,
         }
     }
 
@@ -1114,6 +1170,8 @@ impl SkipBraceScan {
             word_plain: resume.word_plain,
             close_word: resume.close_word,
             function_chain: resume.function_chain,
+            coproc_chain: resume.coproc_chain,
+            word_began_acceptable: resume.word_began_acceptable,
         }
     }
 
@@ -1136,6 +1194,8 @@ impl SkipBraceScan {
             word_plain: self.word_plain,
             close_word: self.close_word,
             function_chain: self.function_chain,
+            coproc_chain: self.coproc_chain,
+            word_began_acceptable: self.word_began_acceptable,
         }
     }
 }

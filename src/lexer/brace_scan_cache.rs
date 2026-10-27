@@ -86,6 +86,18 @@ pub(crate) struct BraceScanResume {
     /// `SkipBraceScan::function_chain`): 0 idle, 1 `function' seen, 2 its
     /// NAME seen — a following `{' opens a nested group (rubash#465).
     pub(crate) function_chain: u8,
+    /// `coproc NAME' chain of the same tracker (see
+    /// `SkipBraceScan::coproc_chain`): 0 idle, 1 `coproc' seen at a
+    /// command position, 2 its NAME seen — a following `{' opens a
+    /// nested group (rubash#1625).
+    pub(crate) coproc_chain: u8,
+    /// Whether the word currently being accumulated began at a
+    /// close-acceptable position (the `prev_accepts_close` value in
+    /// force when its first character was reached). Gates the
+    /// coproc chain's stage 1: GNU produces the COPROC token only
+    /// where a reserved word is acceptable (parse.y:5899), so a
+    /// data-position `coproc` (`echo coproc FC2 {') arms nothing.
+    pub(crate) word_began_acceptable: bool,
 }
 
 /// Outcome of `skip_brace` worth remembering for the `{` at some offset.
