@@ -701,9 +701,7 @@ impl<'a> Lexer<'a> {
                     // (word_began_acceptable): an argument-position
                     // `coproc' is data, not the COPROC token
                     // (rubash#1625).
-                    if scan.close_word == "coproc"
-                        && scan.word_plain
-                        && scan.word_began_acceptable
+                    if scan.close_word == "coproc" && scan.word_plain && scan.word_began_acceptable
                     {
                         scan.coproc_chain = 1;
                     } else if scan.coproc_chain == 1 && scan.word_plain {
