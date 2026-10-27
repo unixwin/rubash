@@ -547,9 +547,39 @@ impl<'a> Lexer<'a> {
         // folded groups) are produced by dedicated scan branches whose
         // kind never depends on the word-position check, so their
         // history kind is recorded verbatim.
+        // GNU's TIME exception rides on the same classification:
+        // time_command_acceptable (parse.y:3286) has no `|' case, so
+        // a `time' read where a pipe connector opened this command
+        // position is produced as a plain WORD even though `|' is in
+        // reserved_word_acceptable's general set — and it is that
+        // WORD that last_read_token then names, which is why a
+        // following `{' is word text there, not a group opener
+        // (rubash#1839: `echo hi | time { echo x; }` — GNU's error
+        // is the stray `}' after the `;', not a folded group).
+        // The predecessor walk is GNU's own ';'/'\n' step to
+        // token_before_that, at the same two-token width the
+        // reader history keeps: newline separators are recorded
+        // as Semicolon here, and a real `;' directly after a pipe
+        // is input the grammar has already rejected before this
+        // token's classification can matter.
+        let time_after_pipe = token.value == "time" && {
+            let mut chain = [
+                self.parse_state.last_token.as_ref(),
+                self.parse_state.token_before_that.as_ref(),
+            ]
+            .into_iter()
+            .flatten();
+            loop {
+                match chain.next() {
+                    Some((TokenKind::Pipe | TokenKind::PipeErr, _)) => break true,
+                    Some((TokenKind::Semicolon, _)) => continue,
+                    _ => break false,
+                }
+            }
+        };
         let history_kind = if token.kind == TokenKind::Keyword
             && is_keyword(&token.value)
-            && !self.reserved_word_position()
+            && (!self.reserved_word_position() || time_after_pipe)
         {
             TokenKind::Word
         } else {

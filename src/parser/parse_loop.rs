@@ -3029,6 +3029,26 @@ fn push_compound_command(state: &mut ParseState, mut command: CommandNode) {
     state.current_cmd = CommandNode::new();
 }
 
+/// Whether the command position at `start` was opened by a pipe
+/// connector (`|` or `|&`). GNU parse.y:3286
+/// (time_command_acceptable): for a `;`/`\n` predecessor the rule
+/// consults token_before_that, so newline separators between the
+/// pipe and the head are stepped over — a pipeline continues
+/// across them. Any other token ends the walk: it opened (or
+/// already fills) this command position.
+fn time_head_follows_pipe(tokens: &[Token], start: usize) -> bool {
+    let mut index = start;
+    while let Some(prev) = index.checked_sub(1) {
+        index = prev;
+        let token = &tokens[prev];
+        if token.kind == TokenKind::Semicolon && token.line_break {
+            continue;
+        }
+        return matches!(token.kind, TokenKind::Pipe | TokenKind::PipeErr);
+    }
+    false
+}
+
 pub(super) fn parse_time_prefixed_compound_command(
     tokens: &[Token],
     start: usize,
@@ -3040,6 +3060,25 @@ pub(super) fn parse_time_prefixed_compound_command(
     // not fold a plain-word `time` — e.g. one the lexer reclassified
     // under a POSIX pass (parse.y:3286, rubash#1520).
     if !is_keyword(tokens, start, "time") {
+        return None;
+    }
+    // GNU parse.y:3286 time_command_acceptable: `|' is not an
+    // acceptable predecessor — the timespec production hangs off
+    // pipeline_command (parse.y:1416), and a pipeline's later
+    // elements derive from `command` alone, so after a pipe
+    // connector the recorded `time` keyword is an ordinary command
+    // NAME and a following compound is argument text, not a timed
+    // command (rubash#1839: `echo hi | time { echo x; }` is GNU's
+    // `syntax error near unexpected token `}'`, rc 2). The check is
+    // on the token that opened this command position: step back
+    // over newline separators (a pipeline continues across them;
+    // GNU's own rule consults token_before_that for exactly the
+    // ';'/'\n' predecessor case) to the connector that began this
+    // unit. Callers on a fresh command position (list head, group
+    // body slice, function body) see no pipe there and admit as
+    // before; the recursive second-head call sees the first head's
+    // own tokens (TIME/TIMEOPT in GNU's table), never a pipe.
+    if time_head_follows_pipe(tokens, start) {
         return None;
     }
     // rubash#1548: operand window per parse.y special_case_tokens —
