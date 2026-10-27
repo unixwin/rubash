@@ -274,7 +274,18 @@ mod pipeline_tests {
     }
 
     #[test]
-    fn test_time_prefix_wraps_non_initial_pipeline_stage() {
+    // rubash#1854 (pin correction; the previous form of this test
+    // asserted the opposite): per the #1785 settled semantics, GNU's
+    // grammar never reaches a timespec from a non-initial pipeline
+    // element — mid-pipeline `time` is just a command name, resolved
+    // through PATH at execution (GNU bash 5.3.20 oracle probe of this
+    // exact line: `time: command not found`, the stage fails 127 and
+    // the pipeline carries on). The parser therefore demotes the
+    // stage head to a frozen plain word (`time_head_plain_word`,
+    // #1520/#1785) instead of folding a per-stage TimeCommand.
+    // Lane note: parser_tests is not in the CI target list; this
+    // target runs locally via `cargo test --test parser_tests`.
+    fn test_time_in_non_initial_pipeline_stage_is_a_plain_command_name() {
         let input = "printf alpha | time cat | wc -c";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -282,10 +293,9 @@ mod pipeline_tests {
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
         assert_eq!(pipeline.stages.len(), 3);
         assert_eq!(pipeline.stages[0].words, ["printf", "alpha"]);
-        let time_command = pipeline.stages[1].time_command.as_ref().unwrap();
-        assert_eq!(time_command.keyword, "time");
-        assert_eq!(time_command.command.words, ["cat"]);
-        assert_eq!(pipeline.stages[1].pipe, Some(1));
+        assert!(pipeline.stages[1].time_command.is_none());
+        assert!(pipeline.stages[1].time_head_plain_word);
+        assert_eq!(pipeline.stages[1].words, ["time", "cat"]);
         assert_eq!(pipeline.stages[2].words, ["wc", "-c"]);
     }
 
