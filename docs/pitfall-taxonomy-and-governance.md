@@ -398,6 +398,8 @@ root 定位），**不允许直接删**；做法是**改名迁移**，且只在�
 提供者，跨平台时换注 GNU coreutils 即可，产品名 winuxcmd 本身不改；引擎对
 winuxcmd 的引用仅允许存在于注释。
 
+**Supersede 注记（2026-10-27，用户裁定）**：上段「相关决策」中「不做 FFI」与「引擎对 winuxcmd 的引用仅允许存在于注释」两点自本日起被 supersede。FFI 以 unixwin/niubash#567 与 ffi-route DESIGN 所定的形态获准存在：默认关闭的 opt-in 加速面，PATH 集成仍是默认、回退与等价性参照；引擎侧只认中性的 route provider 接缝，DLL 与 winuxcmd 名字不进引擎——这与本段「概念上引擎只认 "coreutils provider"」的中立精神一致。回应本 ADR 原两条理由（模型边界、成本收益）的证据见 ffi-route DESIGN §0。§3.8 其余内容（改名迁移、coreutils provider 概念）继续有效。
+
 ## 四、热点文件提示（改动需extra谨慎）
 
 `executor/mod.rs`(677 次)、`command_prepare.rs`(123)、`command_substitution.rs`(98)、
