@@ -3556,7 +3556,7 @@ impl Executor {
                 }
             }
         }
-        let status = match (if matches!(
+        let status = match if matches!(
             builtin,
             crate::builtins::complete::CompletionBuiltin::Compgen
         ) {
@@ -3587,7 +3587,7 @@ impl Executor {
                 &mut stdout,
                 &mut stderr,
             )
-        }) {
+        } {
             Ok(status) => status,
             Err(error) => {
                 // rubash#1798: never leak a bound frame past this
