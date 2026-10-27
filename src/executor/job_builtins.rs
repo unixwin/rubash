@@ -1084,6 +1084,24 @@ impl Executor {
         Ok(())
     }
 
+    /// End-of-stream notification step (rubash#1853). The per-command
+    /// boundary flush above only runs when a NEXT top-level command is
+    /// walked, so a signal death in the stream's LAST command — a
+    /// foreground child, or a background child reaped during that
+    /// command's foreground wait — never reached stderr before the
+    /// shell exited. GNU prints it without a following command:
+    /// wait_for calls notify_and_cleanup for the dead foreground job
+    /// as the wait completes (jobs.c:3385), and
+    /// maybe_print_job_notifications prints whenever the shell is not
+    /// interactive (jobs.c:4723-4728), background deaths included.
+    /// The drivers' shared finish path therefore replays the reap +
+    /// report half of the boundary step once at stream end, before
+    /// the EXIT trap runs (GNU's notice precedes run_exit_trap).
+    pub(crate) fn flush_job_notifications_at_stream_end(&mut self) -> Result<(), ExecuteError> {
+        self.refresh_background_jobs()?;
+        self.report_pending_signal_notices()
+    }
+
     /// Format queued signal-death notices exactly as
     /// report_pending_signal_notices prints them at the command
     /// boundary. Split out so execute_wait can route the notices ITS

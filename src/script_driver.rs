@@ -4864,6 +4864,14 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
             }
         }
     }
+    // rubash#1853: end-of-stream job notifications. The boundary
+    // flush in execute_ast only fires when a further top-level
+    // command is walked, so a signal death in the stream's last
+    // command would otherwise leave the shell silently (GNU prints
+    // it from the wait itself — jobs.c:3385 notify_and_cleanup in
+    // wait_for; jobs.c:4723 maybe_print_job_notifications). This
+    // runs before the EXIT trap below, matching GNU's order.
+    let _ = executor.flush_job_notifications_at_stream_end();
     let code = match executor.run_exit_trap_with_status(status) {
         Ok(code) => code,
         Err(ExecuteError::ExitCode(code)) => code,
