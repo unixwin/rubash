@@ -664,10 +664,19 @@ impl Executor {
             .or(definition_line);
         // GNU execute_cmd.c:5387-5391: the entry fire's DebugDecision — a
         // non-zero trap status under debugging_mode skips the body entirely
-        // (no RETURN trap either, probe m2: `FN=0` with the body's echo
-        // absent); the function call's status is EXECUTION_SUCCESS.
+        // and the RETURN trap does not run for the skipped frame
+        // (execute_cmd.c:5391-5407 keeps both the body execution and
+        // run_return_trap inside the not-skipped branch; P-1, adjudicated
+        // against the GNU 5.3.20 oracle — probes p1a/p1a2: body absent,
+        // RETURN trap silent). The skipped call's status is the trap's
+        // status — `result = run_debug_trap()` flows through (p1a: 1,
+        // p1a2: 127) — NOT EXECUTION_SUCCESS; that rule belongs to the
+        // simple-command seam (execute_cmd.c:4510).
+        // WP-3: an attached session also admits this seam (function
+        // breakpoints, design 5.2); with no DEBUG action installed the
+        // funnel only consults the session.
         let mut debug_entry_return: Option<i32> = None;
-        let debug_entry_skip = if function_traced {
+        let debug_entry_skip_status = if function_traced || self.debugger_session_here() {
             if let Some(line) = body_open_line {
                 self.set_current_line_value(line);
             }
@@ -687,8 +696,8 @@ impl Executor {
                 .unwrap_or_else(|| {
                     crate::executor::command_text::bash_command_source_text(call_cmd)
                 });
-            match self.run_debug_trap(&command_text) {
-                Ok(skip) => skip.is_some(),
+            match self.run_debug_trap(crate::debugger::SeamKind::FunctionEntry, &command_text) {
+                Ok(skip) => skip,
                 // rubash#1162: a `return` inside the DEBUG action at the
                 // entry fire (funcnest is already incremented, so the
                 // action runs in this function's frame) returns from THIS
@@ -698,12 +707,12 @@ impl Executor {
                 // aborted the whole script at the top-level driver.
                 Err(ExecuteError::Return(status)) => {
                     debug_entry_return = Some(status);
-                    false
+                    None
                 }
                 Err(error) => return Err(error),
             }
         } else {
-            false
+            None
         };
         // GNU execute_function (execute_cmd.c:5269+) applies the call's
         // redirections to real descriptors for the body's duration
@@ -800,7 +809,7 @@ impl Executor {
         // run_unwind_frame does in GNU.
         let result = if let Some(status) = debug_entry_return {
             Err(ExecuteError::Return(status))
-        } else if debug_entry_skip {
+        } else if debug_entry_skip_status.is_some() {
             Ok(())
         } else {
             self.with_compound_output_redirects(call_cmd, |executor| {
@@ -871,9 +880,51 @@ impl Executor {
             Err(ExecuteError::ExitCode(_)) | Err(ExecuteError::LastpipeExit(_))
         ) {
             None
+        } else if debug_entry_skip_status.is_some() {
+            // P-1 (adjudicated at the entry fire above): GNU does not
+            // run the RETURN trap for an entry-skipped frame —
+            // execute_cmd.c:5391-5407 keeps run_return_trap inside the
+            // not-skipped branch.
+            None
         } else {
             self.run_function_return_trap()?
         };
+        // DE-04 (design 5.4): every frame that returns — by completion,
+        // by entry skip, or by an entry force-return — is reported to
+        // the session at this site, with the status the caller will
+        // observe. Exit unwinds are not returns: the session learns of
+        // them through DE-09 instead.
+        if !matches!(
+            result,
+            Err(ExecuteError::ExitCode(_)) | Err(ExecuteError::LastpipeExit(_))
+        ) {
+            let (route, frame_status) = if let Some(status) = debug_entry_skip_status {
+                (crate::debugger::ReturnRoute::EntrySkipped, status)
+            } else if let Some(status) = debug_entry_return {
+                (
+                    crate::debugger::ReturnRoute::EntryForceReturn,
+                    trap_return_status.unwrap_or(status),
+                )
+            } else {
+                let status = match &result {
+                    Ok(()) => trap_return_status.unwrap_or(self.exit_code),
+                    Err(ExecuteError::Return(status)) => trap_return_status.unwrap_or(*status),
+                    _ => self.exit_code,
+                };
+                (crate::debugger::ReturnRoute::Completed, status)
+            };
+            let caller_location = call_cmd.line.map(|line| {
+                let file = self
+                    .shell_state
+                    .bash_source_stack
+                    .get(1)
+                    .or_else(|| self.shell_state.bash_source_stack.first())
+                    .cloned()
+                    .unwrap_or_default();
+                crate::debugger::SourceLocation::new(file, line as u32)
+            });
+            self.debugger_note_frame_returned(name, route, frame_status, caller_location)?;
+        }
         // GNU execute_cmd.c run_unwind_frame ("function_calling") AFTER the
         // run_return_trap fires: uw_maybe_set_return_trap restores the saved
         // action only when the body left the trap untrapped
@@ -982,7 +1033,11 @@ impl Executor {
                 Ok(())
             }
             Ok(()) => {
-                if let Some(status) = trap_return_status {
+                if let Some(status) = debug_entry_skip_status {
+                    // P-1: a skipped frame returns the trap's status
+                    // (the funnel's Some(status)); see the entry fire.
+                    self.exit_code = status;
+                } else if let Some(status) = trap_return_status {
                     self.exit_code = status;
                 }
                 Ok(())

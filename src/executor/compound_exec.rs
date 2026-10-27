@@ -531,7 +531,8 @@ impl Executor {
                 || inner.conditional_command.is_some();
             if !inner_defers_debug && self.debug_trap_in_scope() {
                 let inner_text = bash_command_source_text(inner);
-                let _ = self.run_debug_trap(&inner_text)?;
+                let _ =
+                    self.run_debug_trap(crate::debugger::SeamKind::BackgroundLaunch, &inner_text)?;
             }
         }
         let display_source = bash_command_source_text(&background_command.command);
@@ -2052,7 +2053,8 @@ impl Executor {
             // the `?` did.
             let trap_result = if !inner_defers_debug && self.debug_trap_in_scope() {
                 let inner_text = bash_command_source_text(inner);
-                self.run_debug_trap(&inner_text).map(|_| ())
+                self.run_debug_trap(crate::debugger::SeamKind::TimeInner, &inner_text)
+                    .map(|_| ())
             } else {
                 Ok(())
             };
@@ -2343,7 +2345,8 @@ impl Executor {
         // with *okp = 1 — the evaluation is skipped, not failed.
         let init_skipped = if self.debug_trap_in_scope() && !arithmetic.init.trim().is_empty() {
             restore_for_line(self);
-            self.run_debug_trap(&arithmetic.init)?.is_some()
+            self.run_debug_trap(crate::debugger::SeamKind::ArithForInit, &arithmetic.init)?
+                .is_some()
         } else {
             false
         };
@@ -2397,9 +2400,13 @@ impl Executor {
                 "__RUBASH_TRAP_DEBUG",
             );
             let mut test_skipped = false;
-            if !test_empty && debug_may_fire && self.debug_trap_in_scope() {
+            if !test_empty
+                && ((debug_may_fire && self.debug_trap_in_scope()) || self.debugger_session_here())
+            {
                 restore_for_line(self);
-                test_skipped = self.run_debug_trap(&arithmetic.test)?.is_some();
+                test_skipped = self
+                    .run_debug_trap(crate::debugger::SeamKind::ArithForTest, &arithmetic.test)?
+                    .is_some();
             }
             if test_skipped {
                 break;
@@ -2480,9 +2487,15 @@ impl Executor {
                 "DEBUG",
                 "__RUBASH_TRAP_DEBUG",
             );
-            let update_skipped = if !update_empty && debug_may_fire && self.debug_trap_in_scope() {
+            let update_skipped = if !update_empty
+                && ((debug_may_fire && self.debug_trap_in_scope()) || self.debugger_session_here())
+            {
                 restore_for_line(self);
-                self.run_debug_trap(&arithmetic.update)?.is_some()
+                self.run_debug_trap(
+                    crate::debugger::SeamKind::ArithForUpdate,
+                    &arithmetic.update,
+                )?
+                .is_some()
             } else {
                 false
             };
@@ -4183,13 +4196,14 @@ impl Executor {
         // common no-trap loop does not allocate a String per `case` (same
         // folded admission as the ast_exec per-command DEBUG preamble,
         // rubash#186).
-        if self.debug_trap_in_scope()
-            && !self.debug_trap_running
-            && crate::builtins::trap::has_active_trap_action(
-                &self.shell_state.env_vars,
-                "DEBUG",
-                "__RUBASH_TRAP_DEBUG",
-            )
+        if !self.debug_trap_running
+            && ((self.debug_trap_in_scope()
+                && crate::builtins::trap::has_active_trap_action(
+                    &self.shell_state.env_vars,
+                    "DEBUG",
+                    "__RUBASH_TRAP_DEBUG",
+                ))
+                || self.debugger_session_here())
         {
             let raw_word = if case_command.word_metadata.raw.is_empty() {
                 case_command.word.as_str()
@@ -4201,7 +4215,10 @@ impl Executor {
             // runs, and the case command returns EXECUTION_SUCCESS (probe
             // k9/m-issue: `R=0` after the skipped head).
             if self
-                .run_debug_trap(&format!("case {raw_word} in "))?
+                .run_debug_trap(
+                    crate::debugger::SeamKind::CaseHead,
+                    &format!("case {raw_word} in "),
+                )?
                 .is_some()
             {
                 self.exit_code = 0;

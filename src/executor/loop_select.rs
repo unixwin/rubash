@@ -167,7 +167,9 @@ impl Executor {
             // on the final iteration leaves the for command's status at the
             // trap's status (probe k1: `FOR=1`).
             if self.debug_trap_in_scope() {
-                if let Some(skip_status) = self.run_debug_trap(&for_text)? {
+                if let Some(skip_status) =
+                    self.run_debug_trap(crate::debugger::SeamKind::ForHead, &for_text)?
+                {
                     self.exit_code = skip_status;
                     ran_body = true;
                     continue;

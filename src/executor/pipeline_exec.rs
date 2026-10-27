@@ -1347,7 +1347,9 @@ impl Executor {
                 // captured in-process stage: empty output + the trap status
                 // reproduces both, and the pipe chain stays intact (issue
                 // #521, huck#268's pipeline-stage fire site).
-                if let Some(skip_status) = self.run_debug_trap(&stage_text)? {
+                if let Some(skip_status) =
+                    self.run_debug_trap(crate::debugger::SeamKind::PipelineElement, &stage_text)?
+                {
                     statuses.push(skip_status);
                     input = String::new();
                     // rubash#1141: a skipped element is an instant empty

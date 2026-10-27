@@ -464,6 +464,7 @@ impl Executor {
             standard_path_scope: None,
             debug_trap_running: false,
             debug_trap_action_cache: std::cell::RefCell::new(None),
+            debug_driver: None,
             line_env_os_value: std::cell::RefCell::new(None),
             expansion_probe_active: std::cell::Cell::new(false),
             return_trap_running: false,

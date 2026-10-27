@@ -1726,6 +1726,10 @@ impl Executor {
             standard_path_scope: self.standard_path_scope.clone(),
             debug_trap_running: false,
             debug_trap_action_cache: std::cell::RefCell::new(None),
+            // WP-3: a command-substitution child never inherits the
+            // debug session (DE-12: its frames are synthesized in a
+            // later work package; stops stay on the owning executor).
+            debug_driver: None,
             line_env_os_value: std::cell::RefCell::new(None),
             expansion_probe_active: std::cell::Cell::new(false),
             return_trap_running: false,

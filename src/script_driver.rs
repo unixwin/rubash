@@ -4876,6 +4876,11 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
             1
         }
     };
+    // DE-09 (design WP-1 G-13): the driver finish side reports the
+    // final status to the session — never the EXIT funnel itself.
+    // Idempotent with the exit builtin's dispatch-side report: the
+    // first finish point to speak wins.
+    executor.debugger_note_exit(code);
     // After the EXIT trap (whose writes still belong to the streams):
     // shell exit closes every descriptor, so each still-open persistent
     // output process substitution sees EOF and finishes — run the

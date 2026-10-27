@@ -74,10 +74,10 @@ impl Executor {
             // debugging_mode returns EXECUTION_SUCCESS — the select command
             // never expands its word list nor runs.
             if self
-                .run_debug_trap(&format!(
-                    "select {} in {}",
-                    select_command.variable, words_text
-                ))?
+                .run_debug_trap(
+                    crate::debugger::SeamKind::SelectHead,
+                    &format!("select {} in {}", select_command.variable, words_text),
+                )?
                 .is_some()
             {
                 self.exit_code = 0;

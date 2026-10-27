@@ -345,6 +345,10 @@ impl Executor {
             crate::builtins::exit::ExitAction::Exit(code) => {
                 self.exit_code = code;
                 let code = self.run_exit_trap_for_status(code)?;
+                // DE-09 (design WP-1 G-13): the dispatch finish
+                // side reports the final status to the session —
+                // never the EXIT funnel itself.
+                self.debugger_note_exit(code);
                 Err(ExecuteError::ExitCode(code))
             }
             crate::builtins::exit::ExitAction::Continue(status) => {

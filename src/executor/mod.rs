@@ -732,6 +732,14 @@ pub struct Executor {
     /// to the spliced text (trap re-set, alias-table change feeding the
     /// splice) misses and re-parses.
     debug_trap_action_cache: std::cell::RefCell<Option<(String, crate::parser::Ast, i64)>>,
+    /// WP-3 (1.5.0 debugger design 4.4): the attached debug
+    /// session's driver, consulted through the DEBUG-trap funnel
+    /// (`run_debug_trap`). `None` on every executor but the
+    /// session's owner — child executors (command substitution,
+    /// pipeline stages) never inherit it, so no stop can fire
+    /// inside a synthesized frame (DE-12's frame model is a later
+    /// work package).
+    debug_driver: Option<crate::debugger::SessionDriver>,
     return_trap_running: bool,
     signal_trap_running: bool,
     /// The last value written to the OS environment's

@@ -1040,16 +1040,29 @@ impl Executor {
             // rubash#186: debug_trap_in_scope() is folded into the condition
             // after debug_trap_active so the common no-trap run never pays it
             // (both are pure reads, so the reordering is behavior-neutral).
+            // WP-3 (design 4.4): an attached session widens this
+            // seam's admission past the trap-action test — the
+            // session's scope is the attachment itself, not the
+            // functrace inheritance the trap path checks.
+            let session_here = self.debugger_session_here();
             if !skips_debug_trap
-                && debug_trap_active
-                && self.debug_trap_in_scope()
+                && ((debug_trap_active && self.debug_trap_in_scope()) || session_here)
                 && !self.debug_trap_running
             {
                 // Bash exposes the about-to-run command's line via LINENO
                 // inside the DEBUG trap action (dbg-support2.tests).
                 self.set_current_line(command);
                 let command_text = crate::executor::command_text::bash_command_source_text(command);
-                if self.run_debug_trap(&command_text)?.is_some() {
+                // The main seam's kind comes from the node's own
+                // fields (150-c REPORT section 5, note 8).
+                let seam = if command.conditional_command.is_some() {
+                    crate::debugger::SeamKind::Conditional
+                } else if command.arithmetic_command.is_some() {
+                    crate::debugger::SeamKind::Arithmetic
+                } else {
+                    crate::debugger::SeamKind::SimpleCommand
+                };
+                if self.run_debug_trap(seam, &command_text)?.is_some() {
                     // execute_cmd.c:4510: execute_simple_command returns
                     // EXECUTION_SUCCESS for the skipped unit, and
                     // execute_command_internal commits that as

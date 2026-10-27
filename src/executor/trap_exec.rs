@@ -997,10 +997,21 @@ impl Executor {
     /// value only.
     pub(crate) fn run_debug_trap(
         &mut self,
+        seam: crate::debugger::SeamKind,
         command_text: &str,
     ) -> Result<Option<i32>, ExecuteError> {
         if self.debug_trap_running || self.host_internal_depth.get() > 0 {
             return Ok(None);
+        }
+        // WP-3 (design 4.4; WP-1 gap G-02; 150-c REPORT section 5
+        // note 1): the session gate is consulted BEFORE the
+        // trap-action lookup below, so an attached session is asked
+        // on every funnel arrival — including the no-action early
+        // return — while a disarmed gate costs one atomic load and
+        // the funnel behaves exactly as before. The first arrival
+        // serves the entry stop (note 4).
+        if crate::debugger::SESSION_ACTIVE.is_armed() {
+            self.debugger_serve_entry_stop()?;
         }
         self.debug_trap_running = true;
         // rubash#375: borrowing, allocation-free consult (GNU trap.c:1154
@@ -1009,6 +1020,12 @@ impl Executor {
         let Some(action) =
             crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
         else {
+            // G-03 (WP-1): the no-action path is still a seam
+            // arrival — the consult is asked here too (150-c
+            // REPORT section 5, note 1).
+            if crate::debugger::SESSION_ACTIVE.is_armed() {
+                self.debugger_consult(seam, command_text)?;
+            }
             self.debug_trap_running = false;
             return Ok(None);
         };
@@ -1078,7 +1095,16 @@ impl Executor {
         let extdebug =
             crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extdebug");
         let skip_command = extdebug && trap_status != 0;
-        Ok(skip_command.then_some(trap_status))
+        if skip_command {
+            // Design 4.2's order: the extdebug veto (step 4) is
+            // decided before the consult (step 5) — a vetoed unit
+            // neither executes nor parks at a stop.
+            return Ok(Some(trap_status));
+        }
+        if crate::debugger::SESSION_ACTIVE.is_armed() {
+            self.debugger_consult(seam, command_text)?;
+        }
+        Ok(None)
     }
 
     /// Runs the RETURN trap action when a function (or sourced script)
@@ -1503,6 +1529,15 @@ impl Executor {
             }
         }
 
+        // WP-3 (design 4.4; WP-1 gaps G-05/G-10; 150-c REPORT
+        // section 5, note 5): the asynchronous stop is serviced
+        // here — after any signal trap for it has been dispatched
+        // above — at the boundary poll. While a trap action runs,
+        // servicing waits: the poll's later arrivals (after the
+        // action completes) synchronize on the same point.
+        if !self.debug_trap_running && !self.return_trap_running && !self.error_trap_running {
+            self.debugger_service_async_stop()?;
+        }
         Ok(())
     }
 
@@ -5228,4 +5263,407 @@ fn compound_stdio_arms_in_parse_order(command: &CommandNode) -> Vec<CompoundStdi
         .collect();
     order.sort_by_key(|(position, _)| *position);
     order.into_iter().map(|(_, arm)| arm).collect()
+}
+
+// ---------------------------------------------------------------------
+// WP-3 consult wiring (1.5.0 debugger design sections 4/5/6; WP-1
+// gap register G-02/G-03/G-05/G-06/G-08/G-13; 150-c REPORT section 5).
+//
+// The executor half of the debugger: the DEBUG-trap funnel above
+// consults the attached session through these methods. Everything
+// here is inert while no driver is installed on this executor —
+// the funnel's gate load is the only cost — and child executors
+// never carry a driver, so no stop can fire inside a synthesized
+// frame (DE-12's model belongs to a later work package).
+// ---------------------------------------------------------------------
+
+impl Executor {
+    /// Is a debug session attached to THIS executor? The process
+    /// gate is consulted first (the zero-cost rule of design 4.4);
+    /// the per-executor driver is what makes the attachment ours.
+    pub(crate) fn debugger_session_here(&self) -> bool {
+        crate::debugger::SESSION_ACTIVE.is_armed() && self.debug_driver.is_some()
+    }
+
+    /// Install a debug session on this executor. Gate pairing is
+    /// the driver layer's job (150-c REPORT section 5, note 7):
+    /// installation activates the session; termination
+    /// ([`Executor::debugger_note_exit`]) or detach deactivates it.
+    pub(crate) fn install_debug_session(&mut self, driver: crate::debugger::SessionDriver) {
+        driver.session().activate();
+        self.debug_driver = Some(driver);
+    }
+
+    /// The attached session's driver, if any (frontend and test
+    /// access; the consult itself works through the field).
+    pub(crate) fn debug_driver(&self) -> Option<&crate::debugger::SessionDriver> {
+        self.debug_driver.as_ref()
+    }
+
+    /// The attached session's driver, mutably.
+    pub(crate) fn debug_driver_mut(&mut self) -> Option<&mut crate::debugger::SessionDriver> {
+        self.debug_driver.as_mut()
+    }
+
+    /// The location facts a stop reports, read from the same state
+    /// the trap path reads: the ambient line stamp and the
+    /// BASH_SOURCE stack top (the innermost file), plus the frame
+    /// depth.
+    fn debugger_location(&self) -> (Option<crate::debugger::SourceLocation>, usize) {
+        let line = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .and_then(|value| value.parse::<u32>().ok());
+        let file = self.shell_state.bash_source_stack.first().cloned();
+        let location = match (file, line) {
+            (Some(file), Some(line)) => Some(crate::debugger::SourceLocation::new(file, line)),
+            _ => None,
+        };
+        (location, self.shell_state.function_depth)
+    }
+
+    /// Serve the entry stop if it is still pending (DE-01; WP-1
+    /// gap G-08; 150-c REPORT section 5, note 4). The entry stop is
+    /// an already-established stop — the session was constructed
+    /// stopped — so the first funnel arrival serves it instead of
+    /// arming anything new.
+    fn debugger_serve_entry_stop(&mut self) -> Result<(), ExecuteError> {
+        let pending = match self.debug_driver.as_mut() {
+            Some(driver) => driver.take_entry_stop_pending(),
+            None => false,
+        };
+        if pending {
+            self.debugger_serve_stop()?;
+        }
+        Ok(())
+    }
+
+    /// Serve the stop the session is parked at: run the driver's
+    /// stop loop, then apply its outcome.
+    fn debugger_serve_stop(&mut self) -> Result<(), ExecuteError> {
+        let outcome = match self.debug_driver.as_mut() {
+            Some(driver) => driver.serve_stop(),
+            None => return Ok(()),
+        };
+        match outcome {
+            crate::debugger::StopLoopOutcome::Resume(arming) => {
+                let Some(driver) = self.debug_driver.as_mut() else {
+                    return Ok(());
+                };
+                match driver.session_mut().resume(arming) {
+                    Ok(()) => Ok(()),
+                    Err(_) => {
+                        // The stop loop ended the session while
+                        // parked (exit/die) and still asked to
+                        // resume: no debuggee is left to continue,
+                        // so the run unwinds with the session's
+                        // final status — the same shape as the
+                        // debuggee exiting at this point.
+                        let status = driver
+                            .session()
+                            .termination()
+                            .map(|termination| termination.status())
+                            .unwrap_or(self.exit_code);
+                        Err(ExecuteError::ExitCode(status))
+                    }
+                }
+            }
+            crate::debugger::StopLoopOutcome::Detach => {
+                if let Some(driver) = self.debug_driver.take() {
+                    driver.session().deactivate();
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Park the session at a decided stop and serve it. The
+    /// consult only decides stops from the running state; a
+    /// rejection here means the state moved under the decision
+    /// (the session was terminated concurrently) and the stop
+    /// simply does not land.
+    fn debugger_stop_and_serve(
+        &mut self,
+        info: crate::debugger::StopInfo,
+    ) -> Result<(), ExecuteError> {
+        if let Some(driver) = self.debug_driver.as_mut() {
+            if driver.session_mut().stop(info).is_err() {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
+        self.debugger_serve_stop()
+    }
+
+    /// The funnel consult (design 4.2 step 5; WP-1 gap G-06;
+    /// 150-c REPORT section 5, notes 1/3/8). Asked at every funnel
+    /// arrival while a session is attached — including the
+    /// no-action early return — after the trap action ran and was
+    /// not vetoed. Decides breakpoint, function-breakpoint, and
+    /// stepping stops; a decided stop is served before this
+    /// returns, so the debuggee parks inside the funnel and
+    /// resumes from the same seam. `command_text` is the funnel's
+    /// own frozen text — never reconstructed here (note 8).
+    fn debugger_consult(
+        &mut self,
+        seam: crate::debugger::SeamKind,
+        command_text: &str,
+    ) -> Result<(), ExecuteError> {
+        use crate::debugger::{HitOutcome, SeamKind, StepArming, StopInfo, StopReason};
+
+        let (location, depth) = self.debugger_location();
+        let function_name = if seam == SeamKind::FunctionEntry {
+            self.shell_state.function_name_stack.first().cloned()
+        } else {
+            None
+        };
+
+        enum Pending {
+            None,
+            Stop(StopInfo),
+            Condition(crate::debugger::BreakpointId, StopReason),
+        }
+        let mut pending = Pending::None;
+        if let Some(driver) = self.debug_driver.as_mut() {
+            let session = driver.session_mut();
+            if session.is_running() {
+                // Breakpoint accounting (design 5.1/5.2/5.5):
+                // register_hit counts the hit and spends ignore
+                // credit before any condition is evaluated.
+                let mut candidates: Vec<(crate::debugger::BreakpointId, bool)> = Vec::new();
+                if let Some(location) = &location {
+                    candidates.extend(
+                        session
+                            .breakpoints()
+                            .line_entries_at(&location.file, location.line)
+                            .map(|entry| (entry.id, false)),
+                    );
+                }
+                if let Some(name) = &function_name {
+                    candidates.extend(
+                        session
+                            .breakpoints()
+                            .function_entries_named(name)
+                            .map(|entry| (entry.id, true)),
+                    );
+                }
+                for (id, is_function) in candidates {
+                    let reason = if is_function {
+                        StopReason::FunctionBreakpoint(id)
+                    } else {
+                        StopReason::Breakpoint(id)
+                    };
+                    match session.breakpoints_mut().register_hit(id) {
+                        HitOutcome::Stop { .. } => {
+                            pending = Pending::Stop(StopInfo {
+                                reason,
+                                location: location.clone(),
+                                seam: Some(seam),
+                                frame_depth: depth,
+                                command_text: Some(command_text.to_string()),
+                            });
+                            break;
+                        }
+                        HitOutcome::NeedsCondition { id } => {
+                            pending = Pending::Condition(id, reason);
+                            break;
+                        }
+                        HitOutcome::Disabled | HitOutcome::Ignored | HitOutcome::NoSuchEntry => {}
+                    }
+                }
+                if matches!(pending, Pending::None) {
+                    // Stepping predicates (design section 6): the
+                    // arming installed by the last resume is a
+                    // one-shot rule evaluated here. Finish is
+                    // evaluated at the return site, not at seams.
+                    let step_stop = match session.arming() {
+                        StepArming::StepInto => true,
+                        StepArming::StepOver { max_depth } => depth <= max_depth,
+                        StepArming::Continue | StepArming::Finish { .. } => false,
+                    };
+                    if step_stop {
+                        pending = Pending::Stop(StopInfo {
+                            reason: StopReason::Step,
+                            location: location.clone(),
+                            seam: Some(seam),
+                            frame_depth: depth,
+                            command_text: Some(command_text.to_string()),
+                        });
+                    }
+                }
+            }
+        }
+
+        match pending {
+            Pending::None => Ok(()),
+            Pending::Stop(info) => self.debugger_stop_and_serve(info),
+            Pending::Condition(id, reason) => {
+                // The condition is evaluated without the driver
+                // borrowed (evaluation runs engine code). An entry
+                // that vanished while deciding cannot stop.
+                let text = self
+                    .debug_driver
+                    .as_ref()
+                    .and_then(|driver| driver.session().breakpoints().get(id))
+                    .and_then(|entry| entry.condition.clone());
+                let Some(text) = text else {
+                    return Ok(());
+                };
+                match self.evaluate_debug_condition(&text) {
+                    Ok(true) => {
+                        // Committing the stop is what consumes a
+                        // one-shot entry (design 5.3).
+                        if let Some(driver) = self.debug_driver.as_mut() {
+                            driver
+                                .session_mut()
+                                .breakpoints_mut()
+                                .commit_conditional_stop(id);
+                        }
+                        self.debugger_stop_and_serve(StopInfo {
+                            reason,
+                            location,
+                            seam: Some(seam),
+                            frame_depth: depth,
+                            command_text: Some(command_text.to_string()),
+                        })
+                    }
+                    Ok(false) => Ok(()),
+                    Err(()) => {
+                        // Design 5.3: a failed evaluation counts as
+                        // false and is reported once per breakpoint;
+                        // the driver keeps the report record.
+                        if let Some(driver) = self.debug_driver.as_mut() {
+                            driver.note_condition_error(id);
+                        }
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    /// Design 5.3: a breakpoint condition is a shell command,
+    /// evaluated through the engine's own execution in the current
+    /// frame; its exit status is the verdict. The evaluation runs
+    /// under the funnel's re-entrancy guard (restored afterwards),
+    /// so neither the DEBUG trap nor the consult fires for the
+    /// evaluation's own commands — the fire that led here counts
+    /// as in progress. `$?` is preserved across the evaluation,
+    /// like across a trap firing. `Err(())` is a failed evaluation
+    /// (execution error), which the caller counts as false.
+    fn evaluate_debug_condition(&mut self, text: &str) -> Result<bool, ()> {
+        let tokens = crate::lexer::tokenize(text);
+        let ast = crate::parser::parse(&tokens);
+        let saved_exit_code = self.exit_code;
+        let saved_trap_running = std::mem::replace(&mut self.debug_trap_running, true);
+        let result = self.execute_ast(&ast);
+        self.debug_trap_running = saved_trap_running;
+        let status = self.exit_code;
+        self.exit_code = saved_exit_code;
+        match result {
+            Ok(()) => Ok(status == 0),
+            Err(_) => Err(()),
+        }
+    }
+
+    /// Service an asynchronous stop request at the boundary poll
+    /// (DE-07; design 4.4; 150-c REPORT section 5, note 5). Called
+    /// from `run_pending_signal_traps` after signal-trap dispatch:
+    /// a pending request emits its serviced event and parks the
+    /// session with reason [`StopReason::Pause`].
+    fn debugger_service_async_stop(&mut self) -> Result<(), ExecuteError> {
+        if !self.debugger_session_here() {
+            return Ok(());
+        }
+        let serve = match self.debug_driver.as_mut() {
+            Some(driver) => {
+                let session = driver.session_mut();
+                session.take_async_stop() && session.is_running()
+            }
+            None => false,
+        };
+        if !serve {
+            return Ok(());
+        }
+        if let Some(driver) = self.debug_driver.as_mut() {
+            driver
+                .session_mut()
+                .emit(crate::debugger::DebugEvent::AsyncStopServiced);
+        }
+        let (location, depth) = self.debugger_location();
+        self.debugger_stop_and_serve(crate::debugger::StopInfo {
+            reason: crate::debugger::StopReason::Pause,
+            location,
+            seam: Some(crate::debugger::SeamKind::BoundaryPoll),
+            frame_depth: depth,
+            command_text: None,
+        })
+    }
+
+    /// DE-09 (WP-1 gap G-13; 150-c REPORT section 5, note 6): the
+    /// session learns the debuggee's final status from the
+    /// driver/dispatch finish side — never from the EXIT funnel,
+    /// which has dead faces (exec replacement, the no-action
+    /// path). Idempotent: the first finish point to speak wins;
+    /// later ones find the session already terminated. Ends the
+    /// gate pairing.
+    pub(crate) fn debugger_note_exit(&mut self, status: i32) {
+        let Some(driver) = self.debug_driver.as_mut() else {
+            return;
+        };
+        if driver.session().is_terminated() {
+            return;
+        }
+        let _ = driver.session_mut().exit(status);
+        driver.session().deactivate();
+    }
+
+    /// DE-04 (design 5.4): report a frame return to the session,
+    /// emitted at the return site for every return route, and
+    /// service a `Finish` arming naming that frame: the session
+    /// stops in the caller, before the caller's next seam.
+    /// `frame_depth` is read here, while the returning frame is
+    /// still installed; `caller_location` is the call site's
+    /// location as the caller will present it.
+    pub(crate) fn debugger_note_frame_returned(
+        &mut self,
+        function: &str,
+        route: crate::debugger::ReturnRoute,
+        status: i32,
+        caller_location: Option<crate::debugger::SourceLocation>,
+    ) -> Result<(), ExecuteError> {
+        if !self.debugger_session_here() {
+            return Ok(());
+        }
+        let frame_depth = self.shell_state.function_depth;
+        let mut finish_stop = false;
+        if let Some(driver) = self.debug_driver.as_mut() {
+            let session = driver.session_mut();
+            session.emit(crate::debugger::DebugEvent::FrameReturned(
+                crate::debugger::FrameReturn {
+                    function: Some(function.to_string()),
+                    frame_depth,
+                    status,
+                    route,
+                },
+            ));
+            finish_stop = session.is_running()
+                && matches!(
+                    session.arming(),
+                    crate::debugger::StepArming::Finish { frame_depth: armed } if armed == frame_depth
+                );
+        }
+        if finish_stop {
+            self.debugger_stop_and_serve(crate::debugger::StopInfo {
+                reason: crate::debugger::StopReason::Step,
+                location: caller_location,
+                seam: Some(crate::debugger::SeamKind::FunctionReturn),
+                frame_depth: frame_depth.saturating_sub(1),
+                command_text: None,
+            })?;
+        }
+        Ok(())
+    }
 }

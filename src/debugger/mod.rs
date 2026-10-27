@@ -11,15 +11,17 @@
 //!   elsewhere and only translate into session operations),
 //! - no platform windowing or process facilities,
 //! - no execution logic: the executor consults the session through
-//!   the funnel in a later work package; nothing here reaches back
-//!   into executor internals. With no session attached the gate flag
-//!   stays disarmed and this module costs one atomic load.
+//!   the DEBUG-trap funnel (WP-3 wiring, in `executor::trap_exec`);
+//!   nothing here reaches back into executor internals. With no
+//!   session attached the gate flag stays disarmed and this module
+//!   costs one atomic load.
 //!
 //! The single-threaded session contract applies throughout: one
 //! thread owns one session; the only cross-thread surface is the
 //! atomic gate and stop-request flags.
 
 pub mod breakpoints;
+pub mod driver;
 pub mod event;
 pub mod gate;
 pub mod session;
@@ -37,6 +39,8 @@ pub use breakpoints::{
     BreakpointTarget, HitFlow, HitOutcome, WatchSnapshot,
 };
 #[allow(unused_imports)]
+pub use driver::{SessionDriver, StopLoop, StopLoopOutcome};
+#[allow(unused_imports)]
 pub use event::{
     DebugEvent, ExceptionKind, ExceptionSite, FrameReturn, OutputStream, ReturnRoute, SeamKind,
     SourceLocation, StopInfo, StopReason, SynthesizedFrameKind, WatchChange,
@@ -45,3 +49,6 @@ pub use event::{
 pub use gate::{GateFlag, SESSION_ACTIVE};
 #[allow(unused_imports)]
 pub use session::{DebugSession, SessionError, SessionState, StepArming, Termination};
+
+#[cfg(test)]
+mod wiring_tests;
