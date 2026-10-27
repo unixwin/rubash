@@ -125,11 +125,12 @@ impl Executor {
         // `while read -r l; do expr ...; done < f` iterates over every
         // line (rubash#260: the FUNCTION_STDIN text mirror eagerly fed the
         // whole remaining buffer to every child and marked it consumed,
-        // ending the loop after one iteration). For a regular-file source
-        // the fd table already has the whole GNU mechanism — byte-accurate
+        // ending the loop after one iteration). For a stream source
+        // (regular file, FIFO, device — compound_fd0_stream_source) the
+        // fd table already has the whole GNU mechanism — byte-accurate
         // record reads (FdTable::read_file_bytes) and DuplicateHandle-based
         // child inheritance — so bind fd 0 to the handle instead of
-        // slurping the text mirror. Non-file sources (pipes, procsubs,
+        // slurping the text mirror. Text-production sources (procsubs,
         // heredocs, here-strings, /dev-aliases) keep the mirror below.
         let Some(guard) = self.bind_command_fd0_input(cmd)? else {
             return execute(self);
@@ -140,10 +141,11 @@ impl Executor {
     }
 
     /// The binding half of with_command_input_redirects_inner: a
-    /// regular-file `< file` opens a real FileFd on fd slot 0 (GNU's
-    /// shared-offset descriptor, redir.c do_redirection_internal), any
-    /// other input source — here-string, heredoc, procsub text, /dev/fd
-    /// alias — stages its expanded text on FUNCTION_STDIN with the slot
+    /// stream-source `< file` (regular file, FIFO, character/block
+    /// device) opens a real FileFd on fd slot 0 (GNU's shared-offset
+    /// descriptor, redir.c do_redirection_internal), any other input
+    /// source — here-string, heredoc, procsub text, /dev/fd alias —
+    /// stages its expanded text on FUNCTION_STDIN with the slot
     /// snapshotted. Returns None when the command carries no fd-0 input
     /// binding at all (nothing to restore). Used by the compound wrapper
     /// and by the exec builtin, whose spawn must see the node's input
@@ -258,7 +260,7 @@ impl Executor {
                 }
             }
         }
-        if let Some(file) = self.compound_fd0_regular_file(cmd) {
+        if let Some(file) = self.compound_fd0_stream_file(cmd) {
             // Snapshot the FUNCTION_STDIN pair too: restore_command_fd0_input
             // is unconditional, and this branch never rewrites the text
             // channel — the guard must put back exactly what it found.
@@ -1121,14 +1123,25 @@ fn strip_heredoc_body(body: &str) -> String {
 }
 
 impl Executor {
-    /// The compound's fd-0 `< file` source when it is a real regular file
-    /// on disk — the case where GNU's shared-offset descriptor semantics
-    /// (rubash#260) are exactly representable with a FileFd on fd 0 (see
-    /// with_command_input_redirects_inner). Everything else — pipes,
-    /// process substitutions, /dev-fd aliases, /proc synthetic files,
-    /// /dev/null, missing files, `<>` read-write opens — returns None and
-    /// keeps the FUNCTION_STDIN text-mirror transport.
-    fn compound_fd0_regular_file(&mut self, cmd: &CommandNode) -> Option<Rc<FileFd>> {
+    /// The compound's fd-0 `< file` source when it is a real stream
+    /// object on disk — a regular file, a FIFO, or a character/block
+    /// device: the sources whose kernel reads are an on-demand stream
+    /// over one shared open file description, exactly GNU's
+    /// shared-offset descriptor semantics (rubash#260; see
+    /// with_command_input_redirects_inner). Everything else — process
+    /// substitutions, /dev-fd aliases, /proc synthetic files,
+    /// /dev/null, missing files, directories, `<>` read-write opens —
+    /// returns None and keeps the FUNCTION_STDIN text-mirror transport.
+    /// The distinction is load-bearing for FIFOs (rubash#1861): the
+    /// mirror's fs::read_to_string (loop_redirect_input) reads a FIFO
+    /// to EOF before the body runs — the bind stalls until the writer
+    /// closes, the over-read bytes die with the mirror, and a later
+    /// opener misses the writer entirely — while the FileFd endpoint
+    /// reads byte-wise on demand (FdTable::read_file_bytes; only
+    /// seekable disk files take the buffered + rewind path), so the
+    /// stream is consumed exactly as GNU's unbuffered pipe reads are
+    /// (read.def keeps pipes unbuffered for the same reason).
+    fn compound_fd0_stream_file(&mut self, cmd: &CommandNode) -> Option<Rc<FileFd>> {
         if std::env::var_os("RB_721").is_some() {
             eprintln!(
                 "[721] compound_stdin_open_failure redirect_in={:?} redirects={:?}",
@@ -1168,12 +1181,34 @@ impl Executor {
             &self.shell_state.env_vars,
         ));
         if !std::fs::metadata(&path)
-            .map(|meta| meta.is_file())
+            .map(|meta| Self::compound_fd0_stream_source(&meta))
             .unwrap_or(false)
         {
             return None;
         }
         FileFd::open_read(path).ok()
+    }
+
+    /// The descriptor-bindable source class for a compound's fd-0
+    /// `< file` (see compound_fd0_stream_file): regular files plus —
+    /// on unix — FIFOs and character/block devices, the filesystem
+    /// objects that yield a live kernel stream from open(2). Windows
+    /// has no filesystem FIFOs or device nodes of this kind, so the
+    /// class is regular files only there.
+    fn compound_fd0_stream_source(meta: &std::fs::Metadata) -> bool {
+        if meta.is_file() {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            let file_type = meta.file_type();
+            file_type.is_fifo() || file_type.is_char_device() || file_type.is_block_device()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
     /// GNU redir.c do_redirection_internal (redir.c:767-955) opens a

@@ -616,7 +616,7 @@ impl FdTable {
 
     /// True when fd 0's read endpoint is a descriptor the shell owns — a
     /// real file (the enclosing compound's `done < file` binding,
-    /// command_input_scope.rs compound_fd0_regular_file), a virtual text
+    /// command_input_scope.rs compound_fd0_stream_file), a virtual text
     /// fd, a procsub stream or a coproc pipe — rather than the process's
     /// inherited stdin. GNU builtin_read reads exactly ONE descriptor: fd
     /// 0 as do_redirections bound it (read.def:294; redir.c:767-955), so
