@@ -1377,6 +1377,9 @@ impl Executor {
         let mut recursive = false;
         let mut remove_empty_dir = false;
         let mut verbose = false;
+        // coreutils rm.c: --preserve-root is the default; the
+        // failsafe it arms is applied per operand below (rubash#1847).
+        let mut preserve_root = true;
         let mut no_more_options = false;
         let mut operands: Vec<&str> = Vec::new();
         // coreutils diagnostics are the emulated command's own stderr
@@ -1402,7 +1405,10 @@ impl Executor {
                 continue;
             }
             if let Some(long) = expanded.strip_prefix("--") {
-                let name = long.split('=').next().unwrap_or(long);
+                let (name, value) = match long.split_once('=') {
+                    Some((name, value)) => (name, Some(value)),
+                    None => (long, None),
+                };
                 match name {
                     // The real binary owns these two texts.
                     "help" | "version" => return Ok(false),
@@ -1410,7 +1416,36 @@ impl Executor {
                     "recursive" => recursive = true,
                     "dir" => remove_empty_dir = true,
                     "verbose" => verbose = true,
-                    "interactive" | "one-file-system" | "preserve-root" | "no-preserve-root" => {}
+                    "interactive" | "one-file-system" => {}
+                    // getopt_long declares --preserve-root with an
+                    // optional argument whose only accepted value is
+                    // `all`; any other attached value is its own
+                    // diagnostic with no Try line (coreutils 9.4).
+                    "preserve-root" => match value {
+                        None | Some("all") => preserve_root = true,
+                        Some(other_value) => {
+                            writeln!(
+                                stderr,
+                                "rm: unrecognized --preserve-root argument: '{other_value}'"
+                            )?;
+                            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                            self.exit_code = 1;
+                            return Ok(true);
+                        }
+                    },
+                    "no-preserve-root" => match value {
+                        None => preserve_root = false,
+                        Some(_) => {
+                            writeln!(
+                                stderr,
+                                "rm: option '--no-preserve-root' doesn't allow an argument"
+                            )?;
+                            writeln!(stderr, "Try 'rm --help' for more information.")?;
+                            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                            self.exit_code = 1;
+                            return Ok(true);
+                        }
+                    },
                     _ => {
                         // glibc getopt_long reports the whole word,
                         // an attached `=value` included.
@@ -1453,6 +1488,10 @@ impl Executor {
 
         let mut status = 0;
         let mut stdout = Vec::new();
+        // The root the preserve-root failsafe protects: the shell
+        // namespace's own `/` mapping (the payload root on Windows,
+        // the filesystem root elsewhere).
+        let root_target = self.session_path(shell_path_to_windows("/", &self.shell_state.env_vars));
         for expanded in operands {
             let target =
                 self.session_path(shell_path_to_windows(expanded, &self.shell_state.env_vars));
@@ -1476,11 +1515,45 @@ impl Executor {
                     continue;
                 }
             }
+            // coreutils remove.c preserve-root failsafe (rubash#1847):
+            // a recursive removal whose operand IS the root directory
+            // is refused before anything is touched; the remaining
+            // operands still run and the status is 1. The dot/dotdot
+            // refusal above pre-empts the spellings whose last
+            // component is `.`/`..` (GNU's order — `/.`, `/tmp/..`
+            // get the refusing line, not this one), so the guard
+            // sees the bare-root spellings and root symlink shapes.
+            if recursive && preserve_root && rm_operand_resolves_to_root(&target, &root_target) {
+                status = 1;
+                let shown = rm_root_display_name(expanded);
+                if shown == "/" {
+                    writeln!(
+                        &mut stderr,
+                        "rm: it is dangerous to operate recursively on '/'"
+                    )?;
+                } else {
+                    writeln!(
+                        &mut stderr,
+                        "rm: it is dangerous to operate recursively on '{shown}' (same as '/')"
+                    )?;
+                }
+                writeln!(
+                    &mut stderr,
+                    "rm: use --no-preserve-root to override this failsafe"
+                )?;
+                continue;
+            }
             let result = match fs::symlink_metadata(&target) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
-                    // A symlink operand names the link itself; a directory
-                    // link is unlinked with remove_dir.
-                    if target.is_dir() {
+                    // A symlink operand names the link itself; GNU
+                    // unlinks it and never touches the target. Windows
+                    // removes a DIRECTORY symlink with RemoveDirectory
+                    // (DeleteFile refuses it), hence remove_dir there;
+                    // on unix unlink serves every link — remove_dir
+                    // on a link path is ENOTDIR, which -f then
+                    // swallowed, leaving `rm -rf dirlink` a silent
+                    // no-op (rubash#1847 boundary shape).
+                    if cfg!(windows) && target.is_dir() {
                         fs::remove_dir(&target)
                     } else {
                         fs::remove_file(&target)
@@ -1490,7 +1563,23 @@ impl Executor {
                     if recursive {
                         fs::remove_dir_all(&target)
                     } else if remove_empty_dir {
-                        fs::remove_dir(&target)
+                        // gnulib remove.c reports a -d failure by the
+                        // directory's contents, not by rmdir's errno:
+                        // a non-empty directory is always "Directory
+                        // not empty", while a bare rmdir on the root
+                        // directory itself reports EBUSY (rubash#1847).
+                        fs::remove_dir(&target).map_err(|error| {
+                            if fs::read_dir(&target)
+                                .is_ok_and(|mut entries| entries.next().is_some())
+                            {
+                                io::Error::new(
+                                    io::ErrorKind::DirectoryNotEmpty,
+                                    "Directory not empty",
+                                )
+                            } else {
+                                error
+                            }
+                        })
                     } else {
                         status = 1;
                         writeln!(
@@ -2311,6 +2400,40 @@ fn cp_usage_text() -> &'static str {
        --parents --preserve[=ATTR_LIST] --remove-destination --recursive\
        --suffix=SUFFIX --symbolic-link --target-directory=DIR\
        --target-dir=DIR --update\n"
+}
+
+/// Whether an rm operand's target IS the root directory, for the
+/// preserve-root failsafe (rubash#1847). A bare symlink operand
+/// names the link itself — GNU unlinks it and never follows it to
+/// the target — so symlink metadata excludes it; a trailing slash
+/// makes symlink_metadata resolve through the link, so a slashed
+/// link to the root still counts. Identity is canonical-path
+/// equality with the root's own mapping, which covers the `//`
+/// spelling and symlink chains without any name matching.
+fn rm_operand_resolves_to_root(target: &std::path::Path, root: &std::path::Path) -> bool {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => return false,
+        Ok(_) => {}
+        Err(_) => return false,
+    }
+    match (fs::canonicalize(target), fs::canonicalize(root)) {
+        (Ok(target), Ok(root)) => target == root,
+        _ => false,
+    }
+}
+
+/// The name the preserve-root diagnostic prints for an operand: the
+/// walked path (fts) collapses a leading run of three or more
+/// slashes to one, while a leading pair is preserved as its own
+/// spelling — which is why `//` carries the ` (same as '/')` suffix
+/// and `///` is reported as plain `/` (coreutils 9.4 probes).
+fn rm_root_display_name(operand: &str) -> String {
+    let leading = operand.bytes().take_while(|byte| *byte == b'/').count();
+    if leading >= 3 {
+        format!("/{}", &operand[leading..])
+    } else {
+        operand.to_string()
+    }
 }
 
 /// cp quotes names with quotearg_colon: single quotes around the name, and
