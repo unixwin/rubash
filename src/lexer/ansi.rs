@@ -381,15 +381,18 @@ fn push_ansi_c_codepoint(output: &mut String, value: u32) {
     // locale::ansi_lex_locale_name: a re-derivation under a line's
     // read-time locale pins it), so an `export LC_ALL=...` earlier in the
     // script is honored at the word's GNU read time.
-    // Only an EXPLICITLY selected non-UTF-8 locale closes the gate: with
-    // no locale variables rubash's platform default stays UTF-8 (its whole
-    // text layer is UTF-8 on Windows; GNU would default to the C locale —
-    // a documented platform divergence).
-    let explicit_non_utf8_locale = {
-        let name = crate::locale::ansi_lex_locale_name();
-        !name.is_empty() && !crate::locale::is_utf8_locale_name(&name)
-    };
-    if value > 0x7f && explicit_non_utf8_locale {
+    // The gate asks the ONE shared locale decision
+    // (locale::locale_name_selects_utf8, the same predicate behind the
+    // `${#var}` length face): a non-UTF-8 decision closes it — and that
+    // includes the no-locale-variables case, where setlocale(LC_ALL, "")
+    // falls back to the C locale (locale.c set_default_locale), so
+    // `$'\uE301'` stays the six literal characters and `${#x}` counts 6,
+    // exactly as GNU does (rubash#1837; this gate used to treat an empty
+    // locale name as platform-default UTF-8 while the length face
+    // treated it as C, so the two faces disagreed in that environment).
+    let non_utf8_locale =
+        !crate::locale::locale_name_selects_utf8(&crate::locale::ansi_lex_locale_name());
+    if value > 0x7f && non_utf8_locale {
         if value < 0x1_0000 {
             output.push_str(&format!("\\u{value:04X}"));
         } else {

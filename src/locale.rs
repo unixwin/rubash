@@ -157,22 +157,35 @@ pub fn locale_name() -> String {
 }
 
 /// Whether multibyte (UTF-8) character semantics are in effect, i.e. whether
-/// the locale named by the environment is actually active.
+/// the locale named by the environment is actually active. The decision
+/// itself lives in [`locale_name_selects_utf8`]; this is its form for the
+/// live process environment.
+pub fn is_utf8() -> bool {
+    locale_name_selects_utf8(&locale_name())
+}
+
+/// The single locale decision shared by every character-semantics gate:
+/// the `${#var}` length face ([`is_utf8`]/[`is_multi_byte`]) and the
+/// `\u`/`\U` decoder faces (the ANSI-C lexer in `lexer/ansi.rs`, `echo -e`
+/// in `builtins/echo.rs`, printf's format walker) all ask this one
+/// question of the locale name in effect on their own read path.
 ///
 /// GNU bash resolves the locale at startup with setlocale(LC_ALL, "")
 /// (locale.c set_default_locale, called from shell.c), so with NO locale
 /// variable set — or every one of them empty — the C locale is in effect
-/// and character semantics are byte semantics (rubash#1622; this branch
-/// used to keep a default UTF-8 model, a leftover of the locale port
-/// that #1464's explicit-locale fixes never reached). `C`/`POSIX` and
-/// any named single-byte locale (ru_RU.CP1251, en_US.ISO-8859-1, ...)
-/// likewise select byte semantics. A UTF-8-named locale selects UTF-8
-/// only when the C library can activate it; otherwise GNU bash - and
-/// rubash - fall back to the C locale, which is what makes `${#var}`
-/// count bytes on a machine that does not have `en_US.UTF-8` compiled
-/// in (intl1.sub: 31/30 for a 15-character Cyrillic word, not 16/15).
-pub fn is_utf8() -> bool {
-    let name = locale_name();
+/// and character semantics are byte semantics: an empty name NEVER
+/// selects UTF-8 (rubash#1622 fixed that default on the length face;
+/// rubash#1837 removed the opposite default the decoder gates still
+/// kept, under which `$'\uE301'` decoded to a 3-byte character while
+/// `${#x}` counted those bytes one by one in the same environment).
+/// `C`/`POSIX` and any named single-byte locale (ru_RU.CP1251,
+/// en_US.ISO-8859-1, ...) likewise select byte semantics. A UTF-8-named
+/// locale selects UTF-8 only when the C library can activate it;
+/// otherwise GNU bash - and rubash - fall back to the C locale, which is
+/// what makes `${#var}` count bytes on a machine that does not have
+/// `en_US.UTF-8` compiled in (intl1.sub: 31/30 for a 15-character
+/// Cyrillic word, not 16/15).
+pub fn locale_name_selects_utf8(name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
@@ -180,10 +193,10 @@ pub fn is_utf8() -> bool {
     if lower == "c" || lower == "posix" {
         return false;
     }
-    if !is_utf8_locale_name(&name) {
+    if !is_utf8_locale_name(name) {
         return false;
     }
-    utf8_locale_active(&name)
+    utf8_locale_active(name)
 }
 
 /// GNU/MBCS view of the same decision: multibyte mode is on when

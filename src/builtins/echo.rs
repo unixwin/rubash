@@ -230,12 +230,15 @@ fn push_codepoint(output: &mut Vec<u8>, value: u32) {
     // (unicode.c:141: `\u%04X` / `\U%08X`, ISO C99 escape with UPPERCASE
     // hex) — under LC_ALL=C GNU keeps `echo -e '\u00e9'` as the six literal
     // characters `\u00E9` (rubash#1488). The ANSI-C decoder in lexer/ansi.rs
-    // already applies exactly this gate (#353); mirror it here. Only an
-    // EXPLICITLY selected non-UTF-8 locale closes the gate (no locale
-    // variables keeps rubash's platform-default UTF-8 model).
+    // applies exactly this gate (#353); mirror it here — through the ONE
+    // shared locale decision (locale::locale_name_selects_utf8, the same
+    // predicate behind the `${#var}` length face), so a non-UTF-8 decision
+    // closes the gate here too, including the no-locale-variables case,
+    // where setlocale(LC_ALL, "") falls back to the C locale and GNU keeps
+    // the escape literal (rubash#1837).
     if value > 0x7f {
         let name = crate::locale::active_locale_name();
-        if !name.is_empty() && !crate::locale::is_utf8_locale_name(&name) {
+        if !crate::locale::locale_name_selects_utf8(&name) {
             if value < 0x1_0000 {
                 output.extend_from_slice(format!("\\u{value:04X}").as_bytes());
             } else {
