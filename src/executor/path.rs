@@ -1388,6 +1388,19 @@ pub fn external_command_for_named_program(
     let posix_aware = !argv_dialect_legacy(env_vars) && posix_aware_child(program, env_vars);
     #[cfg(not(windows))]
     let posix_aware = false;
+    // Namespace bridges (pathmatrix section 7 item 1; final ruling
+    // 2026-10-27 item (a)): a bridge program's argv is by design
+    // interpreted inside ANOTHER filesystem namespace — a WSL guest's
+    // Linux tree, an SSH remote's tree — so every word crosses verbatim:
+    // no virtual-root funnel, no drive-form translation, no /dev/null
+    // rewrite. Membership is a semantic class of platform fixtures (see
+    // is_namespace_bridge_program), closed by the platform rather than by
+    // symptom reports, so this is a child-class axis of the funnel like
+    // posix_aware, not a per-tool exception list. The legacy dialect hatch
+    // gates the class with the rest of the Option B dialect, so the field
+    // rollback restores the pre-exclusion funnel wholesale.
+    #[cfg(windows)]
+    let namespace_bridge = !argv_dialect_legacy(env_vars) && is_namespace_bridge_program(program);
     // unixwin/rubash#592: drive-form operands (`/d/x`, `/c/...`) translate
     // for the POSIX-aware class too, so the pre-translation is complete
     // across execution context, argument position and target existence. The
@@ -1429,6 +1442,10 @@ pub fn external_command_for_named_program(
             // and take this funnel (D6). Every other child class (native
             // exes, cmd, MSYS/Cygwin tools) is untouched and still gets the
             // native form.
+            #[cfg(windows)]
+            if namespace_bridge {
+                return arg.clone();
+            }
             #[cfg(windows)]
             if !posix_aware {
                 if let Some(translated) =
@@ -2106,6 +2123,31 @@ fn under_winuxcmd_tree(program: &Path) -> bool {
         guard.insert(key, hit);
     }
     hit
+}
+
+/// Namespace bridges: programs whose argv is by design interpreted inside
+/// another filesystem namespace — `wsl` hands its words to a Linux guest,
+/// the OpenSSH client family (`ssh`/`scp`/`sftp`) hands its words to a
+/// remote host. A path spelling in such an argv names a file in THAT
+/// namespace, so the spawn-boundary translation funnel must not touch any
+/// word of it (pathmatrix section 7 item 1; final ruling 2026-10-27 item
+/// (a)). The pre-exclusion funnel classified bridges as native and rewrote
+/// them: `ssh host cat /var/log/x` left with an enclave-prefixed local
+/// path and `wsl ... /home/user/...` went through the home map (section 3
+/// bridge cells, in-loop evidence). Membership is the platform's fixed
+/// bridge set, judged on the resolved program's stem — the same kind of
+/// child-class axis as `posix_aware_child` below, not a word-level guard
+/// and not an open-ended per-tool list: a program joins this class by the
+/// platform property of being a namespace bridge, never by a bug report
+/// about an individual tool.
+#[cfg(windows)]
+fn is_namespace_bridge_program(program: &Path) -> bool {
+    let stem = program
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(stem.as_str(), "wsl" | "ssh" | "scp" | "sftp")
 }
 
 /// Option B (niubash#124(b), the MSYS per-child dialect model): whether a
@@ -5714,6 +5756,156 @@ mod tests {
         assert_eq!(
             child_argv(&native, &["/home/u/x"], &env_with_home),
             vec![r"C:\Users\u\x".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---- pathmatrix section 7 item 1: namespace bridges cross verbatim ----
+
+    #[cfg(windows)]
+    #[test]
+    fn pathmatrix_bridge_wsl_argv_crosses_verbatim() {
+        // Final ruling 2026-10-27 item (a): wsl is a namespace bridge —
+        // its argv is interpreted inside the WSL guest's filesystem
+        // namespace, so every word crosses the spawn boundary
+        // byte-for-byte. The pre-exclusion funnel rewrote the /home word
+        // through the home map (section 3 bridge_wsl cell: /home/user/...
+        // became C:/users\user\...). The token set gives every funnel rule
+        // a representative — home map, /tmp map, a root-mapped virtual
+        // root, a drive form, the /dev/null rewrite — so the pin guards
+        // the whole exclusion, not just the one rule the matrix caught.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+        let wsl = PathBuf::from(r"C:\Windows\System32\wsl.exe");
+
+        let args = [
+            "-d",
+            "Ubuntu",
+            "cat",
+            "/home/user/PM_PAYLOAD_HOME_MARKER.txt",
+            "/tmp/x",
+            "/usr/bin",
+            "/c/Windows/win.ini",
+            "/dev/null",
+        ];
+        assert_eq!(
+            child_argv(&wsl, &args, &env_vars),
+            args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>()
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pathmatrix_bridge_ssh_argv_crosses_verbatim() {
+        // The remote command words name files on the SSH server, not on
+        // this machine: the pre-exclusion funnel prefixed /var/log/x with
+        // the enclave root (section 3 bridge_ssh cell:
+        // C:\niu-payload\var\log\x). Host word and command word are not
+        // path-shaped and stay untouched either way; the three path-shaped
+        // words are the discriminating ones.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+        let ssh = PathBuf::from(r"C:\Windows\System32\OpenSSH\ssh.exe");
+
+        let args = [
+            "deploy@build-box",
+            "cat",
+            "/var/log/x",
+            "/tmp/x",
+            "/c/Windows/win.ini",
+        ];
+        assert_eq!(
+            child_argv(&ssh, &args, &env_vars),
+            args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>()
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pathmatrix_bridge_openssh_family_members_cross_verbatim() {
+        // Class membership is the platform property, not the two headline
+        // names: scp/sftp operands are remote-namespace paths by the same
+        // property and cross verbatim too.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+
+        for program in [
+            PathBuf::from(r"C:\Windows\System32\OpenSSH\scp.exe"),
+            PathBuf::from(r"C:\Windows\System32\OpenSSH\sftp.exe"),
+        ] {
+            for operand in ["/tmp/x", "/home/u/x", "/usr/bin"] {
+                assert_eq!(
+                    child_argv(&program, &[operand], &env_vars),
+                    vec![operand.to_string()],
+                    "bridge operand {operand:?} must stay verbatim for {program:?}"
+                );
+            }
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pathmatrix_bridge_exclusion_is_class_scoped_native_still_translates() {
+        // The exclusion is scoped to the bridge class: a native child
+        // takes the same shapes through the funnel exactly as before
+        // (expectations mirror the #164/#592 sibling pins).
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+        let mut env_with_home = env_vars.clone();
+        env_with_home.insert("HOME".to_string(), r"C:\Users\i164home".to_string());
+        let native = PathBuf::from("git.exe");
+
+        assert_eq!(
+            child_argv(&native, &["/tmp/x"], &env_vars),
+            vec![std::env::temp_dir()
+                .join("x")
+                .to_string_lossy()
+                .into_owned()]
+        );
+        assert_eq!(
+            child_argv(&native, &["/home/u/x"], &env_with_home),
+            vec![r"C:\Users\u\x".to_string()]
+        );
+        assert_eq!(
+            child_argv(&native, &["/usr/bin"], &env_vars),
+            vec![root.join("usr").join("bin").to_string_lossy().into_owned()]
+        );
+        assert_eq!(
+            child_argv(&native, &["/c/Windows"], &env_vars),
+            vec![r"C:\Windows".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pathmatrix_bridge_legacy_dialect_restores_funnel() {
+        // __RUBASH_ARGV_DIALECT=legacy is the internal field rollback for
+        // the whole Option B dialect; the bridge class rides the same
+        // hatch, so the rollback restores the pre-exclusion funnel for
+        // bridge children too (an existing root target translates through
+        // the native funnel, a missing one stays verbatim — the legacy
+        // existence gate of the sibling pins).
+        let root = i164_fixture_root();
+        let mut env_vars = i164_rooted_env(&root);
+        env_vars.insert("__RUBASH_ARGV_DIALECT".to_string(), "legacy".to_string());
+        let wsl = PathBuf::from(r"C:\Windows\System32\wsl.exe");
+
+        assert_eq!(
+            child_argv(&wsl, &["/usr/bin"], &env_vars),
+            vec![root.join("usr").join("bin").to_string_lossy().into_owned()]
+        );
+        assert_eq!(
+            child_argv(&wsl, &["/usr/definitely/missing"], &env_vars),
+            vec!["/usr/definitely/missing".to_string()]
         );
 
         let _ = fs::remove_dir_all(&root);
