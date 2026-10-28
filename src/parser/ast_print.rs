@@ -698,7 +698,7 @@ impl Printer {
                 end_keyword_metadata: if_command.end_keyword_metadata.clone(),
             };
             let nested_node = CommandNode {
-                if_command: Some(nested),
+                if_command: Some(Box::new(nested)),
                 ..CommandNode::new()
             };
             self.make_command_string(&nested_node);
@@ -1028,19 +1028,19 @@ impl Printer {
         }
         let mut redirects = Vec::new();
         if let Some(redirect) = &cmd.redirect_in {
-            redirects.push(redirect.clone());
+            redirects.push(redirect.as_ref().clone());
         }
         if let Some(redirect) = &cmd.redirect_out {
-            redirects.push(redirect.clone());
+            redirects.push(redirect.as_ref().clone());
         }
         if let Some(redirect) = &cmd.append {
-            redirects.push(redirect.clone());
+            redirects.push(redirect.as_ref().clone());
         }
         if let Some(redirect) = &cmd.redirect_err {
-            redirects.push(redirect.clone());
+            redirects.push(redirect.as_ref().clone());
         }
         if let Some(redirect) = &cmd.redirect_err_append {
-            redirects.push(redirect.clone());
+            redirects.push(redirect.as_ref().clone());
         }
         if let Some(here_string) = &cmd.here_string {
             if !redirects

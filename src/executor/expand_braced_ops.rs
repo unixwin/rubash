@@ -280,6 +280,19 @@ impl Executor {
         }
         if let Some((array_name, key)) = parse_array_subscript(name) {
             if self.is_assoc_parameter_array(array_name) {
+                // A plain `${name[key]}` reaches this handler only after
+                // the indexed handler's typed fetch returned None. When
+                // that fetch was settled by the typed cell, its miss is
+                // authoritative: re-deriving it from the serialized
+                // storage would clone the whole storage and linear-scan
+                // it per read (Θ(n) per missed read, the assoc_get_miss
+                // shape), and would evaluate a side-effecting subscript
+                // a second time where GNU evaluates it once. Answer the
+                // miss directly; every unsettled state keeps the storage
+                // leg below as the source of truth.
+                if self.assoc_element_fetch_settled(name) {
+                    return Some(String::new());
+                }
                 let key = self.assoc_subscript_key(key);
                 return Some(
                     self.parameter_array_storage(array_name)

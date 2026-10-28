@@ -131,6 +131,20 @@ impl Executor {
                 // status, not a jump out of it — mark for
                 // execute_time_ast_command's report adjudication.
                 self.errexit_status_converted.set(true);
+                // DE-06 (design 9.3; PLAN row 12): the errexit
+                // decision — park a selected `set -e` filter here,
+                // before the exit path. The gate matches the ERR
+                // fire above exactly: under fork collapse the
+                // death is adjudicated at the region close (whose
+                // promotion parks, after the wait-side ERR fire),
+                // and a timed death is decided by the time branch.
+                if !self.subshell_fork_collapse.get() && self.timed_dispatch_depth.get() == 0 {
+                    self.debugger_note_exception_site(
+                        crate::debugger::ExceptionKind::Errexit,
+                        self.exit_code,
+                        None,
+                    )?;
+                }
                 return Err(ExecuteError::ExitCode(self.exit_code));
             }
             return result;
@@ -383,6 +397,17 @@ impl Executor {
                 // rubash#1611: conversion of a completed command's
                 // status — mark for execute_time_ast_command.
                 self.errexit_status_converted.set(true);
+                // DE-06 (design 9.3; PLAN row 12): the errexit
+                // decision — park a selected `set -e` filter here,
+                // before the exit path (timed deaths park at the
+                // time branch's promotion instead).
+                if self.timed_dispatch_depth.get() == 0 {
+                    self.debugger_note_exception_site(
+                        crate::debugger::ExceptionKind::Errexit,
+                        self.exit_code,
+                        None,
+                    )?;
+                }
                 return Err(ExecuteError::ExitCode(self.exit_code));
             }
             return Ok(());
@@ -503,6 +528,17 @@ impl Executor {
                     // redirection failure status) — mark the conversion
                     // for execute_time_ast_command.
                     self.errexit_status_converted.set(true);
+                    // DE-06 (design 9.3; PLAN row 12): the errexit
+                    // decision — park a selected `set -e` filter
+                    // here, before the exit path (timed deaths park
+                    // at the time branch's promotion instead).
+                    if self.timed_dispatch_depth.get() == 0 {
+                        self.debugger_note_exception_site(
+                            crate::debugger::ExceptionKind::Errexit,
+                            1,
+                            None,
+                        )?;
+                    }
                     return Err(ExecuteError::ExitCode(1));
                 }
                 Ok(())

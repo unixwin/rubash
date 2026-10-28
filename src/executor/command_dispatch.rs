@@ -462,7 +462,32 @@ impl Executor {
             if result.is_ok() {
                 self.errexit_status_converted.set(true);
             }
-            Err(ExecuteError::ExitCode(self.exit_code))
+            // DE-06 (design 9.3; PLAN row 12): this conversion is
+            // the errexit decision — a selected `set -e` filter
+            // reports the site and parks the session before the
+            // exit path runs. Inside a timed dispatch the death
+            // is decided later, by the ast_exec time branch,
+            // which parks at its own promotion instead. Only the
+            // frame that ORIGINATES the conversion parks: an Err
+            // already in flight was adjudicated at the deeper
+            // frame where its command completed, and the frames
+            // it unwinds through (a sourced file's `.` call, a
+            // function call) re-enter this arm with the same
+            // status — parking there too would report one death
+            // as two exception stops.
+            let site_result = if self.timed_dispatch_depth.get() == 0 && result.is_ok() {
+                self.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::Errexit,
+                    self.exit_code,
+                    None,
+                )
+            } else {
+                Ok(())
+            };
+            match site_result {
+                Ok(()) => Err(ExecuteError::ExitCode(self.exit_code)),
+                Err(error) => Err(error),
+            }
         } else {
             result
         };

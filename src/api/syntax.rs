@@ -213,12 +213,10 @@ impl Walker<'_> {
         // detached (section 6.3), whatever shape it has.
         let detached = detached || node.background;
         // Substitutions inside this node's own words execute as
-        // part of the node, in the node's context: command
-        // substitutions stay linked to the session; process
+        // part of the node, in the node's context: process
         // substitutions run in separate processes (detached).
-        for substitution in &node.command_substitutions {
-            self.walk_list(&substitution.commands, detached);
-        }
+        // (Command substitutions are not stored on the node — the
+        // wt44/parse4 record vectors were retired; see nodes.rs.)
         for substitution in &node.process_substitutions {
             self.walk_list(&substitution.commands, true);
         }

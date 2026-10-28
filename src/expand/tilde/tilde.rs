@@ -18,10 +18,12 @@ pub const QUOTED_ASSIGNMENT_VALUE: char = crate::executor::markers::QUOTED_WORD_
 /// fallback chain — tilde.c:349-350 consults APPDATA on _WIN32, and
 /// tilde.c:354-356 sh_get_home_dir (variables.c:736) reads the passwd
 /// database, which is fixed for the uid and never tracks a reassigned $HOME.
-/// Rubash's stand-in for that fallback on Windows is USERPROFILE; on Unix
-/// there is none yet, so `None` means "GNU would consult the passwd database
-/// here and this host has no entry to offer" and callers keep the word
-/// verbatim.
+/// Rubash's stand-in for that fallback on Windows is USERPROFILE. On
+/// Unix the fallback is the real passwd lookup GNU performs:
+/// sh_get_home_dir returns current_user.home_dir, which
+/// get_current_user_info (shell.c:1878) fills from
+/// `getpwuid (current_user.uid)` — pw_dir when an entry exists, and
+/// `"/"` when the uid has no passwd entry at all (rubash#1908).
 pub(crate) fn tilde_home(env_vars: &HashMap<String, String>) -> Option<String> {
     if let Some(home) = env_vars.get("HOME") {
         return Some(home.clone());
@@ -39,7 +41,15 @@ pub(crate) fn tilde_home(env_vars: &HashMap<String, String>) -> Option<String> {
             .ok()
             .filter(|value| !value.is_empty())
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        // GNU's chain ends at the passwd database for the CURRENT uid;
+        // a uid with no entry still yields a value — "/" (shell.c
+        // get_current_user_info's no-entry arm) — so the bare `~` is
+        // never left without its GNU home source on unix.
+        Some(passwd_home_for_current_user().unwrap_or_else(|| "/".to_string()))
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         None
     }
@@ -173,13 +183,42 @@ fn expand_user_tilde_word(word: &str, env_vars: &HashMap<String, String>) -> Opt
 /// `/etc/passwd` file convention below.
 #[cfg(unix)]
 pub fn passwd_home_for_user(user: &str, _env_vars: &HashMap<String, String>) -> Option<String> {
-    use std::ffi::{CStr, CString};
+    use std::ffi::CString;
 
     // A name with an embedded NUL cannot exist in the passwd database.
     let name = CString::new(user).ok()?;
 
-    // getpwnam_r needs a caller buffer; sysconf(_SC_GETPW_R_SIZE_MAX)
-    // sizes it, doubling on ERANGE covers hosts reporting -1/undersized.
+    pw_dir_from_lookup(|pwd, buf, len, result| unsafe {
+        libc::getpwnam_r(name.as_ptr(), pwd, buf, len, result)
+    })
+}
+
+/// The current user's passwd home directory — the bare-`~` fallback
+/// when HOME is missing.
+///
+/// GNU lib/tilde/tilde.c:354-356: with no HOME variable the expansion
+/// consults sh_get_home_dir (variables.c:736), i.e. current_user.home_dir
+/// as filled by get_current_user_info (shell.c:1878) from
+/// `getpwuid (current_user.uid)`. Uses getpwuid_r, the thread-safe
+/// spelling of getpwuid, mirroring the named lookup's getpwnam_r.
+#[cfg(unix)]
+pub fn passwd_home_for_current_user() -> Option<String> {
+    let uid = unsafe { libc::getuid() };
+    pw_dir_from_lookup(|pwd, buf, len, result| unsafe {
+        libc::getpwuid_r(uid, pwd, buf, len, result)
+    })
+}
+
+/// Shared buffer dance for the reentrant passwd lookups above:
+/// sysconf(_SC_GETPW_R_SIZE_MAX) sizes the caller buffer, doubling on
+/// ERANGE covers hosts reporting -1/undersized. A successful lookup
+/// yields pw_dir; any failure (including "no such entry") yields None.
+#[cfg(unix)]
+fn pw_dir_from_lookup(
+    lookup: impl Fn(*mut libc::passwd, *mut libc::c_char, usize, *mut *mut libc::passwd) -> libc::c_int,
+) -> Option<String> {
+    use std::ffi::CStr;
+
     let mut buf_len = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
     if buf_len < 1024 {
         buf_len = 1024;
@@ -189,21 +228,14 @@ pub fn passwd_home_for_user(user: &str, _env_vars: &HashMap<String, String>) -> 
         let mut buf = vec![0u8; buf_len as usize];
         let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
         let mut result: *mut libc::passwd = std::ptr::null_mut();
-        let status = unsafe {
-            libc::getpwnam_r(
-                name.as_ptr(),
-                &mut pwd,
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-                &mut result,
-            )
-        };
+        let status = lookup(&mut pwd, buf.as_mut_ptr().cast(), buf.len(), &mut result);
         if status == libc::ERANGE {
             buf_len = buf_len.saturating_mul(2);
             continue;
         }
         if status != 0 || result.is_null() {
-            // Unknown user: no expansion (GNU failure path keeps the word).
+            // No entry: the caller decides the fallback (GNU failure
+            // path keeps the word for `~user`; "/" for the bare `~`).
             return None;
         }
         let dir = unsafe { CStr::from_ptr(pwd.pw_dir) };

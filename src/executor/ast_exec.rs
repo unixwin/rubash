@@ -438,6 +438,18 @@ impl Executor {
                     && !$command.inverted
                     && $command.and_or().is_none()
                 {
+                    // DE-06 (design 9.3; PLAN row 12): the parent
+                    // frame's errexit adjudication of the dead
+                    // region's status — park a selected `set -e`
+                    // filter here, in the restored parent state,
+                    // before the exit path runs. (The wait-side
+                    // ERR fire above has already run, so the GNU
+                    // trap-before-exit order holds.)
+                    self.debugger_note_exception_site(
+                        crate::debugger::ExceptionKind::Errexit,
+                        self.exit_code,
+                        None,
+                    )?;
                     return Err(ExecuteError::ExitCode(self.exit_code));
                 }
                 // Resume past the region's closing command — the subshell
@@ -1404,6 +1416,15 @@ impl Executor {
                     && !time_command.inverted
                     && command.and_or().is_none()
                 {
+                    // DE-06 (design 9.3; PLAN row 12): the errexit
+                    // decision for a timed command is made here —
+                    // park a selected `set -e` filter before the
+                    // exit path runs.
+                    self.debugger_note_exception_site(
+                        crate::debugger::ExceptionKind::Errexit,
+                        self.exit_code,
+                        None,
+                    )?;
                     return Err(ExecuteError::ExitCode(self.exit_code));
                 }
                 if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
@@ -1627,6 +1648,14 @@ impl Executor {
                     && !command.inverted
                     && command.and_or().is_none()
                 {
+                    // DE-06 (design 9.3; PLAN row 12): the errexit
+                    // decision — park a selected `set -e` filter
+                    // before the exit path runs.
+                    self.debugger_note_exception_site(
+                        crate::debugger::ExceptionKind::Errexit,
+                        self.exit_code,
+                        None,
+                    )?;
                     return Err(ExecuteError::ExitCode(self.exit_code));
                 }
                 if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
@@ -1804,6 +1833,14 @@ impl Executor {
                         && !command.inverted
                         && command.and_or().is_none()
                     {
+                        // DE-06 (design 9.3; PLAN row 12): the
+                        // errexit decision — park a selected
+                        // `set -e` filter before the exit path runs.
+                        self.debugger_note_exception_site(
+                            crate::debugger::ExceptionKind::Errexit,
+                            self.exit_code,
+                            None,
+                        )?;
                         return Err(ExecuteError::ExitCode(self.exit_code));
                     }
                     close_subshell_region_if_ended!(command);
@@ -1994,6 +2031,14 @@ impl Executor {
                         && !command.inverted
                         && command.and_or().is_none()
                     {
+                        // DE-06 (design 9.3; PLAN row 12): the
+                        // errexit decision — park a selected
+                        // `set -e` filter before the exit path runs.
+                        self.debugger_note_exception_site(
+                            crate::debugger::ExceptionKind::Errexit,
+                            self.exit_code,
+                            None,
+                        )?;
                         return Err(ExecuteError::ExitCode(self.exit_code));
                     }
                     // GNU eval.c:111 (reader_loop case DISCARD): the rest of
@@ -2046,6 +2091,14 @@ impl Executor {
                         && !command.inverted
                         && command.and_or().is_none()
                     {
+                        // DE-06 (design 9.3; PLAN row 12): the
+                        // errexit decision — park a selected
+                        // `set -e` filter before the exit path runs.
+                        self.debugger_note_exception_site(
+                            crate::debugger::ExceptionKind::Errexit,
+                            1,
+                            None,
+                        )?;
                         return Err(ExecuteError::ExitCode(1));
                     }
                 }
@@ -2213,6 +2266,14 @@ impl Executor {
                 && !command.inverted
                 && command.and_or().is_none()
             {
+                // DE-06 (design 9.3; PLAN row 12): the errexit
+                // decision — park a selected `set -e` filter
+                // before the exit path runs.
+                self.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::Errexit,
+                    self.exit_code,
+                    None,
+                )?;
                 return Err(ExecuteError::ExitCode(self.exit_code));
             }
 

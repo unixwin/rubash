@@ -291,7 +291,7 @@ impl Executor {
     fn mapfile_virtual_fd_input(&mut self, fd: u32) -> Option<String> {
         if self.fd_table.is_open_for_read(fd) {
             if let Some(input) = self.fd_table.read_all_text(fd) {
-                if let Some((_, offset)) = self.fd_table.input_snapshot(fd) {
+                if let Some(offset) = self.fd_table.input_offset(fd) {
                     self.shell_state
                         .env_vars
                         .insert(fd_stdin_offset_key(fd), offset.to_string());

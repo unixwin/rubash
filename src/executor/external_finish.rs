@@ -186,7 +186,7 @@ impl Executor {
             .env_vars
             .contains_key("__RUBASH_SCRIPT_NAME")
             && !self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
-            && self.fd_table.input_snapshot(0).is_none()
+            && self.fd_table.input_offset(0).is_none()
             && !expanded_is_this_shell
         {
             return Ok(false);
@@ -539,7 +539,7 @@ impl Executor {
         // dups the file (shared offset). Install a real File endpoint on
         // fd 0 for plain file redirects; text sources (heredoc/here-string)
         // keep the FUNCTION_STDIN channel.
-        let file_stdin = cmd.redirect_in.as_ref().and_then(|redirect| {
+        let file_stdin = cmd.redirect_in.as_deref().and_then(|redirect| {
             if redirect.fd.unwrap_or(0) != 0 {
                 return None;
             }
@@ -744,7 +744,16 @@ impl Executor {
 
         self.restore_shell_env(saved_env);
         if let Some(saved_shell_state) = saved_shell_state {
+            // rubash#1907: this direct-assignment restore bypasses
+            // restore_flat_subshell, so apply its process-umask half
+            // explicitly — the in-process child script ran against
+            // this same process, and a `umask` inside it must die at
+            // this process boundary like GNU's exec'd child.
+            let fork_saved_process_umask = saved_shell_state.fork_saved_process_umask;
             self.shell_state = saved_shell_state;
+            if let Some(mask) = fork_saved_process_umask {
+                crate::builtins::umask::apply_process_umask(mask);
+            }
         }
         self.shell_state.coproc_names = saved_coproc_names;
         self.shell_state.last_background_pid = saved_last_background_pid;

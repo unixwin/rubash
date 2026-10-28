@@ -958,14 +958,8 @@ pub(super) fn lone_word_function_head_candidate(cmd: &CommandNode) -> bool {
     bare.assignments
         .retain(|(name, _)| !name.starts_with("__RUBASH_"));
     bare.process_substitutions.clear();
-    bare.command_substitutions.clear();
-    bare.arithmetic_expansions.clear();
-    bare.parameter_expansions.clear();
-    bare.brace_expansions.clear();
     bare.extglob_patterns.clear();
-    bare.tilde_expansions.clear();
     bare.pathname_patterns.clear();
-    bare.word_quotes.clear();
     command_is_empty(&bare)
 }
 
@@ -975,14 +969,8 @@ pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
         && cmd.compound_assignments.is_empty()
         && cmd.array_element_assignments.is_empty()
         && cmd.process_substitutions.is_empty()
-        && cmd.command_substitutions.is_empty()
-        && cmd.arithmetic_expansions.is_empty()
-        && cmd.parameter_expansions.is_empty()
-        && cmd.brace_expansions.is_empty()
         && cmd.extglob_patterns.is_empty()
-        && cmd.tilde_expansions.is_empty()
         && cmd.pathname_patterns.is_empty()
-        && cmd.word_quotes.is_empty()
         && cmd.heredoc.is_none()
         && cmd.heredoc_delimiter.is_none()
         && cmd.heredoc_redirects.is_empty()

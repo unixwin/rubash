@@ -211,12 +211,12 @@ fn command_redirect_for_fd<'c>(cmd: &'c CommandNode, fd: u32) -> Option<&'c Redi
         .rev()
         .find(|redirect| redirect.fd_var.is_none() && redirect_binds_fd(redirect, fd))
         .or(match fd {
-            0 => cmd.redirect_in.as_ref(),
-            1 => cmd.redirect_out.as_ref().or(cmd.append.as_ref()),
+            0 => cmd.redirect_in.as_deref(),
+            1 => cmd.redirect_out.as_deref().or(cmd.append.as_deref()),
             2 => cmd
                 .redirect_err
-                .as_ref()
-                .or(cmd.redirect_err_append.as_ref()),
+                .as_deref()
+                .or(cmd.redirect_err_append.as_deref()),
             _ => None,
         })
 }

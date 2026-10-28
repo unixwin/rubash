@@ -808,7 +808,7 @@ fn alias_time_arithmetic_command(
     let metadata = ArithmeticExpressionMetadata::new(expression.clone());
     let mut arithmetic = CommandNode::new();
     arithmetic.words = vec!["((".to_string(), expression.clone(), "))".to_string()];
-    arithmetic.arithmetic_command = Some(ArithmeticCommand {
+    arithmetic.arithmetic_command = Some(Box::new(ArithmeticCommand {
         open_delimiter: "((".to_string(),
         open_delimiter_metadata: synthetic_keyword_metadata("(("),
         expression,
@@ -821,7 +821,7 @@ fn alias_time_arithmetic_command(
         has_comparison: metadata.has_comparison,
         has_logical: metadata.has_logical,
         has_update: metadata.has_update,
-    });
+    }));
     copy_command_redirects(command, &mut arithmetic);
     Some(alias_time_command_from_words(
         words,

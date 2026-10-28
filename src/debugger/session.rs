@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use super::breakpoints::BreakpointTable;
 use super::evaluation::EvaluationOutcome;
-use super::event::{DebugEvent, StopInfo};
+use super::event::{DebugEvent, ExceptionSite, StopInfo, StopReason};
 use super::gate::SESSION_ACTIVE;
 use crate::api::views::InspectionSnapshot;
 
@@ -125,11 +125,11 @@ pub enum StepArming {
 /// frontends use: the DAP adapter accepts exactly these ids in
 /// `setExceptionBreakpoints` (and offers them as its
 /// `exceptionBreakpointFilters`), and the CLI lists and toggles
-/// the same strings. A filter being *set* only records the
-/// user's selection in the session; the engine-side sites that
-/// report against the filters (the DE-06 producers) are
-/// PLAN row 12 — until then no exception stop can occur, and
-/// neither frontend may claim one did.
+/// the same strings. Setting a filter records the user's
+/// selection in the session; the engine-side sites report
+/// against the selection through the DE-06 producers
+/// (PLAN row 12): a covered site is reported and parks the
+/// session, an uncovered site is neither.
 pub const EXCEPTION_FILTER_IDS: [&str; 3] = ["err-trap", "set -e", "parse-error"];
 
 /// The filter id naming one exception kind.
@@ -214,6 +214,14 @@ pub struct DebugSession {
     /// at the operation-set layer so both frontends read and
     /// write the one set. Empty until a frontend sets it.
     exception_filters: std::collections::HashSet<String>,
+    /// The exception site the session is parked at, while the
+    /// current stop is an exception stop (PLAN row 12): the
+    /// executor producer records the site in the same breath as
+    /// it queues DE-06 and parks, and `stop` clears the record
+    /// whenever a stop that is not an exception stop commits —
+    /// so a frontend answering `exceptionInfo` reads exactly
+    /// the site of the stop being served, never a stale one.
+    last_exception: Option<ExceptionSite>,
 }
 
 impl DebugSession {
@@ -241,6 +249,7 @@ impl DebugSession {
             defined_functions: std::collections::HashSet::new(),
             step_file_scope: None,
             exception_filters: std::collections::HashSet::new(),
+            last_exception: None,
         };
         session.emit(DebugEvent::SessionStarted);
         session.emit(DebugEvent::Stopped(entry_stop));
@@ -381,6 +390,21 @@ impl DebugSession {
         self.exception_filters.contains(exception_filter_id(kind))
     }
 
+    /// Record the exception site the session is parking at
+    /// (PLAN row 12). Executor-producer side only: the producer
+    /// records the site, queues DE-06, and parks the session
+    /// with [`StopReason::Exception`] in one breath, so the
+    /// record and the stop always name the same site.
+    pub fn note_exception_site(&mut self, site: ExceptionSite) {
+        self.last_exception = Some(site);
+    }
+
+    /// The exception site of the current stop, while that stop
+    /// is an exception stop; `None` at every other stop.
+    pub fn last_exception_site(&self) -> Option<&ExceptionSite> {
+        self.last_exception.as_ref()
+    }
+
     /// Could this session stop the debuggee at the next seam?
     /// (design 4.4's inert shape.) True exactly when the session
     /// is running AND something is armed: a stepping arming
@@ -460,6 +484,13 @@ impl DebugSession {
             SessionState::Running => {
                 self.state = SessionState::Stopped;
                 self.arming = StepArming::Continue;
+                // The exception-site record belongs to an
+                // exception stop only (PLAN row 12): any other
+                // stop supersedes it, so a later `exceptionInfo`
+                // can never answer with a previous site.
+                if !matches!(info.reason, StopReason::Exception(_)) {
+                    self.last_exception = None;
+                }
                 self.last_stop = Some(info.clone());
                 self.emit(DebugEvent::Stopped(info));
                 Ok(())
@@ -534,7 +565,9 @@ impl Default for DebugSession {
 #[cfg(test)]
 mod tests {
     use super::{DebugSession, SessionError, SessionState, StepArming, Termination};
-    use crate::debugger::event::{DebugEvent, SourceLocation, StopInfo, StopReason};
+    use crate::debugger::event::{
+        DebugEvent, ExceptionKind, ExceptionSite, SourceLocation, StopInfo, StopReason,
+    };
 
     fn seam_stop() -> StopInfo {
         StopInfo {
@@ -778,5 +811,35 @@ mod tests {
             SessionError::AlreadyTerminated.to_string(),
             "session has terminated"
         );
+    }
+
+    /// PLAN row 12: the site a producer records for an exception
+    /// stop is the site `exceptionInfo` answers with at that
+    /// stop — and the next, non-exception stop clears it, so no
+    /// stale site can ever be reported.
+    #[test]
+    fn an_exception_site_is_recorded_for_its_stop_and_cleared_by_the_next() {
+        let mut session = DebugSession::new();
+        assert_eq!(session.last_exception_site(), None);
+        session.resume(StepArming::Continue).unwrap();
+        let site = ExceptionSite {
+            kind: ExceptionKind::Errexit,
+            status: 1,
+            location: Some(SourceLocation::new("a.sh", 3)),
+        };
+        session.note_exception_site(site.clone());
+        session
+            .stop(StopInfo {
+                reason: StopReason::Exception(ExceptionKind::Errexit),
+                location: site.location.clone(),
+                seam: None,
+                frame_depth: 0,
+                command_text: None,
+            })
+            .unwrap();
+        assert_eq!(session.last_exception_site(), Some(&site));
+        session.resume(StepArming::Continue).unwrap();
+        session.stop(seam_stop()).unwrap();
+        assert_eq!(session.last_exception_site(), None);
     }
 }

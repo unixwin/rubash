@@ -102,6 +102,14 @@ pub enum StopReason {
     /// An asynchronous stop request was serviced at a boundary poll
     /// (design 4.4/9.4).
     Pause,
+    /// An exception site whose filter is selected parked the
+    /// session before the engine's pending action ran (design
+    /// 9.3; PLAN row 12): before the ERR trap action for
+    /// [`ExceptionKind::ErrTrap`], before the exit path for
+    /// [`ExceptionKind::Errexit`], and before the run ends for
+    /// [`ExceptionKind::ParseError`]. The stop is a park, not a
+    /// veto: resuming lets the pending action proceed unchanged.
+    Exception(ExceptionKind),
 }
 
 /// The payload of a stop: everything a frontend needs to render the
@@ -187,8 +195,11 @@ pub enum ExceptionKind {
     ParseError,
 }
 
-/// An exception-site payload (DE-06). This is a notification, not a
-/// veto: it cannot cancel the exit it reports.
+/// An exception-site payload (DE-06). The site is reported, and
+/// because its filter is selected the session also parks there
+/// ([`StopReason::Exception`]); the park is not a veto — resuming
+/// lets the action the site announced (the trap action, the exit,
+/// the run's end) proceed unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExceptionSite {
     /// Which surface reported.
@@ -240,7 +251,9 @@ pub enum DebugEvent {
     FrameReturned(FrameReturn),
     /// DE-05: a watch entry's value changed since the previous stop.
     WatchChanged(WatchChange),
-    /// DE-06: an exception site was reached (notification only).
+    /// DE-06: an exception site whose filter is selected was
+    /// reached; the park at the site follows as a
+    /// [`DebugEvent::Stopped`] with [`StopReason::Exception`].
     ExceptionSite(ExceptionSite),
     /// DE-07: an asynchronous stop request was serviced at a
     /// boundary poll, after any signal trap for it had been

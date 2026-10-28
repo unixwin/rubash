@@ -10,18 +10,18 @@ pub(in crate::executor) fn apply_inherited_stderr_to_stdout_fd_copy(
 
     if command
         .redirect_out
-        .as_ref()
+        .as_deref()
         .is_some_and(|redirect| redirect_target_fd(&redirect.target) == Some(2))
     {
         command.redirect_out = None;
-        command.append = Some(redirect.clone());
+        command.append = Some(Box::new(redirect.clone()));
     }
 
     if command
         .append
-        .as_ref()
+        .as_deref()
         .is_some_and(|redirect| redirect_target_fd(&redirect.target) == Some(2))
     {
-        command.append = Some(redirect.clone());
+        command.append = Some(Box::new(redirect.clone()));
     }
 }

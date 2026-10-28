@@ -349,22 +349,22 @@ pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
         parts.push(words);
     }
 
-    if let Some(redirect) = own_redirect(cmd.redirect_in.as_ref()) {
+    if let Some(redirect) = own_redirect(cmd.redirect_in.as_deref()) {
         parts.push(format_redirect("<", redirect));
     }
-    if let Some(redirect) = own_redirect(cmd.redirect_out.as_ref()) {
+    if let Some(redirect) = own_redirect(cmd.redirect_out.as_deref()) {
         parts.push(format_redirect(
             if redirect.clobber { ">|" } else { ">" },
             redirect,
         ));
     }
-    if let Some(redirect) = own_redirect(cmd.append.as_ref()) {
+    if let Some(redirect) = own_redirect(cmd.append.as_deref()) {
         parts.push(format_redirect(">>", redirect));
     }
-    if let Some(redirect) = own_redirect(cmd.redirect_err.as_ref()) {
+    if let Some(redirect) = own_redirect(cmd.redirect_err.as_deref()) {
         parts.push(format_redirect("2>", redirect));
     }
-    if let Some(redirect) = own_redirect(cmd.redirect_err_append.as_ref()) {
+    if let Some(redirect) = own_redirect(cmd.redirect_err_append.as_deref()) {
         parts.push(err_append_source_text(cmd, redirect));
     }
     if let Some(here_string) = &cmd.here_string {
@@ -1023,8 +1023,8 @@ fn function_command_source_text(function_command: &crate::parser::FunctionComman
 }
 
 pub(in crate::executor) fn append_source_redirects(text: &mut String, cmd: &CommandNode) {
-    append_function_redirect(text, own_redirect(cmd.redirect_in.as_ref()), "<");
-    let combined = own_redirect(cmd.redirect_out.as_ref())
+    append_function_redirect(text, own_redirect(cmd.redirect_in.as_deref()), "<");
+    let combined = own_redirect(cmd.redirect_out.as_deref())
         .filter(|redirect| {
             matches!(
                 redirect.kind,
@@ -1033,7 +1033,7 @@ pub(in crate::executor) fn append_source_redirects(text: &mut String, cmd: &Comm
             )
         })
         .or_else(|| {
-            own_redirect(cmd.redirect_err_append.as_ref()).filter(|redirect| {
+            own_redirect(cmd.redirect_err_append.as_deref()).filter(|redirect| {
                 matches!(
                     redirect.kind,
                     crate::parser::RedirectKind::CombinedOutput
@@ -1051,15 +1051,15 @@ pub(in crate::executor) fn append_source_redirects(text: &mut String, cmd: &Comm
     } else {
         append_function_redirect(
             text,
-            own_redirect(cmd.redirect_out.as_ref()),
-            own_redirect(cmd.redirect_out.as_ref())
+            own_redirect(cmd.redirect_out.as_deref()),
+            own_redirect(cmd.redirect_out.as_deref())
                 .filter(|redirect| redirect.clobber)
                 .map(|_| ">|")
                 .unwrap_or(">"),
         );
-        append_function_redirect(text, own_redirect(cmd.append.as_ref()), ">>");
-        append_function_redirect(text, own_redirect(cmd.redirect_err.as_ref()), "2>");
-        if let Some(redirect) = own_redirect(cmd.redirect_err_append.as_ref()) {
+        append_function_redirect(text, own_redirect(cmd.append.as_deref()), ">>");
+        append_function_redirect(text, own_redirect(cmd.redirect_err.as_deref()), "2>");
+        if let Some(redirect) = own_redirect(cmd.redirect_err_append.as_deref()) {
             text.push(' ');
             text.push_str(&err_append_source_text(cmd, redirect));
         }

@@ -1648,7 +1648,6 @@ mod function_tests {
         assert_eq!(function.name_metadata.word_index, 0);
         assert_eq!(function.name_metadata.value, "greet");
         assert_eq!(function.name_metadata.raw, "greet");
-        assert!(function.name_metadata.word_quotes.is_empty());
         assert!(function.keyword);
         assert_eq!(function.keyword_text.as_deref(), Some("function"));
         assert_eq!(
@@ -4006,7 +4005,6 @@ mod command_substitution_tests {
         assert!(substitutions[0].current_shell);
         assert!(!substitutions[0].pipe_output);
         assert_eq!(substitutions[0].commands[0].words, ["echo", "hi"]);
-        assert!(command.parameter_expansions.is_empty());
     }
 
     #[test]

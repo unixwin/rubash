@@ -166,9 +166,9 @@ fn synthetic_word_metadata(word_index: usize, value: &str) -> WordMetadata {
 
 fn alias_arithmetic_part(command: &CommandNode, words: &[String]) -> String {
     let mut text = words.join(" ");
-    append_alias_arithmetic_redirect(&mut text, command.redirect_in.as_ref(), "<");
-    append_alias_arithmetic_redirect(&mut text, command.redirect_out.as_ref(), ">");
-    append_alias_arithmetic_redirect(&mut text, command.append.as_ref(), ">>");
+    append_alias_arithmetic_redirect(&mut text, command.redirect_in.as_deref(), "<");
+    append_alias_arithmetic_redirect(&mut text, command.redirect_out.as_deref(), ">");
+    append_alias_arithmetic_redirect(&mut text, command.append.as_deref(), ">>");
     text
 }
 

@@ -1123,7 +1123,19 @@ impl Executor {
         // carries their registrations) is swapped back (rubash#1336).
         self.flush_region_owned_output_process_substitutions(&saved_state.env_vars);
         self.restore_shell_env(saved_state.env_vars.clone());
+        // rubash#1907: the region ran against this same PROCESS, so a
+        // `umask` inside it re-masked the process itself; GNU's fork
+        // discards that with the child. Re-apply the mask the save
+        // point snapshotted — LAST, so the deferred procsub bodies
+        // flushed above still ran in the region's context. Idempotent:
+        // callers that restore the same snapshot more than once (or a
+        // snapshot whose region never touched the mask) re-apply the
+        // same value.
+        let fork_saved_process_umask = saved_state.fork_saved_process_umask;
         self.shell_state = saved_state;
+        if let Some(mask) = fork_saved_process_umask {
+            crate::builtins::umask::apply_process_umask(mask);
+        }
     }
 
     pub fn aliases_snapshot(&self) -> HashMap<String, String> {

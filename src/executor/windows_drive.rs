@@ -72,7 +72,7 @@ pub(in crate::executor) fn bare_windows_drive_command_root(cmd: &CommandNode) ->
     if cmd
         .word_metadata
         .first()
-        .is_some_and(|metadata| !metadata.word_quotes.is_empty() || metadata.raw.as_str() != word)
+        .is_some_and(|metadata| metadata.raw.as_str() != word)
     {
         return None;
     }

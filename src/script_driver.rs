@@ -407,6 +407,30 @@ fn run_script_grouped_at_line_offset(
             && stdin_script_errexit_enabled(executor)
             && !executor.last_command_inverted();
         if parse_error || exit_jump || errexit_stop {
+            // DE-06 (design 9.3; PLAN row 12): a parse error is
+            // ending this run — a selected `parse-error` filter
+            // reports the site and parks the session here, after
+            // the diagnostic and the group's valid prefix, before
+            // the exit path runs. The site's line is the failed
+            // group's first line (the diagnostic itself names the
+            // exact line). A stop-loop unwind from the park (the
+            // user ended the session there) replaces the pending
+            // classification with its own exit.
+            if parse_error {
+                let location = executor.shell_state.bash_source_stack.first().map(|file| {
+                    crate::debugger::SourceLocation::new(
+                        file.clone(),
+                        start_line.saturating_add(line_offset) as u32,
+                    )
+                });
+                if let Err(ExecuteError::ExitCode(code)) = executor.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::ParseError,
+                    executor.last_exit_code(),
+                    location,
+                ) {
+                    return (code, true);
+                }
+            }
             // The parse-abort classification (a reader discard, not an
             // exit-shell jump) must not read as `exit`; the errexit break
             // propagates even then (GNU ERREXIT, see above).
@@ -4804,6 +4828,23 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
         // run, whose driver returns the group status directly.
         executor.set_last_exit_code(status);
         let parse_error = executor.take_parse_error();
+        // DE-06 (design 9.3; PLAN row 12): a parse error is
+        // ending this stdin run — a selected `parse-error`
+        // filter reports the site and parks the session before
+        // the exit path runs; a stop-loop unwind from the park
+        // replaces the run's status with its own.
+        if parse_error {
+            let location = executor.shell_state.bash_source_stack.first().map(|file| {
+                crate::debugger::SourceLocation::new(file.clone(), pending_start_line as u32)
+            });
+            if let Err(ExecuteError::ExitCode(code)) = executor.debugger_note_exception_site(
+                crate::debugger::ExceptionKind::ParseError,
+                status,
+                location,
+            ) {
+                executor.set_last_exit_code(code);
+            }
+        }
         pending.clear();
         if parse_error
             || executor.take_exit_jump_pending()
@@ -4833,6 +4874,21 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
         // Same group-status commit as the loop body above (rubash#508).
         executor.set_last_exit_code(status);
         let parse_error = executor.take_parse_error();
+        // DE-06 (design 9.3; PLAN row 12): the final group's
+        // parse error — same site treatment as the loop arm
+        // above.
+        if parse_error {
+            let location = executor.shell_state.bash_source_stack.first().map(|file| {
+                crate::debugger::SourceLocation::new(file.clone(), pending_start_line as u32)
+            });
+            if let Err(ExecuteError::ExitCode(code)) = executor.debugger_note_exception_site(
+                crate::debugger::ExceptionKind::ParseError,
+                status,
+                location,
+            ) {
+                executor.set_last_exit_code(code);
+            }
+        }
         if parse_error
             || executor.take_exit_jump_pending()
             || (status != 0

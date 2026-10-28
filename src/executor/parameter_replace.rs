@@ -77,11 +77,11 @@ fn replace_parameter_pattern_inner(
     // single-slash form anchors at the beginning (`#`) or end (`%`).
     if !global {
         if let Some(prefix_pattern) = pattern.strip_prefix('#') {
-            return replace_parameter_prefix(value, prefix_pattern, &amp, extglob);
+            return replace_parameter_prefix(value, prefix_pattern, &amp, nocase, extglob);
         }
 
         if let Some(suffix_pattern) = pattern.strip_prefix('%') {
-            return replace_parameter_suffix(value, suffix_pattern, &amp, extglob);
+            return replace_parameter_suffix(value, suffix_pattern, &amp, nocase, extglob);
         }
     }
 
@@ -256,9 +256,10 @@ pub(in crate::executor) fn replace_parameter_prefix(
     value: &str,
     pattern: &str,
     amp: &dyn Fn(&str) -> String,
+    nocase: bool,
     extglob: bool,
 ) -> String {
-    let Some(end) = find_parameter_prefix_match(value, pattern, extglob) else {
+    let Some(end) = find_parameter_prefix_match(value, pattern, nocase, extglob) else {
         return value.to_string();
     };
     format!("{}{}", amp(&value[..end]), &value[end..])
@@ -268,9 +269,10 @@ pub(in crate::executor) fn replace_parameter_suffix(
     value: &str,
     pattern: &str,
     amp: &dyn Fn(&str) -> String,
+    nocase: bool,
     extglob: bool,
 ) -> String {
-    let Some(start) = find_parameter_suffix_match(value, pattern, extglob) else {
+    let Some(start) = find_parameter_suffix_match(value, pattern, nocase, extglob) else {
         return value.to_string();
     };
     format!("{}{}", &value[..start], amp(&value[start..]))
@@ -295,6 +297,7 @@ pub(super) fn pattern_contains_glob(pattern: &str) -> bool {
 pub(in crate::executor) fn find_parameter_prefix_match(
     value: &str,
     pattern: &str,
+    nocase: bool,
     extglob: bool,
 ) -> Option<usize> {
     if pattern.is_empty() {
@@ -304,9 +307,9 @@ pub(in crate::executor) fn find_parameter_prefix_match(
     let prechecked = pattern_pair_gates_clean(pattern, value);
     let candidate_matches = |word: &str| {
         if prechecked {
-            parameter_pattern_match_prechecked(pattern, word, false, extglob)
+            parameter_pattern_match_prechecked(pattern, word, nocase, extglob)
         } else {
-            parameter_pattern_match(pattern, word, false, extglob)
+            parameter_pattern_match(pattern, word, nocase, extglob)
         }
     };
     // A star-free pattern matches at most pattern_match_length_bound
@@ -336,6 +339,7 @@ pub(in crate::executor) fn find_parameter_prefix_match(
 pub(in crate::executor) fn find_parameter_suffix_match(
     value: &str,
     pattern: &str,
+    nocase: bool,
     extglob: bool,
 ) -> Option<usize> {
     if pattern.is_empty() {
@@ -345,9 +349,9 @@ pub(in crate::executor) fn find_parameter_suffix_match(
     let prechecked = pattern_pair_gates_clean(pattern, value);
     let candidate_matches = |word: &str| {
         if prechecked {
-            parameter_pattern_match_prechecked(pattern, word, false, extglob)
+            parameter_pattern_match_prechecked(pattern, word, nocase, extglob)
         } else {
-            parameter_pattern_match(pattern, word, false, extglob)
+            parameter_pattern_match(pattern, word, nocase, extglob)
         }
     };
     // Bound prune, twin of find_parameter_prefix_match: a star-free

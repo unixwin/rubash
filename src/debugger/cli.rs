@@ -228,6 +228,14 @@ impl CliStopLoop {
             StopReason::Step => "step".to_string(),
             StopReason::Watchpoint(id) => format!("watchpoint {}", id.number()),
             StopReason::Pause => "pause".to_string(),
+            StopReason::Exception(kind) => {
+                let kind = match kind {
+                    ExceptionKind::ErrTrap => "ERR trap",
+                    ExceptionKind::Errexit => "errexit",
+                    ExceptionKind::ParseError => "parse error",
+                };
+                format!("exception ({kind})")
+            }
         };
         match &stop.location {
             Some(loc) => {
@@ -800,22 +808,54 @@ impl CliStopLoop {
     /// The store is the session's — the same one the DAP
     /// adapter's `setExceptionBreakpoints` writes.
     fn exceptions(&mut self, session: &mut DebugSession, rest: &str) {
-        let mut parts = rest.split_whitespace();
-        let Some(filter) = parts.next() else {
-            let selected = session.exception_filters();
-            for id in EXCEPTION_FILTER_IDS {
-                let state = if selected.contains(&id) { "on" } else { "off" };
-                self.line(&format!("exception {id}: {state}"));
-            }
-            return;
+        let rest = rest.trim();
+        // The toggle form is `<filter> on|off`, and a filter id
+        // may itself contain a space (`set -e`): the state is
+        // the LAST word and the id is everything before it.
+        // (Row 12: the first-word grammar could never spell the
+        // `set -e` id, so the CLI face could not arm that filter
+        // at all.) A rest that names a known id whole is the
+        // query form; anything else with a second word is the
+        // malformed-toggle error the original grammar printed.
+        let toggle = match rest.rsplit_once(char::is_whitespace) {
+            Some((head, tail)) if tail == "on" || tail == "off" => Some((head.trim(), tail)),
+            _ => None,
         };
-        let Some(state) = parts.next() else {
-            let on = session.exception_filters().contains(&filter);
-            self.line(&format!(
-                "exception {filter}: {}",
-                if on { "on" } else { "off" }
-            ));
-            return;
+        let (filter, state) = match toggle {
+            Some((filter, state)) => (filter, state),
+            None => {
+                let mut parts = rest.split_whitespace();
+                let Some(filter) = parts.next() else {
+                    let selected = session.exception_filters();
+                    for id in EXCEPTION_FILTER_IDS {
+                        let state = if selected.contains(&id) { "on" } else { "off" };
+                        self.line(&format!("exception {id}: {state}"));
+                    }
+                    return;
+                };
+                match parts.next() {
+                    None => {
+                        let on = session.exception_filters().contains(&filter);
+                        self.line(&format!(
+                            "exception {filter}: {}",
+                            if on { "on" } else { "off" }
+                        ));
+                        return;
+                    }
+                    Some(state) if !EXCEPTION_FILTER_IDS.contains(&rest) => {
+                        self.line(&format!("exceptions: expected on|off, got '{state}'"));
+                        return;
+                    }
+                    Some(_) => {
+                        let on = session.exception_filters().contains(&rest);
+                        self.line(&format!(
+                            "exception {rest}: {}",
+                            if on { "on" } else { "off" }
+                        ));
+                        return;
+                    }
+                }
+            }
         };
         let mut selected: Vec<String> = session
             .exception_filters()

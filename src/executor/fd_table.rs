@@ -1119,6 +1119,26 @@ impl FdTable {
         Some(input.offset)
     }
 
+    /// Current read offset of a materialized (Text /
+    /// ProcessSubstitution) endpoint, without copying its bytes.
+    /// Callers that only mirror the cursor (the `read` builtin's
+    /// per-record offset write-back, scope restore, existence probes)
+    /// must use this rather than [`Self::input_snapshot`]: GNU serves
+    /// each record off the shared descriptor cursor in O(record)
+    /// (read.def zreadc), so consulting the cursor after a record
+    /// must not clone and re-convert the whole stream — doing so made
+    /// every `read` on a procsub endpoint cost O(stream), i.e.
+    /// `while read; done < <(...)` quadratic in the stream size
+    /// (perf-round F6: subst.lad_procsub_read@20000 at 27x GNU).
+    pub(crate) fn input_offset(&self, fd: u32) -> Option<usize> {
+        let endpoint = self.entries.get(&fd)?.read.as_ref()?;
+        let input = match endpoint {
+            FdReadEndpoint::Text(input) | FdReadEndpoint::ProcessSubstitution(input) => input,
+            _ => return None,
+        };
+        Some(input.borrow().offset)
+    }
+
     pub(crate) fn input_snapshot_bytes(&self, fd: u32) -> Option<(Vec<u8>, usize)> {
         let endpoint = self.entries.get(&fd)?.read.as_ref()?;
         let input = match endpoint {
@@ -1349,6 +1369,38 @@ mod tests {
                 .as_deref(),
             Some("two")
         );
+    }
+
+    #[test]
+    fn input_offset_tracks_consumption_without_a_snapshot() {
+        // perf-round F6: the per-record offset write-back must consult
+        // the cursor through input_offset; it tracks read consumption
+        // exactly like the snapshot's offset half, and stays None for
+        // fds with no materialized endpoint.
+        let mut table = FdTable::new();
+        assert_eq!(table.input_offset(10), None);
+        table.open_input(
+            10,
+            FdReadEndpoint::process_substitution_bytes(b"one\ntwo\n".to_vec()),
+            true,
+        );
+        assert_eq!(table.input_offset(10), Some(0));
+        assert_eq!(
+            table.read_text(10, '\n', None, false, false, true),
+            Some("one".to_string())
+        );
+        assert_eq!(table.input_offset(10), Some(4));
+        assert_eq!(
+            table.input_offset(10),
+            Some(table.input_snapshot(10).unwrap().1)
+        );
+        assert_eq!(
+            table.read_text(10, '\n', None, false, false, true),
+            Some("two".to_string())
+        );
+        assert_eq!(table.input_offset(10), Some(8));
+        assert_eq!(table.read_text(10, '\n', None, false, false, true), None);
+        assert_eq!(table.input_offset(99), None);
     }
 
     #[test]

@@ -1690,6 +1690,7 @@ impl<W: Write + 'static> StopLoop for DapStopLoop<W> {
             }
             StopReason::Watchpoint(id) => ("data breakpoint", vec![id.number()]),
             StopReason::Pause => ("pause", Vec::new()),
+            StopReason::Exception(_) => ("exception", Vec::new()),
         };
         let mut body = vec![
             ("reason", Json::from(reason)),
@@ -1889,21 +1890,66 @@ impl<W: Write + 'static> DapStopLoop<W> {
                     }
                 },
                 "exceptionInfo" => {
-                    // WP-15: the request shape exists, and its
-                    // honest answer at any stop reachable today is
-                    // that the stop carries no exception: sites are
-                    // notifications (DE-06, rendered as console
-                    // output when the row-12 producers land), and
-                    // parking at a site is the M2 session option —
-                    // a stop that IS an exception stop cannot occur
-                    // yet, so no body is ever fabricated here.
-                    self.fail(
-                        seq,
-                        "exceptionInfo",
-                        "exceptionInfo: the current stop carries no exception site \
-                         (sites are reported as output events; parking at the site \
-                         is an M2 session option)",
-                    );
+                    // WP-15's request shape, with the row-12
+                    // producers behind it: at an exception stop
+                    // the session's recorded site answers — the
+                    // same site DE-06 reported and the stop parked
+                    // at. At any other stop the honest answer
+                    // stands: the stop carries no exception.
+                    let site = match session.last_stop().map(|stop| &stop.reason) {
+                        Some(StopReason::Exception(_)) => session.last_exception_site().cloned(),
+                        _ => None,
+                    };
+                    match site {
+                        Some(site) => {
+                            let id = super::session::exception_filter_id(site.kind);
+                            let kind_name = match site.kind {
+                                ExceptionKind::ErrTrap => "ERR trap",
+                                ExceptionKind::Errexit => "errexit",
+                                ExceptionKind::ParseError => "parse error",
+                            };
+                            let description = match site.kind {
+                                ExceptionKind::ErrTrap => "an ERR trap action is about to run",
+                                ExceptionKind::Errexit => {
+                                    "an errexit decision is about to end the shell"
+                                }
+                                ExceptionKind::ParseError => "a parse error is terminating the run",
+                            };
+                            let location = site
+                                .location
+                                .map(|loc| format!(" at {}:{}", loc.file, loc.line))
+                                .unwrap_or_default();
+                            self.respond(
+                                seq,
+                                "exceptionInfo",
+                                Some(Json::obj(vec![
+                                    ("exceptionId", Json::from(id)),
+                                    ("description", Json::from(description)),
+                                    ("breakMode", Json::from("always")),
+                                    (
+                                        "details",
+                                        Json::obj(vec![
+                                            (
+                                                "message",
+                                                Json::from(format!(
+                                                    "{kind_name} (status {}){location}",
+                                                    site.status
+                                                )),
+                                            ),
+                                            ("typeName", Json::from(id)),
+                                        ]),
+                                    ),
+                                ])),
+                            );
+                        }
+                        None => {
+                            self.fail(
+                                seq,
+                                "exceptionInfo",
+                                "exceptionInfo: the current stop carries no exception site",
+                            );
+                        }
+                    }
                 }
                 "continue" => {
                     self.mark_running();

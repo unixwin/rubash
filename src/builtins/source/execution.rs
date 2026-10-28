@@ -139,6 +139,17 @@ fn run_source_groups(
             ran_any = true;
             let parse_error = executor.take_parse_error();
             if parse_error {
+                // DE-06 (design 9.3; PLAN row 12): the parse
+                // error aborts this sourced file — a selected
+                // `parse-error` filter reports the site and
+                // parks the session before the abort completes.
+                executor.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::ParseError,
+                    2,
+                    executor.shell_state.bash_source_stack.first().map(|file| {
+                        crate::debugger::SourceLocation::new(file.clone(), start_line as u32)
+                    }),
+                )?;
                 executor.set_exit_code(status);
                 // evalstring.c:585-601: a syntax error aborts the remaining
                 // sourced text as an ORDINARY failure — no jump_to_top_level.
@@ -273,6 +284,17 @@ fn run_source_groups(
         match group_result {
             Ok(()) if !parse_error => {}
             Ok(()) => {
+                // DE-06 (design 9.3; PLAN row 12): the parse
+                // error aborts this sourced file — a selected
+                // `parse-error` filter reports the site and
+                // parks the session before the abort completes.
+                executor.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::ParseError,
+                    2,
+                    executor.shell_state.bash_source_stack.first().map(|file| {
+                        crate::debugger::SourceLocation::new(file.clone(), start_line as u32)
+                    }),
+                )?;
                 // GNU evalstring.c:585-606: a syntax error aborts the
                 // remaining file; `.` itself returns 2.
                 executor.set_exit_code(2);
@@ -280,6 +302,15 @@ fn run_source_groups(
                 return Ok(());
             }
             Err(ExecuteError::ExitCode(code)) if parse_error => {
+                // DE-06 (design 9.3; PLAN row 12): same site,
+                // on the flagged-jump arm.
+                executor.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::ParseError,
+                    code,
+                    executor.shell_state.bash_source_stack.first().map(|file| {
+                        crate::debugger::SourceLocation::new(file.clone(), start_line as u32)
+                    }),
+                )?;
                 executor.set_exit_code(code);
                 // Same discard-not-exit classification as the incomplete
                 // branch above: the flagged jump is the parse abort's, not a

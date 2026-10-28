@@ -2928,7 +2928,7 @@ impl Executor {
         // The close lives inside the `redir_fd != redirector` guard
         // (redir.c:1128): `read x <&0-` is a complete no-op and leaves the
         // descriptor open (rubash#938).
-        if let Some(redirect) = cmd.redirect_in.as_ref() {
+        if let Some(redirect) = cmd.redirect_in.as_deref() {
             let target = self.expand_redirect_target(redirect);
             if redirect_target_fd_and_move(&target) == Some((fd, true))
                 && redirect.fd.unwrap_or(0) != fd
@@ -2954,7 +2954,7 @@ impl Executor {
         {
             return true;
         }
-        if cmd.redirect_in.as_ref().is_some_and(|redirect| {
+        if cmd.redirect_in.as_deref().is_some_and(|redirect| {
             redirect.fd == Some(fd)
                 && !is_closed_redirect_target(&self.expand_redirect_target(redirect))
         }) {
@@ -3006,7 +3006,7 @@ impl Executor {
         // Command-attached redirects that never entered the fd table
         // (rubash#1296 dual-store): an opened source is readable, a
         // `<&-` target is not.
-        if cmd.redirect_in.as_ref().is_some_and(|redirect| {
+        if cmd.redirect_in.as_deref().is_some_and(|redirect| {
             redirect.fd.unwrap_or(0) == fd
                 && !is_closed_redirect_target(&self.expand_redirect_target(redirect))
         }) {
@@ -3194,18 +3194,18 @@ fn first_invalid_read_option(word: &str) -> Option<char> {
 
 fn command_closes_stdin(cmd: &CommandNode) -> bool {
     cmd.redirect_in
-        .as_ref()
+        .as_deref()
         .is_some_and(|redirect| redirect.fd.unwrap_or(0) == 0 && redirect.target == "&-")
 }
 
 fn command_redirects_stdin(cmd: &CommandNode) -> bool {
     cmd.redirect_in
-        .as_ref()
+        .as_deref()
         .is_some_and(|redirect| redirect.fd.unwrap_or(0) == 0)
 }
 
 fn redirected_input_fd(executor: &Executor, cmd: &CommandNode) -> Option<u32> {
-    let redirect = cmd.redirect_in.as_ref()?;
+    let redirect = cmd.redirect_in.as_deref()?;
     if !redirect.operator.contains('&') {
         return None;
     }

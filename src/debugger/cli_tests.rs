@@ -395,3 +395,159 @@ fn cli_and_dap_stop_at_the_same_lines_for_the_same_script() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ---------------------------------------------------------------------
+// PLAN row 12: the DE-06 exception-site producers, CLI face.
+// A selected filter reports the site and parks the session
+// BEFORE the pending engine action; resuming lets the action
+// proceed unchanged. An unselected filter produces nothing.
+// ---------------------------------------------------------------------
+
+const ERR_TRAP_SCRIPT: &str = "\
+T=none
+trap 'T=hit' ERR
+X=5
+false
+echo after
+";
+
+#[test]
+fn err_trap_filter_parks_before_the_action_and_the_action_still_runs() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("errsite", ERR_TRAP_SCRIPT);
+    let commands = "\
+exceptions err-trap on
+break 5
+continue
+print T
+print X
+continue
+print T
+continue
+";
+    let (status, transcript) = run_cli(&program, commands);
+    assert_eq!(status, 0, "the session runs to a clean exit: {transcript}");
+    for needle in [
+        // The site is reported, and the session parks at the
+        // failing command's line.
+        "exception site: ERR trap (status 1) at <PROG>:4",
+        "Stopped (exception (ERR trap)) at <PROG>:4",
+        // Parked BEFORE the trap action: T is untouched, the
+        // failing command's own effects are all visible.
+        "T = none",
+        "X = 5",
+        // After the resume the action ran, then the line-5
+        // breakpoint stops the run as usual.
+        "Stopped (breakpoint 1) at <PROG>:5: echo after",
+        "T = hit",
+    ] {
+        assert!(
+            transcript.contains(needle),
+            "transcript must contain {needle:?}:\n{transcript}"
+        );
+    }
+    // The park precedes the action: "T = none" is read at the
+    // exception stop, "T = hit" only after the resume.
+    let parked = transcript.find("T = none").expect("parked read");
+    let acted = transcript.find("T = hit").expect("post-resume read");
+    assert!(
+        parked < acted,
+        "the action ran only after the resume:\n{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+const ERREXIT_SCRIPT: &str = "\
+set -e
+X=7
+false
+echo unreachable
+";
+
+#[test]
+fn errexit_filter_parks_before_the_exit_and_the_run_still_exits() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("errexitsite", ERREXIT_SCRIPT);
+    let commands = "\
+exceptions set -e on
+continue
+print X
+continue
+";
+    let (status, transcript) = run_cli(&program, commands);
+    assert_eq!(status, 1, "the errexit exit still happens: {transcript}");
+    for needle in [
+        "exception site: errexit (status 1) at <PROG>:3",
+        "Stopped (exception (errexit)) at <PROG>:3",
+        // The corpse is inspectable at the park.
+        "X = 7",
+    ] {
+        assert!(
+            transcript.contains(needle),
+            "transcript must contain {needle:?}:\n{transcript}"
+        );
+    }
+    // One death, one report: the exit unwinds through the
+    // frame of the `.` that sourced this program; that frame
+    // must not re-report the site the origin frame parked.
+    assert_eq!(
+        transcript.matches("exception site: errexit").count(),
+        1,
+        "exactly one exception note:\n{transcript}"
+    );
+    assert_eq!(
+        transcript.matches("Stopped (exception").count(),
+        1,
+        "exactly one exception stop:\n{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn an_unselected_filter_neither_reports_nor_parks() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("nofilter", ERREXIT_SCRIPT);
+    let (status, transcript) = run_cli(&program, "continue\n");
+    assert_eq!(status, 1, "the run still exits under set -e: {transcript}");
+    assert!(
+        !transcript.contains("exception site:"),
+        "no site is reported without the filter:\n{transcript}"
+    );
+    assert!(
+        !transcript.contains("Stopped (exception"),
+        "no exception stop without the filter:\n{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+const PARSE_SCRIPT: &str = "\
+echo before
+echo )
+echo after
+";
+
+#[test]
+fn parse_error_filter_parks_and_the_run_still_exits_2() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("parsesite", PARSE_SCRIPT);
+    let commands = "\
+exceptions parse-error on
+continue
+continue
+";
+    let (status, transcript) = run_cli(&program, commands);
+    assert_eq!(
+        status, 2,
+        "the parse error still ends the run: {transcript}"
+    );
+    for needle in [
+        "exception site: parse error (status 2) at <PROG>:2",
+        "Stopped (exception (parse error)) at <PROG>:2",
+    ] {
+        assert!(
+            transcript.contains(needle),
+            "transcript must contain {needle:?}:\n{transcript}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

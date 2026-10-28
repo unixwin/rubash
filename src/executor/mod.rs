@@ -1024,6 +1024,21 @@ pub struct Executor {
     /// (ExpansionFailure), mirroring the simple-command handling of
     /// the same error class.
     pub(crate) conditional_expansion_error_status: Cell<Option<i32>>,
+    /// rubash#1915: the process-substitution span targets the parser
+    /// recorded for the operands of the `[[ ]]` command currently
+    /// being evaluated, each paired with the exact operand text it was
+    /// recorded for. `execute_conditional_command` installs the table
+    /// (save/restore around the evaluation); the conditional nounset
+    /// scan points mask exactly the spans recorded for the word under
+    /// scan before judging it — GNU's parent word walk extracts a
+    /// procsub span verbatim (subst.c:1311 extract_process_subst) and
+    /// never expands its body (subst.c:6362 process_substitute owns
+    /// it), the same structural criterion the simple-command pre-scan
+    /// applies through `CommandNode::process_substitutions`. A
+    /// look-alike span in a quoted sibling operand was never recorded
+    /// for THAT word, so its `$` stays a live parent reference. Empty
+    /// outside conditional evaluation.
+    pub(crate) conditional_procsub_span_targets: Vec<(String, Vec<String>)>,
     /// rubash#637: marks a pending evalerror abort as bad-subscript class.
     /// The eval boundary absorbs exactly this class (eval returns failure,
     /// the caller continues — GNU evalstring.c:365,422-442 swallowing

@@ -367,7 +367,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn loop_redirect_input(&mut self, cmd: &CommandNode) -> Option<String> {
-        let redirect = cmd.redirect_in.as_ref()?;
+        let redirect = cmd.redirect_in.as_deref()?;
         if redirect.fd.unwrap_or(0) != 0 {
             return None;
         }

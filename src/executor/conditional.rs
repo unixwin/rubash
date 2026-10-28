@@ -47,12 +47,63 @@ impl Executor {
         &mut self,
         command: &crate::parser::ConditionalCommand,
     ) -> i32 {
-        if let Some(status) =
+        // rubash#1915: publish the procsub spans the parser recorded
+        // for this conditional's operands so the nounset scan points
+        // below mask exactly those spans before judging a word (see
+        // Executor::conditional_procsub_span_targets). Save/restore:
+        // a conditional evaluated inside an operand's command
+        // substitution on this same executor (eval/source frames)
+        // nests inside the outer conditional's table.
+        let span_targets: Vec<(String, Vec<String>)> = command
+            .args
+            .iter()
+            .zip(&command.arg_metadata)
+            .filter_map(|(arg, metadata)| {
+                if metadata.process_substitutions.is_empty() {
+                    None
+                } else {
+                    Some((
+                        arg.clone(),
+                        metadata
+                            .process_substitutions
+                            .iter()
+                            .map(|substitution| substitution.target.clone())
+                            .collect(),
+                    ))
+                }
+            })
+            .collect();
+        let saved_span_targets =
+            std::mem::replace(&mut self.conditional_procsub_span_targets, span_targets);
+        let status = if let Some(status) =
             self.conditional_status_with_metadata(&command.args, &command.arg_metadata)
         {
-            return status;
-        }
-        self.execute_conditional(&command.args)
+            status
+        } else {
+            self.execute_conditional(&command.args)
+        };
+        self.conditional_procsub_span_targets = saved_span_targets;
+        status
+    }
+
+    /// rubash#1915: mask the process-substitution spans the parser
+    /// recorded for THIS conditional word out of the text a `[[ ]]`
+    /// nounset scan is about to judge. The lookup is by the word's
+    /// exact operand text, and the spans come from that word's own
+    /// parse record: a `<(...)`-shaped string inside a quoted sibling
+    /// operand was never recorded for it, so its `$` remains a live
+    /// parent reference and the scan still reports it. Words with no
+    /// recorded span (including derived strings the evaluator builds)
+    /// scan exactly as before.
+    fn mask_conditional_procsub_spans<'a>(&self, word: &'a str) -> std::borrow::Cow<'a, str> {
+        let Some((_, targets)) = self
+            .conditional_procsub_span_targets
+            .iter()
+            .find(|(arg, _)| arg == word)
+        else {
+            return std::borrow::Cow::Borrowed(word);
+        };
+        Self::mask_recorded_span_targets(word, targets.iter().map(String::as_str))
     }
 
     pub(super) fn execute_conditional(&mut self, args: &[String]) -> i32 {
@@ -264,7 +315,11 @@ impl Executor {
         // returns only i32, so record the fatal for
         // execute_conditional_command_with_redirects to unwind.
         if !self.conditional_expansion_fatal.get() {
-            if let Some((name, message, status)) = self.parameter_expansion_error_in_word(word) {
+            // rubash#1915: the scan judges the parent word, never a
+            // recorded procsub body — mask this word's recorded spans
+            // (the expansion below still consumes the original word).
+            let masked = self.mask_conditional_procsub_spans(word);
+            if let Some((name, message, status)) = self.parameter_expansion_error_in_word(&masked) {
                 if status == 1 {
                     // GNU subst.c: a non-fatal word-expansion error
                     // (substring expression < 0, bad substitution) is
@@ -954,7 +1009,11 @@ impl Executor {
         }
         let mut prefix_comsubs: Vec<String> = Vec::new();
         for word in [left, right] {
-            let (unbound, bodies) = self.nounset_unbound_parameter_with_comsubs(word);
+            // rubash#1915: same recorded-span masking as the operand
+            // expansion scan — a procsub body's `$` is the child's,
+            // never a parent reference for the `=~` nounset verdict.
+            let masked = self.mask_conditional_procsub_spans(word);
+            let (unbound, bodies) = self.nounset_unbound_parameter_with_comsubs(&masked);
             prefix_comsubs.extend(bodies);
             if let Some(name) = unbound {
                 for body in &prefix_comsubs {

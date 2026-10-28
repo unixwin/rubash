@@ -2342,8 +2342,16 @@ impl Executor {
         // with *okp = 1 — the evaluation is skipped, not failed.
         let init_skipped = if self.debug_trap_in_scope() && !arithmetic.init.trim().is_empty() {
             restore_for_line(self);
-            self.run_debug_trap(crate::debugger::SeamKind::ArithForInit, &arithmetic.init)?
-                .is_some()
+            // An Err here unwinds past the loop: balance the ENTRY
+            // increment before returning (single-exit invariant,
+            // execute_cmd.c:3296; see the body match below, #1911).
+            match self.run_debug_trap(crate::debugger::SeamKind::ArithForInit, &arithmetic.init) {
+                Ok(outcome) => outcome.is_some(),
+                Err(error) => {
+                    self.shell_state.loop_depth -= 1;
+                    return Err(error);
+                }
+            }
         } else {
             false
         };
@@ -2401,9 +2409,16 @@ impl Executor {
                 && ((debug_may_fire && self.debug_trap_in_scope()) || self.debugger_session_here())
             {
                 restore_for_line(self);
-                test_skipped = self
-                    .run_debug_trap(crate::debugger::SeamKind::ArithForTest, &arithmetic.test)?
-                    .is_some();
+                // Balance the ENTRY increment on an unwinding Err
+                // (single-exit invariant, execute_cmd.c:3296; #1911).
+                match self.run_debug_trap(crate::debugger::SeamKind::ArithForTest, &arithmetic.test)
+                {
+                    Ok(outcome) => test_skipped = outcome.is_some(),
+                    Err(error) => {
+                        self.shell_state.loop_depth -= 1;
+                        return Err(error);
+                    }
+                }
             }
             if test_skipped {
                 break;
@@ -2472,7 +2487,24 @@ impl Executor {
                     self.shell_state.loop_depth -= 1;
                     return Err(ExecuteError::Continue(level - 1));
                 }
-                Err(error) => return Err(error),
+                // Any other unwind crossing this loop (an expansion
+                // failure from the body, an exit/return jump, ...):
+                // balance the ENTRY increment before returning, like
+                // the Break/Continue arms above. GNU
+                // execute_arith_for_command (execute_cmd.c:3219) has a
+                // single exit whose loop_level-- (execute_cmd.c:3296)
+                // runs unconditionally — the body result there is a
+                // status, never an escape past the frame. Leaving the
+                // depth raised here defeats the enclosing list walk's
+                // DISCARD absorption, whose guard reads
+                // loop_depth == 0: an evalerror raised in the body
+                // (expr.c evalerror -> jump_to_top_level (DISCARD))
+                // then escapes as a script-fatal error instead of
+                // discarding just this for command (rubash#1911).
+                Err(error) => {
+                    self.shell_state.loop_depth -= 1;
+                    return Err(error);
+                }
             }
 
             // execute_cmd.c:3191-3199: the skipped update evaluates as 0 —
@@ -2488,11 +2520,18 @@ impl Executor {
                 && ((debug_may_fire && self.debug_trap_in_scope()) || self.debugger_session_here())
             {
                 restore_for_line(self);
-                self.run_debug_trap(
+                // Balance the ENTRY increment on an unwinding Err
+                // (single-exit invariant, execute_cmd.c:3296; #1911).
+                match self.run_debug_trap(
                     crate::debugger::SeamKind::ArithForUpdate,
                     &arithmetic.update,
-                )?
-                .is_some()
+                ) {
+                    Ok(outcome) => outcome.is_some(),
+                    Err(error) => {
+                        self.shell_state.loop_depth -= 1;
+                        return Err(error);
+                    }
+                }
             } else {
                 false
             };
@@ -2915,10 +2954,10 @@ impl Executor {
         // apply_command_output_redirects splices into the body only for a
         // stdio-slot redirect; with neither, the stored slice runs as-is.
         let redirect_needs_ps_rewrite = [
-            cmd.redirect_out.as_ref(),
-            cmd.append.as_ref(),
-            cmd.redirect_err.as_ref(),
-            cmd.redirect_err_append.as_ref(),
+            cmd.redirect_out.as_deref(),
+            cmd.append.as_deref(),
+            cmd.redirect_err.as_deref(),
+            cmd.redirect_err_append.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -2967,31 +3006,35 @@ impl Executor {
         };
         if stdio_redirect_cmd
             .redirect_in
-            .as_ref()
+            .as_deref()
             .is_some_and(is_numbered)
         {
             stdio_redirect_cmd.redirect_in = None;
         }
         if stdio_redirect_cmd
             .redirect_out
-            .as_ref()
+            .as_deref()
             .is_some_and(is_numbered)
         {
             stdio_redirect_cmd.redirect_out = None;
         }
-        if stdio_redirect_cmd.append.as_ref().is_some_and(is_numbered) {
+        if stdio_redirect_cmd
+            .append
+            .as_deref()
+            .is_some_and(is_numbered)
+        {
             stdio_redirect_cmd.append = None;
         }
         if stdio_redirect_cmd
             .redirect_err
-            .as_ref()
+            .as_deref()
             .is_some_and(is_numbered)
         {
             stdio_redirect_cmd.redirect_err = None;
         }
         if stdio_redirect_cmd
             .redirect_err_append
-            .as_ref()
+            .as_deref()
             .is_some_and(is_numbered)
         {
             stdio_redirect_cmd.redirect_err_append = None;
@@ -4123,14 +4166,14 @@ impl Executor {
         }
         if body_stdin.is_none() {
             if let Some(redirect) = &cmd.redirect_in {
-            if redirect.fd.unwrap_or(0) == 0 {
-                let target = self.expand_redirect_target(redirect);
-                if is_closed_redirect_target(&target) {
-                    child.stdin(Stdio::null());
-                } else if redirect_target_fd(&target).is_none() {
-                    child.stdin(Stdio::from(self.open_input_redirect(&target)?));
+                if redirect.fd.unwrap_or(0) == 0 {
+                    let target = self.expand_redirect_target(redirect);
+                    if is_closed_redirect_target(&target) {
+                        child.stdin(Stdio::null());
+                    } else if redirect_target_fd(&target).is_none() {
+                        child.stdin(Stdio::from(self.open_input_redirect(&target)?));
+                    }
                 }
-            }
             }
         }
 
@@ -4543,7 +4586,7 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = cmd
             .redirect_out
-            .as_ref()
+            .as_deref()
             .filter(|r| is_stdout_splice_redirect(cmd, r))
         {
             let target = self.expand_redirect_target(redirect);
@@ -4557,7 +4600,11 @@ impl Executor {
             for clause in &mut case_command.clauses {
                 apply_stdout_append_redirect(&mut clause.body, &append_redirect);
             }
-        } else if let Some(redirect) = cmd.append.as_ref().filter(|r| is_stdout_write_redirect(r)) {
+        } else if let Some(redirect) = cmd
+            .append
+            .as_deref()
+            .filter(|r| is_stdout_write_redirect(r))
+        {
             let mut append_redirect = redirect.clone();
             append_redirect.target = self.expand_redirect_target(redirect);
             for clause in &mut case_command.clauses {
@@ -4567,7 +4614,7 @@ impl Executor {
 
         if let Some(redirect) = cmd
             .redirect_err
-            .as_ref()
+            .as_deref()
             .filter(|r| is_stderr_splice_redirect(cmd, r))
         {
             let target = self.expand_redirect_target(redirect);
@@ -4583,7 +4630,7 @@ impl Executor {
             }
         } else if let Some(redirect) = cmd
             .redirect_err_append
-            .as_ref()
+            .as_deref()
             .filter(|r| is_stderr_splice_redirect(cmd, r))
         {
             let mut append_redirect = redirect.clone();
@@ -4638,14 +4685,8 @@ fn if_condition_is_side_effect_free(condition: &[CommandNode]) -> bool {
         && command.compound_assignments.is_empty()
         && command.array_element_assignments.is_empty()
         && command.process_substitutions.is_empty()
-        && command.command_substitutions.is_empty()
-        && command.arithmetic_expansions.is_empty()
-        && command.parameter_expansions.is_empty()
-        && command.brace_expansions.is_empty()
         && command.extglob_patterns.is_empty()
-        && command.tilde_expansions.is_empty()
         && command.pathname_patterns.is_empty()
-        && command.word_quotes.is_empty()
         && command.redirects.is_empty()
         && command.redirect_in.is_none()
         && command.redirect_out.is_none()
@@ -4701,14 +4742,8 @@ fn for_body_is_bare_colon(body: &[CommandNode]) -> Option<&CommandNode> {
         && command.compound_assignments.is_empty()
         && command.array_element_assignments.is_empty()
         && command.process_substitutions.is_empty()
-        && command.command_substitutions.is_empty()
-        && command.arithmetic_expansions.is_empty()
-        && command.parameter_expansions.is_empty()
-        && command.brace_expansions.is_empty()
         && command.extglob_patterns.is_empty()
-        && command.tilde_expansions.is_empty()
         && command.pathname_patterns.is_empty()
-        && command.word_quotes.is_empty()
         && command.redirects.is_empty()
         && command.redirect_in.is_none()
         && command.redirect_out.is_none()

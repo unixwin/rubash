@@ -3300,9 +3300,6 @@ mod k1_batch2 {
         );
     }
 
-
-
-
     /// rubash#1213: `return` with too many arguments is the no_args
     /// DISCARD class — message, status 2, rest of the line abandoned,
     /// in functions, at top level, and for the numeric path's caller.
@@ -3425,10 +3422,7 @@ mod k1_batch2 {
     /// it dispatches to an external `time` (absent here: 127).
     #[test]
     fn issue_1218_posix_time_dash_word() {
-        let (stdout, stderr, code) = run(
-            "k1-1218",
-            "set -o posix\ntime -p true\necho \"rc=$?\"\n",
-        );
+        let (stdout, stderr, code) = run("k1-1218", "set -o posix\ntime -p true\necho \"rc=$?\"\n");
         assert_eq!(code, Some(0), "stderr:\n{stderr}");
         assert_eq!(stdout, "rc=127\n");
         assert!(
@@ -3741,6 +3735,382 @@ mod issue_1904 {
         server.join().expect("server thread");
         assert_eq!(status, Some(0), "stderr:\n{stderr}");
         assert_eq!(stdout, "GOT:hello1904", "stderr:\n{stderr}");
+    }
+}
+
+/// rubash#1911: an arithmetic evaluation error (GNU expr.c `evalerror` ->
+/// `jump_to_top_level (DISCARD)`) discards only the current command. Inside
+/// an arithmetic-for BODY the error must end just the loop (status 1) and
+/// execution resumes after `done`; every sibling loop/compound body already
+/// behaved that way. The leak was `execute_arithmetic_for_command`
+/// (src/executor/compound_exec.rs) returning a body error without balancing
+/// its entry `loop_depth += 1`, which defeated the enclosing list walk's
+/// DISCARD absorption guard (`loop_depth == 0`) and made the error
+/// script-fatal. GNU execute_cmd.c:3219 `execute_arith_for_command` has a
+/// single exit whose `loop_level--` (execute_cmd.c:3296) is unconditional.
+/// Probe scripts and expectations below are GNU bash 5.3's, taken verbatim
+/// from the differential matrix that isolated the bug (script FILES, not
+/// `-c`: the discard unit is the reader's command list).
+mod issue_1911 {
+    use super::*;
+
+    fn run_script(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).trim_end().to_string(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// `want_err_part` empty skips the stderr assertion.
+    fn check(case: &str, script: &str, want_stdout: &str, want_status: i32, want_err_part: &str) {
+        let dir = case_scratch(case);
+        let (stdout, stderr, status) = run_script(&dir, script);
+        assert_eq!(status, Some(want_status), "case {case} stderr:\n{stderr}");
+        assert_eq!(stdout, want_stdout, "case {case} stderr:\n{stderr}");
+        if !want_err_part.is_empty() {
+            assert!(
+                stderr.contains(want_err_part),
+                "case {case}: stderr should contain {want_err_part:?}:\n{stderr}"
+            );
+        }
+    }
+
+    // --- the bug family: arith-for body, error at function top level ---
+
+    #[test]
+    fn issue1911_minimal_repro_division_by_zero() {
+        // The issue's minimal repro (division by zero on iteration i=1),
+        // with the follow-up echo on its own line: GNU discards just the
+        // loop, prints the marker with the loop's status 1, exits 0.
+        check(
+            "1911-min",
+            "for ((i=0;i<3;i++)); do x=$(( 100 / (i-1))); done\necho \"after_loop rc=$?\"\n",
+            "after_loop rc=1",
+            0,
+            "division by 0",
+        );
+    }
+
+    #[test]
+    fn issue1911_minimal_repro_same_line_form() {
+        // Control: with the echo on the SAME line as the loop, the
+        // discard eats the rest of that line too (the current-command
+        // unit is the whole line's list), so nothing prints and the
+        // script exits with the discarded loop's status 1 — in GNU and
+        // in rubash alike (GNU-probed; this shape alone cannot see the
+        // bug, it pins the line boundary of the discard).
+        check(
+            "1911-min-sameline",
+            "for ((i=0;i<3;i++)); do x=$(( 100 / (i-1))); done; echo \"after_loop rc=$?\"\n",
+            "",
+            1,
+            "division by 0",
+        );
+    }
+
+    #[test]
+    fn issue1911_body_error_loop_only_script() {
+        check(
+            "1911-p5",
+            "for ((__bs_i=0; __bs_i<3; __bs_i++)); do\nx=$(( 077 + 0xff - 0b101 ))\ndone\necho \"after_loop rc=$?\"\nunset __bs_i\necho \"after_unset rc=$?\"\n",
+            "after_loop rc=1\nafter_unset rc=0",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_body_error_one_liner() {
+        check(
+            "1911-p4",
+            "for ((i=0; i<3; i++)); do x=$(( 077 + 0xff - 0b101 )); echo \"iter $i\"; done\necho \"loop_done rc=$?\"\n",
+            "loop_done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_body_error_second_iteration() {
+        check(
+            "1911-q1",
+            "for ((i=0; i<3; i++)); do if (( i == 1 )); then x=$(( 0b101 )); fi; echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "iter 0\ndone rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_body_div_zero() {
+        check(
+            "1911-q6",
+            "for ((i=0; i<3; i++)); do x=$(( 10 / 0 )); echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "division by 0",
+        );
+    }
+
+    #[test]
+    fn issue1911_body_error_long_loop_tail_runs() {
+        check(
+            "1911-q7",
+            "for ((__bs_i=0; __bs_i<5000; __bs_i++)); do\nx=$(( 077 + 0xff - 0b101 ))\ndone\necho \"TAIL-RAN\"\n",
+            "TAIL-RAN",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_error_inside_function_called_from_body() {
+        check(
+            "1911-r5",
+            "f() { x=$(( 0b101 )); echo \"in-f\"; }\nfor ((i=0; i<3; i++)); do f; echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_comsub_then_error_in_body() {
+        check(
+            "1911-r6",
+            "for ((i=0; i<3; i++)); do x=$(echo hi); y=$(( 0b101 )); echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_subscript_error_in_body() {
+        check(
+            "1911-s1",
+            "arr=(1 2 3)\nfor ((i=0; i<3; i++)); do x=${arr[0b101]}; echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_arith_for_nested_in_while_body() {
+        // The leak pierced the outer while boundary too: GNU discards
+        // only up to the innermost enclosing list (the while body ends,
+        // status 1, outer script continues).
+        check(
+            "1911-s2",
+            "i=0\nwhile (( i < 3 )); do\n  for ((j=0; j<3; j++)); do x=$(( 0b101 )); echo \"inner $j\"; done\n  echo \"after-inner rc=$?\"\n  i=$((i+1))\ndone\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_arith_for_nested_in_arith_for() {
+        check(
+            "1911-s3",
+            "for ((i=0; i<2; i++)); do\n  for ((j=0; j<2; j++)); do x=$(( 0b101 )); echo \"inner $j\"; done\n  echo \"after-inner rc=$?\"\ndone\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_break_after_discarded_loop_is_outside_loop() {
+        // The leaked depth also corrupted later break adjudication: after
+        // the discarded loop, a bare `break` must again draw the GNU
+        // "only meaningful in a loop" diagnostic (and return 0), not act
+        // as an in-loop break swallowing the rest of the script.
+        check(
+            "1911-break-after",
+            "for ((i=0;i<3;i++)); do x=$(( 0b101 )); done\nbreak\necho \"after rc=$?\"\n",
+            "after rc=0",
+            0,
+            "only meaningful in a",
+        );
+    }
+
+    // --- sibling shapes that already matched GNU (guard the class) ---
+
+    #[test]
+    fn issue1911_control_top_level_assignment() {
+        check(
+            "1911-p1",
+            "x=$(( 077 + 0xff - 0b101 ))\necho \"after rc=$? x=[${x-UNSET}]\"\n",
+            "after rc=1 x=[UNSET]",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_top_level_next_line_runs() {
+        check(
+            "1911-p2",
+            "x=$(( 0b101 ))\necho alive\n",
+            "alive",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_error_as_last_command_exits_1() {
+        check(
+            "1911-p3",
+            "x=$(( 0b101 ))\n",
+            "",
+            1,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_while_body() {
+        check(
+            "1911-q2",
+            "i=0\nwhile (( i < 3 )); do x=$(( 0b101 )); i=$((i+1)); echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_until_body() {
+        check(
+            "1911-r2",
+            "i=0\nuntil (( i >= 3 )); do x=$(( 0b101 )); i=$((i+1)); echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_for_in_body() {
+        check(
+            "1911-r1",
+            "for i in 1 2 3; do x=$(( 0b101 )); echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_function_body() {
+        check(
+            "1911-q3",
+            "f() { x=$(( 0b101 )); echo \"in-f-after\"; }\nf\necho \"after-f rc=$?\"\n",
+            "after-f rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_if_body() {
+        check(
+            "1911-q4",
+            "if true; then x=$(( 0b101 )); echo \"in-if-after\"; fi\necho \"after-if rc=$?\"\n",
+            "after-if rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_group_body() {
+        check(
+            "1911-q5",
+            "{ x=$(( 0b101 )); echo \"in-group-after\"; }\necho \"after-group rc=$?\"\n",
+            "after-group rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_header_init_error() {
+        check(
+            "1911-r3",
+            "for ((i=0b101; i<3; i++)); do echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_header_step_error() {
+        check(
+            "1911-r4",
+            "for ((i=0; i<3; i+= (i==1 ? 0b101 : 1) )); do echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "iter 0\ndone rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_arith_for_inside_function() {
+        check(
+            "1911-r7",
+            "g() { for ((i=0; i<3; i++)); do x=$(( 0b101 )); echo \"iter $i\"; done; echo \"in-g-after-loop rc=$?\"; }\ng\necho \"after-g rc=$?\"\n",
+            "after-g rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_arith_for_inside_group() {
+        check(
+            "1911-s4",
+            "{ for ((i=0; i<3; i++)); do x=$(( 0b101 )); echo \"iter $i\"; done; echo \"in-group-after rc=$?\"; }\necho \"after-group rc=$?\"\n",
+            "after-group rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_plain_false_body_not_an_evalerror() {
+        // A plain failing command is NOT the DISCARD class: no
+        // diagnostic, the loop runs out its iterations, script exits 0.
+        check(
+            "1911-p7",
+            "for ((__bs_i=0; __bs_i<3; __bs_i++)); do\nfalse\ndone\nunset __bs_i\n",
+            "",
+            0,
+            "",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_valid_arithmetic_loop() {
+        check(
+            "1911-p6",
+            "for ((__bs_i=0; __bs_i<3; __bs_i++)); do\nx=$(( 077 + 0xff - 0101 ))\ndone\necho \"after_loop rc=$? x=$x\"\nunset __bs_i\n",
+            "after_loop rc=0 x=253",
+            0,
+            "",
+        );
     }
 }
 

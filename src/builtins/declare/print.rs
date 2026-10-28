@@ -9,8 +9,8 @@ use super::output::{
     print_declaration, print_plain_declaration, print_unset_declaration, DeclarationAttrs,
 };
 use super::{
-    ARRAY_VARS, ASSOC_VARS, DECLARED_UNSET_VARS, EXECUTION_FAILURE, INTEGER_VARS, LOWERCASE_VARS,
-    NAMEREF_VARS, READONLY_VARS, UPPERCASE_VARS,
+    ARRAY_VARS, ASSOC_VARS, DECLARED_UNSET_VARS, EXECUTION_FAILURE, EXPORTED_VARS, INTEGER_VARS,
+    LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS, UPPERCASE_VARS,
 };
 
 pub(super) fn print_declare_names<W, E>(
@@ -48,17 +48,15 @@ where
     let filter_lowercase = options.lowercase;
     let filter_nameref = options.nameref;
 
-    let exported = exported_vars(variables);
-    let readonly = marked_vars(variables, READONLY_VARS);
-    let arrays = marked_vars(variables, ARRAY_VARS);
-    let assocs = marked_vars(variables, ASSOC_VARS);
-    let integers = marked_vars(variables, INTEGER_VARS);
-    let uppercase = marked_vars(variables, UPPERCASE_VARS);
-    let lowercase = marked_vars(variables, LOWERCASE_VARS);
-    let capcase = marked_vars(variables, super::CAPCASE_VARS);
-    let namerefs = marked_vars(variables, NAMEREF_VARS);
-    let declared_unset = marked_vars(variables, DECLARED_UNSET_VARS);
     let names_to_print = if names.is_empty() {
+        // Listing mode only: declaration_names_to_print consumes these
+        // three sets as candidate sources as well as filters, so they are
+        // materialized here — a full listing walks the table anyway. The
+        // named-print path below never builds them; its per-name
+        // attribute reads are point queries (VarTable::is_marked).
+        let uppercase = marked_vars(variables, UPPERCASE_VARS);
+        let lowercase = marked_vars(variables, LOWERCASE_VARS);
+        let namerefs = marked_vars(variables, NAMEREF_VARS);
         let mut listed = declaration_names_to_print(
             variables,
             filter_exported,
@@ -84,13 +82,13 @@ where
             if listed.iter().any(|name| name == view_name) {
                 continue;
             }
-            let passes = (!filter_exported || exported.contains(view_name))
-                && (!filter_readonly || readonly.contains(view_name))
+            let passes = (!filter_exported || variables.is_marked(EXPORTED_VARS, view_name))
+                && (!filter_readonly || variables.is_marked(READONLY_VARS, view_name))
                 && (!filter_assoc)
-                && (!filter_integer || integers.contains(view_name))
-                && (!filter_uppercase || uppercase.contains(view_name))
-                && (!filter_lowercase || lowercase.contains(view_name))
-                && (!filter_nameref || namerefs.contains(view_name));
+                && (!filter_integer || variables.is_marked(INTEGER_VARS, view_name))
+                && (!filter_uppercase || variables.is_marked(UPPERCASE_VARS, view_name))
+                && (!filter_lowercase || variables.is_marked(LOWERCASE_VARS, view_name))
+                && (!filter_nameref || variables.is_marked(NAMEREF_VARS, view_name));
             if passes {
                 listed.push(view_name.clone());
             }
@@ -142,106 +140,30 @@ where
     // bound, the per-name attributes come from the pre-frame snapshot,
     // not the tempvar's live marks (capcase has no VarAttrs slot and
     // stays live — a case-converted underlying keeps its mark, which
-    // is exactly the attribute the pre-frame binding carries).
-    let (
-        exported,
-        readonly,
-        arrays,
-        assocs,
-        integers,
-        uppercase,
-        lowercase,
-        namerefs,
-        declared_unset,
-    ) = if underlay.is_empty() {
-        (
-            exported,
-            readonly,
-            arrays,
-            assocs,
-            integers,
-            uppercase,
-            lowercase,
-            namerefs,
-            declared_unset,
-        )
-    } else {
-        let mut exported = exported;
-        let mut readonly = readonly;
-        let mut arrays = arrays;
-        let mut assocs = assocs;
-        let mut integers = integers;
-        let mut uppercase = uppercase;
-        let mut lowercase = lowercase;
-        let mut namerefs = namerefs;
-        let mut declared_unset = declared_unset;
-        for (name, under) in underlay.iter() {
-            exported.remove(name);
-            readonly.remove(name);
-            arrays.remove(name);
-            assocs.remove(name);
-            integers.remove(name);
-            uppercase.remove(name);
-            lowercase.remove(name);
-            namerefs.remove(name);
-            declared_unset.remove(name);
-            if let Some((_, a)) = under {
-                if a.exported {
-                    exported.insert(name.clone());
-                }
-                if a.readonly {
-                    readonly.insert(name.clone());
-                }
-                if a.array {
-                    arrays.insert(name.clone());
-                }
-                if a.assoc {
-                    assocs.insert(name.clone());
-                }
-                if a.integer {
-                    integers.insert(name.clone());
-                }
-                if a.uppercase {
-                    uppercase.insert(name.clone());
-                }
-                if a.lowercase {
-                    lowercase.insert(name.clone());
-                }
-                if a.nameref {
-                    namerefs.insert(name.clone());
-                }
-                if a.declared_unset {
-                    declared_unset.insert(name.clone());
-                }
+    // is exactly the attribute the pre-frame binding carries). The
+    // reads are point queries: the snapshot answers for underlay
+    // names, the live marks for every other name — the same answers
+    // the snapshot-adjusted mark sets gave, without materializing
+    // (and re-sorting) a name set per attribute for every print.
+    let underlay_attr =
+        |name: &str, key: &str, pick: fn(&crate::shell::var_table::VarAttrs) -> bool| -> bool {
+            match underlay.get(name) {
+                Some(under) => under.as_ref().is_some_and(|(_, a)| pick(a)),
+                None => variables.is_marked(key, name),
             }
-        }
-        (
-            exported,
-            readonly,
-            arrays,
-            assocs,
-            integers,
-            uppercase,
-            lowercase,
-            namerefs,
-            declared_unset,
-        )
-    };
+        };
     for name in names_to_print {
         let attrs = DeclarationAttrs {
-            exported: exported.contains(&name),
-            readonly: readonly.contains(&name),
-            array: arrays.contains(&name),
-            assoc: assocs.contains(&name),
-            integer: integers.contains(&name),
-            uppercase: uppercase.contains(&name),
-            lowercase: lowercase.contains(&name),
-            capcase: capcase.contains(&name),
-            nameref: namerefs.contains(&name),
-            trace: match underlay.get(&name) {
-                Some(under) => under.as_ref().is_some_and(|(_, a)| a.trace),
-                None => variables.is_marked(super::TRACE_VARS, &name),
-            },
+            exported: underlay_attr(&name, EXPORTED_VARS, |a| a.exported),
+            readonly: underlay_attr(&name, READONLY_VARS, |a| a.readonly),
+            array: underlay_attr(&name, ARRAY_VARS, |a| a.array),
+            assoc: underlay_attr(&name, ASSOC_VARS, |a| a.assoc),
+            integer: underlay_attr(&name, INTEGER_VARS, |a| a.integer),
+            uppercase: underlay_attr(&name, UPPERCASE_VARS, |a| a.uppercase),
+            lowercase: underlay_attr(&name, LOWERCASE_VARS, |a| a.lowercase),
+            capcase: variables.is_marked(super::CAPCASE_VARS, &name),
+            nameref: underlay_attr(&name, NAMEREF_VARS, |a| a.nameref),
+            trace: underlay_attr(&name, super::TRACE_VARS, |a| a.trace),
         };
         // A dynamic variable's cell is whatever the last bind stored; GNU's
         // declare -p reads the dynamic_value getter, so the CURRENT dynamic
@@ -278,7 +200,9 @@ where
             } else {
                 print_declaration(&name, value, attrs, nbuckets, stdout)?;
             }
-        } else if attrs.has_scalar_attribute() || declared_unset.contains(&name) {
+        } else if attrs.has_scalar_attribute()
+            || underlay_attr(&name, DECLARED_UNSET_VARS, |a| a.declared_unset)
+        {
             print_unset_declaration(&name, attrs, stdout)?;
         } else {
             writeln!(
@@ -312,15 +236,15 @@ pub(crate) fn declaration_line(
     plain: bool,
 ) -> Option<String> {
     let attrs = DeclarationAttrs {
-        exported: exported_vars(variables).contains(name),
-        readonly: marked_vars(variables, READONLY_VARS).contains(name),
-        array: marked_vars(variables, ARRAY_VARS).contains(name),
-        assoc: marked_vars(variables, ASSOC_VARS).contains(name),
-        integer: marked_vars(variables, INTEGER_VARS).contains(name),
-        uppercase: marked_vars(variables, UPPERCASE_VARS).contains(name),
-        lowercase: marked_vars(variables, LOWERCASE_VARS).contains(name),
-        capcase: marked_vars(variables, super::CAPCASE_VARS).contains(name),
-        nameref: marked_vars(variables, NAMEREF_VARS).contains(name),
+        exported: variables.is_marked(EXPORTED_VARS, name),
+        readonly: variables.is_marked(READONLY_VARS, name),
+        array: variables.is_marked(ARRAY_VARS, name),
+        assoc: variables.is_marked(ASSOC_VARS, name),
+        integer: variables.is_marked(INTEGER_VARS, name),
+        uppercase: variables.is_marked(UPPERCASE_VARS, name),
+        lowercase: variables.is_marked(LOWERCASE_VARS, name),
+        capcase: variables.is_marked(super::CAPCASE_VARS, name),
+        nameref: variables.is_marked(NAMEREF_VARS, name),
         trace: variables.is_marked(super::TRACE_VARS, name),
     };
     let mut out: Vec<u8> = Vec::new();
@@ -331,9 +255,7 @@ pub(crate) fn declaration_line(
         } else {
             print_declaration(name, value, attrs, nbuckets, &mut out).ok()?;
         }
-    } else if attrs.has_scalar_attribute()
-        || marked_vars(variables, DECLARED_UNSET_VARS).contains(name)
-    {
+    } else if attrs.has_scalar_attribute() || variables.is_marked(DECLARED_UNSET_VARS, name) {
         print_unset_declaration(name, attrs, &mut out).ok()?;
     } else {
         return None;

@@ -798,11 +798,11 @@ impl Executor {
             Err(ExecuteError::IoError(error)) => {
                 let mut stderr = Vec::new();
                 let redirect_target = [
-                    cmd.redirect_in.as_ref(),
-                    cmd.redirect_out.as_ref(),
-                    cmd.append.as_ref(),
-                    cmd.redirect_err.as_ref(),
-                    cmd.redirect_err_append.as_ref(),
+                    cmd.redirect_in.as_deref(),
+                    cmd.redirect_out.as_deref(),
+                    cmd.append.as_deref(),
+                    cmd.redirect_err.as_deref(),
+                    cmd.redirect_err_append.as_deref(),
                 ]
                 .into_iter()
                 .flatten()
@@ -864,6 +864,17 @@ impl Executor {
                 self.maybe_run_error_trap(cmd)?;
             }
             self.errexit_status_converted.set(true);
+            // DE-06 (design 9.3; PLAN row 12): the errexit
+            // decision — park a selected `set -e` filter here,
+            // before the exit path (timed deaths park at the
+            // time branch's promotion instead).
+            if self.timed_dispatch_depth.get() == 0 {
+                self.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::Errexit,
+                    self.exit_code,
+                    None,
+                )?;
+            }
             return Err(ExecuteError::ExitCode(self.exit_code));
         }
         Ok(())
@@ -1065,14 +1076,8 @@ impl Executor {
             || !cmd.compound_assignments.is_empty()
             || !cmd.array_element_assignments.is_empty()
             || !cmd.process_substitutions.is_empty()
-            || !cmd.command_substitutions.is_empty()
-            || !cmd.arithmetic_expansions.is_empty()
-            || !cmd.parameter_expansions.is_empty()
-            || !cmd.brace_expansions.is_empty()
             || !cmd.extglob_patterns.is_empty()
-            || !cmd.tilde_expansions.is_empty()
             || !cmd.pathname_patterns.is_empty()
-            || !cmd.word_quotes.is_empty()
             || !cmd.redirects.is_empty()
             || cmd.redirect_in.is_some()
             || cmd.redirect_out.is_some()
@@ -6084,7 +6089,6 @@ mod command_word_materialization_tests {
         let ast = crate::parser::parse(&tokens);
         let cmd = &ast.commands[0];
         assert_eq!(cmd.words, vec!["[", "1", "-eq", "2", "]"]);
-        assert!(cmd.word_quotes.is_empty());
         assert!(cmd.process_substitutions.is_empty());
         for (index, word) in cmd.words.iter().enumerate() {
             let raw = cmd

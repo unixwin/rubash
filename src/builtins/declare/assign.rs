@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
 use super::diagnostic::diagnostic_prefix;
-use super::marks::{mark_typed, marked_vars, unmark_typed};
+use super::marks::{mark_typed, unmark_typed};
 use super::names::valid_nameref_value;
 use super::storage::{
     append_array_value, append_assoc_scalar_append_value, append_assoc_value,
@@ -37,7 +37,6 @@ pub(super) fn assign_declare_names<W>(
 where
     W: Write,
 {
-    let readonly = marked_vars(variables, READONLY_VARS);
     let mut status = EXECUTION_SUCCESS;
     // GNU variables.c:5760 { "BASH_COMPAT", sv_shcompat }: a declare-family
     // operand rebinding BASH_COMPAT re-syncs the compatNN shopt flags (the
@@ -218,7 +217,7 @@ where
                 )?;
             }
             if assoc || variables.is_marked(ASSOC_VARS, base) {
-                if readonly.contains(base) {
+                if variables.is_marked(READONLY_VARS, base) {
                     writeln!(
                         stderr,
                         "{}{command_name}: {}: readonly variable",
@@ -301,12 +300,13 @@ where
                     // in [0] (array.tests: m=; declare -a m[10]=v keeps
                     // [0]=""). Parsing "" as one empty word materialized a
                     // phantom [0]="" element in every freshly created array.
-                    let arrays = marked_vars(variables, ARRAY_VARS);
                     let mut entries = match variables.get(base).cloned() {
                         Some(current) if current.starts_with(STORAGE_WORD_PREFIX) => {
                             indexed_array_entries(&current)
                         }
-                        Some(current) if !current.is_empty() || !arrays.contains(base) => {
+                        Some(current)
+                            if !current.is_empty() || !variables.is_marked(ARRAY_VARS, base) =>
+                        {
                             indexed_array_entries(&current)
                         }
                         _ => Default::default(),
@@ -393,7 +393,7 @@ where
         if is_noassign_bash_array(var_name) {
             continue;
         }
-        if readonly.contains(var_name) {
+        if variables.is_marked(READONLY_VARS, var_name) {
             // GNU declare.def:881-890: ASSIGN_DISALLOWED assignments fail via
             // sh_readonly (bare `name: readonly variable`). Scalar operands
             // fail earlier through the builtin_error path, which keeps the

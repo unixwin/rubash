@@ -720,14 +720,22 @@ pub struct WordMetadata {
     pub word_index: usize,
     pub value: String,
     pub raw: String,
-    pub brace_expansions: Vec<BraceExpansion>,
-    pub command_substitutions: Vec<CommandSubstitutionNode>,
+    // brace / command-substitution / parameter / arithmetic / tilde
+    // expansion records used to be stored here; wt44/parse4 stopped
+    // every scan that fed them (the executor re-derives all of them
+    // from the word text at consumption time), so the vectors were
+    // empty on every instance — their storage is removed (perf F4
+    // node diet). Only the three record kinds with live consumers
+    // remain, plus word_quotes below.
     pub process_substitutions: Vec<ProcessSubstitution>,
-    pub parameter_expansions: Vec<ParameterExpansion>,
-    pub arithmetic_expansions: Vec<ArithmeticExpansion>,
     pub extglob_patterns: Vec<ExtglobPattern>,
-    pub tilde_expansions: Vec<TildeExpansion>,
     pub pathname_patterns: Vec<PathnamePattern>,
+    /// Word-quote records: always empty (wt44/parse4 — the executor
+    /// re-derives quoting from the raw word at consumption time), but
+    /// RETAINED for now because niubash-runtime's drive-letter
+    /// admission still reads it (niubash crates/niubash-runtime
+    /// shell.rs). Retire it together with that reader's cleanup,
+    /// coordinated with a niubash rubash-pin bump.
     pub word_quotes: Vec<WordQuote>,
     /// The locale name under which this word's dollar-quoted backslash-u /
     /// backslash-U escapes were decoded at lex time - Some only for words
@@ -744,13 +752,8 @@ impl WordMetadata {
             word_index,
             value,
             raw,
-            brace_expansions: Vec::new(),
-            command_substitutions: Vec::new(),
             process_substitutions: Vec::new(),
-            parameter_expansions: Vec::new(),
-            arithmetic_expansions: Vec::new(),
             extglob_patterns: Vec::new(),
-            tilde_expansions: Vec::new(),
             pathname_patterns: Vec::new(),
             word_quotes: Vec::new(),
             lex_locale: None,
@@ -777,13 +780,8 @@ impl WordMetadata {
             // consumption points (comsub execution parses the body itself,
             // pretty-print rendering re-scans the word, the conditional
             // `=~` check re-scans the raw).
-            brace_expansions: Vec::new(),
-            command_substitutions: Vec::new(),
             process_substitutions,
-            parameter_expansions: Vec::new(),
-            arithmetic_expansions: Vec::new(),
             extglob_patterns: super::extglob_patterns_in_word_with_raw(&value, &raw),
-            tilde_expansions: Vec::new(),
             pathname_patterns: super::pathname_patterns_in_word(&value, &raw),
             word_quotes: Vec::new(),
             lex_locale: if crate::lexer::raw_has_ansi_u_escape(&raw) {
@@ -823,13 +821,8 @@ impl WordMetadata {
         Self {
             word_index,
             // See `new` for why the non-live kinds stay empty (wt44/parse4).
-            brace_expansions: Vec::new(),
-            command_substitutions: Vec::new(),
             process_substitutions,
-            parameter_expansions: Vec::new(),
-            arithmetic_expansions: Vec::new(),
             extglob_patterns,
-            tilde_expansions: Vec::new(),
             pathname_patterns,
             word_quotes: Vec::new(),
             lex_locale: if crate::lexer::raw_has_ansi_u_escape(&raw) {
@@ -1181,34 +1174,31 @@ pub struct CommandNode {
     pub array_element_assignments: Vec<ArrayElementAssignment>,
     /// Structured process substitutions parsed from `<(...)` and `>(...)`.
     pub process_substitutions: Vec<ProcessSubstitution>,
-    /// Structured command substitutions parsed from `$()` and backticks.
-    pub command_substitutions: Vec<CommandSubstitutionNode>,
-    /// Structured arithmetic expansions parsed from `$((...))`.
-    pub arithmetic_expansions: Vec<ArithmeticExpansion>,
-    /// Structured parameter expansions parsed from `$name`, `$?`, and `${...}`.
-    pub parameter_expansions: Vec<ParameterExpansion>,
-    /// Structured brace expansions parsed from `{a,b}` and `{1..3}` words.
-    pub brace_expansions: Vec<BraceExpansion>,
+    // The per-node command / arithmetic / parameter / brace / tilde
+    // expansion record vectors and the word-quote record vector that used
+    // to live here were removed (perf F4): the wt44/parse4 pruning had
+    // already stopped every scan that fed them, so all six were empty on
+    // every node ever built — 144 bytes of dead weight on the hottest
+    // struct in the crate. The executor re-derives those analyses from
+    // the word text at their consumption points, exactly as before.
     /// Structured extglob patterns parsed from `@(a|b)`, `!(x)`, etc.
     pub extglob_patterns: Vec<ExtglobPattern>,
-    /// Structured tilde prefixes parsed from words and assignment values.
-    pub tilde_expansions: Vec<TildeExpansion>,
     /// Structured pathname expansion patterns parsed from glob words.
     pub pathname_patterns: Vec<PathnamePattern>,
-    /// Structured quoted segments parsed from raw shell words.
-    pub word_quotes: Vec<WordQuote>,
     /// Redirections in parse order.
     pub redirects: Vec<Redirect>,
-    /// Input redirect
-    pub redirect_in: Option<Redirect>,
+    /// Input redirect (boxed: a Redirect is ~104 bytes; the five mirror
+    /// slots are None on the overwhelming majority of commands, and every
+    /// Vec<CommandNode> in the system paid their inline size).
+    pub redirect_in: Option<Box<Redirect>>,
     /// Output redirect
-    pub redirect_out: Option<Redirect>,
+    pub redirect_out: Option<Box<Redirect>>,
     /// Append redirect
-    pub append: Option<Redirect>,
+    pub append: Option<Box<Redirect>>,
     /// Stderr redirect
-    pub redirect_err: Option<Redirect>,
+    pub redirect_err: Option<Box<Redirect>>,
     /// Stderr append redirect
-    pub redirect_err_append: Option<Redirect>,
+    pub redirect_err_append: Option<Box<Redirect>>,
     /// Here-document stdin body
     pub heredoc: Option<String>,
     /// Here-document stdin body with preexpanded flag (typed carrier for
@@ -1249,12 +1239,14 @@ pub struct CommandNode {
     pub subshell_end: bool,
     /// `for name in words; do ...; done`
     pub for_command: Option<Box<ForCommand>>,
-    /// `(( expression ))`
-    pub arithmetic_command: Option<ArithmeticCommand>,
+    /// `(( expression ))` (boxed like the other compound payloads: the
+    /// inline form charged every simple command ~168 bytes for a payload
+    /// it never carries — perf F4 node diet).
+    pub arithmetic_command: Option<Box<ArithmeticCommand>>,
     /// `if condition; then body; fi`
-    pub if_command: Option<IfCommand>,
+    pub if_command: Option<Box<IfCommand>>,
     /// `while/until condition; do body; done`
-    pub loop_command: Option<LoopCommand>,
+    pub loop_command: Option<Box<LoopCommand>>,
     /// `[[ expression ]]`
     pub conditional_command: Option<Box<ConditionalCommand>>,
     /// `( compound_list )`
@@ -1343,14 +1335,8 @@ impl CommandNode {
             compound_assignments: Vec::new(),
             array_element_assignments: Vec::new(),
             process_substitutions: Vec::new(),
-            command_substitutions: Vec::new(),
-            arithmetic_expansions: Vec::new(),
-            parameter_expansions: Vec::new(),
-            brace_expansions: Vec::new(),
             extglob_patterns: Vec::new(),
-            tilde_expansions: Vec::new(),
             pathname_patterns: Vec::new(),
-            word_quotes: Vec::new(),
             redirects: Vec::new(),
             redirect_in: None,
             redirect_out: None,
@@ -1410,4 +1396,35 @@ impl Default for CommandNode {
 pub struct Ast {
     /// List of commands
     pub commands: Vec<CommandNode>,
+}
+
+#[cfg(test)]
+mod node_size_budget_tests {
+    // Perf F4 (parse throughput): every Vec<CommandNode> in the system —
+    // the top-level Ast, function/if/loop/case bodies, pipeline stages —
+    // pays growth churn and memcpy proportional to sizeof(CommandNode),
+    // and word_metadata vectors pay sizeof(WordMetadata) per word. The
+    // 2026-10-28 node diet (dead wt44/parse4 record vectors removed,
+    // Redirect mirror slots and the if/loop/arithmetic payloads boxed)
+    // took CommandNode 2272 -> 1000 bytes and WordMetadata 296 -> 176.
+    // These budgets keep the fat from silently growing back: a new
+    // payload belongs behind a Box, and a new record vector needs a
+    // live consumer (see the wt44/parse4 note in WordMetadata::new).
+    #[test]
+    fn command_node_size_budget() {
+        assert!(
+            std::mem::size_of::<super::CommandNode>() <= 1088,
+            "CommandNode grew to {} bytes (budget 1088)",
+            std::mem::size_of::<super::CommandNode>()
+        );
+    }
+
+    #[test]
+    fn word_metadata_size_budget() {
+        assert!(
+            std::mem::size_of::<super::WordMetadata>() <= 176,
+            "WordMetadata grew to {} bytes (budget 176)",
+            std::mem::size_of::<super::WordMetadata>()
+        );
+    }
 }

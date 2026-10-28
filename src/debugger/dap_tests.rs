@@ -429,7 +429,8 @@ fn dap_initialize_capabilities_are_exactly_the_landed_features() {
 /// session at the operation-set layer — known ids accepted,
 /// unknown ids rejected as a batch — and `exceptionInfo` at a
 /// stop that carries no exception answers with the honest
-/// error (sites are notifications; parking is M2).
+/// error. (At an exception stop it names the site — the
+/// row-12 pins at the end of this file.)
 #[test]
 fn dap_exception_filters_and_exception_info() {
     let _span = GateTestSpan::new();
@@ -1748,4 +1749,191 @@ fn dap_no_debug_launch_runs_plainly() {
     );
     client.ok("disconnect", Json::obj(vec![]));
     assert_eq!(server.join().expect("server thread"), 0);
+}
+
+// ---------------------------------------------------------------------
+// PLAN row 12: the DE-06 exception-site producers, DAP face.
+// A selected filter parks the run with stopped reason
+// "exception"; `exceptionInfo` names the recorded site; the
+// pending engine action still runs after `continue`.
+// ---------------------------------------------------------------------
+
+#[test]
+fn dap_err_trap_exception_stop_reports_and_parks() {
+    let _span = GateTestSpan::new();
+    let program = program_file("errsite", "trap 'echo TRAPPED' ERR\nfalse\necho after\n");
+    let (mut client, server) = start_server(DapLaunchPreset::default());
+    handshake(&mut client, &program, vec![]);
+    client.ok(
+        "setExceptionBreakpoints",
+        Json::obj(vec![("filters", Json::Array(vec![Json::from("err-trap")]))]),
+    );
+    client.ok("configurationDone", Json::obj(vec![]));
+    let stopped = client.take_event("stopped");
+    assert_eq!(s(&stopped, "reason"), "entry");
+    client.ok("continue", Json::obj(vec![]));
+    let stopped = client.take_event("stopped");
+    assert_eq!(s(&stopped, "reason"), "exception");
+    // exceptionInfo names the site the session parked at.
+    let info = client.ok("exceptionInfo", Json::obj(vec![("threadId", Json::Int(1))]));
+    assert_eq!(
+        info.get("exceptionId").and_then(Json::as_str),
+        Some("err-trap")
+    );
+    let message = info
+        .get("details")
+        .and_then(|details| details.get("message"))
+        .and_then(Json::as_str)
+        .unwrap_or("");
+    assert!(
+        message.contains("ERR trap") && message.contains("status 1"),
+        "exceptionInfo message: {message}"
+    );
+    client.ok("continue", Json::obj(vec![]));
+    let (outputs, exit_code) = client.collect_outputs_until_terminated();
+    assert_eq!(exit_code, 0);
+    // The DE-06 console note arrived first; the trap action ran
+    // after the resume; the script then completed. The capture
+    // drain may merge adjacent stdout into one chunk, so the
+    // assertions are chunk-robust: order by first chunk that
+    // carries the text, and compare the joined stdout whole.
+    let console_at = outputs
+        .iter()
+        .position(|(category, text)| {
+            category == "console" && text.contains("exception site: ERR trap (status 1)")
+        })
+        .expect("the DE-06 console note is emitted");
+    let trapped_at = outputs
+        .iter()
+        .position(|(category, text)| category == "stdout" && text.contains("TRAPPED"))
+        .expect("the trap action ran after the resume");
+    assert!(
+        console_at < trapped_at,
+        "the note precedes the trap action: {outputs:?}"
+    );
+    let joined_stdout: String = outputs
+        .iter()
+        .filter(|(category, _)| category == "stdout")
+        .map(|(_, text)| text.as_str())
+        .collect();
+    assert_eq!(
+        joined_stdout, "TRAPPED\nafter\n",
+        "the trap action ran, then the script completed"
+    );
+    client.ok("disconnect", Json::obj(vec![]));
+    assert_eq!(server.join().expect("server thread"), 0);
+}
+
+#[test]
+fn dap_errexit_exception_stop_and_wrong_filter_passes_through() {
+    let _span = GateTestSpan::new();
+    let script = "set -e\nX=7\nfalse\necho unreachable\n";
+    // The matching filter parks the run at the errexit site.
+    let program = program_file("errexitsite", script);
+    let (mut client, server) = start_server(DapLaunchPreset::default());
+    handshake(&mut client, &program, vec![]);
+    client.ok(
+        "setExceptionBreakpoints",
+        Json::obj(vec![("filters", Json::Array(vec![Json::from("set -e")]))]),
+    );
+    client.ok("configurationDone", Json::obj(vec![]));
+    let stopped = client.take_event("stopped");
+    assert_eq!(s(&stopped, "reason"), "entry");
+    client.ok("continue", Json::obj(vec![]));
+    let stopped = client.take_event("stopped");
+    assert_eq!(s(&stopped, "reason"), "exception");
+    let info = client.ok("exceptionInfo", Json::obj(vec![("threadId", Json::Int(1))]));
+    assert_eq!(
+        info.get("exceptionId").and_then(Json::as_str),
+        Some("set -e")
+    );
+    client.ok("continue", Json::obj(vec![]));
+    let (outputs, exit_code) = client.collect_outputs_until_terminated();
+    assert_eq!(exit_code, 1, "the errexit exit still happens");
+    assert!(
+        outputs
+            .iter()
+            .all(|(_, text)| !text.contains("unreachable")),
+        "the line after the failing command never runs: {outputs:?}"
+    );
+    // One death, one report: the frames the exit unwinds
+    // through (the `.` that sourced this program, here) must
+    // not re-report the site the origin frame already parked.
+    let notes = outputs
+        .iter()
+        .filter(|(category, text)| {
+            category == "console" && text.contains("exception site: errexit (status 1)")
+        })
+        .count();
+    assert_eq!(notes, 1, "one exception note per death: {outputs:?}");
+    client.ok("disconnect", Json::obj(vec![]));
+    assert_eq!(server.join().expect("server thread"), 1);
+
+    // A filter naming a different kind does not park this run:
+    // it terminates straight through with the same status.
+    let program = program_file("errexitother", script);
+    let (mut client, server) = start_server(DapLaunchPreset::default());
+    handshake(&mut client, &program, vec![]);
+    client.ok(
+        "setExceptionBreakpoints",
+        Json::obj(vec![(
+            "filters",
+            Json::Array(vec![Json::from("parse-error")]),
+        )]),
+    );
+    client.ok("configurationDone", Json::obj(vec![]));
+    let stopped = client.take_event("stopped");
+    assert_eq!(s(&stopped, "reason"), "entry");
+    client.ok("continue", Json::obj(vec![]));
+    let (_, exit_code) = client.collect_outputs_until_terminated();
+    assert_eq!(exit_code, 1);
+    client.ok("disconnect", Json::obj(vec![]));
+    assert_eq!(server.join().expect("server thread"), 1);
+}
+
+#[test]
+fn dap_parse_error_exception_stop() {
+    let _span = GateTestSpan::new();
+    let program = program_file("parsesite", "echo before\necho )\necho after\n");
+    let (mut client, server) = start_server(DapLaunchPreset::default());
+    handshake(&mut client, &program, vec![]);
+    client.ok(
+        "setExceptionBreakpoints",
+        Json::obj(vec![(
+            "filters",
+            Json::Array(vec![Json::from("parse-error")]),
+        )]),
+    );
+    client.ok("configurationDone", Json::obj(vec![]));
+    let stopped = client.take_event("stopped");
+    assert_eq!(s(&stopped, "reason"), "entry");
+    client.ok("continue", Json::obj(vec![]));
+    let stopped = client.take_event("stopped");
+    assert_eq!(s(&stopped, "reason"), "exception");
+    let info = client.ok("exceptionInfo", Json::obj(vec![("threadId", Json::Int(1))]));
+    assert_eq!(
+        info.get("exceptionId").and_then(Json::as_str),
+        Some("parse-error")
+    );
+    client.ok("continue", Json::obj(vec![]));
+    let (outputs, exit_code) = client.collect_outputs_until_terminated();
+    assert_eq!(exit_code, 2, "the parse error still ends the run");
+    assert!(
+        outputs
+            .iter()
+            .any(|(category, text)| category == "stdout" && text.contains("before")),
+        "the valid prefix ran: {outputs:?}"
+    );
+    assert!(
+        outputs
+            .iter()
+            .any(|(category, text)| category == "stderr" && text.contains("syntax error")),
+        "the diagnostic was emitted before the park: {outputs:?}"
+    );
+    assert!(
+        outputs.iter().all(|(_, text)| !text.contains("after")),
+        "the unit after the error never runs: {outputs:?}"
+    );
+    client.ok("disconnect", Json::obj(vec![]));
+    assert_eq!(server.join().expect("server thread"), 2);
 }

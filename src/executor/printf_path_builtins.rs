@@ -317,22 +317,22 @@ impl Executor {
         // and fd-dup targets are dispatched after the builtin returns.
         let out_target = cmd
             .redirect_out
-            .as_ref()
+            .as_deref()
             .filter(|redirect| redirect.fd_var.is_none())
             .map(|redirect| self.expand_redirect_target(redirect));
         let append_target = cmd
             .append
-            .as_ref()
+            .as_deref()
             .filter(|redirect| redirect.fd_var.is_none())
             .map(|redirect| self.expand_redirect_target(redirect));
         let err_target = cmd
             .redirect_err
-            .as_ref()
+            .as_deref()
             .filter(|redirect| redirect.fd_var.is_none())
             .map(|redirect| self.expand_redirect_target(redirect));
         let err_append_target = cmd
             .redirect_err_append
-            .as_ref()
+            .as_deref()
             .filter(|redirect| redirect.fd_var.is_none())
             .map(|redirect| self.expand_redirect_target(redirect));
 

@@ -162,7 +162,7 @@ impl Executor {
         {
             if let Some(redirect) = command
                 .redirect_out
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stdout_splice_redirect(command, r))
             {
                 let target = self.expand_redirect_target(redirect);
@@ -192,7 +192,7 @@ impl Executor {
         {
             if let Some(redirect) = command
                 .append
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stdout_write_redirect(r))
             {
                 let target = self.expand_redirect_target(redirect);
@@ -218,7 +218,7 @@ impl Executor {
         {
             if let Some(redirect) = command
                 .redirect_err
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stderr_splice_redirect(command, r))
             {
                 let target = self.expand_redirect_target(redirect);
@@ -262,7 +262,7 @@ impl Executor {
         {
             if let Some(redirect) = command
                 .redirect_err_append
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stderr_splice_redirect(command, r))
             {
                 let target = self.expand_redirect_target(redirect);
@@ -304,28 +304,28 @@ fn brace_stdio_arms_in_parse_order(command: &CommandNode) -> Vec<BraceStdioArm> 
         (
             command
                 .redirect_out
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stdout_splice_redirect(command, r)),
             BraceStdioArm::Out,
         ),
         (
             command
                 .append
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stdout_write_redirect(r)),
             BraceStdioArm::Append,
         ),
         (
             command
                 .redirect_err
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stderr_splice_redirect(command, r)),
             BraceStdioArm::Err,
         ),
         (
             command
                 .redirect_err_append
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stderr_splice_redirect(command, r)),
             BraceStdioArm::ErrAppend,
         ),

@@ -320,7 +320,7 @@ impl Executor {
         // the process-substitution stream's shared offset before the
         // descriptor binding is unwound.
         if let Some(path) = &guard.procsub_stream_path {
-            if let Some((_, offset)) = self.fd_table.input_snapshot_bytes(0) {
+            if let Some(offset) = self.fd_table.input_offset(0) {
                 self.procsub_stream_set_offset(path, offset);
             }
         }
@@ -1225,7 +1225,7 @@ impl Executor {
             eprintln!(
                 "[721] compound_stdin_open_failure redirect_in={:?} redirects={:?}",
                 cmd.redirect_in
-                    .as_ref()
+                    .as_deref()
                     .map(|r| format!("{} {:?}", r.target, r.kind)),
                 cmd.redirects
                     .iter()
@@ -1233,7 +1233,7 @@ impl Executor {
                     .collect::<Vec<_>>()
             );
         }
-        let redirect = cmd.redirect_in.as_ref()?;
+        let redirect = cmd.redirect_in.as_deref()?;
         if redirect.fd.unwrap_or(0) != 0 || redirect.fd_var.is_some() {
             return None;
         }
@@ -1303,7 +1303,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Option<String> {
-        let redirect = cmd.redirect_in.as_ref()?;
+        let redirect = cmd.redirect_in.as_deref()?;
         if redirect.fd.unwrap_or(0) != 0 {
             return None;
         }

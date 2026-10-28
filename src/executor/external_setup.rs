@@ -467,8 +467,8 @@ impl Executor {
         }
         let exec_words = rewritten.words.clone();
         if let Some(source) = shared_combined_output_process_substitution(
-            rewritten.redirect_out.as_ref(),
-            rewritten.redirect_err_append.as_ref(),
+            rewritten.redirect_out.as_deref(),
+            rewritten.redirect_err_append.as_deref(),
         ) {
             let path = self.empty_process_substitution_temp()?;
             let display_path = shell_display_path(&path.to_string_lossy());
@@ -489,8 +489,8 @@ impl Executor {
             });
         }
         if let Some(source) = shared_combined_output_process_substitution(
-            rewritten.append.as_ref(),
-            rewritten.redirect_err_append.as_ref(),
+            rewritten.append.as_deref(),
+            rewritten.redirect_err_append.as_deref(),
         ) {
             let path = self.empty_process_substitution_temp()?;
             let display_path = shell_display_path(&path.to_string_lossy());
@@ -877,7 +877,7 @@ impl Executor {
             .env_vars
             .insert(fd_stdin_offset_key(0), input_len);
         let target = shell_display_path(&path.to_string_lossy());
-        rewritten.redirect_in = Some(Redirect {
+        rewritten.redirect_in = Some(Box::new(Redirect {
             fd: Some(0),
             fd_var: None,
             operator: "<".to_string(),
@@ -895,7 +895,7 @@ impl Executor {
             target,
             append: false,
             clobber: false,
-        });
+        }));
         files.inputs.push(path);
         Ok(())
     }
@@ -993,10 +993,10 @@ impl Executor {
         // the enclosing command's $? with the body's).
         let saved_exit_code = self.exit_code;
         let targets = [
-            cmd.redirect_out.as_ref(),
-            cmd.append.as_ref(),
-            cmd.redirect_err.as_ref(),
-            cmd.redirect_err_append.as_ref(),
+            cmd.redirect_out.as_deref(),
+            cmd.append.as_deref(),
+            cmd.redirect_err.as_deref(),
+            cmd.redirect_err_append.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -1680,10 +1680,13 @@ fn sync_ordered_redirect_targets(command: &mut CommandNode) {
         let source = if redirect.fd.unwrap_or(1) == 2 {
             command
                 .redirect_err_append
-                .as_ref()
-                .or(command.redirect_err.as_ref())
+                .as_deref()
+                .or(command.redirect_err.as_deref())
         } else {
-            command.redirect_out.as_ref().or(command.append.as_ref())
+            command
+                .redirect_out
+                .as_deref()
+                .or(command.append.as_deref())
         };
         if let Some(source) = source {
             redirect.target = source.target.clone();

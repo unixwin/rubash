@@ -1832,6 +1832,15 @@ impl Executor {
         if action.is_empty() {
             return Ok(());
         }
+        // DE-06 (design 9.3; PLAN row 12): every gate passed and
+        // the action is about to run — a selected `err-trap`
+        // filter reports the site and parks the session here,
+        // before the action executes.
+        self.debugger_note_exception_site(
+            crate::debugger::ExceptionKind::ErrTrap,
+            self.exit_code,
+            None,
+        )?;
         self.error_trap_running = true;
         let saved_exit = self.exit_code;
         // GNU trap.c:367 _run_trap_internal saves last_command_exit_value in
@@ -2120,7 +2129,11 @@ impl Executor {
         ast: &mut Ast,
         prepare_targets: bool,
     ) -> Result<(), ExecuteError> {
-        if let Some(redirect) = cmd.redirect_out.as_ref().filter(|r| r.fd.unwrap_or(1) == 1) {
+        if let Some(redirect) = cmd
+            .redirect_out
+            .as_deref()
+            .filter(|r| r.fd.unwrap_or(1) == 1)
+        {
             // GNU do_redirections opens the expanded word once, relative to
             // the cwd in force when the compound command starts; the
             // diagnostic reports that word (redir.c report_error on
@@ -2174,7 +2187,7 @@ impl Executor {
         ast: &mut Ast,
         _prepare_targets: bool,
     ) -> Result<(), ExecuteError> {
-        if let Some(redirect) = cmd.append.as_ref().filter(|r| r.fd.unwrap_or(1) == 1) {
+        if let Some(redirect) = cmd.append.as_deref().filter(|r| r.fd.unwrap_or(1) == 1) {
             let expanded = self.expand_redirect_target(redirect);
             // subst.c:12663-12668 failglob: abort before anchoring.
             if self.redirect_failglob_aborted() {
@@ -2207,7 +2220,11 @@ impl Executor {
         ast: &mut Ast,
         prepare_targets: bool,
     ) -> Result<(), ExecuteError> {
-        if let Some(redirect) = cmd.redirect_err.as_ref().filter(|r| r.fd.unwrap_or(2) == 2) {
+        if let Some(redirect) = cmd
+            .redirect_err
+            .as_deref()
+            .filter(|r| r.fd.unwrap_or(2) == 2)
+        {
             let expanded = self.expand_redirect_target(redirect);
             // subst.c:12663-12668 failglob: abort before the target is
             // created/anchored (see the redirect_out arm above).
@@ -2264,7 +2281,7 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = cmd
             .redirect_err_append
-            .as_ref()
+            .as_deref()
             .filter(|r| r.fd.unwrap_or(2) == 2)
         {
             let expanded = self.expand_redirect_target(redirect);
@@ -5247,25 +5264,25 @@ fn compound_stdio_arms_in_parse_order(command: &CommandNode) -> Vec<CompoundStdi
         (
             command
                 .redirect_out
-                .as_ref()
+                .as_deref()
                 .filter(|r| r.fd.unwrap_or(1) == 1),
             CompoundStdioArm::Out,
         ),
         (
-            command.append.as_ref().filter(|r| r.fd.unwrap_or(1) == 1),
+            command.append.as_deref().filter(|r| r.fd.unwrap_or(1) == 1),
             CompoundStdioArm::Append,
         ),
         (
             command
                 .redirect_err
-                .as_ref()
+                .as_deref()
                 .filter(|r| r.fd.unwrap_or(2) == 2),
             CompoundStdioArm::Err,
         ),
         (
             command
                 .redirect_err_append
-                .as_ref()
+                .as_deref()
                 .filter(|r| r.fd.unwrap_or(2) == 2),
             CompoundStdioArm::ErrAppend,
         ),
@@ -6168,6 +6185,66 @@ impl Executor {
             frame_depth: depth,
             command_text: None,
         })
+    }
+
+    /// DE-06 (design 9.3; PLAN row 12): an exception site whose
+    /// filter the user selected is reached — an ERR trap action
+    /// is about to run, an errexit decision is about to end the
+    /// shell, or a parse error is about to end the current input.
+    /// The site is reported (DE-06) and the session parks at it
+    /// with reason [`StopReason::Exception`], served through the
+    /// one stop path, BEFORE the pending action runs; resuming
+    /// lets the action proceed unchanged — the park is not a
+    /// veto (an errexit exit cannot be cancelled from the stop,
+    /// only inspected before it happens). A site whose filter
+    /// is not selected is neither reported nor parked: the
+    /// selection, written identically by both frontends at the
+    /// WP-15 operation layer, is the session option the
+    /// design's M2 parking item names. A site reached while the
+    /// session is not running free — inside an evaluation at a
+    /// parked stop — produces nothing: a stop is already being
+    /// served, and no second stop may interleave. Callers pass
+    /// the site location when they know it better than the
+    /// ambient line stamp (the parse drivers know the failed
+    /// unit's first line); `None` reads the stamp.
+    pub(crate) fn debugger_note_exception_site(
+        &mut self,
+        kind: crate::debugger::ExceptionKind,
+        status: i32,
+        location: Option<crate::debugger::SourceLocation>,
+    ) -> Result<(), ExecuteError> {
+        if !self.debugger_session_here() {
+            return Ok(());
+        }
+        let (fallback_location, depth) = self.debugger_location();
+        let location = location.or(fallback_location);
+        let park = match self.debug_driver.as_mut() {
+            Some(driver) => {
+                let session = driver.session_mut();
+                if !session.is_running() || !session.exception_filter_covers(kind) {
+                    return Ok(());
+                }
+                let site = crate::debugger::ExceptionSite {
+                    kind,
+                    status,
+                    location: location.clone(),
+                };
+                session.note_exception_site(site.clone());
+                session.emit(crate::debugger::DebugEvent::ExceptionSite(site));
+                true
+            }
+            None => false,
+        };
+        if park {
+            self.debugger_stop_and_serve(crate::debugger::StopInfo {
+                reason: crate::debugger::StopReason::Exception(kind),
+                location,
+                seam: None,
+                frame_depth: depth,
+                command_text: None,
+            })?;
+        }
+        Ok(())
     }
 
     /// DE-09 (WP-1 gap G-13; 150-c REPORT section 5, note 6): the

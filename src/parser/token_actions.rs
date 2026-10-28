@@ -679,7 +679,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     // `{var}` redirects allocate a fresh descriptor (GNU
                     // redir.c redir_varassign) — never the fd-0 mirror.
                     if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
-                        state.current_cmd.redirect_in = Some(redirect);
+                        state.current_cmd.redirect_in = Some(Box::new(redirect));
                     }
                     *i = next_i;
                 } else if let Some((mut process_substitution, next_i)) =
@@ -752,7 +752,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     );
                     state.current_cmd.redirects.push(redirect.clone());
                     if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
-                        state.current_cmd.redirect_in = Some(redirect);
+                        state.current_cmd.redirect_in = Some(Box::new(redirect));
                     }
                     *i += 1;
                 } else if let Some(error) = missing_redirect_target_node(
@@ -814,7 +814,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 let redirect =
                     redirect_node(&token.value, Some(2), &target, false, token.value == "2>|");
                 state.current_cmd.redirects.push(redirect.clone());
-                state.current_cmd.redirect_err = Some(redirect);
+                state.current_cmd.redirect_err = Some(Box::new(redirect));
                 *i = next_i;
             } else if let Some(next_i) =
                 assign_redirect_err_target(tokens, *i, &mut state.current_cmd)
@@ -844,7 +844,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     .push(process_substitution);
                 let redirect = redirect_node(&token.value, Some(2), &target, true, false);
                 state.current_cmd.redirects.push(redirect.clone());
-                state.current_cmd.redirect_err_append = Some(redirect);
+                state.current_cmd.redirect_err_append = Some(Box::new(redirect));
                 *i = next_i;
             } else if let Some(next_i) =
                 assign_redirect_err_append_target(tokens, *i, &mut state.current_cmd)

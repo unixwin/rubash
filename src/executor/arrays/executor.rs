@@ -153,6 +153,65 @@ impl Executor {
         result
     }
 
+    /// Whether an assoc element read of `expression` (`name[key]`) was
+    /// already settled by the typed cell in
+    /// `array_element_parameter_value_uncached`: its assoc branch answers
+    /// a hit itself, and when the freshness gate is open for the storage
+    /// name and a structured assoc cell exists, its miss is authoritative
+    /// (the cell is a complete mirror of the render, rubash#616 Phase 1a
+    /// invariant) — the serialized storage cannot hold a value the cell
+    /// lacks. Callers that would otherwise re-derive the element from the
+    /// storage after the fetch returned None (the operator/array braced
+    /// handler) consult this to skip the whole-storage clone + linear
+    /// scan that can only agree with the cell, and to avoid evaluating a
+    /// side-effecting subscript a second time (GNU evaluates it once per
+    /// expansion). The check re-derives the fetch's own admission on the
+    /// same names, so every state the fetch declines — nameref that does
+    /// not resolve, assoc mark absent, gate closed, no assoc cell, the
+    /// all-elements `*` form (which the fetch answers as a join, not an
+    /// element) — reports false and the storage leg runs unchanged.
+    pub(in crate::executor) fn assoc_element_fetch_settled(&self, expression: &str) -> bool {
+        let Some((array_name, key)) = parse_array_subscript(expression) else {
+            return false;
+        };
+        if key == "*" {
+            return false;
+        }
+        let pre_attrs = self.shell_state.env_vars.attr_of(array_name);
+        let storage_owned: String;
+        let storage_name: &str = if pre_attrs.nameref {
+            match self.resolved_variable_name(array_name) {
+                Some(resolved) => {
+                    storage_owned = resolved;
+                    &storage_owned
+                }
+                None => return false,
+            }
+        } else {
+            array_name
+        };
+        let assoc_marked = if pre_attrs.nameref {
+            is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, storage_name)
+        } else {
+            pre_attrs.assoc
+        };
+        if !assoc_marked {
+            return false;
+        }
+        if self.shell_state.env_vars.array_cells_dirty()
+            && !self.shell_state.env_vars.cell_is_fresh(storage_name)
+        {
+            return false;
+        }
+        matches!(
+            self.shell_state
+                .variables
+                .get(storage_name)
+                .map(|variable| &variable.value),
+            Some(crate::shell::ShellValue::AssociativeArray(_))
+        )
+    }
+
     fn array_element_parameter_value_uncached(&self, expression: &str) -> Option<String> {
         let (array_name, key) = parse_array_subscript(expression)?;
 

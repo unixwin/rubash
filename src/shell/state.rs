@@ -309,6 +309,17 @@ pub struct ShellState {
     /// lifetime. A clone starts empty: a fork child may only drain
     /// carriers it wrote itself, never the parent's pending ones.
     pub(crate) procsub_adhoc_carriers: RefCell<Vec<PathBuf>>,
+    /// rubash#1907: the PROCESS umask recorded at the fork-save point
+    /// (`clone_for_child_save`). The `umask` builtin applies the mask
+    /// to the process (builtins/umask.rs), and a flat `( )` region has
+    /// no fork to discard the child's mask the way GNU's
+    /// execute_in_subshell (execute_cmd.c:1576) does — so the save
+    /// point snapshots the process mask into the saved state and
+    /// `restore_flat_subshell` re-applies it when the region ends.
+    /// Only the SAVED snapshot's copy is ever read; the live state's
+    /// own copy is inert. None where there is no process umask
+    /// (Windows) or when the state was never a fork snapshot.
+    pub(crate) fork_saved_process_umask: Option<u32>,
 }
 
 /// The shape of the PIPESTATUS variable cell (variables.c:6291
@@ -447,6 +458,14 @@ pub(crate) struct InteriorSnapshot {
     debug_trap_command: Option<String>,
     xtrace_fd: i32,
     xtrace_fd_source: String,
+    /// rubash#1907: the PROCESS umask at the command-substitution
+    /// boundary. The body runs in this same process, so a `umask`
+    /// inside `$( )` re-masks the process itself; GNU's substitution
+    /// child (subst.c:7143 command_substitute) discards it at exit.
+    /// Snapshotted/restored with the interior state so the leak
+    /// cannot reach the parent (the `( )` boundary's twin fix rides
+    /// `fork_saved_process_umask` on the full-state snapshot).
+    process_umask: Option<u32>,
 }
 
 impl InteriorSnapshot {
@@ -502,6 +521,7 @@ impl ShellState {
             debug_trap_command: self.debug_trap_command.borrow().clone(),
             xtrace_fd: self.xtrace_fd.get(),
             xtrace_fd_source: self.xtrace_fd_source.borrow().clone(),
+            process_umask: crate::builtins::umask::snapshot_process_umask(),
         }
     }
 
@@ -517,6 +537,11 @@ impl ShellState {
     pub(crate) fn clone_for_child_save(&mut self) -> Self {
         let mut saved = self.clone();
         std::mem::swap(&mut saved.session_history, &mut self.session_history);
+        // rubash#1907: the fork boundary is also where the PROCESS
+        // umask is snapshotted — the child region runs against this
+        // same process, so only a snapshot taken NOW lets the restore
+        // put the parent's mask back (see the field docs).
+        saved.fork_saved_process_umask = crate::builtins::umask::snapshot_process_umask();
         saved
     }
 
@@ -550,6 +575,12 @@ impl ShellState {
         *self.debug_trap_command.borrow_mut() = snapshot.debug_trap_command.clone();
         self.xtrace_fd.set(snapshot.xtrace_fd);
         *self.xtrace_fd_source.borrow_mut() = snapshot.xtrace_fd_source.clone();
+        // rubash#1907: the substitution body ran against this same
+        // PROCESS — re-apply the boundary's process umask (see the
+        // InteriorSnapshot field docs).
+        if let Some(mask) = snapshot.process_umask {
+            crate::builtins::umask::apply_process_umask(mask);
+        }
     }
 }
 
@@ -624,6 +655,7 @@ impl Clone for ShellState {
             // rubash#1691: see the field docs — a clone drains only
             // its own ad-hoc carriers.
             procsub_adhoc_carriers: RefCell::new(Vec::new()),
+            fork_saved_process_umask: self.fork_saved_process_umask,
         }
     }
 }

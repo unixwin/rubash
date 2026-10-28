@@ -21,7 +21,7 @@ impl Executor {
         // last matching redirect in source order is the effective one.
         let redirect = cmd
             .redirect_in
-            .as_ref()
+            .as_deref()
             .filter(|redirect| redirect.fd == Some(fd))
             .or_else(|| {
                 cmd.redirects.iter().rev().find(|redirect| {

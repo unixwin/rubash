@@ -156,10 +156,10 @@ impl Executor {
             }
         }
         for redirect in [
-            cmd.redirect_out.as_ref(),
-            cmd.append.as_ref(),
-            cmd.redirect_err.as_ref(),
-            cmd.redirect_err_append.as_ref(),
+            cmd.redirect_out.as_deref(),
+            cmd.append.as_deref(),
+            cmd.redirect_err.as_deref(),
+            cmd.redirect_err_append.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -317,11 +317,11 @@ impl Executor {
             .map(|redirect| semantic_key(redirect))
             .collect();
         for redirect in [
-            cmd.redirect_in.as_ref(),
-            cmd.redirect_out.as_ref(),
-            cmd.append.as_ref(),
-            cmd.redirect_err.as_ref(),
-            cmd.redirect_err_append.as_ref(),
+            cmd.redirect_in.as_deref(),
+            cmd.redirect_out.as_deref(),
+            cmd.append.as_deref(),
+            cmd.redirect_err.as_deref(),
+            cmd.redirect_err_append.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -360,7 +360,19 @@ impl Executor {
                     crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
                 )
             {
-                if let Some(name) = self.nounset_unbound_parameter(&redirect.target_metadata.raw) {
+                // rubash#1915: the scan judges the raw target text, but
+                // a recorded process-substitution span inside it is
+                // child text (subst.c:6362 process_substitute) — mask
+                // the command's recorded spans before judging, exactly
+                // like the simple-command pre-scan does.
+                // The command node's own span records are consumed by
+                // materialization before redirects apply, but the
+                // target word's metadata keeps its recordings.
+                let masked_target = Self::mask_recorded_process_substitutions(
+                    &redirect.target_metadata.raw,
+                    &redirect.target_metadata.process_substitutions,
+                );
+                if let Some(name) = self.nounset_unbound_parameter(&masked_target) {
                     let mut stderr = Vec::new();
                     writeln!(
                         &mut stderr,
