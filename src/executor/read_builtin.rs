@@ -61,6 +61,10 @@ impl Executor {
                     && redirect_target_fd_and_move(&target).is_none()
                     && !target.starts_with("<(")
                 {
+                    crate::special_paths::proc_trace(
+                        "read-probe",
+                        &format!("{target} -> {:?}", self.probe_input_redirect(&target).map(|_| ())),
+                    );
                     if let Err(error) = self.probe_input_redirect(&target) {
                         let mut line = Vec::new();
                         let _ = writeln!(

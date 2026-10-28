@@ -159,6 +159,19 @@ pub(crate) fn is_synthetic_link_path(target: &str) -> bool {
     crate::proc_vfs::proc_is_link_path(target)
 }
 
+/// TEMPORARY diagnostic for the A-1 read-face hunt (remove with the
+/// commit that resolves it): appends one line to ./rb-proc-trace.log
+/// when that file exists in the process cwd; a no-op otherwise.
+pub(crate) fn proc_trace(point: &str, detail: &str) {
+    let path = std::path::Path::new("rb-proc-trace.log");
+    if path.exists() {
+        use std::io::Write as _;
+        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) {
+            let _ = writeln!(file, "{point}: {detail}");
+        }
+    }
+}
+
 /// Resolve a synthetic-link path to its target (rubash#1900): both
 /// spellings — the OS-native one for opens/metadata and the
 /// shell-namespace display one for readlink-style answers. The

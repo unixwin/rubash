@@ -3812,13 +3812,28 @@ mod issue_1917 {
                 "OK",
             ),
         ];
+        // TEMPORARY trace hook for the A-1 hunt: the child's cwd is
+        // this scratch dir, and the engine appends decision lines to
+        // ./rb-proc-trace.log when the file exists (proc_trace).
+        std::fs::write(dir.join("rb-proc-trace.log"), "").expect("create trace file");
+        let mut report = String::new();
+        let mut passed = 0;
         for (name, code, expected) in faces {
             let (stdout, stderr, status) = run(&dir, code);
-            assert_eq!(
-                stdout, *expected,
-                "face {name}: status={status:?} stderr:\n{stderr}"
-            );
+            if stdout == *expected {
+                passed += 1;
+            }
+            report.push_str(&format!(
+                "face {name}: stdout={stdout:?} (want {expected}) status={status:?} stderr={stderr:?}\n"
+            ));
         }
+        let trace = std::fs::read_to_string(dir.join("rb-proc-trace.log"))
+            .unwrap_or_else(|_| "<no trace>".to_string());
+        assert_eq!(
+            passed,
+            faces.len(),
+            "read faces report:\n{report}\ntrace:\n{trace}"
+        );
     }
 
     /// A-2: /proc/self/cmdline carries the TRUE argv — a known marker

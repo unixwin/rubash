@@ -580,6 +580,13 @@ impl Executor {
             // further down does; a link resolves to its native target
             // and continues through the ordinary file flow with it
             // (the session cwd answers for self/cwd, per G-02).
+            crate::special_paths::proc_trace(
+                "read-inner",
+                &format!(
+                    "{expanded_target} content={}",
+                    crate::special_paths::synthetic_proc_content(&expanded_target).is_some()
+                ),
+            );
             if let Some(bytes) = crate::special_paths::synthetic_proc_content(&expanded_target) {
                 let input = crate::executor::substitution_metadata::bytes_to_shell_text(&bytes);
                 if input.is_empty() {

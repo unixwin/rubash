@@ -249,6 +249,7 @@ impl Executor {
             }
             return None;
         }
+        crate::special_paths::proc_trace("classify-in", target);
         // SyntheticLink (rubash#1900): /proc/<pid>/exe and .../cwd are
         // magic links — the open goes to the resolved target file. The
         // session cwd (G-02; never the process-global cwd) answers for
@@ -258,14 +259,17 @@ impl Executor {
             target,
             Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
         ) {
+            crate::special_paths::proc_trace("classify-in", "-> link");
             return Some(File::open(&link.native));
         }
         // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): synthetic /proc files
         // serve as a pre-filled pipe converted to a File; reads hit EOF at
         // content end, matching procfs static-snapshot semantics.
         if let Some(content) = crate::special_paths::synthetic_proc_content(target) {
+            crate::special_paths::proc_trace("classify-in", "-> content");
             return Some(Self::synthetic_content_file(target, &content));
         }
+        crate::special_paths::proc_trace("classify-in", "-> none");
         None
     }
 
