@@ -718,15 +718,15 @@ pub struct WordMetadata {
     // went the same way (redundancy R4): no production reader in
     // either repo — the live store is the CommandNode aggregate,
     // which push_command_word fills from WordScans directly.
+    // The word-quote record followed in the 1.5.0 migration: it
+    // was always empty (the executor re-derives quoting from the
+    // raw word at consumption time) and its last reader —
+    // niubash-runtime's drive-letter admission — dropped the
+    // read, so the storage is removed like the kinds above.
+    // (ArrayElementAssignment::word_quotes is a different, live
+    // field and stays.)
     pub process_substitutions: Vec<ProcessSubstitution>,
     pub pathname_patterns: Vec<PathnamePattern>,
-    /// Word-quote records: always empty (wt44/parse4 — the executor
-    /// re-derives quoting from the raw word at consumption time), but
-    /// RETAINED for now because niubash-runtime's drive-letter
-    /// admission still reads it (niubash crates/niubash-runtime
-    /// shell.rs). Retire it together with that reader's cleanup,
-    /// coordinated with a niubash rubash-pin bump.
-    pub word_quotes: Vec<WordQuote>,
     /// The locale name under which this word's dollar-quoted backslash-u /
     /// backslash-U escapes were decoded at lex time - Some only for words
     /// whose raw carries such an escape (the one lex product whose value is
@@ -744,7 +744,6 @@ impl WordMetadata {
             raw,
             process_substitutions: Vec::new(),
             pathname_patterns: Vec::new(),
-            word_quotes: Vec::new(),
             lex_locale: None,
         }
     }
@@ -761,7 +760,7 @@ impl WordMetadata {
         Self {
             word_index,
             // wt44/parse4: parameter / arithmetic / brace / tilde expansion
-            // records, command-substitution records and word-quote records
+            // records and command-substitution records
             // stay empty — GNU runs no per-word expansion analyses at parse
             // time (parse.y:5305 read_token_word builds the word once;
             // subst.c analyzes at execution); this port's executor
@@ -771,7 +770,6 @@ impl WordMetadata {
             // `=~` check re-scans the raw).
             process_substitutions,
             pathname_patterns: super::pathname_patterns_in_word(&value, &raw),
-            word_quotes: Vec::new(),
             lex_locale: if crate::lexer::raw_has_ansi_u_escape(&raw) {
                 Some(crate::locale::locale_name())
             } else {
@@ -810,7 +808,6 @@ impl WordMetadata {
             // See `new` for why the non-live kinds stay empty (wt44/parse4).
             process_substitutions,
             pathname_patterns,
-            word_quotes: Vec::new(),
             lex_locale: if crate::lexer::raw_has_ansi_u_escape(&raw) {
                 Some(crate::locale::locale_name())
             } else {
