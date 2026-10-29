@@ -153,6 +153,69 @@ fn comsub_group_redirect_still_suppresses_function_output() {
     );
 }
 
+/// Sibling face of the same capture contract (found by the ecosuite
+/// nvm fast re-run, `nvm_get_default_packages`): when the writing leaf
+/// is a SPAWNED EXTERNAL command, the stdio plan binds its fd 2 to the
+/// active capture through a shared pipe, and the post-exit drain must
+/// deliver those bytes to the capture the pipe was materialized for.
+/// The drain resolved through fd 1's CURRENT endpoint instead, so a
+/// call wrap's later `>/dev/null` (or `>file`) rebind of fd 1 swallowed
+/// the merged stream (or diverted it into the file). GNU: the child's
+/// fd 2 IS the substitution pipe (subst.c:7143 command_substitute).
+#[cfg(unix)]
+#[test]
+fn comsub_redirected_function_external_stderr_leaf_captures() {
+    assert_stdout(
+        "h() { /bin/sh -c 'echo CEE >&2'; }\n\
+         echo \"[$(h 2>&1 >/dev/null)]\"",
+        "[CEE]\n",
+    );
+}
+
+/// The diverted-to-file variant: with `>cap.txt` as the call's fd-1
+/// leg, the external leaf's stderr still belongs to the capture and
+/// only its stdout may land in the file.
+#[cfg(unix)]
+#[test]
+fn comsub_redirected_function_external_leaf_file_target_keeps_stderr_in_capture() {
+    let dir = std::env::temp_dir().join(format!("rubash-issue2031-ext-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let script = format!(
+        "cd {} || exit 1\n\
+         w() {{ /bin/sh -c 'echo WERR >&2'; }}\n\
+         echo \"cap=[$(w 2>&1 >cap.txt)] file=[$(cat cap.txt)]\"",
+        dir.display()
+    );
+    assert_stdout(&script, "cap=[WERR] file=[]\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The nvm_get_default_packages shape exactly: an external writer
+/// addressing /dev/stderr inside the function (awk prints the error
+/// there), captured through the call's `2>&1 >/dev/null`.
+#[cfg(unix)]
+#[test]
+fn comsub_redirected_function_dev_stderr_writer_captures() {
+    assert_stdout(
+        "v() { awk 'BEGIN{ print \"AWKERR\" > \"/dev/stderr\" }'; }\n\
+         echo \"[$(v 2>&1 >/dev/null)]\"",
+        "[AWKERR]\n",
+    );
+}
+
+/// Guards for the external leaf: dup-only still captures, and the
+/// null-first order still empties (fd 2 follows fd 1 into /dev/null).
+#[cfg(unix)]
+#[test]
+fn comsub_redirected_function_external_leaf_order_guards() {
+    assert_stdout(
+        "h() { /bin/sh -c 'echo CEE >&2'; }\n\
+         echo \"A:[$(h 2>&1)] B:[$(h >/dev/null 2>&1)]\"",
+        "A:[CEE] B:[]\n",
+    );
+}
+
 /// Guard (file-shaped): a call's genuine redirect wins over the
 /// enclosing group's, and the group's alone reaches the body — the
 /// plain-descriptor forms of the same bindings.

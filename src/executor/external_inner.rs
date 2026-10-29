@@ -1284,7 +1284,7 @@ impl Executor {
         // the parent's only post-spawn duty was the wait.
         if matches!(
             self.external_stdio_outcome,
-            Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(_))
+            Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(..))
         ) || self.external_needs_fd_copy_capture(cmd)
         {
             return false;
@@ -1744,6 +1744,7 @@ impl Executor {
                     let foreground_pid = child.id();
                     if let super::external_redirects::ExternalStdioOutcome::CapturePipe(
                         mut reader,
+                        capture_generation,
                     ) = outcome
                     {
                         use std::io::Read;
@@ -1761,9 +1762,21 @@ impl Executor {
                             );
                         }
                         self.run_sigchld_trap_for_reaped_child()?;
-                        // Route the merged stream into the active capture
-                        // exactly like the legacy single-stream collection.
-                        self.write_default_stdout(&merged)?;
+                        // Route the merged stream into the capture the
+                        // plan materialized the pipe for — addressed by
+                        // its recorded generation, NOT through fd 1's
+                        // current endpoint: a function-call wrap may have
+                        // rebound fd 1 since the plan (rubash#2031:
+                        // `$(f 2>&1 >/dev/null)`, f's external leaf wrote
+                        // its stderr into the capture pipe, and resolving
+                        // the drain through fd 1 landed the bytes in the
+                        // /dev/null target file instead of the
+                        // substitution's capture).
+                        super::shell_options::write_stdout_capture_at_generation(
+                            &merged,
+                            capture_generation,
+                        )
+                        .map_err(ExecuteError::IoError)?;
                         self.exit_code = crate::executor::wait_status::process_exit_status(&status);
                     } else {
                         let status = self.wait_external_child(&mut child)?;

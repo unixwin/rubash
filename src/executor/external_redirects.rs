@@ -60,15 +60,21 @@ pub(in crate::executor) enum ExternalStdioOutcome {
     LiveHandles,
     /// The plan bound one or both fds to the active capture through ONE
     /// shared pipe: drain this reader to EOF and write the bytes into the
-    /// capture (the merge order is already inside the stream).
-    CapturePipe(os_pipe::PipeReader),
+    /// capture (the merge order is already inside the stream). The second
+    /// field is the capture generation the pipe was materialized for —
+    /// the drain addresses THAT capture scope, never fd 1's current
+    /// endpoint: a function-call wrap between the plan and the drain may
+    /// have rebound fd 1 (rubash#2031: `$(f 2>&1 >/dev/null)` with an
+    /// external leaf in f sent the merged bytes into the /dev/null-bound
+    /// fd 1's file instead of the substitution capture).
+    CapturePipe(os_pipe::PipeReader, usize),
 }
 
 impl std::fmt::Debug for ExternalStdioOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::LiveHandles => f.write_str("LiveHandles"),
-            Self::CapturePipe(_) => f.write_str("CapturePipe(..)"),
+            Self::CapturePipe(..) => f.write_str("CapturePipe(..)"),
         }
     }
 }
@@ -81,6 +87,9 @@ struct ExternalStdioPlan {
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
     capture_reader: Option<os_pipe::PipeReader>,
+    /// Capture generation `capture_reader`'s pipe was materialized for
+    /// (meaningful only when `capture_reader` is Some).
+    capture_generation: usize,
 }
 
 impl Executor {
@@ -104,6 +113,7 @@ impl Executor {
                     stdout,
                     stderr,
                     capture_reader,
+                    capture_generation,
                 } = plan;
                 if let Some(stdio) = stdout {
                     process.stdout(stdio);
@@ -112,7 +122,7 @@ impl Executor {
                     process.stderr(stdio);
                 }
                 self.external_stdio_outcome = Some(match capture_reader {
-                    Some(reader) => ExternalStdioOutcome::CapturePipe(reader),
+                    Some(reader) => ExternalStdioOutcome::CapturePipe(reader, capture_generation),
                     None => ExternalStdioOutcome::LiveHandles,
                 });
                 return Ok(());
@@ -522,6 +532,7 @@ impl Executor {
         // fd pointing there gets a DuplicateHandle so `rubash > log` still
         // merges into log, not the console).
         let mut capture_reader = None;
+        let mut capture_generation = 0usize;
         let mut capture_writer: Option<os_pipe::PipeWriter> = None;
         let mut realize = |slot: &ExternalStdioSlot,
                            is_fd1: bool|
@@ -546,6 +557,8 @@ impl Executor {
                             let (reader, writer) =
                                 os_pipe::pipe().map_err(ExecuteError::IoError)?;
                             capture_reader = Some(reader);
+                            capture_generation =
+                                crate::executor::shell_options::stdout_capture_generation();
                             capture_writer = Some(writer);
                         }
                         let clone = capture_writer.as_ref().unwrap().try_clone().ok();
@@ -582,6 +595,7 @@ impl Executor {
             stdout,
             stderr,
             capture_reader,
+            capture_generation,
         }))
     }
 
