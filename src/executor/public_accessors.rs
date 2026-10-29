@@ -429,6 +429,17 @@ impl Executor {
         self.exit_code = exit_code;
     }
 
+    /// GNU execute_cmd.c:4886-4888: mark the running simple command as
+    /// a failed POSIX special builtin (the builtin returned an
+    /// > EX_SHERRBASE error class — EX_USAGE for the caller here); the
+    /// dispatch gate in execute_materialized_command converts the mark
+    /// into the non-interactive POSIX exit (execute_cmd.c:1004-1017).
+    /// For builtin-layer code that holds the Executor across the module
+    /// boundary (builtins/source.rs) and cannot touch the field.
+    pub(crate) fn mark_special_builtin_failed(&self) {
+        self.special_builtin_failed.set(true);
+    }
+
     pub fn set_history_provider(&mut self, provider: crate::history::SharedHistoryProvider) {
         self.history_provider = Some(provider);
     }

@@ -11,6 +11,14 @@ impl Executor {
             let status =
                 self.execute_export_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            // rubash#2117: the -f face's invalid option returns
+            // EX_USAGE (GNU setattr.def via declare.def's function
+            // face), which execute_cmd.c:4886-4888 marks
+            // special_builtin_failed; this path's status vocabulary
+            // has 2 only for that face.
+            if status == crate::builtins::setattr::EX_USAGE {
+                self.special_builtin_failed.set(true);
+            }
             return Ok(status);
         }
         // GNU export.def shares declare.def's operand handling: an
@@ -115,6 +123,17 @@ impl Executor {
         } else {
             status
         };
+        // rubash#2117: GNU setattr.def's invalid-option return is
+        // EX_USAGE (258 > EX_SHERRBASE), which execute_cmd.c:4886-4888
+        // marks special_builtin_failed; the dispatch gate then exits a
+        // non-interactive POSIX shell (execute_cmd.c:1004-1017).
+        // setattr's layer returns the converted EX_BADUSAGE (2), and
+        // within export's status vocabulary 2 is only ever this face
+        // (operand failures are EXECUTION_FAILURE), so key the mark on
+        // it — the convention execute_set/execute_shift already use.
+        if status == crate::builtins::setattr::EX_USAGE {
+            self.special_builtin_failed.set(true);
+        }
         // GNU execute_cmd.c:1004-1017 with the sh_invalidid/err_readonly
         // assignment class: in POSIX mode a non-interactive shell exits when
         // the special builtin export fails on an ASSIGNMENT (`export 9bad=1`,

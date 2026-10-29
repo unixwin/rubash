@@ -41,6 +41,12 @@ impl Executor {
             )?;
             self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             self.exit_code = 2;
+            // rubash#2117: GNU builtins/source.def:143-147 returns
+            // EX_USAGE (258 > EX_SHERRBASE) for the missing-filename
+            // face, which execute_cmd.c:4886-4888 marks
+            // special_builtin_failed — a non-interactive POSIX shell
+            // exits (execute_cmd.c:1004-1017).
+            self.special_builtin_failed.set(true);
             return Ok(());
         };
 

@@ -11,6 +11,14 @@ impl Executor {
             let status =
                 self.execute_readonly_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            // rubash#2117: the -f face's invalid option returns
+            // EX_USAGE (GNU setattr.def via declare.def's function
+            // face), which execute_cmd.c:4886-4888 marks
+            // special_builtin_failed; this path's status vocabulary
+            // has 2 only for that face.
+            if status == crate::builtins::setattr::EX_USAGE {
+                self.special_builtin_failed.set(true);
+            }
             return Ok(status);
         }
 
@@ -116,6 +124,13 @@ impl Executor {
         } else {
             status
         };
+        // rubash#2117: same EX_USAGE mark as execute_export — GNU
+        // setattr.def's invalid-option return (execute_cmd.c:4886-4888);
+        // readonly's status vocabulary has the converted 2 only for
+        // this face.
+        if status == crate::builtins::setattr::EX_USAGE {
+            self.special_builtin_failed.set(true);
+        }
         // GNU execute_cmd.c:1004-1017 with the sh_invalidid/err_readonly
         // assignment class: in POSIX mode a non-interactive shell exits when
         // the special builtin readonly fails on an assignment (`readonly
