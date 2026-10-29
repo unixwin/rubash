@@ -230,7 +230,7 @@ fn anchor_at_session_cwd(candidate: PathBuf, env_vars: &HashMap<String, String>)
     candidate
 }
 
-fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
+pub(crate) fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
     const ENV_KEYS: &[&str] = &[
         "PATH",
         // G-02: cached lookup results are anchored at the session cwd
