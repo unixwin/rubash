@@ -117,6 +117,12 @@ impl Executor {
         // rubash#1569: the bare listing renders the bindings
         // underneath this command's own tempenv frame.
         let underlay = self.tempenv_listing_underlay();
+        // builtins/set.def:210 routes `-o history` through bash_set_history;
+        // when THIS command flipped the option ON (the fast `-o` arm in
+        // shell_options.rs already fired its own hook and would have made
+        // the prior state read on), the FLAG_ON re-arm load runs.
+        let history_prior =
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "history");
         let status = crate::builtins::set::set_with_io(
             cmd.words[1..].iter().map(String::as_str),
             &mut self.shell_state.env_vars,
@@ -124,6 +130,11 @@ impl Executor {
             &mut stderr,
             &underlay,
         )?;
+        if !history_prior
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "history")
+        {
+            self.reload_history_file_on_rearm();
+        }
         if cmd.words.len() == 1 && !self.posix_mode_enabled() {
             // GNU set.def set_builtin with no arguments calls
             // print_var_list over ALL variables — shell functions are
@@ -151,6 +162,57 @@ impl Executor {
             self.special_builtin_failed.set(true);
         }
         Ok(status)
+    }
+
+    /// builtins/set.def:456-472 bash_set_history, the FLAG_ON arm: applying
+    /// `set -o history` re-arms recording and then runs
+    /// `if (history_lines_this_session == 0) load_history();` — the session
+    /// resumes from $HISTFILE when nothing has been recorded yet. There is
+    /// NO already-loaded guard on GNU's arm: re-arming after a startup-file
+    /// opt-out re-reads the file onto the startup-loaded list (verified
+    /// bash 5.3.20: rcfile `set +o history`, prompt `set -o history`,
+    /// `history` lists the seeded file twice — the startup load plus this
+    /// re-arm load). The separate first-arm rule below (load_history_file_
+    /// if_needed, rubash#1668) keeps its own already-loaded guard; this arm
+    /// must not inherit it (niubash#660 resume semantics).
+    pub(in crate::executor) fn reload_history_file_on_rearm(&mut self) {
+        let Some(session) = self.ensure_session_history() else {
+            return;
+        };
+        if session.borrow().lines_this_session != 0 {
+            return;
+        }
+        let Some(path) = self.get_env("HISTFILE").map(String::from) else {
+            return;
+        };
+        if path.is_empty() {
+            return;
+        }
+        // bashhist.c:323-328 load_history: the HISTSIZE/HISTFILESIZE
+        // defaults and the sv_histsize("HISTFILESIZE") truncation run on
+        // every load, then the file is read into the list.
+        if self.get_env("HISTSIZE").is_none() {
+            self.set_env("HISTSIZE", "500");
+        }
+        if self.get_env("HISTFILESIZE").is_none() {
+            if let Some(histsize) = self.get_env("HISTSIZE").map(String::from) {
+                self.set_env("HISTFILESIZE", &histsize);
+            }
+        }
+        let resolved = self.resolve_shell_path(&path);
+        let write_ts = self.get_env("HISTTIMEFORMAT").is_some();
+        if let Some(max) = crate::history::SessionHistory::size_limit(self.get_env("HISTFILESIZE"))
+        {
+            let _ = session
+                .borrow_mut()
+                .truncate_file(&resolved.to_string_lossy(), max, write_ts);
+        }
+        if resolved.exists() {
+            let histsize = crate::history::SessionHistory::size_limit(self.get_env("HISTSIZE"));
+            let mut shell = session.borrow_mut();
+            shell.histfile_loaded = true;
+            let _ = shell.load_file_with_arming(&resolved.to_string_lossy(), histsize, write_ts);
+        }
     }
 
     /// bashhist.c load_history: the first "set -o history" in a session

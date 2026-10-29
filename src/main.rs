@@ -1550,7 +1550,17 @@ fn run_script_file_with_init(
 /// NOT call this. `--noediting` (no_line_editing=1) and an explicit
 /// `-o vi` both keep emacs off.
 fn apply_init_interactive_defaults(executor: &mut Executor) {
-    executor.set_shell_option("history", true);
+    // GNU shell.c:1835-1837 init_interactive: `if (enable_history_list ==
+    // -1) enable_history_list = 1;` — the interactive default arms history
+    // only when nothing has set the option yet; a preset (an embedding
+    // host, a host contract carrier) stands. Forcing the option ON here is
+    // what a startup file's `set +o history` must be able to survive: the
+    // defaults run BEFORE the startup files, whose opt-out is the user's
+    // word (niubash#660 — the unconditional set made an opted-out shell
+    // record and save anyway).
+    if executor.get_env("__RUBASH_SETOPT_history").is_none() {
+        executor.set_shell_option("history", true);
+    }
     executor.set_shell_option("histexpand", true);
     if executor.get_env("__RUBASH_NO_EDITING").as_deref() == Some("1") {
         return;
