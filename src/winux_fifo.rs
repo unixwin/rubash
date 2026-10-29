@@ -151,7 +151,12 @@ pub(crate) fn fifo_wait_interrupted(env_vars: &HashMap<String, String>) -> bool 
     }
     let mut interrupted = false;
     for &signal in &signals {
-        let Some(name) = crate::executor::trap_exec::signal_trap_name(signal) else {
+        // The trap_exec name composition (signal_trap_name), spelled
+        // through the public kill path: that module is executor-private,
+        // and its whole body is this one translate + SIG prefix.
+        let Some(name) =
+            crate::builtins::kill::translate_signal(&signal.to_string()).map(|n| format!("SIG{n}"))
+        else {
             continue;
         };
         match crate::builtins::trap::get_trap_action(env_vars, &name) {
