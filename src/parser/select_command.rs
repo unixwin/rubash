@@ -61,6 +61,24 @@ pub(super) fn parse_select_command(
                 if select_brace_body_start(tokens, i) {
                     break;
                 }
+                // GNU parse.y:1007 (`SELECT WORD newline_list IN
+                // word_list list_terminator newline_list DO
+                // compound_list DONE`): after the list terminator and
+                // the newline list, only `do` (or the `{` body form
+                // above) may follow — any other token is the
+                // syntax-error token (rubash#2087: `select x in a b`
+                // + `done` blames `done`). Collecting it as another
+                // list word degrades the recognized head into an
+                // executable simple command.
+                if tokens.get(i).is_some() {
+                    return Some(head_unexpected_token_node(
+                        tokens,
+                        start,
+                        i,
+                        source,
+                        source_line_offset,
+                    ));
+                }
                 continue;
             }
             if select_brace_body_start(tokens, i) {
@@ -99,6 +117,26 @@ pub(super) fn parse_select_command(
                 );
                 return Some(finish_compound_command(command, tokens, tokens.len()));
             }
+            // GNU's lexer returns SEMI_SEMI for the case-terminator
+            // family (parse.y: the word_list production admits WORD
+            // tokens only), so an unquoted `;;'/`;&'/`;;&' in the list
+            // is the syntax-error token (rubash#2087: `select x in a;;
+            // do ...' blames `;;'). This lexer emits the family as Word
+            // tokens (raw == value is the unquoted operator spelling; a
+            // quoted `';;'' stays a genuine list word), and the collect
+            // below would swallow it as one.
+            if tokens[i].kind == TokenKind::Word
+                && tokens[i].raw == tokens[i].value
+                && matches!(tokens[i].value.as_str(), ";;" | ";&" | ";;&")
+            {
+                return Some(head_unexpected_token_node(
+                    tokens,
+                    start,
+                    i,
+                    source,
+                    source_line_offset,
+                ));
+            }
             if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
                 let raw = if next_i == i + 1 {
                     tokens[i].raw.as_str()
@@ -124,6 +162,26 @@ pub(super) fn parse_select_command(
                 list_terminator_metadata = Some(build_keyword_metadata(&tokens[i]));
             }
             i += 1;
+        }
+        // GNU parse.y:979-985: with no `in` list the head is `SELECT WORD
+        // newline_list DO` / `SELECT WORD ';' newline_list DO` — after
+        // the terminator run the next token must be `do` (or the `{`
+        // body form handled below); anything else is the syntax-error
+        // token (rubash#2087: `select x; echo y; do ...` blames `echo`;
+        // `select x` + `done` blames `done`). Returning None here
+        // degrades the recognized head into an executable simple
+        // command.
+        if tokens.get(i).is_some()
+            && !is_keyword(tokens, i, "do")
+            && !select_brace_body_start(tokens, i)
+        {
+            return Some(head_unexpected_token_node(
+                tokens,
+                start,
+                i,
+                source,
+                source_line_offset,
+            ));
         }
         true
     };
@@ -238,6 +296,42 @@ fn parse_select_body_commands(tokens: &[Token]) -> Vec<CommandNode> {
 
 fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {
     Box::new(build_word_metadata(0, &token.value, &token.raw))
+}
+
+/// The `syntax error near unexpected token' node for a token that
+/// breaks the `select` head's grammar at its position (rubash#2087) —
+/// the same `__RUBASH_PARSE_ERROR_NEAR__` encoding as the `(`-in-list
+/// node above: the spec carries the offending token and ITS line, the
+/// source assignment echoes its physical line.
+fn head_unexpected_token_node(
+    tokens: &[Token],
+    start: usize,
+    bad_index: usize,
+    source: Option<&std::rc::Rc<str>>,
+    source_line_offset: usize,
+) -> (CommandNode, usize) {
+    let token = &tokens[bad_index];
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
+    command.insert_assignment(
+        "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+        format!(
+            "{}{}{}",
+            token.value,
+            crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+            token.position
+        ),
+    );
+    command.insert_assignment(
+        "__RUBASH_PARSE_SOURCE__".to_string(),
+        super::parse_loop::offending_line_text(
+            tokens,
+            bad_index,
+            source.map(|rc| &**rc),
+            source_line_offset,
+        ),
+    );
+    finish_compound_command(command, tokens, tokens.len())
 }
 
 fn skip_newline_list(tokens: &[Token], mut index: usize) -> usize {
