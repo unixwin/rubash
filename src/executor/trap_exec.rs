@@ -1822,6 +1822,37 @@ impl Executor {
                     // Record $? before the unwind so an interactive host that
                     // only maps ExitCode(code) still reports 130 after Ctrl+C.
                     self.exit_code = 128 + signal;
+                    // niubash#698: the same classification the other two
+                    // mailbox drains make for this exact event — the
+                    // boundary dispatch's untrapped branch above
+                    // (run_pending_signal_traps) and the `wait` builtin's
+                    // drain (job_builtins wait_pending_signal_status,
+                    // rubash#1825): in an interactive session an untrapped
+                    // delivery is a DISCARD-class unwind (GNU jobs.c:3315
+                    // ADDINTERRUPT throws the interrupted wait to the
+                    // top-level reader; the session survives with
+                    // $?=128+sig), not a jump_to_top_level exit. This
+                    // mid-wait drain is the ONLY consumer on the paths
+                    // where no kernel delivery adjudicates first — the
+                    // Windows foreground/pipeline waits (#2020) and the
+                    // non-unix builtin sleep — so without the mark the
+                    // source driver read the bare ExitCode as an exit
+                    // jump and an interactive niu died at rc=130 on the
+                    // first untrapped Ctrl+C of a foreground command.
+                    // The test reads the executor's session flag (the
+                    // host-declared interactive state every sibling
+                    // classification reads), never the process env.
+                    // Non-interactive sessions set nothing and keep the
+                    // exit classification byte-identically.
+                    if self
+                        .shell_state
+                        .env_vars
+                        .get("__RUBASH_INTERACTIVE")
+                        .map(String::as_str)
+                        == Some("1")
+                    {
+                        self.signal_discard_pending = true;
+                    }
                     return Err(ExecuteError::ExitCode(128 + signal));
                 }
             }
@@ -1909,6 +1940,13 @@ impl Executor {
                     if crate::builtins::kill::last_delivery_kernel_caused(libc::SIGINT) {
                         return Ok(Some(libc::SIGINT));
                     }
+                    // The delivery is forgotten (see above), so the
+                    // discard classification observe attached to its
+                    // unwind is forgotten with it: the mark classifies
+                    // the unwind it was set for, and a swallowed
+                    // unwind must not leave it behind to misclassify a
+                    // later genuine exit in the same unit (niubash#698).
+                    self.take_signal_discard_pending();
                 }
                 other => other?,
             }

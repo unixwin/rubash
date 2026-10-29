@@ -3837,8 +3837,16 @@ fn run_source_impl(
         // SigintUnwind is the same DISCARD shape with a fixed verdict
         // (rubash#1639): GNU threw to the top-level reader on the
         // foreground job's SIGINT death — no diagnostic, the reader
-        // continues, and $? is the 130 the wait recorded.
-        Err(ExecuteError::SigintUnwind) => 130,
+        // continues, and $? is the 130 the wait recorded. A mid-wait
+        // mailbox drain (observe_signals_while_blocked, niubash#698)
+        // may have attached its discard mark to the same interrupt
+        // before the wait converted it to this spelling; consume the
+        // unit's bookkeeping here so the mark cannot outlive its unit
+        // and misclassify a later unit's genuine exit.
+        Err(ExecuteError::SigintUnwind) => {
+            let _ = executor.take_signal_discard_pending();
+            130
+        }
         // A `return` that unwinds to this unit's top ends the unit with
         // its status as an ordinary value (builtins/evalfile.c
         // source_file returns it; no jump_to_top_level). It can only
