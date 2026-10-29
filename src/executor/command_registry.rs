@@ -282,7 +282,9 @@ pub(crate) enum CfgGate {
     /// `#[cfg(windows)]` faces only.
     WindowsOnly,
     /// The simple-command face is gated by the host flag
-    /// `external_file_builtins_enabled` (Executor::set_external_file_builtins_enabled).
+    /// `external_file_builtins_enabled` (Executor::set_external_file_builtins_enabled);
+    /// since rubash#2066 the pipeline stage arms of the same names are
+    /// gated by it too (the comsub faces are not).
     HostFlagExternalFileBuiltins,
 }
 
@@ -614,8 +616,9 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
         introspection: Introspection::Emulated,
-        // The host flag gates the simple-command face; the pipeline and
-        // comsub faces are not flag-gated (audit §1.4/§1.5/§1.6).
+        // The host flag gates the simple-command face and, since
+        // rubash#2066, the pipeline stage arm; the comsub faces are
+        // not flag-gated (audit §1.4/§1.5/§1.6).
         cfg: CfgGate::HostFlagExternalFileBuiltins,
         hash_record: HashRecord::Yes,
         slash_forms: &[SlashForm::new("/bin/cat", SlashKind::Emulated), SlashForm::new("/usr/bin/cat", SlashKind::Emulated)],

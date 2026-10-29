@@ -4844,6 +4844,16 @@ impl Executor {
                 Ok(Some((spec.apply(input), String::new(), 0)))
             }
             "cat" => {
+                // rubash#2066: this arm IS the in-process layer, so the
+                // host flag gates it exactly like the simple-command face
+                // (handle_external_file_builtins returns not-handled when
+                // the flag is off): with the layer off, the stage runs
+                // the real PATH program. Spotted downstream by
+                // SpookyWaste/dsh-bash-native patch 0003 — the pipeline
+                // faces never read the flag.
+                if !self.external_file_builtins_enabled {
+                    return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                }
                 use crate::executor::external_file_builtins::{
                     cat_format, parse_cat_argv, CatParsed,
                 };
@@ -5041,6 +5051,17 @@ impl Executor {
                 Ok(Some((output, String::new(), 0)))
             }
             "sed" => {
+                // rubash#2066: same host-flag gate as the cat arm above —
+                // with the in-process layer off, the stage runs the real
+                // PATH program (and reports 127 when there is none),
+                // never the bridge. Without the gate, the inverted
+                // recheck below only half-masked the blind spot: a host
+                // that turned the layer off still got the bridge on
+                // the one shape the recheck cannot see (hash-resolved
+                // but missed by the PATH walk).
+                if !self.external_file_builtins_enabled {
+                    return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                }
                 let args = command.words[1..]
                     .iter()
                     .map(|word| self.expand_word(word))
@@ -5216,6 +5237,13 @@ impl Executor {
             // real binary exactly as before.
             #[cfg(windows)]
             "tput" => {
+                // rubash#2066: same host-flag gate as the cat/sed arms —
+                // the simple-command tput face sits behind the flag in
+                // handle_external_file_builtins, so the stage arm must
+                // not answer when the host turned the layer off.
+                if !self.external_file_builtins_enabled {
+                    return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+                }
                 // Stage argv is pre-expansion here (the arms expand their
                 // own arguments), so resolve against the expanded operands
                 // — a non-admitted expansion falls through below.
