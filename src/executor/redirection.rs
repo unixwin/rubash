@@ -521,6 +521,35 @@ impl Executor {
         // command's earlier redirects opened/closed/duped for the scan.
         let mut opened: HashMap<u32, bool> = HashMap::new();
 
+        // rubash#2098: for each candidate, whether a LATER candidate
+        // also supplies fd 0 (the fd0_stdin_redirect_winner predicate:
+        // fd 0 with an input-supplying kind). GNU's ordered walk opens
+        // EVERY fd-0 redirect — a superseded entry's descriptor is
+        // replaced by the winner's dup2, but its open already ran. The
+        // #1950 winner-probe design validates net targets without
+        // connecting and lets only the winner's bind connect, so a
+        // losing net entry's open must be settled in this gate — the
+        // one walk every funnel passes exactly once — while the winner
+        // stays probe-pure (its bind performs the single connect).
+        let mut later_fd0_supplier = vec![false; candidates.len()];
+        let mut seen_fd0_supplier = false;
+        for (index, redirect) in candidates.iter().enumerate().rev() {
+            later_fd0_supplier[index] = seen_fd0_supplier;
+            if redirect.fd.unwrap_or(0) == 0
+                && matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::ReadWrite
+                        | crate::parser::RedirectKind::CloseInput
+                        | crate::parser::RedirectKind::HereDoc
+                        | crate::parser::RedirectKind::HereString
+                )
+            {
+                seen_fd0_supplier = true;
+            }
+        }
+
         for (index, redirect) in candidates.iter().enumerate() {
             if matches!(redirect.kind, crate::parser::RedirectKind::HereString) {
                 continue;
@@ -952,6 +981,31 @@ impl Executor {
                             )
                             .map(|_| Some(RedirectRejection::Command));
                     }
+                }
+            }
+            // rubash#2098: a non-winning fd-0 NET redirect's open is
+            // settled here — connect once and drop the descriptor,
+            // mirroring GNU's open-then-superseded dup2 (redir.c
+            // do_redirections applies the whole list in order; only
+            // the last fd-0 binding survives). A connect failure is
+            // the command's redirection failure, reported at this
+            // entry through the fd-2 binding applied so far, exactly
+            // like the file probes below (connect_net_stream already
+            // printed its `connect:` pre-line). The winning entry is
+            // NOT opened here: its bind performs the one connect.
+            if redirect.fd.unwrap_or(0) == 0
+                && matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+                )
+                && crate::special_paths::is_net_redirect_target(&target)
+                && later_fd0_supplier[index]
+            {
+                if let Err(error) = self.open_net_redirect(&target) {
+                    let text = crate::posix_errors::message(&error);
+                    return self
+                        .reject_redirect_at(cmd, index, &text)
+                        .map(|_| Some(RedirectRejection::Command));
                 }
             }
             // `<> word` opens O_RDWR|O_CREAT (make_cmd.c:682) — creating
@@ -2333,7 +2387,7 @@ impl Executor {
                 // plain path it is the same mapped append open as
                 // before; a net target connects, a synthetic /proc
                 // entry lands in its sink.
-                let mut file = self.open_append_target(path)?;
+                let file = self.open_append_target(path)?;
                 // GNU builtins/common.c:320-334 sh_chkwrite: a builtin's
                 // failed flush is reported by the BUILTIN as
                 // `<name>: write error: <strerror>` (builtin_error via
@@ -2344,7 +2398,7 @@ impl Executor {
                 // /dev/full`, and the internally-emulated /bin/echo all
                 // took that bare channel). Mirror the Closed arm: diag
                 // into the opposite stream, status + write-failed flag.
-                if let Err(error) = file.write_all(&bytes) {
+                if let Err(error) = crate::fd::write_file_all(&file, &bytes) {
                     if !bytes.is_empty() {
                         let command = cmd.words.first().map(String::as_str).unwrap_or("command");
                         diag.push_str(&format!(
@@ -2612,8 +2666,8 @@ impl OutputFdState {
                 // The open classifies through the registry
                 // (rubash#1964), whose filesystem arm performs exactly
                 // that session-anchored mapped append.
-                let mut file = executor.open_append_target(&path)?;
-                file.write_all(output)?;
+                let file = executor.open_append_target(&path)?;
+                crate::fd::write_file_all(&file, output)?;
                 Ok(())
             }
             OutputTarget::SharedFile(file) => {

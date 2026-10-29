@@ -198,7 +198,14 @@ impl Executor {
                     )
                 {
                     let target = self.expand_redirect_target(redirect);
-                    if redirect_target_fd(&target).is_none() && !is_closed_redirect_target(&target)
+                    // rubash#2098: net targets are skipped — the
+                    // reject gate already settled a losing net entry's
+                    // one connect (and reported its failure); probing
+                    // a ReadWrite net target here would connect a
+                    // second time.
+                    if redirect_target_fd(&target).is_none()
+                        && !is_closed_redirect_target(&target)
+                        && !crate::special_paths::is_net_redirect_target(&target)
                     {
                         if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                             self.probe_input_redirect_readwrite(&target)?;

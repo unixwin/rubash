@@ -2067,8 +2067,8 @@ impl Executor {
                     self.exit_code = 0;
                     return Ok(true);
                 }
-                let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-                file.write_all(&output)?;
+                let file = self.create_redirect_output(&target, redirect.clobber)?;
+                crate::fd::write_file_all(&file, &output)?;
                 self.exit_code = 0;
                 return Ok(true);
             }
@@ -2178,14 +2178,13 @@ impl Executor {
                         && diagnostics.is_empty()
                     {
                         if let Some(file) = self.dev_fd_operand_live_file(cmd, fd) {
-                            use std::io::Write;
                             if procsub_sink.is_none() && !procsub_streamed {
                                 procsub_sink = self.open_cat_output_sink(cmd)?;
                             }
                             if !output.is_empty() {
                                 match procsub_sink.as_mut() {
                                     Some(sink_file) => {
-                                        sink_file.write_all(&filter(&output))?;
+                                        crate::fd::write_file_all(sink_file, &filter(&output))?;
                                     }
                                     None => {
                                         self.write_cat_output(cmd, &filter(&output))?;
@@ -2346,9 +2345,8 @@ impl Executor {
                     // through the sink; append the (normally empty)
                     // remainder there — write_cat_output would
                     // re-create and truncate the target.
-                    use std::io::Write;
                     match procsub_sink.as_mut() {
-                        Some(sink_file) => sink_file.write_all(&output)?,
+                        Some(sink_file) => crate::fd::write_file_all(sink_file, &output)?,
                         None => self.write_cat_output(cmd, &output)?,
                     }
                 } else {
@@ -2514,7 +2512,7 @@ impl Executor {
     /// GNU cat.c's byte-copy loop. Identity options only (formatting needs
     /// whole-stream state).
     fn stream_cat_stdin_operand(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        use std::io::{Read, Write};
+        use std::io::Read;
         // The output target is opened ONCE for the whole copy: `write_cat_output`
         // recreates (truncates) it per call, so a per-8 KiB-chunk caller kept
         // only the last chunk (niubash#198).
@@ -2527,7 +2525,7 @@ impl Executor {
                 break;
             }
             match sink.as_mut() {
-                Some(file) => file.write_all(&buffer[..count])?,
+                Some(file) => crate::fd::write_file_all(file, &buffer[..count])?,
                 None => self.write_cat_output(cmd, &buffer[..count])?,
             }
         }
@@ -2545,14 +2543,13 @@ impl Executor {
         file: &FileFd,
         sink: &mut Option<File>,
     ) -> Result<(), ExecuteError> {
-        use std::io::Write;
         loop {
             let chunk = crate::fd::read_some(file.handle, 8192).map_err(ExecuteError::IoError)?;
             if chunk.is_empty() {
                 break;
             }
             match sink.as_mut() {
-                Some(sink_file) => sink_file.write_all(&chunk)?,
+                Some(sink_file) => crate::fd::write_file_all(sink_file, &chunk)?,
                 None => self.write_cat_output(cmd, &chunk)?,
             }
         }
@@ -2586,7 +2583,7 @@ impl Executor {
                 break;
             }
             match sink.as_mut() {
-                Some(file) => file.write_all(&buffer[..count])?,
+                Some(file) => crate::fd::write_file_all(file, &buffer[..count])?,
                 None => self.write_cat_output(cmd, &buffer[..count])?,
             }
         }
