@@ -372,7 +372,9 @@ impl Executor {
             Some(FdReadEndpoint::CoprocStdout { fd: file_fd, .. }) => {
                 crate::fd::duplicate_handle(file_fd.handle)
                     .map(crate::fd::handle_to_file)
-                    .map_err(|e| crate::posix_errors::path_error(&file_fd.path.to_string_lossy(), e))
+                    .map_err(|e| {
+                        crate::posix_errors::path_error(&file_fd.path.to_string_lossy(), e)
+                    })
             }
             Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
                 let bytes = self
@@ -1404,8 +1406,13 @@ impl Executor {
                 }
                 if let Some(body) = redirect.body.clone() {
                     if let Some(word) = body.strip_prefix('\u{1d}') {
-                        let mut input = decode_ansi_c_quoted_word(word)
-                            .unwrap_or_else(|| self.expand_word(word));
+                        // rubash#1965: the storage word is the
+                        // decoded-with-guard form — the canonical
+                        // storage ladder strips the ANSI-C IFS guard
+                        // (expand_stored_here_string_word); this arm's
+                        // open-coded decode/expand skipped the strip
+                        // and leaked U+E401 into the delivered stream.
+                        let mut input = self.expand_stored_here_string_word(word);
                         input.push('\n');
                         return Some(input);
                     }
@@ -1419,7 +1426,17 @@ impl Executor {
             }
             if let Some(word) = cmd.here_string.clone() {
                 let decoded = decode_ansi_c_quoted_word(&word);
-                let mut input = decoded.unwrap_or_else(|| self.expand_here_string_mut(&word));
+                // rubash#1965: same missing strip as the storage arms —
+                // the decoded/expanded text can still carry the ANSI-C
+                // IFS guard (U+E401) that decode_ansi_c_quoted_word
+                // planted around IFS whitespace, and GNU's r_reading_string
+                // path (redir.c:373 expand_assignment_string_to_string)
+                // delivers the plain characters. A bare U+E401 in a
+                // delivered stream is always the guard: user-typed literal
+                // U+E401 arrives E400-escaped, and the strip is E400-aware.
+                let mut input = crate::executor::markers::strip_ansi_c_ifs_guard(
+                    &decoded.unwrap_or_else(|| self.expand_here_string_mut(&word)),
+                );
                 input.push('\n');
                 return Some(input);
             }
@@ -1501,8 +1518,17 @@ impl Executor {
                     }
                     if let Some(body) = redirect.body.as_deref() {
                         if let Some(word) = body.strip_prefix('\u{1d}') {
-                            let mut input = decode_ansi_c_quoted_word(word)
-                                .unwrap_or_else(|| self.expand_word(word));
+                            // rubash#1965: readback twin of the mut
+                            // ladder's storage arm — strip the ANSI-C
+                            // IFS guard after the decode/expand, exactly
+                            // like expand_stored_here_string_word (the
+                            // &self expand_word cannot run the &mut
+                            // funnel). The strip is E400-aware, so a
+                            // user-typed literal U+E401 stays data.
+                            let mut input = crate::executor::markers::strip_ansi_c_ifs_guard(
+                                &decode_ansi_c_quoted_word(word)
+                                    .unwrap_or_else(|| self.expand_word(word)),
+                            );
                             input.push('\n');
                             return Some(input);
                         }
@@ -1523,8 +1549,14 @@ impl Executor {
                     let mut input = if let Some(pre) = preexpanded_stdin_body(word) {
                         pre.to_string()
                     } else {
-                        decode_ansi_c_quoted_word(word)
-                            .unwrap_or_else(|| self.expand_embedded_parameters_for_heredoc(word))
+                        // rubash#1965: strip the ANSI-C IFS guard from
+                        // the decoded/expanded word (E400-aware), like
+                        // every other here-string delivery arm.
+                        crate::executor::markers::strip_ansi_c_ifs_guard(
+                            &decode_ansi_c_quoted_word(word).unwrap_or_else(|| {
+                                self.expand_embedded_parameters_for_heredoc(word)
+                            }),
+                        )
                     };
                     input.push('\n');
                     Some(input)
@@ -1547,8 +1579,15 @@ impl Executor {
                     }
                     if let Some(body) = redirect.body.as_deref() {
                         if let Some(word) = body.strip_prefix('\u{1d}') {
-                            let mut input = decode_ansi_c_quoted_word(word)
-                                .unwrap_or_else(|| self.expand_word(word));
+                            // rubash#1965: synthesized-command twin of
+                            // the storage arms above — the stored word's
+                            // ANSI-C decode can carry the IFS guard
+                            // (U+E401); strip it (E400-aware) so the
+                            // guard never reaches the delivered stream.
+                            let mut input = crate::executor::markers::strip_ansi_c_ifs_guard(
+                                &decode_ansi_c_quoted_word(word)
+                                    .unwrap_or_else(|| self.expand_word(word)),
+                            );
                             input.push('\n');
                             return Some(input);
                         }
@@ -1736,8 +1775,13 @@ impl Executor {
         let mut input = if let Some(pre) = preexpanded_stdin_body(word) {
             pre.to_string()
         } else {
-            decode_ansi_c_quoted_word(word)
-                .unwrap_or_else(|| self.expand_embedded_parameters_for_heredoc(word))
+            // rubash#1965: strip the ANSI-C IFS guard from the
+            // decoded/expanded word (E400-aware), like every other
+            // here-string delivery arm.
+            crate::executor::markers::strip_ansi_c_ifs_guard(
+                &decode_ansi_c_quoted_word(word)
+                    .unwrap_or_else(|| self.expand_embedded_parameters_for_heredoc(word)),
+            )
         };
         input.push('\n');
         Some(input)
