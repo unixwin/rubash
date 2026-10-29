@@ -85,12 +85,30 @@ impl Executor {
         }
         match cmd.words[0].as_str() {
             "/bin/pwd" | "/usr/bin/pwd" => {
+                // Issue #2093 (GNU findcmd.c:383-385): a slash-bearing word
+                // is execve'd verbatim — when the shell path layer
+                // translates this spelling to an existing, executable
+                // literal file, that FILE answers (physical-pwd default,
+                // --help/--version) and the builtin redirect stands down;
+                // with no literal file the redirect stays (the Windows
+                // no-/bin default, docs/builtins.md §4.3). Declining routes
+                // to the real exec path, whose own literal probe resolves
+                // the same file.
+                if crate::executor::path::literal_executable_file(name, &self.shell_state.env_vars)
+                {
+                    return Ok(false);
+                }
                 let mut pwd_cmd = cmd.clone();
                 pwd_cmd.words[0] = "pwd".to_string();
                 self.exit_code = self.execute_pwd(&pwd_cmd)?;
                 Ok(true)
             }
             "/bin/printf" | "/usr/bin/printf" => {
+                // Issue #2093: same literal-file gate as the pwd arm above.
+                if crate::executor::path::literal_executable_file(name, &self.shell_state.env_vars)
+                {
+                    return Ok(false);
+                }
                 let mut printf_cmd = cmd.clone();
                 printf_cmd.words[0] = "printf".to_string();
                 self.exit_code = self.execute_printf(&printf_cmd)?;
