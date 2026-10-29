@@ -47,6 +47,18 @@ pub struct DebugCliPreset {
     pub program: Option<String>,
     /// Arguments passed to the program as positional parameters.
     pub args: Vec<String>,
+    /// A startup file the host asks to have sourced into the
+    /// session before the program runs (niubash#692): the
+    /// niubash host maps the invocation's explicit `--rcfile`
+    /// here (already gated by `--norc` on the host side). The
+    /// rubash binary's own leading scan passes `None` — its
+    /// option model has no rcfile channel on this route.
+    /// Sourcing happens as the run input's first unit, in the
+    /// same session, so the file's functions and traps are live
+    /// for the debuggee and an `exit` inside it ends the run
+    /// with its status before the program starts — the
+    /// startup-file discipline every other route applies.
+    pub startup_file: Option<String>,
 }
 
 /// Run a `--debug` session on the controlling terminal.
@@ -107,8 +119,17 @@ pub fn run_debug_cli_with_stream(
 
     // The run input: source the program with its arguments as
     // positionals — one process, one session (design 6.3), the
-    // same input the DAP run builds.
-    let mut input = String::from(". ");
+    // same input the DAP run builds. A host-supplied startup
+    // file (niubash#692) is sourced as the input's first unit,
+    // ahead of the program line; with none, the input is
+    // byte-identical to the pre-#692 form.
+    let mut input = String::new();
+    if let Some(startup_file) = &preset.startup_file {
+        input.push_str(". ");
+        input.push_str(&super::dap::shell_single_quote(startup_file));
+        input.push('\n');
+    }
+    input.push_str(". ");
     input.push_str(&super::dap::shell_single_quote(&identity));
     for arg in &preset.args {
         input.push(' ');

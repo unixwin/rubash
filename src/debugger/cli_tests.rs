@@ -80,18 +80,48 @@ fn program_file(name: &str, source: &str) -> (std::path::PathBuf, String) {
 /// Run one scripted CLI session; return (status, transcript with
 /// the program path normalized to `<PROG>`).
 fn run_cli(program: &str, commands: &str) -> (i32, String) {
+    run_cli_with_startup(program, None, commands)
+}
+
+/// Run one scripted CLI session with a host-supplied startup
+/// file (niubash#692: the `--rcfile` channel); the startup
+/// path is normalized to `<RC>` in the transcript as well.
+fn run_cli_with_startup(program: &str, startup: Option<&str>, commands: &str) -> (i32, String) {
     let out = SharedOut(Rc::new(RefCell::new(Vec::new())));
     let status = run_debug_cli_with_stream(
         DebugCliPreset {
             program: Some(program.to_string()),
             args: Vec::new(),
+            startup_file: startup.map(str::to_string),
         },
         Box::new(BufReader::new(Cursor::new(commands.as_bytes().to_vec()))),
         Box::new(out.clone()),
     );
     let bytes = out.0.borrow().clone();
     let text = String::from_utf8_lossy(&bytes).into_owned();
-    (status, text.replace(program, "<PROG>"))
+    let text = text.replace(program, "<PROG>");
+    let text = match startup {
+        Some(path) => text.replace(path, "<RC>"),
+        None => text,
+    };
+    (status, text)
+}
+
+/// Write `source` to a named file inside an existing temp dir;
+/// return its identity-form path (the canonicalization
+/// `program_file` applies).
+fn sibling_file(dir: &std::path::Path, name: &str, source: &str) -> String {
+    let path = dir.join(name);
+    std::fs::write(&path, source).expect("write sibling file");
+    let canonical = std::fs::canonicalize(&path).expect("canonicalize");
+    let text = canonical.to_string_lossy().into_owned();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        text
+    }
 }
 
 const SESSION_SCRIPT: &str = "\
@@ -783,6 +813,144 @@ fn issue1962_source_missing_file_reports_and_the_session_lives() {
     assert!(
         transcript.contains("Stopped (breakpoint 1) at <PROG>:4"),
         "{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------
+// niubash#692: the host-supplied startup file (the niubash
+// host's `--rcfile` channel) is sourced into the session
+// before the program — its definitions are live for the
+// debuggee, a function-valued DEBUG trap it installs coexists
+// with breakpoints (the niubash#681 shape, whose repro was
+// written against this very loading face), and an `exit`
+// inside it ends the run before the program starts.
+
+#[test]
+fn startup_file_definitions_are_live_for_the_debuggee() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file(
+        "rcdefs",
+        "\
+rc_helper
+echo \"after helper\"
+",
+    );
+    let rc = sibling_file(
+        &dir,
+        "rcdefs-rc.sh",
+        "\
+RC_MARKER=loaded-from-rc
+rc_helper() {
+  HELPER_RAN=yes
+  return 3
+}
+",
+    );
+    let (status, transcript) = run_cli_with_startup(
+        &program,
+        Some(&rc),
+        "break 2\ncontinue\nprint RC_MARKER\nprint HELPER_RAN\ncontinue\n",
+    );
+    assert_eq!(status, 0, "the session runs to a clean exit: {transcript}");
+    assert!(
+        transcript.contains("Stopped (breakpoint 1) at <PROG>:2: echo \"after helper\""),
+        "the program breakpoint must stop after the rc-defined call: {transcript}"
+    );
+    assert!(
+        transcript.contains("RC_MARKER = loaded-from-rc"),
+        "the rc's variable must be set in the session: {transcript}"
+    );
+    assert!(
+        transcript.contains("HELPER_RAN = yes"),
+        "the rc-defined function must have run: {transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn startup_file_debug_trap_function_coexists_with_breakpoints() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file(
+        "rctrap",
+        "\
+A=1
+B=2
+echo done
+",
+    );
+    let rc = sibling_file(
+        &dir,
+        "rctrap-rc.sh",
+        "\
+rc_trap_handler() {
+  TRAP_HITS=$(( ${TRAP_HITS:-0} + 1 ))
+}
+trap 'rc_trap_handler' DEBUG
+",
+    );
+    let (status, transcript) = run_cli_with_startup(
+        &program,
+        Some(&rc),
+        "break 2\ncontinue\nprint TRAP_HITS\ncontinue\n",
+    );
+    assert_eq!(status, 0, "the session runs to a clean exit: {transcript}");
+    assert!(
+        transcript.contains("Stopped (breakpoint 1) at <PROG>:2: B=2"),
+        "a function-valued DEBUG trap from the rc must not kill the breakpoint \
+         (niubash#681): {transcript}"
+    );
+    assert!(
+        transcript.contains("TRAP_HITS = "),
+        "the rc's DEBUG trap must be live during the program: {transcript}"
+    );
+    assert!(
+        !transcript.contains("TRAP_HITS = 0"),
+        "the rc's DEBUG trap must have fired before the line-2 stop: {transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn startup_file_exit_ends_the_run_before_the_program() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("rcexit", "echo never\n");
+    let rc = sibling_file(&dir, "rcexit-rc.sh", "exit 7\n");
+    let (status, transcript) = run_cli_with_startup(&program, Some(&rc), "continue\n");
+    assert_eq!(
+        status, 7,
+        "an exit in the startup file ends the run with its status: {transcript}"
+    );
+    assert!(
+        transcript.contains("Stopped (entry) — <PROG>"),
+        "the entry stop still comes first: {transcript}"
+    );
+    assert!(
+        !transcript.contains("<PROG>:1"),
+        "the program must not start after the startup file exits: {transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn startup_file_missing_does_not_abort_the_session() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("rcmissing", "echo reached\n");
+    let missing = sibling_file(&dir, "rcmissing-rc.sh", "exit 99\n");
+    std::fs::remove_file(&missing).expect("remove the startup file");
+    // The source builtin reports the missing file on the
+    // debuggee's stderr (its own pinned diagnostic); the point
+    // here is the session still runs the program — the failure
+    // is visible, never a silent drop and never a refusal.
+    let (status, transcript) =
+        run_cli_with_startup(&program, Some(&missing), "break 1\ncontinue\ncontinue\n");
+    assert_eq!(
+        status, 0,
+        "the program still runs to completion: {transcript}"
+    );
+    assert!(
+        transcript.contains("Stopped (breakpoint 1) at <PROG>:1: echo reached"),
+        "the program breakpoint must still stop: {transcript}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
