@@ -1026,6 +1026,20 @@ impl Executor {
                     can_r = true;
                     can_w = true;
                 }
+                // rubash#2042 (master face met at the #2088 takeover
+                // merge): the bind is symbolic but the underlying inode
+                // is a 0644-class synthetic /proc regular file — writes
+                // fail EINVAL, but the fd's facts are the file's: the
+                // generic-file class, readable by inode mode (the same
+                // measurement FD_FILE_PREFIX carries). A class the read
+                // side already settled (a <> pair shares one inode)
+                // stands; only the default class gains the read bit.
+                Some(FdWriteEndpoint::ProcContentWrite) => {
+                    if class == 'f' {
+                        can_r = true;
+                    }
+                    can_w = true;
+                }
                 None => {}
             }
             if let Some(target) = target {
