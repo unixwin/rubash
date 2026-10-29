@@ -5485,10 +5485,18 @@ impl Executor {
         // survive. (The FUNCTION_STDIN_OFFSET bookkeeping below runs
         // after the restore, on the restored table.)
         let saved_input_env = self.snapshot_spec_env(command);
-        let input = self
-            .stdin_string_for_command_mut(command)
-            .unwrap_or_default();
+        // rubash#2003: snapshot an fd-alias source before the resolution
+        // below drains it (see stage_fd_alias_source).
+        let alias_source = self.stage_fd_alias_source(command);
+        let alias_buffered_offset = alias_source
+            .and_then(|fd| self.fd_table.input_snapshot_bytes(fd))
+            .map(|(_, offset)| offset);
+        let resolved = self.stdin_string_for_command_mut(command);
         self.restore_spec_variables(saved_input_env);
+        if let (Some(fd), Some(payload)) = (alias_source, &resolved) {
+            self.materialize_stage0_alias_source(fd, payload, alias_buffered_offset);
+        }
+        let input = resolved.unwrap_or_default();
         if from_function_stdin {
             self.shell_state
                 .env_vars
@@ -5496,6 +5504,112 @@ impl Executor {
             (input, Some(base))
         } else {
             (input, None)
+        }
+    }
+
+    /// rubash#2003: the fd that a pipeline element's own fd-0 redirect
+    /// aliases (`<&N`, `0<&N`, `< /dev/fd/N` and the other dev-stdio
+    /// spellings), when that redirect is the element's fd-0 winner and
+    /// its target is decidable without command substitution. Used by
+    /// initial_pipeline_input (stage 0's payload materialization) and
+    /// by the compound/function stage funnels (binding the stage
+    /// clone's fd 0 to the aliased descriptor). GNU
+    /// execute_pipeline (execute_cmd.c:2620) forks every element with
+    /// the shell's own descriptors and the element applies its own
+    /// redirections inside the fork (execute_cmd.c:4617
+    /// execute_simple_command -> redir.c do_redirection_internal), so
+    /// the element's reads ARE the aliased descriptor's reads, exactly
+    /// once. Rubash's stage-0 payload resolution
+    /// (stdin_string_for_command_mut) instead serves the alias by
+    /// draining the shared descriptor to EOF, while several stage
+    /// funnels consume the element's stdin through the descriptor
+    /// channel itself — the inline cat arm re-resolving the redirect,
+    /// a compound stage binding fd 0 to the endpoint, function and
+    /// builtin stages running on clones whose fd tables share the
+    /// endpoint, the external spawner materializing it by handle — so
+    /// every one of them read EOF from the descriptor the resolution
+    /// had just drained and the payload vanished (`exec 3<f; cat <&3 |
+    /// wc -l` printed 0; `x=$(cat < <(seq 5) | wc -l)` captured 0).
+    /// initial_pipeline_input therefore materializes the aliased fd's
+    /// endpoint after resolving the payload (see
+    /// materialize_stage0_alias_source), restoring the
+    /// single-consumption contract. fd 0 itself is excluded: it is the
+    /// element's own slot, owned by the stage machinery.
+    pub(in crate::executor) fn stage_fd_alias_source(&self, command: &CommandNode) -> Option<u32> {
+        let winner = command.redirects.iter().rev().find(|redirect| {
+            redirect.fd.unwrap_or(0) == 0
+                && matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::ReadWrite
+                        | crate::parser::RedirectKind::CloseInput
+                        | crate::parser::RedirectKind::HereDoc
+                        | crate::parser::RedirectKind::HereString
+                )
+        });
+        let redirect = match winner {
+            Some(redirect)
+                if matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::ReadWrite
+                ) && redirect.fd_var.is_none() =>
+            {
+                redirect
+            }
+            // A heredoc/here-string/close winner IS the fd-0 source;
+            // the payload never came from an aliased descriptor.
+            Some(_) => return None,
+            None => command
+                .redirect_in
+                .as_ref()
+                .filter(|redirect| redirect.fd.unwrap_or(0) == 0 && redirect.fd_var.is_none())?,
+        };
+        if redirect.target.contains("$(") || redirect.target.contains('`') {
+            return None;
+        }
+        let target = self.expand_redirect_target(redirect);
+        redirect_target_fd(&target).filter(|fd| *fd != 0)
+    }
+
+    /// rubash#2003: leave the fd that element 0's payload was resolved
+    /// from holding that payload as a buffered endpoint, so the stage's
+    /// descriptor-channel consumers read the same bytes through the
+    /// shared cursor — one consumption, like GNU's dup — instead of
+    /// EOF from a drained descriptor. A buffered source only had its
+    /// cursor advanced by the resolution's drain, so restoring the
+    /// pre-resolution offset undoes it; a handle-backed source (a
+    /// regular file, a streamed procsub pipe, a coproc read end) was
+    /// read to EOF through the shared handle and cannot be un-read, so
+    /// its endpoint is replaced by a buffered one carrying the payload
+    /// bytes (the transport encoding round-trips raw bytes by design).
+    fn materialize_stage0_alias_source(
+        &mut self,
+        fd: u32,
+        payload: &str,
+        buffered_offset: Option<usize>,
+    ) {
+        match self.fd_table.read_endpoint(fd) {
+            Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
+                if let Some(offset) = buffered_offset {
+                    self.fd_table.set_input_offset(fd, offset);
+                }
+            }
+            Some(FdReadEndpoint::File(_)) | Some(FdReadEndpoint::CoprocStdout { .. }) => {
+                let dynamic = self
+                    .fd_table
+                    .entries
+                    .get(&fd)
+                    .map(|entry| entry.dynamic)
+                    .unwrap_or(false);
+                let bytes =
+                    crate::executor::substitution_metadata::shell_text_to_raw_bytes(payload);
+                self.fd_table
+                    .open_input(fd, FdReadEndpoint::bytes(bytes), dynamic);
+            }
+            _ => {}
         }
     }
 }

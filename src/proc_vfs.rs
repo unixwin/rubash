@@ -526,12 +526,25 @@ fn process_image_path(pid: u32) -> Option<String> {
 /// never consulted either, which is why /proc/self/cmdline claimed
 /// "not a file". `link_target_is_dir` states the link ENTRY's
 /// definitional target kind (an exe image is a file; a cwd is a
-/// directory), not a per-instance guess.
+/// directory), not a per-instance guess. `writable` / `executable`
+/// are definitional in the same sense (rubash#1936): they state the
+/// access the procfs entry's mode grants — the top-level generated
+/// files are 0444 (read-only for every user, root included, because
+/// the entries have no write handler), the per-pid content files are
+/// 0644 owned by the process's user, the directories are 0555 (x for
+/// traversal, no w), and a link's access is its target's (an exe
+/// image is r-x at least and owned writable; a cwd directory is
+/// rwx for its owner). GNU test.c:556/559 routes -w/-x through
+/// sh_eaccess (lib/sh/eaccess.c:194), which is exactly this mode
+/// question asked of the real entries on the oracle platform
+/// (measured against GNU bash 5.3.20 on real procfs).
 pub struct ProcUnaryFacts {
     pub is_dir: bool,
     pub is_file: bool,
     pub is_link: bool,
     pub link_target_is_dir: bool,
+    pub writable: bool,
+    pub executable: bool,
 }
 
 #[cfg(windows)]
@@ -541,12 +554,16 @@ pub fn proc_unary_facts(path: &str) -> Option<ProcUnaryFacts> {
         is_file: false,
         is_link: false,
         link_target_is_dir: false,
+        writable: false,
+        executable: true,
     };
     let file_facts = ProcUnaryFacts {
         is_dir: false,
         is_file: true,
         is_link: false,
         link_target_is_dir: false,
+        writable: false,
+        executable: false,
     };
     let trimmed = path.trim_end_matches('/');
     if trimmed == "/proc" {
@@ -560,7 +577,10 @@ pub fn proc_unary_facts(path: &str) -> Option<ProcUnaryFacts> {
             return Some(dir_facts);
         }
         if PID_CONTENT_FILES.contains(&tail) {
-            return Some(file_facts);
+            return Some(ProcUnaryFacts {
+                writable: true,
+                ..file_facts
+            });
         }
         if PID_LINK_FILES.contains(&tail) {
             return Some(ProcUnaryFacts {
@@ -568,6 +588,8 @@ pub fn proc_unary_facts(path: &str) -> Option<ProcUnaryFacts> {
                 is_file: false,
                 is_link: true,
                 link_target_is_dir: tail == "cwd",
+                writable: true,
+                executable: true,
             });
         }
         return None;
@@ -583,6 +605,42 @@ pub fn proc_unary_facts(path: &str) -> Option<ProcUnaryFacts> {
 
 #[cfg(not(windows))]
 pub fn proc_unary_facts(_path: &str) -> Option<ProcUnaryFacts> {
+    None
+}
+
+/// The write class of a synthetic /proc CONTENT entry (rubash#1935):
+/// `Some(true)` when a write-direction open succeeds on the real
+/// procfs entry, `Some(false)` when it fails at open, `None` when the
+/// path is not synthetic content at all. The classes are the entries'
+/// procfs modes: the top-level generated files are 0444 and have no
+/// write handler, so even root's O_RDWR/O_WRONLY open fails EACCES;
+/// the per-pid content files (status/cmdline) are 0644, so the open
+/// succeeds and only the WRITE fails (EINVAL). Measured against GNU
+/// bash 5.3.20 on real procfs (`exec 3<>/proc/version` → Permission
+/// denied; `exec 3<>/proc/self/status` opens, reads serve, writes
+/// fail EINVAL). Off Windows the generator is a stub and this answers
+/// None — the real procfs serves the path there.
+#[cfg(windows)]
+pub fn proc_content_write_allowed(path: &str) -> Option<bool> {
+    let trimmed = path.trim_end_matches('/');
+    if let Some((pid_ref, tail)) = parse_pid_spelling(trimmed) {
+        if !pid_ref_alive(pid_ref) {
+            return None;
+        }
+        if PID_CONTENT_FILES.contains(&tail) {
+            return Some(true);
+        }
+        return None;
+    }
+    let leaf = trimmed.strip_prefix("/proc/")?;
+    if !leaf.contains('/') && TOP_LEVEL_FILES.contains(&leaf) {
+        return Some(false);
+    }
+    None
+}
+
+#[cfg(not(windows))]
+pub fn proc_content_write_allowed(_path: &str) -> Option<bool> {
     None
 }
 

@@ -76,11 +76,24 @@ impl Executor {
         // convert it — flush it here so the mark can never leak into
         // the next input unit (whose first line must run normally,
         // seeing only the recorded $?=130).
+        //
+        // rubash#1997: the take must be unconditional, not Ok-gated.
+        // When this unit itself ends in Err — the common case being
+        // the post-command boundary poll adjudicating the shell's
+        // own unconsumed SIGINT delivery into ExitCode(130) AFTER
+        // the wait already set the mark — an Ok-only flush left the
+        // mark standing, and the next input unit's first boundary
+        // converted it, silently discarding that unit's first line
+        // and leaving $? at 130 for the line after. GNU's
+        // ADDINTERRUPT throw is consumed by the list that was
+        // executing when the interrupt landed (eval.c:111 reader
+        // DISCARD); it can never legitimately reach a later line.
+        // On the Err path the unit already ends with the
+        // interrupt's own verdict, so dropping the mark loses
+        // nothing; on the Ok path it converts as before.
+        let fg_sigint_unwind = std::mem::take(&mut self.fg_sigint_unwind);
         let result = match result {
-            Ok(()) if self.fg_sigint_unwind => {
-                self.fg_sigint_unwind = false;
-                Err(ExecuteError::SigintUnwind)
-            }
+            Ok(()) if fg_sigint_unwind => Err(ExecuteError::SigintUnwind),
             other => other,
         };
         // rubash#423: GNU has no per-run cwd undo. `cd` runs chdir(2) in the

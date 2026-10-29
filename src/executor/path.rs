@@ -3332,6 +3332,29 @@ fn shell_path_to_windows_inner(path: &str, env_vars: &HashMap<String, String>) -
         }
     }
 
+    // /dev/shm is the POSIX shared-memory tmpfs (rubash#1899). It is a
+    // real, writable directory namespace — not a capability device —
+    // so it must not fall into the /dev sentinel arm below (which made
+    // every /dev/shm file an unsupported-device error and sent data
+    // to a literal enclave path instead). Like /var/tmp it plays the
+    // temporary-files role in the simulation: a lazily materialized
+    // directory below the per-user temp base (<temp>/dev/shm), kept
+    // distinct from both /tmp and /var/tmp. This arm sits ahead of the
+    // /dev arm for that reason.
+    if cfg!(windows) && (normalized == "/dev/shm" || normalized.starts_with("/dev/shm/")) {
+        if let Some(shm) = windows_shm_dir() {
+            // Lazy materialization, same discipline as /var/tmp
+            // (rubash#328): create only when a /dev/shm path is
+            // actually resolved.
+            let _ = std::fs::create_dir_all(&shm);
+            return if normalized == "/dev/shm" {
+                shm
+            } else {
+                shm.join(normalized.strip_prefix("/dev/shm/").unwrap_or_default())
+            };
+        }
+    }
+
     // `/dev` is a capability namespace. Only specific /dev paths are mapped
     // on Windows; do not let unsupported fd/tty spellings become ordinary
     // files below the logical root.
@@ -3625,6 +3648,18 @@ pub(in crate::executor) fn windows_var_tmp_dir() -> Option<PathBuf> {
     }
     let base = crate::executor::local_helpers::safe_temp_dir_string();
     Some(PathBuf::from(base).join("var").join("tmp"))
+}
+
+/// The /dev/shm backing directory (rubash#1899): derived from the same
+/// temp base as /var/tmp, in a dev/shm subdirectory so the tmpfs
+/// namespace cannot collide with /tmp, /var/tmp, or unrelated %TEMP%
+/// contents.
+pub(in crate::executor) fn windows_shm_dir() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let base = crate::executor::local_helpers::safe_temp_dir_string();
+    Some(PathBuf::from(base).join("dev").join("shm"))
 }
 
 /// Best-effort creation of the /var/tmp backing directory at shell startup.

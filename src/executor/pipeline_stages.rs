@@ -183,6 +183,25 @@ impl Executor {
             subshell.shell_state.env_vars.remove(FUNCTION_STDIN);
             subshell.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
         }
+        // rubash#2003: when the element's own fd-0 winner is an fd alias
+        // (`<&N`, `< /dev/fd/N`), GNU binds the element's fd 0 to that
+        // descriptor (execute_cmd.c:2620 execute_pipeline forks the
+        // element with the shell's descriptors; redir.c
+        // do_redirection_internal dups the source onto fd 0) — the
+        // descriptor is the element's ONLY stdin channel. Arming the
+        // FUNCTION_STDIN mirror with the resolved payload as well makes
+        // mirror readers drain the mirror and then fall through to the
+        // endpoint, serving the same bytes twice (a stage-0 read loop
+        // iterated its input twice), so bind the clone's fd 0 to the
+        // source endpoint — dup shares the open file description — and
+        // drop the mirror, the live_stdin treatment above. A failed dup
+        // (unbound source) keeps the mirror fallback.
+        if let Some(alias_fd) = self.stage_fd_alias_source(command) {
+            if subshell.fd_table.dup_input(0, alias_fd).is_ok() {
+                subshell.shell_state.env_vars.remove(FUNCTION_STDIN);
+                subshell.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
+            }
+        }
         let raws_aligned = command.assignment_raws.len() == command.assignments.len();
         for (index, (name, value)) in command.assignments.iter().enumerate() {
             let (base_name, _) = assignment_name_and_append(name);
@@ -352,8 +371,56 @@ impl Executor {
         // top-level function path does this through
         // command_with_process_substitution_files; pipeline stages skipped
         // it, leaving $1 as the literal <(date) string.
-        let (materialized_command, procsub_files) =
+        // rubash#2003: the materialization below rewrites an fd-0 alias
+        // redirect (`<&N` on a buffered source) into a temp-file path
+        // for the external-spawn layer and CONSUMES the source endpoint
+        // (command_with_process_substitution_files' redirect snapshot).
+        // A function element is never spawned: its body resolves the
+        // alias itself, so the consumption must not stand — snapshot
+        // the alias source's offset (and its per-fd mirror-offset key)
+        // and restore both after the call.
+        let alias_snapshot = self.stage_fd_alias_source(command).and_then(|alias_fd| {
+            self.fd_table
+                .input_snapshot_bytes(alias_fd)
+                .map(|(_, offset)| (alias_fd, offset))
+        });
+        let alias_offset_key = alias_snapshot.map(|(alias_fd, _)| {
+            (
+                alias_fd,
+                self.shell_state
+                    .env_vars
+                    .get(&fd_stdin_offset_key(alias_fd))
+                    .cloned(),
+            )
+        });
+        let (mut materialized_command, procsub_files) =
             self.command_with_process_substitution_files(command)?;
+        if let Some((alias_fd, offset)) = alias_snapshot {
+            self.fd_table.set_input_offset(alias_fd, offset);
+            if let Some((key_fd, saved)) = &alias_offset_key {
+                restore_optional_env_var(
+                    &mut self.shell_state.env_vars,
+                    &fd_stdin_offset_key(*key_fd),
+                    saved.clone(),
+                );
+            }
+            // Undo the snapshot's redirect rewrite too: the temp path
+            // would stage a second text channel inside the body (a read
+            // loop then iterates the alias bytes twice — once staged,
+            // once through the fd-0 dup below). Only the alias spelling
+            // is restored; a `<( )` target's rewrite is a real
+            // materialization the body depends on.
+            if let (Some(original), Some(rewritten)) = (
+                command.redirect_in.as_ref(),
+                materialized_command.redirect_in.as_mut(),
+            ) {
+                if redirect_target_fd(&original.target) == Some(alias_fd)
+                    && rewritten.target != original.target
+                {
+                    rewritten.target = original.target.clone();
+                }
+            }
+        }
         // GNU expands a pipeline element's words through the same word-list
         // machinery as any simple command (execute_cmd.c:624
         // execute_command_internal -> execute_simple_command ->
@@ -411,7 +478,21 @@ impl Executor {
         // clone's fd table carries (the #761 streaming treatment). Any
         // ambient mirror the clone inherited is removed with it: in
         // this state the live descriptor, not the buffer, is fd 0.
-        if live_stdin {
+        // rubash#2003: when the element's own fd-0 winner is an fd alias
+        // (`<&N`, `< /dev/fd/N`), the descriptor is the element's only
+        // stdin channel (execute_cmd.c:2620 execute_pipeline; redir.c
+        // do_redirection_internal dups the source onto the element's
+        // fd 0). Bind the clone's fd 0 to the source endpoint — dup
+        // shares the open file description — and keep the mirror absent
+        // like the live_stdin treatment: a body command reading the
+        // descriptor channel (`cat`, an external child) otherwise sees
+        // an unbound fd 0 and reads EOF while only mirror readers
+        // (`read`) are served. A failed dup (unbound source) keeps the
+        // mirror fallback.
+        let alias_bound = self
+            .stage_fd_alias_source(command)
+            .is_some_and(|alias_fd| subshell.fd_table.dup_input(0, alias_fd).is_ok());
+        if live_stdin || alias_bound {
             subshell.shell_state.env_vars.remove(FUNCTION_STDIN);
             subshell.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
         } else {

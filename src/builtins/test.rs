@@ -592,7 +592,15 @@ fn virtual_device_test(op: &str, operand: &str) -> Option<bool> {
     if cfg!(unix) && matches!(op, "-O" | "-G") {
         return None;
     }
-    if crate::executor::path::is_shell_null_device(operand) {
+    // rubash#1898: /dev/zero and /dev/full carry the null device's
+    // exact truth table in GNU (measured against the 5.3.20 oracle:
+    // -e -r -w -c true; -x -s -b -f false) — they are the same class
+    // of always-present character device, so one arm serves all
+    // three spellings, judged by the registry.
+    if crate::executor::path::is_shell_null_device(operand)
+        || crate::special_paths::is_zero_device(operand)
+        || crate::special_paths::is_full_device(operand)
+    {
         return Some(match op {
             "-a" | "-e" | "-r" | "-w" | "-c" => true,
             "-x" | "-s" | "-b" | "-p" | "-S" | "-u" | "-g" | "-k" | "-h" | "-L" | "-O" | "-G"
@@ -668,6 +676,14 @@ fn proc_unary_test(op: &str, operand: &str) -> Option<bool> {
         "-f" => facts.is_file || (facts.is_link && !facts.link_target_is_dir),
         "-h" | "-L" => facts.is_link,
         "-r" => true,
+        // rubash#1936: -w/-x are mode questions the facts now carry
+        // (procfs modes are definitional — see ProcUnaryFacts); they
+        // previously fell through to the filesystem, which has no
+        // such names on Windows and answered false for every entry,
+        // including the writable per-pid files and the executable
+        // exe link.
+        "-w" => facts.writable,
+        "-x" => facts.executable,
         "-s" => facts.is_file || (facts.is_link && !facts.link_target_is_dir),
         _ => return None,
     })

@@ -149,6 +149,28 @@ impl Executor {
         }
     }
 
+    /// `exec N<directory` reached through a synthetic link
+    /// (rubash#1937): GNU's O_RDONLY open of a directory succeeds —
+    /// only the READ fails (EISDIR). Windows cannot open a directory
+    /// handle at all, so the bind installs the Directory endpoint and
+    /// the read side fabricates the failure (see
+    /// FdReadEndpoint::Directory). Bookkeeping mirrors
+    /// set_fd_input_file.
+    pub(in crate::executor) fn set_fd_input_directory(&mut self, fd: u32, dynamic: bool) {
+        self.fd_table
+            .open_input(fd, FdReadEndpoint::Directory, dynamic);
+        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+        self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+        self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+        if dynamic {
+            self.shell_state
+                .env_vars
+                .insert(fd_dynamic_input_key(fd), "1".to_string());
+        } else {
+            self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
+        }
+    }
+
     /// `[N]<>file` — one O_RDWR handle feeding both directions of the slot
     /// (GNU redir.c r_input_output opens a single descriptor).
     pub(in crate::executor) fn set_fd_readwrite_file(
@@ -167,6 +189,111 @@ impl Executor {
             self.set_fd_input_file(fd, file_fd.clone(), dynamic);
             self.fd_table
                 .open_output(fd, FdWriteEndpoint::File(file_fd), dynamic);
+            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+            self.shell_state
+                .env_vars
+                .remove(&fd_output_process_substitution_key(fd));
+            self.shell_state
+                .env_vars
+                .insert(fd_output_key(fd), target.to_string());
+            return Ok(());
+        }
+        // rubash#1898: the zero/full devices bind directly — reads
+        // come from the pump-fed zero source; /dev/zero writes go to
+        // the null sink; /dev/full writes bind the FullDevice
+        // endpoint, whose faces fail ENOSPC through sh_chkwrite
+        // exactly like the direct redirect faces.
+        if crate::special_paths::is_zero_device(target)
+            || crate::special_paths::is_full_device(target)
+        {
+            let full = crate::special_paths::is_full_device(target);
+            let read_file = Self::zero_device_file(&target)?;
+            let read_fd = FileFd::from_file(read_file, target.into());
+            self.set_fd_input_file(fd, read_fd, dynamic);
+            if full {
+                self.fd_table
+                    .open_output(fd, FdWriteEndpoint::FullDevice, dynamic);
+            } else {
+                let write_file = self.create_redirect_output("/dev/null", true)?;
+                let write_fd = FileFd::from_file(write_file, target.into());
+                self.fd_table
+                    .open_output(fd, FdWriteEndpoint::File(write_fd), dynamic);
+            }
+            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+            self.shell_state
+                .env_vars
+                .remove(&fd_output_process_substitution_key(fd));
+            self.shell_state
+                .env_vars
+                .insert(fd_output_key(fd), target.to_string());
+            return Ok(());
+        }
+        // rubash#1935: synthetic /proc content — the entry's write
+        // class decides the open, the same answer the probe ladder
+        // gives: the 0444 class fails the open EACCES (redir.c
+        // r_input_output on the real entry); the 0644 class binds —
+        // reads serve the generated snapshot through the byte
+        // channel, writes land in the absorbed sink.
+        if let Some(allowed) = crate::special_paths::synthetic_proc_write_allowed(target) {
+            if !allowed {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "Permission denied",
+                ));
+            }
+            let bytes = crate::special_paths::synthetic_proc_content(target).unwrap_or_default();
+            self.set_fd_input_bytes(fd, bytes, dynamic);
+            let sink = Self::synthetic_proc_write_sink(false)?;
+            let file_fd = FileFd::from_file(sink, target.into());
+            self.fd_table
+                .open_output(fd, FdWriteEndpoint::File(file_fd), dynamic);
+            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+            self.shell_state
+                .env_vars
+                .remove(&fd_output_process_substitution_key(fd));
+            self.shell_state
+                .env_vars
+                .insert(fd_output_key(fd), target.to_string());
+            return Ok(());
+        }
+        // rubash#1963: `<> /dev/fd/N` opens the alias through the
+        // kernel on GNU — a closed alias fails the open ENOENT, an
+        // open one binds a dup of the descriptor in both directions.
+        if let Some(alias_fd) = crate::special_paths::fd_alias_target(target) {
+            if !super::redirection::dup_source_fd_open(
+                &self.fd_table,
+                alias_fd,
+                &std::collections::HashMap::new(),
+            ) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "No such file or directory",
+                ));
+            }
+            let _ = self.fd_table.dup_input(fd, alias_fd);
+            let _ = self.fd_table.dup_output(fd, alias_fd);
+            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+            self.shell_state
+                .env_vars
+                .remove(&fd_output_process_substitution_key(fd));
+            self.shell_state
+                .env_vars
+                .insert(fd_output_key(fd), target.to_string());
+            return Ok(());
+        }
+        // SyntheticLink (rubash#1900): the open goes to the resolved
+        // native target, as the input arms bind it — the pair split
+        // serves `<>`; a directory target fails the pair open, like
+        // GNU's O_RDWR open of a directory fails.
+        if let Some(link) = crate::special_paths::synthetic_link_target(
+            target,
+            Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
+        ) {
+            let (read_file, write_file) =
+                FileFd::open_readwrite_pair(std::path::PathBuf::from(&link.native))?;
+            self.set_fd_input_file(fd, read_file, dynamic);
+            self.fd_table
+                .open_output(fd, FdWriteEndpoint::File(write_file), dynamic);
             self.shell_state.env_vars.remove(&fd_closed_key(fd));
             self.shell_state
                 .env_vars
@@ -216,6 +343,28 @@ impl Executor {
             let file_fd = FileFd::from_file(file, target.clone().into());
             self.fd_table
                 .open_output(fd, FdWriteEndpoint::File(file_fd), dynamic);
+            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+            self.shell_state
+                .env_vars
+                .remove(&fd_output_process_substitution_key(fd));
+            self.shell_state.env_vars.insert(fd_output_key(fd), target);
+            return Ok(());
+        }
+        // rubash#1898: device write binds — /dev/zero discards
+        // through the null sink; /dev/full binds the FullDevice
+        // endpoint (its writes fail ENOSPC through sh_chkwrite).
+        if crate::special_paths::is_zero_device(&target)
+            || crate::special_paths::is_full_device(&target)
+        {
+            if crate::special_paths::is_full_device(&target) {
+                self.fd_table
+                    .open_output(fd, FdWriteEndpoint::FullDevice, dynamic);
+            } else {
+                let file = self.create_redirect_output("/dev/null", true)?;
+                let file_fd = FileFd::from_file(file, target.clone().into());
+                self.fd_table
+                    .open_output(fd, FdWriteEndpoint::File(file_fd), dynamic);
+            }
             self.shell_state.env_vars.remove(&fd_closed_key(fd));
             self.shell_state
                 .env_vars
@@ -2972,6 +3121,10 @@ impl Executor {
                 }
             }
             Some(FdReadEndpoint::InheritedProcessStdin) => Ok(Stdio::inherit()),
+            // rubash#1937: a directory endpoint has no handle to
+            // hand the image; the null device is the closest
+            // spawnable state (cross-boundary residual).
+            Some(FdReadEndpoint::Directory) => Ok(Stdio::null()),
             // fd 0 closed (`exec 0<&-`): the closest spawnable state to
             // GNU's inherited-but-unreadable descriptor.
             None if self.fd_table.has_entry(0) => Ok(Stdio::null()),
@@ -3481,6 +3634,17 @@ impl Executor {
                         let file = self.open_net_redirect(&target)?;
                         let file_fd = FileFd::from_file(file, target.clone().into());
                         self.set_fd_input_file(fd, file_fd, fd != 0);
+                    } else if crate::special_paths::is_zero_device(&target)
+                        || crate::special_paths::is_full_device(&target)
+                    {
+                        // rubash#1898: the zero/full devices read as
+                        // an unbounded zero stream — bind the
+                        // pump-fed source handle (a real handle, so
+                        // the descriptor behaves like the device).
+                        let file = Self::zero_device_file(&target)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                        let file_fd = FileFd::from_file(file, target.clone().into());
+                        self.set_fd_input_file(fd, file_fd, fd != 0);
                     } else if let Some(bytes) =
                         crate::special_paths::synthetic_proc_content(&target)
                     {
@@ -3502,9 +3666,22 @@ impl Executor {
                         // to the resolved native target (the session
                         // cwd answers for self/cwd), exactly as the
                         // open ladder binds it.
-                        let file = FileFd::open_read(std::path::PathBuf::from(&link.native))
-                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
-                        self.set_fd_input_file(fd, file, fd != 0);
+                        // rubash#1937: a DIRECTORY target (self/cwd)
+                        // has no openable handle on Windows, but
+                        // GNU's bind succeeds — only reads fail
+                        // (EISDIR). Bind the directory endpoint
+                        // instead of failing the whole redirect at
+                        // open. (Off Windows proc_unary_facts is a
+                        // stub and the real open below serves.)
+                        if crate::proc_vfs::proc_unary_facts(&target)
+                            .is_some_and(|facts| facts.is_link && facts.link_target_is_dir)
+                        {
+                            self.set_fd_input_directory(fd, fd != 0);
+                        } else {
+                            let file = FileFd::open_read(std::path::PathBuf::from(&link.native))
+                                .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                            self.set_fd_input_file(fd, file, fd != 0);
+                        }
                     } else {
                         // G-02 session-cwd anchor (rubash#1887): see
                         // set_fd_readwrite_file — without it `exec
@@ -3790,6 +3967,18 @@ impl Executor {
                 self.shell_state
                     .env_vars
                     .insert(fd_output_process_substitution_key(target_fd), command);
+            }
+            Some(FdWriteEndpoint::FullDevice) => {
+                // rubash#1898: the ledger records the device
+                // spelling itself, so a respawned child re-derives
+                // the class from the registry.
+                self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                self.shell_state
+                    .env_vars
+                    .insert(fd_output_key(target_fd), "/dev/full".to_string());
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_output_process_substitution_key(target_fd));
             }
             None => {
                 self.shell_state.env_vars.remove(&fd_output_key(target_fd));
@@ -4913,6 +5102,17 @@ impl Executor {
                     fd_stdin_key(target_fd),
                     format!("{FD_COPROC_STDIN_TARGET_PREFIX}{pid}"),
                 );
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_stdin_offset_key(target_fd));
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_dynamic_input_key(target_fd));
+            }
+            Some(FdReadEndpoint::Directory) => {
+                // rubash#1937: the directory endpoint cannot cross
+                // a respawn — clear the ledger like an unbound fd.
+                self.shell_state.env_vars.remove(&fd_stdin_key(target_fd));
                 self.shell_state
                     .env_vars
                     .remove(&fd_stdin_offset_key(target_fd));

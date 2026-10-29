@@ -528,6 +528,15 @@ impl Executor {
             if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                 self.set_fd_readwrite_file(fd, &target, true)
                     .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+            } else if crate::special_paths::is_zero_device(&target)
+                || crate::special_paths::is_full_device(&target)
+            {
+                // rubash#1898: the zero/full devices read as an
+                // unbounded zero stream — bind the pump-fed source.
+                let file = Self::zero_device_file(&target)
+                    .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                let file_fd = FileFd::from_file(file, target.clone().into());
+                self.set_fd_input_file(fd, file_fd, true);
             } else if let Some(bytes) = crate::special_paths::synthetic_proc_content(&target) {
                 // Registry first (rubash#1917, same ladder-skip family
                 // as the exec-fd face): synthetic /proc content has no
@@ -540,9 +549,18 @@ impl Executor {
             ) {
                 // SyntheticLink (rubash#1900): open the resolved
                 // native target (session cwd answers for self/cwd).
-                let file = FileFd::open_read(std::path::PathBuf::from(&link.native))
-                    .map_err(|error| crate::posix_errors::path_error(&target, error))?;
-                self.set_fd_input_file(fd, file, true);
+                // rubash#1937: a directory target binds the directory
+                // endpoint (GNU's bind succeeds; reads fail EISDIR) —
+                // see the exec-fd face in trap_exec.rs.
+                if crate::proc_vfs::proc_unary_facts(&target)
+                    .is_some_and(|facts| facts.is_link && facts.link_target_is_dir)
+                {
+                    self.set_fd_input_directory(fd, true);
+                } else {
+                    let file = FileFd::open_read(std::path::PathBuf::from(&link.native))
+                        .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                    self.set_fd_input_file(fd, file, true);
+                }
             } else {
                 // niubash#177: same operand resolution as
                 // open_input_redirect — a virtual-root input operand may

@@ -1876,6 +1876,11 @@ impl Executor {
                 }
             }
             Some(FdReadEndpoint::InheritedProcessStdin) => BackgroundStdio::Inherit,
+            // rubash#1937: a directory endpoint has no spawnable
+            // handle; the null device is the closest state (the
+            // child's reads see EOF instead of EISDIR — the
+            // cross-boundary residual class).
+            Some(FdReadEndpoint::Directory) => BackgroundStdio::Null,
             // fd 0 closed or absent: the closest spawnable state to GNU's
             // inherited-but-unreadable descriptor.
             None => BackgroundStdio::Null,
@@ -4442,6 +4447,10 @@ impl Executor {
                     Err(_) => CoprocStderrPlan::Direct(Stdio::inherit()),
                 }
             }
+            // rubash#1898: fd 2 bound to /dev/full — the child's
+            // stderr writes are absorbed (the ENOSPC profile cannot
+            // cross the spawn boundary; the in-shell faces carry it).
+            Some(FdWriteEndpoint::FullDevice) => CoprocStderrPlan::Direct(Stdio::null()),
         }
     }
 
@@ -4772,6 +4781,8 @@ impl Executor {
             Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => CoprocFdSpec::File(
                 crate::fd::handle_to_file(crate::fd::duplicate_handle_inheritable(fd.handle)?),
             ),
+            // rubash#1898: mirrors the plan's /dev/full arm.
+            Some(FdWriteEndpoint::FullDevice) => CoprocFdSpec::Null,
         })
     }
 

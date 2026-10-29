@@ -15,7 +15,8 @@
 //!   filesystem), keeping only their own semantic pre-steps (noclobber,
 //!   session-cwd anchoring, consume/probe discipline);
 //! - the per-class query functions ([`is_net_redirect_target`],
-//!   [`is_shell_null_device`], [`fd_alias_target`],
+//!   [`is_shell_null_device`], [`is_zero_device`], [`is_full_device`],
+//!   [`fd_alias_target`],
 //!   [`synthetic_proc_content`], [`is_synthetic_link_path`]) are the
 //!   same judgments in the shapes existing consumers already ask; they
 //!   are defined here once, from the same bodies, so a query answer
@@ -55,9 +56,21 @@ pub enum SpecialPathClass {
     /// `/dev/null` (plus the DOS spelling `NUL` on Windows) — the
     /// sink/source-of-EOF device; opens route to the mapped device.
     NullDevice,
+    /// `/dev/zero` — the zero device (rubash#1898): reads yield an
+    /// unbounded stream of NUL bytes, writes are discarded. A real
+    /// device on Unix; in the Windows simulation the service faces
+    /// build it (a pump-fed pipe for reads, the null sink for
+    /// writes), so the class is judged on every platform and only
+    /// its construction is platform work.
+    ZeroDevice,
+    /// `/dev/full` — the full device (rubash#1898): reads yield
+    /// zeros like /dev/zero, and every write fails ENOSPC
+    /// (`write error: No space left on device`, sh_chkwrite).
+    FullDevice,
     /// `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N`,
-    /// `/proc/self/fd/N` — an alias for a dup of the named fd in the
-    /// shell's fd table, never a filesystem open.
+    /// `/proc/self/fd/N`, `/proc/<own-pid>/fd/N` — an alias for a dup
+    /// of the named fd in the shell's fd table, never a filesystem
+    /// open.
     FdAlias(u32),
     /// A synthetic /proc file whose bytes the engine generates
     /// (Windows-only simulation; the class is empty off Windows).
@@ -93,6 +106,10 @@ pub fn classify_special_path(target: &str) -> SpecialPathClass {
         SpecialPathClass::NetRedirect
     } else if is_shell_null_device(target) {
         SpecialPathClass::NullDevice
+    } else if is_zero_device(target) {
+        SpecialPathClass::ZeroDevice
+    } else if is_full_device(target) {
+        SpecialPathClass::FullDevice
     } else if let Some(fd) = fd_alias_target(target) {
         SpecialPathClass::FdAlias(fd)
     } else if is_synthetic_link_path(target) {
@@ -126,6 +143,21 @@ pub fn is_shell_null_device(path: &str) -> bool {
     normalized == "/dev/null" || (cfg!(windows) && normalized.eq_ignore_ascii_case("NUL"))
 }
 
+/// Whether `path` spells the zero device (rubash#1898): the POSIX
+/// spelling with backslashes normalized, exactly the judgment shape
+/// the null device uses. GNU serves /dev/zero from the kernel device;
+/// the registry judges the spelling on every platform so no face
+/// re-derives it.
+pub(crate) fn is_zero_device(path: &str) -> bool {
+    path.replace('\\', "/") == "/dev/zero"
+}
+
+/// Whether `path` spells the full device (rubash#1898): reads yield
+/// zeros, writes fail ENOSPC. Same judgment shape as the zero device.
+pub(crate) fn is_full_device(path: &str) -> bool {
+    path.replace('\\', "/") == "/dev/full"
+}
+
 /// GNU redir.c opens `/dev/stdin`/`/dev/stdout`/`/dev/stderr`,
 /// `/dev/fd/N`, and `/proc/self/fd/N` through the OS's fd-alias device
 /// files, which the kernel resolves to a dup of fd N — behaviorally
@@ -142,8 +174,30 @@ pub fn fd_alias_target(target: &str) -> Option<u32> {
     }
     let fd = target
         .strip_prefix("/dev/fd/")
-        .or_else(|| target.strip_prefix("/proc/self/fd/"))?;
+        .or_else(|| target.strip_prefix("/proc/self/fd/"))
+        .or_else(|| own_pid_fd_tail(target))?;
     canonical_fd_number(fd)
+}
+
+/// The numeric-pid spelling of the shell's OWN fd directory
+/// (rubash#1974): `/proc/<pid>/fd/N` with pid == this process. GNU
+/// resolves it through procfs exactly like `/proc/self/fd/N` — the
+/// kernel serves the directory under both names — so the registry
+/// judges it here, once, instead of leaving each consumer to grow a
+/// private pid rewrite (the operand face in dev_fd_operands carried
+/// the only copy, and the redirect/test faces classified the spelling
+/// as a plain filesystem path). Foreign pids stay Filesystem: dup'ing
+/// another process's descriptors is a different mechanism than an
+/// alias of the shell's own table. The pid field is canonical decimal
+/// for the same reason the fd field is (procfs serves only canonical
+/// pid directory names).
+fn own_pid_fd_tail(target: &str) -> Option<&str> {
+    let rest = target.strip_prefix("/proc/")?;
+    let (pid, tail) = rest.split_once("/fd/")?;
+    if canonical_fd_number(pid)? != std::process::id() {
+        return None;
+    }
+    Some(tail)
 }
 
 /// The registry's numeric field is canonical decimal — exactly the
@@ -176,6 +230,16 @@ fn canonical_fd_number(fd: &str) -> Option<u32> {
 /// snapshot, matching procfs semantics.
 pub fn synthetic_proc_content(target: &str) -> Option<Vec<u8>> {
     crate::proc_vfs::proc_file_content(target)
+}
+
+/// Whether a write-direction open of a synthetic /proc content entry
+/// succeeds on the real procfs entry (rubash#1935): `Some(false)` for
+/// the 0444 class (the open itself fails EACCES), `Some(true)` for
+/// the 0644 per-pid class (the open succeeds; writes fail later),
+/// `None` when `target` is not synthetic content. The simulation
+/// behind the class is Windows-only, like [`synthetic_proc_content`].
+pub(crate) fn synthetic_proc_write_allowed(target: &str) -> Option<bool> {
+    crate::proc_vfs::proc_content_write_allowed(target)
 }
 
 /// The registry's classification query for the synthetic-link class:
@@ -228,14 +292,18 @@ pub fn synthetic_proc_dir_entries(target: &str) -> Option<Vec<String>> {
 /// pairs; the dir itself is listed as the guide form, and nothing
 /// completes past it — GNU has no hostname completion there).
 ///
-/// Spellings the registry does not classify — `/dev/zero`,
-/// `/dev/full`, `/dev/tty` today — are deliberately absent: to the
-/// open points they are plain filesystem paths (the enclave's real
-/// directory serves them), so listing them here would invent a
-/// simulation the engine does not perform (audit D5 owns them).
+/// Spellings the registry does not classify — `/dev/tty` today —
+/// are deliberately absent: to the open points they are plain
+/// filesystem paths (the enclave's real directory serves them), so
+/// listing them here would invent a simulation the engine does not
+/// perform. `/dev/zero` and `/dev/full` joined the registry with
+/// the audit-D5 simulation (rubash#1898), so they are listed here
+/// in the same change, as the consistency pin below requires.
 pub fn special_dev_entries() -> &'static [(&'static str, bool)] {
     &[
         ("null", false),
+        ("zero", false),
+        ("full", false),
         ("stdin", false),
         ("stdout", false),
         ("stderr", false),
@@ -272,7 +340,11 @@ mod tests {
         }
         let fd = target
             .strip_prefix("/dev/fd/")
-            .or_else(|| target.strip_prefix("/proc/self/fd/"))?;
+            .or_else(|| target.strip_prefix("/proc/self/fd/"))
+            // Issue rubash#1974: the registry also judges the shell's
+            // own numeric-pid spelling; the mirror carries the same
+            // arm so the battery keeps tripping on drift.
+            .or_else(|| own_pid_fd_tail(target))?;
         // Issue rubash#1973: the pre-registry body also accepted
         // leading-zero spellings, which GNU rejects everywhere; the
         // mirror carries the corrected canonical judgment so the
@@ -374,10 +446,14 @@ mod tests {
             // The one overlap family: the fd-alias reading wins over
             // the /proc reading on every platform.
             ("/proc/self/fd/0", FdAlias(0)),
-            // Ordinary paths and not-yet-implemented device spellings
-            // (/dev/zero is audit D5, a later slice) stay Filesystem.
+            // Character devices (rubash#1898): /dev/zero and
+            // /dev/full are registry classes on every platform —
+            // the service faces build them where the OS has none.
+            ("/dev/zero", ZeroDevice),
+            ("/dev/full", FullDevice),
+            ("\\dev\\zero", ZeroDevice),
+            // Ordinary paths stay Filesystem.
             ("/dev/tty", Filesystem),
-            ("/dev/zero", Filesystem),
             ("etc/hosts", Filesystem),
             ("/tmp/x", Filesystem),
             ("", Filesystem),
@@ -406,6 +482,16 @@ mod tests {
                 is_shell_null_device(target),
                 class == NullDevice,
                 "null query vs classify for {target:?}"
+            );
+            assert_eq!(
+                is_zero_device(target),
+                class == ZeroDevice,
+                "zero query vs classify for {target:?}"
+            );
+            assert_eq!(
+                is_full_device(target),
+                class == FullDevice,
+                "full query vs classify for {target:?}"
             );
             assert_eq!(
                 fd_alias_target(target),
@@ -475,6 +561,45 @@ mod tests {
                 "canonical spelling must stay an fd alias: {spelling:?}"
             );
         }
+    }
+
+    /// Issue rubash#1974 regression pin: the shell's own numeric-pid
+    /// spelling `/proc/<pid>/fd/N` is an fd alias exactly like
+    /// `/proc/self/fd/N` (GNU resolves both through procfs to the same
+    /// descriptor), while a foreign pid's fd directory is NOT an alias
+    /// of the shell's table and a non-canonical pid spelling names no
+    /// procfs directory at all.
+    #[test]
+    fn issue1974_own_pid_fd_spellings_are_aliases() {
+        let pid = std::process::id();
+        for (spelling, fd) in [
+            (format!("/proc/{pid}/fd/0"), 0),
+            (format!("/proc/{pid}/fd/3"), 3),
+            (format!("/proc/{pid}/fd/63"), 63),
+        ] {
+            assert_eq!(
+                fd_alias_target(&spelling),
+                Some(fd),
+                "own-pid spelling must be an fd alias: {spelling:?}"
+            );
+            assert_eq!(
+                classify_special_path(&spelling),
+                SpecialPathClass::FdAlias(fd),
+                "own-pid spelling must classify as fd alias: {spelling:?}"
+            );
+        }
+        // Foreign pid (pid 1 can never be this test process in the
+        // harness, and dup'ing a foreign process's fds is not the
+        // alias mechanism).
+        assert_eq!(fd_alias_target("/proc/1/fd/0"), None);
+        assert_eq!(
+            classify_special_path("/proc/1/fd/0"),
+            SpecialPathClass::Filesystem
+        );
+        // Non-canonical pid and fd fields stay filesystem spellings.
+        assert_eq!(fd_alias_target(&format!("/proc/{pid}/fd/03")), None);
+        assert_eq!(fd_alias_target(&format!("/proc/0{pid}/fd/3")), None);
+        assert_eq!(fd_alias_target("/proc/self/fd/3"), Some(3));
     }
 
     /// rubash#1900: resolution answers exactly for the link class —

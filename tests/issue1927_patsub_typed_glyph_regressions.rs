@@ -92,10 +92,35 @@ fn literal_typed_zone_glyphs_roundtrip() {
 
 /// Two adjacent typed glyphs (U+E400 then U+E312): each gets exactly its
 /// own escape — the pair walk must not merge or double either.
+///
+/// This shape goes through a script FILE, not `-c`: on the `-c` channel
+/// a typed U+E400 immediately followed by another zone glyph is
+/// byte-indistinguishable from a materialized LITERAL_CHAR_ESCAPE
+/// transport pair, and `command_string_entry_text` preserves such a
+/// pair as protocol (its documented ambiguous seam). The file channel
+/// (`bytes_to_script_text`) escapes each typed glyph on its own, so the
+/// mark walk sees two adjacent escape pairs — the shape this pin
+/// covers. GNU reads the file's two glyphs as two glyphs.
 #[test]
 fn literal_typed_adjacent_glyphs_roundtrip() {
-    let out = rubash_stdout("v=abc\nprintf '%s' \"${v/b/\u{E400}\u{E312}x}\"");
-    assert_eq!(out, format!("a\u{E400}\u{E312}xc").into_bytes());
+    let script = "v=abc\nprintf '%s' \"${v/b/\u{E400}\u{E312}x}\"\n";
+    let path = std::env::temp_dir().join(format!(
+        "rubash_issue1927_adjacent_{}.sh",
+        std::process::id()
+    ));
+    std::fs::write(&path, script.as_bytes()).expect("write probe script");
+    let out = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&path)
+        .env("LC_ALL", "C.utf8")
+        .output()
+        .expect("run rubash on probe script");
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.stdout, "a\u{E400}\u{E312}xc".as_bytes());
 }
 
 /// The raw-byte introducer U+E000 typed literally keeps its pre-#1927

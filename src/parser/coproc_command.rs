@@ -170,7 +170,10 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
 
     // Simple command: collect remaining tokens as words
     let mut words = Vec::new();
-    let mut word_metadata = Vec::new();
+    // Explicit element type: the rubash#1983 index-1 check below
+    // reads word_metadata[0].raw before the first push, which
+    // leaves the element type ambiguous to inference (E0282).
+    let mut word_metadata: Vec<WordMetadata> = Vec::new();
     while i < tokens.len() {
         // rubash#1652 (continued): GNU also rejects `!` as the
         // SECOND word of the coproc's simple command (`coproc a !
@@ -182,7 +185,25 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         // covers index 1. (A quoted "!" is a real word and never
         // reaches this arm: is_keyword only matches the bare
         // keyword token.)
-        if words.len() == 1 && is_keyword(tokens, i, "!") {
+        //
+        // rubash#1983: the index-1 rejection does NOT apply when
+        // the one collected word is an assignment word. GNU's
+        // lexer returns an assignment-shaped first word as
+        // ASSIGNMENT_WORD, and parse.y:5899
+        // reserved_word_acceptable has no ASSIGNMENT_WORD in its
+        // accept set, so the following `!` never becomes BANG at
+        // all — it lexes as a plain WORD and lands as the child
+        // command's NAME (`coproc X=1 ! echo hi` runs a child that
+        // reports `!: command not found`, script rc 0; verified
+        // against GNU bash 5.3.20, incl. the `a[1]=x` / `a+=1`
+        // shapes; a non-name first word like `9a=1` or `a-b=1`
+        // stays a WORD and the `!` still errors). The raw spelling
+        // decides: a quoted name (`"X"=1`) is not an assignment
+        // word in GNU either.
+        if words.len() == 1
+            && !coproc_word_is_assignment(&word_metadata[0].raw)
+            && is_keyword(tokens, i, "!")
+        {
             return Some(coproc_bang_error(tokens, start, i));
         }
         if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
@@ -303,6 +324,35 @@ fn coproc_command(
 
 fn synthetic_delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
     Box::new(build_word_metadata(0, delimiter, delimiter))
+}
+
+/// GNU assignment-word shape at the head of a simple command: a name
+/// (`[A-Za-z_][A-Za-z0-9_]*`, optionally with a `[...]` subscript)
+/// followed by `=` or `+=`. This is the shape GNU's lexer returns as
+/// ASSIGNMENT_WORD (parse.y read_token), after which reserved words
+/// stop being recognized (parse.y:5899 reserved_word_acceptable) —
+/// the rubash#1983 exemption for a `!` following the coproc's first
+/// word. (Judgment shape first measured in the #1712 line's
+/// 537e177c; subscript/`+=` arms oracle-verified for #1983.)
+fn coproc_word_is_assignment(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    let mut i = 0;
+    if i >= bytes.len() || !(bytes[i] == b'_' || bytes[i].is_ascii_alphabetic()) {
+        return false;
+    }
+    while i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] == b'[' {
+        match word[i..].find(']') {
+            Some(close) => i += close + 1,
+            None => return false,
+        }
+    }
+    if i < bytes.len() && bytes[i] == b'+' {
+        i += 1;
+    }
+    i < bytes.len() && bytes[i] == b'='
 }
 
 fn is_coproc_shell_command_start(tokens: &[Token], index: usize) -> bool {

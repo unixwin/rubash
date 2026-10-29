@@ -228,8 +228,8 @@ impl Executor {
         // A word wrapped in quotes (e.g. `"$(cmd) extra"`) keeps its spaces
         // together: quote removal happens after field splitting in Bash, so
         // quoted words must not be split even when they expand to whitespace.
-        // Quote state comes from the raw word only: word_quotes (the
-        // lexer quote segments) also records quotes nested inside a braced
+        // Quote state comes from the raw word only: a lexer
+        // quote-segment scan would also record quotes nested inside a braced
         // parameter expansion (e.g. ${1-"$@"}), but those are word syntax
         // of the expansion, not outer quoting, so they must not suppress
         // field splitting of the unquoted word's result. raw_word_is_quoted

@@ -5009,6 +5009,186 @@ mod issue_1952 {
     }
 }
 
+/// rubash#2003: a pipeline element 0 whose own fd-0 redirect aliases
+/// another descriptor (`<&N`, `0<&N`, `< /dev/fd/N`) lost its entire
+/// input. GNU forks every element with the shell's own descriptors
+/// (execute_cmd.c:2620 execute_pipeline) and the element applies its
+/// own redirections inside the fork (execute_cmd.c:4617
+/// execute_simple_command -> redir.c do_redirection_internal), so the
+/// element's reads ARE the aliased descriptor's reads, exactly once.
+/// Rubash's stage-0 payload resolution served the alias by draining
+/// the shared descriptor to EOF, while the stage funnels that consume
+/// stdin through the descriptor channel itself (the inline cat arm
+/// re-resolving the redirect, a compound stage binding fd 0 to the
+/// endpoint, function stages on fd-table-sharing clones, the external
+/// spawner materializing the endpoint by handle) then read EOF from
+/// the drained descriptor — `cat < <(seq 5) | wc -l` inside a command
+/// substitution captured 0, `exec 3<file; cat <&3 | wc -l` printed 0.
+/// The payload resolution now materializes the aliased fd's endpoint
+/// (buffered endpoints get their pre-resolution offset back;
+/// handle-backed endpoints are replaced by a buffered endpoint
+/// carrying the payload bytes), restoring single consumption.
+/// Expectations hand-measured against GNU Bash 5.3.20 (the vendored
+/// oracle build) on 2026-10-29; producers use the printf builtin so
+/// the pins stay self-contained.
+mod issue_2003 {
+    use super::*;
+
+    fn run(dir: &Path, code: &str) -> (String, String, Option<i32>) {
+        let out = run_rubash_in(dir, &["-c", code], Duration::from_secs(30));
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// The reported shape: a procsub-fed consumer that is itself
+    /// piped, inside a command substitution.
+    #[test]
+    fn issue2003_comsub_pipeline_keeps_procsub_redirect_payload() {
+        let dir = case_scratch("2003-comsub-wc");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "x=$(cat < <(printf '1\\n2\\n3\\n4\\n5\\n') | wc -l)\n\
+             echo \"count:[$x]\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "count:[5]\n", "stderr:\n{stderr}");
+    }
+
+    /// Same funnel, payload-consuming second stage (grep arm).
+    #[test]
+    fn issue2003_comsub_pipeline_keeps_procsub_redirect_for_grep() {
+        let dir = case_scratch("2003-comsub-grep");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "x=$(cat < <(printf 'a\\nb\\nc\\n') | grep b)\n\
+             echo \"got:[$x]\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "got:[b]\n", "stderr:\n{stderr}");
+    }
+
+    /// Stage 0 with a `<&N` dup of a regular file: the stage reads
+    /// the file through the dup, and the shared cursor is spent
+    /// afterwards (a second identical pipeline sees EOF), like GNU.
+    #[test]
+    fn issue2003_dup_redirect_stage0_delivers_file_payload() {
+        let dir = case_scratch("2003-dup-file");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             cat <&3 | wc -l\n\
+             cat <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n0\n", "stderr:\n{stderr}");
+    }
+
+    /// The `/dev/fd/N` spelling of the same dup.
+    #[test]
+    fn issue2003_devfd_spelling_stage0_delivers_file_payload() {
+        let dir = case_scratch("2003-devfd-file");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             cat < /dev/fd/3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// Stage 0 with a `<&N` dup of a streamed procsub pipe bound by
+    /// an earlier `exec`: the pipe bytes survive the stage-0 payload
+    /// resolution (handle-backed endpoint materialization).
+    #[test]
+    fn issue2003_dup_redirect_stage0_delivers_procsub_pipe() {
+        let dir = case_scratch("2003-dup-procsub");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "exec 3< <(printf '1\\n2\\n3\\n4\\n5\\n')\n\
+             cat <&3 | wc -l\n\
+             cat <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n0\n", "stderr:\n{stderr}");
+    }
+
+    /// A compound stage (read loop) binds fd 0 to the aliased
+    /// endpoint itself; it must read the payload through that bind.
+    #[test]
+    fn issue2003_compound_stage0_dup_redirect_reads_through() {
+        let dir = case_scratch("2003-loop-dup");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             while IFS= read -r l; do echo \"r:$l\"; done <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// A function stage carrying the dup redirect on the call.
+    #[test]
+    fn issue2003_function_stage0_dup_redirect_reads_through() {
+        let dir = case_scratch("2003-func-dup");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "f() { cat; }\n\
+             printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             f <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// The cat `-` operand resolves to the same redirected fd 0.
+    #[test]
+    fn issue2003_cat_dash_operand_reads_redirect_payload() {
+        let dir = case_scratch("2003-cat-dash");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             cat - <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// Control: at stage 1 the element's own dup redirect wins over
+    /// the pipe (single resolution at the stage, no stage-0 payload
+    /// involved) — GNU behavior before and after the fix.
+    #[test]
+    fn issue2003_stage1_dup_redirect_still_wins_over_pipe() {
+        let dir = case_scratch("2003-stage1-dup");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             printf '9\\n8\\n' | cat <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// Control: the direct procsub redirect on a top-level pipeline
+    /// element streamed even before this fix (rubash#1952) and must
+    /// keep working.
+    #[test]
+    fn issue2003_direct_procsub_pipeline_control() {
+        let dir = case_scratch("2003-direct");
+        let (stdout, stderr, status) = run(&dir, "cat < <(printf '1\\n2\\n') | wc -l\n");
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "2\n", "stderr:\n{stderr}");
+    }
+}
+
 /// rubash#1976: the bidirectional netopen face (`exec 3<>/dev/tcp/host/port`)
 /// opened the connection but every fd-3 read AND write failed with
 /// `Invalid argument`. GNU netopen returns ONE connected socket descriptor

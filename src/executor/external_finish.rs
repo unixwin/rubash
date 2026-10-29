@@ -64,9 +64,10 @@ impl Executor {
             if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
                 return result;
             }
-            let mut file = open_redirect_append(
-                &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
-            )?;
+            // Classified append open (rubash#1964): the raw mapped
+            // open this replaces could not reach /dev/tcp targets
+            // (their mapped name is not a file).
+            let mut file = self.open_append_target(&target)?;
             file.write_all(output)?;
         } else {
             self.write_default_stdout(output)?;
@@ -103,9 +104,10 @@ impl Executor {
         if crate::executor::execution_misc::redirect_target_fd(&target).is_some() {
             return Ok(None);
         }
-        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
         if append {
-            return Ok(Some(open_redirect_append(&path)?));
+            // Classified append open (rubash#1964), the streaming
+            // twin of write_cat_output's append arm.
+            return Ok(Some(self.open_append_target(&target)?));
         }
         Ok(Some(self.create_redirect_output(&target, clobber)?))
     }
