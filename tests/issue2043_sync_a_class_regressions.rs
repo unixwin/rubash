@@ -83,14 +83,18 @@ fn issue2043_a1_mkdir_no_operand_is_missing_operand() {
 #[test]
 fn issue2043_a2_comsub_basename_extra_operand() {
     let dir = scratch("a2");
-    // The value and status are GNU's: rc 1, empty substitution. (The
-    // extra-operand diagnostic text itself is produced by the real
-    // basename on the declined path but does not reach the terminal:
-    // a spawned child's stderr inside $() is swallowed wholesale by
-    // the substitution plumbing — a wider, pre-existing gap pinned
-    // as registered case cp-comsub-diagnostic in the S5 corpus.)
+    // The value and status are GNU's: rc 1, empty substitution. The
+    // extra-operand diagnostic also reaches the terminal since
+    // rubash#2086 closed the comsub child-stderr passthrough gap
+    // (a spawned child's stderr inside $() was swallowed wholesale by
+    // the substitution plumbing; the S5 corpus case
+    // cp-comsub-diagnostic now asserts the GNU expectation too).
     let out = run("x=$(basename a b c); echo \"rc=$? [$x]\"", &dir);
     assert_eq!(out.stdout, "rc=1 []\n");
+    assert_eq!(
+        out.stderr,
+        "basename: extra operand 'c'\nTry 'basename --help' for more information.\n"
+    );
     // On the simple face the same decline reaches the real basename
     // with its diagnostic intact — the machinery's target behavior.
     let out = run("basename a b c", &dir);
