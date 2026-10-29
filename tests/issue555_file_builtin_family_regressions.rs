@@ -171,6 +171,7 @@ fn assert_literal_operand_contract(case: &Case) {
 /// The family table: one row per wrapper in external_file_builtins.rs.
 /// Adding a wrapper to that file without adding its row here is the
 /// gap this suite exists to close.
+#[cfg(windows)]
 fn quoted_cases() -> Vec<Case> {
     vec![
         Case {

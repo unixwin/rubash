@@ -8,6 +8,175 @@ use super::*;
 
 /// How a redirect-list rejection classifies, decided by the walker and
 /// consumed by the dispatch sites (rubash#535).
+/// rubash#1930: mask the parts of a RAW redirect target the nounset
+/// gate must not judge: single-quoted spans (and `$'...'`) carry no
+/// expansion at all, and a backslash-escaped character is literal —
+/// GNU's check rides the real expansion (redir.c:298
+/// redirection_expand -> expand_words_no_vars), where those bytes
+/// never produce a parameter reference. The gate scans the raw target
+/// text (the word faces present carrier-encoded text instead), so
+/// present the same contract here: quoted spans collapse to one
+/// space, escaped characters are neutralized, and substitution units
+/// (`$(...)`, `${...}`, backticks) pass through verbatim — the
+/// scanner owns their interiors. Double-quoted spans stay live: a
+/// `$name` inside them IS a parent reference the gate must judge.
+fn mask_redirect_target_quoted_spans(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut masked = String::with_capacity(raw.len());
+    let mut i = 0usize;
+    let mut single = false;
+    let mut double = false;
+    // Consume a quoted span starting at the opening quote chars[i],
+    // appending the single replacement space. Returns the index just
+    // past the closing quote (or the end of input).
+    fn quoted_span_end(chars: &[char], mut i: usize) -> usize {
+        i += 1;
+        while i < chars.len() && chars[i] != '\'' {
+            i += 1;
+        }
+        i.saturating_add(1).min(chars.len())
+    }
+    while i < chars.len() {
+        let ch = chars[i];
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            // Escaped character: literal in both the bare and the
+            // double-quoted state (in double quotes only before
+            // $ ` " \ — before anything else the backslash itself is
+            // literal and the next character keeps its own meaning,
+            // which for the scanner only matters for those four).
+            let escapable = !double || matches!(chars.get(i + 1), Some('$' | '`' | '"' | '\\'));
+            if escapable && i + 1 < chars.len() {
+                masked.push(' ');
+                masked.push(' ');
+                i += 2;
+            } else {
+                masked.push(ch);
+                i += 1;
+            }
+            continue;
+        }
+        if double {
+            match ch {
+                '"' => {
+                    double = false;
+                    masked.push(ch);
+                    i += 1;
+                }
+                '$' if chars.get(i + 1) == Some(&'(') => {
+                    if let Some(end) =
+                        crate::lexer::skip_parenthesized_unit_corrected(&chars, i + 1)
+                    {
+                        masked.extend(chars[i..end].iter());
+                        i = end;
+                    } else {
+                        masked.push(ch);
+                        i += 1;
+                    }
+                }
+                '$' if chars.get(i + 1) == Some(&'{') => {
+                    let rest: String = chars[i + 2..].iter().collect();
+                    if let Some(end) = super::parameter_ops::matching_parameter_brace(&rest) {
+                        masked.extend(chars[i..i + 2 + end + 1].iter());
+                        i += 2 + end + 1;
+                    } else {
+                        masked.push(ch);
+                        i += 1;
+                    }
+                }
+                '`' => {
+                    masked.push(ch);
+                    i += 1;
+                    while i < chars.len() {
+                        let bt = chars[i];
+                        masked.push(bt);
+                        i += 1;
+                        if bt == '\\' && i < chars.len() {
+                            masked.push(chars[i]);
+                            i += 1;
+                            continue;
+                        }
+                        if bt == '`' {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    masked.push(ch);
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        match ch {
+            '\'' => {
+                masked.push(' ');
+                single = true;
+                i += 1;
+            }
+            '"' => {
+                double = true;
+                masked.push(ch);
+                i += 1;
+            }
+            '$' if chars.get(i + 1) == Some(&'\'') => {
+                // $'...': ANSI-C quoting — no parameter expansion
+                // inside, so the span masks like a single-quoted one.
+                masked.push('$');
+                masked.push(' ');
+                i = quoted_span_end(&chars, i + 1);
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                if let Some(end) = crate::lexer::skip_parenthesized_unit_corrected(&chars, i + 1) {
+                    masked.extend(chars[i..end].iter());
+                    i = end;
+                } else {
+                    masked.push(ch);
+                    i += 1;
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                let rest: String = chars[i + 2..].iter().collect();
+                if let Some(end) = super::parameter_ops::matching_parameter_brace(&rest) {
+                    masked.extend(chars[i..i + 2 + end + 1].iter());
+                    i += 2 + end + 1;
+                } else {
+                    masked.push(ch);
+                    i += 1;
+                }
+            }
+            '`' => {
+                masked.push(ch);
+                i += 1;
+                while i < chars.len() {
+                    let bt = chars[i];
+                    masked.push(bt);
+                    i += 1;
+                    if bt == '\\' && i < chars.len() {
+                        masked.push(chars[i]);
+                        i += 1;
+                        continue;
+                    }
+                    if bt == '`' {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                masked.push(ch);
+                i += 1;
+            }
+        }
+    }
+    masked
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::executor) enum RedirectRejection {
     /// A dup/ambiguous/open failure: the command is abandoned with status 1
@@ -50,6 +219,13 @@ pub(in crate::executor) enum OutputTarget {
     /// raw stderr channel, never through the live fd_table[2].
     ProcessStderr,
     Null,
+    /// rubash#1898: a /dev/full target — GNU's open succeeds and
+    /// every write fails ENOSPC, reported by the builtin through
+    /// sh_chkwrite (`<name>: write error: No space left on device`).
+    /// There is no Windows handle with that failure profile, so the
+    /// target is its own class and the write faces produce the
+    /// failure themselves.
+    FullDevice,
     CoprocStdin(u32),
     Path(String),
     /// GNU dup2 semantics: a write endpoint carried by fd_table refers to
@@ -372,6 +548,14 @@ impl Executor {
                     &redirect.target_metadata.raw,
                     &redirect.target_metadata.process_substitutions,
                 );
+                // rubash#1930: the raw target still spells its quotes,
+                // and the scanner has no quote state — a `$name` inside
+                // single quotes is literal filename text in GNU
+                // (`echo hi > '$NOPE'` creates the file), not an unbound
+                // reference. Mask the quoted spans (the recorded-span
+                // masking above runs first: a span's own text may carry
+                // quotes the quote masker must not reinterpret).
+                let masked_target = mask_redirect_target_quoted_spans(&masked_target);
                 if let Some(name) = self.nounset_unbound_parameter(&masked_target) {
                     let mut stderr = Vec::new();
                     writeln!(
@@ -730,6 +914,39 @@ impl Executor {
                     )
                     .map(|_| Some(RedirectRejection::Command));
             }
+            // rubash#1963: an fd-alias target under any file-open
+            // kind whose fd is closed — GNU's redir_open over the
+            // /dev/fd layer fails ENOENT, reported once through
+            // redirection_error (redir.c:149-176). The judgment is a
+            // pure fd-table lookup against the ordered effects
+            // recorded so far in this list, so the gate delivers it
+            // here, before any serving face can report it a second
+            // time (the no-output mirror paired with the routing
+            // walk) or not at all (a builtin that never reads stdin
+            // silently ignored its failed input open). Open aliases
+            // pass: their serving faces own the dup semantics.
+            if matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Output
+                    | crate::parser::RedirectKind::ClobberOutput
+                    | crate::parser::RedirectKind::CombinedOutput
+                    | crate::parser::RedirectKind::Append
+                    | crate::parser::RedirectKind::CombinedAppend
+                    | crate::parser::RedirectKind::Input
+                    | crate::parser::RedirectKind::ReadWrite
+            ) {
+                if let Some(fd) = crate::special_paths::fd_alias_target(&target) {
+                    if !dup_source_fd_open(&self.fd_table, fd, &opened) {
+                        return self
+                            .reject_redirect_at(
+                                cmd,
+                                index,
+                                &format!("{target}: No such file or directory"),
+                            )
+                            .map(|_| Some(RedirectRejection::Command));
+                    }
+                }
+            }
             // `<> word` opens O_RDWR|O_CREAT (make_cmd.c:682) — creating
             // the missing file is part of the redirection, not a consumer
             // side effect (rubash#264). Other open failures (bad
@@ -738,14 +955,23 @@ impl Executor {
                 && !is_null_device(&target)
                 && dev_stdio_redirect_fd(&target).is_none()
                 && !crate::special_paths::is_net_redirect_target(&target)
-                && !target.starts_with("<(")
+                // rubash#1931: only a parser-recorded (unquoted) span
+                // target is exempt from the open probe — a quoted
+                // "<(...)" target is a literal filename whose failed
+                // open must report here like any other.
+                && !super::external_setup::redirect_target_span_is_recorded(redirect)
                 // Registry classes (rubash#1917/#1900): a synthetic
                 // /proc spelling's mapped path is not the file — the
                 // class's own open face owns its outcome, so this
                 // raw-path probe must not judge it (same skip class as
-                // the Input probe below).
+                // the Input probe below). The zero/full devices
+                // (rubash#1898) are the same shape: their mapped name
+                // is the /dev capability sentinel, and their own
+                // classified probe owns the outcome.
                 && crate::special_paths::synthetic_proc_content(&target).is_none()
                 && !crate::special_paths::is_synthetic_link_path(&target)
+                && !crate::special_paths::is_zero_device(&target)
+                && !crate::special_paths::is_full_device(&target)
             {
                 let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
                 if let Err(error) = FileFd::open_readwrite_pair(path) {
@@ -773,7 +999,9 @@ impl Executor {
                 && !is_null_device(&target)
                 && dev_stdio_redirect_fd(&target).is_none()
                 && !crate::special_paths::is_net_redirect_target(&target)
-                && !target.starts_with("<(")
+                // rubash#1931: recorded-span exemption only, as in the
+                // ReadWrite probe above.
+                && !super::external_setup::redirect_target_span_is_recorded(redirect)
                 && redirect_target_fd(&target).is_none()
                 // Registry classes (rubash#1917/#1900): synthetic /proc
                 // content and links are validated by the open ladder
@@ -785,6 +1013,11 @@ impl Executor {
                 // (cf. rubash#1904's comsub face).
                 && crate::special_paths::synthetic_proc_content(&target).is_none()
                 && !crate::special_paths::is_synthetic_link_path(&target)
+                // The zero/full devices (rubash#1898): same skip —
+                // the classified input ladder owns their outcome;
+                // their mapped name is the /dev capability sentinel.
+                && !crate::special_paths::is_zero_device(&target)
+                && !crate::special_paths::is_full_device(&target)
             {
                 let path = self.session_path(crate::executor::path::windows_operand_file_path(
                     shell_path_to_windows(&target, &self.shell_state.env_vars),
@@ -1299,6 +1532,11 @@ impl Executor {
                         }
                     }
                     FdWriteEndpoint::CoprocStdin { pid, .. } => OutputTarget::CoprocStdin(*pid),
+                    // rubash#1898: a /dev/full binding seeds the
+                    // FullDevice target, so `echo x >&7` on an
+                    // exec-bound fd fails exactly like the direct
+                    // redirect face.
+                    FdWriteEndpoint::FullDevice => OutputTarget::FullDevice,
                     FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                         OutputTarget::Path(path.to_string_lossy().into_owned())
                     }
@@ -1669,6 +1907,16 @@ impl Executor {
             state.fds.insert(fd, OutputTarget::Closed);
         } else if is_null_device(target) {
             state.fds.insert(fd, OutputTarget::Null);
+        } else if crate::special_paths::is_full_device(target) {
+            // rubash#1898: /dev/full accepts the open (no validation
+            // open to perform — the mapped name is a capability
+            // sentinel on Windows); every write fails ENOSPC through
+            // OutputTarget::FullDevice.
+            state.fds.insert(fd, OutputTarget::FullDevice);
+        } else if crate::special_paths::is_zero_device(target) {
+            // rubash#1898: /dev/zero discards writes exactly like the
+            // null device.
+            state.fds.insert(fd, OutputTarget::Null);
         } else if let Some(source_fd) =
             crate::executor::execution_misc::dev_stdio_redirect_fd(target)
         {
@@ -1767,38 +2015,38 @@ impl Executor {
             };
             #[cfg(not(unix))]
             let fifo_validation: Option<Result<(), std::io::Error>> = None;
-            let open_result: Result<(), std::io::Error> =
-                match fifo_validation {
-                    Some(result) => result,
-                    None if crate::special_paths::is_net_redirect_target(&target) => {
-                        // rubash#1967: net twin of the #1868 FIFO
-                        // validation above — this walk's create would
-                        // CONNECT and drop the File (only the Path is
-                        // kept in the state), and the flush's open
-                        // connects again: two connections where GNU's
-                        // do_redirections opens once. Validate by
-                        // resolution; the flush open is the single
-                        // connect, and a refusal surfaces there with
-                        // the same diagnostic.
-                        self.validate_net_redirect_target(&target)
-                            .map_err(|e| crate::posix_errors::path_error(&target, e))
-                    }
-                    None if redirect.append => {
-                        // GNU redir.c redirection_error (redir.c:149-176) carries the
-                        // failed open's target word (`$FIX/b: No such file or
-                        // directory`, issue #518); a bare OS error renders
-                        // message-only and drops the word.
-                        open_redirect_append(&self.session_path(shell_path_to_windows(
-                            &target,
-                            &self.shell_state.env_vars,
-                        )))
+            let open_result: Result<(), std::io::Error> = match fifo_validation {
+                Some(result) => result,
+                None if crate::special_paths::is_net_redirect_target(&target) => {
+                    // rubash#1967: net twin of the #1868 FIFO
+                    // validation above — this walk's create would
+                    // CONNECT and drop the File (only the Path is
+                    // kept in the state), and the flush's open
+                    // connects again: two connections where GNU's
+                    // do_redirections opens once. Validate by
+                    // resolution; the flush open is the single
+                    // connect, and a refusal surfaces there with
+                    // the same diagnostic.
+                    self.validate_net_redirect_target(&target)
+                        .map_err(|e| crate::posix_errors::path_error(&target, e))
+                }
+                None if redirect.append => {
+                    // GNU redir.c redirection_error (redir.c:149-176) carries the
+                    // failed open's target word (`$FIX/b: No such file or
+                    // directory`, issue #518); a bare OS error renders
+                    // message-only and drops the word. The open itself
+                    // classifies through the registry (rubash#1964):
+                    // this validation is an append open, so it must
+                    // succeed and fail for exactly the shapes the
+                    // real append does.
+                    self.open_append_target(&target)
                         .map(|_| ())
                         .map_err(|e| crate::posix_errors::path_error(&target, e))
-                    }
-                    None => self
-                        .create_redirect_output(&target, redirect.clobber)
-                        .map(|_| ()),
-                };
+                }
+                None => self
+                    .create_redirect_output(&target, redirect.clobber)
+                    .map(|_| ()),
+            };
             if let Err(error) = open_result {
                 // GNU redir.c:149-176 redirection_error, reached from
                 // do_redirections (redir.c:246): a failed open reports
@@ -2014,6 +2262,23 @@ impl Executor {
                 }
             }
             OutputTarget::Null => {}
+            OutputTarget::FullDevice => {
+                // rubash#1898: GNU builtins/common.c:320-334
+                // sh_chkwrite — the write to /dev/full fails ENOSPC
+                // and the builtin reports it in its own name, exactly
+                // the Closed arm's protocol with the device's
+                // strerror.
+                if !output.is_empty() && !(fd == 1 && builtin_output_write_is_unchecked(cmd)) {
+                    let command = cmd.words.first().map(String::as_str).unwrap_or("command");
+                    diag.push_str(&format!(
+                        "{}{command}: write error: No space left on device\n",
+                        self.diagnostic_prefix()
+                    ));
+                    self.exit_code = 1;
+                    self.last_builtin_write_failed.set(true);
+                    *status = 1;
+                }
+            }
             OutputTarget::Closed => {
                 if !output.is_empty() && !(fd == 1 && builtin_output_write_is_unchecked(cmd)) {
                     let command = cmd.words.first().map(String::as_str).unwrap_or("command");
@@ -2032,16 +2297,12 @@ impl Executor {
                 }
             }
             OutputTarget::Path(path) => {
-                // rubash#1967: net targets flush through netopen (the
-                // one open for the redirect; see the write_to_fd Path
-                // arm) — the filesystem append-open cannot connect.
-                let mut file = if crate::special_paths::is_net_redirect_target(path) {
-                    self.open_net_redirect(path)?
-                } else {
-                    open_redirect_append(
-                        &self.session_path(shell_path_to_windows(path, &self.shell_state.env_vars)),
-                    )?
-                };
+                // The flush open classifies through the registry like
+                // every other append-shaped open (rubash#1964) — for a
+                // plain path it is the same mapped append open as
+                // before; a net target connects, a synthetic /proc
+                // entry lands in its sink.
+                let mut file = self.open_append_target(path)?;
                 // GNU builtins/common.c:320-334 sh_chkwrite: a builtin's
                 // failed flush is reported by the BUILTIN as
                 // `<name>: write error: <strerror>` (builtin_error via
@@ -2281,6 +2542,19 @@ impl OutputFdState {
                 Ok(())
             }
             OutputTarget::Null | OutputTarget::Closed => Ok(()),
+            OutputTarget::FullDevice => {
+                // rubash#1898: a write routed here fails ENOSPC; the
+                // caller's sh_chkwrite handling (#1496 arm in
+                // write_state_output_or_diagnostic) renders it in the
+                // builtin's name. The error carries its strerror as
+                // the payload so the rendering is exact on every
+                // platform (no OS raw code means the same text on
+                // Windows, whose error table has no ENOSPC entry).
+                Err(
+                    std::io::Error::new(std::io::ErrorKind::Other, "No space left on device")
+                        .into(),
+                )
+            }
             OutputTarget::CoprocStdin(fd) => {
                 if let Some(pipe) = executor.coproc_write_file(fd) {
                     crate::fd::write_all(pipe.handle, output)?;
@@ -2294,26 +2568,15 @@ impl OutputFdState {
                 Ok(())
             }
             OutputTarget::Path(path) => {
-                // rubash#1967: a net target's flush open is the ONE
-                // open (the setup/ordered walks validate by
-                // resolution) and must go through netopen — the
-                // target's mapped pseudo-path is not a file, and the
-                // filesystem append-open fails ENOENT without ever
-                // connecting.
-                let mut file = if crate::special_paths::is_net_redirect_target(path) {
-                    executor.open_net_redirect(path)?
-                } else {
-                    // G-02: the recorded target is the raw redirect
-                    // word — anchor it at the session cwd, never the
-                    // process cwd (this append-open is where buffered
-                    // builtin output actually lands; the setup open in
-                    // open_command_output_target only creates/
-                    // truncates).
-                    open_redirect_append(&executor.session_path(shell_path_to_windows(
-                        &path,
-                        &executor.shell_state.env_vars,
-                    )))?
-                };
+                // G-02: the recorded target is the raw redirect word —
+                // anchor it at the session cwd, never the process cwd
+                // (this append-open is where buffered builtin output
+                // actually lands; the setup open in
+                // open_command_output_target only creates/truncates).
+                // The open classifies through the registry
+                // (rubash#1964), whose filesystem arm performs exactly
+                // that session-anchored mapped append.
+                let mut file = executor.open_append_target(&path)?;
                 file.write_all(output)?;
                 Ok(())
             }

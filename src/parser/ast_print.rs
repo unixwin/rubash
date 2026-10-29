@@ -1517,3 +1517,189 @@ fn decode_ansi_c_word_spans(text: &str) -> String {
     }
     out
 }
+
+/// The result of [`pretty_print_input`]: the canonical text to print,
+/// plus the parse-error command that stopped the loop, if any.
+pub struct PrettyPrintOutcome {
+    /// Everything pretty_print_loop would print before the stop point
+    /// (or the whole input's canonical text on success), in its
+    /// newline discipline.
+    pub output: String,
+    /// The command node carrying a parse-error marker, when one was
+    /// read. GNU pretty_print_loop aborts there (eval.c:215-253): the
+    /// parser's stderr diagnostic is the only other output and the
+    /// loop returns EXECUTION_FAILURE. Callers with an executor report
+    /// it via `Executor::report_pretty_print_parse_error` and exit 1;
+    /// the node itself must never be printed as command text.
+    pub parse_error: Option<CommandNode>,
+}
+
+/// pretty_print_loop (eval.c:215-253) over a whole input text: parse
+/// the input and render each command canonically (print_cmd.c) with
+/// one trailing newline, the way `bash --pretty-print` does
+/// (shell.c:830-831). The loop reads one command at a time: a blank
+/// input line ends the current command, an empty parse prints one
+/// newline (suppressed right after another newline), and commands
+/// with blank lines inside are kept whole while their syntax is
+/// still open.
+///
+/// This is the library entry for the face (rubash#1977 /
+/// niubash#656): the loop used to exist only inside the rubash
+/// binary's main, and niubash carried a mirror whose emptiness table
+/// lacked the subshell/background/inverted/time fields — those whole
+/// commands were judged empty and printed nothing. Both binaries now
+/// run this entry.
+pub fn pretty_print_input(contents: &str, posix: bool) -> PrettyPrintOutcome {
+    let mut output = String::new();
+    let mut pending = String::new();
+    let mut last_was_newline = false;
+    for line in contents.lines() {
+        if line.trim().is_empty() && !crate::lexer::has_unclosed_input_syntax_posix(&pending, posix)
+        {
+            match flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline) {
+                Ok(next) => last_was_newline = next,
+                Err(node) => {
+                    return PrettyPrintOutcome {
+                        output,
+                        parse_error: Some(node),
+                    };
+                }
+            }
+            pending.clear();
+            if !last_was_newline {
+                output.push('\n');
+                last_was_newline = true;
+            }
+            continue;
+        }
+        if !pending.is_empty() {
+            pending.push('\n');
+        }
+        pending.push_str(line);
+    }
+    match flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline) {
+        Ok(next) => last_was_newline = next,
+        Err(node) => {
+            return PrettyPrintOutcome {
+                output,
+                parse_error: Some(node),
+            };
+        }
+    }
+    // GNU's reader delivers an empty parse at EOF after the last command
+    // (eval.c:225-247), printing one final newline.
+    if !last_was_newline && !output.is_empty() {
+        output.push('\n');
+    }
+    PrettyPrintOutcome {
+        output,
+        parse_error: None,
+    }
+}
+
+/// Print one parsed command batch the way pretty_print_loop does.
+/// Returns the updated last_was_newline state, or the parse-error
+/// command node when one was read (GNU aborts pretty-printing there
+/// after the parser's stderr diagnostic).
+fn flush_pretty_print_chunk(
+    chunk: &str,
+    posix: bool,
+    output: &mut String,
+    last_was_newline: bool,
+) -> Result<bool, CommandNode> {
+    let tokens = crate::lexer::tokenize_with_initial_posix(chunk, posix);
+    let ast = crate::parser::parse(&tokens);
+    let mut printed = false;
+    for command in &ast.commands {
+        // The parse-error nodes carry their diagnostics as internal
+        // `__RUBASH_PARSE_*` marker assignments; pretty-printing those as
+        // command text leaks the markers into stdout. GNU's reader
+        // longjmps before any print (eval.c:225 `code = setjmp_nosigs
+        // (top_level)`); the caller reports the diagnostic and stops.
+        if command.assignments.iter().any(|(name, _)| {
+            name.starts_with("__RUBASH_PARSE_ERROR") || name == "__RUBASH_COMPOUND_SYNTAX_ERROR"
+        }) {
+            return Err(command.clone());
+        }
+        if is_pretty_print_empty(command) {
+            continue;
+        }
+        output.push_str(&pretty_print_command(command));
+        output.push('\n');
+        printed = true;
+    }
+    if printed {
+        return Ok(false);
+    }
+    Ok(last_was_newline)
+}
+
+/// Comment-only and whitespace-only parses must not print (GNU parses them
+/// as empty commands and suppresses the output).
+fn is_pretty_print_empty(command: &CommandNode) -> bool {
+    command.words.is_empty()
+        && command.assignments.is_empty()
+        && command.compound_assignments.is_empty()
+        && command.array_element_assignments.is_empty()
+        && command.for_command.is_none()
+        && command.select_command.is_none()
+        && command.loop_command.is_none()
+        && command.if_command.is_none()
+        && command.case_command.is_none()
+        && command.function_command.is_none()
+        && command.arithmetic_command.is_none()
+        && command.conditional_command.is_none()
+        && command.coproc_command.is_none()
+        && command.brace_group.is_none()
+        && command.pipeline_command.is_none()
+        && command.and_or_list.is_none()
+        && command.subshell_command.is_none()
+        && command.background_command.is_none()
+        && command.inverted_command.is_none()
+        && command.time_command.is_none()
+}
+
+#[cfg(test)]
+mod pretty_print_input_tests {
+    // rubash#1977 / niubash#656: the pretty_print_loop entry. The
+    // canonical forms were measured against GNU bash 5.3.20
+    // --pretty-print on the same input; the time / subshell /
+    // background / inverted shapes are the ones niubash's mirror
+    // emptiness table swallowed whole.
+    use super::pretty_print_input;
+
+    #[test]
+    fn prints_time_subshell_background_inverted_and_plain_forms() {
+        let outcome = pretty_print_input(
+            "time echo hi\n(echo subshell)\necho bg &\n! echo inv\ntime -p echo t2\n",
+            false,
+        );
+        assert!(outcome.parse_error.is_none());
+        assert_eq!(
+            outcome.output,
+            "time echo hi\n( echo subshell )\necho bg &\n! echo inv\ntime -p echo t2\n\n"
+        );
+    }
+
+    #[test]
+    fn blank_line_separates_commands_and_empty_input_prints_nothing() {
+        let outcome = pretty_print_input("echo a\n\necho b\n", false);
+        assert!(outcome.parse_error.is_none());
+        assert_eq!(outcome.output, "echo a\n\necho b\n\n");
+
+        let outcome = pretty_print_input("", false);
+        assert!(outcome.parse_error.is_none());
+        assert_eq!(outcome.output, "");
+    }
+
+    #[test]
+    fn parse_error_stops_the_loop_after_prior_commands() {
+        // GNU pretty_print_loop aborts at the command read_command
+        // fails on: earlier commands have printed, later ones never
+        // do, and the error node is handed back for reporting instead
+        // of being printed as marker-assignment text.
+        let outcome = pretty_print_input("echo before\nif then fi\necho after\n", false);
+        assert_eq!(outcome.output, "echo before\n");
+        assert!(outcome.parse_error.is_some());
+    }
+}

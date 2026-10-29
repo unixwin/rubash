@@ -139,7 +139,7 @@ fn issue1520_flip_on_then_off_same_line_stays_keyword() {
 /// `set +o posix` executes too late to rescue the keyword.
 #[test]
 fn issue1520_posix_from_start_set_plus_o_same_line_still_not_keyword() {
-    let (stdout, stderr, code) = rubash_c_with_flags(&["--posix"], "set +o posix; time -p true");
+    let (_stdout, stderr, code) = rubash_c_with_flags(&["--posix"], "set +o posix; time -p true");
     assert_time_not_found(&stderr, code);
 }
 

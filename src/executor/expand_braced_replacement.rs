@@ -243,6 +243,12 @@ impl Executor {
         let mut marked = String::with_capacity(chars.len() + 8);
         let mut index = 0;
         while index < chars.len() {
+            // rubash#1927: an existing literal-char escape pair is
+            // already-escaped user data — copy it as a unit.
+            if let Some(next) = push_existing_literal_pair(&mut marked, chars, index) {
+                index = next;
+                continue;
+            }
             let ch = chars[index];
             match ch {
                 '\'' | crate::executor::markers::DATA_SQUOTE => {
@@ -288,6 +294,12 @@ impl Executor {
         let mut marked = String::with_capacity(chars.len() + 8);
         let mut index = 0;
         while index < chars.len() {
+            // rubash#1927: an existing literal-char escape pair is
+            // already-escaped user data — copy it as a unit.
+            if let Some(next) = push_existing_literal_pair(&mut marked, chars, index) {
+                index = next;
+                continue;
+            }
             let ch = chars[index];
             match ch {
                 '\'' => {
@@ -295,6 +307,11 @@ impl Executor {
                     // become quoted replacement data (CTLESC in GNU).
                     index += 1;
                     while index < chars.len() && chars[index] != '\'' {
+                        // rubash#1927: keep an existing escape pair whole.
+                        if let Some(next) = push_existing_literal_pair(&mut marked, chars, index) {
+                            index = next;
+                            continue;
+                        }
                         push_single_quoted_replacement_char(&mut marked, chars[index], false);
                         index += 1;
                     }
@@ -487,6 +504,38 @@ fn push_replacement_literal(marked: &mut String, ch: char) {
     crate::executor::markers::push_literal_char(marked, ch);
 }
 
+/// Copy an EXISTING literal-char escape pair at `chars[index]` verbatim
+/// and return the index just past it, or None when no pair starts there.
+///
+/// The replacement text this file walks is transport text: script entry
+/// escaping (substitution_metadata::bytes_to_script_text /
+/// command_string_entry_text) has already E400-escaped every typed
+/// marker-zone glyph in the source, so a glyph the user typed into the
+/// replacement body arrives as a LITERAL_CHAR_ESCAPE pair. The per-char
+/// literal arms would escape each half a second time (push_literal_char
+/// prefixes the introducer AND the payload), and the output boundary's
+/// single decode then leaves a stray U+E400 in front of the glyph
+/// (rubash#1927: `${v/b/<U+E312>x}` printed U+E400 U+E312 x). An existing
+/// pair is already-escaped user data — copy it as a unit, the same
+/// verbatim rule push_single_quoted_replacement_char applies to decoded
+/// ANSI-C text. The E400 + E000 pair is NOT taken: U+E000 owns the
+/// raw-byte pair protocol (push_replacement_literal copies it verbatim)
+/// and its pair form here is that protocol, not the literal escape.
+fn push_existing_literal_pair(marked: &mut String, chars: &[char], index: usize) -> Option<usize> {
+    if chars.get(index).copied() == Some(crate::executor::markers::LITERAL_CHAR_ESCAPE)
+        && chars.get(index + 1).is_some_and(|next| {
+            crate::executor::markers::is_marker_zone_char(*next)
+                && *next as u32 != crate::executor::markers::RAW_BYTE_MARKER_ESCAPE
+        })
+    {
+        marked.push(chars[index]);
+        marked.push(chars[index + 1]);
+        Some(index + 2)
+    } else {
+        None
+    }
+}
+
 /// Copy a char from a single-quoted replacement span: `$` and backticks are
 /// literal (no expansion inside single quotes), `&` and backslash become
 /// quoted replacement data.
@@ -519,6 +568,10 @@ fn push_single_quoted_replacement_char(marked: &mut String, ch: char, decoded_an
 /// index. Backslashes escape only `$`, backtick, `"`, and `\`; every
 /// other backslash is a literal, quoted backslash.
 fn push_double_quoted_replacement_char(marked: &mut String, chars: &[char], index: usize) -> usize {
+    // rubash#1927: keep an existing escape pair whole.
+    if let Some(next) = push_existing_literal_pair(marked, chars, index) {
+        return next;
+    }
     match chars[index] {
         '\\' => match chars.get(index + 1) {
             Some('$') => {
@@ -542,6 +595,10 @@ fn push_double_quoted_replacement_char(marked: &mut String, chars: &[char], inde
             }
             Some(other) => {
                 marked.push(PATSUB_QUOTED_BACKSLASH);
+                // rubash#1927: a pair after the backslash rides whole.
+                if let Some(next) = push_existing_literal_pair(marked, chars, index + 1) {
+                    return next;
+                }
                 match *other {
                     // Quote data inside a double-quoted replacement span must
                     // reach the expander protected (GNU subst.c
@@ -621,6 +678,13 @@ fn push_ansi_c_replacement_span(marked: &mut String, chars: &[char], index: usiz
         let ch = chars[cursor];
         if ch == '\\' && cursor + 1 < chars.len() {
             body.push(ch);
+            // rubash#1927: a typed glyph inside the span body arrives as an
+            // entry-escaped pair — keep it whole in the body so the decode
+            // below leaves the pair intact.
+            if let Some(next) = push_existing_literal_pair(&mut body, chars, cursor + 1) {
+                cursor = next;
+                continue;
+            }
             // rubash#843: a LITERAL registry-zone glyph typed inside the
             // span body rides the canonical decoder verbatim (only
             // `\u`-decoded codepoints get the E400 escape there). Escape it
@@ -636,6 +700,11 @@ fn push_ansi_c_replacement_span(marked: &mut String, chars: &[char], index: usiz
                 push_single_quoted_replacement_char(marked, decoded_char, true);
             }
             return cursor + 1;
+        }
+        // rubash#1927: keep an existing escape pair whole in the body.
+        if let Some(next) = push_existing_literal_pair(&mut body, chars, cursor) {
+            cursor = next;
+            continue;
         }
         push_replacement_literal(&mut body, ch);
         cursor += 1;
@@ -683,6 +752,10 @@ fn push_unquoted_escape_compat42(marked: &mut String, chars: &[char], index: usi
         }
         Some(other) => {
             marked.push(PATSUB_QUOTED_BACKSLASH);
+            // rubash#1927: a pair after the backslash rides whole.
+            if let Some(next) = push_existing_literal_pair(marked, chars, index + 1) {
+                return next;
+            }
             push_replacement_literal(marked, *other);
             index + 2
         }
@@ -723,6 +796,10 @@ fn push_unquoted_escape(marked: &mut String, chars: &[char], index: usize) -> us
             index + 2
         }
         Some(_) => {
+            // rubash#1927: a pair after the backslash rides whole.
+            if let Some(next) = push_existing_literal_pair(marked, chars, index + 1) {
+                return next;
+            }
             push_replacement_literal(marked, chars[index + 1]);
             index + 2
         }
@@ -775,6 +852,10 @@ fn push_replacement_dollar(
                 index + 2
             }
             Some(other) => {
+                // rubash#1927: a pair after the `$` rides whole.
+                if let Some(next) = push_existing_literal_pair(marked, chars, index + 1) {
+                    return next;
+                }
                 push_replacement_literal(marked, *other);
                 index + 2
             }

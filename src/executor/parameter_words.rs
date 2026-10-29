@@ -168,14 +168,23 @@ fn secondary_assignment_targets(inner: &str) -> Vec<String> {
 /// name — the target whose later assignment can leak into earlier
 /// fragments of the same word (rubash#1169).
 fn parameter_assignment_target(inner: &str) -> Option<String> {
-    let (name, _word) = super::expand_braced_ops::split_once_outside_subscript_str(inner, ":=")
-        .or_else(|| super::expand_braced_ops::split_once_outside_subscript(inner, '='))?;
-    let base = name.split('[').next().unwrap_or(name);
-    if is_shell_name(base) {
-        Some(base.to_string())
-    } else {
-        None
+    // rubash#1960: the `:=` split's left-hand side is not always the
+    // target — in `${v=x:=y}` the first operator is `=` and the `:=`
+    // is word text, so a `:=` candidate whose base is not a shell name
+    // falls through to the `=` split instead of reporting no target.
+    for (name, _word) in [
+        super::expand_braced_ops::split_once_outside_subscript_str(inner, ":="),
+        super::expand_braced_ops::split_once_outside_subscript(inner, '='),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let base = name.split('[').next().unwrap_or(name);
+        if is_shell_name(base) {
+            return Some(base.to_string());
+        }
     }
+    None
 }
 
 /// Whether `name` — the left-hand side of a top-level `=`/`:=` split of
@@ -1608,17 +1617,21 @@ impl Executor {
         // `${x[i=0$(...)]}` expands element i=0 -- it does not assign
         // through `x[i` and does not expand the subscript text as the
         // operator word, which would run the embedded $(...) twice).
+        // rubash#1953: the `:=` split names an assignment only when its
+        // left-hand side is an assignment target; otherwise the `:=`
+        // sits inside another operator's word and the split's "value"
+        // is that word's text, which must not be expanded here (see
+        // parameter_assignment_target_form). rubash#1960: a rejected
+        // `:=` split must not swallow the fragment either — GNU
+        // parameter_brace_expand (subst.c:9777) extracts the parameter
+        // name first and dispatches on the FIRST operator character,
+        // so in `${v=x:=y}` the operator is the earlier `=` and the
+        // `:=` is word text. The filter leaves such a body unclaimed
+        // here so the `=` arm below binds `v` to `x:=y`.
         if let Some((name, value)) =
             super::expand_braced_ops::split_once_outside_subscript_str(inner, ":=")
+                .filter(|(name, _)| parameter_assignment_target_form(name))
         {
-            // rubash#1953: the split names an assignment only when its
-            // left-hand side is an assignment target; otherwise the
-            // `:=` sits inside another operator's word and the split's
-            // "value" is that word's text, which must not be expanded
-            // here (see parameter_assignment_target_form).
-            if !parameter_assignment_target_form(name) {
-                return;
-            }
             if self
                 .parameter_operator_value(name)
                 .is_some_and(|value| !value.is_empty())

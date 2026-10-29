@@ -260,6 +260,34 @@ pub(in crate::executor) fn redirect_target_fd(target: &str) -> Option<u32> {
     redirect_target_fd_and_move(target).and_then(|(fd, move_fd)| (!move_fd).then_some(fd))
 }
 
+/// True when the expanded target is a DUP spelling (`&N` / `&N-`):
+/// the only shape GNU services with a dup2 (redir.c
+/// r_duplicating_input / r_duplicating_output). An fd-alias PATH
+/// spelling (/dev/fd/N, /dev/stdin, /proc/self/fd/N) resolves to the
+/// same fd number through redirect_target_fd_and_move, but GNU
+/// services it with an OPEN over the alias layer (redir_open) — the
+/// two shapes must not share a service face (rubash#1963: an alias
+/// under a file-open kind failed with the dup face's
+/// `N: Bad file descriptor` instead of the open's ENOENT).
+pub(in crate::executor) fn redirect_target_is_dup_spelling(target: &str) -> bool {
+    target
+        .trim_start_matches([
+            crate::executor::markers::QUOTED_WORD_PREFIX,
+            STORAGE_WORD_PREFIX,
+        ])
+        .starts_with('&')
+}
+
+/// The dup source fd of a target, but only when the target is a dup
+/// spelling; alias path spellings return None so file-open faces
+/// fall through to their classified opens (rubash#1963).
+pub(in crate::executor) fn dup_spelling_source_fd(target: &str) -> Option<u32> {
+    if !redirect_target_is_dup_spelling(target) {
+        return None;
+    }
+    redirect_target_fd_and_move(target).map(|(fd, _)| fd)
+}
+
 pub(in crate::executor) fn redirect_target_fd_and_move(target: &str) -> Option<(u32, bool)> {
     let target = target.trim_start_matches([
         crate::executor::markers::QUOTED_WORD_PREFIX,

@@ -11,8 +11,13 @@ impl Executor {
         // command's process-substitution fds when the command finishes;
         // `a=(<(echo p9)); cat "${a[0]}"` then reports `No such file`).
         let procsub_fd_base = self.command_scoped_procsub_input_fds.len();
+        // rubash#1646: watermark for this command's varredir_close
+        // records — drained at the command's end below, when GNU's
+        // undo_redirections would close them.
+        let varredir_close_base = self.deferred_varredir_closes.len();
         let result = self.execute_command_with_procsub_scope(cmd, procsub_fd_base);
         self.close_command_scoped_procsub_input_fds_from(procsub_fd_base);
+        self.drain_deferred_varredir_closes(varredir_close_base);
         // Debug-only systemic regression net for the typed-cell ↔ mirror
         // invariant: after every command boundary every fresh (undirty)
         // structured array cell must still equal its mirror projection.

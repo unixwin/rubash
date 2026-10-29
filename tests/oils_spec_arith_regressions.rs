@@ -628,6 +628,7 @@ echo $(( 24#ag7 ))");
 }
 
 #[test]
+#[allow(non_snake_case)] // name mirrors the Oils spec case id `arith/invalid-const-A`
 fn arith_invalid_const_A() {
     // Oils `####` case: arith/invalid-const-A
     let (status, stdout, stderr) = run(r"echo $((a + x42))
@@ -644,6 +645,7 @@ status=0
 }
 
 #[test]
+#[allow(non_snake_case)] // name mirrors the Oils spec case id `arith/invalid-const-B-fresh`
 fn arith_invalid_const_B_fresh() {
     // Oils `####` case: arith/invalid-const-B-fresh
     let (status, stdout, stderr) = run(r"echo $((a + 42x))

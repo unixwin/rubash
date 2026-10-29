@@ -679,6 +679,9 @@ impl MapfileRecordSource {
                     next_fill_offset: 0,
                 }))
             }
+            // rubash#1937: a directory endpoint has no record
+            // source; the read face itself reports EISDIR.
+            FdReadEndpoint::Directory => None,
         }
     }
 

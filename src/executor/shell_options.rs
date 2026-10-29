@@ -107,10 +107,76 @@ impl Executor {
     /// mode 0666 (make_cmd.c:682, consumed by redir.c:702 redir_open), so
     /// probing a missing name CREATES it — the open is part of the
     /// redirection's side effects (rubash#264), not just a check.
+    ///
+    /// The probe asks the registry first (rubash#1935/#1963/#1964):
+    /// the classes with no filesystem file behind the mapped path get
+    /// their own open semantics instead of a raw open of a literal
+    /// path that cannot exist — a net target connects, a closed fd
+    /// alias fails ENOENT (the kernel open of the alias name decides,
+    /// exactly like the input ladder), a synthetic /proc entry opens
+    /// or refuses by its write class, a synthetic link opens its
+    /// resolved target. Only plain filesystem spellings (and the null
+    /// device, whose mapped open is the device) reach the raw open.
+    /// Errors are raw: callers apply posix_errors::path_error.
     pub(in crate::executor) fn probe_input_redirect_readwrite(
         &self,
         target: &str,
     ) -> io::Result<File> {
+        use crate::special_paths::SpecialPathClass;
+        match crate::special_paths::classify_special_path(target) {
+            SpecialPathClass::NetRedirect => return self.open_net_redirect_raw(target),
+            // rubash#1898: the devices — <> on /dev/zero reads zeros
+            // and discards writes; <> on /dev/full reads zeros (the
+            // probe's File is dropped by every caller; the sink
+            // stand-in carries the write side of the bind contract).
+            SpecialPathClass::ZeroDevice => return Self::zero_device_file(&target),
+            SpecialPathClass::FullDevice => return Self::synthetic_proc_write_sink(false),
+            SpecialPathClass::FdAlias(fd) => {
+                if super::redirection::dup_source_fd_open(
+                    &self.fd_table,
+                    fd,
+                    &std::collections::HashMap::new(),
+                ) {
+                    // The alias is open: GNU's open succeeds (a dup of
+                    // the descriptor). The probe's File is dropped by
+                    // every caller, so the null device stands in.
+                    return self.create_redirect_output("/dev/null", true);
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "No such file or directory",
+                ));
+            }
+            SpecialPathClass::SyntheticProc => {
+                match crate::special_paths::synthetic_proc_write_allowed(target) {
+                    Some(false) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "Permission denied",
+                        ));
+                    }
+                    Some(true) => return Self::synthetic_proc_write_sink(false),
+                    None => {}
+                }
+            }
+            SpecialPathClass::SyntheticLink => {
+                match crate::special_paths::synthetic_link_target(
+                    target,
+                    Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
+                ) {
+                    Some(link) => {
+                        return OpenOptions::new().read(true).write(true).open(&link.native);
+                    }
+                    None => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "No such file or directory",
+                        ));
+                    }
+                }
+            }
+            SpecialPathClass::NullDevice | SpecialPathClass::Filesystem => {}
+        }
         let path = self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars));
         // niubash#519: CON has no read+write handle (GENERIC_READ|
         // GENERIC_WRITE -> ERROR_INVALID_PARAMETER); the real `<>` bind
@@ -295,6 +361,16 @@ impl Executor {
                 &self.shell_state.env_vars,
             )));
         }
+        // rubash#1898: /dev/zero reads yield an unbounded stream of
+        // NUL bytes, and /dev/full reads yield the same zeros — both
+        // serve from the pump-fed zero source (a real handle, so
+        // external children can inherit it). On Unix the construction
+        // is equivalent to opening the real device.
+        if crate::special_paths::is_zero_device(target)
+            || crate::special_paths::is_full_device(target)
+        {
+            return Some(Self::zero_device_file(&target));
+        }
         // GNU redir.c resolves /dev/std*, /dev/fd/N, /proc/self/fd/N through
         // the OS fd-alias layer — a dup of fd N, not a filesystem path.
         // Windows has no /dev, so resolve against the virtual fd table
@@ -359,6 +435,77 @@ impl Executor {
             use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
             let fd = reader.into_raw_fd();
             Ok(unsafe { File::from_raw_fd(fd) })
+        }
+    }
+
+    /// rubash#1935: the write side of a 0644-class synthetic /proc
+    /// entry (`/proc/self/status`, `/proc/self/cmdline`). GNU's open
+    /// of the real entry succeeds and only the WRITE fails (EINVAL),
+    /// but no Windows handle reproduces a per-write EINVAL, so writes
+    /// land in a throwaway temp file. That removes the two failure
+    /// shapes this family exists for — ENOENT (no service face at
+    /// all) and a phantom enclave file created at the mapped literal
+    /// path — while keeping the observable contract: the open
+    /// succeeds, and the generated snapshot stays the only read truth
+    /// (on GNU the failed write never alters what a later read of
+    /// the entry serves either). Unique per call: two opens of the
+    /// entry are two open file descriptions. Delete-on-close where
+    /// the platform supports it.
+    pub(in crate::executor) fn synthetic_proc_write_sink(append: bool) -> io::Result<File> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SINK_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SINK_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("rubash-proc-sink-{}-{seq}", std::process::id()));
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        if append {
+            options.append(true);
+        } else {
+            options.truncate(true);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            // FILE_FLAG_DELETE_ON_CLOSE: the sink must not outlive
+            // the descriptor that owns it.
+            options.custom_flags(0x0400_0000);
+        }
+        let file = options.open(&path)?;
+        #[cfg(unix)]
+        {
+            // The descriptor stays valid after the name is unlinked.
+            let _ = std::fs::remove_file(&path);
+        }
+        Ok(file)
+    }
+
+    /// rubash#1898: a readable File that yields an unbounded stream
+    /// of NUL bytes — the /dev/zero (and /dev/full) read face. Unix
+    /// hosts have the real devices: opening the target IS GNU's
+    /// semantics, an unbounded kernel-owned zero source. Windows has
+    /// no zero device, so a pump thread feeds a pipe, following the
+    /// process-substitution streaming precedent: consumers get a
+    /// real handle (external children can inherit it), reads never
+    /// see EOF, and the pump exits on a broken pipe once the last
+    /// reader closes.
+    pub(in crate::executor) fn zero_device_file(target: &str) -> io::Result<File> {
+        #[cfg(unix)]
+        {
+            File::open(target)
+        }
+        #[cfg(windows)]
+        {
+            let _ = target;
+            use std::io::Write as _;
+            let (reader, mut writer) = std::io::pipe()?;
+            std::thread::spawn(move || {
+                const ZEROS: [u8; 8192] = [0u8; 8192];
+                while writer.write_all(&ZEROS).is_ok() {}
+            });
+            use std::os::windows::io::{FromRawHandle as _, IntoRawHandle as _};
+            let handle = reader.into_raw_handle();
+            Ok(unsafe { File::from_raw_handle(handle) })
         }
     }
 
@@ -459,7 +606,9 @@ impl Executor {
             Some(FdReadEndpoint::CoprocStdout { fd: file_fd, .. }) => {
                 crate::fd::duplicate_handle(file_fd.handle)
                     .map(crate::fd::handle_to_file)
-                    .map_err(|e| crate::posix_errors::path_error(&file_fd.path.to_string_lossy(), e))
+                    .map_err(|e| {
+                        crate::posix_errors::path_error(&file_fd.path.to_string_lossy(), e)
+                    })
             }
             Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
                 let bytes = self
@@ -487,10 +636,32 @@ impl Executor {
             Some(FdReadEndpoint::InheritedProcessStdin) => {
                 super::inherited_stdin::duplicate_process_stdin()
             }
-            _ => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("{target}: Bad file descriptor"),
-            )),
+            _ => {
+                // rubash#1963: no read endpoint, but the descriptor
+                // may be open write-only (`exec 63>f; : < /dev/fd/63`).
+                // GNU's /dev/fd open is a fresh open of the
+                // descriptor's TARGET, judged against the target
+                // file's mode, not the descriptor's: a file binding
+                // reopens its path (its stored path is the native
+                // form it was opened from), and any other open
+                // descriptor's read-open succeeds against the null
+                // device (reads see EOF — the stdio write ends'
+                // content contract is the dev-operand face's
+                // documented decline). Only a descriptor with no
+                // endpoint at all keeps the EBADF answer.
+                match self.fd_table.write_endpoint(fd) {
+                    Some(FdWriteEndpoint::File(file)) => File::open(&file.path)
+                        .map_err(|e| crate::posix_errors::path_error(target, e)),
+                    Some(_) => File::open(shell_path_to_windows(
+                        "/dev/null",
+                        &self.shell_state.env_vars,
+                    )),
+                    None => Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("{target}: Bad file descriptor"),
+                    )),
+                }
+            }
         }
     }
 
@@ -724,6 +895,75 @@ impl Executor {
                 &self.shell_state.env_vars,
             ));
         }
+        // rubash#1898: /dev/zero discards writes exactly like the
+        // null device; opens route to the same sink.
+        if crate::special_paths::is_zero_device(target) {
+            return OpenOptions::new().write(true).open(shell_path_to_windows(
+                "/dev/null",
+                &self.shell_state.env_vars,
+            ));
+        }
+        // rubash#1898: /dev/full ACCEPTS the open — GNU fails only
+        // the write (ENOSPC). The direct builtin faces route their
+        // flush through OutputTarget::FullDevice, which owns the
+        // write-error shape; the File returned here is the stand-in
+        // for the probe/bind/external contracts that need the open
+        // itself to succeed (their writes are absorbed — the
+        // documented residual of those faces).
+        if crate::special_paths::is_full_device(target) {
+            return Self::synthetic_proc_write_sink(false);
+        }
+        // rubash#1935: synthetic /proc content has no filesystem file
+        // behind the mapped path — without this step `> /proc/...`
+        // either failed ENOENT or created a phantom enclave file at
+        // the literal path. Ask the entry's write class instead: the
+        // 0444 class refuses the open EACCES; the 0644 class accepts
+        // it and the writes are absorbed (see
+        // synthetic_proc_write_sink).
+        if let Some(allowed) = crate::special_paths::synthetic_proc_write_allowed(target) {
+            if !allowed {
+                return Err(crate::posix_errors::path_error(
+                    target,
+                    io::Error::new(io::ErrorKind::PermissionDenied, "Permission denied"),
+                ));
+            }
+            return Self::synthetic_proc_write_sink(false);
+        }
+        // rubash#1963: an fd-alias spelling is an open of fd N's
+        // open file description (redir.c redir_open over the /dev/fd
+        // layer), never a filesystem create at the mapped literal
+        // path — the literal create made a phantom enclave file for
+        // a spelling GNU fails ENOENT when the fd is closed. Closed
+        // alias: ENOENT, pre-shaped like the synthetic arm above
+        // (this function's callers render the io message verbatim).
+        // Open alias: resolve through the endpoint like the append
+        // face (open_append_target's FdAlias arm); endpoint shapes
+        // that cannot take a handle dup fall back to the null sink —
+        // the routing walk owns exact delivery for fds 1/2 through
+        // its dup shortcut, and this function's contract is the
+        // open itself.
+        if let Some(fd) = crate::special_paths::fd_alias_target(target) {
+            if !super::redirection::dup_source_fd_open(
+                &self.fd_table,
+                fd,
+                &std::collections::HashMap::new(),
+            ) {
+                return Err(crate::posix_errors::path_error(
+                    target,
+                    io::Error::new(io::ErrorKind::NotFound, "No such file or directory"),
+                ));
+            }
+            return match self.open_output_fd_append(target) {
+                Ok(file) => Ok(file),
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                    OpenOptions::new().write(true).open(shell_path_to_windows(
+                        "/dev/null",
+                        &self.shell_state.env_vars,
+                    ))
+                }
+                Err(error) => Err(error),
+            };
+        }
         let target = self.redirect_output_path_target(target);
         let path = self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
         if !clobber
@@ -873,6 +1113,14 @@ impl Executor {
                     "coprocess file descriptor",
                 ));
             }
+            FdWriteEndpoint::FullDevice => {
+                // rubash#1898: an append-dup of a /dev/full binding —
+                // GNU's open succeeds and its writes fail ENOSPC; no
+                // handle reproduces that, so the append lands on the
+                // absorbed sink (a deep edge; the bound write faces
+                // themselves carry the exact ENOSPC shape).
+                return Self::synthetic_proc_write_sink(true);
+            }
             FdWriteEndpoint::File(_) => unreachable!("handled above"),
         };
         if is_null_device(&path.to_string_lossy()) {
@@ -885,6 +1133,106 @@ impl Executor {
                 ));
         }
         OpenOptions::new().create(true).append(true).open(path)
+    }
+
+    /// The one append opener every face asks (rubash#1964). GNU
+    /// redir.c r_appending_to performs ONE open of the word
+    /// (redir.c:702 redir_open, O_WRONLY|O_CREAT|O_APPEND) — for a
+    /// /dev/tcp word that open IS the connection, for /dev/fd/N it
+    /// resolves through the descriptor, for a synthetic /proc entry
+    /// it is the entry's write-class open. The append faces used to
+    /// raw-open the mapped literal path instead, so a net target was
+    /// unreachable through them (the mapped name is not a file) and
+    /// an append probe could fail shapes the real open serves — up
+    /// to preempting an external command whose own redirect handling
+    /// would have connected. Classify first; only plain filesystem
+    /// spellings reach the mapped append open. Errors are raw:
+    /// callers apply posix_errors::path_error.
+    pub(in crate::executor) fn open_append_target(&self, target: &str) -> io::Result<File> {
+        use crate::special_paths::SpecialPathClass;
+        match crate::special_paths::classify_special_path(target) {
+            SpecialPathClass::NetRedirect => self.open_net_redirect_raw(target),
+            SpecialPathClass::NullDevice => {
+                OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .open(shell_path_to_windows(
+                        "/dev/null",
+                        &self.shell_state.env_vars,
+                    ))
+            }
+            // rubash#1898: /dev/zero appends discard like the null
+            // device; /dev/full appends take the sink stand-in (the
+            // open succeeds — GNU fails only the write; the direct
+            // builtin faces own that shape via OutputTarget).
+            SpecialPathClass::ZeroDevice => {
+                OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .open(shell_path_to_windows(
+                        "/dev/null",
+                        &self.shell_state.env_vars,
+                    ))
+            }
+            SpecialPathClass::FullDevice => Self::synthetic_proc_write_sink(true),
+            SpecialPathClass::FdAlias(fd) => {
+                if !super::redirection::dup_source_fd_open(
+                    &self.fd_table,
+                    fd,
+                    &std::collections::HashMap::new(),
+                ) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "No such file or directory",
+                    ));
+                }
+                // The descriptor is open: the append open resolves
+                // through its endpoint. Endpoint shapes that cannot
+                // take an append dup (the process stdio family) fall
+                // back to the mapped device open, which is the shape
+                // those spellings have always taken.
+                match self.open_output_fd_append(target) {
+                    Ok(file) => Ok(file),
+                    Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                        crate::executor::execution_misc::open_redirect_append(&self.session_path(
+                            shell_path_to_windows(target, &self.shell_state.env_vars),
+                        ))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            SpecialPathClass::SyntheticProc => {
+                match crate::special_paths::synthetic_proc_write_allowed(target) {
+                    Some(false) => Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "Permission denied",
+                    )),
+                    Some(true) => Self::synthetic_proc_write_sink(true),
+                    None => {
+                        crate::executor::execution_misc::open_redirect_append(&self.session_path(
+                            shell_path_to_windows(target, &self.shell_state.env_vars),
+                        ))
+                    }
+                }
+            }
+            SpecialPathClass::SyntheticLink => {
+                match crate::special_paths::synthetic_link_target(
+                    target,
+                    Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
+                ) {
+                    Some(link) => crate::executor::execution_misc::open_redirect_append(
+                        &std::path::PathBuf::from(&link.native),
+                    ),
+                    None => Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "No such file or directory",
+                    )),
+                }
+            }
+            SpecialPathClass::Filesystem => crate::executor::execution_misc::open_redirect_append(
+                &self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars)),
+            ),
+        }
     }
 
     pub(in crate::executor) fn write_output_fd_redirect(
@@ -939,6 +1287,13 @@ impl Executor {
             }
             FdWriteEndpoint::File(file_fd) => {
                 crate::fd::write_all(file_fd.handle, output)?;
+            }
+            FdWriteEndpoint::FullDevice => {
+                // rubash#1898: every write to a /dev/full binding
+                // fails ENOSPC; the payload carries the strerror so
+                // the sh_chkwrite rendering is exact on every
+                // platform (Windows' error table has no ENOSPC).
+                return Err(io::Error::new(io::ErrorKind::Other, "No space left on device").into());
             }
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 let mut file = OpenOptions::new().create(true).append(true).open(path)?;
@@ -1080,6 +1435,10 @@ impl Executor {
             FdWriteEndpoint::CoprocStdin { .. } | FdWriteEndpoint::ProcessSubstitution { .. } => {
                 write_stderr_bytes(output)
             }
+            // rubash#1898: fd 2 bound to /dev/full — the diagnostic
+            // write fails ENOSPC and is lost, exactly GNU's outcome
+            // for a failing builtin_error write.
+            FdWriteEndpoint::FullDevice => Ok(()),
             FdWriteEndpoint::File(file_fd) => crate::fd::write_all(file_fd.handle, output),
         };
         let _ = result;
@@ -1166,6 +1525,13 @@ impl Executor {
             }
             FdWriteEndpoint::File(file_fd) => {
                 crate::fd::write_all(file_fd.handle, output)?;
+            }
+            FdWriteEndpoint::FullDevice => {
+                // rubash#1898: every write to a /dev/full binding
+                // fails ENOSPC; the payload carries the strerror so
+                // the sh_chkwrite rendering is exact on every
+                // platform (Windows' error table has no ENOSPC).
+                return Err(io::Error::new(io::ErrorKind::Other, "No space left on device").into());
             }
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 let mut file = OpenOptions::new().create(true).append(true).open(path)?;
@@ -1504,8 +1870,16 @@ impl Executor {
                 }
                 if let Some(body) = redirect.body.clone() {
                     if let Some(word) = body.strip_prefix('\u{1d}') {
-                        let mut input = decode_ansi_c_quoted_word(word)
-                            .unwrap_or_else(|| self.expand_word(word));
+                        // rubash#1965: a STORAGE_WORD_PREFIX here-string body
+                        // is already-decoded text whose $'...' blanks carry
+                        // the ANSI_C_IFS_GUARD carrier. The canonical funnel
+                        // (expand_stored_here_string_word, the
+                        // expand_heredoc_redirect_text ladder) strips the
+                        // guard at this value boundary; decoding/expanding
+                        // here without the strip leaked U+E401 into the
+                        // delivered stream on the pipeline staging route.
+                        // Route through the funnel function itself.
+                        let mut input = self.expand_stored_here_string_word(word);
                         input.push('\n');
                         return Some(input);
                     }
@@ -1601,8 +1975,16 @@ impl Executor {
                     }
                     if let Some(body) = redirect.body.as_deref() {
                         if let Some(word) = body.strip_prefix('\u{1d}') {
-                            let mut input = decode_ansi_c_quoted_word(word)
-                                .unwrap_or_else(|| self.expand_word(word));
+                            // rubash#1965: the same storage arm as the mut
+                            // ladder above — its decode-or-expand result must
+                            // pass the value-boundary ANSI_C_IFS_GUARD strip
+                            // the canonical funnel applies
+                            // (expand_stored_here_string_word, &mut-only, so
+                            // this &self ladder applies the identical strip).
+                            let mut input = crate::executor::markers::strip_ansi_c_ifs_guard(
+                                &decode_ansi_c_quoted_word(word)
+                                    .unwrap_or_else(|| self.expand_word(word)),
+                            );
                             input.push('\n');
                             return Some(input);
                         }
@@ -2395,7 +2777,12 @@ pub(in crate::executor) fn probe_output_redirect(
     executor.create_redirect_output(target, clobber).map(|_| ())
 }
 
-/// Append-arm twin of [`probe_output_redirect`].
+/// Append-arm twin of [`probe_output_redirect`]. The open itself
+/// classifies through the registry (Executor::open_append_target,
+/// rubash#1964): the probe IS an append open, so it must succeed and
+/// fail for exactly the shapes the bind's open does — a net target
+/// connects, a synthetic /proc entry answers by write class, a
+/// closed fd alias fails ENOENT.
 pub(in crate::executor) fn probe_output_redirect_append(
     executor: &Executor,
     target: &str,
@@ -2419,11 +2806,10 @@ pub(in crate::executor) fn probe_output_redirect_append(
             return Ok(());
         }
     }
-    crate::executor::execution_misc::open_redirect_append(&executor.session_path(
-        shell_path_to_windows(target, &executor.shell_state.env_vars),
-    ))
-    .map(|_| ())
-    .map_err(|e| crate::posix_errors::path_error(target, e))
+    executor
+        .open_append_target(target)
+        .map(|_| ())
+        .map_err(|e| crate::posix_errors::path_error(target, e))
 }
 
 /// Feed a spawned child's stdin pipe with the shell's virtual-stdin

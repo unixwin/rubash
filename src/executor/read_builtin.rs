@@ -3046,6 +3046,10 @@ impl Executor {
             Some(FdReadEndpoint::InheritedProcessStdin) => Some(read_timeout_zero_poll_handle(
                 crate::fd::process_std_handle(0),
             )),
+            // rubash#1937: a directory endpoint's read fails at
+            // once — it is as "ready" as a materialized source, and
+            // the read itself reports EISDIR.
+            Some(FdReadEndpoint::Directory) => Some(0),
             None => None,
         }
     }

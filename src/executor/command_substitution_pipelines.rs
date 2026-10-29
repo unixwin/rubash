@@ -323,20 +323,48 @@ impl Executor {
     /// whitelist (a leading `cat` that does not stand down, rubash#320
     /// no file redirection, rubash#1130 no expansion error in the body).
     /// `emit_warnings` is set only by the typed entry point, which owns
-    /// the here-document warnings; the readback entry stays silent so a
-    /// comsub expanded through both paths warns once.
+    /// the delimited-by-end-of-file here-document warning; the readback
+    /// entry stays silent for that one so a comsub expanded through
+    /// both paths warns once. The header-close warning at the top of
+    /// this function is entry-independent (rubash#1982).
     fn heredoc_comsub_plan(&self, source: &str, emit_warnings: bool) -> Option<HeredocComsubPlan> {
         if !source.contains("<<") {
             return None;
         }
-        let closed_by_paren = source.contains(crate::executor::markers::IFS_GLUE);
+        // rubash#1982: the reader's comsub-heredoc rotation
+        // (lexer::relocate_comsub_heredoc_paren) splices an IFS_GLUE
+        // marker immediately after the owning `$(`, so a marker
+        // inside the source's FIRST line records "the closing paren
+        // sat on the heredoc header line" even though the reprinted
+        // source no longer contains that `)`. A marker at or after
+        // the first newline is the older delimiter-line record
+        // (`EOF)`) and keeps its closed_by_paren meaning for the
+        // delimited-by-end-of-file warning below.
+        let first_line_end = source.find('\n').unwrap_or(source.len());
+        let header_close_marked =
+            source[..first_line_end].contains(crate::executor::markers::IFS_GLUE);
+        let closed_by_paren = source[first_line_end..].contains(crate::executor::markers::IFS_GLUE);
         let source = source.replace(crate::executor::markers::IFS_GLUE, "");
         let source = self.comsub_body_alias_splice_extracted(&source);
-        if emit_warnings && heredoc_header_closes_command_substitution(&source) {
+        if header_close_marked || heredoc_header_closes_command_substitution(&source) {
             // GNU parse.y:4563-4567: when the `)` that closes a command
             // substitution sits on the heredoc header line (`cat << EOF)`),
             // the heredoc has not been gathered yet, so bash warns and then
             // gathers it anyway (heredoc7.sub line 17).
+            // rubash#1982: this warning belongs to the substitution's
+            // parse, not to one expansion face — GNU emits it whichever
+            // way the word is expanded, so it must not ride
+            // `emit_warnings` (some shapes are produced entirely by the
+            // readback entry, which used to silence it completely).
+            // The textual check covers sources that still carry the
+            // header-line `)`; reader-produced sources carry the
+            // rotation's marker instead (header_close_marked above).
+            // Once-ness across faces is already the decline memo's
+            // contract (a typed decline is recorded and the readback
+            // retry never re-plans the same source), so no second
+            // emission site exists for one expansion episode.
+            // `emit_warnings` now owns only the
+            // delimited-by-end-of-file warning further below.
             let start_line = self
                 .shell_state
                 .env_vars
@@ -427,6 +455,43 @@ impl Executor {
             return None;
         }
         if piped_next.is_some_and(command_has_file_redirect) {
+            return None;
+        }
+        // rubash#1981: admission must verify the whole shape the
+        // produce step can model. heredoc_comsub_produce concatenates
+        // each admitted cat's stdin body and nothing else: it cannot
+        // honor file operands (GNU cat interleaves operand files with
+        // the heredoc in argument order — `cat file <<EOF` prints the
+        // file, `cat - file <<EOF` prints body then file) and it
+        // cannot honor option flags. Every cat the plan can fetch
+        // (the first command and, in the sequence arm, every top-level
+        // command) must therefore carry no operands beyond a sole
+        // bare `-`, cat's name for the stdin the heredoc supplies.
+        // The pipeline arm models at most [cat, sort -u]; a third
+        // stage would be silently dropped, so longer pipelines
+        // decline too. Declining only costs the shortcut — the real
+        // executor produces GNU's output for every declined shape.
+        let cat_operands_admissible = |command: &CommandNode| {
+            if command.words.first().map(String::as_str) != Some("cat") {
+                return true;
+            }
+            let operands = &command.words[1..];
+            operands.is_empty() || (operands.len() == 1 && operands[0] == "-")
+        };
+        if !cat_operands_admissible(first)
+            || ast
+                .commands
+                .iter()
+                .any(|command| !cat_operands_admissible(command))
+        {
+            return None;
+        }
+        if ast
+            .commands
+            .first()
+            .and_then(|command| command.pipeline_command.as_ref())
+            .is_some_and(|pipeline| pipeline.stages.len() > 2)
+        {
             return None;
         }
         if emit_warnings && (closed_by_paren || command_has_warned_heredoc(first)) {

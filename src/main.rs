@@ -3,8 +3,6 @@
 //! Run with: cargo run
 
 use rubash::executor::Executor;
-use rubash::lexer::tokenize_with_initial_posix;
-use rubash::parser::parse;
 use rubash::script_driver::{
     check_binary_file, finish_shell, prepare_interactive_history, run_interactive_stdin,
     run_script_with_history, run_source, run_source_with_line_offset, script_uses_aliases,
@@ -478,6 +476,11 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
     }
     let mut init_file: Option<String> = long_state.init_file.take();
     let pretty_print = long_state.pretty_print;
+    // GNU shell.c:506-510: dump mode lists the input's locale strings
+    // instead of executing (read_but_dont_execute); the -D short flag
+    // below can still raise it during the short-option scan.
+    let mut dump_strings = long_state.dump_strings;
+    let dump_po = long_state.dump_po;
     // niubash #107 / GNU shell.c: `-c` does not bind the NEXT argv — commands
     // are read from the FIRST NON-OPTION argument. Options between `-c` and
     // the command string (`bash -c -l 'echo hi'`) keep being parsed as
@@ -623,6 +626,13 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                 read_from_stdin = true;
                 index += 1;
             }
+            (false, "-D") | (false, "+D") => {
+                // GNU shell.c:960-964 (case 'D', either sign):
+                // dump_translatable_strings — the input's locale strings
+                // are listed instead of executed (shell.c:506-510).
+                dump_strings = true;
+                index += 1;
+            }
             (false, "--") | (false, "-") => {
                 // GNU shell.c:905-911: a lone - or -- ends option parsing;
                 // the next argv is the script file. rubash#1480: the marker
@@ -653,6 +663,15 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                     }
                 }
                 if pending_command {
+                    if dump_strings {
+                        // GNU shell.c:506-510 with a -c string: the
+                        // string is read but not executed; its locale
+                        // strings dump (locale.c:550), anchored as `-c`
+                        // in PO mode. Nothing runs — no startup files,
+                        // no side effects (rubash#1977).
+                        dump_strings_text(script, dump_po, "-c");
+                        return 0;
+                    }
                     executor.set_env("BASH_EXECUTION_STRING", script);
                     if let Some(command_name) = args.get(index + 1) {
                         executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
@@ -680,6 +699,14 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                     stdin_positionals.push(script.to_string());
                     index += 1;
                     continue;
+                }
+                if dump_strings {
+                    // GNU shell.c:506-510 + locale.c:550: dump the script
+                    // file's locale strings and exit; the script never
+                    // executes (rubash#1977 — the flag used to be accepted
+                    // and silently dropped, so the operand ran).
+                    executor.set_env("__RUBASH_SCRIPT_NAME", script);
+                    return run_dump_strings(executor, script, dump_po);
                 }
                 if pretty_print {
                     // GNU shell.c:830-831: --pretty-print replaces execution
@@ -719,6 +746,17 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
         // `bash -c` -> "bash: -c: option requires an argument", exit 2.
         eprintln!("bash: -c: option requires an argument");
         return 2;
+    }
+
+    if dump_strings {
+        // GNU shell.c:506-510: with no script operand the dump pass
+        // reads standard input (the -s route included). PO anchors cite
+        // the shell's own argv[0] (locale.c yy_input_name).
+        let mut contents = String::new();
+        let _ = io::stdin().read_to_string(&mut contents);
+        let source_name = argv0.unwrap_or("bash");
+        dump_strings_text(&contents, dump_po, source_name);
+        return 0;
     }
 
     if pretty_print {
@@ -859,6 +897,8 @@ fn apply_startup_job_control(executor: &mut Executor) {
 struct LongOptionState {
     init_file: Option<String>,
     pretty_print: bool,
+    dump_strings: bool,
+    dump_po: bool,
 }
 
 /// The long-option table of the contractual GNU 5.3.0 build
@@ -955,6 +995,16 @@ fn parse_long_options(
             "pretty-print" => {
                 state.pretty_print = true;
             }
+            "dump-strings" => {
+                state.dump_strings = true;
+            }
+            "dump-po-strings" => {
+                // GNU shell.c:506-507: --dump-po-strings implies
+                // dump_translatable_strings, rendered in PO format
+                // (locale.c mk_msgstr).
+                state.dump_strings = true;
+                state.dump_po = true;
+            }
             "noediting" => {
                 // shell.c:269 --noediting sets no_line_editing=1: both
                 // editing modes report off (`[[ -o emacs ]]` /
@@ -962,8 +1012,6 @@ fn parse_long_options(
                 // reads plain lines.
                 executor.set_env("__RUBASH_NO_EDITING", "1");
             }
-            // "dump-po-strings" | "dump-strings": accepted, no Windows
-            // counterpart today.
             // GNU shell.c:255: --debug writes the `debugging` variable that
             // NO code in bash ever reads — a write-only fossil, so the flag
             // carries zero observable GNU behavior to conflict with. niu
@@ -1019,15 +1067,14 @@ bash [GNU long option] [option] script-file ...
 // (issue #585 host-half): the niu launcher answers `bash --help` through
 // the lib so both binaries print byte-identical GNU usage.
 
-/// pretty_print_loop (eval.c:215-253): parse the script and print each
-/// command canonically (print_cmd.c) followed by one newline, then exit
-/// successfully (shell.c:830-831).
-fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
+/// Read a script operand for the --pretty-print / --dump-strings
+/// drivers (the same open_shell_script exit matrix as the script-file
+/// driver: ENOENT -> 127 (EX_NOTFOUND), any other open error -> 126
+/// (EX_NOINPUT) — `bash -D missing` exits 127, not 1 (rubash#262)).
+/// On error the diagnostic is printed here and the exit code returned.
+fn read_script_operand(executor: &mut Executor, script: &str) -> Result<String, i32> {
     let path = executor.resolve_shell_path(script);
     let Ok(contents) = rubash::script_driver::read_script_bytes(&path) else {
-        // Same open_shell_script exit matrix as the script-file driver:
-        // ENOENT -> 127 (EX_NOTFOUND), any other open error -> 126
-        // (EX_NOINPUT) — `bash -D missing` exits 127, not 1 (rubash#262).
         let (message, code) = match std::fs::metadata(&path) {
             Ok(metadata) if metadata.is_dir() => ("Is a directory".to_string(), 126),
             Ok(_) => ("Permission denied".to_string(), 126),
@@ -1045,136 +1092,70 @@ fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
             .or_else(|| executor.get_env("BASH_ARGV0"))
             .unwrap_or("bash");
         eprintln!("{shell_name}: {script}: {message}");
-        return code;
+        return Err(code);
     };
-    run_pretty_print_text(executor, &contents)
+    Ok(contents)
+}
+
+/// pretty_print_loop (eval.c:215-253): parse the script and print each
+/// command canonically (print_cmd.c) followed by one newline, then exit
+/// successfully (shell.c:830-831).
+fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
+    match read_script_operand(executor, script) {
+        Ok(contents) => run_pretty_print_text(executor, &contents),
+        Err(code) => code,
+    }
 }
 
 /// The contents-based core of [`run_pretty_print`] (pretty_print_loop,
 /// eval.c:215-253), shared by the script-file form and the stdin form.
+/// The loop itself lives in the library
+/// (`rubash::parser::ast_print::pretty_print_input`) so hosts print
+/// identically; this wrapper owns the executor-side parse-error
+/// report and the exit code.
 fn run_pretty_print_text(executor: &mut Executor, contents: &str) -> i32 {
-    let contents = contents.to_string();
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-    let mut output = String::new();
-    // pretty_print_loop (eval.c:215-253) reads one command at a time: a
-    // blank input line ends the current command, an empty parse prints one
-    // newline (suppressed right after another newline, last_was_newline),
-    // and each parsed command prints as its canonical text plus one newline.
-    // Commands with blank lines inside are kept whole while their syntax is
-    // still open.
-    let mut pending = String::new();
-    let mut last_was_newline = false;
-    for line in contents.lines() {
-        if line.trim().is_empty()
-            && !rubash::lexer::has_unclosed_input_syntax_posix(&pending, posix)
-        {
-            match flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline, executor)
-            {
-                Ok(next) => last_was_newline = next,
-                // GNU eval.c:215-253 pretty_print_loop: read_command's
-                // parse error longjmps to top_level — yyerror's stderr
-                // diagnostic already fired, commands parsed before the
-                // error have printed, nothing after it does, and the loop
-                // returns EXECUTION_FAILURE.
-                Err(()) => {
-                    print!("{output}");
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                    return 1;
-                }
-            }
-            pending.clear();
-            if !last_was_newline {
-                output.push('\n');
-                last_was_newline = true;
-            }
-            continue;
-        }
-        if !pending.is_empty() {
-            pending.push('\n');
-        }
-        pending.push_str(line);
+    let outcome = rubash::parser::ast_print::pretty_print_input(contents, posix);
+    if let Some(command) = &outcome.parse_error {
+        // GNU eval.c:215-253 pretty_print_loop: read_command's parse
+        // error longjmps to top_level — yyerror's stderr diagnostic
+        // already fired, commands parsed before the error have printed,
+        // nothing after it does, and the loop returns
+        // EXECUTION_FAILURE.
+        executor.report_pretty_print_parse_error(command);
+        print!("{}", outcome.output);
+        let _ = io::stdout().flush();
+        return 1;
     }
-    match flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline, executor) {
-        Ok(next) => last_was_newline = next,
-        Err(()) => {
-            print!("{output}");
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            return 1;
-        }
-    }
-    // GNU's reader delivers an empty parse at EOF after the last command
-    // (eval.c:225-247), printing one final newline.
-    if !last_was_newline && !output.is_empty() {
-        output.push('\n');
-    }
-    print!("{output}");
+    print!("{}", outcome.output);
     0
 }
 
-/// Print one parsed command batch the way pretty_print_loop does. Returns
-/// the updated last_was_newline state, or Err when a command parsed to a
-/// parse-error node (GNU aborts pretty-printing there after the parser's
-/// stderr diagnostic).
-fn flush_pretty_print_chunk(
-    chunk: &str,
-    posix: bool,
-    output: &mut String,
-    last_was_newline: bool,
-    executor: &mut rubash::Executor,
-) -> Result<bool, ()> {
-    let tokens = tokenize_with_initial_posix(chunk, posix);
-    let ast = parse(&tokens);
-    let mut printed = false;
-    for command in &ast.commands {
-        // The parse-error nodes carry their diagnostics as internal
-        // `__RUBASH_PARSE_*` marker assignments; pretty-printing those as
-        // command text leaks the markers into stdout. GNU's reader
-        // longjmps before any print (eval.c:225 `code = setjmp_nosigs
-        // (top_level)`); report the diagnostic and stop the loop.
-        if command.assignments.iter().any(|(name, _)| {
-            name.starts_with("__RUBASH_PARSE_ERROR") || name == "__RUBASH_COMPOUND_SYNTAX_ERROR"
-        }) {
-            executor.report_pretty_print_parse_error(command);
-            return Err(());
+/// -D / --dump-strings over a script file (shell.c:506-510,
+/// locale.c:550): dump the file's locale strings and exit; the script
+/// never executes (rubash#1977).
+fn run_dump_strings(executor: &mut Executor, script: &str, po: bool) -> i32 {
+    match read_script_operand(executor, script) {
+        Ok(contents) => {
+            dump_strings_text(&contents, po, script);
+            0
         }
-        if is_pretty_print_empty(command) {
-            continue;
-        }
-        output.push_str(&rubash::parser::ast_print::pretty_print_command(command));
-        output.push('\n');
-        printed = true;
+        Err(code) => code,
     }
-    if printed {
-        return Ok(false);
-    }
-    Ok(last_was_newline)
 }
 
-/// Comment-only and whitespace-only parses must not print (GNU parses them
-/// as empty commands and suppresses the output).
-fn is_pretty_print_empty(command: &rubash::parser::CommandNode) -> bool {
-    command.words.is_empty()
-        && command.assignments.is_empty()
-        && command.compound_assignments.is_empty()
-        && command.array_element_assignments.is_empty()
-        && command.for_command.is_none()
-        && command.select_command.is_none()
-        && command.loop_command.is_none()
-        && command.if_command.is_none()
-        && command.case_command.is_none()
-        && command.function_command.is_none()
-        && command.arithmetic_command.is_none()
-        && command.conditional_command.is_none()
-        && command.coproc_command.is_none()
-        && command.brace_group.is_none()
-        && command.pipeline_command.is_none()
-        && command.and_or_list.is_none()
-        && command.subshell_command.is_none()
-        && command.background_command.is_none()
-        && command.inverted_command.is_none()
-        && command.time_command.is_none()
+/// The text-based core of the dump drivers, shared by the script-file,
+/// -c and stdin forms: collect the locale strings through the library
+/// entry (`rubash::locale::collect_locale_strings`) and print the GNU
+/// rendering.
+fn dump_strings_text(contents: &str, po: bool, source_name: &str) {
+    let mut strings = Vec::new();
+    rubash::locale::collect_locale_strings(contents, 1, &mut strings);
+    print!(
+        "{}",
+        rubash::locale::render_locale_string_dump(&strings, po, source_name)
+    );
+    let _ = io::stdout().flush();
 }
 
 fn run_command_string_with_init(

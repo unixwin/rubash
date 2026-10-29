@@ -562,6 +562,23 @@ impl Executor {
             || self.shell_state.completion_specs.get("-E").is_some()
     }
 
+    /// The session's open fd numbers, ascending: every fd-table entry
+    /// holding a live read or write endpoint. This is the table the
+    /// `/dev/fd/N` spellings resolve against (the special-path
+    /// registry's fd-alias class), exposed for consumers that
+    /// enumerate that namespace — host completion lists exactly
+    /// these numbers under `/dev/fd/` (niubash#627; vfs audit §6.4:
+    /// the dynamic tier's source is the fd table itself, never a
+    /// name list).
+    pub fn open_fds(&self) -> Vec<u32> {
+        self.fd_table
+            .entries
+            .keys()
+            .copied()
+            .filter(|&fd| self.fd_table.is_open(fd))
+            .collect()
+    }
+
     pub fn set_external_file_builtins_enabled(&mut self, enabled: bool) {
         self.external_file_builtins_enabled = enabled;
     }

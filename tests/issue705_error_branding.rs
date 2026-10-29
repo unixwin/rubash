@@ -21,9 +21,8 @@
 //! Case ids follow rubash#746 (`705.<n>`, this file owns 705.20+).
 
 use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 fn sandbox(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rubash-705b-{tag}-{}", std::process::id()));
