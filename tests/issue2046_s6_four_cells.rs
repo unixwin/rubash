@@ -134,3 +134,78 @@ fn issue2046_b3_stty_validates_all_operands_before_touching_the_device() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------- C1
+
+#[test]
+fn issue2046_c1_uname_help_is_the_full_coreutils_text() {
+    let dir = scratch("c1");
+    // GNU coreutils 9.4 `uname --help`, byte for byte (the pre-fix
+    // engine answered a two-line short form). The same text is the
+    // S5 corpus uname-help cell's hard expectation.
+    let out = run("uname --help", &dir);
+    assert_eq!(
+        out.stdout,
+        "Usage: uname [OPTION]...\n\
+         Print certain system information.  With no OPTION, same as -s.\n\
+         \n\
+         \x20 -a, --all                print all information, in the following order,\n\
+         \x20                            except omit -p and -i if unknown:\n\
+         \x20 -s, --kernel-name        print the kernel name\n\
+         \x20 -n, --nodename           print the network node hostname\n\
+         \x20 -r, --kernel-release     print the kernel release\n\
+         \x20 -v, --kernel-version     print the kernel version\n\
+         \x20 -m, --machine            print the machine hardware name\n\
+         \x20 -p, --processor          print the processor type (non-portable)\n\
+         \x20 -i, --hardware-platform  print the hardware platform (non-portable)\n\
+         \x20 -o, --operating-system   print the operating system\n\
+         \x20     --help        display this help and exit\n\
+         \x20     --version     output version information and exit\n\
+         \n\
+         GNU coreutils online help: <https://www.gnu.org/software/coreutils/>\n\
+         Report any translation bugs to <https://translationproject.org/team/>\n\
+         Full documentation <https://www.gnu.org/software/coreutils/uname>\n\
+         or available locally via: info '(coreutils) uname invocation'\n"
+    );
+    assert_eq!(out.stderr, "");
+    // arch shares the usage_text owner; its --help is the full
+    // coreutils page too (body line is GNU's "Print machine
+    // architecture.", not the paraphrase the short form carried).
+    let out = run("arch --help", &dir);
+    assert_eq!(
+        out.stdout,
+        "Usage: arch [OPTION]...\n\
+         Print machine architecture.\n\
+         \n\
+         \x20     --help        display this help and exit\n\
+         \x20     --version     output version information and exit\n\
+         \n\
+         GNU coreutils online help: <https://www.gnu.org/software/coreutils/>\n\
+         Report any translation bugs to <https://translationproject.org/team/>\n\
+         Full documentation <https://www.gnu.org/software/coreutils/arch>\n\
+         or available locally via: info '(coreutils) arch invocation'\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------- C2
+
+#[test]
+fn issue2046_c2_arch_extra_operand_quotes_are_ascii() {
+    let dir = scratch("c2");
+    // The corpus shape: ASCII quotes, not the Unicode ‘’ pair.
+    let out = run("arch extra; echo rc=$?", &dir);
+    assert_eq!(out.stdout, "rc=1\n");
+    assert_eq!(
+        out.stderr,
+        "arch: extra operand 'extra'\nTry 'arch --help' for more information.\n"
+    );
+    // The shared extra-operand owner serves uname identically.
+    let out = run("uname extra; echo rc=$?", &dir);
+    assert_eq!(out.stdout, "rc=1\n");
+    assert_eq!(
+        out.stderr,
+        "uname: extra operand 'extra'\nTry 'uname --help' for more information.\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
