@@ -198,6 +198,34 @@ fn issue_1359_autofd_write_redirect_keeps_stdout_intact_and_ordered() {
 }
 
 #[test]
+fn issue_1895_multi_slash_target_splits_at_first_slash() {
+    // GNU netopen splits at the FIRST slash (lib/sh/netopen.c:291
+    // strchr): host `a`, service `b/80` — the service word fails, so
+    // the diagnostic names `b/80`, not `b`. Oracle-verified against
+    // GNU bash 5.3.20 for both protocols.
+    let (stdout, stderr, _code) = run_c("( exec 3<>/dev/tcp/a/b/80; echo rc=$? )");
+    assert_eq!(stdout, "rc=1\n");
+    assert!(
+        stderr.contains("b/80: Servname not supported for ai_socktype"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("/dev/tcp/a/b/80: Invalid argument"),
+        "stderr: {stderr}"
+    );
+    let (stdout, stderr, _code) = run_c("( exec 3<>/dev/udp/a/b/53; echo rc=$? )");
+    assert_eq!(stdout, "rc=1\n");
+    assert!(
+        stderr.contains("b/53: Servname not supported for ai_socktype"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("/dev/udp/a/b/53: Invalid argument"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
 fn issue_1896_service_alias_resolves_like_getservbyname() {
     // `www` is http's alias in the services database on unix
     // (/etc/services) and on Windows (drivers\etc\services) alike.
