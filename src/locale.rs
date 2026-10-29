@@ -1378,6 +1378,25 @@ pub fn collect_locale_strings(input: &str, base_line: usize, out: &mut Vec<(usiz
             // no `$"` by construction, so the word scan is a no-op for
             // them and a body scan for the braced form.
             crate::lexer::TokenKind::Variable => scan_locale_words(&token.raw, line, out),
+            crate::lexer::TokenKind::Keyword => {
+                // Two Keyword raws are folded compound spellings whose
+                // inner text never surfaces as word tokens (the lexer
+                // folds them for the parser): an arithmetic command
+                // `((...))` as one whole-spelling token, and a brace
+                // group `{ ...; }` (standalone groups and function
+                // bodies alike). GNU lexes both bodies — arithmetic
+                // text resp. commands — so their locale strings dump
+                // (oracle-probed: ((y = $"a")), { echo $"b"; },
+                // f() { echo $"c"; }). Other Keyword raws are bare
+                // operator words (`if`, `then`, `(`, ...) whose
+                // following text arrives as its own tokens.
+                let raw = token.raw.as_str();
+                if raw.len() >= 4 && raw.starts_with("((") && raw.ends_with("))") {
+                    scan_arithmetic_text(&raw[2..raw.len() - 2], line, out);
+                } else if raw.len() > 2 && raw.starts_with('{') && raw.ends_with('}') {
+                    collect_locale_strings(&raw[1..raw.len() - 1], line, out);
+                }
+            }
             crate::lexer::TokenKind::CommandSubst => match substitution_span(&token.raw) {
                 SubstitutionSpan::Command(body) => collect_locale_strings(&body, line, out),
                 SubstitutionSpan::Arithmetic(body) => scan_arithmetic_text(&body, line, out),
@@ -2055,6 +2074,29 @@ mod dump_strings_tests {
         assert_eq!(
             bodies("echo $(( ${x:-$\"arith.brace\"} + 1 ))"),
             vec!["arith.brace"]
+        );
+    }
+
+    #[test]
+    fn folded_compound_bodies_dump() {
+        // The lexer folds an arithmetic command and a brace group
+        // into single Keyword tokens; GNU lexes their bodies, so
+        // their locale strings dump (oracle-probed shapes).
+        assert_eq!(bodies("((y = $\"arithcmd\"))"), vec!["arithcmd"]);
+        assert_eq!(bodies("{ echo $\"brace.group\"; }"), vec!["brace.group"]);
+        assert_eq!(
+            bodies("f() { echo $\"in.function\"; }"),
+            vec!["in.function"]
+        );
+        assert_eq!(
+            bodies("function g { echo $\"in.function.kw\"; }"),
+            vec!["in.function.kw"]
+        );
+        // Bare keyword tokens carry no body: nothing dumps, and the
+        // words after them still scan as their own tokens.
+        assert_eq!(
+            bodies("if true; then echo $\"if.body\"; fi"),
+            vec!["if.body"]
         );
     }
 
