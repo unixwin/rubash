@@ -586,6 +586,22 @@ pub struct Executor {
     /// refresh_background_jobs in job_builtins.rs). Entries are
     /// (pid, flattened status, killing signal).
     pending_job_completions: Vec<(u32, i32, Option<i32>)>,
+    /// rubash#2053/#2057: coproc pids whose completion has been
+    /// applied (status recorded in completed_statuses) but whose
+    /// retirement — coproc_unsetvars + endpoint close, GNU's
+    /// coproc_reap via coproc_dispose — is deferred to a disposal
+    /// point. GNU separates the reap from the disposal: waitchld
+    /// records the status asynchronously (execute_cmd.c:2326
+    /// coproc_setstatus), while coproc_reap runs from
+    /// cleanup_dead_jobs, whose non-interactive callers are the
+    /// notify_and_cleanup inside a foreground wait_for (jobs.c:3385),
+    /// the wait/jobs builtins, and stream end — never a bare command
+    /// boundary. Retiring at the boundary that merely RECORDED the
+    /// completion unbinds <name>/<name>_PID before the next command
+    /// expands, stealing a `wait $C_PID` operand (bare wait reports
+    /// 0 instead of the recorded status) or a `{C[1]}` redirect
+    /// operand (ambiguous redirect).
+    pending_coproc_retirements: Vec<u32>,
     /// rubash#1528: deferred `time` reports for timed coproc commands.
     /// GNU times a coproc like any async job — the interval is the
     /// job's lifetime (spawn to completion) and the report prints when

@@ -677,14 +677,17 @@ impl Executor {
         }
 
         if self.handle_external_shortcuts(cmd)? {
+            self.note_emulated_foreground_wait();
             return Ok(());
         }
 
         if self.handle_host_external_command(cmd)? {
+            self.note_emulated_foreground_wait();
             return Ok(());
         }
 
         if self.handle_external_file_builtins(cmd)? {
+            self.note_emulated_foreground_wait();
             return Ok(());
         }
 
