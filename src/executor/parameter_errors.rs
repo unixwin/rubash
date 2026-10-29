@@ -1093,6 +1093,236 @@ impl Executor {
         masked.map_or(std::borrow::Cow::Borrowed(text), std::borrow::Cow::Owned)
     }
 
+    /// rubash#1930: mask the parts of a RAW word text that expansion
+    /// would treat as quoted or escaped data, so a text scan judges
+    /// only the `$` references GNU's expansion would actually perform.
+    ///
+    /// The word-level scans consume COOKED words, where the lexer has
+    /// already carrier-encoded quoted text (a single-quoted `$` arrives
+    /// as DATA_DOLLAR and the walker steps over it). A redirect target's
+    /// raw metadata keeps the source spelling instead — real quote
+    /// characters and backslashes — and nounset_unbound_parameter has
+    /// no quote state, so `> '$NOPE'` reported an unbound variable GNU
+    /// never references: redir.c:298 redirection_expand expands the
+    /// word through expand_word_internal, whose single-quoted spans are
+    /// literal data (subst.c:11882 string_extract_single_quoted) and
+    /// whose backslash-escaped sigils never start an expansion.
+    ///
+    /// The mask blanks single-quoted spans (delimiters included) and
+    /// `$'...'` ANSI-C spans (parse.y:5546-5558 hands `$'` to
+    /// parse_matched_pair; the decoded text is literal), and blanks a
+    /// `$`/backtick that a backslash escapes, in or out of double
+    /// quotes. Everything else rides verbatim — double-quoted content
+    /// stays live (a `'` inside `"..."` is literal and does NOT open a
+    /// span), and `$(...)`/backtick units are copied whole under the
+    /// same skip rules the walker itself applies, so quotes inside a
+    /// substitution body cannot toggle this walk's state either.
+    /// `$((...))` arithmetic rides verbatim too: it is evaluated in
+    /// the parent, and the walker keeps scanning its text, so a quote
+    /// character inside it is arithmetic text, never a span delimiter
+    /// for this walk.
+    pub(in crate::executor) fn mask_raw_word_quoted_spans(text: &str) -> std::borrow::Cow<'_, str> {
+        if !text.contains('\'') && !text.contains('\\') {
+            return std::borrow::Cow::Borrowed(text);
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let mut masked = String::with_capacity(text.len());
+        let mut index = 0usize;
+        let mut single = false;
+        let mut ansi_single = false;
+        let mut double = false;
+        while index < chars.len() {
+            let ch = chars[index];
+            if single {
+                masked.push(' ');
+                if ansi_single && ch == '\\' && index + 1 < chars.len() {
+                    masked.push(' ');
+                    index += 2;
+                    continue;
+                }
+                if ch == '\'' {
+                    single = false;
+                    ansi_single = false;
+                }
+                index += 1;
+                continue;
+            }
+            if double {
+                match ch {
+                    '"' => {
+                        masked.push(ch);
+                        double = false;
+                        index += 1;
+                    }
+                    '\\' => {
+                        masked.push(ch);
+                        match chars.get(index + 1).copied() {
+                            Some('$' | '`') => {
+                                masked.push(' ');
+                                index += 2;
+                            }
+                            Some(next) => {
+                                masked.push(next);
+                                index += 2;
+                            }
+                            None => index += 1,
+                        }
+                    }
+                    '`' => {
+                        let end = Self::raw_backtick_span_end(&chars, index);
+                        masked.extend(chars[index..end].iter());
+                        index = end;
+                    }
+                    '$' if chars.get(index + 1) == Some(&'(')
+                        && chars.get(index + 2) != Some(&'(') =>
+                    {
+                        let end = Self::raw_comsub_span_end(&chars, index);
+                        masked.extend(chars[index..end].iter());
+                        index = end;
+                    }
+                    '$' if chars.get(index + 1) == Some(&'(')
+                        && chars.get(index + 2) == Some(&'(') =>
+                    {
+                        let end = Self::raw_arith_span_end(&chars, index);
+                        masked.extend(chars[index..end].iter());
+                        index = end;
+                    }
+                    _ => {
+                        masked.push(ch);
+                        index += 1;
+                    }
+                }
+                continue;
+            }
+            match ch {
+                '\\' => {
+                    masked.push(ch);
+                    match chars.get(index + 1).copied() {
+                        Some('$' | '`') => {
+                            masked.push(' ');
+                            index += 2;
+                        }
+                        Some(next) => {
+                            masked.push(next);
+                            index += 2;
+                        }
+                        None => index += 1,
+                    }
+                }
+                '\'' => {
+                    masked.push(' ');
+                    single = true;
+                    ansi_single = false;
+                    index += 1;
+                }
+                '"' => {
+                    masked.push(ch);
+                    double = true;
+                    index += 1;
+                }
+                '$' if chars.get(index + 1) == Some(&'\'') => {
+                    masked.push('$');
+                    masked.push(' ');
+                    single = true;
+                    ansi_single = true;
+                    index += 2;
+                }
+                '`' => {
+                    let end = Self::raw_backtick_span_end(&chars, index);
+                    masked.extend(chars[index..end].iter());
+                    index = end;
+                }
+                '$' if chars.get(index + 1) == Some(&'(') && chars.get(index + 2) != Some(&'(') => {
+                    let end = Self::raw_comsub_span_end(&chars, index);
+                    masked.extend(chars[index..end].iter());
+                    index = end;
+                }
+                '$' if chars.get(index + 1) == Some(&'(') && chars.get(index + 2) == Some(&'(') => {
+                    let end = Self::raw_arith_span_end(&chars, index);
+                    masked.extend(chars[index..end].iter());
+                    index = end;
+                }
+                _ => {
+                    masked.push(ch);
+                    index += 1;
+                }
+            }
+        }
+        std::borrow::Cow::Owned(masked)
+    }
+
+    /// End index (exclusive) of the `$((...))` unit opened at `dollar`
+    /// in a raw word text. Arithmetic is evaluated in the PARENT (GNU
+    /// expr.c expr_streval), and nounset_unbound_parameter keeps
+    /// scanning its text for `$name` references — so the unit rides
+    /// verbatim and quote characters inside it must not toggle the
+    /// mask walk's quote state. Parens balance plainly (the parser's
+    /// P_ARITH matching, parse.y parse_matched_pair).
+    fn raw_arith_span_end(chars: &[char], dollar: usize) -> usize {
+        let mut depth = 0usize;
+        let mut index = dollar + 1;
+        while index < chars.len() {
+            match chars[index] {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return index + 1;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        chars.len()
+    }
+
+    /// End index (exclusive) of the `$(...)` unit opened at `dollar`
+    /// in a raw word text — the same balanced, quote-aware skip
+    /// nounset_unbound_parameter applies to command substitutions
+    /// (the body is a forked child, subst.c:7143 command_substitute).
+    fn raw_comsub_span_end(chars: &[char], dollar: usize) -> usize {
+        let mut depth = 1usize;
+        let mut single = false;
+        let mut double = false;
+        let mut index = dollar + 2;
+        while index < chars.len() {
+            match chars[index] {
+                '\\' if !single => {
+                    index += 2;
+                    continue;
+                }
+                '\'' if !double => single = !single,
+                '"' if !single => double = !double,
+                '(' if !single && !double => depth += 1,
+                ')' if !single && !double => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return index + 1;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        chars.len()
+    }
+
+    /// End index (exclusive) of the backtick unit opened at `start`
+    /// in a raw word text — the same skip nounset_unbound_parameter
+    /// applies (backslash-escaped backticks do not close the unit).
+    fn raw_backtick_span_end(chars: &[char], start: usize) -> usize {
+        let mut index = start + 1;
+        while index < chars.len() {
+            match chars[index] {
+                '\\' => index += 2,
+                '`' => return index + 1,
+                _ => index += 1,
+            }
+        }
+        chars.len()
+    }
+
     pub(in crate::executor) fn parameter_expansion_error(
         &self,
         cmd: &CommandNode,

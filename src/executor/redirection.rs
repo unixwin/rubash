@@ -372,6 +372,15 @@ impl Executor {
                     &redirect.target_metadata.raw,
                     &redirect.target_metadata.process_substitutions,
                 );
+                // rubash#1930: the raw target text still carries its
+                // source quoting, which the cooked-word scans never see
+                // (the lexer carrier-encodes it away). Judge the target
+                // the way expansion would: a `$` inside '...' / $'...'
+                // or behind a backslash is literal data, not a
+                // reference (redir.c:298 redirection_expand reaches
+                // err_unboundvar only for references the expansion
+                // actually performs).
+                let masked_target = Self::mask_raw_word_quoted_spans(&masked_target);
                 if let Some(name) = self.nounset_unbound_parameter(&masked_target) {
                     let mut stderr = Vec::new();
                     writeln!(
