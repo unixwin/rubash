@@ -4200,9 +4200,30 @@ impl Executor {
         // drivers): its readers must reach the fd-table transports, not
         // an empty payload mirror.
         let streaming_stdin = self.pipeline_stdin_stream.is_some();
-        if streaming_stdin || live_stdin {
+        // The staged mirror IS the stage's fd 0. GNU execute_cmd.c
+        // execute_pipeline forks every element and do_piping
+        // (execute_cmd.c:6373, `if (pipe_in) dup2 (pipe_in, 0)`) replaces
+        // the forked element's fd 0 with the inter-stage pipe; an element
+        // whose fd 0 is a staged payload (heredoc, here-string, its own
+        // `< file`) gets the same replacement from its own
+        // do_redirections. A PERSISTENT shell binding must not leak into
+        // the stage: after `exec 0</dev/null` (trap_exec.rs
+        // execute_stdio_only_exec_redirect binds fd-table slot 0
+        // persistently) or an enclosing `while read; done < file` stream
+        // bind (command_input_scope.rs bind_command_fd0_input), every
+        // stage consumer that judges fd 0 from the fd table (read_io.rs's
+        // fd-0 File arm, external_setup.rs apply_external_stdin_redirect's
+        // inherit arm) read the binding instead of the pipe payload staged
+        // in FUNCTION_STDIN. Clear the slot for the stage's duration so
+        // the staged mirror governs — the same shape the streaming tail
+        // uses when it binds the tail pipe onto fd 0
+        // (execute_external_prefix_streaming_tail) — and restore the
+        // snapshot in the unwind below: the dup2 happens in GNU's forked
+        // child, so the parent's descriptor survives the pipeline.
+        let saved_stage_fd0 = if streaming_stdin || live_stdin {
             self.shell_state.env_vars.remove(FUNCTION_STDIN);
             self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
+            None
         } else {
             self.shell_state
                 .env_vars
@@ -4210,7 +4231,8 @@ impl Executor {
             self.shell_state
                 .env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
-        }
+            Some(self.fd_table.entries.remove(&0))
+        };
         self.pipeline_stdin_consumed.set(None);
         let result = if command_has_pipeline_process_substitution(command) {
             // The substitution child inherits the stage's stdin — the
@@ -4265,6 +4287,20 @@ impl Executor {
         // Restore the parent's job table (rubash#1349 swap above).
         if let Some(saved) = saved_job_table {
             self.shell_state.job_table = saved;
+        }
+        // Restore the ambient fd-0 binding the stage replaced: GNU's
+        // do_piping dup2 ran in the forked element, so the parent shell
+        // keeps its own descriptor after the pipeline (redir.c RX_ACTIVE
+        // persistence for `exec 0<target`).
+        if let Some(saved) = saved_stage_fd0 {
+            match saved {
+                Some(entry) => {
+                    self.fd_table.entries.insert(0, entry);
+                }
+                None => {
+                    self.fd_table.entries.remove(&0);
+                }
+            }
         }
         // Inline stage arms that ran on `self` consumed FUNCTION_STDIN
         // directly; subshell/child stages report through the cell. Whichever

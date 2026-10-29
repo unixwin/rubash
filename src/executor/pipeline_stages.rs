@@ -37,6 +37,14 @@ impl Executor {
         self.shell_state
             .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        // The staged mirror IS the stage's fd 0 (same invariant as
+        // execute_pipeline_stage): GNU runs the lastpipe element in the
+        // current shell with the pipe dup2'd onto fd 0
+        // (execute_cmd.c:2758), so a PERSISTENT fd-0 binding (`exec
+        // 0<target`, an enclosing `done < file` stream bind) must not
+        // shadow the staged payload. Clear the slot for the element and
+        // restore it below — the parent keeps its descriptor.
+        let saved_stage_fd0 = self.fd_table.entries.remove(&0);
 
         let saved_stdout_capture = self.stdout_capture.take();
         let saved_stderr_capture = self.stderr_capture.take();
@@ -81,6 +89,18 @@ impl Executor {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
         self.pipeline_stdin_consumed.set(Some(consumed));
+        // Restore the ambient fd-0 binding the element replaced (GNU's
+        // in-shell dup2 is undone after the element — the shell keeps its
+        // own descriptor, redir.c RX_ACTIVE persistence for `exec
+        // 0<target`).
+        match saved_stage_fd0 {
+            Some(entry) => {
+                self.fd_table.entries.insert(0, entry);
+            }
+            None => {
+                self.fd_table.entries.remove(&0);
+            }
+        }
         restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
         restore_optional_env_var(
             &mut self.shell_state.env_vars,
