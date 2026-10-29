@@ -70,7 +70,10 @@
 //! wording, with GNU's `Try 'stty --help'` hint after invalid argument
 //! and no hint after invalid integer (both probed). On macOS the baud
 //! table stops at 38400: Darwin's libc provides no B57600+ constants,
-//! so higher bare-decimal rates are invalid arguments there.
+//! so higher bare-decimal rates are invalid arguments there; the
+//! Linux-only termios names with no Darwin counterpart (`swtch`,
+//! `iuclc`, `olcuc`) are omitted from the dump there, and `line`
+//! prints 0 (Darwin termios has no c_line field).
 //!
 //! The mode persists on the console handle after the builtin returns, so a
 //! menu script's `stty raw -echo` stays in force for every later `read` —
@@ -1046,8 +1049,10 @@ fn display_all_unix(stdout: &mut Vec<u8>) -> Result<(), ()> {
     let speed = unsafe { libc::cfgetospeed(&term) };
     let ispeed = unsafe { libc::cfgetispeed(&term) };
 
-    // Control characters (GNU control_info order).
-    let controls: [(&str, u32); 15] = [
+    // Control characters (GNU control_info order). VSWTC is a
+    // Linux/Android c_cc index only — Darwin termios has no swtch
+    // slot, so the row is omitted there.
+    let controls = [
         ("intr", libc::VINTR as u32),
         ("quit", libc::VQUIT as u32),
         ("erase", libc::VERASE as u32),
@@ -1055,6 +1060,7 @@ fn display_all_unix(stdout: &mut Vec<u8>) -> Result<(), ()> {
         ("eof", libc::VEOF as u32),
         ("eol", libc::VEOL as u32),
         ("eol2", libc::VEOL2 as u32),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         ("swtch", libc::VSWTC as u32),
         ("start", libc::VSTART as u32),
         ("stop", libc::VSTOP as u32),
@@ -1090,16 +1096,23 @@ fn display_all_unix(stdout: &mut Vec<u8>) -> Result<(), ()> {
             baud_from_const(speed).unwrap_or(0)
         )
     };
+    // Darwin termios has no c_line field; the line discipline is 0
+    // there (the honest constant, as on the Windows face).
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let line_discipline = term.c_line;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let line_discipline = 0;
     stdout.extend_from_slice(
         format!(
             "{speed_text} rows {}; columns {}; line = {};\n",
-            ws.ws_row, ws.ws_col, term.c_line
+            ws.ws_row, ws.ws_col, line_discipline
         )
         .as_bytes(),
     );
 
-    // Input flags, WinuxCmd line order.
-    let input: [(&str, libc::tcflag_t, libc::tcflag_t); 12] = [
+    // Input flags, WinuxCmd line order. IUCLC is a Linux/Android
+    // iflag only — Darwin termios has no such bit, row omitted there.
+    let input = [
         ("ignbrk", libc::IGNBRK, libc::IGNBRK),
         ("brkint", libc::BRKINT, libc::BRKINT),
         ("parmrk", libc::PARMRK, libc::PARMRK),
@@ -1109,6 +1122,7 @@ fn display_all_unix(stdout: &mut Vec<u8>) -> Result<(), ()> {
         ("icrnl", libc::ICRNL, libc::ICRNL),
         ("ixon", libc::IXON, libc::IXON),
         ("ixoff", libc::IXOFF, libc::IXOFF),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         ("iuclc", libc::IUCLC, libc::IUCLC),
         ("ixany", libc::IXANY, libc::IXANY),
         ("imaxbel", libc::IMAXBEL, libc::IMAXBEL),
@@ -1121,8 +1135,10 @@ fn display_all_unix(stdout: &mut Vec<u8>) -> Result<(), ()> {
     });
     stdout.extend_from_slice(input_line.as_bytes());
     // Output flags; the delay masks are fixed at 0 like the applet.
-    let output: [(&str, libc::tcflag_t, libc::tcflag_t); 8] = [
+    // OLCUC is a Linux/Android oflag only — row omitted on Darwin.
+    let output = [
         ("opost", libc::OPOST, libc::OPOST),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         ("olcuc", libc::OLCUC, libc::OLCUC),
         ("ocrnl", libc::OCRNL, libc::OCRNL),
         ("onlcr", libc::ONLCR, libc::ONLCR),
