@@ -922,8 +922,22 @@ impl Executor {
         if let Some(redirect) = &stdio.stderr_redirect {
             let file = open_command_substitution_redirect(redirect).ok()?;
             process.stderr(Stdio::from(file));
+        } else if self.command_substitution_stderr_is_process_stderr() {
+            // GNU subst.c:7143 command_substitute: the forked child shares
+            // the parent's fd 2 — only fd 1 is replaced by the capture
+            // pipe, fd 2 is never captured (subst.c:7149). Inherit it live:
+            // piping it into wait_with_output's buffer dropped the bytes
+            // wholesale, so a spawned child's diagnostics inside $( )
+            // vanished while its status survived (rubash#2086).
+            process.stderr(Stdio::inherit());
         } else {
-            process.stderr(Stdio::piped());
+            // fd 2 is rebound (a file, a stdout snapshot), closed, or
+            // captured by an enclosing pipeline stage in this context: a
+            // bare spawn has no handle for that binding. Decline to the
+            // full-execution path, whose stdio planner realizes fd 2 from
+            // the fd table (the same fall-through every other
+            // inexpressible shape in this route takes).
+            return None;
         }
         // rubash#438: /dev/fd/N operand words stay literal on Unix; pin the
         // substitution pipe read ends at their numbers in the child.
@@ -968,6 +982,21 @@ impl Executor {
                 .trim_capture_terminator()
                 .to_string(),
         )
+    }
+
+    /// True when this executor's fd 2 is the ambient process stderr: the
+    /// seeded default endpoint, not closed, and not shadowed by an
+    /// executor-level stderr capture (a pipeline-stage body installs one,
+    /// and its buffered routing — not a live handle — owns fd 2 there).
+    /// Only then does `Stdio::inherit()` name exactly the object GNU's
+    /// substitution fork leaves on the child's fd 2 (subst.c:7143).
+    fn command_substitution_stderr_is_process_stderr(&self) -> bool {
+        !self.fd_table.is_closed(2)
+            && self.stderr_capture.is_none()
+            && matches!(
+                self.fd_table.output_endpoint(2),
+                Some(FdWriteEndpoint::Stderr)
+            )
     }
 
     fn command_substitution_words_and_stdio(
