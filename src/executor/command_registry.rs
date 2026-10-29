@@ -2681,10 +2681,10 @@ mod registry_consistency {
         // Shadow-arm guard on the whole pipelines file, with the
         // known non-claims pinned exactly so a real claim cannot
         // hide behind them: "mktemp" is the word arm implementation
-        // home's own name key (its claim is the ComsubWord entry,
-        // projected by COMSUB_WORD) plus the heredoc producer's
-        // negative guard; "time" is the leading time-prefix skip
-        // in the timed wrapper.
+        // home's own name key (mktemp_command_substitution guards
+        // itself; its claim is the ComsubWord entry, projected by
+        // COMSUB_WORD in the word evaluator); "time" is the leading
+        // time-prefix skip in the timed wrapper.
         let scanned = only_registered(normalized(claim_literals(SRC_COMSUB_PIPELINES)));
         let mut expected = claims(Entry::ComsubTimed);
         expected.extend(claims(Entry::ComsubHeredoc));
