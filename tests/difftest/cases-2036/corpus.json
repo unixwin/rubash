@@ -1,0 +1,1187 @@
+{
+ "corpus": "rubash #2036 S5 three-way sync corpus (engine x WinuxCmd reference x GNU)",
+ "anchors": {
+  "shell": "GNU bash 5.3.20 (owner-built)",
+  "coreutils": "GNU coreutils 9.4",
+  "diffutils": "GNU diffutils 3.10",
+  "measured": "2026-10-29",
+  "note": "WinuxCmd applets are themselves differentially pinned to GNU in the WinuxCmd repo; the GNU column is the shared sync target. The Windows three-way run of this same case set is the win-diff battery (pkg10 H cell)."
+ },
+ "cases": [
+  {
+   "id": "echo-basic",
+   "name": "echo",
+   "face": "builtin",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "echo hello",
+   "expect": {
+    "rc": 0,
+    "stdout": "hello\n"
+   }
+  },
+  {
+   "id": "echo-n",
+   "name": "echo",
+   "face": "builtin",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "echo -n hi; echo '|'",
+   "expect": {
+    "rc": 0,
+    "stdout": "hi|\n"
+   }
+  },
+  {
+   "id": "env-basic",
+   "name": "env",
+   "face": "builtin",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "env S5V=probe printenv S5V",
+   "expect": {
+    "rc": 0,
+    "stdout": "probe\n"
+   }
+  },
+  {
+   "id": "env-u-path",
+   "name": "env",
+   "face": "builtin",
+   "status": "registered",
+   "ref": "#2046 B2 (unruled; registered only, no behavior change)",
+   "path": "system",
+   "script": "env -u PATH printenv PATH; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=127\n",
+    "stderr": "env: failed to run command 'printenv': No such file or directory\n"
+   },
+   "gnu": {
+    "rc": 0,
+    "stdout": "rc=1\n"
+   }
+  },
+  {
+   "id": "false-rc",
+   "name": "false",
+   "face": "builtin",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "false; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n"
+   }
+  },
+  {
+   "id": "true-rc",
+   "name": "true",
+   "face": "builtin",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "true; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=0\n"
+   }
+  },
+  {
+   "id": "kill-l-9",
+   "name": "kill",
+   "face": "builtin",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "kill -l 9",
+   "expect": {
+    "rc": 0,
+    "stdout": "KILL\n"
+   }
+  },
+  {
+   "id": "kill-l-int",
+   "name": "kill",
+   "face": "builtin",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "kill -l INT",
+   "expect": {
+    "rc": 0,
+    "stdout": "2\n"
+   }
+  },
+  {
+   "id": "printf-basic",
+   "name": "printf",
+   "face": "builtin",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "printf '%s-%d\\n' ab 7",
+   "expect": {
+    "rc": 0,
+    "stdout": "ab-7\n"
+   }
+  },
+  {
+   "id": "pwd-basic",
+   "name": "pwd",
+   "face": "builtin",
+   "status": "gnu",
+   "ref": "stdout is the scratch dir, stored as {DIR}",
+   "path": "system",
+   "script": "pwd",
+   "expect": {
+    "rc": 0,
+    "stdout": "{DIR}\n"
+   }
+  },
+  {
+   "id": "test-basic",
+   "name": "test",
+   "face": "builtin",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "[ 1 -eq 1 ] && echo yes; [ -f f.txt ] && echo file",
+   "files": {
+    "f.txt": "hello\n"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "yes\nfile\n"
+   }
+  },
+  {
+   "id": "bracket-basic",
+   "name": "[",
+   "face": "builtin",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "[ 2 -gt 1 ] && echo big",
+   "expect": {
+    "rc": 0,
+    "stdout": "big\n"
+   }
+  },
+  {
+   "id": "uname-s",
+   "name": "uname",
+   "face": "hidden-fastpath",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "uname -s",
+   "expect": {
+    "rc": 0,
+    "stdout": "Linux\n"
+   }
+  },
+  {
+   "id": "uname-help",
+   "name": "uname",
+   "face": "hidden-fastpath",
+   "status": "registered",
+   "ref": "#2046 C1 (unruled; registered only, no behavior change)",
+   "path": "system",
+   "script": "uname --help",
+   "expect": {
+    "rc": 0,
+    "stdout": "Usage: uname [OPTION]...\nPrint certain system information.  With no OPTION, same as -s.\n"
+   },
+   "gnu": {
+    "rc": 0,
+    "stdout": "Usage: uname [OPTION]...\nPrint certain system information.  With no OPTION, same as -s.\n\n  -a, --all                print all information, in the following order,\n                             except omit -p and -i if unknown:\n  -s, --kernel-name        print the kernel name\n  -n, --nodename           print the network node hostname\n  -r, --kernel-release     print the kernel release\n  -v, --kernel-version     print the kernel version\n  -m, --machine            print the machine hardware name\n  -p, --processor          print the processor type (non-portable)\n  -i, --hardware-platform  print the hardware platform (non-portable)\n  -o, --operating-system   print the operating system\n      --help        display this help and exit\n      --version     output version information and exit\n\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/uname>\nor available locally via: info '(coreutils) uname invocation'\n"
+   }
+  },
+  {
+   "id": "arch-basic",
+   "name": "arch",
+   "face": "hidden-fastpath",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "arch",
+   "expect": {
+    "rc": 0,
+    "stdout": "x86_64\n"
+   }
+  },
+  {
+   "id": "arch-extra",
+   "name": "arch",
+   "face": "hidden-fastpath",
+   "status": "registered",
+   "ref": "#2046 C2 (unruled; registered only, no behavior change)",
+   "path": "system",
+   "script": "arch extra; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "arch: extra operand ‘extra’\nTry 'arch --help' for more information.\n"
+   },
+   "gnu": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "arch: extra operand 'extra'\nTry 'arch --help' for more information.\n"
+   }
+  },
+  {
+   "id": "stty-badopt",
+   "name": "stty",
+   "face": "hidden-fastpath",
+   "status": "registered",
+   "ref": "#2046 B3 (unruled; registered only, no behavior change)",
+   "path": "system",
+   "script": "stty -Z; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "stty: 'standard input': Inappropriate ioctl for device\n"
+   },
+   "gnu": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "stty: invalid argument '-Z'\nTry 'stty --help' for more information.\n"
+   }
+  },
+  {
+   "id": "stty-size",
+   "name": "stty",
+   "face": "hidden-fastpath",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "stty size; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "stty: 'standard input': Inappropriate ioctl for device\n"
+   }
+  },
+  {
+   "id": "stty-fake",
+   "name": "stty",
+   "face": "hidden-fastpath",
+   "status": "registered",
+   "ref": "stand_down Replace ruled (#2036 S3 table, stty row; user 2026-10-29: keep the engine builtin)",
+   "path": "fakes",
+   "script": "stty -a; echo rc=$?",
+   "fakes": {
+    "stty": "echo FAKE-stty"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "stty: 'standard input': Inappropriate ioctl for device\n"
+   },
+   "gnu": {
+    "rc": 0,
+    "stdout": "FAKE-stty\nrc=0\n"
+   }
+  },
+  {
+   "id": "sleep-zero",
+   "name": "sleep",
+   "face": "fastpath",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "sleep 0; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=0\n"
+   }
+  },
+  {
+   "id": "sleep-bad",
+   "name": "sleep",
+   "face": "fastpath",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "sleep abc; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "sleep: invalid time interval 'abc'\nTry 'sleep --help' for more information.\n"
+   }
+  },
+  {
+   "id": "sleep-fake",
+   "name": "sleep",
+   "face": "fastpath",
+   "status": "registered",
+   "ref": "stand_down Replace ruled (#2036 S3 table, sleep row)",
+   "path": "fakes",
+   "script": "sleep 0; echo rc=$?",
+   "fakes": {
+    "sleep": "echo FAKE-sleep"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=0\n"
+   },
+   "gnu": {
+    "rc": 0,
+    "stdout": "FAKE-sleep\nrc=0\n"
+   }
+  },
+  {
+   "id": "dirname-basic",
+   "name": "dirname",
+   "face": "fastpath",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "dirname /a/b/c",
+   "expect": {
+    "rc": 0,
+    "stdout": "/a/b\n"
+   }
+  },
+  {
+   "id": "dirname-multi",
+   "name": "dirname",
+   "face": "fastpath",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "dirname /a/b /c/d",
+   "expect": {
+    "rc": 0,
+    "stdout": "/a\n/c\n"
+   }
+  },
+  {
+   "id": "basename-basic",
+   "name": "basename",
+   "face": "fastpath",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "basename /a/b/c",
+   "expect": {
+    "rc": 0,
+    "stdout": "c\n"
+   }
+  },
+  {
+   "id": "basename-suffixarg",
+   "name": "basename",
+   "face": "fastpath",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "basename /a/b.txt .txt",
+   "expect": {
+    "rc": 0,
+    "stdout": "b\n"
+   }
+  },
+  {
+   "id": "basename-comsub-basic",
+   "name": "basename",
+   "face": "comsub-arm",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "x=$(basename /a/b/c); echo \"[$x]\"",
+   "expect": {
+    "rc": 0,
+    "stdout": "[c]\n"
+   }
+  },
+  {
+   "id": "basename-comsub-suffix",
+   "name": "basename",
+   "face": "comsub-arm",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "x=$(basename /a/b.txt .txt); echo \"[$x]\"",
+   "expect": {
+    "rc": 0,
+    "stdout": "[b]\n"
+   }
+  },
+  {
+   "id": "basename-comsub-root",
+   "name": "basename",
+   "face": "comsub-arm",
+   "status": "gnu",
+   "ref": "#2043 mechanism collateral: comsub arm shares the simple face's basename_value surgery",
+   "path": "system",
+   "script": "x=$(basename /); echo \"[$x]\"",
+   "expect": {
+    "rc": 0,
+    "stdout": "[/]\n"
+   }
+  },
+  {
+   "id": "basename-comsub-extra",
+   "name": "basename",
+   "face": "comsub-arm",
+   "status": "gnu",
+   "ref": "#2043 A2",
+   "path": "system",
+   "script": "x=$(basename a b c); echo \"rc=$? [$x]\"",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1 []\n",
+    "stderr": "basename: extra operand 'c'\nTry 'basename --help' for more information.\n"
+   }
+  },
+  {
+   "id": "basename-comsub-opt",
+   "name": "basename",
+   "face": "comsub-arm",
+   "status": "gnu",
+   "ref": "#2043 A3",
+   "path": "system",
+   "script": "x=$(basename --suffix=.txt /a/b.txt); echo \"rc=$? [$x]\"",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=0 [b]\n"
+   }
+  },
+  {
+   "id": "basename-comsub-nopath",
+   "name": "basename",
+   "face": "comsub-arm",
+   "status": "gnu",
+   "ref": "#2046 B1 (FailClosed ruled, DECISIONS 2026-10-29)",
+   "path": "nonexist",
+   "script": "x=$(basename /a/b/c); echo \"rc=$? [$x]\"",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=127 []\n",
+    "stderr_contains": "basename: command not found"
+   }
+  },
+  {
+   "id": "dirname-comsub-nopath",
+   "name": "dirname",
+   "face": "comsub-arm",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "nonexist",
+   "script": "x=$(dirname /a/b/c); echo \"rc=$? [$x]\"",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=127 []\n",
+    "stderr_contains": "dirname: command not found"
+   }
+  },
+  {
+   "id": "cat-file",
+   "name": "cat",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "cat f.txt",
+   "files": {
+    "f.txt": "hello\nworld\n"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "hello\nworld\n"
+   }
+  },
+  {
+   "id": "cat-n",
+   "name": "cat",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "cat -n f.txt",
+   "files": {
+    "f.txt": "hello\nworld\n"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "     1\thello\n     2\tworld\n"
+   }
+  },
+  {
+   "id": "cat-missing",
+   "name": "cat",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "cat nope.txt; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "cat: nope.txt: No such file or directory\n"
+   }
+  },
+  {
+   "id": "cat-version",
+   "name": "cat",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "emulation declines --version to the real body; version digits are the runner's coreutils, the brand line is the contract",
+   "path": "system",
+   "script": "cat --version | head -n 1",
+   "expect": {
+    "rc": 0,
+    "stdout_contains": "(GNU coreutils)"
+   }
+  },
+  {
+   "id": "cat-simple-fake",
+   "name": "cat",
+   "face": "emulated",
+   "status": "registered",
+   "ref": "stand_down Replace ruled (#2036 S3 table, cat row); attribution corrected per S4 four-quadrant measurement: the simple face replaces BOTH script and ELF shapes (shape-blind)",
+   "path": "fakes",
+   "script": "cat f.txt",
+   "files": {
+    "f.txt": "hello\nworld\n"
+   },
+   "fakes": {
+    "cat": "echo FAKE-cat"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "hello\nworld\n"
+   },
+   "gnu": {
+    "rc": 0,
+    "stdout": "FAKE-cat\n"
+   }
+  },
+  {
+   "id": "cat-simple-elf",
+   "name": "cat",
+   "face": "emulated",
+   "status": "registered",
+   "ref": "stand_down Replace ruled (#2036 S3 table, cat row); attribution corrected per S4 four-quadrant measurement: the simple face replaces BOTH script and ELF shapes (shape-blind)",
+   "path": "fakes",
+   "script": "cat f.txt",
+   "files": {
+    "f.txt": "hello\nworld\n"
+   },
+   "elf_fakes": [
+    "cat"
+   ],
+   "expect": {
+    "rc": 0,
+    "stdout": "hello\nworld\n"
+   },
+   "gnu": {
+    "rc": 0,
+    "stdout": ""
+   }
+  },
+  {
+   "id": "cat-pipe-fake",
+   "name": "cat",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "S4 four-quadrant attribution: the pipeline face yields both shapes to the concurrent direct-spawn planner (shape-blind), matching GNU's result",
+   "path": "fakes",
+   "script": "cat f.txt | head -n 1",
+   "files": {
+    "f.txt": "hello\nworld\n"
+   },
+   "fakes": {
+    "cat": "echo FAKE-cat"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "FAKE-cat\n"
+   }
+  },
+  {
+   "id": "command-cat-fake",
+   "name": "cat",
+   "face": "emulated",
+   "status": "registered",
+   "ref": "#2046 cell 2 companion (command-face claim ruled keep, #2036 S3 section 3.2-d)",
+   "path": "fakes",
+   "script": "command cat f.txt",
+   "files": {
+    "f.txt": "hello\nworld\n"
+   },
+   "fakes": {
+    "cat": "echo FAKE-cat"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "hello\nworld\n"
+   },
+   "gnu": {
+    "rc": 0,
+    "stdout": "FAKE-cat\n"
+   }
+  },
+  {
+   "id": "command-sleep-fake",
+   "name": "sleep",
+   "face": "fastpath",
+   "status": "gnu",
+   "ref": "#2046 cell 2 (ruled keep, #2036 S3 section 3.2-d: command sleep spawns the real body, which is also the GNU shape)",
+   "path": "fakes",
+   "script": "command sleep 9; echo rc=$?",
+   "fakes": {
+    "sleep": "echo FAKE-sleep"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "FAKE-sleep\nrc=0\n"
+   }
+  },
+  {
+   "id": "chmod-shape",
+   "name": "chmod",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "chmod 600 f.txt; stat -c %a f.txt",
+   "files": {
+    "f.txt": "hello\n"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "600\n"
+   }
+  },
+  {
+   "id": "chmod-missing",
+   "name": "chmod",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "chmod; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "chmod: missing operand\nTry 'chmod --help' for more information.\n"
+   }
+  },
+  {
+   "id": "cp-shape",
+   "name": "cp",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "cp f.txt g.txt; cat g.txt",
+   "files": {
+    "f.txt": "hello\nworld\n"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "hello\nworld\n"
+   }
+  },
+  {
+   "id": "cp-missing",
+   "name": "cp",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "cp; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "cp: missing file operand\nTry 'cp --help' for more information.\n"
+   }
+  },
+  {
+   "id": "mkdir-missing",
+   "name": "mkdir",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "#2043 A1",
+   "path": "system",
+   "script": "mkdir",
+   "expect": {
+    "rc": 1,
+    "stdout": "",
+    "stderr": "mkdir: missing operand\nTry 'mkdir --help' for more information.\n"
+   }
+  },
+  {
+   "id": "mkdir-p-missing",
+   "name": "mkdir",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "#2043 A1",
+   "path": "system",
+   "script": "mkdir -p",
+   "expect": {
+    "rc": 1,
+    "stdout": "",
+    "stderr": "mkdir: missing operand\nTry 'mkdir --help' for more information.\n"
+   }
+  },
+  {
+   "id": "mkdir-dd-missing",
+   "name": "mkdir",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "#2043 A1",
+   "path": "system",
+   "script": "mkdir --",
+   "expect": {
+    "rc": 1,
+    "stdout": "",
+    "stderr": "mkdir: missing operand\nTry 'mkdir --help' for more information.\n"
+   }
+  },
+  {
+   "id": "mkdir-basic",
+   "name": "mkdir",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "mkdir newdir; [ -d newdir ] && echo made",
+   "expect": {
+    "rc": 0,
+    "stdout": "made\n"
+   }
+  },
+  {
+   "id": "mkdir-exists",
+   "name": "mkdir",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "mkdir .; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "mkdir: cannot create directory '.': File exists\n"
+   }
+  },
+  {
+   "id": "mkfifo-shape",
+   "name": "mkfifo",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "mkfifo p; [ -p p ] && echo fifo",
+   "expect": {
+    "rc": 0,
+    "stdout": "fifo\n"
+   }
+  },
+  {
+   "id": "rm-shape",
+   "name": "rm",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "rm f.txt; [ -e f.txt ] || echo gone",
+   "files": {
+    "f.txt": "hello\n"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "gone\n"
+   }
+  },
+  {
+   "id": "rm-missing",
+   "name": "rm",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "rm; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "rm: missing operand\nTry 'rm --help' for more information.\n"
+   }
+  },
+  {
+   "id": "rmdir-shape",
+   "name": "rmdir",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "mkdir d; rmdir d; [ -e d ] || echo gone",
+   "expect": {
+    "rc": 0,
+    "stdout": "gone\n"
+   }
+  },
+  {
+   "id": "rmdir-missing",
+   "name": "rmdir",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "rmdir; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "rmdir: missing operand\nTry 'rmdir --help' for more information.\n"
+   }
+  },
+  {
+   "id": "sed-stdin",
+   "name": "sed",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "printf 'hello\\n' | sed 's/hello/world/'",
+   "expect": {
+    "rc": 0,
+    "stdout": "world\n"
+   }
+  },
+  {
+   "id": "sed-file",
+   "name": "sed",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "sed 's/hello/world/' f.txt",
+   "files": {
+    "f.txt": "hello\n"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "world\n"
+   }
+  },
+  {
+   "id": "sed-i",
+   "name": "sed",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "sed -i 's/hello/world/' f.txt; cat f.txt",
+   "files": {
+    "f.txt": "hello\n"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "world\n"
+   }
+  },
+  {
+   "id": "touch-shape",
+   "name": "touch",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "touch new.txt; [ -f new.txt ] && echo touched",
+   "expect": {
+    "rc": 0,
+    "stdout": "touched\n"
+   }
+  },
+  {
+   "id": "touch-missing",
+   "name": "touch",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "touch; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n",
+    "stderr": "touch: missing file operand\nTry 'touch --help' for more information.\n"
+   }
+  },
+  {
+   "id": "tty-notty",
+   "name": "tty",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "tty; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "not a tty\nrc=1\n"
+   }
+  },
+  {
+   "id": "tty-s",
+   "name": "tty",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "tty -s; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n"
+   }
+  },
+  {
+   "id": "tput-noterm",
+   "name": "tput",
+   "face": "emulated",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "tput cols; echo rc=$?",
+   "env": {
+    "TERM": ""
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=2\n",
+    "stderr": "tput: No value for $TERM and no -T specified\n"
+   }
+  },
+  {
+   "id": "grep-pipe",
+   "name": "grep",
+   "face": "pipeline",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "printf 'alpha\\nbeta\\n' | grep beta",
+   "expect": {
+    "rc": 0,
+    "stdout": "beta\n"
+   }
+  },
+  {
+   "id": "grep-nomatch",
+   "name": "grep",
+   "face": "pipeline",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "printf 'alpha\\n' | grep zzz; echo rc=$?",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1\n"
+   }
+  },
+  {
+   "id": "head-pipe",
+   "name": "head",
+   "face": "pipeline",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "printf '1\\n2\\n3\\n' | head -n 2",
+   "expect": {
+    "rc": 0,
+    "stdout": "1\n2\n"
+   }
+  },
+  {
+   "id": "tr-pipe",
+   "name": "tr",
+   "face": "pipeline",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "printf 'abc\\n' | tr a-z A-Z",
+   "expect": {
+    "rc": 0,
+    "stdout": "ABC\n"
+   }
+  },
+  {
+   "id": "wc-pipe",
+   "name": "wc",
+   "face": "pipeline",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "printf 'a\\nb\\n' | wc -l",
+   "expect": {
+    "rc": 0,
+    "stdout": "2\n"
+   }
+  },
+  {
+   "id": "yes-head",
+   "name": "yes",
+   "face": "pipeline-standin",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "yes | head -n 2",
+   "expect": {
+    "rc": 0,
+    "stdout": "y\ny\n"
+   }
+  },
+  {
+   "id": "yes-word",
+   "name": "yes",
+   "face": "pipeline-standin",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "yes no | head -n 1",
+   "expect": {
+    "rc": 0,
+    "stdout": "no\n"
+   }
+  },
+  {
+   "id": "sort-comsub-heredoc",
+   "name": "sort",
+   "face": "comsub-heredoc",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "x=$(sort -u <<'EOF'\nb\na\nb\nEOF\n); printf '%s\\n' \"$x\"",
+   "expect": {
+    "rc": 0,
+    "stdout": "a\nb\n"
+   }
+  },
+  {
+   "id": "diff-same",
+   "name": "diff",
+   "face": "external-shortcut",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "diff a.txt b.txt; echo rc=$?",
+   "files": {
+    "a.txt": "one\ntwo\n",
+    "b.txt": "one\ntwo\n"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=0\n"
+   }
+  },
+  {
+   "id": "diff-differ",
+   "name": "diff",
+   "face": "external-shortcut",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "diff a.txt b.txt; echo rc=$?",
+   "files": {
+    "a.txt": "one\ntwo\n",
+    "b.txt": "one\nTWO\n"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "2c2\n< two\n---\n> TWO\nrc=1\n"
+   }
+  },
+  {
+   "id": "diff-shebang",
+   "name": "diff",
+   "face": "external-shortcut",
+   "status": "gnu",
+   "ref": "#2043 A4",
+   "path": "system",
+   "script": "diff a.sh b.sh; echo rc=$?",
+   "files": {
+    "a.sh": "#!/bin/bash\necho hi\n",
+    "b.sh": "#!/bin/sh\necho hi\n"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "1c1\n< #!/bin/bash\n---\n> #!/bin/sh\nrc=1\n"
+   }
+  },
+  {
+   "id": "diff-missing",
+   "name": "diff",
+   "face": "external-shortcut",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "diff a.txt nope.txt; echo rc=$?",
+   "files": {
+    "a.txt": "one\n"
+   },
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=2\n",
+    "stderr": "diff: nope.txt: No such file or directory\n"
+   }
+  },
+  {
+   "id": "time-type",
+   "name": "time",
+   "face": "keyword",
+   "status": "gnu",
+   "ref": "audit section 3.2 measured GNU-equal",
+   "path": "system",
+   "script": "type -t time",
+   "expect": {
+    "rc": 0,
+    "stdout": "keyword\n"
+   }
+  },
+  {
+   "id": "time-true",
+   "name": "time",
+   "face": "keyword",
+   "status": "gnu",
+   "ref": "timing values are machine state; rc and silence are the contract",
+   "path": "system",
+   "script": "time true",
+   "expect": {
+    "rc": 0,
+    "stdout": ""
+   }
+  },
+  {
+   "id": "basename-comsub-dashdash",
+   "name": "basename",
+   "face": "comsub-arm",
+   "status": "gnu",
+   "ref": "#2043 mechanism collateral: comsub arm shares the simple face's operand admission",
+   "path": "system",
+   "script": "x=$(basename -- -x); echo \"rc=$? [$x]\"",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=0 [-x]\n"
+   }
+  },
+  {
+   "id": "basename-comsub-noval",
+   "name": "basename",
+   "face": "comsub-arm",
+   "status": "gnu",
+   "ref": "#2043 mechanism collateral: no-operand declines to full execution (GNU missing-operand diagnostic)",
+   "path": "system",
+   "script": "x=$(basename); echo \"rc=$? [$x]\"",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1 []\n",
+    "stderr_contains": "basename: missing operand"
+   }
+  }
+ ]
+}
