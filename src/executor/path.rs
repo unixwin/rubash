@@ -1416,10 +1416,25 @@ pub fn external_command_for_named_program(
     // native funnel (external_argument_path), exactly like a native
     // child's argv.
     #[cfg(windows)]
-    let data_primary_positions = if posix_aware {
-        argv_data_primary_positions(command_name, args)
-    } else {
+    let data_primary_positions = if argv_dialect_legacy(env_vars) {
         std::collections::HashSet::new()
+    } else {
+        // rubash#2063 (dsh-bash-native patch 0001, SpookyWaste): the set
+        // is a property of the tool's grammar, not of the child's path
+        // layer, so EVERY child class gets it — until now only the
+        // POSIX-aware class computed it, and a native child's
+        // pattern/script/program text was rewritten by both funnels
+        // below while the bundled toolchain's copies stayed protected.
+        // The legacy hatch keeps gating the mask with the rest of the
+        // Option B bundle, exactly as the posix_aware gate did. The
+        // grammar key is the caller's typed word (every production
+        // spawn route hands one in); the one route that hands in no
+        // word (external_command_for_program) keys the table on the
+        // program's own file stem instead — the grammar belongs to
+        // the program that runs.
+        let grammar_key =
+            command_name.or_else(|| program.file_stem().and_then(|stem| stem.to_str()));
+        argv_data_primary_positions(grammar_key, args)
     };
     let native_args = args
         .iter()
@@ -1441,13 +1456,14 @@ pub fn external_command_for_named_program(
             // Third-party tree members (rg/bat/fd/shim) are NOT posix_aware
             // and take this funnel (D6). Every other child class (native
             // exes, cmd, MSYS/Cygwin tools) is untouched and still gets the
-            // native form.
+            // native form. A data-primary word (rubash#2063) is not a path
+            // in any child class, so it skips this funnel too.
             #[cfg(windows)]
             if namespace_bridge {
                 return arg.clone();
             }
             #[cfg(windows)]
-            if !posix_aware {
+            if !posix_aware && !data_primary_positions.contains(&position) {
                 if let Some(translated) =
                     translated_virtual_system_root_argument(arg, shell_wrapped, env_vars)
                 {
@@ -1471,6 +1487,15 @@ pub fn external_command_for_named_program(
                 }
                 external_argument_path(arg, env_vars)
             } else {
+                #[cfg(windows)]
+                {
+                    // rubash#2063: a data-primary word is not a path,
+                    // whatever the child class — it reaches a native
+                    // child verbatim, exactly like a POSIX-aware one.
+                    if data_primary_positions.contains(&position) {
+                        return arg.clone();
+                    }
+                }
                 external_argument_path(arg, env_vars)
             }
         })
@@ -1864,7 +1889,7 @@ fn argv_dialect_legacy(env_vars: &HashMap<String, String>) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("legacy"))
 }
 
-/// unixwin/rubash#592: the argv indices of a POSIX-aware child's arguments
+/// unixwin/rubash#592: the argv indices of a child's arguments
 /// that are DATA by the tool's own grammar — pattern/script/program text
 /// whose bytes must cross the boundary verbatim (invariant C, niubash#62:
 /// the shell cannot separate `ls /d/` from `grep -F "/h/"` by shape). Two
@@ -6149,11 +6174,79 @@ mod tests {
             vec!["/a/b/c.txt".to_string(), ".txt".to_string()],
         );
         // Without a command name (external_command_for_program route) the
-        // grammar is unknown: nothing is masked, shapes translate.
+        // grammar keys on the program's own file stem (rubash#2063); `ls`
+        // is not a grammar tool, so nothing is masked, shapes translate.
         assert_eq!(
             child_argv(&applet, &["/d/repo/x"], &env_vars),
             vec![r"D:\repo\x".to_string()],
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn data_primary_positions_hold_for_native_children() {
+        // rubash#2063 (dsh-bash-native patch 0001, SpookyWaste): a
+        // third-party suite is never `posix_aware`, so its operands
+        // still take the native funnel; the pattern/script/program
+        // positions are grammar properties of the tool and must stay
+        // verbatim for this child class too.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+
+        // The production spawn routes hand the typed command word to
+        // the funnel and the table keys on it; this name-less helper
+        // hands in no word, so the executable's own file stem
+        // identifies the grammar instead.
+        let argv_for = |program: &Path, args: &[&str]| {
+            let owned = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+            let (command, _) = external_command_for_program(program, &owned, &env_vars);
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let grep = PathBuf::from(r"C:\tools\grep.exe");
+        let argv = argv_for(&grep, &["-F", "/tmp/pat", "/tmp/file.txt"]);
+        assert_eq!(argv[0], "-F");
+        assert_eq!(argv[1], "/tmp/pat", "the grep pattern stays verbatim");
+        assert_ne!(
+            argv[2], "/tmp/file.txt",
+            "the file operand still translates"
+        );
+
+        let sed = PathBuf::from(r"C:\tools\sed.exe");
+        let argv = argv_for(&sed, &["-n", "/tmp/x/p", "/tmp/file.txt"]);
+        assert_eq!(argv[1], "/tmp/x/p", "the sed script stays verbatim");
+
+        let awk = PathBuf::from(r"C:\tools\awk.exe");
+        let argv = argv_for(&awk, &["/tmp/x/{print}", "/tmp/file.txt"]);
+        assert_eq!(argv[0], "/tmp/x/{print}", "the awk program stays verbatim");
+
+        // `-e` carries data; `-f` carries a path, so only the former
+        // stays verbatim.
+        let argv = argv_for(&grep, &["-e", "/tmp/pat", "/tmp/file.txt"]);
+        assert_eq!(
+            argv[1], "/tmp/pat",
+            "a -e pattern is data and stays verbatim"
+        );
+        assert_ne!(
+            argv[2], "/tmp/file.txt",
+            "the file operand still translates"
+        );
+        let argv = argv_for(&grep, &["-f", "/tmp/pats.txt", "/tmp/file.txt"]);
+        assert_ne!(
+            argv[1], "/tmp/pats.txt",
+            "a pattern file is a path and translates"
+        );
+
+        // Drive-shaped data skips the second (native) funnel verbatim
+        // too, while a drive-shaped file operand still translates.
+        let argv = argv_for(&grep, &["-F", "/c/pat", "/c/file.txt"]);
+        assert_eq!(argv[1], "/c/pat", "the drive-shaped pattern stays verbatim");
+        assert_eq!(argv[2], r"C:\file.txt", "the file operand still translates");
 
         let _ = fs::remove_dir_all(&root);
     }
