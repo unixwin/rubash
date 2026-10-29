@@ -4848,17 +4848,21 @@ mod issue_1952 {
     /// Pipeline form: `head -1` completes the pipeline from line 1
     /// alone, before the producer's flag exists.
     ///
-    /// Ignored pending rubash#1959: on Windows, a process
-    /// substitution delivered as an argv word to a spawned external
-    /// child (`head` here) is drained to a temp file before spawn —
-    /// the parent reads the pipe to EOF first, so this form does not
-    /// stream there yet (root-cause chain: rubash#1959 and
-    /// fix-1952 REPORT §7). The in-process consumer forms above do
-    /// stream on Windows. The GNU assertion below is kept verbatim;
-    /// remove this ignore once #1959's rendezvous endpoint (named
-    /// pipe delivery to external children) lands.
+    /// The rubash#1959 drain (the parent read the producer to EOF into a
+    /// temp file before spawn) is fixed — the word face now streams
+    /// through the #1903 fifo-marker rendezvous, pinned Windows-green in
+    /// tests/issue1959_procsub_argv_streaming.rs. This literal pin still
+    /// cannot run on Windows for two tool-side reasons, neither a rubash
+    /// gap: the suite's airtight PATH resolves an MSYS head that does
+    /// not speak the marker rendezvous at all, and WinuxCmd#1442 tracks
+    /// the head line-mode fifo-operand gap for the toolchain that does.
+    /// It runs again on non-Windows (the unix face pins the read end at
+    /// the operand's fd, unchanged since #1952).
     #[test]
-    #[ignore = "rubash#1959: Windows drains procsub argv words to external children to a temp file before spawn (no streaming); remove when the #1959 rendezvous endpoint lands"]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows tool-side: suite PATH head is not marker-aware and WinuxCmd#1442 (head line-mode on fifo operand); the #1959 rendezvous itself is pinned in tests/issue1959_procsub_argv_streaming.rs"
+    )]
     fn issue1952_pipeline_head_streams_first_line() {
         let dir = case_scratch("1952-pipe");
         let (stdout, stderr, status) = run(
