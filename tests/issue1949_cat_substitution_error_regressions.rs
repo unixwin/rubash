@@ -9,6 +9,15 @@
 //! builtin uses, so the reason text can no longer drift from the
 //! read failure that produced it.
 //!
+//! rubash#2027 update: GNU cat renders the operand through quotef
+//! (gnulib quotearg shell-escape style), so an operand holding shell
+//! special characters prints single-quoted (`cat: '<(echo hi)': No
+//! such file or directory`). On Windows hosts these paths are temp
+//! dirs under `C:\...` and the backslash plus drive colon are shell
+//! special, so the expected operand here is the quotef rendering; the
+//! original Unix-path measurements (`/tmp/rubash-i1949-*`) stay bare
+//! exactly as pinned.
+//!
 //! All expectations measured against GNU bash 5.3.20.
 
 use std::fs;
@@ -77,6 +86,23 @@ impl Scratch {
     }
 }
 
+/// The gnulib quotearg shell-escape rule the cat shortcut's diagnostic
+/// follows since rubash#2027: bare when every character is shell-safe,
+/// otherwise the whole operand wrapped in `'...'`.
+fn quotef(path: &str) -> String {
+    let safe = |ch: char| {
+        ch.is_alphanumeric()
+            || matches!(
+                ch,
+                '_' | '.' | '/' | '-' | '+' | ',' | '@' | '%' | '~' | '#' | '{' | '}'
+            )
+    };
+    if path.chars().all(safe) {
+        return path.to_string();
+    }
+    format!("'{path}'")
+}
+
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
@@ -92,7 +118,13 @@ fn issue1949_directory_operand_reports_is_a_directory() {
     let (out, err, rc) = s.run(&script);
     assert_eq!(rc, 0, "stderr: {err}");
     assert_eq!(out, "rc=1 V=[]\n");
-    assert_eq!(err, format!("cat: {}: Is a directory\n", dir.display()));
+    assert_eq!(
+        err,
+        format!(
+            "cat: {}: Is a directory\n",
+            quotef(&dir.display().to_string())
+        )
+    );
 }
 
 #[test]
@@ -105,7 +137,7 @@ fn issue1949_traversal_through_a_file_reports_not_a_directory() {
     let (out, err, rc) = s.run(&script);
     assert_eq!(rc, 0, "stderr: {err}");
     assert_eq!(out, "rc=1 V=[]\n");
-    assert_eq!(err, format!("cat: {bad}: Not a directory\n"));
+    assert_eq!(err, format!("cat: {}: Not a directory\n", quotef(&bad)));
 }
 
 #[cfg(unix)]
@@ -122,7 +154,10 @@ fn issue1949_symlink_loop_reports_eloop() {
     assert_eq!(out, "rc=1 V=[]\n");
     assert_eq!(
         err,
-        format!("cat: {}: Too many levels of symbolic links\n", a.display())
+        format!(
+            "cat: {}: Too many levels of symbolic links\n",
+            quotef(&a.display().to_string())
+        )
     );
 }
 
@@ -130,8 +165,12 @@ fn issue1949_symlink_loop_reports_eloop() {
 fn issue1949_plain_enoent_stays_unquoted() {
     let s = Scratch::new("enoent");
     // GNU agreement guard: the ENOENT wording itself was never the
-    // bug — the QUOTING was. `cat: PATH: No such file or directory`,
-    // no single quotes around the path.
+    // bug — the QUOTING was: #1949 removed the blanket `'...': No
+    // such file or directory` crush. Since rubash#2027 the operand
+    // quoting is GNU cat's own quotef rule (shell-unsafe operands
+    // print quoted, plain paths print bare), so on Windows hosts the
+    // backslash-bearing temp path is quoted exactly as GNU cat would
+    // render it, and the assertion below follows quotef.
     let missing = s.dir.join("missing.txt");
     let script = format!("x=$(cat {})\necho \"rc=$? V=[$x]\"\n", missing.display());
     let (out, err, rc) = s.run(&script);
@@ -139,6 +178,9 @@ fn issue1949_plain_enoent_stays_unquoted() {
     assert_eq!(out, "rc=1 V=[]\n");
     assert_eq!(
         err,
-        format!("cat: {}: No such file or directory\n", missing.display())
+        format!(
+            "cat: {}: No such file or directory\n",
+            quotef(&missing.display().to_string())
+        )
     );
 }

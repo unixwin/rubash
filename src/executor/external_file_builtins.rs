@@ -2135,11 +2135,15 @@ impl Executor {
                     match fs::read(&link.native) {
                         Ok(bytes) => output.extend(bytes),
                         Err(error) => {
+                            // rubash#2027: the operand renders through GNU
+                            // cat's quotef and the reason keeps the real
+                            // errno mapping (including the Windows
+                            // reserved-name to ENOENT inference).
                             writeln!(
                                 &mut diagnostics,
                                 "cat: {}: {}",
-                                target,
-                                crate::posix_errors::message(&error)
+                                super::command_substitution::gnu_cat_quoted_operand(&target),
+                                crate::posix_errors::path_strerror(&target, &error)
                             )?;
                             status = 1;
                         }
@@ -2208,12 +2212,21 @@ impl Executor {
                         // strerror and no shell diagnostic prefix. The
                         // discarded error flattened EACCES/EISDIR to a
                         // blanket ENOENT text behind the script prefix
-                        // (rubash#1309).
+                        // (rubash#1309). rubash#2027: the operand itself
+                        // renders through GNU cat's quotef (coreutils
+                        // `error (0, errno, "%s", quotef (name))`), so
+                        // `cat '<(echo hi)'` reports
+                        // `cat: '<(echo hi)': No such file or directory`,
+                        // and the reason keeps the real-errno mapping —
+                        // on Windows a name bearing the reserved `<`/`>`
+                        // bytes can never exist, so the invalid-name
+                        // rejection reads ENOENT exactly like the Unix
+                        // lookup failure it stands in for.
                         writeln!(
                             &mut diagnostics,
                             "cat: {}: {}",
-                            target,
-                            crate::posix_errors::message(&error)
+                            super::command_substitution::gnu_cat_quoted_operand(&target),
+                            crate::posix_errors::path_strerror(&target, &error)
                         )?;
                         status = 1;
                     }
