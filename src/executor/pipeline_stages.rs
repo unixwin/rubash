@@ -1453,16 +1453,17 @@ impl Executor {
                 let _ = stdin.write_all(&payload);
             })
         });
-        if let Some(mut reader) = merged_stage_reader {
+        if let Some(reader) = merged_stage_reader {
             // One pipe carries the merged stream in true write order; drain
-            // it to EOF while the child runs, then reap.
-            use std::io::Read;
-            let mut merged = Vec::new();
-            reader
-                .read_to_end(&mut merged)
-                .map_err(ExecuteError::IoError)?;
+            // it while the child runs, then reap. rubash#2020: on Windows
+            // the drain runs on a reader thread and the child wait polls
+            // the engine signal mailbox between slices (a recorded ^C
+            // settles 128+sig instead of running the member to natural
+            // end); unix keeps the plain blocking read-to-EOF-then-wait
+            // (the kernel already records group deliveries).
             self.note_foreground_wait();
-            let status = child.wait().map_err(ExecuteError::IoError)?;
+            let (status, mut merged) =
+                super::pipeline_exec::wait_pipeline_stage_merged_output(self, &mut child, reader)?;
             // The child is gone; its stdin pipe is broken, so the payload
             // writer thread (spawned above) has finished or is about to.
             let _ = stdin_writer.map(|writer| writer.join());
@@ -1498,7 +1499,13 @@ impl Executor {
             )));
         }
         self.note_foreground_wait();
-        let output = child.wait_with_output()?;
+        // rubash#2020: the drain+wait face of a sequential stage member. On
+        // Windows the captured stdout/stderr drain on reader threads while
+        // the child wait polls the engine signal mailbox between slices (a
+        // recorded ^C settles 128+sig instead of running the member to its
+        // natural end — the parent used to sit in the blocking read for the
+        // member's whole lifetime); unix keeps the plain wait_with_output.
+        let output = super::pipeline_exec::wait_pipeline_stage_output(self, &mut child)?;
         // Same reaping boundary as the merged branch above: the exited child
         // broke the stdin pipe, the payload writer thread ends on its
         // broken-pipe write, and joining here keeps the thread's lifetime
