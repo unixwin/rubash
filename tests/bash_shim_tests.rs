@@ -1,3 +1,11 @@
+//! `bash` face shim behaviour (src/bin/bash.rs).
+//!
+//! The shim is built only with `--features windows-shim` (see Cargo.toml):
+//! on Unix the same face is a hardlink/symlink to the host binary, so there
+//! is nothing to forward. Gating here keeps `cargo test` green on Unix
+//! without the binary while Windows packaging still exercises it.
+#![cfg(feature = "windows-shim")]
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;
