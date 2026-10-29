@@ -99,6 +99,21 @@ pub trait HistoryProvider: Debug {
     fn history_base(&mut self) -> usize {
         1
     }
+    /// bashhist.c:174 (`int hist_last_line_added;` — zero-initialized):
+    /// whether the line currently being executed has already been added
+    /// to the host list. maybe_add_history clears it per line
+    /// (bashhist.c:757-764) and really_add_history sets it when the line
+    /// was actually recorded (bashhist.c:957-964); fc's own line is
+    /// excluded from its listings through it — fc.def:328-335 `last_hist
+    /// = i - rh - hist_last_line_added`. The REPL provider contract is
+    /// save-at-accept — the host records each submitted line BEFORE the
+    /// engine dispatches it (cf. bashhist.c maybe_add_history) — so a
+    /// host following that contract reports true while its line runs;
+    /// the default false is the C initializer: no signal that the
+    /// in-flight line was recorded (rubash#2006).
+    fn last_line_added(&mut self) -> bool {
+        false
+    }
 }
 
 /// Shared provider handle suitable for injecting into an Executor.

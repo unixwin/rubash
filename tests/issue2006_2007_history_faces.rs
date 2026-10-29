@@ -22,11 +22,11 @@
 //! pass — the engine's own history semantics match GNU. The two
 //! provider-path pins reduced to state the HistoryProvider contract
 //! did not carry (the in-flight line's recorded flag; history_base).
-//! rubash#2007 closed first: the trait now carries `history_base`
-//! (readline history.c:113; stifling advances it, history.c:389-404,
-//! 675-698) with the unstifled GNU initial value as the default, and
-//! the display/`history -d` provider paths consume it. The #2006 pin
-//! waits on the last_line_added channel (rubash#2006).
+//! Both channels are now on the trait with the GNU C initializers as
+//! defaults — `history_base` (readline history.c:113; stifling advances
+//! it, history.c:389-404,675-698) and `last_line_added` (bashhist.c:174,
+//! set by really_add_history:957-964) — and the provider display /
+//! `history -d` / fc call sites consume them. Both pins are live.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -113,11 +113,14 @@ fn session_path_fc_list_excludes_itself() {
 
 /// The host store fixture. `base` models the stifled store's global
 /// numbering (readline history_base): a store trimmed to HISTSIZE keeps
-/// the numbers of the entries it dropped (rubash#2007).
+/// the numbers of the entries it dropped (rubash#2007). `last_added`
+/// models the save-at-accept contract: the host recorded the submitted
+/// line before dispatch (bashhist.c hist_last_line_added; rubash#2006).
 #[derive(Debug, Default)]
 struct ListProvider {
     entries: Vec<String>,
     base: usize,
+    last_added: bool,
 }
 
 impl rubash::history::HistoryProvider for ListProvider {
@@ -151,12 +154,23 @@ impl rubash::history::HistoryProvider for ListProvider {
     fn history_base(&mut self) -> usize {
         self.base
     }
+    fn last_line_added(&mut self) -> bool {
+        self.last_added
+    }
 }
 
-fn executor_with(entries: Vec<String>, base: usize) -> rubash::executor::Executor {
+fn executor_with(
+    entries: Vec<String>,
+    base: usize,
+    last_added: bool,
+) -> rubash::executor::Executor {
     use std::cell::RefCell;
     use std::rc::Rc;
-    let provider = Rc::new(RefCell::new(ListProvider { entries, base }));
+    let provider = Rc::new(RefCell::new(ListProvider {
+        entries,
+        base,
+        last_added,
+    }));
     let mut executor = rubash::executor::Executor::new();
     executor.set_history_provider(provider);
     executor.set_env("__RUBASH_INTERACTIVE", "1");
@@ -165,16 +179,16 @@ fn executor_with(entries: Vec<String>, base: usize) -> rubash::executor::Executo
 
 /// #2006: the host recorded `fc -l` itself before dispatch (it is the
 /// last entry, exactly as bashhist leaves it). GNU lists only the
-/// entries before it.
+/// entries before it: fc.def:328-335 computes
+/// `last_hist = i - rh - hist_last_line_added` ("the current command
+/// line ... is already part of the history list"; PTY evidence
+/// p3-gnu-03 vs p3-hist-03).
 ///
-/// Ignored: on the provider path the executor cannot reproduce GNU's
-/// fc.def last_hist = len - rh - hist_last_line_added — the
-/// HistoryProvider contract carries no signal for whether the host
-/// recorded the in-flight line (and builtins/fc's provider call site
-/// hard-codes both terms to false). The session path above passes;
-/// this pin waits on the contract adjudication in rubash#2006.
+/// The provider contract now carries `last_line_added` (bashhist.c:174,
+/// set by really_add_history:957-964) and the fc provider call site
+/// feeds it — with the bridge's rh on (shell.c:1830-1842
+/// init_interactive) — instead of hard-wiring both terms to false.
 #[test]
-#[ignore = "provider contract gap: no hist_last_line_added channel (rubash#2006)"]
 fn provider_path_fc_list_excludes_itself() {
     let dir = tempdir("prov-fc");
     let d = dir.to_string_lossy().replace('\\', "/");
@@ -185,12 +199,41 @@ fn provider_path_fc_list_excludes_itself() {
             "fc -l".to_string(),
         ],
         1,
+        true,
     );
     let script = format!("cd {d}\nfc -l > out.txt 2> err.txt\n");
     let code = rubash::script_driver::run_source(&mut executor, &script, true);
     assert_eq!(code, 0);
     let out = std::fs::read_to_string(dir.join("out.txt")).expect("fc output");
     assert_eq!(out, "1\t echo alpha\n2\t echo beta\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #2006 same-root face over a stifled store: `fc -l` numbering is
+/// history_base-based (fc.def's emit prints i + history_base, exactly
+/// like display_history), and the fc line is excluded even when the
+/// requested range reaches the end of the list.
+#[test]
+fn provider_path_fc_list_range_numbers_from_base() {
+    let dir = tempdir("prov-fc-range");
+    let d = dir.to_string_lossy().replace('\\', "/");
+    let mut executor = executor_with(
+        vec![
+            "echo a".to_string(),
+            "echo b".to_string(),
+            "echo c".to_string(),
+            "fc -l".to_string(),
+        ],
+        5,
+        true,
+    );
+    let script = format!("cd {d}\nfc -l > out.txt 2> err.txt\nfc -l 6 8 > range.txt\n");
+    let code = rubash::script_driver::run_source(&mut executor, &script, true);
+    assert_eq!(code, 0);
+    let out = std::fs::read_to_string(dir.join("out.txt")).expect("fc output");
+    assert_eq!(out, "5\t echo a\n6\t echo b\n7\t echo c\n");
+    let range = std::fs::read_to_string(dir.join("range.txt")).expect("fc range output");
+    assert_eq!(range, "6\t echo b\n7\t echo c\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
 #[test]
@@ -233,6 +276,7 @@ fn provider_path_history_numbering_survives_stifle() {
             "history".to_string(),
         ],
         4,
+        false,
     );
     let script = format!("cd {d}\nhistory > out.txt 2> err.txt\n");
     let code = rubash::script_driver::run_source(&mut executor, &script, true);
@@ -259,6 +303,7 @@ fn provider_path_history_delete_offset_uses_base() {
             "echo c".to_string(),
         ],
         4,
+        false,
     );
     let script = format!("cd {d}\nhistory -d 5\nhistory > out.txt 2> err.txt\n");
     let code = rubash::script_driver::run_source(&mut executor, &script, true);
