@@ -554,7 +554,8 @@ impl Session {
     }
 
     /// The options view: `set -o` and `shopt` options by name,
-    /// with validity checked and reported.
+    /// plus the flag-only shell options (`restricted`), with
+    /// validity checked and reported.
     pub fn options(&mut self) -> OptionsView<'_> {
         self.executor.options_view()
     }

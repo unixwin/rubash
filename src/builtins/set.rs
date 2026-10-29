@@ -7,9 +7,9 @@ mod options;
 mod unset;
 
 pub(crate) use options::{
-    is_shell_option, print_shell_option, print_shell_options, print_shell_options_by_state,
-    set_shell_option, shell_option_enabled, shell_option_names, shellopts_value,
-    sync_shell_option_flag, SET_O_PRINT_WIDTH, SHOPT_O_PRINT_WIDTH,
+    SET_O_PRINT_WIDTH, SHOPT_O_PRINT_WIDTH, is_flag_only_shell_option, is_shell_option,
+    print_shell_option, print_shell_options, print_shell_options_by_state, set_shell_option,
+    shell_option_enabled, shell_option_names, shellopts_value, sync_shell_option_flag,
 };
 pub use unset::unset;
 pub(crate) use unset::unset_with_stderr;
