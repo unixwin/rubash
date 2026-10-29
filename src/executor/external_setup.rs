@@ -96,6 +96,27 @@ fn word_metadata_needs_process_substitution_materialization(metadata: &WordMetad
         || crate::parser::raw_word_has_unquoted_process_substitution(&metadata.raw)
 }
 
+/// Whether a redirect target's `<(`/`>(` text shape is a REAL process
+/// substitution. GNU expand_word_internal (subst.c:11365-11372, cases
+/// '<'/'>') recognizes the span only where the character is reached
+/// UNQUOTED: inside double quotes (`quoted & Q_DOUBLE_QUOTES`) the '<'
+/// falls through to add_character, and single-quoted text arrives
+/// CTLESC-protected, so a quoted `"<(cmd)"` target is a literal filename
+/// for redirection_expand (redir.c:298) — its body never runs and its
+/// parameters are never expanded as a substitution. The materialization
+/// arms in command_with_process_substitution_files judge the COOKED
+/// target (quote characters already stripped by the lexer; inner quote
+/// characters survive only as data sentinels), so without this raw-side
+/// judgment a quoted fake substitution was spawned before the nounset
+/// gate ran: its body expanded `$var`s the gate was about to judge and
+/// printed the gate's own diagnostic a second time (rubash#1931), and
+/// without `set -u` the body simply executed where GNU opens a literal
+/// file. The judge is the parser's quote-aware DFA — the same one the
+/// dup-redirect gate consults (redirection.rs).
+fn redirect_target_is_unquoted_process_substitution(redirect: &Redirect) -> bool {
+    crate::parser::raw_word_has_unquoted_process_substitution(&redirect.target_metadata.raw)
+}
+
 pub(in crate::executor) fn shared_combined_output_process_substitution(
     first: Option<&Redirect>,
     second: Option<&Redirect>,
@@ -105,6 +126,7 @@ pub(in crate::executor) fn shared_combined_output_process_substitution(
     if first.target != second.target
         || !matches!(first.operator.as_str(), "&>" | "&>>")
         || first.operator != second.operator
+        || !redirect_target_is_unquoted_process_substitution(first)
     {
         return None;
     }
@@ -423,6 +445,7 @@ impl Executor {
                 .target
                 .strip_prefix("<(")
                 .and_then(|target| target.strip_suffix(')'))
+                .filter(|_| redirect_target_is_unquoted_process_substitution(redirect))
             {
                 // rubash#1952: stream first — name the spawned body's
                 // pipe by its word fd (GNU subst.c:6362 hands the
@@ -525,6 +548,7 @@ impl Executor {
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    .filter(|_| redirect_target_is_unquoted_process_substitution(redirect))
                 {
                     let source = source.to_string();
                     let path = self.empty_process_substitution_temp()?;
@@ -545,6 +569,7 @@ impl Executor {
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    .filter(|_| redirect_target_is_unquoted_process_substitution(redirect))
                 {
                     let source = source.to_string();
                     let path = self.empty_process_substitution_temp()?;
@@ -565,6 +590,7 @@ impl Executor {
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    .filter(|_| redirect_target_is_unquoted_process_substitution(redirect))
                 {
                     let source = source.to_string();
                     let path = self.empty_process_substitution_temp()?;
@@ -585,6 +611,7 @@ impl Executor {
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    .filter(|_| redirect_target_is_unquoted_process_substitution(redirect))
                 {
                     let source = source.to_string();
                     let path = self.empty_process_substitution_temp()?;
