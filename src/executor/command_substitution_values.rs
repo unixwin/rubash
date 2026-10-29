@@ -1,3 +1,4 @@
+use super::command_registry::{comsub_front_slot, ComsubFrontSlot};
 use super::*;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
@@ -763,10 +764,14 @@ impl Executor {
     ) -> Option<String> {
         words.first()?;
         let stdio = self.command_substitution_words_and_stdio(words)?;
-        if matches!(
-            stdio.expanded_words.first().map(String::as_str),
-            Some("tty") | Some("/bin/tty") | Some("/usr/bin/tty")
-        ) {
+        // The front face's claim keys are the registry's COMSUB_FRONT
+        // projection (rubash#2036 S4), slash forms included.
+        if stdio
+            .expanded_words
+            .first()
+            .and_then(|word| comsub_front_slot(word))
+            == Some(ComsubFrontSlot::Tty)
+        {
             let silent = stdio
                 .expanded_words
                 .iter()
@@ -806,7 +811,7 @@ impl Executor {
         // &self path records no hash-table entry (`$(tty)` has the same
         // introspection face).
         #[cfg(windows)]
-        if matches!(first_word, "tput" | "/bin/tput" | "/usr/bin/tput") {
+        if comsub_front_slot(first_word) == Some(ComsubFrontSlot::Tput) {
             if let Some(outcome) = self.admitted_tput_outcome_for_words(&stdio.expanded_words) {
                 let (output, status) = match outcome {
                     crate::executor::tput_emulation::TputOutcome::Bytes(bytes) => {

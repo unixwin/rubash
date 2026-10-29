@@ -1,5 +1,11 @@
 use super::*;
 
+#[cfg(windows)]
+use super::command_registry::{comsub_front_slot, ComsubFrontSlot};
+use super::command_registry::{
+    pipeline_precheck_claims, pipeline_stage_slot, pipeline_standin_claims, timed_consumer_slot,
+    timed_followup_claims, timed_producer_slot, PipelineSlot, TimedConsumerSlot, TimedProducerSlot,
+};
 #[cfg(any(windows, unix))]
 use crate::executor::fd_table::FdEntry;
 
@@ -95,7 +101,9 @@ fn timed_followup_keeps_stream(command: &CommandNode, name: &str) -> bool {
     if command.words.is_empty() {
         return true;
     }
-    matches!(name, "echo" | "printf" | "true" | ":" | "false" | "sleep")
+    // The claim set is the registry's TimedFollowup projection
+    // (rubash#2036 S4).
+    timed_followup_claims(name)
 }
 
 #[cfg(windows)]
@@ -1748,9 +1756,11 @@ impl Executor {
             return None;
         }
         let name = self.expand_word(command.words.first()?);
-        match name.as_str() {
-            "true" | ":" => Some(()),
-            "sleep" => {
+        // The producer claim set is the registry's TimedProducer
+        // projection (rubash#2036 S4).
+        match timed_producer_slot(&name) {
+            Some(TimedProducerSlot::TrueColon) => Some(()),
+            Some(TimedProducerSlot::Sleep) => {
                 // When sleep does not resolve (PATH unset, rubash#1126;
                 // or a set PATH without it, rubash#1545), decline the
                 // timing model so the real pipeline reports the failure.
@@ -1764,7 +1774,7 @@ impl Executor {
                 *at += duration;
                 Some(())
             }
-            "echo" => {
+            Some(TimedProducerSlot::Echo) => {
                 let mut args: Vec<String> = command.words[1..]
                     .iter()
                     .enumerate()
@@ -1788,7 +1798,7 @@ impl Executor {
                 chunks.push((*at, output));
                 Some(())
             }
-            _ => None,
+            None => None,
         }
     }
 
@@ -1836,14 +1846,17 @@ impl Executor {
         let mut last_status = 0;
         for command in body {
             let name = self.expand_word(command.words.first()?);
-            match name.as_str() {
-                "sleep" if !saw_read => {
+            // The consumer claim set is the registry's TimedConsumer
+            // projection (rubash#2036 S4); the guards and the
+            // fall-through into the followup arm are unchanged.
+            match timed_consumer_slot(&name) {
+                Some(TimedConsumerSlot::Sleep) if !saw_read => {
                     at += command
                         .words
                         .get(1)
                         .and_then(|word| self.expand_word(word).parse::<f64>().ok())?;
                 }
-                "read" if !saw_read => {
+                Some(TimedConsumerSlot::Read) if !saw_read => {
                     let (timeout, char_limit, name) = self.timed_read_options(command)?;
                     read_name = name;
                     let (value, status) = timed_read_value(input, at, timeout, char_limit);
@@ -2716,7 +2729,9 @@ impl Executor {
                 // path and let the sequential stage executor report it.
                 // (The stand-in's legitimate case is a HASH-resolved
                 // name find_user_command's PATH walk cannot see.)
-                (matches!(expanded_name.as_str(), "yes" | "head" | "wc")
+                // The stand-in set is the registry's PipelineStandIn
+                // projection (rubash#2036 S4).
+                (pipeline_standin_claims(&expanded_name)
                     && !self.emulated_external_stands_down(&expanded_name))
                 .then(|| internal_pipeline_program(&expanded_name))
             })?;
@@ -4740,15 +4755,19 @@ impl Executor {
         // external programs (head, cat, sed, grep, wc, tr) must stand
         // down in both cases and let the external stage report the
         // failure. Builtin arms are unaffected.
-        if matches!(name, "head" | "cat" | "sed" | "grep" | "wc" | "tr" | "tput")
-            && self.emulated_external_stands_down(name)
-        {
+        // The pre-check set is the registry's PIPELINE_PRECHECK
+        // projection (rubash#2036 S4): the non-builtin stage claims.
+        if pipeline_precheck_claims(name) && self.emulated_external_stands_down(name) {
             return self.execute_external_pipeline_stage(command, input, stdin_inherit);
         }
-        match name {
-            "true" | ":" => Ok(Some((String::new(), String::new(), 0))),
-            "false" => Ok(Some((String::new(), String::new(), 1))),
-            "echo" => {
+        // The stage arms are the registry's PIPELINE_STAGE projection
+        // (rubash#2036 S4); the restricted-guard claims (`.`, cd,
+        // command, exec, source) never reach this match — they were
+        // judged by restricted_command_error above.
+        match pipeline_stage_slot(name) {
+            Some(PipelineSlot::TrueColon) => Ok(Some((String::new(), String::new(), 0))),
+            Some(PipelineSlot::False) => Ok(Some((String::new(), String::new(), 1))),
+            Some(PipelineSlot::Echo) => {
                 // rubash#1488: same variable-table locale guard as the
                 // plain execute_echo path — a pipeline stage's \u/\U
                 // gate must see the shell's LC_ALL, not the process env.
@@ -4766,7 +4785,7 @@ impl Executor {
                     0,
                 )))
             }
-            "printf" => {
+            Some(PipelineSlot::Printf) => {
                 let args: Vec<String> = self.expand_pipeline_stage_arg_words(command, 1);
                 let mut env_vars = self.shell_state.env_vars.clone();
                 let mut output = Vec::new();
@@ -4783,7 +4802,7 @@ impl Executor {
                     status,
                 )))
             }
-            "trap" => {
+            Some(PipelineSlot::Trap) => {
                 // A `trap ACTION EXIT` install as a pipeline element runs in
                 // the forked subshell in GNU and fires at the element's exit
                 // (execute_cmd.c:1761-1763; rubash#1104: `trap 'echo X' EXIT
@@ -4827,7 +4846,7 @@ impl Executor {
                     status,
                 )))
             }
-            "head" => {
+            Some(PipelineSlot::Head) => {
                 let args = command.words[1..]
                     .iter()
                     .map(|word| self.expand_word(word))
@@ -4843,7 +4862,7 @@ impl Executor {
                 };
                 Ok(Some((spec.apply(input), String::new(), 0)))
             }
-            "cat" => {
+            Some(PipelineSlot::Cat) => {
                 // rubash#2066: this arm IS the in-process layer, so the
                 // host flag gates it exactly like the simple-command face
                 // (handle_external_file_builtins returns not-handled when
@@ -5050,7 +5069,7 @@ impl Executor {
                 };
                 Ok(Some((output, String::new(), 0)))
             }
-            "sed" => {
+            Some(PipelineSlot::Sed) => {
                 // rubash#2066: same host-flag gate as the cat arm above —
                 // with the in-process layer off, the stage runs the real
                 // PATH program (and reports 127 when there is none),
@@ -5081,7 +5100,7 @@ impl Executor {
                     self.execute_external_pipeline_stage(command, input, stdin_inherit)
                 }
             }
-            "grep" => {
+            Some(PipelineSlot::Grep) => {
                 // The inline fast path handles the flag forms GNU pipelines use
                 // most (grep [-cinvq] [--] PATTERN with stdin input only).
                 // Anything else -- regex engine flags, file operands, unknown
@@ -5135,7 +5154,7 @@ impl Executor {
                 }
                 Ok(Some((output, String::new(), i32::from(selected == 0))))
             }
-            "wc" => {
+            Some(PipelineSlot::Wc) => {
                 let args: Vec<String> = command.words[1..]
                     .iter()
                     .map(|word| self.expand_word(word))
@@ -5197,7 +5216,7 @@ impl Executor {
                 }
                 self.execute_external_pipeline_stage(command, input, stdin_inherit)
             }
-            "tr" => {
+            Some(PipelineSlot::Tr) => {
                 let args = command.words[1..]
                     .iter()
                     .map(|word| self.expand_word(word))
@@ -5236,7 +5255,7 @@ impl Executor {
             // the byte-exact whitelist; anything else falls through to the
             // real binary exactly as before.
             #[cfg(windows)]
-            "tput" => {
+            Some(PipelineSlot::Tput) => {
                 // rubash#2066: same host-flag gate as the cat/sed arms —
                 // the simple-command tput face sits behind the flag in
                 // handle_external_file_builtins, so the stage arm must
@@ -5266,6 +5285,10 @@ impl Executor {
                     self.execute_external_pipeline_stage(command, input, stdin_inherit)
                 }
             }
+            // Unclaimed names — and, off Windows, the Tput slot (its
+            // arm is cfg(windows): the whitelist exists to dodge the
+            // Windows spawn floor) — take the historical fallback:
+            // function stage, builtin stage, external stage.
             _ => {
                 if let Some(output) =
                     self.execute_function_pipeline_stage(command, input, live_stdin)?
@@ -6287,10 +6310,15 @@ struct InlineGrepSpec {
 /// costs concurrency, never correctness.
 #[cfg(windows)]
 fn tput_inline_stage(command: &CommandNode) -> bool {
-    matches!(
-        command.words.first().map(String::as_str),
-        Some("tput") | Some("/bin/tput") | Some("/usr/bin/tput")
-    )
+    // The form set is the tput row's registered name family, read
+    // through the registry's COMSUB_FRONT table (rubash#2036 S4):
+    // its tput entries are exactly the bare name plus the row's
+    // Emulated slash forms, pinned against the row by the registry
+    // consistency tests.
+    command
+        .words
+        .first()
+        .is_some_and(|word| comsub_front_slot(word) == Some(ComsubFrontSlot::Tput))
 }
 
 /// Non-Windows stub so `cfg!(windows) && tput_inline_stage(command)` at the

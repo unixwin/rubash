@@ -1,3 +1,6 @@
+use super::command_registry::{
+    comsub_heredoc_slot, comsub_timed_slot, ComsubHeredocSlot, ComsubTimedSlot,
+};
 use super::*;
 
 #[cfg(windows)]
@@ -183,7 +186,13 @@ fn heredoc_comsub_produce(
     let mut output = if first.pipe.is_none() && ast.commands.len() > 1 {
         let mut output = String::new();
         for command in &ast.commands {
-            if command.words.first().map(String::as_str) != Some("cat")
+            // The producer's claim keys are the registry's
+            // ComsubHeredoc projection (rubash#2036 S4).
+            if command
+                .words
+                .first()
+                .and_then(|word| comsub_heredoc_slot(word))
+                != Some(ComsubHeredocSlot::Cat)
                 || command.pipe.is_some()
                 // rubash#320: redirect-carrying cats are not
                 // shortcut-eligible (see command_has_file_redirect).
@@ -199,7 +208,10 @@ fn heredoc_comsub_produce(
         if first.pipe.is_some() {
             let next = piped_next?;
             match next.words.as_slice() {
-                [cmd, option] if cmd == "sort" && option == "-u" => {
+                [cmd, option]
+                    if comsub_heredoc_slot(cmd) == Some(ComsubHeredocSlot::Sort)
+                        && option == "-u" =>
+                {
                     let mut lines = output.lines().map(str::to_string).collect::<Vec<_>>();
                     lines.sort();
                     lines.dedup();
@@ -407,7 +419,11 @@ impl Executor {
         } else {
             (first, ast.commands.get(1))
         };
-        if first.words.first().map(String::as_str) != Some("cat")
+        if first
+            .words
+            .first()
+            .and_then(|word| comsub_heredoc_slot(word))
+            != Some(ComsubHeredocSlot::Cat)
             || self.emulated_external_stands_down("cat")
         {
             // When cat does not resolve (PATH unset, rubash#1126; or a
@@ -472,7 +488,12 @@ impl Executor {
         // decline too. Declining only costs the shortcut — the real
         // executor produces GNU's output for every declined shape.
         let cat_operands_admissible = |command: &CommandNode| {
-            if command.words.first().map(String::as_str) != Some("cat") {
+            if command
+                .words
+                .first()
+                .and_then(|word| comsub_heredoc_slot(word))
+                != Some(ComsubHeredocSlot::Cat)
+            {
                 return true;
             }
             let operands = &command.words[1..];
@@ -678,16 +699,19 @@ impl Executor {
     }
 
     fn timed_command_substitution_inner(&self, words: &[String]) -> Option<String> {
-        match words.first().map(String::as_str) {
-            None | Some(":") | Some("true") => {
+        // The claim keys are the registry's ComsubTimed projection
+        // (rubash#2036 S4), slash forms included; arm bodies and
+        // their order are unchanged.
+        match words.first().map(|word| comsub_timed_slot(word)) {
+            None | Some(Some(ComsubTimedSlot::TrueColon)) => {
                 self.last_command_substitution_status.set(Some(0));
                 Some(String::new())
             }
-            Some("false") => {
+            Some(Some(ComsubTimedSlot::False)) => {
                 self.last_command_substitution_status.set(Some(1));
                 Some(String::new())
             }
-            Some("echo") => {
+            Some(Some(ComsubTimedSlot::Echo)) => {
                 let args = words[1..]
                     .iter()
                     .map(|word| self.expand_word(word))
@@ -695,7 +719,7 @@ impl Executor {
                 self.last_command_substitution_status.set(Some(0));
                 Some(echo_command_substitution_output(&args))
             }
-            Some("printf") => {
+            Some(Some(ComsubTimedSlot::Printf)) => {
                 let expanded_args = words[1..]
                     .iter()
                     .flat_map(|word| self.expand_command_substitution_arg_values(word))
@@ -717,7 +741,10 @@ impl Executor {
                         .to_string(),
                 )
             }
-            Some("tty") | Some("/bin/tty") | Some("/usr/bin/tty") => {
+            Some(Some(ComsubTimedSlot::Tty)) => {
+                // Only the BARE form consults the stand-down
+                // predicate; the slash forms never did (the Tty
+                // slot covers all three registered forms).
                 if words.first().map(String::as_str) == Some("tty")
                     && self.emulated_external_stands_down("tty")
                 {
@@ -734,7 +761,7 @@ impl Executor {
                     "not a tty".to_string()
                 })
             }
-            Some("cat") => {
+            Some(Some(ComsubTimedSlot::Cat)) => {
                 // When cat does not resolve (PATH unset, rubash#1126; or
                 // a set PATH without it, rubash#1545), decline.
                 if self.emulated_external_stands_down("cat") {
