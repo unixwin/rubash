@@ -46,6 +46,14 @@ pub fn path_error(target: &str, err: std::io::Error) -> std::io::Error {
     // Windows reports ERROR_INVALID_NAME (123) for wildcard characters in
     // a path; older toolchains surface it as InvalidInput rather than
     // InvalidArgument, so match the raw code as well as the kind.
+    //
+    // rubash#2024: `<` and `>` in the operand are the same class — a QUOTED
+    // process-substitution target (`< "<(echo hi)"`) expands to that literal
+    // text; GNU redir.c do_redirection_internal (redir.c:916 redir_open)
+    // opens the name and reports ENOENT because no such file exists. The
+    // characters are illegal in a Windows filename, so the session
+    // filesystem provably cannot hold one and the open fails
+    // ERROR_INVALID_NAME instead of ENOENT.
     let invalid_name = if cfg!(windows) {
         err.raw_os_error() == Some(123) || err.kind() == std::io::ErrorKind::InvalidInput
     } else {
