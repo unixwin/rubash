@@ -333,6 +333,13 @@ impl VarTable {
             == self.synced_epoch.get(name).copied().unwrap_or(0)
     }
 
+    /// The tracked names a choked mirror write has marked since their
+    /// last proof — one half of the boundary verifier's candidate set
+    /// (rubash#1956; the other half is the store's cell registry).
+    pub(crate) fn stale_names(&self) -> &HashSet<String> {
+        &self.stale
+    }
+
     /// The current mirror epoch of a tracked name, or `None` when
     /// the name is untracked. This is the freshness coordinate the
     /// debugger's stop-and-diff watch compares across stops

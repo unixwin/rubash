@@ -969,65 +969,109 @@ impl Executor {
         if self.shell_state.env_vars.array_cells_dirty() {
             return;
         }
-        for (name, variable) in self.shell_state.variables.iter() {
-            // Freshness skip (rubash#1510): the cell was proven against
-            // this exact mirror epoch and no choked mirror write has
-            // touched the name since, so the comparison below would
-            // re-derive the same verdict element by element.
-            if !forced && self.shell_state.env_vars.cell_is_fresh(name) {
-                continue;
+        if forced {
+            // Full-strength (coherence fuzz): re-prove every structured
+            // cell, feed nothing.
+            for (name, variable) in self.shell_state.variables.iter() {
+                self.typed_cell_coherent(name, variable);
             }
-            let coherent = match &variable.value {
-                // Most variables are scalars; skip them before the mirror
-                // hash lookup, which would otherwise dominate this
-                // per-command check (a 100k-iteration `while read` loop
-                // calls it 200k times).
-                crate::shell::ShellValue::Scalar(_) => continue,
-                crate::shell::ShellValue::IndexedArray(cell) => {
-                    let Some(mirror) = self.shell_state.env_vars.get(name) else {
-                        continue;
-                    };
-                    let parsed = super::arrays::indexed_array_entries_cached(mirror);
-                    // Both maps are key-ascending, so a length check plus a
-                    // pairwise zip is an exact map comparison.
-                    let coherent = cell.len() == parsed.len()
-                        && cell.iter().zip(parsed.iter()).all(
-                            |((cell_index, cell_value), (parsed_index, parsed_value))| {
-                                i64::try_from(*parsed_index)
-                                    .map(|index| index == *cell_index)
-                                    .unwrap_or(false)
-                                    && cell_value == parsed_value
-                            },
-                        );
-                    assert!(
-                        coherent,
-                        "typed indexed cell `{name}` disagrees with its mirror: \
-                         cell={cell:?} mirror_parse={parsed:?} mirror={mirror:?}"
-                    );
-                    coherent
+            return;
+        }
+        // rubash#1956: candidate-driven boundary pass. Iterating the
+        // whole variable store here made every command boundary cost
+        // Θ(total variables) — a group of N scalar assignments paid
+        // Θ(N²) fresh-checks (assign-wrap-8000 in a debug build:
+        // 19.1s). The names that can possibly need proof are exactly
+        //   stale ∪ cell-candidates:
+        // a celled name that is not fresh is either stale (a choked
+        // mirror write marked it — every epoch bump is paired with the
+        // stale mark) or untracked, and every untracked celled name is
+        // in the store's registry (each store mutation that creates a
+        // cell registers it; `get_mut` registers conservatively). The
+        // per-name treatment below is the old loop's, unchanged:
+        // freshness skip, mirror-absent skip, full proof, track.
+        let candidates: Vec<String> = self
+            .shell_state
+            .env_vars
+            .stale_names()
+            .iter()
+            .chain(self.shell_state.variables.cell_candidate_names().iter())
+            .cloned()
+            .collect::<std::collections::HashSet<String>>()
+            .into_iter()
+            .collect();
+        for name in &candidates {
+            let verdict = {
+                let Some(variable) = self.shell_state.variables.get(name) else {
+                    // The variable is gone; its registry entry is dead.
+                    self.shell_state.variables.drop_cell_candidate(name);
+                    continue;
+                };
+                // Freshness skip (rubash#1510): the cell was proven
+                // against this exact mirror epoch and no choked mirror
+                // write has touched the name since.
+                if self.shell_state.env_vars.cell_is_fresh(name) {
+                    continue;
                 }
-                crate::shell::ShellValue::AssociativeArray(cell) => {
-                    let Some(mirror) = self.shell_state.env_vars.get(name) else {
-                        continue;
-                    };
-                    let parsed = super::assignment_helpers::assoc_entries_cached(mirror);
-                    let coherent = cell.len() == parsed.len()
-                        && parsed
-                            .iter()
-                            .all(|(key, value)| cell.get(key).is_some_and(|v| v == value));
-                    assert!(
-                        coherent,
-                        "typed assoc cell `{name}` disagrees with its mirror: \
-                         cell={cell:?} mirror_parse={parsed:?} mirror={mirror:?}"
-                    );
-                    coherent
-                }
+                self.typed_cell_coherent(name, variable)
             };
-            // Just proven against the live mirror: register the cell in
-            // the freshness protocol so later boundaries skip it until a
-            // choked mirror write marks the name stale again.
-            if coherent && !forced {
-                self.shell_state.env_vars.track_cell(name);
+            match verdict {
+                // Just proven against the live mirror: register the
+                // cell in the freshness protocol so later boundaries
+                // skip it until a choked mirror write marks the name
+                // stale again.
+                Some(true) => self.shell_state.env_vars.track_cell(name),
+                Some(false) => {}
+                // Not (or no longer) a structured cell, or no mirror
+                // behind it: nothing to prove until a cell (re)appears,
+                // which re-registers the name.
+                None => self.shell_state.variables.drop_cell_candidate(name),
+            }
+        }
+    }
+
+    /// The per-cell proof: `None` when `variable` holds no structured
+    /// cell or the name has no mirror (both skip, as the pre-#1956 full
+    /// iteration did); otherwise the exact cell↔mirror comparison,
+    /// asserted in place, returning the coherence verdict.
+    #[cfg(debug_assertions)]
+    fn typed_cell_coherent(&self, name: &str, variable: &crate::shell::Variable) -> Option<bool> {
+        match &variable.value {
+            crate::shell::ShellValue::Scalar(_) => None,
+            crate::shell::ShellValue::IndexedArray(cell) => {
+                let mirror = self.shell_state.env_vars.get(name)?;
+                let parsed = super::arrays::indexed_array_entries_cached(mirror);
+                // Both maps are key-ascending, so a length check plus a
+                // pairwise zip is an exact map comparison.
+                let coherent = cell.len() == parsed.len()
+                    && cell.iter().zip(parsed.iter()).all(
+                        |((cell_index, cell_value), (parsed_index, parsed_value))| {
+                            i64::try_from(*parsed_index)
+                                .map(|index| index == *cell_index)
+                                .unwrap_or(false)
+                                && cell_value == parsed_value
+                        },
+                    );
+                assert!(
+                    coherent,
+                    "typed indexed cell `{name}` disagrees with its mirror: \
+                     cell={cell:?} mirror_parse={parsed:?} mirror={mirror:?}"
+                );
+                Some(coherent)
+            }
+            crate::shell::ShellValue::AssociativeArray(cell) => {
+                let mirror = self.shell_state.env_vars.get(name)?;
+                let parsed = super::assignment_helpers::assoc_entries_cached(mirror);
+                let coherent = cell.len() == parsed.len()
+                    && parsed
+                        .iter()
+                        .all(|(key, value)| cell.get(key).is_some_and(|v| v == value));
+                assert!(
+                    coherent,
+                    "typed assoc cell `{name}` disagrees with its mirror: \
+                     cell={cell:?} mirror_parse={parsed:?} mirror={mirror:?}"
+                );
+                Some(coherent)
             }
         }
     }

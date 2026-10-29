@@ -4,6 +4,8 @@
 //! `builtins/declare.def`. The executor's legacy environment map remains an
 //! adapter while callers migrate to this owner.
 
+#[cfg(debug_assertions)]
+use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +43,20 @@ impl Variable {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct VariableStore {
     variables: BTreeMap<String, Variable>,
+    /// rubash#1956: registry of names that may currently hold a
+    /// structured cell, feeding the debug-only command-boundary
+    /// verifier's candidate set. Over-approximation is the safe side
+    /// (a registered scalar costs one lookup at the next boundary and
+    /// is dropped there); under-approximation would blind the net.
+    /// Every mutation method that can create, replace, or destroy a
+    /// cell registers accordingly — the array-directed setters register
+    /// unconditionally, `get_mut` registers conservatively (the caller
+    /// may rewrite the value in place), wholesale `set` registers the
+    /// exact outcome, and removal drops the name. Debug-only state:
+    /// release builds compile the field and its upkeep out entirely,
+    /// like the verifier itself.
+    #[cfg(debug_assertions)]
+    cell_candidates: HashSet<String>,
 }
 
 impl VariableStore {
@@ -48,10 +64,12 @@ impl VariableStore {
         self.variables.get(name)
     }
     pub fn get_mut(&mut self, name: &str) -> Option<&mut Variable> {
+        self.note_cell_candidate(name);
         self.variables.get_mut(name)
     }
 
     pub(crate) fn remove(&mut self, name: &str) -> Option<Variable> {
+        self.drop_cell_candidate(name);
         self.variables.remove(name)
     }
 
@@ -60,8 +78,41 @@ impl VariableStore {
         if self.get(&name).map_or(false, |old| old.readonly) {
             return Err("readonly variable");
         }
-        self.variables.insert(name, variable);
+        let is_cell = matches!(
+            variable.value,
+            ShellValue::IndexedArray(_) | ShellValue::AssociativeArray(_)
+        );
+        self.variables.insert(name.clone(), variable);
+        if is_cell {
+            self.note_cell_candidate(&name);
+        } else {
+            self.drop_cell_candidate(&name);
+        }
         Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    fn note_cell_candidate(&mut self, name: &str) {
+        self.cell_candidates.insert(name.to_string());
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn note_cell_candidate(&mut self, _name: &str) {}
+
+    /// Drop `name` from the cell registry (it provably holds no cell:
+    /// removed, replaced by a scalar, or observed cell-less by the
+    /// verifier). No-op in release builds.
+    pub fn drop_cell_candidate(&mut self, name: &str) {
+        #[cfg(debug_assertions)]
+        self.cell_candidates.remove(name);
+        #[cfg(not(debug_assertions))]
+        let _ = name;
+    }
+
+    /// The registered cell-candidate names (verifier input).
+    #[cfg(debug_assertions)]
+    pub fn cell_candidate_names(&self) -> &HashSet<String> {
+        &self.cell_candidates
     }
 
     pub fn set_scalar(
@@ -92,6 +143,7 @@ impl VariableStore {
         index: i64,
         value: impl Into<String>,
     ) -> Result<(), &'static str> {
+        self.note_cell_candidate(name);
         let variable = self
             .variables
             .entry(name.to_string())
@@ -122,6 +174,7 @@ impl VariableStore {
         I: IntoIterator<Item = V>,
         V: Into<String>,
     {
+        self.note_cell_candidate(name);
         let variable = self
             .variables
             .entry(name.to_string())
@@ -160,6 +213,7 @@ impl VariableStore {
         I: IntoIterator<Item = (i64, V)>,
         V: Into<String>,
     {
+        self.note_cell_candidate(name);
         let variable = self
             .variables
             .entry(name.to_string())
@@ -201,6 +255,7 @@ impl VariableStore {
         value: &str,
         expected_len: usize,
     ) -> bool {
+        self.note_cell_candidate(name);
         let Some(variable) = self.variables.get_mut(name) else {
             return false;
         };
@@ -229,6 +284,7 @@ impl VariableStore {
         value: &str,
         expected_len: usize,
     ) -> bool {
+        self.note_cell_candidate(name);
         let Some(variable) = self.variables.get_mut(name) else {
             return false;
         };
@@ -261,6 +317,7 @@ impl VariableStore {
         name: &str,
         parsed: &BTreeMap<usize, String>,
     ) -> bool {
+        self.note_cell_candidate(name);
         let Some(variable) = self.variables.get_mut(name) else {
             return false;
         };
@@ -329,6 +386,7 @@ impl VariableStore {
         K: Into<String>,
         V: Into<String>,
     {
+        self.note_cell_candidate(name);
         let variable = self
             .variables
             .entry(name.to_string())
@@ -358,6 +416,7 @@ impl VariableStore {
         key: impl Into<String>,
         value: impl Into<String>,
     ) -> Result<(), &'static str> {
+        self.note_cell_candidate(name);
         let variable = self
             .variables
             .entry(name.to_string())
@@ -421,6 +480,7 @@ impl VariableStore {
         if self.get(name).map_or(false, |variable| variable.readonly) {
             return Err("readonly variable");
         }
+        self.drop_cell_candidate(name);
         Ok(self.variables.remove(name))
     }
 
