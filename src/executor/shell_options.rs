@@ -143,16 +143,13 @@ impl Executor {
         }
     }
 
-    /// Parse and connect a net redirect target, returning the
-    /// endpoint in its native socket form. The File form
-    /// (open_net_redirect_raw) adopts the SOCKET as a raw handle for
-    /// the fd machinery, but std File reads on an adopted overlapped
-    /// socket fail on Windows (ERROR_INVALID_PARAMETER), so byte
-    /// consumers read through this socket form, whose reads go
-    /// through WSARecv/recv. The diagnostic pre-lines (service-name
-    /// failure, refused connect; rubash#1237) are emitted here so
-    /// both forms report identically.
-    pub(in crate::executor) fn connect_net_stream(&self, target: &str) -> io::Result<NetStream> {
+    /// Parse and resolve a net redirect target WITHOUT connecting:
+    /// the first-slash split, the service resolution and the host
+    /// resolution GNU's getaddrinfo performs inside netopen, with
+    /// the diagnostic pre-lines those failures carry (service name,
+    /// unresolvable host; rubash#1237/#1894). Returns the protocol
+    /// flag and the resolved address set.
+    fn resolve_net_target(&self, target: &str) -> io::Result<(bool, Vec<std::net::SocketAddr>)> {
         let (udp, rest) = if let Some(rest) = target.strip_prefix("/dev/tcp/") {
             (false, rest)
         } else if let Some(rest) = target.strip_prefix("/dev/udp/") {
@@ -208,6 +205,39 @@ impl Executor {
             eprintln!("{}{host}: Name or service not known", self.error_prefix());
             return Err(invalid());
         }
+        Ok((udp, addrs))
+    }
+
+    /// Validation-only form for the setup/probe walks. GNU opens a
+    /// net redirect exactly once — at the bind (redir.c
+    /// do_redirections) — but this port's in-process funnels run
+    /// probe walks ahead of the bind to surface the open's errors
+    /// early. For a filesystem target a probe open is unobservable;
+    /// for a net target it is a real connection that eats the peer's
+    /// greeting and leaves the bind's own connection reset
+    /// (rubash#1950/#1967). A probe therefore resolves the target —
+    /// surfacing every failure that can be known without connecting,
+    /// with the same pre-lines — and leaves the connect itself to
+    /// the bind's one open; a refused connection surfaces there with
+    /// the same diagnostic the probe's open would have produced.
+    pub(in crate::executor) fn validate_net_redirect_target(
+        &self,
+        target: &str,
+    ) -> io::Result<()> {
+        self.resolve_net_target(target).map(|_| ())
+    }
+
+    /// Parse and connect a net redirect target, returning the
+    /// endpoint in its native socket form. The File form
+    /// (open_net_redirect_raw) adopts the SOCKET as a raw handle for
+    /// the fd machinery, but std File reads on an adopted overlapped
+    /// socket fail on Windows (ERROR_INVALID_PARAMETER), so byte
+    /// consumers read through this socket form, whose reads go
+    /// through WSARecv/recv. The diagnostic pre-lines (service-name
+    /// failure, refused connect; rubash#1237) are emitted here so
+    /// both forms report identically.
+    pub(in crate::executor) fn connect_net_stream(&self, target: &str) -> io::Result<NetStream> {
+        let (udp, addrs) = self.resolve_net_target(target)?;
         if udp {
             // The bind family follows the RESOLVED address, not the
             // host spelling (rubash#1897): _netopen6 sockets and
@@ -333,6 +363,24 @@ impl Executor {
     }
 
     fn open_input_redirect_impl(&self, target: &str, consume: bool) -> io::Result<File> {
+        // rubash#1950: a probe (consume == false) must not open a net
+        // target either — the classified ladder would CONNECT, a real
+        // connection the probe drops unread: it eats the peer's
+        // greeting, and the bind phase's one real open (GNU's only
+        // open, redir.c do_redirections) is left talking to a reset
+        // stream. Validate by resolution instead — the #1820 FIFO
+        // carve-out's rule: the probe asks every question the open
+        // can answer without performing it, the bind performs the
+        // open. Every probe caller drops the returned File unread,
+        // so the /dev/null stand-in is inert.
+        if !consume && crate::special_paths::is_net_redirect_target(target) {
+            self.validate_net_redirect_target(target)
+                .map_err(|e| crate::posix_errors::path_error(target, e))?;
+            return File::open(shell_path_to_windows(
+                "/dev/null",
+                &self.shell_state.env_vars,
+            ));
+        }
         if let Some(opened) = self.open_classified_input(target) {
             return opened;
         }

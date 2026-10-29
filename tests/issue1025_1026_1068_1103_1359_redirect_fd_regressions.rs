@@ -326,3 +326,89 @@ fn issue_1359_autofd_write_redirect_from_function_and_group() {
     assert_eq!(std::fs::read(dir.join("file3")).expect("file3"), b"one\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Start a counting greeting server for the single-open pins
+/// (rubash#1950/#1967): every accepted connection is counted, sent
+/// the greeting, and half-closed (write side) so a client reading
+/// to EOF finishes at once; whatever the client sends on that
+/// connection is recorded. Returns the port, the shared log, a stop
+/// flag, and the accept thread.
+fn start_counting_server() -> (
+    u16,
+    std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind counting server");
+    let port = listener.local_addr().expect("local addr").port();
+    listener.set_nonblocking(true).expect("nonblocking");
+    let log: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_log = Arc::clone(&log);
+    let thread_stop = Arc::clone(&stop);
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !thread_stop.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.write_all(b"GREETING\n");
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+                    let mut received = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        match stream.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => received.extend_from_slice(&buf[..n]),
+                            Err(_) => break,
+                        }
+                    }
+                    thread_log.lock().expect("log lock").push(received);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (port, log, stop, server)
+}
+
+fn counting_server_result(
+    log: &std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    server: std::thread::JoinHandle<()>,
+) -> Vec<Vec<u8>> {
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    server.join().expect("counting server thread");
+    log.lock().expect("log lock").clone()
+}
+
+#[test]
+fn issue_1950_cat_input_redirect_opens_exactly_one_connection() {
+    // GNU netopen runs once per redirection (redir.c
+    // do_redirections): a multi-accept peer sees ONE connection and
+    // the reader gets its greeting. The probe/setup walks must not
+    // connect ahead of the bind's open.
+    let (port, log, stop, server) = start_counting_server();
+    let (stdout, stderr, code) = run_c(&format!("cat < /dev/tcp/127.0.0.1/{port}"));
+    let connections = counting_server_result(&log, &stop, server);
+    assert_eq!(stdout, "GREETING\n", "stderr: {stderr}");
+    assert_eq!(code, Some(0));
+    assert_eq!(connections.len(), 1, "connections: {connections:?}");
+}
+
+#[test]
+fn issue_1950_comsub_cat_opens_exactly_one_connection() {
+    let (port, log, stop, server) = start_counting_server();
+    let (stdout, stderr, code) = run_c(&format!(
+        "x=$(cat < /dev/tcp/127.0.0.1/{port}); echo \"x=[$x]\""
+    ));
+    let connections = counting_server_result(&log, &stop, server);
+    assert_eq!(stdout, "x=[GREETING]\n", "stderr: {stderr}");
+    assert_eq!(code, Some(0));
+    assert_eq!(connections.len(), 1, "connections: {connections:?}");
+}
