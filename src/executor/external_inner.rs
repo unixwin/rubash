@@ -155,10 +155,20 @@ impl Executor {
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
         );
+        // rubash#1905: synthetic /proc operands become spawn-time
+        // snapshot files for a child without its own /proc layer; the
+        // record lives until spawn_external_process has waited the
+        // child out (function scope end).
+        let (proc_args, _proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
+            &dev_args,
+            Some(&config.command[0]),
+            Some(program.as_path()),
+            &env_map,
+        );
         let (mut process, used_shell) = external_command_for_named_program(
             &program,
             Some(&config.command[0]),
-            &dev_args,
+            &proc_args,
             &env_map,
             env_map
                 .get("BASH_ARGV0")
@@ -832,10 +842,20 @@ impl Executor {
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
         );
+        // rubash#1905: synthetic /proc operands become spawn-time
+        // snapshot files for a child without its own /proc layer; the
+        // record lives until spawn_external_process has waited the
+        // child out (function scope end).
+        let (proc_args, _proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
+            &dev_args,
+            Some(&cmd.words[0]),
+            Some(program.as_path()),
+            &self.shell_state.env_vars,
+        );
         let (mut process, used_shell) = external_command_for_named_program(
             &program,
             Some(&cmd.words[0]),
-            &dev_args,
+            &proc_args,
             &self.shell_state.env_vars,
             self.bash_argv0_env_supplied(&cmd.assignments),
         );

@@ -1413,6 +1413,15 @@ impl Executor {
         if super::external_inner::is_enoexec_candidate(&program) {
             return None;
         }
+        // rubash#1905: a word naming a synthetic /proc operand needs
+        // the spawn-boundary materialization the foreground external
+        // path owns (proc_operands); the direct spawn has no operand
+        // plumbing, so the shape keeps the wrapper, whose child
+        // serves the operand there — the same decline family as
+        // process substitutions above.
+        if crate::executor::proc_operands::args_name_synthetic_proc(&expanded.words) {
+            return None;
+        }
         Some((program, expanded.words))
     }
 

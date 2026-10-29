@@ -1295,7 +1295,18 @@ fn push_external_args(command: &mut Command, args: &[String]) {
 #[cfg(windows)]
 fn windows_program_is_posix_runtime_hosted(command: &Command) -> bool {
     let program = command.get_program();
-    let Some(directory) = std::path::Path::new(program).parent() else {
+    program_dir_hosts_posix_runtime(std::path::Path::new(program))
+}
+
+/// Whether a program at `program` is hosted by an MSYS2/Cygwin POSIX
+/// runtime, detected by the runtime DLL shipping beside it — the
+/// path-shaped form of [`windows_program_is_posix_runtime_hosted`] for
+/// consumers that classify a child before a `Command` exists (the
+/// rubash#1905 operand policy in `proc_operands`). A failed lookup
+/// classifies the program as native.
+#[cfg(windows)]
+pub(in crate::executor) fn program_dir_hosts_posix_runtime(program: &Path) -> bool {
+    let Some(directory) = program.parent() else {
         return false;
     };
     ["msys-2.0.dll", "cygwin1.dll"].iter().any(|dll| {
@@ -1305,6 +1316,77 @@ fn windows_program_is_posix_runtime_hosted(command: &Command) -> bool {
             .map(|meta| meta.is_file())
             .unwrap_or(false)
     })
+}
+
+#[cfg(not(windows))]
+pub(in crate::executor) fn program_dir_hosts_posix_runtime(_program: &Path) -> bool {
+    false
+}
+
+/// rubash#1905: whether a child spawned for `program` resolves
+/// synthetic /proc spellings through a layer of its own, so the spawn
+/// boundary must hand such operands over VERBATIM instead of
+/// materializing them (see `executor::proc_operands`). Three classes
+/// own a namespace the shell must not rewrite into:
+///
+/// - namespace bridges (wsl/ssh/scp/sftp): the argv is interpreted in
+///   another filesystem namespace entirely (final ruling 2026-10-27
+///   item (a), the same axis the translation funnel honors);
+/// - MSYS2/Cygwin-runtime-hosted tools: their runtime serves a live
+///   /proc of its own (and answers `self` as the reader) — a shell
+///   snapshot would replace its format face and strip its self
+///   semantics;
+/// - scripts a POSIX-layer shell will interpret (`should_run_with_shell`
+///   minus the cmd/PowerShell-hosted forms): the interpreter owns the
+///   namespace (a rubash respawn carries the simulation itself; a
+///   shebang to an MSYS bash carries that runtime's /proc). Batch and
+///   PowerShell scripts are excluded from this arm: their hosts are
+///   native programs with no /proc layer, so their operands take the
+///   materialization like any native child's.
+///
+/// Everything else — native programs and the WinuxCmd family
+/// (`posix_aware_child` means it speaks shell-namespace PATH SPELLINGS;
+/// its native_path layer has /dev faces but no /proc) — has no /proc
+/// layer and receives materialized operands. Off Windows the question
+/// is empty (real procfs serves every child), so the stub answers
+/// false and the materialization pass stays inert there.
+#[cfg(windows)]
+pub(in crate::executor) fn child_resolves_synthetic_proc(program: &Path) -> bool {
+    is_namespace_bridge_program(program)
+        || program_dir_hosts_posix_runtime(program)
+        || (should_run_with_shell(program)
+            && !is_windows_batch_file(program)
+            && !is_windows_powershell_script(program))
+}
+
+#[cfg(not(windows))]
+pub(in crate::executor) fn child_resolves_synthetic_proc(_program: &Path) -> bool {
+    false
+}
+
+/// rubash#1905: the argument positions the operand materialization
+/// must leave alone for a given child — the data-primary positions
+/// (grep/sed/awk pattern words and kin) when the child is of the
+/// WinuxCmd class, exactly the protection the translation funnel
+/// applies to that class in `external_command_for_named_program`.
+/// Data is not an operand even when it is shaped like a path. For
+/// every other child class the dialect already translates
+/// path-shaped words wholesale (Option B), so the set is empty.
+pub(in crate::executor) fn synthetic_proc_skip_positions(
+    program: &Path,
+    env_vars: &HashMap<String, String>,
+    command_name: Option<&str>,
+    args: &[String],
+) -> std::collections::HashSet<usize> {
+    #[cfg(windows)]
+    {
+        if posix_aware_child(program, env_vars) {
+            return argv_data_primary_positions(command_name, args);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (program, env_vars, command_name, args);
+    std::collections::HashSet::new()
 }
 
 /// Quote one argument for a Windows command line so the child's argv sees

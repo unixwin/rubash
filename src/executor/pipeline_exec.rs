@@ -2870,6 +2870,7 @@ impl Executor {
 
         let mut processes = Vec::with_capacity(commands.len());
         let mut stage_dev_ops = Vec::with_capacity(commands.len());
+        let mut stage_proc_ops = Vec::with_capacity(commands.len());
         let capture_intermediate_stderr =
             self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout);
         // rubash#1454: when the caller streams the final payload to the
@@ -2931,9 +2932,28 @@ impl Executor {
             };
             let (dev_args, dev_ops) = self.materialize_dev_fd_operands(args, dev_stdin, dev_stdout);
             stage_dev_ops.push(dev_ops);
+            // rubash#1905: synthetic /proc operands become spawn-time
+            // snapshot files for a child without its own /proc layer;
+            // each stage's record rides beside its dev_ops and is
+            // dropped where those are finished. Internal stages are
+            // the engine itself re-entered — they keep the literal
+            // spelling (their faces serve /proc), so no program is
+            // offered to the policy for them.
+            let proc_program = if internal_pipeline_program_name(program).is_some() {
+                None
+            } else {
+                Some(program.as_path())
+            };
+            let (proc_args, proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
+                &dev_args,
+                Some(expanded_name),
+                proc_program,
+                &self.shell_state.env_vars,
+            );
+            stage_proc_ops.push(proc_ops);
             let (mut process, _) = if let Some(name) = internal_pipeline_program_name(program) {
                 let mut process = std::process::Command::new(std::env::current_exe()?);
-                process.arg(format!("--internal-{name}")).args(&dev_args);
+                process.arg(format!("--internal-{name}")).args(&proc_args);
                 (process, false)
             } else {
                 // command_name is the already-expanded first field from the
@@ -2944,7 +2964,7 @@ impl Executor {
                 external_command_for_named_program(
                     program,
                     Some(expanded_name),
-                    &dev_args,
+                    &proc_args,
                     &self.shell_state.env_vars,
                     self.bash_argv0_env_supplied(&commands[index].assignments),
                 )
@@ -3099,6 +3119,7 @@ impl Executor {
                 crate::executor::wait_status::process_exit_status(&status),
             );
             self.finish_dev_fd_operands(std::mem::take(&mut stage_dev_ops[index]));
+            drop(std::mem::take(&mut stage_proc_ops[index]));
         }
         let mut last = processes.pop().expect("pipeline has at least two stages");
         debug_assert_eq!(processes.len(), last_index);
@@ -3107,6 +3128,7 @@ impl Executor {
         let mut stdout_bytes = join_pipe_drain(last_stdout)?;
         stdout_bytes
             .extend(self.finish_dev_fd_operands(std::mem::take(&mut stage_dev_ops[last_index])));
+        drop(std::mem::take(&mut stage_proc_ops[last_index]));
         results[last_index] = (
             crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
             crate::executor::substitution_metadata::bytes_to_shell_text(&join_pipe_drain(

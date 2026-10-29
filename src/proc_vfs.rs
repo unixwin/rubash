@@ -36,6 +36,29 @@ const PID_LINK_FILES: [&str; 2] = ["cwd", "exe"];
 #[allow(dead_code)] // table face consumed by the Windows generators and the cross-platform tests
 const PID_ENTRIES: [&str; 4] = ["cmdline", "cwd", "exe", "status"];
 
+/// The canonical entry name when `path` is exactly a top-level synthetic
+/// file spelling (`/proc/<name>`, no further components), else None.
+/// Pure table membership — the operand-materialization face
+/// (rubash#1905) asks it on every platform, because the rewrite decision
+/// must be an exact-spelling judgment: looser shapes the content
+/// generator happens to answer (a trailing slash, a per-pid spelling)
+/// are NOT operand-materializable, each for its own ruled reason
+/// (see `executor::proc_operands`). The generation face stays
+/// `proc_file_content`'s; this face only names the spelling, and the
+/// caller's content fetch goes through the registry as usual, so a
+/// table/generator drift would surface as a kept literal word (a loud
+/// failure in the child), never as a wrong snapshot.
+pub(crate) fn top_level_file_name(path: &str) -> Option<&'static str> {
+    let name = path.strip_prefix("/proc/")?;
+    if name.contains('/') {
+        return None;
+    }
+    TOP_LEVEL_FILES
+        .iter()
+        .find(|entry| **entry == name)
+        .copied()
+}
+
 // Count of ToolHelp process snapshots taken by this module on the
 // calling thread, so the rubash#1917 §4.2 call-count budget (self
 // face: zero snapshots; one enumeration pass: at most one) is

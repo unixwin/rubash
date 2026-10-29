@@ -846,10 +846,20 @@ impl Executor {
         };
         let (dev_args, dev_ops) =
             self.materialize_dev_fd_operands(&stdio.expanded_words[1..], dev_stdin, dev_stdout);
+        // rubash#1905: synthetic /proc operands become spawn-time
+        // snapshot files for a child without its own /proc layer; the
+        // record lives until the substitution's output is collected
+        // (function scope end).
+        let (proc_args, _proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
+            &dev_args,
+            Some(&stdio.expanded_words[0]),
+            Some(program.as_path()),
+            &self.shell_state.env_vars,
+        );
         let (mut process, _) = external_command_for_named_program(
             &program,
             Some(&stdio.expanded_words[0]),
-            &dev_args,
+            &proc_args,
             &self.shell_state.env_vars,
             self.bash_argv0_env_supplied(&[]),
         );
@@ -1086,10 +1096,8 @@ impl Executor {
         // is a special form that does not resolve (out of range); None
         // when it is not a special prefix at all, so the caller falls
         // through to the `~user` lookup.
-        match crate::expand::tilde::tilde::special_tilde_expansion(
-            word,
-            &self.shell_state.env_vars,
-        ) {
+        match crate::expand::tilde::tilde::special_tilde_expansion(word, &self.shell_state.env_vars)
+        {
             Some(Some(value)) => Some(value),
             Some(None) => Some(word.to_string()),
             None => None,
