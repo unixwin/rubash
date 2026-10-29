@@ -190,6 +190,18 @@ impl Executor {
                                 shell_path_to_windows(&target, &self.shell_state.env_vars),
                                 &self.shell_state.env_vars,
                             ));
+                        // rubash#1903: mapfile's fd-0 redirect slurp
+                        // takes a fifo marker's stream through the
+                        // rendezvous, not the marker bytes (same family
+                        // as read_redirected_fd).
+                        #[cfg(windows)]
+                        if let Some(Ok(bytes)) =
+                            crate::winux_fifo::slurp_marker_bytes(&path, &self.shell_state.env_vars)
+                        {
+                            return Some(
+                                crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
+                            );
+                        }
                         if let Ok(input) =
                             crate::executor::substitution_metadata::read_shell_input_file(path)
                         {

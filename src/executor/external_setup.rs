@@ -198,7 +198,14 @@ impl Executor {
                     )
                 {
                     let target = self.expand_redirect_target(redirect);
-                    if redirect_target_fd(&target).is_none() && !is_closed_redirect_target(&target)
+                    // rubash#2098: net targets are skipped — the
+                    // reject gate already settled a losing net entry's
+                    // one connect (and reported its failure); probing
+                    // a ReadWrite net target here would connect a
+                    // second time.
+                    if redirect_target_fd(&target).is_none()
+                        && !is_closed_redirect_target(&target)
+                        && !crate::special_paths::is_net_redirect_target(&target)
                     {
                         if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                             self.probe_input_redirect_readwrite(&target)?;
@@ -289,7 +296,16 @@ impl Executor {
             if redirect.fd.unwrap_or(0) == 0 && self.input_fd_redirects_to_process_stdin(&target) {
                 return Ok(());
             }
-            let file = if redirect.append {
+            let file = if redirect.append && crate::special_paths::is_net_redirect_target(&target) {
+                // rubash#2091: a net target has no filesystem path — the
+                // raw open below reported a bare ENOENT (no target
+                // named) and the connection never happened. redir.c
+                // netopen connects once; the socket serves the `<>`
+                // open in both directions (the plain `<` arm reaches
+                // the same class through open_input_redirect's registry
+                // walk).
+                self.open_net_redirect(&target)?
+            } else if redirect.append {
                 let path =
                     self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
                 // niubash#519: CON has no read+write handle; a child's fd 0
@@ -1241,7 +1257,10 @@ impl Executor {
         // merged with the shell's env_vars, `__RUBASH_*` keys crossing only
         // through the spawn-inherited whitelist, and the parent's caught
         // traps cancelled for the child (subst.c:6421).
-        let mut env_map: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        let mut env_map: std::collections::BTreeMap<String, String> =
+            crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
                 env_map.insert(key.clone(), value.clone());
@@ -1251,6 +1270,13 @@ impl Executor {
             !(key.starts_with("__RUBASH_TRAP") && key != crate::builtins::trap::TRAP_ORIG_IGNORES)
         });
         env_map.insert("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string());
+        // rubash#2032: process_substitute's consumer is a forked child
+        // (subst.c:6362), so it inherits the parent's positional
+        // parameters (POSITIONAL_PARAMS_TRANSPORT).
+        env_map.insert(
+            super::compound_exec::POSITIONAL_PARAMS_TRANSPORT.to_string(),
+            self.positional_params_transport_value(),
+        );
         // subst.c:6609 subshell_level++ — the procsub child runs one level
         // deeper than the parent for $BASH_SUBSHELL/$BASHPID.
         env_map.insert(

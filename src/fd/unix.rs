@@ -332,6 +332,20 @@ pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Write all bytes to an opened redirect-target `File` through the
+/// raw-handle primitive (rubash#2102). A netopen target's File wraps a
+/// SOCKET handle: std's `File::write_all` reaches WriteFile on Windows,
+/// which rejects a socket with ERROR_INVALID_PARAMETER — every write
+/// failed `Invalid argument`, live peer or dead, and a dead peer never
+/// surfaced its real error. The primitive routes sockets through send
+/// (see windows_impl::is_socket_handle / rubash#1976), so a closed peer
+/// reports its genuine failure (the EPIPE/ECONNRESET family) through
+/// sh_chkwrite. On Unix the primitive is the same write(2) std issues.
+pub fn write_file_all(file: &std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    write_all(file.as_raw_fd(), bytes)
+}
+
 pub fn write_all(h: HANDLE, bytes: &[u8]) -> std::io::Result<()> {
     let mut off = 0usize;
     while off < bytes.len() {
@@ -591,7 +605,8 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
         cmd.current_dir(cwd);
     }
     // The spec's env IS the child environment (the caller composes it from
-    // std::env::vars() plus the shell's exported state, then strips what a
+    // the ingested process environment plus the shell's exported state,
+    // then strips what a
     // subshell must not inherit — e.g. the __RUBASH_TRAP* keys, POSIX
     // 2.11: caught traps reset in a subshell). Merging with this process's
     // environment instead would resurrect every stripped key as a stale

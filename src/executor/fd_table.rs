@@ -156,6 +156,19 @@ pub(crate) enum FdWriteEndpoint {
     /// faces produce the failure — the registry's answer travels
     /// with the descriptor instead of being re-derived per face.
     FullDevice,
+    /// rubash#2042: an fd bound to a 0644-class synthetic /proc
+    /// content entry (`/proc/self/status`, `/proc/<pid>/cmdline`).
+    /// The open succeeds (procfs 0644) and every WRITE fails EINVAL —
+    /// procfs content files without a write handler answer
+    /// `write error: Invalid argument` (measured on real procfs,
+    /// bash 5.3.20: `echo hi >&3` after `exec 3<>/proc/self/status`
+    /// fails with rc 1 in the writer's name). No Windows handle
+    /// reproduces a per-write EINVAL, so — exactly like FullDevice —
+    /// the endpoint is carried symbolically and the in-shell write
+    /// faces produce the failure. The read side stays the generated
+    /// snapshot byte channel; the failed write never alters what a
+    /// later read serves (GNU's observable too).
+    ProcContentWrite,
 }
 
 #[derive(Debug, Clone)]
@@ -1316,6 +1329,21 @@ impl FdTable {
                         let _ = std::fs::File::create(&path);
                         MaterializedWrite::File(path)
                     }
+                    FdWriteEndpoint::ProcContentWrite => {
+                        // rubash#2042: same boundary as FullDevice —
+                        // the child gets an absorbed sink file; the
+                        // EINVAL write profile cannot cross into a
+                        // child handle (the in-shell write faces
+                        // carry it exactly); GNU hands the child the
+                        // real procfs entry.
+                        let path = std::env::temp_dir().join(format!(
+                            "rubash-proc-sink-{}-{}",
+                            std::process::id(),
+                            fd
+                        ));
+                        let _ = std::fs::File::create(&path);
+                        MaterializedWrite::File(path)
+                    }
                 });
                 (*fd, MaterializedFd { read, write })
             })
@@ -1355,6 +1383,9 @@ impl PartialEq for FdWriteEndpoint {
             (Self::Stdout, Self::Stdout) | (Self::Stderr, Self::Stderr) => true,
             // rubash#1898: /dev/full endpoints are interchangeable.
             (Self::FullDevice, Self::FullDevice) => true,
+            // rubash#2042: all 0644-class synthetic /proc write binds
+            // are interchangeable, like the device class above.
+            (Self::ProcContentWrite, Self::ProcContentWrite) => true,
             (Self::File(a), Self::File(b)) => Rc::ptr_eq(a, b),
             (Self::CoprocStdin { pid: a, .. }, Self::CoprocStdin { pid: b, .. }) => a == b,
             (

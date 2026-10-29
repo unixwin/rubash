@@ -640,6 +640,56 @@ impl Executor {
                     raw,
                 ));
             }
+            // rubash#2091: a /dev/tcp|udp target is judged by the
+            // registry on its shell spelling too — it has no filesystem
+            // path at all, so the translated-path machinery below
+            // served a silent EOF and the connection GNU's
+            // do_redirections performs (redir.c netopen) never
+            // happened, for `<>` and plain `<` alike. Connect once here
+            // and serve the record off the live socket, bound
+            // transiently as fd 0 like the device branch below; a
+            // failed connect is the redirection's failure, reported in
+            // the serve like the dangling-alias face above
+            // (rubash#721).
+            if crate::special_paths::is_net_redirect_target(&expanded_target) {
+                match self.open_net_redirect(&expanded_target) {
+                    Ok(file) => {
+                        let file = FileFd::from_file(file, expanded_target.clone().into());
+                        let saved = self.fd_table.entries.get(&0).cloned();
+                        self.fd_table
+                            .open_input(0, FdReadEndpoint::File(file), false);
+                        let line = self.read_virtual_fd_stdin(
+                            0,
+                            silent,
+                            delimiter,
+                            char_limit,
+                            exact_char_limit,
+                            escape_aware,
+                            raw,
+                        );
+                        match saved {
+                            Some(entry) => {
+                                self.fd_table.entries.insert(0, entry);
+                            }
+                            None => {
+                                self.fd_table.entries.remove(&0);
+                            }
+                        }
+                        return line;
+                    }
+                    Err(error) => {
+                        let mut stderr = Vec::new();
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}{}",
+                            self.diagnostic_prefix(),
+                            crate::posix_errors::message(&error)
+                        );
+                        let _ = self.write_redirected_command_stderr(cmd, &stderr);
+                        return None;
+                    }
+                }
+            }
             let link_native = crate::special_paths::synthetic_link_target(
                 &expanded_target,
                 Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
@@ -662,6 +712,41 @@ impl Executor {
                     .read(true)
                     .write(true)
                     .open(&path);
+            }
+            // rubash#1903: a WinuxCmd fifo marker is a regular file on
+            // disk, so the live-handle branch below would bind the
+            // marker file itself and the slurp further down would read
+            // its bytes. Bind the rendezvous read handle transiently
+            // instead — the same record-wise live read, over the pipe.
+            #[cfg(windows)]
+            if crate::winux_fifo::path_is_winux_fifo(&path) {
+                let Ok(server) = crate::winux_fifo::open_winux_fifo_read(&path, &|| {
+                    crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+                }) else {
+                    return None;
+                };
+                let file = FileFd::from_file(server, path.clone());
+                let saved = self.fd_table.entries.get(&0).cloned();
+                self.fd_table
+                    .open_input(0, FdReadEndpoint::File(file), false);
+                let line = self.read_virtual_fd_stdin(
+                    0,
+                    silent,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                    escape_aware,
+                    raw,
+                );
+                match saved {
+                    Some(entry) => {
+                        self.fd_table.entries.insert(0, entry);
+                    }
+                    None => {
+                        self.fd_table.entries.remove(&0);
+                    }
+                }
+                return line;
             }
             // GNU redir.c opens the target as the command's fd 0; for
             // non-regular inputs (/dev/tty → CON, NUL, a fifo) the read must

@@ -138,7 +138,24 @@ impl Executor {
             return Ok(());
         }
 
-        let Some(program) = find_user_command(&config.command[0], &env_map) else {
+        // rubash#2046 B2: GNU env hands the composed environment to
+        // execvp, and execvp with PATH ABSENT from that environment
+        // searches its default path (glibc confstr _CS_PATH) instead of
+        // failing — `env -u PATH printenv PATH` runs /usr/bin/printenv
+        // and reports its rc 1, not env's 127. Mirror that one shape:
+        // resolve against the standard path (path::standard_path, the
+        // same confstr port `command -p` uses) whenever the composed
+        // environment carries no PATH at all. A set-but-empty PATH is
+        // a different shape and keeps the plain lookup — the ruling's
+        // scope is the unset form only.
+        let program = if crate::executor::path::path_is_unset(&env_map) {
+            let mut lookup_env = env_map.clone();
+            lookup_env.insert("PATH".to_string(), standard_path(&env_map));
+            find_user_command(&config.command[0], &lookup_env)
+        } else {
+            find_user_command(&config.command[0], &env_map)
+        };
+        let Some(program) = program else {
             let mut stderr = Vec::new();
             writeln!(
                 &mut stderr,
@@ -155,10 +172,20 @@ impl Executor {
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
         );
+        // rubash#1905: synthetic /proc operands become spawn-time
+        // snapshot files for a child without its own /proc layer; the
+        // record lives until spawn_external_process has waited the
+        // child out (function scope end).
+        let (proc_args, _proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
+            &dev_args,
+            Some(&config.command[0]),
+            Some(program.as_path()),
+            &env_map,
+        );
         let (mut process, used_shell) = external_command_for_named_program(
             &program,
             Some(&config.command[0]),
-            &dev_args,
+            &proc_args,
             &env_map,
             env_map
                 .get("BASH_ARGV0")
@@ -650,14 +677,17 @@ impl Executor {
         }
 
         if self.handle_external_shortcuts(cmd)? {
+            self.note_emulated_foreground_wait();
             return Ok(());
         }
 
         if self.handle_host_external_command(cmd)? {
+            self.note_emulated_foreground_wait();
             return Ok(());
         }
 
         if self.handle_external_file_builtins(cmd)? {
+            self.note_emulated_foreground_wait();
             return Ok(());
         }
 
@@ -832,10 +862,20 @@ impl Executor {
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
         );
+        // rubash#1905: synthetic /proc operands become spawn-time
+        // snapshot files for a child without its own /proc layer; the
+        // record lives until spawn_external_process has waited the
+        // child out (function scope end).
+        let (proc_args, _proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
+            &dev_args,
+            Some(&cmd.words[0]),
+            Some(program.as_path()),
+            &self.shell_state.env_vars,
+        );
         let (mut process, used_shell) = external_command_for_named_program(
             &program,
             Some(&cmd.words[0]),
-            &dev_args,
+            &proc_args,
             &self.shell_state.env_vars,
             self.bash_argv0_env_supplied(&cmd.assignments),
         );
@@ -977,16 +1017,40 @@ impl Executor {
             // each command and pass named pipes/FIFOs to `diff`. Upstream
             // shopt1.sub uses `diff <("$t1") <("$t2")` where the files are
             // executable helper scripts that differ only by a shebang.
-            let left =
-                shell_path_to_windows(&self.expand_word(&cmd.words[1]), &self.shell_state.env_vars);
-            let right =
-                shell_path_to_windows(&self.expand_word(&cmd.words[2]), &self.shell_state.env_vars);
-            if let (Ok(left_source), Ok(right_source)) =
-                (fs::read_to_string(left), fs::read_to_string(right))
-            {
-                if strip_shebang(&left_source) == strip_shebang(&right_source) {
-                    self.exit_code = 0;
-                    return Ok(true);
+            //
+            // rubash#2043 A4: the in-process equality answer may only
+            // stand in for the real diff on that documented shape —
+            // both operands produced by a process substitution of THIS
+            // command (a parser-recorded, unquoted `<(...)` span on
+            // each operand word). For plain files the shortcut
+            // silently reported a shebang-only difference as equal
+            // where GNU diff reports it (rc 1 with the `1c1` block);
+            // those fall through to the real diff like every other
+            // operand pair.
+            let both_operands_are_procsub = [1usize, 2].iter().all(|&index| {
+                cmd.word_metadata.get(index).is_some_and(|metadata| {
+                    metadata
+                        .process_substitutions
+                        .iter()
+                        .any(|substitution| !substitution.output)
+                })
+            });
+            if both_operands_are_procsub {
+                let left = shell_path_to_windows(
+                    &self.expand_word(&cmd.words[1]),
+                    &self.shell_state.env_vars,
+                );
+                let right = shell_path_to_windows(
+                    &self.expand_word(&cmd.words[2]),
+                    &self.shell_state.env_vars,
+                );
+                if let (Ok(left_source), Ok(right_source)) =
+                    (fs::read_to_string(left), fs::read_to_string(right))
+                {
+                    if strip_shebang(&left_source) == strip_shebang(&right_source) {
+                        self.exit_code = 0;
+                        return Ok(true);
+                    }
                 }
             }
         }
@@ -1284,7 +1348,7 @@ impl Executor {
         // the parent's only post-spawn duty was the wait.
         if matches!(
             self.external_stdio_outcome,
-            Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(_))
+            Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(..))
         ) || self.external_needs_fd_copy_capture(cmd)
         {
             return false;
@@ -1712,6 +1776,43 @@ impl Executor {
                 for dup in parent_side_dups {
                     crate::fd::close_handle(dup);
                 }
+                // rubash#2094: when the stdio plan left a capture pipe to
+                // collect, start draining it NOW — before the stdin feed
+                // below and before the child wait. The feed is a
+                // synchronous write_all of the whole payload; once the
+                // payload and the child's output each exceed the pipe
+                // buffer, the child stops reading (its output pipe is
+                // full), the feed blocks mid-payload, and a drain that
+                // only starts after the feed never runs — a three-way
+                // deadlock (`out=$(dl | command sed …)` with ~128 KiB in
+                // flight; measured hang threshold between 135,000 and
+                // 140,000 bytes of payload). GNU forks, so its drain is
+                // concurrent by construction: subst.c:7143
+                // command_substitute dups the capture pipe into the
+                // child, and the parent reads it (subst.c:7437
+                // read_comsub) BEFORE waiting (subst.c:7441 wait_for).
+                // This is the same discipline niubash#158 applied to the
+                // concurrent pipeline members (drain the last member
+                // before waiting on the producers). A non-capture outcome
+                // is put back untouched for the handling below.
+                let capture_drain = match self.external_stdio_outcome.take() {
+                    Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(
+                        reader,
+                        capture_generation,
+                    )) => Some((
+                        std::thread::spawn(move || {
+                            use std::io::Read;
+                            let mut reader = reader;
+                            let mut merged = Vec::new();
+                            reader.read_to_end(&mut merged).map(|_| merged)
+                        }),
+                        capture_generation,
+                    )),
+                    other => {
+                        self.external_stdio_outcome = other;
+                        None
+                    }
+                };
                 // Only materialize the virtual stdin text when the child
                 // actually owns a pipe — `<&N` on a real file handle uses
                 // Stdio::from(dup) (no child.stdin to take), and draining
@@ -1734,7 +1835,41 @@ impl Executor {
                     }
                 }
 
-                if let Some(outcome) = self.external_stdio_outcome.take() {
+                if let Some((drain, capture_generation)) = capture_drain {
+                    // rubash#2094: the capture drain has been running on
+                    // its thread since before the stdin feed; the child
+                    // wait, the signal-death note, the SIGCHLD trap and
+                    // the generation-addressed routing keep exactly the
+                    // order the serial drain produced (drain -> wait ->
+                    // note -> trap -> route is observationally wait ->
+                    // note -> trap -> route once the drain overlaps the
+                    // feed). EOF follows the child's exit — the parent's
+                    // own write-end copies dropped with the Command — so
+                    // the join only collects the drained bytes.
+                    let foreground_pid = child.id();
+                    let status = self.wait_external_child(&mut child)?;
+                    if let Some(signal) = crate::executor::wait_status::exit_status_signal(&status)
+                    {
+                        self.note_child_signal_death(
+                            foreground_pid,
+                            signal,
+                            self.signal_notice_command_text(cmd),
+                            true,
+                        );
+                    }
+                    self.run_sigchld_trap_for_reaped_child()?;
+                    let merged = drain.join().map_err(|_| {
+                        ExecuteError::IoError(std::io::Error::other(
+                            "stdout capture drain thread panicked",
+                        ))
+                    })??;
+                    super::shell_options::write_stdout_capture_at_generation(
+                        &merged,
+                        capture_generation,
+                    )
+                    .map_err(ExecuteError::IoError)?;
+                    self.exit_code = crate::executor::wait_status::process_exit_status(&status);
+                } else if let Some(outcome) = self.external_stdio_outcome.take() {
                     // niubash#144: the stdio plan already gave the child real
                     // handles; only the shared capture pipe needs collecting.
                     // Drain it to EOF first — the merged bytes stream in true
@@ -1744,8 +1879,14 @@ impl Executor {
                     let foreground_pid = child.id();
                     if let super::external_redirects::ExternalStdioOutcome::CapturePipe(
                         mut reader,
+                        capture_generation,
                     ) = outcome
                     {
+                        // Fallback for an outcome re-armed after the
+                        // drain start above (no producer does so today —
+                        // CapturePipe outcomes are claimed by capture_drain
+                        // before the feed). Kept so this branch stays
+                        // total over the outcome enum.
                         use std::io::Read;
                         let mut merged = Vec::new();
                         reader.read_to_end(&mut merged)?;
@@ -1761,9 +1902,21 @@ impl Executor {
                             );
                         }
                         self.run_sigchld_trap_for_reaped_child()?;
-                        // Route the merged stream into the active capture
-                        // exactly like the legacy single-stream collection.
-                        self.write_default_stdout(&merged)?;
+                        // Route the merged stream into the capture the
+                        // plan materialized the pipe for — addressed by
+                        // its recorded generation, NOT through fd 1's
+                        // current endpoint: a function-call wrap may have
+                        // rebound fd 1 since the plan (rubash#2031:
+                        // `$(f 2>&1 >/dev/null)`, f's external leaf wrote
+                        // its stderr into the capture pipe, and resolving
+                        // the drain through fd 1 landed the bytes in the
+                        // /dev/null target file instead of the
+                        // substitution's capture).
+                        super::shell_options::write_stdout_capture_at_generation(
+                            &merged,
+                            capture_generation,
+                        )
+                        .map_err(ExecuteError::IoError)?;
                         self.exit_code = crate::executor::wait_status::process_exit_status(&status);
                     } else {
                         let status = self.wait_external_child(&mut child)?;

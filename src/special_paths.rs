@@ -232,6 +232,23 @@ pub fn synthetic_proc_content(target: &str) -> Option<Vec<u8>> {
     crate::proc_vfs::proc_file_content(target)
 }
 
+/// The registry's exact-spelling face for the top-level synthetic
+/// files: the canonical entry name when `target` is exactly
+/// `/proc/<name>` for a generated top-level file, else None. The
+/// spawn-boundary operand materialization (rubash#1905) rewrites only
+/// these spellings: their content depends on no reader and no process,
+/// so a snapshot taken at spawn time is faithful. Per-pid spellings
+/// (whose referent is a process that may exit, or `self`, whose
+/// referent is the READER) and sub-path shapes deliberately answer
+/// None here even where the content generator would answer Some —
+/// classification breadth is for the shell's own faces; operand
+/// hand-off to a child is a narrower contract. Crate-internal: the
+/// host faces have no consumer for this judgment, so the public API
+/// (and its ledger) does not grow.
+pub(crate) fn synthetic_proc_top_level_name(target: &str) -> Option<&'static str> {
+    crate::proc_vfs::top_level_file_name(target)
+}
+
 /// Whether a write-direction open of a synthetic /proc content entry
 /// succeeds on the real procfs entry (rubash#1935): `Some(false)` for
 /// the 0444 class (the open itself fails EACCES), `Some(true)` for

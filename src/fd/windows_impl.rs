@@ -1096,6 +1096,20 @@ pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Write all bytes to an opened redirect-target `File` through the
+/// raw-handle primitive (rubash#2102). A netopen target's File wraps a
+/// SOCKET handle: std's `File::write_all` reaches WriteFile, which
+/// rejects a socket with ERROR_INVALID_PARAMETER — every write failed
+/// `Invalid argument`, live peer or dead, and a dead peer never
+/// surfaced its real error. The primitive routes sockets through send
+/// (see is_socket_handle / rubash#1976), so a closed peer reports its
+/// genuine failure (the WSAECONNRESET/EPIPE family) through
+/// sh_chkwrite. The File keeps owning the handle; this only borrows it.
+pub fn write_file_all(file: &std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    write_all(file.as_raw_handle() as HANDLE, bytes)
+}
+
 pub fn write_all(h: HANDLE, bytes: &[u8]) -> std::io::Result<()> {
     // rubash#1976: send, not WriteFile, on a netopen endpoint (see
     // is_socket_handle); write_all loops send until the buffer is out,

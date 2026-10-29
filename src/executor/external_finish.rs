@@ -57,8 +57,8 @@ impl Executor {
             if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
                 return result;
             }
-            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-            file.write_all(output)?;
+            let file = self.create_redirect_output(&target, redirect.clobber)?;
+            crate::fd::write_file_all(&file, output)?;
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
             if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
@@ -67,8 +67,8 @@ impl Executor {
             // Classified append open (rubash#1964): the raw mapped
             // open this replaces could not reach /dev/tcp targets
             // (their mapped name is not a file).
-            let mut file = self.open_append_target(&target)?;
-            file.write_all(output)?;
+            let file = self.open_append_target(&target)?;
+            crate::fd::write_file_all(&file, output)?;
         } else {
             self.write_default_stdout(output)?;
         }
@@ -675,8 +675,10 @@ impl Executor {
             None
         };
         let saved_process_env: Option<HashMap<String, String>> = if fresh_shell {
-            let saved: HashMap<String, String> = env::vars().collect();
-            for (name, _) in env::vars() {
+            let saved: HashMap<String, String> = crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect();
+            for (name, _) in crate::executor::env_helpers::process_env_pairs() {
                 env::remove_var(&name);
             }
             for (name, value) in self.shell_state.env_vars.values_map() {
@@ -736,7 +738,7 @@ impl Executor {
         }
 
         if let Some(saved) = saved_process_env {
-            for (name, _) in env::vars() {
+            for (name, _) in crate::executor::env_helpers::process_env_pairs() {
                 env::remove_var(&name);
             }
             for (name, value) in saved {

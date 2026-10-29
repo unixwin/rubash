@@ -73,6 +73,7 @@ mod declare_local;
 mod dev_fd_operands;
 mod dynamic_arrays;
 mod exec_profile;
+pub(in crate::executor) mod proc_operands;
 pub(in crate::executor) use dynamic_arrays::dense_view_element;
 pub(in crate::executor) use dynamic_arrays::env_derived_dynamic_parameter_value;
 pub(crate) mod embedded_mutations;
@@ -184,9 +185,14 @@ mod alias_helpers;
 pub(crate) mod assignment_helpers;
 mod ast_exec;
 mod builtin_names;
+#[allow(dead_code)]
+// rubash#2036: consumers landed through S4 (introspection, dispatch,
+// pipeline and comsub projections); a few registration-only fields
+// are read by the module's consistency pins rather than hot paths.
+pub(crate) mod command_registry;
 mod command_subst_helpers;
 mod command_text;
-mod env_helpers;
+pub(crate) mod env_helpers;
 mod execution_misc;
 mod function_env;
 pub(crate) mod local_helpers;
@@ -580,6 +586,22 @@ pub struct Executor {
     /// refresh_background_jobs in job_builtins.rs). Entries are
     /// (pid, flattened status, killing signal).
     pending_job_completions: Vec<(u32, i32, Option<i32>)>,
+    /// rubash#2053/#2057: coproc pids whose completion has been
+    /// applied (status recorded in completed_statuses) but whose
+    /// retirement — coproc_unsetvars + endpoint close, GNU's
+    /// coproc_reap via coproc_dispose — is deferred to a disposal
+    /// point. GNU separates the reap from the disposal: waitchld
+    /// records the status asynchronously (execute_cmd.c:2326
+    /// coproc_setstatus), while coproc_reap runs from
+    /// cleanup_dead_jobs, whose non-interactive callers are the
+    /// notify_and_cleanup inside a foreground wait_for (jobs.c:3385),
+    /// the wait/jobs builtins, and stream end — never a bare command
+    /// boundary. Retiring at the boundary that merely RECORDED the
+    /// completion unbinds <name>/<name>_PID before the next command
+    /// expands, stealing a `wait $C_PID` operand (bare wait reports
+    /// 0 instead of the recorded status) or a `{C[1]}` redirect
+    /// operand (ambiguous redirect).
+    pending_coproc_retirements: Vec<u32>,
     /// rubash#1528: deferred `time` reports for timed coproc commands.
     /// GNU times a coproc like any async job — the interval is the
     /// job's lifetime (spawn to completion) and the report prints when

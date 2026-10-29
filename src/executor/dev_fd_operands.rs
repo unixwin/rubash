@@ -151,15 +151,26 @@ pub(in crate::executor) fn dev_operand_targets_fd(arg: &str, fd: u32) -> bool {
     matches!(split_dev_operand(arg), Some((_, value)) if dev_operand_fd(value) == Some(fd))
 }
 
-fn split_dev_operand(arg: &str) -> Option<(&str, &str)> {
-    if dev_operand_fd(arg).is_some() {
+/// The operand word-shape discipline shared by the operand passes
+/// (the dev-fd pass here, the synthetic-/proc pass in proc_operands):
+/// a word carries an operand when it IS the operand spelling, or when
+/// it carries it after `=` under an option-looking key. `value_ok`
+/// judges whether a (whole or post-`=`) word is the pass's operand
+/// spelling.
+pub(in crate::executor) fn split_keyed_operand<'a>(
+    arg: &'a str,
+    value_ok: impl Fn(&str) -> bool,
+) -> Option<(&'a str, &'a str)> {
+    if value_ok(arg) {
         return Some(("", arg));
     }
     // `dd of=/dev/stdout`, `tar --file=/dev/stdin` and similar carry the
     // operand after `=`. Option-looking keys (`--x`, lowercase dd-style
     // keys) rewrite; `FOO=/dev/stdin` environment assignments stay literal.
     let (key, value) = arg.split_once('=')?;
-    dev_operand_fd(value)?;
+    if !value_ok(value) {
+        return None;
+    }
     if key.starts_with('-')
         || key
             .chars()
@@ -170,6 +181,10 @@ fn split_dev_operand(arg: &str) -> Option<(&str, &str)> {
     } else {
         None
     }
+}
+
+fn split_dev_operand(arg: &str) -> Option<(&str, &str)> {
+    split_keyed_operand(arg, |value| dev_operand_fd(value).is_some())
 }
 
 /// The descriptor a `/dev/std*` / `/dev/fd/N` / `/proc/self/fd/N` operand
@@ -511,6 +526,12 @@ impl Executor {
             // contract minus the ENOSPC the child would see from
             // the real device; the in-shell faces carry that shape).
             FdWriteEndpoint::FullDevice => dev_operand_temp(&[], m),
+            // rubash#2042: an operand naming a 0644-class synthetic
+            // /proc binding — same absorbed-temp treatment; the
+            // EINVAL write profile the child would see from the real
+            // procfs entry cannot cross the boundary (the in-shell
+            // faces carry that shape).
+            FdWriteEndpoint::ProcContentWrite => dev_operand_temp(&[], m),
         }
     }
 
@@ -791,7 +812,10 @@ impl Executor {
             | FdWriteEndpoint::ProcessSubstitution { .. }
             // rubash#1898: a /dev/full write endpoint holds no
             // readable bytes.
-            | FdWriteEndpoint::FullDevice => None,
+            | FdWriteEndpoint::FullDevice
+            // rubash#2042: neither does a 0644-class synthetic /proc
+            // write binding (the entry's bytes ride the read side).
+            | FdWriteEndpoint::ProcContentWrite => None,
         }
     }
 

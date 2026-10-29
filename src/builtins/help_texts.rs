@@ -665,6 +665,37 @@ pub(crate) static HELP_TOPICS_TABLE: &[HelpTopic] = &[
         ],
         trailing_newline: false,
     },
+    // env: rubash extension builtin (no GNU .def ancestor — GNU bash
+    // has no env builtin). Added by #2036 S2: env was the one builtin
+    // with no help topic, so the help face contradicted `type env`.
+    HelpTopic {
+        name: "env",
+        short_doc: "env [-i] [-u name] [name=value ...] [command [argument ...]]",
+        doc: &[
+            "Run a command in a modified environment.",
+            "",
+            "With no COMMAND, print the resulting environment.",
+            "",
+            "`env' is a rubash extension builtin implementing the coreutils",
+            "env semantics in-process; it shadows the disk command for the",
+            "bare name. `command env' and pathname forms (e.g. /usr/bin/env)",
+            "run the disk command instead.",
+            "",
+            "Options:",
+            "  -i\\tstart with an empty environment",
+            "  -u name\\tremove NAME from the environment",
+            "  -C dir\\tchange working directory to DIR for the command",
+            "  -f file\\tread environment variables from FILE",
+            "  -S string\\tsplit STRING into the command and its arguments",
+            "  -0\\tuse NUL as the output delimiter (print mode only)",
+            "  -v\\tprint verbose information for each processing step",
+            "",
+            "Exit Status:",
+            "Returns the command's exit status; 125 if env itself fails,",
+            "127 if the command is not found.",
+        ],
+        trailing_newline: false,
+    },
     // eval.def
     HelpTopic {
         name: "eval",

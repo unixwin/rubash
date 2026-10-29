@@ -1123,6 +1123,26 @@ impl Executor {
             if redirect.fd_var.is_some() {
                 continue;
             }
+            // rubash#2031: a leg INJECTED by an enclosing compound's splice
+            // (GROUP_REDIRECT_INJECTED_MARK) is not part of this call's own
+            // redirect list in GNU terms — execute_cmd.c:5606 applies the
+            // call's written list once, and an ancestor compound's binding
+            // reaches the body through the descriptors themselves. Here that
+            // binding is already realized on the fd table by the ancestor's
+            // scope, and this call's own with_compound_output_redirects wrap
+            // keeps it in force (skipping the re-bind via
+            // injected_redirect_fd_is_bound) or lets the call's genuine legs
+            // displace it. Re-splicing the injected leg into the body copies
+            // it WITHOUT that context onto leaves that run after a nearer
+            // scope rebinds the fd — e.g. the call's own `>&2` dup onto a
+            // command-substitution capture (an Stdout endpoint, not the
+            // File endpoint injected_redirect_fd_is_bound recognizes) — and
+            // the leaf then re-opens the ancestor's target over the dup
+            // binding, silently swallowing the output
+            // (`$( ( a x >&2 ) 2>&1 >/dev/null )` lost the message).
+            if crate::executor::support_names::is_injected_group_redirect(redirect) {
+                continue;
+            }
             if !suppress_stdout && is_stdout_write_redirect(redirect) {
                 let target = self.expand_redirect_target(redirect);
                 // A combined entry's fd-1 leg is the single open both

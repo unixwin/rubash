@@ -4,7 +4,6 @@
 //! - builtins/command.def (`command_builtin`)
 
 use std::collections::HashMap;
-use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -147,70 +146,9 @@ where
 }
 
 fn is_shell_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "." | ":"
-            | "["
-            | "alias"
-            | "bg"
-            | "bind"
-            | "break"
-            | "builtin"
-            | "caller"
-            | "cd"
-            | "command"
-            | "compgen"
-            | "complete"
-            | "compopt"
-            | "continue"
-            | "declare"
-            | "dirs"
-            | "disown"
-            | "echo"
-            | "enable"
-            | "env"
-            | "eval"
-            | "exec"
-            | "exit"
-            | "export"
-            | "false"
-            | "fc"
-            | "fg"
-            | "getopts"
-            | "hash"
-            | "help"
-            | "history"
-            | "jobs"
-            | "kill"
-            | "let"
-            | "local"
-            | "logout"
-            | "mapfile"
-            | "popd"
-            | "printf"
-            | "pushd"
-            | "pwd"
-            | "read"
-            | "readarray"
-            | "readonly"
-            | "return"
-            | "set"
-            | "shift"
-            | "shopt"
-            | "source"
-            | "suspend"
-            | "test"
-            | "times"
-            | "trap"
-            | "type"
-            | "typeset"
-            | "true"
-            | "ulimit"
-            | "umask"
-            | "unalias"
-            | "unset"
-            | "wait"
-    )
+    // Registry projection (rubash#2036 S2): this fallback describe
+    // face used to carry its own copy of the builtin table.
+    crate::executor::command_registry::is_introspection_builtin(name)
 }
 
 fn find_in_path(name: &str, use_standard_path: bool) -> Option<PathBuf> {
@@ -219,7 +157,9 @@ fn find_in_path(name: &str, use_standard_path: bool) -> Option<PathBuf> {
     // find_user_command (findcmd.c:247) — the same FS_EXEC_PREFERRED +
     // file_to_lose_on walk the executor uses to run commands. Delegating
     // to crate::executor::path keeps describe and execute on one lookup.
-    let mut env_vars: HashMap<String, String> = env::vars().collect();
+    let mut env_vars: HashMap<String, String> = crate::executor::env_helpers::process_env_pairs()
+        .into_iter()
+        .collect();
     if use_standard_path {
         env_vars.insert(
             "PATH".to_string(),

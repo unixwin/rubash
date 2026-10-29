@@ -113,6 +113,36 @@ impl Executor {
                 .write(true)
                 .open(&path);
         }
+        // rubash#1903: the read builtin's own slurp of its redirect
+        // target must go through the rendezvous for a WinuxCmd fifo
+        // marker — plain-reading the target hands `read` the 7 marker
+        // bytes and strands the writer (the #2014 append pin's
+        // `read x < g` face).
+        #[cfg(windows)]
+        if let Some(result) =
+            crate::winux_fifo::slurp_marker_bytes(&path, &self.shell_state.env_vars)
+        {
+            let input = match result {
+                Ok(bytes) => crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
+                Err(_) => return None,
+            };
+            self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
+                &input,
+                delimiter,
+                char_limit,
+                exact_char_limit,
+                escape_aware,
+                raw,
+            );
+            return Some(trim_read_input(
+                input,
+                delimiter,
+                char_limit,
+                exact_char_limit,
+                escape_aware,
+                raw,
+            ));
+        }
         // Same byte-preserving contract as read_io.rs for the shell-owned
         // descriptor path (GNU redir.c feeds raw bytes to the read owner).
         let input = match crate::executor::substitution_metadata::read_shell_input_file(&path) {

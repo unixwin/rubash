@@ -2,6 +2,30 @@ use super::*;
 use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 use crate::shell::var_table::VarTable;
 
+/// Ingest the process environment as (name, value) pairs, dropping the
+/// entries Unicode cannot represent.
+///
+/// `std::env::vars()` panics when its iteration reaches an entry whose
+/// name or value is not valid Unicode (an unpaired surrogate on Windows,
+/// arbitrary non-UTF-8 bytes on Unix). A host process can hand an
+/// embedded Session such an entry at any moment, so every
+/// full-environment read in the engine goes through this filter rather
+/// than `vars()` (rubash#2064; problem definition from dsh-bash-native
+/// patch 0002). GNU carries environ as bytes; this engine's variable
+/// table is String, so the honest equivalent of an undecodable entry is
+/// absence — a lossy U+FFFD conversion would forge data and hand the
+/// forgery to children. Decodable entries pass through exactly, in
+/// environ order.
+pub(crate) fn process_env_pairs() -> Vec<(String, String)> {
+    std::env::vars_os()
+        .filter_map(|(name, value)| {
+            let name = name.to_str()?.to_owned();
+            let value = value.to_str()?.to_owned();
+            Some((name, value))
+        })
+        .collect()
+}
+
 /// Exact-case bare-name fallback into the process environment.
 ///
 /// GNU variables.c: the shell variable table is case-sensitive and the
@@ -13,7 +37,8 @@ use crate::shell::var_table::VarTable;
 /// match the stored key exactly; a case-variant miss is simply unbound
 /// (rubash#273: `M2=x rubash -u -c 'echo $m2'` must fail like GNU).
 pub(in crate::executor) fn exact_case_env_var(name: &str) -> Option<String> {
-    std::env::vars()
+    process_env_pairs()
+        .into_iter()
         .find(|(key, _)| key == name)
         .map(|(_, value)| value)
 }

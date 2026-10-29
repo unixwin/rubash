@@ -15,99 +15,19 @@ mod help_texts;
 
 use help_texts::{HelpTopic, HELP_TOPICS_TABLE};
 
+/// The help topic names, in table order — the single source the
+/// completion `helptopic` action projects from (rubash#2036 S2; the
+/// completion face previously carried its own hand copy, which had
+/// drifted by thirteen `set -o` option names GNU does not treat as
+/// help topics). The registry consistency tests pin this set against
+/// the command registry's builtin/keyword projection.
+pub(crate) fn help_topic_names() -> Vec<&'static str> {
+    HELP_TOPICS_TABLE.iter().map(|topic| topic.name).collect()
+}
+
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
-
-// Consumed previously by the completion helptopic action, which now carries
-// its own GNU-aligned table (see builtins/complete.rs).
-#[allow(dead_code)]
-pub(crate) const HELP_TOPICS: &[&str] = &[
-    "!",
-    ".",
-    ":",
-    "[",
-    "[[",
-    "]]",
-    "{",
-    "}",
-    "alias",
-    "bg",
-    "bind",
-    "break",
-    "builtin",
-    "caller",
-    "case",
-    "cd",
-    "command",
-    "compgen",
-    "complete",
-    "compopt",
-    "continue",
-    "coproc",
-    "declare",
-    "dirs",
-    "disown",
-    "do",
-    "done",
-    "echo",
-    "elif",
-    "else",
-    "enable",
-    "esac",
-    "eval",
-    "exec",
-    "exit",
-    "export",
-    "false",
-    "fc",
-    "fg",
-    "fi",
-    "for",
-    "function",
-    "getopts",
-    "hash",
-    "help",
-    "history",
-    "if",
-    "in",
-    "jobs",
-    "kill",
-    "let",
-    "local",
-    "logout",
-    "mapfile",
-    "popd",
-    "printf",
-    "pushd",
-    "pwd",
-    "read",
-    "readarray",
-    "readonly",
-    "return",
-    "select",
-    "set",
-    "shift",
-    "shopt",
-    "source",
-    "suspend",
-    "test",
-    "then",
-    "time",
-    "times",
-    "trap",
-    "true",
-    "type",
-    "typeset",
-    "ulimit",
-    "umask",
-    "unalias",
-    "unset",
-    "until",
-    "variables",
-    "wait",
-    "while",
-];
 
 pub fn execute(args: &[String]) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
@@ -532,6 +452,7 @@ const HELP_ENTRIES: &[&str] = &[
     "disown [-h] [-ar] [jobspec ... | pid ...]",
     "echo [-neE] [arg ...]",
     "enable [-a] [-dnps] [-f filename] [name ...]",
+    "env [-i] [-u name] [name=value ...] [command [argument ...]]",
     "eval [arg ...]",
     "exec [-cl] [-a name] [command [argument ...]] [redirection ...]",
     "exit [n]",

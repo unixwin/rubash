@@ -33,6 +33,32 @@ pub(super) fn parse_for_command(
         return None;
     }
     let variable_token = tokens.get(start + 1)?;
+    if !matches!(
+        variable_token.kind,
+        TokenKind::Word | TokenKind::Variable | TokenKind::Keyword
+    ) {
+        // GNU parse.y:893 (`FOR WORD newline_list DO ...`): the name
+        // slot admits exactly a WORD, so any other token there is the
+        // syntax-error token at its own position (rubash#2108 face A:
+        // `for; do ...` blames `;', `for > f; do ...` blames `>').
+        // Returning None degraded the head to the word path, which
+        // walked on to `do' and blamed IT instead. Two shapes keep the
+        // None fall-through: end of input (no token to blame — the
+        // dangling-head diagnostic owns it) and a bare newline (GNU
+        // blames `newline' there; that diagnostic owns the shape too).
+        if variable_token.kind == TokenKind::Eof
+            || (variable_token.kind == TokenKind::Semicolon && variable_token.line_break)
+        {
+            return None;
+        }
+        return Some(head_unexpected_token_node(
+            tokens,
+            start,
+            start + 1,
+            source,
+            source_line_offset,
+        ));
+    }
     // GNU keeps the loop variable name as the raw word text — quote removal
     // does not apply to the name position (`for f\1 in ...` reports
     // `f\1': not a valid identifier` against the raw spelling, errors.tests
@@ -43,12 +69,6 @@ pub(super) fn parse_for_command(
     } else {
         variable_token.raw.clone()
     };
-    if !matches!(
-        tokens.get(start + 1)?.kind,
-        TokenKind::Word | TokenKind::Variable | TokenKind::Keyword
-    ) {
-        return None;
-    }
     // `for` loop variable may be any reserved word used as a name: GNU
     // parse.y reads the slot after FOR as a plain WORD (reserved-word
     // recognition is positional), so `for in in a b`, `for do in a` and
@@ -130,6 +150,24 @@ pub(super) fn parse_for_command(
                 if for_brace_body_start(tokens, i) {
                     break;
                 }
+                // GNU parse.y:921 (`FOR WORD newline_list IN word_list
+                // list_terminator newline_list DO compound_list DONE`):
+                // after the list terminator and the newline list, only
+                // `do` (or the `{` body form above) may follow — any other
+                // token is the syntax-error token (rubash#2087:
+                // `for i in 1 2\ndone` blames `done`; `for i in 1 2;
+                // echo x; do ...` blames `echo`). Collecting it as another
+                // list word degrades the recognized head into an
+                // executable simple command.
+                if tokens.get(i).is_some() {
+                    return Some(head_unexpected_token_node(
+                        tokens,
+                        start,
+                        i,
+                        source,
+                        source_line_offset,
+                    ));
+                }
                 continue;
             }
             if for_brace_body_start(tokens, i) {
@@ -168,6 +206,26 @@ pub(super) fn parse_for_command(
                 );
                 return Some(finish_compound_command(command, tokens, tokens.len()));
             }
+            // GNU's lexer returns SEMI_SEMI for the case-terminator
+            // family (parse.y: the word_list production admits WORD
+            // tokens only), so an unquoted `;;'/`;&'/`;;&' in the list
+            // is the syntax-error token (rubash#2087: `for i in 1 2;;
+            // do ...' blames `;;'). This lexer emits the family as Word
+            // tokens (raw == value is the unquoted operator spelling; a
+            // quoted `';;'' stays a genuine list word), and the collect
+            // below would swallow it as one.
+            if tokens[i].kind == TokenKind::Word
+                && tokens[i].raw == tokens[i].value
+                && matches!(tokens[i].value.as_str(), ";;" | ";&" | ";;&")
+            {
+                return Some(head_unexpected_token_node(
+                    tokens,
+                    start,
+                    i,
+                    source,
+                    source_line_offset,
+                ));
+            }
             if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
                 let raw = if next_i == i + 1 {
                     tokens[i].raw.as_str()
@@ -178,6 +236,43 @@ pub(super) fn parse_for_command(
                 words.push(word);
                 i = next_i;
                 continue;
+            }
+            // GNU parse.y:526-529 (`word_list: WORD | word_list WORD`)
+            // admits WORD tokens only, so an operator token the collect
+            // above could not take as a word is the syntax-error token
+            // at its own position (parse.y:921 for the `for`
+            // production; rubash#2108 face B: `for i in 1 2 | cat`
+            // blames `|', `for i in > f 1` blames `>'). The loop used
+            // to step over this whole class silently — the operator
+            // vanished, its target was collected as a list word, and a
+            // bogus loop ran. The gate sits AFTER the collect, so the
+            // word forms that begin with an operator-shaped token are
+            // already taken: process substitutions (GNU lexes `<(...)`
+            // inside read_token_word as word text) and quoted or
+            // escaped operator spellings (`for i in '|' \> ';;'`
+            // iterates over them — Word tokens, never operator kinds).
+            if matches!(
+                tokens[i].kind,
+                TokenKind::Pipe
+                    | TokenKind::PipeErr
+                    | TokenKind::And
+                    | TokenKind::Or
+                    | TokenKind::Background
+                    | TokenKind::RedirectIn
+                    | TokenKind::RedirectOut
+                    | TokenKind::Append
+                    | TokenKind::RedirectErr
+                    | TokenKind::RedirectErrAppend
+                    | TokenKind::HereDoc
+                    | TokenKind::HereString
+            ) {
+                return Some(head_unexpected_token_node(
+                    tokens,
+                    start,
+                    i,
+                    source,
+                    source_line_offset,
+                ));
             }
             i += 1;
         }
@@ -192,6 +287,25 @@ pub(super) fn parse_for_command(
                 list_terminator_metadata = Some(build_keyword_metadata(&tokens[i]));
             }
             i += 1;
+        }
+        // GNU parse.y:893-915: with no `in` list the head is `FOR WORD
+        // newline_list DO` / `FOR WORD ';' newline_list DO` — after the
+        // terminator run the next token must be `do` (or the `{` body
+        // form handled below); anything else is the syntax-error token
+        // (rubash#2087: `for i; echo x; do ...` blames `echo`;
+        // `for i;\ndone` blames `done`). Returning None here degrades
+        // the recognized head into an executable simple command.
+        if tokens.get(i).is_some()
+            && !is_keyword(tokens, i, "do")
+            && !for_brace_body_start(tokens, i)
+        {
+            return Some(head_unexpected_token_node(
+                tokens,
+                start,
+                i,
+                source,
+                source_line_offset,
+            ));
         }
         true
     };
@@ -344,6 +458,42 @@ fn parse_for_body_commands(
 
 fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {
     Box::new(build_word_metadata(0, &token.value, &token.raw))
+}
+
+/// The `syntax error near unexpected token' node for a token that
+/// breaks the `for` head's grammar at its position (rubash#2087) — the
+/// same `__RUBASH_PARSE_ERROR_NEAR__` encoding as the #1140 follower
+/// gate above: the spec carries the offending token and ITS line, the
+/// source assignment echoes its physical line.
+fn head_unexpected_token_node(
+    tokens: &[Token],
+    start: usize,
+    bad_index: usize,
+    source: Option<&std::rc::Rc<str>>,
+    source_line_offset: usize,
+) -> (CommandNode, usize) {
+    let token = &tokens[bad_index];
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
+    command.insert_assignment(
+        "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+        format!(
+            "{}{}{}",
+            near_blame_text(token),
+            crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+            token.position
+        ),
+    );
+    command.insert_assignment(
+        "__RUBASH_PARSE_SOURCE__".to_string(),
+        super::parse_loop::offending_line_text(
+            tokens,
+            bad_index,
+            source.map(|rc| &**rc),
+            source_line_offset,
+        ),
+    );
+    finish_compound_command(command, tokens, tokens.len())
 }
 
 fn skip_newline_list(tokens: &[Token], mut index: usize) -> usize {

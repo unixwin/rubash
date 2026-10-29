@@ -46,6 +46,17 @@ pub const FD_OUTPUT_PROCESS_SUBSTITUTION_PREFIX: &str = "__RUBASH_FD_OUTPUT_PROC
 pub const FD_CLOSED_PREFIX: &str = "__RUBASH_FD_CLOSED_";
 pub const FD_TERMINAL_PREFIX: &str = "__RUBASH_FD_TERMINAL_";
 pub const FD_PIPE_PREFIX: &str = "__RUBASH_FD_PIPE_";
+/// rubash#2042: marks a file-backed open descriptor for the
+/// `test -r /proc/<pid>/fd/N` face. GNU answers -r TRUE for every
+/// live fd magic link regardless of the fd's open mode (measured on
+/// real procfs, bash 5.3.20, uid 1: `lr-x` regular read-only,
+/// `l-wx` write-only append, `lr-x` /dev/null all answer -r yes —
+/// the link is readable iff the descriptor exists). The pipe marker
+/// above deliberately does not cover regular files (rubash#1467
+/// keeps them unmarked so the pipe verdicts stay exact), so the
+/// file-backed class carries its own mark, rewritten fresh each
+/// call like the pipes.
+pub const FD_FILE_PREFIX: &str = "__RUBASH_FD_FILE_";
 pub const FD_STDOUT_TARGET: &str = "__RUBASH_FD_STDOUT";
 pub const FD_STDERR_TARGET: &str = "__RUBASH_FD_STDERR";
 pub const FD_COPROC_STDIN_TARGET_PREFIX: &str = "__RUBASH_COPROC_STDIN:";

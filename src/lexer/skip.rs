@@ -102,7 +102,17 @@ impl<'a> Lexer<'a> {
                 }
                 '$' if self.peek() == Some('(') => {
                     self.advance();
-                    if self.peek() == Some('(') {
+                    // GNU parse.y:4464-4473 (parse_comsub) + parse_matched_pair
+                    // (count=1 nesting, parse.y:3898): word-level `$((` is
+                    // arithmetic only when the second `('s balanced group
+                    // closes right before a `)' (parse_arith_cmd,
+                    // parse.y:4970-4996). Otherwise it is a command
+                    // substitution of a subshell-or-list (`$(( cmd ) || cmd)`,
+                    // nvm.sh:1336) whose body ends at the GROUP match — a
+                    // `))`-pair hunt here swallows the rest of the word.
+                    if self.peek() == Some('(')
+                        && dollar_double_paren_is_arithmetic(&self.input[self.position..])
+                    {
                         self.advance();
                         self.skip_arith_paren();
                     } else {
@@ -327,7 +337,14 @@ impl<'a> Lexer<'a> {
                     }
                     Some('(') => {
                         self.advance();
-                        if self.peek() == Some('(') {
+                        // Same verdict as skip_cmd_subst's `$((` arm (GNU
+                        // parse.y:4464-4473 + parse_arith_cmd parse.y:4970-4996):
+                        // no `))`-pair hunt unless the construct closes as
+                        // arithmetic — `$(( cmd ) || cmd)` inside dquotes must
+                        // not swallow the closing quote and the rest of the word.
+                        if self.peek() == Some('(')
+                            && dollar_double_paren_is_arithmetic(&self.input[self.position..])
+                        {
                             self.advance();
                             self.skip_arith_paren();
                         } else {
@@ -414,7 +431,16 @@ impl<'a> Lexer<'a> {
                             }
                             Some('(') => {
                                 self.advance();
-                                if self.peek() == Some('(') {
+                                // Same verdict as skip_cmd_subst's `$((` arm
+                                // (GNU parse.y:4464-4473 + parse_arith_cmd
+                                // parse.y:4970-4996): a `$(( cmd ) || cmd)`
+                                // body is a command substitution, so the
+                                // braced-word scan must not hunt a `))` pair.
+                                if self.peek() == Some('(')
+                                    && dollar_double_paren_is_arithmetic(
+                                        &self.input[self.position..],
+                                    )
+                                {
                                     self.advance();
                                     self.skip_arith_paren();
                                 } else {
@@ -524,7 +550,13 @@ impl<'a> Lexer<'a> {
                 }
                 '$' if !single && self.peek() == Some('(') => {
                     self.advance();
-                    if self.peek() == Some('(') {
+                    // Same verdict as skip_cmd_subst's `$((` arm (GNU
+                    // parse.y:4464-4473 + parse_arith_cmd parse.y:4970-4996):
+                    // non-arithmetic `$(( cmd ) || cmd)` must close at the
+                    // balanced group, not swallow for a `))` pair.
+                    if self.peek() == Some('(')
+                        && dollar_double_paren_is_arithmetic(&self.input[self.position..])
+                    {
                         self.advance();
                         self.skip_arith_paren();
                     } else {
@@ -942,7 +974,13 @@ impl<'a> Lexer<'a> {
                         }
                         Some('(') => {
                             self.advance();
-                            if self.peek() == Some('(') {
+                            // Same verdict as skip_cmd_subst's `$((` arm (GNU
+                            // parse.y:4464-4473 + parse_arith_cmd
+                            // parse.y:4970-4996): a `$(( cmd ) || cmd)` body
+                            // closes at the balanced group, never a `))` hunt.
+                            if self.peek() == Some('(')
+                                && dollar_double_paren_is_arithmetic(&self.input[self.position..])
+                            {
                                 self.advance();
                                 self.skip_arith_paren();
                             } else {
