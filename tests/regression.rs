@@ -6002,3 +6002,120 @@ mod issue_1903 {
         assert_eq!(stdout, "hi\n");
     }
 }
+
+/// rubash#1905: synthetic /proc operands handed to external children.
+/// The engine's /proc lives only inside the shell; a child without a
+/// /proc layer of its own (System32's native findstr is the regression
+/// PATH's first match) must receive a readable spawn-time snapshot at
+/// the operand boundary, while a child with its own layer (Git's
+/// MSYS-hosted tools) keeps the literal spelling and answers through
+/// it — where `self` names the reader itself, never the shell.
+#[cfg(windows)]
+mod issue_1905 {
+    use super::*;
+
+    fn run_script(case: &str, script: &str) -> (String, String, Option<i32>) {
+        let dir = case_scratch(case);
+        std::fs::write(dir.join("case.sh"), script).expect("write case script");
+        let out = run_rubash_in(&dir, &["case.sh"], Duration::from_secs(30));
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    #[test]
+    fn issue1905_native_child_reads_proc_stat_operand() {
+        // The proc-vfs plan's CLI acceptance shape: a real external
+        // program reads generated /proc content through the operand.
+        let (stdout, stderr, code) = run_script("1905-stat", "findstr /B \"cpu \" /proc/stat\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.starts_with("cpu "), "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_native_child_reads_proc_meminfo_operand() {
+        let (stdout, stderr, code) =
+            run_script("1905-meminfo", "findstr /B \"MemTotal:\" /proc/meminfo\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.contains("MemTotal:"), "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_env_forwarded_child_reads_proc_operand() {
+        let (stdout, stderr, code) = run_script("1905-env", "env findstr /B \"cpu \" /proc/stat\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.starts_with("cpu "), "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_operand_materializes_inside_command_substitution() {
+        let (stdout, stderr, code) = run_script(
+            "1905-comsub",
+            "x=$(findstr /B \"cpu \" /proc/stat)\necho \"head:${x:0:3}\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "head:cpu\n");
+    }
+
+    #[test]
+    fn issue1905_operand_materializes_in_a_pipeline_stage() {
+        // /C: pins findstr's phrase form: a plain quoted string is
+        // term-split on spaces by findstr itself, which would make
+        // the count depend on the runner's core count (the stat
+        // snapshot carries one `cpuN` line per core).
+        let (stdout, stderr, code) = run_script(
+            "1905-pipeline",
+            "findstr /B /C:\"cpu \" /proc/stat | wc -l\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout.trim(), "1", "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_exec_child_reads_proc_operand() {
+        let (stdout, stderr, code) =
+            run_script("1905-exec", "exec findstr /B \"cpu \" /proc/stat\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.starts_with("cpu "), "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_background_shape_serves_operand_through_wrapper() {
+        // The background direct-spawn fast path owns no operand
+        // plumbing: a /proc operand declines it to the wrapper route,
+        // whose child materializes through the foreground machinery.
+        let (stdout, stderr, code) = run_script(
+            "1905-background",
+            "findstr /B \"cpu \" /proc/stat > bg.out &\nwait $!\ncat bg.out\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.starts_with("cpu "), "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_coproc_shape_serves_operand() {
+        let (stdout, stderr, code) = run_script(
+            "1905-coproc",
+            "coproc findstr /B \"cpu \" /proc/stat\ncat <&${COPROC[0]}\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.starts_with("cpu "), "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_hosted_child_keeps_literal_and_answers_for_itself() {
+        // Git's cat is hosted by the MSYS runtime (msys-2.0.dll beside
+        // it): it keeps the literal spelling, resolves it through its
+        // own /proc, and `self` is the reader — the status must name
+        // cat, never the shell. This pins both the verbatim child
+        // class and the ruling that /proc/self is never materialized
+        // from the shell's side.
+        let (stdout, stderr, code) =
+            run_script("1905-self", "cat /proc/self/status | grep \"^Name:\"\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.contains("Name:"), "stdout:\n{stdout}");
+        assert!(stdout.contains("cat"), "stdout:\n{stdout}");
+    }
+}

@@ -2738,7 +2738,8 @@ impl Executor {
                 let child_stdout = Stdio::from(file.try_clone()?);
                 let child_stderr = Stdio::from(file.try_clone()?);
                 let mut child_diag = file.try_clone()?;
-                let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+                let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                    cmd,
                     &cmd.words[1..],
                     crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                     crate::executor::dev_fd_operands::DevOperandStdout::Path(
@@ -2770,7 +2771,8 @@ impl Executor {
             ) {
                 return result;
             }
-            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                cmd,
                 &cmd.words[1..],
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::Path(shell_path_to_windows(
@@ -2808,7 +2810,8 @@ impl Executor {
             ) {
                 return result;
             }
-            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                cmd,
                 &cmd.words[1..],
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::Path(shell_path_to_windows(
@@ -2844,7 +2847,8 @@ impl Executor {
                 } else {
                     dup.strip_suffix('-').unwrap_or(dup)
                 };
-                let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+                let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                    cmd,
                     &cmd.words[1..],
                     crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                     crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
@@ -2899,7 +2903,8 @@ impl Executor {
             ) {
                 return result;
             }
-            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                cmd,
                 &cmd.words[1..],
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
@@ -2957,7 +2962,8 @@ impl Executor {
             ) {
                 return result;
             }
-            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                cmd,
                 &cmd.words[1..],
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
@@ -3041,7 +3047,8 @@ impl Executor {
         let fd1_lands_in_capture = self.fd_table.write_endpoint(1) == Some(FdWriteEndpoint::Stdout)
             && (self.stdout_capture.is_some()
                 || crate::executor::shell_options::stdout_capture_active());
-        let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+        let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+            cmd,
             &cmd.words[1..],
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,

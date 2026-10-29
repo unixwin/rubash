@@ -1175,10 +1175,20 @@ impl Executor {
             dev_stdin,
             crate::executor::dev_fd_operands::DevOperandStdout::Capture,
         );
+        // rubash#1905: synthetic /proc operands become spawn-time
+        // snapshot files for a child without its own /proc layer; the
+        // record lives until the stage's output is collected below
+        // (where dev_ops is finished).
+        let (proc_args, _proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
+            &dev_args,
+            Some(&expanded_name),
+            Some(program.as_path()),
+            &self.shell_state.env_vars,
+        );
         let (mut process, _) = external_command_for_named_program(
             &program,
             Some(&expanded_name),
-            &dev_args,
+            &proc_args,
             &self.shell_state.env_vars,
             self.bash_argv0_env_supplied(&[]),
         );
