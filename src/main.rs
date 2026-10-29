@@ -406,6 +406,11 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
             return rubash::run_debug_cli(rubash::DebugCliPreset {
                 program: Some(args[start].clone()),
                 args: args[start + 1..].to_vec(),
+                // This binary's leading scan has no rcfile
+                // channel on the --debug route (niubash#692 is
+                // the niubash host's dispatch, which passes its
+                // --rcfile here).
+                startup_file: None,
             });
         }
     }
