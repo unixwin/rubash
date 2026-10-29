@@ -1725,6 +1725,32 @@ impl Executor {
                     &bytes,
                 ));
             }
+            // rubash#1903: on Windows a WinuxCmd fifo marker IS a regular
+            // file on disk, so the plain File::open below succeeds
+            // instantly and the slurp returns the 7 marker bytes — no
+            // rendezvous server is ever created and the writer side
+            // waits forever for a peer (the #2014 CI hang: `cat < f`
+            // and `read x < g` shapes). The text channel's one open of
+            // a marker is the read side of the named-pipe rendezvous,
+            // resolved exactly like open_input_redirect's consume arm
+            // (GNU's single open, redir.c do_redirection_internal).
+            #[cfg(windows)]
+            {
+                let win_path = self.session_path(crate::executor::path::windows_operand_file_path(
+                    shell_path_to_windows(&target, &self.shell_state.env_vars),
+                    &self.shell_state.env_vars,
+                ));
+                if crate::winux_fifo::path_is_winux_fifo(&win_path) {
+                    let mut file = crate::winux_fifo::open_winux_fifo_read(&win_path, &|| {
+                        crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+                    })
+                    .ok()?;
+                    use std::io::Read as _;
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).ok()?;
+                    return String::from_utf8(buf).ok();
+                }
+            }
             let mut file = File::open(&path).ok()?;
             {
                 #[cfg(unix)]
