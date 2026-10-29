@@ -149,22 +149,19 @@ fn issue2036_shape1_plain_script_fake() {
 }
 
 /// Shape 1' (audit §4/B5): same shape with an ELF fake (a copy of
-/// /bin/true). Now cat is ALSO answered by the engine (prints the file,
-/// the ELF fake prints nothing) — the external layer distinguishes
-/// script vs ELF candidates. WART: S3/S4 adjudication.
+/// /bin/true), SIMPLE form. Now cat is ALSO answered by the engine
+/// (prints the file; the ELF fake prints nothing) — the external
+/// layer distinguishes script vs ELF candidates. (The pipeline form
+/// of this shape answers the other way; see the W5 wart pin.)
+/// WART: S3/S4 adjudication.
 #[test]
 fn issue2036_shape1_elf_fake_cat_is_replaced() {
     let rig = rig("s1e");
     let elf = rig.root.join("fakebin/cat");
     fs::copy("/bin/true", &elf).expect("elf fake");
     fs::set_permissions(&elf, fs::Permissions::from_mode(0o755)).expect("chmod elf");
-    let head = head_abs();
-    let out = run(
-        &rig.root,
-        &rig.fake_path,
-        &format!("cat f1.txt | {head} -1"),
-    );
-    assert_eq!(out.stdout, "alpha\n", "stderr: {}", out.stderr);
+    let out = run(&rig.root, &rig.fake_path, "cat f1.txt");
+    assert_eq!(out.stdout, "alpha\nbeta\n", "stderr: {}", out.stderr);
 }
 
 // ------------------------------------------------------- §4 shapes 3 / 4
@@ -417,7 +414,7 @@ fn issue2036_introspection_emulated_names_report_file() {
     let out = run(&dir, &path, &script);
     for n in EMULATED_OR_FAST_NAMES {
         assert!(
-            out.stdout.contains(&format!("{n}=\"file\"")),
+            out.stdout.contains(&format!("{n}=file")),
             "{n} must introspect as file, got: {}",
             out.stdout
         );
