@@ -372,6 +372,19 @@ impl Executor {
             return Ok(Some((String::new(), String::new(), 0)));
         };
         let expanded_name = self.expand_word(name);
+        // GNU execute_cmd.c:4657-4663 (execute_simple_command — reached
+        // for every pipeline element through execute_pipeline): in posix
+        // mode a special builtin is found BEFORE functions, so
+        // find_function is never consulted for one. The sequential
+        // driver's early classification declines function-named posix
+        // special elements, but this stage is also the driver's
+        // fall-through route for unclaimed names, so the preclusion is
+        // stated here, at the function route itself — the same decline
+        // execute_function_command_invocation performs for the
+        // top-level call (rubash#2081).
+        if self.posix_mode_enabled() && is_posix_special_builtin(&expanded_name) {
+            return Ok(None);
+        }
         let Some(function_name) = self
             .function_name_for_command_word(&expanded_name)
             // Bash posix-mode notes (item 19): POSIX mode never executes a

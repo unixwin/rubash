@@ -518,6 +518,23 @@ impl Executor {
                 )?;
                 self.write_redirect_diagnostic_routed(&cmd, &stderr)?;
                 self.exit_code = 1;
+                // rubash#2082: GNU execute_cmd.c:4865-4875 — the failure
+                // above is execute_builtin_or_function's do_redirections
+                // returning EX_REDIRFAIL (execute_cmd.c:5613), and for a
+                // special builtin in a posixly_correct non-interactive
+                // shell the conversion is an immediate
+                // jump_to_top_level (ERREXIT) at status
+                // EXECUTION_FAILURE. The jump fires inside
+                // execute_simple_command, so tested contexts (||, if
+                // conditions, `!`) do not contain it and the caller's
+                // ERR-trap check (execute_cmd.c:994) is never reached:
+                // exit WITHOUT the ERR trap the errexit conversion
+                // below would fire. The diagnostic printed above is the
+                // redirection_error report GNU emits before the jump
+                // (redir.c:135).
+                if self.posix_special_redirect_failure_exits(&cmd) {
+                    return Err(ExecuteError::ExitCode(1));
+                }
                 if self.errexit_enabled() && self.errexit_is_active() {
                     // rubash#1171 (same class): a redirect-failed simple
                     // command is a failed command — GNU fires the ERR
@@ -550,6 +567,37 @@ impl Executor {
             }
             other => other,
         }
+    }
+
+    /// rubash#2082: the gate behind the EX_REDIRFAIL conversions —
+    /// execute_command's IoError arm for the apply-layer channel and
+    /// execute_materialized_command's reject-gate channel
+    /// (command_dispatch.rs). GNU's condition is execute_cmd.c:4865-4875:
+    /// `posixly_correct && builtin_is_special && interactive_shell
+    /// == 0`. The `command` builtin's re-dispatch never carries
+    /// builtin_is_special — the same depth gate the
+    /// special_builtin_failed adjudication in
+    /// execute_materialized_command applies (command_dispatch.rs;
+    /// errors8.sub) — and a name the `enable` builtin disabled
+    /// dispatches to the filesystem instead, where GNU's disk-command
+    /// redirection failure stays a plain status 1 (execute_disk_command
+    /// applies the redirections in the forked child).
+    pub(in crate::executor) fn posix_special_redirect_failure_exits(
+        &self,
+        cmd: &CommandNode,
+    ) -> bool {
+        self.posix_mode_enabled()
+            && self.command_builtin_depth == 0
+            && self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_INTERACTIVE")
+                .map(String::as_str)
+                != Some("1")
+            && cmd.words.first().is_some_and(|word| {
+                is_posix_special_builtin(word)
+                    && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word)
+            })
     }
 
     /// GNU shell.c reader_loop under `-n`/`set -n` (noexec): the reader
