@@ -962,7 +962,20 @@ impl Executor {
                     && (has_parse_error || parse_error_raised_during_eval) =>
             {
                 self.exit_code = code;
-                Ok(())
+                // rubash#2126: GNU builtins/evalstring.c:589-596 — a
+                // syntax error (EX_BADSYNTAX) out of parse_and_execute
+                // in a posixly_correct non-interactive shell whose most
+                // recent dispatch is eval/source itself is NOT contained
+                // by the eval boundary: jump_to_top_level (ERREXIT) with
+                // EX_BADUSAGE. The containment arms own every other
+                // shape (non-POSIX mode, `command eval` via the depth
+                // gate inside evalstring_syntax_error_exits, a string
+                // whose own commands already dispatched something else).
+                if self.evalstring_syntax_error_exits() {
+                    Err(ExecuteError::ExitCode(2))
+                } else {
+                    Ok(())
+                }
             }
             // Same containment when an inner boundary already absorbed the
             // error and execute_ast came back Ok with the flag set: GNU's
@@ -970,7 +983,14 @@ impl Executor {
             // EX_BADUSAGE, never the caller's reader.
             Ok(()) if parse_error_raised_during_eval && !parser_error_errexited => {
                 self.exit_code = 2;
-                Ok(())
+                // rubash#2126: same evalstring.c:589-596 conversion for
+                // the surface where the driver swallowed the abort into
+                // an Ok result (parse unit voided after a good prefix).
+                if self.evalstring_syntax_error_exits() {
+                    Err(ExecuteError::ExitCode(2))
+                } else {
+                    Ok(())
+                }
             }
             // GNU evalstring.c:372 installs a local top_level catch for the
             // string being evaluated ("prevents errors in substitution from
@@ -2636,6 +2656,22 @@ impl Executor {
         // covered the no-operand forms; apply the fd_var redirects here so
         // a real operand sees them (and they persist after it exits).
         if self.apply_dynamic_fd_var_redirects(cmd, false)? {
+            // rubash#2125: a `{var}` apply failure is a do_redirections
+            // failure (redir_varassign), reached BEFORE exec_builtin's
+            // search/execve — so in POSIX mode it takes the
+            // execute_cmd.c:4865-4875 EX_REDIRFAIL jump like every
+            // other special-builtin redirect failure, and outside
+            // POSIX mode the command simply completes at status 1.
+            // It must NOT flow into finish_exec_replacement as a bare
+            // status: that path is exec.def's failed_exec, which
+            // covers only the search/execve failure and would exit a
+            // non-POSIX shell (and wrongly defer to `execfail` in
+            // POSIX mode). The mark tells execute_exec_command to
+            // complete at status 1 without the replacement finish.
+            if self.posix_special_redirect_failure_exits(cmd) {
+                return Err(ExecuteError::ExitCode(1));
+            }
+            self.exec_do_redirections_failed.set(true);
             return Ok(1);
         }
 
@@ -3550,6 +3586,18 @@ impl Executor {
                         )?;
                         self.write_default_stderr(&stderr)?;
                         self.exit_code = 1;
+                        // rubash#2125: this inline arm is bare `exec`'s
+                        // own do_redirections — a redir_varassign failure
+                        // here is EX_REDIRFAIL (execute_cmd.c:5613), and
+                        // `exec` is a special builtin, so a posixly_correct
+                        // non-interactive shell takes the
+                        // execute_cmd.c:4865-4875 jump at status 1 instead
+                        // of completing the command. The diagnostic above
+                        // is the redirection_error report GNU emits
+                        // before the jump (redir.c:135).
+                        if self.posix_special_redirect_failure_exits(cmd) {
+                            return Err(ExecuteError::ExitCode(1));
+                        }
                         return Ok(Some(1));
                     }
                     Err(error) => return Err(error),
@@ -5604,7 +5652,19 @@ impl Executor {
             Err(error) => Err(error),
         };
         let result = match status_result {
-            Ok(status) => self.finish_exec_replacement(cmd, status),
+            Ok(status) => {
+                // rubash#2125: the status came from a do_redirections
+                // failure inside execute_exec (the `{var}` apply) —
+                // the command never reached the search/execve stage
+                // finish_exec_replacement adjudicates, so complete at
+                // status 1 with the shell alive (see the mark's doc).
+                if self.exec_do_redirections_failed.replace(false) {
+                    self.exit_code = status;
+                    Ok(())
+                } else {
+                    self.finish_exec_replacement(cmd, status)
+                }
+            }
             Err(error) => Err(error),
         };
         self.restore_exported_functions_after_exec(saved);

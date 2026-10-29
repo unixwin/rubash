@@ -3735,6 +3735,12 @@ impl Executor {
                 self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
             return Some(Err(ExecuteError::ExpansionFailure(1)));
         }
+        // rubash#2126: every skip path above (redirect rejection,
+        // failed tempenv) returns before this point, so reaching here is
+        // the function dispatch itself — execute_cmd.c:4813 assigns
+        // this_shell_builtin = (SHELL_VAR *)NULL for a function
+        // dispatch, disarming the evalstring tracker bit.
+        self.shell_state.last_dispatch_was_eval_or_source = false;
         // GNU variables.c push_context: the function-call tempenv becomes the
         // function's variable context — recorded so a posix special builtin's
         // merged tempenv inside the function (att_propagate,

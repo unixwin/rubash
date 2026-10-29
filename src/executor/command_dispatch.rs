@@ -603,6 +603,13 @@ impl Executor {
             self.exit_code = 1;
             return Ok(());
         }
+        // rubash#2126: this funnel is where a simple command commits to
+        // dispatch (execute_cmd.c:4813's this_shell_builtin assignment
+        // point) — a restricted refusal above never dispatches, so the
+        // note belongs after it. The classification itself (eval /
+        // source / `.` arm, everything else disarms, disabled names
+        // resolve externally) lives in note_simple_command_dispatch.
+        self.note_simple_command_dispatch(word);
         if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word) {
             return self.execute_external(cmd);
         }

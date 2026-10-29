@@ -1829,6 +1829,7 @@ impl Executor {
             exit_jump_pending: Cell::new(false),
             errexit_status_converted: Cell::new(false),
             posix_special_status_converted: Cell::new(false),
+            exec_do_redirections_failed: Cell::new(false),
             timed_dispatch_depth: Cell::new(0),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
