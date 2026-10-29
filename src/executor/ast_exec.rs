@@ -512,6 +512,9 @@ impl Executor {
             // error never suppresses the ERR trap this command earns by
             // failing (GNU run_error_trap is per execute_simple_command).
             self.command_expansion_failed.set(false);
+            // rubash#2117: same one-command lifetime — a dispatch-level
+            // ERR-trap fire (and POSIX rescue) belongs to one command.
+            self.err_trap_fired_at_dispatch.set(false);
             // rubash#1164: sample was_error_trap for THIS command before it
             // executes (execute_cmd.c:914) — adjudication below and inside
             // dispatch consults the sample, so a trap this command installs
@@ -1420,6 +1423,29 @@ impl Executor {
                 let queued_time_reports = std::mem::take(&mut self.pending_list_time_reports);
                 for (started, posix_format) in queued_time_reports {
                     self.print_time_shell(posix_format, started);
+                }
+                // rubash#2117: a POSIX special-builtin failure inside
+                // the timed command was converted by the dispatch gate
+                // into a completed status (the gate's
+                // posix_special_status_converted mark) so the report
+                // above still prints; GNU adjudicates that exit in
+                // execute_time_command's caller, after print_time_info
+                // and after the ERR trap — whose own commands reset
+                // special_builtin_failed at execute_cmd.c:4480, so the
+                // flag is re-read here: a benign trap body rescued the
+                // exit exactly as in the untimed gate, a re-armed flag
+                // (or no trap) still jumps. Tested contexts exempt it
+                // like the errexit jump below (the gate itself only
+                // converts in an active context).
+                if self.posix_special_status_converted.replace(false)
+                    && self.special_builtin_failed.get()
+                    && self.errexit_is_active()
+                    && self.suppress_errexit == 0
+                    && !command.inverted
+                    && !time_command.inverted
+                    && command.and_or().is_none()
+                {
+                    return Err(ExecuteError::ExitCode(self.exit_code));
                 }
                 if self.errexit_enabled()
                     && self.errexit_is_active()

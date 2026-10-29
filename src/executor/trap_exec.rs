@@ -451,6 +451,17 @@ impl Executor {
             crate::builtins::eval::EvalAction::Complete(status) => {
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 self.exit_code = status;
+                // rubash#2117: eval's option faces (an invalid option,
+                // --help) return EX_USAGE (builtins/eval.def:
+                // CASE_HELPOPT / the invalidopt return) — a special
+                // builtin's usage error marks special_builtin_failed
+                // (execute_cmd.c:4886-4888). The Complete arm's status
+                // vocabulary is only success or this face; statuses of
+                // the executed string ride the Execute arm and never
+                // mark it (an inner command's plain 2 is not > EX_SHERRBASE).
+                if status == crate::builtins::eval::EX_USAGE {
+                    self.special_builtin_failed.set(true);
+                }
                 Ok(())
             }
             crate::builtins::eval::EvalAction::Execute(source) => {
@@ -1989,6 +2000,13 @@ impl Executor {
             || (command.and_or().is_some() && !bypass_and_or_gate)
             || self.suppress_errexit != 0
             || self.error_trap_running
+            // rubash#2117: the dispatch-level special_builtin_failed
+            // gate already fired this command's ERR trap (and the
+            // trap's own commands rescued the POSIX exit by clearing
+            // the flag, execute_cmd.c:4480) — GNU fires it once, in
+            // execute_command_internal; a second fire here would
+            // double the action's side effects.
+            || self.err_trap_fired_at_dispatch.get()
             || self.host_internal_depth.get() > 0
             // rubash#439: a word/assignment expansion error (GNU subst.c
             // expand_wdesc_error -> exp_jump_to_top_level(DISCARD)) abandons
@@ -5513,6 +5531,21 @@ impl Executor {
             }
             Ok(None) => match self.execute_exec(cmd) {
                 Ok(status) => {
+                    // rubash#2117: GNU exec.def's option-parse failure
+                    // returns EX_USAGE (258 > EX_SHERRBASE), which
+                    // execute_cmd.c:4886-4888 marks
+                    // special_builtin_failed. The builtin layer returns
+                    // the converted EX_BADUSAGE for that face, and a
+                    // command operand's own exit 2 is indistinguishable
+                    // by value — the layer's own parse is the
+                    // discriminator (builtins/exec.rs
+                    // status_is_option_parse_failure).
+                    if crate::builtins::exec::status_is_option_parse_failure(
+                        &cmd.words[1..],
+                        status,
+                    ) {
+                        self.special_builtin_failed.set(true);
+                    }
                     self.exit_code = status;
                     Ok(status)
                 }

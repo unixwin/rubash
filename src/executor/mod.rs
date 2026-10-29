@@ -1125,6 +1125,17 @@ pub struct Executor {
     /// assignment expansion error sites, reset at each execute_ast loop
     /// iteration, consulted by maybe_run_error_trap.
     pub(crate) command_expansion_failed: Cell<bool>,
+    /// rubash#2117: the dispatch-level special_builtin_failed gate in
+    /// execute_materialized_command fired this command's ERR trap and
+    /// the trap body's own dispatches cleared the flag (GNU's order:
+    /// run_error_trap at execute_cmd.c:993-1001 reads before the
+    /// :1004-1017 check, and every simple command resets the flag at
+    /// :4480), so the POSIX exit was rescued and the command completes
+    /// normally. The mark tells maybe_run_error_trap the trap already
+    /// fired for THIS command, so the list loop's own adjudication
+    /// does not fire it a second time. Reset at each execute_ast loop
+    /// iteration, like command_expansion_failed.
+    pub(crate) err_trap_fired_at_dispatch: Cell<bool>,
     /// rubash#1164: GNU samples `was_error_trap` (execute_cmd.c:914/851 —
     /// signal_is_trapped(ERROR_TRAP) && !signal_is_ignored) BEFORE a
     /// command executes and adjudicates that command's failure against the
@@ -1404,6 +1415,16 @@ pub struct Executor {
     /// execute_time_ast_command entry and taken right after its inner
     /// dispatch, so a stale mark can never be consumed.
     pub(crate) errexit_status_converted: Cell<bool>,
+    /// rubash#2117: set alongside errexit_status_converted by the ONE
+    /// conversion site that is a POSIX special-builtin failure (the
+    /// special_builtin_failed branch of execute_materialized_command's
+    /// tail), so the ast_exec time branch can tell that death apart
+    /// from a plain errexit conversion: its jump is gated on posix
+    /// fatality (not on `set -e`) and on the flag surviving the time
+    /// branch's own ERR-trap fire. Cleared at every
+    /// execute_time_ast_command entry; taken by the time branch after
+    /// its inner dispatch completes, so a stale mark is never consumed.
+    pub(crate) posix_special_status_converted: Cell<bool>,
     /// Depth of enclosing execute_time_ast_command inner dispatches.
     /// While > 0, the dispatch-level errexit conversion sites convert
     /// WITHOUT firing the ERR trap: the timed command completes through

@@ -453,6 +453,20 @@ impl Executor {
                 .map(String::as_str)
                 != Some("1")
         {
+            // rubash#2117: GNU's order in execute_command_internal is
+            // the ERR-trap call (execute_cmd.c:993-1001) BEFORE the
+            // special_builtin_failed check (:1004-1017), and every
+            // simple command resets the flag at entry
+            // (execute_cmd.c:4480) — so the trap body's own commands
+            // clear the flag the failing builtin set, and the check
+            // reads the CLEARED flag: a benign ERR trap rescues the
+            // shell from the POSIX exit, while a trap body that itself
+            // ends in a failing special builtin re-arms the flag and
+            // the exit still fires. Capture the completed command's
+            // status first: GNU's exit carries exec_result
+            // (last_command_exit_value = exec_result, :1010), not the
+            // trap body's last status.
+            let completed_status = self.exit_code;
             // rubash#1611: inside a timed dispatch the ERR trap is
             // adjudicated once, by the ast_exec time branch, when the
             // timed command completes (rubash#1277) — firing here too
@@ -460,13 +474,26 @@ impl Executor {
             if self.timed_dispatch_depth.get() == 0 {
                 self.maybe_run_error_trap(cmd)?;
             }
-            // rubash#1611: this is a conversion of a COMPLETED command's
-            // status, not a jump out of it — mark it so an enclosing
-            // execute_time_ast_command can still print its report (GNU
-            // adjudicates this exit in execute_time_command's caller,
-            // after print_time_info).
-            self.errexit_status_converted.set(true);
-            Err(ExecuteError::ExitCode(self.exit_code))
+            if self.special_builtin_failed.get() {
+                // rubash#1611: this is a conversion of a COMPLETED command's
+                // status, not a jump out of it — mark it so an enclosing
+                // execute_time_ast_command can still print its report (GNU
+                // adjudicates this exit in execute_time_command's caller,
+                // after print_time_info).
+                self.errexit_status_converted.set(true);
+                // rubash#2117: this conversion is the POSIX
+                // special-builtin death, not an errexit one — the time
+                // branch's jump is gated on posix fatality, not `set -e`.
+                self.posix_special_status_converted.set(true);
+                Err(ExecuteError::ExitCode(completed_status))
+            } else {
+                // Rescued by the ERR trap: the trap already fired for
+                // this command at this dispatch — mark it so the list
+                // loop's own ERR adjudication does not fire it again
+                // (rubash#2117).
+                self.err_trap_fired_at_dispatch.set(true);
+                result
+            }
         } else if matches!(result, Err(ExecuteError::Return(_)))
             && (self.shell_state.function_depth > 0 || self.source_nest_depth > 0)
         {
