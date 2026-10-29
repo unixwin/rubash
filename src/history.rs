@@ -85,6 +85,20 @@ pub trait HistoryProvider: Debug {
     fn append_history(&mut self, path: &str) -> io::Result<()>;
     /// Read lines from the given file that are not already in history.
     fn read_new_history(&mut self, path: &str) -> io::Result<()>;
+    /// lib/readline/history.c:113 (`int history_base = 1`): the list
+    /// number of `entries()[0]`. Display numbering and positive
+    /// `history -d` operands are history_base-based (builtins/history.def
+    /// display_history; history.def:203-216,243-260 offset the positive
+    /// operands by history_base). A host that stifles its store to
+    /// HISTSIZE must advance the base exactly like the readline list does
+    /// — the stifled add_history drops the oldest entry and bumps
+    /// history_base (history.c:389-404), stifle_history sets it to the
+    /// dropped count (history.c:675-698) — so the GLOBAL numbering
+    /// survives trimming and never restarts at 1 (rubash#2007). The
+    /// default is the unstifled GNU initial value.
+    fn history_base(&mut self) -> usize {
+        1
+    }
 }
 
 /// Shared provider handle suitable for injecting into an Executor.

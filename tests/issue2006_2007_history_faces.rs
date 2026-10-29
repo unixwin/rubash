@@ -20,10 +20,13 @@
 //!
 //! Disposition (2026-10-29, master 16a42d78): the session-path pins
 //! pass — the engine's own history semantics match GNU. The two
-//! provider-path pins fail and are #[ignore]d with the reason inline:
-//! both divergences reduce to state the HistoryProvider contract does
-//! not carry (the in-flight line's recorded flag; history_base), which
-//! is a contract adjudication, not an engine-code fix.
+//! provider-path pins reduced to state the HistoryProvider contract
+//! did not carry (the in-flight line's recorded flag; history_base).
+//! rubash#2007 closed first: the trait now carries `history_base`
+//! (readline history.c:113; stifling advances it, history.c:389-404,
+//! 675-698) with the unstifled GNU initial value as the default, and
+//! the display/`history -d` provider paths consume it. The #2006 pin
+//! waits on the last_line_added channel (rubash#2006).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -108,9 +111,13 @@ fn session_path_fc_list_excludes_itself() {
 // Provider path (host HistoryProvider — the niubash REPL shape)
 // ---------------------------------------------------------------------
 
+/// The host store fixture. `base` models the stifled store's global
+/// numbering (readline history_base): a store trimmed to HISTSIZE keeps
+/// the numbers of the entries it dropped (rubash#2007).
 #[derive(Debug, Default)]
 struct ListProvider {
     entries: Vec<String>,
+    base: usize,
 }
 
 impl rubash::history::HistoryProvider for ListProvider {
@@ -141,12 +148,15 @@ impl rubash::history::HistoryProvider for ListProvider {
     fn read_new_history(&mut self, _path: &str) -> std::io::Result<()> {
         Ok(())
     }
+    fn history_base(&mut self) -> usize {
+        self.base
+    }
 }
 
-fn executor_with(entries: Vec<String>) -> rubash::executor::Executor {
+fn executor_with(entries: Vec<String>, base: usize) -> rubash::executor::Executor {
     use std::cell::RefCell;
     use std::rc::Rc;
-    let provider = Rc::new(RefCell::new(ListProvider { entries }));
+    let provider = Rc::new(RefCell::new(ListProvider { entries, base }));
     let mut executor = rubash::executor::Executor::new();
     executor.set_history_provider(provider);
     executor.set_env("__RUBASH_INTERACTIVE", "1");
@@ -168,11 +178,14 @@ fn executor_with(entries: Vec<String>) -> rubash::executor::Executor {
 fn provider_path_fc_list_excludes_itself() {
     let dir = tempdir("prov-fc");
     let d = dir.to_string_lossy().replace('\\', "/");
-    let mut executor = executor_with(vec![
-        "echo alpha".to_string(),
-        "echo beta".to_string(),
-        "fc -l".to_string(),
-    ]);
+    let mut executor = executor_with(
+        vec![
+            "echo alpha".to_string(),
+            "echo beta".to_string(),
+            "fc -l".to_string(),
+        ],
+        1,
+    );
     let script = format!("cd {d}\nfc -l > out.txt 2> err.txt\n");
     let code = rubash::script_driver::run_source(&mut executor, &script, true);
     assert_eq!(code, 0);
@@ -202,26 +215,55 @@ fn session_path_history_plain_numbering() {
 }
 
 /// #2007: the host store stifled to HISTSIZE=3; the surviving entries
-/// are global numbers 4,5,6. GNU `history` prints 4,5,6.
+/// are global numbers 4,5,6. GNU `history` prints 4,5,6 (bash 5.3.20
+/// PTY evidence p3-gnu-04 vs p3-hist-04: 399/400/401, never 1/2/3).
 ///
-/// Ignored: the HistoryProvider contract returns bare entry strings
-/// with no history_base channel, so the provider-path display in
-/// builtins/history.rs can only number from 1. The session path above
-/// passes; this pin waits on the contract adjudication in rubash#2007.
+/// The provider contract now carries `history_base` (readline
+/// history.c:113; a stifled store advances it like stifle_history /
+/// the stifled add_history, history.c:389-404,675-698) and the
+/// provider-path display numbers from it instead of a hard-wired 1.
 #[test]
-#[ignore = "provider contract gap: no history_base channel (rubash#2007)"]
 fn provider_path_history_numbering_survives_stifle() {
     let dir = tempdir("prov-hist");
     let d = dir.to_string_lossy().replace('\\', "/");
-    let mut executor = executor_with(vec![
-        "echo h3".to_string(),
-        "echo h4".to_string(),
-        "history".to_string(),
-    ]);
+    let mut executor = executor_with(
+        vec![
+            "echo h3".to_string(),
+            "echo h4".to_string(),
+            "history".to_string(),
+        ],
+        4,
+    );
     let script = format!("cd {d}\nhistory > out.txt 2> err.txt\n");
     let code = rubash::script_driver::run_source(&mut executor, &script, true);
     assert_eq!(code, 0);
     let out = std::fs::read_to_string(dir.join("out.txt")).expect("history output");
     assert_eq!(out, "    4  echo h3\n    5  echo h4\n    6  history\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #2007 same-root face: positive `history -d` operands are DISPLAY
+/// numbers, offset by history_base (builtins/history.def:243-260
+/// `opt - history_base`; the session path mirrors it with shell.base).
+/// With the store's base at 4, `-d 5` removes entries[1]; the survivor
+/// keeps the list number its position now carries (5), exactly like the
+/// session path — GNU numbers are base+index, not stable ids.
+#[test]
+fn provider_path_history_delete_offset_uses_base() {
+    let dir = tempdir("prov-hist-d");
+    let d = dir.to_string_lossy().replace('\\', "/");
+    let mut executor = executor_with(
+        vec![
+            "echo a".to_string(),
+            "echo b".to_string(),
+            "echo c".to_string(),
+        ],
+        4,
+    );
+    let script = format!("cd {d}\nhistory -d 5\nhistory > out.txt 2> err.txt\n");
+    let code = rubash::script_driver::run_source(&mut executor, &script, true);
+    assert_eq!(code, 0);
+    let out = std::fs::read_to_string(dir.join("out.txt")).expect("history output");
+    assert_eq!(out, "    4  echo a\n    5  echo c\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
