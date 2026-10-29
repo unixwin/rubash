@@ -48,7 +48,7 @@ impl Executor {
 
             if self.posix_mode_enabled()
                 && self.is_enabled_shell_builtin_name(name)
-                && is_posix_special_builtin(name)
+                && super::command_registry::is_special_builtin(name)
             {
                 match mode {
                     TypeDescribeMode::Verbose => {
@@ -82,6 +82,13 @@ impl Executor {
                     TypeDescribeMode::TypeOnly => writeln!(stdout, "builtin")?,
                     TypeDescribeMode::PathOnly => {}
                 }
+                return Ok(true);
+            }
+
+            // #2036 S2 disclosure: a live in-process claim (emulation
+            // layer / fast path) is reported as what it is, not as the
+            // PATH file it replaces.
+            if self.describe_emulated_claim_with_io(name, mode, stdout)? {
                 return Ok(true);
             }
         }
@@ -160,7 +167,7 @@ impl Executor {
 
             if self.posix_mode_enabled()
                 && self.is_enabled_shell_builtin_name(name)
-                && is_posix_special_builtin(name)
+                && super::command_registry::is_special_builtin(name)
             {
                 match mode {
                     TypeDescribeMode::Verbose => {
@@ -197,6 +204,13 @@ impl Executor {
                 }
                 found = true;
             }
+
+            // #2036 S2 disclosure (see describe_emulated_claim_with_io):
+            // the claim line takes the builtin line's position; the PATH
+            // enumeration below still runs, as it does for builtins.
+            if self.describe_emulated_claim_with_io(name, mode, stdout)? {
+                found = true;
+            }
         }
 
         for path in self.command_paths(name, force_path) {
@@ -218,5 +232,66 @@ impl Executor {
         }
 
         Ok(found)
+    }
+
+    /// #2036 S2 disclosure ruling: when `name` carries a live
+    /// simple-command claim whose registry projection is
+    /// `Introspection::Emulated`, print the emulation answer for
+    /// `mode` and return true; otherwise print nothing and return
+    /// false. The answer forms mirror the builtin forms one class up:
+    /// Verbose names the replaced body ("X is a shell emulation of
+    /// <path>"), TypeOnly is the single token `emulation`, Reusable
+    /// (`command -v`) is the bare name — invoking the name reproduces
+    /// the in-process behavior, invoking the path would not — and
+    /// PathOnly is silent-but-found, like a builtin under `type -p`.
+    ///
+    /// The liveness test is the dispatch test itself, face by face,
+    /// so the report cannot claim a body dispatch would not run: the
+    /// emulation layer needs its host flag on top of the shared
+    /// stand-down predicate, the fast paths consult the predicate
+    /// alone, and a Windows-only row claims nothing off Windows.
+    /// Liveness implies the stand-down lookup resolved, so the path
+    /// the sentence names always exists.
+    fn describe_emulated_claim_with_io<W>(
+        &self,
+        name: &str,
+        mode: TypeDescribeMode,
+        stdout: &mut W,
+    ) -> Result<bool, ExecuteError>
+    where
+        W: Write,
+    {
+        use super::command_registry::{CfgGate, ClaimClass, Introspection};
+        let Some(row) = super::command_registry::registry_row(name) else {
+            return Ok(false);
+        };
+        if row.introspection != Introspection::Emulated {
+            return Ok(false);
+        }
+        if row.cfg == CfgGate::WindowsOnly && !cfg!(windows) {
+            return Ok(false);
+        }
+        let live = match row.class {
+            ClaimClass::EmulatedExternal => {
+                self.external_file_builtins_enabled && !self.emulated_external_stands_down(name)
+            }
+            ClaimClass::HiddenFastpath | ClaimClass::Fastpath => {
+                !self.emulated_external_stands_down(name)
+            }
+            _ => false,
+        };
+        if !live {
+            return Ok(false);
+        }
+        let Some(path) = self.command_path_without_bridge(name, false) else {
+            return Ok(false);
+        };
+        match mode {
+            TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell emulation of {path}")?,
+            TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+            TypeDescribeMode::TypeOnly => writeln!(stdout, "emulation")?,
+            TypeDescribeMode::PathOnly => {}
+        }
+        Ok(true)
     }
 }
