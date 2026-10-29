@@ -1208,7 +1208,17 @@ fn run_command_string_with_init(
     // command output (empirical: `bash -m -c 'echo $-'` -> two stderr lines
     // then `hBc`).
     apply_startup_job_control(executor);
-    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+    // rubash#2072: a respawned internal child is GNU's forked subshell
+    // (execute_cmd.c:1576 execute_in_subshell), not a new interactive
+    // process — shell.c init_interactive runs only for a process the
+    // user invoked with -i, and this child's argv carries no -i (the
+    // __RUBASH_INTERACTIVE marker merely rode the spawn env from the
+    // interactive parent). Re-running the interactive defaults here
+    // clobbered the verbatim-inherited option state (a parent's
+    // `set +H` came back on inside every background child).
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1")
+        && !rubash::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed)
+    {
         apply_init_interactive_defaults(executor);
     }
     // shell.c:722 run_startup_files runs before the rcfile/-c string
@@ -1239,7 +1249,14 @@ fn run_command_string_with_init(
     // for every interactive shell — including one executing a -c string —
     // after the startup files. rubash#151: this path previously skipped
     // prepare_interactive_history entirely.
-    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+    // rubash#2072: same fork-child exclusion as the defaults above — a
+    // respawned child neither loads $HISTFILE nor saves to it at exit;
+    // GNU runs the history-file protocol only in the top-level
+    // interactive shell (bashhist.c load_history / exit_shell's
+    // maybe_save_shell_history on the reader shell).
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1")
+        && !rubash::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed)
+    {
         prepare_interactive_history(executor);
     }
     let line_offset = executor

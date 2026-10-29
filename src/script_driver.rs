@@ -1551,6 +1551,21 @@ fn run_history_group(
         == Some("1");
     let history_on = history_on && !seval_nohist;
     let histexpand_on = histexpand_on && !seval_nohist;
+    // rubash#2072: respawn transport text (a respawned `&`/coproc/procsub
+    // child's serialized `-c` operand) is not a readline line either: the
+    // child is GNU's forked subshell (execute_cmd.c:1576
+    // execute_in_subshell) executing already-parsed commands, and
+    // bashhist.c pre_process_line runs only on lines the interactive
+    // reader reads. The inherited history/histexpand option state stays
+    // VISIBLE in the child (verbatim fork inheritance — `set -o` reads
+    // it), but it must never be APPLIED to the transport text: with an
+    // interactive parent the child otherwise history-expanded its own
+    // function definitions (`!x: event not found` streams and blanked
+    // lines corrupting the parse — the `nvm ls` noise).
+    let respawn_transport =
+        crate::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed);
+    let history_on = history_on && !respawn_transport;
+    let histexpand_on = histexpand_on && !respawn_transport;
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let cmdhist = shopt_state_enabled(executor, "cmdhist", true);
     let lithist = shopt_state_enabled(executor, "lithist", false);
