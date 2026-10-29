@@ -24,6 +24,7 @@ where
         args,
         diagnostic_prefix,
         &[],
+        1,
         &mut io::sink(),
         stderr,
         &mut surplus,
@@ -35,6 +36,7 @@ pub fn execute_with_history<E, O>(
     args: &[String],
     diagnostic_prefix: &str,
     entries: &[String],
+    history_base: usize,
     stdout: &mut O,
     stderr: &mut E,
     surplus: &mut bool,
@@ -165,7 +167,11 @@ where
         .map(|n| n.unsigned_abs() as usize);
     let start = limit.map(|n| entries.len().saturating_sub(n)).unwrap_or(0);
     for (number, entry) in entries.iter().enumerate().skip(start) {
-        writeln!(stdout, "{:>5}  {}", number + 1, entry)?;
+        // display_history numbers from history_base (lib/readline/history.c):
+        // the session path mirrors it with shell.base (history_exec.rs); the
+        // provider path carries the host's base through this parameter — a
+        // stifled host store keeps its GLOBAL numbers (rubash#2007).
+        writeln!(stdout, "{:>5}  {}", number + history_base, entry)?;
     }
 
     Ok(EXECUTION_SUCCESS)

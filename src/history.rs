@@ -85,6 +85,35 @@ pub trait HistoryProvider: Debug {
     fn append_history(&mut self, path: &str) -> io::Result<()>;
     /// Read lines from the given file that are not already in history.
     fn read_new_history(&mut self, path: &str) -> io::Result<()>;
+    /// lib/readline/history.c:113 (`int history_base = 1`): the list
+    /// number of `entries()[0]`. Display numbering and positive
+    /// `history -d` operands are history_base-based (builtins/history.def
+    /// display_history; history.def:203-216,243-260 offset the positive
+    /// operands by history_base). A host that stifles its store to
+    /// HISTSIZE must advance the base exactly like the readline list does
+    /// — the stifled add_history drops the oldest entry and bumps
+    /// history_base (history.c:389-404), stifle_history sets it to the
+    /// dropped count (history.c:675-698) — so the GLOBAL numbering
+    /// survives trimming and never restarts at 1 (rubash#2007). The
+    /// default is the unstifled GNU initial value.
+    fn history_base(&mut self) -> usize {
+        1
+    }
+    /// bashhist.c:174 (`int hist_last_line_added;` — zero-initialized):
+    /// whether the line currently being executed has already been added
+    /// to the host list. maybe_add_history clears it per line
+    /// (bashhist.c:757-764) and really_add_history sets it when the line
+    /// was actually recorded (bashhist.c:957-964); fc's own line is
+    /// excluded from its listings through it — fc.def:328-335 `last_hist
+    /// = i - rh - hist_last_line_added`. The REPL provider contract is
+    /// save-at-accept — the host records each submitted line BEFORE the
+    /// engine dispatches it (cf. bashhist.c maybe_add_history) — so a
+    /// host following that contract reports true while its line runs;
+    /// the default false is the C initializer: no signal that the
+    /// in-flight line was recorded (rubash#2006).
+    fn last_line_added(&mut self) -> bool {
+        false
+    }
 }
 
 /// Shared provider handle suitable for injecting into an Executor.

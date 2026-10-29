@@ -2820,6 +2820,14 @@ impl Executor {
         }
         let provider = self.history_provider.as_ref().cloned();
         if let Some(provider) = provider {
+            // rubash#2007: the display base is host list state (readline
+            // history.c:113 history_base; a stifled store advances it like
+            // stifle_history/add_history, history.c:389-404,675-698), so the
+            // provider contract carries it — the trait default is the
+            // unstifled 1. Both the display numbering and the positive
+            // `history -d' operands (history.def:203-216,243-260) are
+            // history_base-based.
+            let provider_history_base = provider.borrow_mut().history_base();
             // Detect history file I/O modes (-a/-n/-r/-w) and optional -c.
             let mut has_io = false;
             let mut do_append = false;
@@ -3019,7 +3027,10 @@ impl Executor {
                     if text.starts_with('-') && value < 0 {
                         Some(value + length)
                     } else if value > 0 {
-                        Some(value - 1)
+                        // Positive operands are display numbers, offset by
+                        // history_base (history.def:243-260) — the provider
+                        // base, not a hard-wired 1 (rubash#2007).
+                        Some(value - provider_history_base as i128)
                     } else {
                         Some(0)
                     }
@@ -3074,6 +3085,7 @@ impl Executor {
                 args,
                 &self.diagnostic_prefix(),
                 &entries,
+                provider_history_base,
                 &mut stdout,
                 &mut stderr,
                 &mut surplus,
@@ -3132,17 +3144,38 @@ impl Executor {
                 &mut stderr,
             )?
         } else {
-            let provider_entries = match self.history_provider.as_ref() {
-                Some(provider) => provider.borrow_mut().entries()?,
-                None => Vec::new(),
-            };
+            // fc.def:328-335 over the host store: the provider path
+            // mirrors the interactive shapes the formula was written for.
+            // rh (remember_on_history) is ON — the bridge replaces the
+            // engine's interactive recording, which init_interactive arms
+            // unconditionally (shell.c:1830-1842 `remember_on_history =
+            // enable_history_list`, default 1); the host recorded the
+            // submitted line before dispatch (the contract's
+            // save-at-accept shape), so whether the in-flight line is
+            // actually IN the list comes from the provider's
+            // last_line_added channel (bashhist.c:174, set by
+            // really_add_history:957-964) instead of a hard-wired false —
+            // that hard-wiring is what let `fc -l` list the fc line
+            // itself and the whole history (rubash#2006). history_base is
+            // host list state (rubash#2007). Both trait channels default
+            // to the GNU C initializers, so providers predating the
+            // contract keep compiling and behave as before.
+            let (provider_entries, provider_base, provider_last_added) =
+                match self.history_provider.as_ref() {
+                    Some(provider) => {
+                        let mut p = provider.borrow_mut();
+                        let entries = p.entries()?;
+                        (entries, p.history_base(), p.last_line_added())
+                    }
+                    None => (Vec::new(), 1, false),
+                };
             crate::builtins::fc::execute_with_history(
                 &cmd.words[1..],
                 &self.diagnostic_prefix(),
                 provider_entries,
-                1,
-                false,
-                false,
+                provider_base,
+                provider_last_added,
+                true,
                 posix_mode,
                 &mut stdout,
                 &mut stderr,
@@ -3171,6 +3204,13 @@ impl Executor {
                             shell.entries.pop();
                             shell.timestamps.pop();
                         }
+                    } else {
+                        // fc.def:403-405 bash_delete_last_history
+                        // (bashhist.c:392-417) deletes from THE history
+                        // list; with no engine session the provider IS
+                        // that list (rubash#2006) — drop the fc line the
+                        // same way the session path pops above.
+                        self.history_provider_drop_last();
                     }
                 }
                 let indices: Vec<usize> = if rev {
