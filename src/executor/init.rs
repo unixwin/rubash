@@ -434,6 +434,7 @@ impl Executor {
                 command_number: 1,
                 function_depth: 0,
                 dollar_vars_changed_by_set: false,
+                last_dispatch_was_eval_or_source: false,
                 random_state: RandomGen::seeded(),
                 // rubash#1095's __RUBASH_BG_DEPTH is the authoritative seed
                 // for async `&` children (it deliberately under-seeds the

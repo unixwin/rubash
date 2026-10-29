@@ -202,6 +202,19 @@ fn run_source_groups(
                 // Err out of run_source_groups, so a jump pending at this
                 // point can only be the parse abort's.
                 executor.take_exit_jump_pending();
+                // rubash#2126: the "ordinary failure" reading above is
+                // only half of evalstring.c:585-601 — the same passage's
+                // parse branch (588-596) DOES jump_to_top_level
+                // (ERREXIT) with EX_BADUSAGE when the shell is
+                // non-interactive, posixly_correct, not under `command`,
+                // and the most recent dispatch is this source/eval
+                // itself (this_shell_builtin). Convert under exactly
+                // that gate; every other shape keeps the abort-as-
+                // ordinary-failure behavior.
+                if executor.evalstring_syntax_error_exits() {
+                    executor.set_exit_code(2);
+                    return Err(ExecuteError::ExitCode(2));
+                }
                 return Ok(());
             }
             continue;
@@ -340,6 +353,13 @@ fn run_source_groups(
                 // remaining file; `.` itself returns 2.
                 executor.set_exit_code(2);
                 executor.take_exit_jump_pending();
+                // rubash#2126: evalstring.c:588-596's parse branch —
+                // under the POSIX gate with this source as the most
+                // recent dispatch, the abort is a jump_to_top_level
+                // (ERREXIT) at EX_BADUSAGE, not a return.
+                if executor.evalstring_syntax_error_exits() {
+                    return Err(ExecuteError::ExitCode(2));
+                }
                 return Ok(());
             }
             Err(ExecuteError::ExitCode(code)) if parse_error => {
@@ -357,6 +377,14 @@ fn run_source_groups(
                 // branch above: the flagged jump is the parse abort's, not a
                 // real `exit` (that returns Err with parse_error clear).
                 executor.take_exit_jump_pending();
+                // rubash#2126: same evalstring.c:588-596 conversion on
+                // the flagged-jump arm (the status normalizes to
+                // EX_BADUSAGE — the parse abort's code is already 2 on
+                // every shape that reaches here with the flag set).
+                if executor.evalstring_syntax_error_exits() {
+                    executor.set_exit_code(2);
+                    return Err(ExecuteError::ExitCode(2));
+                }
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -579,6 +607,15 @@ fn execute_source_with_args(
             // exit-shell jump (see run_source_groups' arms above): consume it
             // so the sourcing driver keeps reading (rubash#451 class B).
             executor.take_exit_jump_pending();
+            // rubash#2126: the "no longjmp" reading above holds only
+            // outside evalstring.c:588-596's four conditions — a
+            // non-interactive posixly_correct shell whose most recent
+            // dispatch is this source/eval takes the ERREXIT jump at
+            // EX_BADUSAGE instead of the ordinary return.
+            if executor.evalstring_syntax_error_exits() {
+                executor.set_exit_code(2);
+                return Err(ExecuteError::ExitCode(2));
+            }
             Ok(())
         }
         other => other,

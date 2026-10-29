@@ -962,7 +962,20 @@ impl Executor {
                     && (has_parse_error || parse_error_raised_during_eval) =>
             {
                 self.exit_code = code;
-                Ok(())
+                // rubash#2126: GNU builtins/evalstring.c:589-596 — a
+                // syntax error (EX_BADSYNTAX) out of parse_and_execute
+                // in a posixly_correct non-interactive shell whose most
+                // recent dispatch is eval/source itself is NOT contained
+                // by the eval boundary: jump_to_top_level (ERREXIT) with
+                // EX_BADUSAGE. The containment arms own every other
+                // shape (non-POSIX mode, `command eval` via the depth
+                // gate inside evalstring_syntax_error_exits, a string
+                // whose own commands already dispatched something else).
+                if self.evalstring_syntax_error_exits() {
+                    Err(ExecuteError::ExitCode(2))
+                } else {
+                    Ok(())
+                }
             }
             // Same containment when an inner boundary already absorbed the
             // error and execute_ast came back Ok with the flag set: GNU's
@@ -970,7 +983,14 @@ impl Executor {
             // EX_BADUSAGE, never the caller's reader.
             Ok(()) if parse_error_raised_during_eval && !parser_error_errexited => {
                 self.exit_code = 2;
-                Ok(())
+                // rubash#2126: same evalstring.c:589-596 conversion for
+                // the surface where the driver swallowed the abort into
+                // an Ok result (parse unit voided after a good prefix).
+                if self.evalstring_syntax_error_exits() {
+                    Err(ExecuteError::ExitCode(2))
+                } else {
+                    Ok(())
+                }
             }
             // GNU evalstring.c:372 installs a local top_level catch for the
             // string being evaluated ("prevents errors in substitution from

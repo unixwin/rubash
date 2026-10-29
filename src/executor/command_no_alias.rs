@@ -14,6 +14,17 @@ impl Executor {
             return Ok(());
         };
 
+        // rubash#2126: the `command` re-dispatch is a real dispatch of
+        // the target name (execute_cmd.c:4813 assigns this_shell_builtin
+        // for the re-dispatched command too — the executing_command_
+        // builtin bit gates only the evalstring CHECK, not the set), so
+        // `command eval 'x=1'` re-arms the tracker even though a syntax
+        // error inside THAT eval is contained by the depth gate. A
+        // disabled target falls to execute_external below — a disk
+        // dispatch, which the note's is_disabled term already maps to
+        // disarm.
+        self.note_simple_command_dispatch(word);
+
         if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word) {
             return self.execute_external(cmd);
         }

@@ -4275,6 +4275,13 @@ impl Executor {
         // rubash#1551: a pipeline element is a forked child (see the
         // RANDOM bracket below) — its hash-table writes stay inside it.
         let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        // rubash#2126: same fork argument for the evalstring tracker
+        // bit — a stage's dispatches happen in the forked element, so
+        // the parent's this_shell_builtin (builtins/common.c:70) is
+        // untouched by them; restored with the other stage state below.
+        // (execute_lastpipe_stage deliberately does NOT come through
+        // here: the lastpipe element runs in the current shell.)
+        let saved_dispatch_tracker = self.shell_state.last_dispatch_was_eval_or_source;
         // `|&` → trailing `2>&1` (parse.y:1470-1487; normalize_pipeerr_stage).
         // execute_simple_pipeline already normalized every gathered stage;
         // this idempotent pass covers the recursion entry points that bypass
@@ -4517,6 +4524,8 @@ impl Executor {
         // restored its own mirror entries in the stage's table).
         self.restore_spec_variables(saved_stage_variables);
         self.shell_state.random_state.restore_state(&saved_random);
+        // rubash#2126: the stage's dispatches stay inside the element.
+        self.shell_state.last_dispatch_was_eval_or_source = saved_dispatch_tracker;
         // rubash#1540: harvest the DISCARD latches this stage raised
         // (they were cleared at entry), then restore the entry state so
         // nothing leaks to the parent. The arithmetic verdict delta is
