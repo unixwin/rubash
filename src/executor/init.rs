@@ -464,6 +464,24 @@ impl Executor {
         // cannot re-import them downstream).
         env_vars.remove(super::types::FUNCTION_STDIN);
         env_vars.remove(super::types::FUNCTION_STDIN_OFFSET);
+        // rubash#2137 (F8): the command-substitution body marker is
+        // bracketed execution state — set inside this process around an
+        // embedded comsub run (command_substitution.rs) and around the
+        // mutation fold (embedded_mutations.rs), then restored. An
+        // ambient copy at import rewrote the fatal-expansion exit
+        // status of a top-level shell (127 -> 1,
+        // parameter_errors.rs expansion_fatal_status). Strip it; the
+        // in-process writers re-establish it per run.
+        env_vars.remove("__RUBASH_COMSUB_BODY");
+        // rubash#2137 (F7): debugger mode is invocation state. Its only
+        // legitimate writers are this process's own argv handling
+        // (invocation.rs --debugger, main.rs option arms), which run
+        // after import and write the live table; an ambient copy made
+        // every -c child attempt a debugger startup (including the
+        // ATTEMPTED latch, which then suppressed the real thing). Strip
+        // both keys; own-argv handling re-establishes them.
+        env_vars.remove("__RUBASH_DEBUGGER_MODE");
+        env_vars.remove("__RUBASH_DEBUGGER_ATTEMPTED");
         // rubash#2136: a respawn provenance claim is honored only when
         // the spawner stamp agrees with this process's actual parent
         // (respawn_provenance_validated). An unvalidated claim is
@@ -482,6 +500,34 @@ impl Executor {
         let internal_respawn = respawn_provenance_validated(provenance_claim, spawner_stamp);
         env_vars.remove(RESPAWN_SPAWNER_PID_KEY);
         env_vars.remove("__RUBASH_COPROC_CHILD");
+        // rubash#2137 (F9): POSIX mode gets ONE source of truth — the
+        // option state. Pre-fix the state was split: posix_mode_enabled
+        // and ~30 dialect read sites consult the __RUBASH_POSIX_MODE
+        // marker while `set -o` reports the __RUBASH_SETOPT_posix key,
+        // and both were ambient-writable, so the two halves could
+        // disagree in both directions (dialect on / option off, and
+        // option on with inconsistent fatality). The only legitimate
+        // in-tree writer keeps them in sync
+        // (apply_posix_mode_transition), and the GNU entry channels —
+        // POSIXLY_CORRECT and a SHELLOPTS/BASHOPTS naming posix — write
+        // through it in initialize_fresh_shell_env_vars below. At
+        // import, therefore:
+        //   * a validated respawn is a fork-shaped child whose option
+        //     state is transported state — re-project the marker from
+        //     the transported option truth so the pair cannot split;
+        //   * anything else is a top-level entry: drop the marker and
+        //     the whole transported SETOPT family, and let the GNU
+        //     channels re-derive the pair in sync below.
+        if internal_respawn {
+            if env_vars.get("__RUBASH_SETOPT_posix").map(String::as_str) == Some("1") {
+                env_vars.insert("__RUBASH_POSIX_MODE".to_string(), "1".to_string());
+            } else {
+                env_vars.remove("__RUBASH_POSIX_MODE");
+            }
+        } else {
+            env_vars.remove("__RUBASH_POSIX_MODE");
+            env_vars.retain(|key, _| !key.starts_with("__RUBASH_SETOPT_"));
+        }
         // rubash#1074: a respawned `&`/coproc child is GNU's forked subshell
         // (execute_cmd.c:1576 execute_in_subshell: subshell_level++ in the
         // child), so BASH_SUBSHELL inside it is parent_depth + 1, not 0.
@@ -521,6 +567,15 @@ impl Executor {
         mirror_env_remove("__RUBASH_IN_SOURCE");
         mirror_env_remove(super::types::FUNCTION_STDIN);
         mirror_env_remove(super::types::FUNCTION_STDIN_OFFSET);
+        mirror_env_remove("__RUBASH_COMSUB_BODY");
+        mirror_env_remove("__RUBASH_DEBUGGER_MODE");
+        mirror_env_remove("__RUBASH_DEBUGGER_ATTEMPTED");
+        // Only the posix pair leaves the process-env mirror (rubash#2137
+        // F9): the non-posix SETOPT keys stay as the diagnostic surface
+        // they were, and the niu host's pretty-print read of
+        // __RUBASH_POSIX_MODE consults a live shell's own mirror.
+        mirror_env_remove("__RUBASH_POSIX_MODE");
+        mirror_env_remove("__RUBASH_SETOPT_posix");
         mirror_env_remove(RESPAWN_SPAWNER_PID_KEY);
         mirror_env_remove("__RUBASH_COPROC_CHILD");
         if !internal_respawn {
