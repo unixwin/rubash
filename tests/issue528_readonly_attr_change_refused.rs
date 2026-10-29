@@ -37,7 +37,6 @@ fn shell_bin() -> PathBuf {
 }
 
 struct Output {
-    status: i32,
     stdout: String,
     stderr: String,
 }
@@ -50,7 +49,6 @@ fn run_c(script: &str) -> Output {
         .output()
         .expect("run rubash");
     Output {
-        status: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).replace('\r', ""),
     }

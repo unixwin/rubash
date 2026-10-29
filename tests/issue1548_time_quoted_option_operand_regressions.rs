@@ -48,7 +48,6 @@ impl Drop for Scratch {
 }
 
 struct Output {
-    status: i32,
     stdout: String,
     stderr: String,
 }
@@ -61,7 +60,6 @@ fn run_script(path: &Path) -> Output {
         .output()
         .expect("run rubash script");
     Output {
-        status: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
@@ -84,7 +82,6 @@ fn run_stdin(script: &str) -> Output {
         .expect("write stdin");
     let output = child.wait_with_output().expect("wait rubash");
     Output {
-        status: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }

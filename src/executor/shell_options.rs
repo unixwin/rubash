@@ -1445,8 +1445,16 @@ impl Executor {
                 }
                 if let Some(body) = redirect.body.clone() {
                     if let Some(word) = body.strip_prefix('\u{1d}') {
-                        let mut input = decode_ansi_c_quoted_word(word)
-                            .unwrap_or_else(|| self.expand_word(word));
+                        // rubash#1965: a STORAGE_WORD_PREFIX here-string body
+                        // is already-decoded text whose $'...' blanks carry
+                        // the ANSI_C_IFS_GUARD carrier. The canonical funnel
+                        // (expand_stored_here_string_word, the
+                        // expand_heredoc_redirect_text ladder) strips the
+                        // guard at this value boundary; decoding/expanding
+                        // here without the strip leaked U+E401 into the
+                        // delivered stream on the pipeline staging route.
+                        // Route through the funnel function itself.
+                        let mut input = self.expand_stored_here_string_word(word);
                         input.push('\n');
                         return Some(input);
                     }
@@ -1542,8 +1550,16 @@ impl Executor {
                     }
                     if let Some(body) = redirect.body.as_deref() {
                         if let Some(word) = body.strip_prefix('\u{1d}') {
-                            let mut input = decode_ansi_c_quoted_word(word)
-                                .unwrap_or_else(|| self.expand_word(word));
+                            // rubash#1965: the same storage arm as the mut
+                            // ladder above — its decode-or-expand result must
+                            // pass the value-boundary ANSI_C_IFS_GUARD strip
+                            // the canonical funnel applies
+                            // (expand_stored_here_string_word, &mut-only, so
+                            // this &self ladder applies the identical strip).
+                            let mut input = crate::executor::markers::strip_ansi_c_ifs_guard(
+                                &decode_ansi_c_quoted_word(word)
+                                    .unwrap_or_else(|| self.expand_word(word)),
+                            );
                             input.push('\n');
                             return Some(input);
                         }

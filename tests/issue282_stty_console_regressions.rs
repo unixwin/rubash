@@ -51,7 +51,7 @@ fn stty_is_answered_by_engine() {
 /// for device`, rc=1).
 #[test]
 fn stty_non_terminal_stdin_reports_gnu_diagnostic() {
-    let (stdout, stderr, rc) = run_stdin(&["-c", "stty raw; echo \"rc=$?\""], b"");
+    let (stdout, stderr, _rc) = run_stdin(&["-c", "stty raw; echo \"rc=$?\""], b"");
     assert_eq!(
         stderr, "stty: 'standard input': Inappropriate ioctl for device\n",
         "stdout: {stdout:?}"
@@ -70,6 +70,22 @@ fn stty_size_non_terminal_diagnostic() {
     );
     assert_eq!(_stdout, "rc=1\n");
     let _ = rc;
+}
+
+/// Same diagnostic for the geometry query operands (`cols`/`rows`) and
+/// `speed` — the non-terminal gate precedes operand handling, so every
+/// query face fails identically on a pipe (niubash#535).
+#[test]
+fn stty_query_operands_non_terminal_diagnostic() {
+    for operand in ["cols", "rows", "speed"] {
+        let (stdout, stderr, _rc) =
+            run_stdin(&["-c", &format!("stty {operand}; echo \"rc=$?\"")], b"");
+        assert_eq!(
+            stderr, "stty: 'standard input': Inappropriate ioctl for device\n",
+            "operand {operand}, stdout: {stdout:?}"
+        );
+        assert_eq!(stdout, "rc=1\n", "operand {operand}");
+    }
 }
 
 /// A shell function named stty keeps winning over the engine tool, like

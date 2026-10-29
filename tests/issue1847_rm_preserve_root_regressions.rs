@@ -68,7 +68,6 @@ fn shell_bin() -> PathBuf {
 
 #[cfg(unix)]
 struct Output {
-    status: i32,
     stdout: String,
     stderr: String,
 }
@@ -78,7 +77,6 @@ fn collect(mut child: std::process::Child) -> Output {
     let _ = child.stdin.take();
     let output = child.wait_with_output().expect("wait for rubash");
     Output {
-        status: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).replace('\r', ""),
     }

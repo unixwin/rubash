@@ -2243,6 +2243,10 @@ fn relocate_comsub_heredoc_paren(input: &str) -> Option<String> {
     let mut double = false;
     let mut escaped = false;
     let mut depth = 0usize;
+    // rubash#1982: the `$` index of each currently open `$(`, so the
+    // header-close marker can be spliced next to the substitution
+    // that owns the heredoc (see the closure arm).
+    let mut openers: Vec<Option<usize>> = Vec::new();
     while index < chars.len() {
         let ch = chars[index];
         if escaped {
@@ -2276,14 +2280,17 @@ fn relocate_comsub_heredoc_paren(input: &str) -> Option<String> {
                 && chars.get(index + 2) != Some(&'(') =>
             {
                 depth += 1;
+                openers.push(Some(index));
                 index += 2;
             }
             '(' if depth > 0 && !double => {
                 depth += 1;
+                openers.push(None);
                 index += 1;
             }
             ')' if depth > 0 && !double => {
                 depth = depth.saturating_sub(1);
+                openers.pop();
                 index += 1;
             }
             '<' if depth > 0
@@ -2297,7 +2304,34 @@ fn relocate_comsub_heredoc_paren(input: &str) -> Option<String> {
                     // `)` + its header-line tail move past the gathered body:
                     // `$(cat <<EOF)\nbody\nEOF` reads as GNU's reprint
                     // `$(cat <<EOF\nbody\nEOF)`.
-                    let mut out: String = chars[..paren].iter().collect();
+                    // rubash#1982: GNU warns for this shape at parse time
+                    // (parse.y:4563-4567 "command substitution: 1
+                    // unterminated here-document"), but the reprint erases
+                    // the very fact it reports — after rotation the source
+                    // is indistinguishable from a `)` on its own line.
+                    // Splice an IFS_GLUE marker (the same carrier the
+                    // delimiter-line insert uses; boundary strips drop
+                    // it) immediately after the owning `$(`, so the
+                    // extracted source carries the fact on its first
+                    // line and the expansion-side warning site can tell
+                    // the two apart. The marker must not touch the
+                    // delimiter word: the feeder's header re-scan would
+                    // read it as part of the delimiter.
+                    let owner_end = openers
+                        .iter()
+                        .rev()
+                        .find_map(|opener| *opener)
+                        .map(|opener| opener + 2)
+                        .filter(|end| *end <= paren);
+                    let mut out: String = match owner_end {
+                        Some(end) => {
+                            let mut out: String = chars[..end].iter().collect();
+                            out.push(crate::executor::markers::IFS_GLUE);
+                            out.extend(chars[end..paren].iter());
+                            out
+                        }
+                        None => chars[..paren].iter().collect(),
+                    };
                     out.extend(chars[header_end..next].iter());
                     out.extend(chars[paren..header_end].iter());
                     out.extend(chars[next..].iter());

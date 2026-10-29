@@ -21,6 +21,15 @@
 //!   are defined here once, from the same bodies, so a query answer
 //!   and a classification can never drift apart.
 //!
+//! The judgments are also the registry's public consumer face: glob
+//! asks [`synthetic_proc_dir_entries`] in-crate, and the host's
+//! interactive faces (niubash completion and syntax highlighting,
+//! vfs audit slice S5) ask the classification and the enumeration
+//! faces ([`special_dev_entries`], [`synthetic_proc_dir_entries`])
+//! from outside the crate, so the names a user can complete or gets
+//! styled as paths are exactly the names the open points serve —
+//! never a second, host-side copy of the special-path knowledge.
+//!
 //! Boundary (audit §4.2): the classification *semantics* here are the
 //! shell's own on every platform (GNU invents /dev/tcp, /dev/fd and
 //! friends in the shell, not the OS). The *simulation* behind the
@@ -38,7 +47,7 @@
 /// How a path spelling is special to the shell, if it is. The classes
 /// mirror the audit §4.3 registry categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SpecialPathClass {
+pub enum SpecialPathClass {
     /// `/dev/tcp/host/port`, `/dev/udp/host/port` — not a filesystem
     /// path: opening connects a socket (GNU redir.c netopen,
     /// rubash#1026).
@@ -79,7 +88,7 @@ pub(crate) enum SpecialPathClass {
 /// proc generator itself answers `None` for it) — and the alias wins,
 /// exactly as the reference ladder (open_input_redirect_impl) has
 /// always sequenced it.
-pub(crate) fn classify_special_path(target: &str) -> SpecialPathClass {
+pub fn classify_special_path(target: &str) -> SpecialPathClass {
     if is_net_redirect_target(target) {
         SpecialPathClass::NetRedirect
     } else if is_shell_null_device(target) {
@@ -105,14 +114,14 @@ pub(crate) fn classify_special_path(target: &str) -> SpecialPathClass {
 /// succeeds even with no listener). Host may be a name (resolved by
 /// the OS) or an address; the port may be numeric or a service name
 /// resolved through /etc/services (getservbyname).
-pub(crate) fn is_net_redirect_target(target: &str) -> bool {
+pub fn is_net_redirect_target(target: &str) -> bool {
     target.starts_with("/dev/tcp/") || target.starts_with("/dev/udp/")
 }
 
 /// Whether `path` spells the null device: the POSIX spelling (with
 /// backslashes normalized, as Windows spellings arrive in both
 /// forms) plus, on Windows, the DOS device name in any case.
-pub(crate) fn is_shell_null_device(path: &str) -> bool {
+pub fn is_shell_null_device(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     normalized == "/dev/null" || (cfg!(windows) && normalized.eq_ignore_ascii_case("NUL"))
 }
@@ -124,7 +133,7 @@ pub(crate) fn is_shell_null_device(path: &str) -> bool {
 /// names are recognized here and flow through the fd-dup machinery
 /// (niubash#118: `>> /dev/stdout` used to land on the CONOUT$ device
 /// path and fail with Permission denied).
-pub(crate) fn fd_alias_target(target: &str) -> Option<u32> {
+pub fn fd_alias_target(target: &str) -> Option<u32> {
     match target {
         "/dev/stdin" => return Some(0),
         "/dev/stdout" => return Some(1),
@@ -165,7 +174,7 @@ fn canonical_fd_number(fd: &str) -> Option<u32> {
 /// simulation; off Windows it answers `None` and the path falls
 /// through to the real filesystem). Each call generates a fresh
 /// snapshot, matching procfs semantics.
-pub(crate) fn synthetic_proc_content(target: &str) -> Option<Vec<u8>> {
+pub fn synthetic_proc_content(target: &str) -> Option<Vec<u8>> {
     crate::proc_vfs::proc_file_content(target)
 }
 
@@ -175,7 +184,7 @@ pub(crate) fn synthetic_proc_content(target: &str) -> Option<Vec<u8>> {
 /// (`proc_vfs::proc_link_target`) because one entry
 /// (`/proc/self/cwd`) resolves through the caller's session state,
 /// which classification must not need.
-pub(crate) fn is_synthetic_link_path(target: &str) -> bool {
+pub fn is_synthetic_link_path(target: &str) -> bool {
     crate::proc_vfs::proc_is_link_path(target)
 }
 
@@ -185,7 +194,7 @@ pub(crate) fn is_synthetic_link_path(target: &str) -> bool {
 /// caller supplies the session cwd's forms for the self/cwd entry.
 /// None when the path is not a live synthetic link or its target
 /// cannot be resolved (dead pid, protected process).
-pub(crate) fn synthetic_link_target(
+pub fn synthetic_link_target(
     target: &str,
     self_cwd: Option<&crate::proc_vfs::ProcSelfCwd>,
 ) -> Option<crate::proc_vfs::ProcLinkTarget> {
@@ -200,8 +209,40 @@ pub(crate) fn synthetic_link_target(
 /// from the one enumeration source in [`crate::proc_vfs`]. Glob and
 /// (later) completion ask here so the names a user can complete are
 /// exactly the names the content and link faces serve.
-pub(crate) fn synthetic_proc_dir_entries(target: &str) -> Option<Vec<String>> {
+pub fn synthetic_proc_dir_entries(target: &str) -> Option<Vec<String>> {
     crate::proc_vfs::proc_dir_entries(target)
+}
+
+/// The listable children of the shell-namespace `/dev` directory:
+/// `(name, is_prefix_dir)`. Interactive completion lists exactly
+/// these names under a `/dev/` prefix (niubash#627, vfs audit §6.4),
+/// so the static completion tier can never promise a spelling the
+/// open points do not serve, nor hide one they do.
+///
+/// Leaf entries are the spellings that classify as a device or fd
+/// alias (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`).
+/// Prefix-dir entries are families whose children are NOT a fixed
+/// name set: `fd` (children are the session's live fd numbers — the
+/// dynamic tier, enumerated from the fd table itself, never from
+/// this list), and `tcp`/`udp` (children are free-text host/port
+/// pairs; the dir itself is listed as the guide form, and nothing
+/// completes past it — GNU has no hostname completion there).
+///
+/// Spellings the registry does not classify — `/dev/zero`,
+/// `/dev/full`, `/dev/tty` today — are deliberately absent: to the
+/// open points they are plain filesystem paths (the enclave's real
+/// directory serves them), so listing them here would invent a
+/// simulation the engine does not perform (audit D5 owns them).
+pub fn special_dev_entries() -> &'static [(&'static str, bool)] {
+    &[
+        ("null", false),
+        ("stdin", false),
+        ("stdout", false),
+        ("stderr", false),
+        ("fd", true),
+        ("tcp", true),
+        ("udp", true),
+    ]
 }
 
 #[cfg(test)]
@@ -451,5 +492,61 @@ mod tests {
         }
         assert!(synthetic_link_target("/proc/self/status", None).is_none());
         assert!(synthetic_link_target("/etc/passwd", None).is_none());
+    }
+
+    /// niubash#627 (vfs audit §6.5): the listable /dev table must
+    /// agree with the classification judgments in both directions —
+    /// every listed name is special to the open points, and every
+    /// /dev spelling family the registry treats as special is
+    /// listed. Probed over the audit's known /dev vocabulary, so a
+    /// future registry arm (a /dev/zero simulation, audit D5) trips
+    /// this pin until the table is updated in the same change.
+    #[test]
+    fn special_dev_entries_match_classification() {
+        fn family_is_special(name: &str) -> bool {
+            classify_special_path(&format!("/dev/{name}")) != SpecialPathClass::Filesystem
+                || matches!(
+                    classify_special_path(&format!("/dev/{name}/0")),
+                    SpecialPathClass::FdAlias(_)
+                )
+                || classify_special_path(&format!("/dev/{name}/example.invalid/80"))
+                    == SpecialPathClass::NetRedirect
+        }
+
+        let listed: Vec<&str> = special_dev_entries()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        for (name, is_dir) in special_dev_entries() {
+            assert!(
+                family_is_special(name),
+                "listed /dev entry is not special: {name}"
+            );
+            if *is_dir {
+                // A prefix dir's own spelling is a plain directory to
+                // the open points; only its children are special.
+                assert_eq!(
+                    classify_special_path(&format!("/dev/{name}")),
+                    SpecialPathClass::Filesystem,
+                    "prefix dir spelling must stay Filesystem: {name}"
+                );
+            } else {
+                assert_ne!(
+                    classify_special_path(&format!("/dev/{name}")),
+                    SpecialPathClass::Filesystem,
+                    "leaf entry must classify as special: {name}"
+                );
+            }
+        }
+        for name in [
+            "null", "zero", "full", "stdin", "stdout", "stderr", "fd", "tcp", "udp", "tty", "ptmx",
+            "console", "random", "urandom",
+        ] {
+            assert_eq!(
+                listed.contains(&name),
+                family_is_special(name),
+                "/dev table vs classification drift for {name}"
+            );
+        }
     }
 }

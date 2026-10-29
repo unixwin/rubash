@@ -252,13 +252,14 @@ pub(in crate::executor) fn format_time_report(
 
     // GNU execute_cmd.c:1245: without `time -p` the default format is
     // BASH_TIMEFORMAT — a leading blank line, tab separators and the
-    // minute form (`\nreal\t%3lR\nuser\t%3lU\nsys\t%3lS`); only a set
-    // TIMEFORMAT overrides it (print_time_info, execute_cmd.c:1552-1557).
+    // minute form (`\nreal\t%3lR\nuser\t%3lU\nsys\t%3lS`, with REAL
+    // control characters in the value); only a set TIMEFORMAT
+    // overrides it (print_time_info, execute_cmd.c:1552-1557).
     // POSIX_TIMEFORMAT (:1244) is exclusively the `time -p` format above.
     let format = env_vars
         .get("TIMEFORMAT")
         .map(String::as_str)
-        .unwrap_or("\\nreal\\t%3lR\\nuser\\t%3lU\\nsys\\t%3lS");
+        .unwrap_or("\nreal\t%3lR\nuser\t%3lU\nsys\t%3lS");
 
     if format.is_empty() {
         return None;
@@ -280,19 +281,13 @@ fn expand_time_format(format: &str, metrics: TimeCommandMetrics) -> Result<Strin
     let mut output = String::new();
     let mut chars = format.chars().peekable();
 
+    // GNU print_formatted_time (execute_cmd.c:1346): only `%`
+    // directives are special — every other byte, backslash included,
+    // is copied verbatim (rubash#1939: `TIMEFORMAT='A\nB'` prints
+    // the two characters `\` and `n`, not a newline).
     while let Some(ch) = chars.next() {
         match ch {
             '%' => expand_time_format_percent(&mut output, &mut chars, metrics)?,
-            '\\' => match chars.next() {
-                Some('n') => output.push('\n'),
-                Some('t') => output.push('\t'),
-                Some('\\') => output.push('\\'),
-                Some(other) => {
-                    output.push('\\');
-                    output.push(other);
-                }
-                None => output.push('\\'),
-            },
             other => output.push(other),
         }
     }

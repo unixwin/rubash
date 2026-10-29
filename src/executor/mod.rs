@@ -1481,6 +1481,16 @@ pub struct Executor {
         Option<String>,
         Option<crate::shell::variables::Variable>,
     )>,
+    /// rubash#1646: descriptors a `{var}` redirection opened under
+    /// `shopt varredir_close` on a command-scoped application. GNU closes
+    /// them when the owning command COMPLETES (redir.c undo_redirections
+    /// at execute_cmd.c command end); closing at application time — the
+    /// previous behavior — rejected the command's own `>&$var` writes
+    /// with EBADF and silently dropped a `>(...)` consumer's whole
+    /// stream. execute_dynamic_fd_var_redirect therefore only RECORDS
+    /// the fd here; execute_command drains the records its command added
+    /// (watermark discipline, so nested commands keep their own closes).
+    deferred_varredir_closes: Vec<u32>,
     /// builtins/read.def read_timeout: absolute deadline for `read -t N`
     /// (and the TMOUT default). Set only while a `read` builtin call is
     /// active; consulted by the genuinely blocking endpoints (inherited

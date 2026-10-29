@@ -5100,6 +5100,395 @@ mod issue_1976 {
         assert_eq!(stdout, "rc=142\nline=[]\n", "stderr:\n{stderr}");
     }
 }
+mod issue_1584 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// rubash#1584: GNU execute_cmd.c:2525 execute_coproc forks once
+    /// and the child execs a simple external command itself, so $!
+    /// is the program's own pid (comm=cat). The respawn route put a
+    /// `rubash -c` wrapper at $! and ran cat as a grandchild. The
+    /// direct route must keep the data surface byte-identical (fds
+    /// 63/60, echo-back, wait status) while the pid names cat.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_cat_pid_is_cat() {
+        let dir = case_scratch("1584-cat");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc cat\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo \"fds=${COPROC[0]},${COPROC[1]}\"\n\
+             echo hello >&${COPROC[1]}\n\
+             read -u ${COPROC[0]} line\n\
+             echo \"back=$line\"\n\
+             eval \"exec ${COPROC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(
+            stdout, "comm=cat\nfds=63,60\nback=hello\nrc=0\n",
+            "stderr:\n{stderr}"
+        );
+        assert_eq!(stderr, "", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584: `kill $!` must reach the command itself. With
+    /// the wrapper at $! the TERM killed the wrapper (wait still
+    /// reported 143) and the sleep was never signalled.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_kill_reaches_the_command() {
+        let dir = case_scratch("1584-kill");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc sleep 30\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             kill -TERM $p\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=sleep\nrc=143\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584: a slash-path head takes the same direct route.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_slash_path_pid_is_the_program() {
+        let dir = case_scratch("1584-slash");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc /bin/cat\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo yo >&${COPROC[1]}\n\
+             read -u ${COPROC[0]} line\n\
+             echo \"back=$line\"\n\
+             eval \"exec ${COPROC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=cat\nback=yo\nrc=0\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584: an external command with plain arguments is
+    /// direct too (the args are expanded in the parent only because
+    /// the admitted classes make parent expansion identical to the
+    /// child's).
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_external_with_args() {
+        let dir = case_scratch("1584-args");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc grep --line-buffered foo\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo \"xfooy\" >&${COPROC[1]}\n\
+             read -u ${COPROC[0]} line\n\
+             echo \"back=$line\"\n\
+             eval \"exec ${COPROC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=grep\nback=xfooy\nrc=0\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584: a named coproc binds <NAME>_PID to the same
+    /// direct process.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_named_coproc_pid_is_the_program() {
+        let dir = case_scratch("1584-named");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc NC cat\n\
+             p=${NC_PID}\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo hello >&${NC[1]}\n\
+             read -u ${NC[0]} line\n\
+             echo \"back=$line\"\n\
+             eval \"exec ${NC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=cat\nback=hello\nrc=0\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584 (negative control): a builtin coproc keeps a
+    /// shell-image child — GNU's coproc child for `read` is bash
+    /// itself, so the respawn route (comm=rubash) is the faithful
+    /// shape and must not be direct-spawned.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_builtin_keeps_shell_image() {
+        let dir = case_scratch("1584-builtin");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc read x\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo \"someval\" >&${COPROC[1]}\n\
+             eval \"exec ${COPROC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=rubash\nrc=0\n", "stderr:\n{stderr}");
+    }
+}
+
+mod issue_1582 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// rubash#1582 (contract pin, adjudication pending): at a
+    /// spawn-realized level the identity narrative is already
+    /// GNU-consistent — an async subshell's $BASHPID is the pid its
+    /// children observe as $PPID. Any resolution of the flat-level
+    /// projection must preserve this.
+    #[cfg(unix)]
+    #[test]
+    fn issue1582_async_subshell_bashpid_matches_child_ppid() {
+        let dir = case_scratch("1582-async");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "( /bin/sh -c 'echo $PPID > pp.txt'; echo $BASHPID > bp.txt ) &\n\
+             wait $!\n\
+             if [ \"$(cat pp.txt)\" = \"$(cat bp.txt)\" ]; then echo MATCH; else echo DIFFER; fi\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "MATCH\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1582 (contract pin): $PPID is a startup-frozen value
+    /// in GNU (variables.c set_ppid runs once from
+    /// initialize_shell_variables; subshell forks inherit it), and
+    /// rubash matches — a subshell must NOT observe its parent
+    /// shell's pid through $PPID.
+    #[cfg(unix)]
+    #[test]
+    fn issue1582_ppid_is_frozen_in_subshell() {
+        let dir = case_scratch("1582-ppid");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "t=$PPID\n\
+             ( if [ \"$PPID\" = \"$t\" ]; then echo FROZEN; else echo CHANGED; fi )\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "FROZEN\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1582 (contract pin): `kill $BASHPID` inside a flat
+    /// subshell is scoped to that subshell layer (the #1461
+    /// interception): the layer dies by the signal (status 143,
+    /// no survival output) and the parent shell lives on. Any
+    /// projection change that points $BASHPID at the host process
+    /// must keep this kill scoped, never suicidal to the host.
+    #[cfg(unix)]
+    #[test]
+    fn issue1582_kill_own_bashpid_stays_scoped_to_the_subshell() {
+        let dir = case_scratch("1582-kill");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "( kill -TERM $BASHPID; echo SURVIVED )\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "rc=143\n", "stderr:\n{stderr}");
+    }
+}
+
+mod issue_1646 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// rubash#1646 (varredir_close arm): GNU closes a `{var}` descriptor
+    /// when the owning command COMPLETES (redir.c undo_redirections), so
+    /// the command's own `>&$f` write lands and the `>(...)` consumer
+    /// drains it; only a LATER write sees the closed fd. Closing at
+    /// application time (the old behavior) rejected the first write with
+    /// EBADF and the consumer's stream was lost entirely. GNU bash
+    /// 5.3.20 oracle output for this probe: first-rc=0, the second write
+    /// reports Bad file descriptor, file:[one].
+    #[test]
+    fn issue1646_varredir_close_procsub_write_survives_own_command() {
+        let dir = case_scratch("1646-varredir-procsub");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "shopt -s varredir_close\n\
+             echo one {f}> >(cat > out.txt) >&$f\n\
+             echo \"first-rc=$?\"\n\
+             echo two >&$f 2>/dev/null || echo second-failed\n\
+             sleep 0.5\n\
+             echo \"file:[$(cat out.txt)]\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(
+            stdout, "first-rc=0\nsecond-failed\nfile:[one]\n",
+            "stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("Bad file descriptor"),
+            "the post-completion write must report EBADF: {stderr}"
+        );
+    }
+
+    /// rubash#1646 (varredir_close arm, plain-file form of the same
+    /// invariant): a `{f}>file` descriptor closed at application time
+    /// rejected the owning command's write too — first-rc was 1 and the
+    /// file stayed empty. GNU: first-rc=0, second write EBADF, file
+    /// holds exactly the first line.
+    #[test]
+    fn issue1646_varredir_close_plain_file_write_survives_own_command() {
+        let dir = case_scratch("1646-varredir-file");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "shopt -s varredir_close\n\
+             echo one {f}>plain.txt >&$f\n\
+             echo \"first-rc=$?\"\n\
+             echo two >&$f 2>/dev/null || echo second-failed\n\
+             echo \"file:[$(cat plain.txt)]\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(
+            stdout, "first-rc=0\nsecond-failed\nfile:[one]\n",
+            "stderr:\n{stderr}"
+        );
+    }
+
+    /// rubash#1646 (headline form): a persistent `exec {f}> >(...)`
+    /// stream that is never explicitly closed must still reach the
+    /// consumer when the shell exits — GNU's consumer drains at EOF
+    /// (subst.c:6362 process_substitute pipe semantics); the shell-exit
+    /// sweep is rubash's drain point. Byte-exact content check after
+    /// the process has exited.
+    #[test]
+    fn issue1646_persistent_procsub_drains_at_exit() {
+        let dir = case_scratch("1646-exit-drain");
+        let (_stdout, stderr, code) = run(
+            &dir,
+            "exec {f}> >(cat > out.txt)\nprintf 'a\\nb\\nc\\n' >&$f\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        let drained = std::fs::read(dir.join("out.txt")).expect("consumer output exists");
+        assert_eq!(drained, b"a\nb\nc\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1646 (default mode): with varredir_close off (the GNU
+    /// default) the descriptor persists across commands, both writes
+    /// land, and the accumulated stream drains whole at shell exit.
+    #[test]
+    fn issue1646_dynamic_fd_procsub_accumulates_and_drains_at_exit() {
+        let dir = case_scratch("1646-default-drain");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "echo one {f}> >(cat > out.txt) >&$f\necho \"first-rc=$?\"\necho two >&$f\necho \"second-rc=$?\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "first-rc=0\nsecond-rc=0\n", "stderr:\n{stderr}");
+        let drained = std::fs::read(dir.join("out.txt")).expect("consumer output exists");
+        assert_eq!(drained, b"one\ntwo\n", "stderr:\n{stderr}");
+    }
+}
+
+mod issue_1951 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(60),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// rubash#1951: the streamed input-procsub endpoint serves a
+    /// line-wise `while read` loop completely and in order — the count
+    /// over 20k produced lines is exact (the materialized endpoint this
+    /// replaces lost its constant-factor footing entirely: ~0.29ms per
+    /// line at the audit tip). GNU bash 5.3.20 prints the same count.
+    #[test]
+    fn issue1951_procsub_endpoint_while_read_count_exact() {
+        let dir = case_scratch("1951-stream-count");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "n=0\nwhile read -r l; do n=$((n+1)); done < <(seq 1 20000)\necho \"read=$n\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "read=20000\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1951 (content face): lines arrive whole and in order —
+    /// the first, middle and last records read off the endpoint match
+    /// the producer's sequence exactly.
+    #[test]
+    fn issue1951_procsub_endpoint_records_whole_and_ordered() {
+        let dir = case_scratch("1951-stream-order");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "n=0\nfirst= mid= last=\nwhile read -r l; do n=$((n+1)); case $n in 1) first=$l;; 1000) mid=$l;; esac; last=$l; done < <(seq 1 2000)\necho \"$first/$mid/$last/$n\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "1/1000/2000/2000\n", "stderr:\n{stderr}");
+    }
+}
 
 /// rubash#1903: a WinuxCmd `mkfifo` marker was not recognized by shell
 /// redirections — `echo hi > f` truncated the marker as a plain file

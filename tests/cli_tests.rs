@@ -2480,6 +2480,41 @@ fn time_uses_timeformat_variable() {
 }
 
 #[test]
+fn timeformat_backslash_is_a_literal_byte() {
+    // rubash#1939: GNU print_formatted_time (execute_cmd.c:1346)
+    // expands only `%` directives — a backslash in TIMEFORMAT is
+    // copied verbatim, so 'A\nB' prints the four bytes A, \, n, B.
+    let output = rubash_command()
+        .arg("-c")
+        .arg("TIMEFORMAT='A\\nB'; time true")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "A\\nB\n");
+}
+
+#[test]
+fn time_default_format_starts_with_a_real_newline_and_tabs() {
+    // rubash#1939: the default report is BASH_TIMEFORMAT
+    // (execute_cmd.c:1245), whose value holds real newline/tab
+    // characters: a leading blank line, then `real\t…m…s`.
+    let output = rubash_command()
+        .arg("-c")
+        .arg("time true")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_stderr_matches(
+        &String::from_utf8_lossy(&output.stderr),
+        r"^\nreal\t\d+m\d+\.\d{3}s\nuser\t\d+m\d+\.\d{3}s\nsys\t\d+m\d+\.\d{3}s\n$",
+    );
+}
+
+#[test]
 fn time_p_ignores_timeformat_variable() {
     let output = rubash_command()
         .arg("-c")

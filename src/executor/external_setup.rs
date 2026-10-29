@@ -108,11 +108,46 @@ pub(in crate::executor) fn shared_combined_output_process_substitution(
     {
         return None;
     }
+    if !redirect_target_span_is_recorded(first) && !redirect_target_span_is_recorded(second) {
+        return None;
+    }
     first
         .target
         .strip_prefix(">(")
         .and_then(|target| target.strip_suffix(')'))
         .map(str::to_string)
+}
+
+/// rubash#1931: whether a redirect target whose VALUE text is one
+/// whole process-substitution span is a REAL span — the parser
+/// recorded it (unquoted) in the target's own metadata. The
+/// materialization arms in `command_with_process_substitution_files`
+/// match on the target's quote-stripped value, where a double-quoted
+/// `"<(cmd)"` / `">(cmd)"` is indistinguishable from a live span;
+/// GNU creates the substitution only for a span the parser saw
+/// unquoted (parse.y read_token_word) and treats the quoted form as
+/// a literal filename. Admission therefore consults the recorded
+/// spans, with the same raw-gated re-derivation the word loop in
+/// that function uses when a word's metadata carries none.
+pub(in crate::executor) fn redirect_target_span_is_recorded(redirect: &Redirect) -> bool {
+    let metadata = &redirect.target_metadata;
+    let recorded = if !metadata.process_substitutions.is_empty() {
+        metadata.process_substitutions.as_slice()
+    } else if crate::parser::raw_word_has_unquoted_process_substitution(&metadata.raw) {
+        return crate::parser::WordMetadata::new(
+            0,
+            redirect.target.clone(),
+            redirect.target.clone(),
+        )
+        .process_substitutions
+        .iter()
+        .any(|substitution| substitution.target == redirect.target);
+    } else {
+        return false;
+    };
+    recorded
+        .iter()
+        .any(|substitution| substitution.target == redirect.target)
 }
 
 fn dynamic_fd_word(word: &str) -> Option<&str> {
@@ -423,6 +458,10 @@ impl Executor {
                 .target
                 .strip_prefix("<(")
                 .and_then(|target| target.strip_suffix(')'))
+                // rubash#1931: only a parser-recorded (unquoted) span
+                // materializes; a quoted "<(...)" target is a literal
+                // filename in GNU.
+                .filter(|_| redirect_target_span_is_recorded(redirect))
             {
                 // rubash#1952: stream first — name the spawned body's
                 // pipe by its word fd (GNU subst.c:6362 hands the
@@ -525,6 +564,8 @@ impl Executor {
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    // rubash#1931: recorded-span admission, as above.
+                    .filter(|_| redirect_target_span_is_recorded(redirect))
                 {
                     let source = source.to_string();
                     let path = self.empty_process_substitution_temp()?;
@@ -545,6 +586,8 @@ impl Executor {
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    // rubash#1931: recorded-span admission, as above.
+                    .filter(|_| redirect_target_span_is_recorded(redirect))
                 {
                     let source = source.to_string();
                     let path = self.empty_process_substitution_temp()?;
@@ -565,6 +608,8 @@ impl Executor {
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    // rubash#1931: recorded-span admission, as above.
+                    .filter(|_| redirect_target_span_is_recorded(redirect))
                 {
                     let source = source.to_string();
                     let path = self.empty_process_substitution_temp()?;
@@ -585,6 +630,8 @@ impl Executor {
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    // rubash#1931: recorded-span admission, as above.
+                    .filter(|_| redirect_target_span_is_recorded(redirect))
                 {
                     let source = source.to_string();
                     let path = self.empty_process_substitution_temp()?;

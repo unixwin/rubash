@@ -1318,6 +1318,406 @@ fn platform_collate(_a: &str, _b: &str, _locale: &str) -> Option<std::cmp::Order
     None
 }
 
+/// -D / --dump-strings / --dump-po-strings (rubash#1977): collect every
+/// locale string ($"...") in `input` without executing anything, the way
+/// GNU bash's dump options do. GNU wires the flag as
+/// read_but_dont_execute (shell.c:506-510) and prints each string from
+/// locale_expand as the word lexer recognizes it (locale.c:550-565);
+/// this is the library entry for that face — the rubash binary's main
+/// routes the option here, and hosts call it too. It began as niubash's
+/// host implementation (the only implementation either binary had);
+/// the audit's two-way break (rubash binary missing, niubash shadow) is
+/// closed by owning it here.
+///
+/// GNU recognizes a locale string only where the word lexer reads `$`
+/// followed by `"` while scanning a word (parse.y read_token_word's
+/// dollar-quote branch). Comment text and here-doc bodies are never
+/// lexed as words, so they never dump; single-quoted text, double-quoted
+/// spans and backtick bodies are skipped as units; word-embedded,
+/// quoted and arithmetic-embedded command substitutions are re-lexed,
+/// so locale strings inside them do dump (parse.y:4100 processes `$(`
+/// units encountered inside a matched pair). Two recognition classes
+/// the original host pass skipped are covered, per GNU 5.3.20 probes:
+/// `${...}` bodies (default values, patterns, subscripts are lexed as
+/// words: `${x:-$"d"}`, `${x##$"pat"}`, `${arr[$"i"]}` all dump) and
+/// bare `$"..."` in arithmetic text (`$((1 + $"a"))`, `((y = $"b"))`,
+/// `$[1 + $"c"]` all dump).
+///
+/// This pass therefore walks the token stream — which already excludes
+/// the comment and here-doc-body classes structurally, since the lexer
+/// never yields word-shaped tokens from them — and applies the
+/// word-level quote rules to the raw spelling of word-shaped tokens.
+///
+/// Collects `(line, raw body)` pairs into `out`, in source order.
+/// `base_line` is the line the token stream's own numbering starts
+/// from: top-level tokens carry real script lines in `token.position`,
+/// while a re-lexed substitution body restarts at 1, so nested strings
+/// are mapped back with `base_line + position - 1`. GNU reports the
+/// physical line of each nested string; the two agree whenever the
+/// substitution body starts on its token's start line (the
+/// overwhelmingly common single-line word).
+///
+/// Known residuals of the standalone-pass shape (shared with the host
+/// implementation it replaces): a syntax error later in the input does
+/// not stop collection or change the exit code the way GNU's reader
+/// does (GNU dumps the strings read before the error and exits 2), and
+/// a nested `$"..."` inside a command substitution inside a dumped
+/// body is reported verbatim where GNU rewrites it to `"..."` (needs
+/// the byte-exact body serializer of the host-semantic-layer plan, C1
+/// residual).
+pub fn collect_locale_strings(input: &str, base_line: usize, out: &mut Vec<(usize, String)>) {
+    for token in crate::lexer::tokenize(input) {
+        let line = base_line + token.position.saturating_sub(1);
+        match token.kind {
+            crate::lexer::TokenKind::Word
+            | crate::lexer::TokenKind::Assignment
+            | crate::lexer::TokenKind::BraceExpand => scan_locale_words(&token.raw, line, out),
+            // A standalone `${...}` expansion is a Variable token, not
+            // a Word (lexer/scanner.rs, the `$` + `{` arm); its raw is
+            // the expansion spelling itself, and `$name` raws contain
+            // no `$"` by construction, so the word scan is a no-op for
+            // them and a body scan for the braced form.
+            crate::lexer::TokenKind::Variable => scan_locale_words(&token.raw, line, out),
+            crate::lexer::TokenKind::CommandSubst => match substitution_span(&token.raw) {
+                SubstitutionSpan::Command(body) => collect_locale_strings(&body, line, out),
+                SubstitutionSpan::Arithmetic(body) => scan_arithmetic_text(&body, line, out),
+                SubstitutionSpan::None => {}
+            },
+            _ => {}
+        }
+    }
+}
+
+/// Word-level scan of one token's raw spelling, mirroring where GNU's word
+/// lexer recognizes `$"`: outside single quotes, double-quoted spans,
+/// backtick bodies and `$'...'` units. `\"` at word level escapes the
+/// next character, so `\$"x"` is not a locale string introducer.
+fn scan_locale_words(raw: &str, line: usize, out: &mut Vec<(usize, String)>) {
+    let bytes = raw.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => i = skip_single_quoted(bytes, i + 1),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'"' => i = scan_double_quoted(raw, i + 1, line, out),
+            b'$' => match bytes.get(i + 1) {
+                Some(b'"') => {
+                    let close = locale_body_end(raw, i + 2, line, out);
+                    out.push((line, raw[i + 2..close].to_string()));
+                    i = close + 1;
+                }
+                Some(b'\'') => i = skip_ansi_c_quoted(bytes, i + 2),
+                Some(b'{') => i = scan_dollar_brace_body(raw, i + 2, line, out),
+                Some(b'(') => i = scan_substitution_unit(raw, i + 1, line, out),
+                _ => i += 1,
+            },
+            b'\\' => i = (i + 2).min(bytes.len()),
+            _ => i += 1,
+        }
+    }
+}
+
+/// `${...}` spans are delimited by skip_dollar_brace, but their bodies
+/// are word text to GNU's lexer — default values, patterns and
+/// subscripts are lexed as words, so locale strings inside them dump.
+/// Scan the body with the word scanner instead of skipping the unit
+/// whole; the returned index is the same one the skip would give.
+fn scan_dollar_brace_body(
+    raw: &str,
+    start: usize,
+    line: usize,
+    out: &mut Vec<(usize, String)>,
+) -> usize {
+    let end = skip_dollar_brace(raw.as_bytes(), start);
+    let body_end = if end > start && raw.as_bytes()[end - 1] == b'}' {
+        end - 1
+    } else {
+        end
+    };
+    scan_locale_words(&raw[start..body_end], line, out);
+    end
+}
+
+/// Byte index of the closing `"` of a locale string body whose text starts at
+/// `start` (just past the opening quote). Nested `${...}`/`` `...` ``/`$(...)`
+/// units are skipped the way GNU parse_matched_pair skips them while it
+/// extracts the pair, and command-substitution units are re-lexed so their
+/// own locale strings dump first (GNU order: inner before outer). The
+/// surrounding body is reported verbatim: GNU additionally rewrites nested
+/// `$"..."` units to `"..."` inside the body it dumps, which needs a
+/// byte-exact body serializer rubash does not expose (host-semantic-layer
+/// plan, C1 residual).
+fn locale_body_end(raw: &str, start: usize, line: usize, out: &mut Vec<(usize, String)>) -> usize {
+    let bytes = raw.as_bytes();
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return i,
+            b'\\' => i = (i + 2).min(bytes.len()),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'$' => match bytes.get(i + 1) {
+                Some(b'{') => i = skip_dollar_brace(bytes, i + 2),
+                Some(b'(') => i = scan_substitution_unit(raw, i + 1, line, out),
+                _ => i += 1,
+            },
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Walks a double-quoted span. `$` followed by `"` is literal data here (GNU
+/// dumps nothing for `echo "$"dqp" tail"`), while `$(...)` units are re-lexed
+/// (parse.y:4100) and their locale strings dump, and `${...}` units carry
+/// word text whose locale strings dump (GNU probe: `"${x:-$"d"}"` dumps).
+fn scan_double_quoted(
+    raw: &str,
+    start: usize,
+    line: usize,
+    out: &mut Vec<(usize, String)>,
+) -> usize {
+    let bytes = raw.as_bytes();
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return i + 1,
+            b'\\' => i = (i + 2).min(bytes.len()),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'$' => match bytes.get(i + 1) {
+                Some(b'{') => i = scan_dollar_brace_body(raw, i + 2, line, out),
+                Some(b'(') => i = scan_substitution_unit(raw, i + 1, line, out),
+                _ => i += 1,
+            },
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Extracts the span of a `$(...)` / `$((...))` unit whose `(` sits at `open`
+/// and dispatches it: command-substitution bodies are re-lexed (GNU dumps
+/// their locale strings, unquoted, word-embedded or double-quoted alike) and
+/// arithmetic bodies are scanned as arithmetic text.
+fn scan_substitution_unit(
+    raw: &str,
+    open: usize,
+    line: usize,
+    out: &mut Vec<(usize, String)>,
+) -> usize {
+    let bytes = raw.as_bytes();
+    let Some(close) = paren_close(bytes, open) else {
+        return bytes.len();
+    };
+    if bytes.get(open + 1) == Some(&b'(') {
+        scan_arithmetic_text(&raw[open + 2..close - 1], line, out);
+    } else {
+        collect_locale_strings(&raw[open + 1..close], line, out);
+    }
+    close + 1
+}
+
+/// Arithmetic text (`$(( ... ))` inner span, `(( ... ))` bodies,
+/// `$[ ... ]`): a bare `$"..."` dumps here — GNU's arithmetic is lexed
+/// by the same word machinery (GNU 5.3.20 probes above) — and quoted
+/// command substitutions are parsed by GNU and their locale strings
+/// dump (GNU 5.3.0: `$(( "$(echo $"x")" + 1 ))` dumps `"x"`).
+fn scan_arithmetic_text(text: &str, line: usize, out: &mut Vec<(usize, String)>) {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = scan_double_quoted(text, i + 1, line, out),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'$' if bytes.get(i + 1) == Some(&b'"') => {
+                let close = locale_body_end(text, i + 2, line, out);
+                out.push((line, text[i + 2..close].to_string()));
+                i = close + 1;
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'(') => {
+                if bytes.get(i + 2) == Some(&b'(') {
+                    // Nested arithmetic span: scanned as arithmetic text
+                    // by this same walk (its own `$"..."` still dumps).
+                    i += 3;
+                } else {
+                    i = scan_substitution_unit(text, i + 1, line, out);
+                }
+            }
+            b'\\' => i = (i + 2).min(bytes.len()),
+            _ => i += 1,
+        }
+    }
+}
+
+enum SubstitutionSpan {
+    Command(String),
+    Arithmetic(String),
+    None,
+}
+
+/// Classifies a CommandSubst token's raw spelling: a `` `...` `` token shares
+/// the kind but never starts with `$(`, and its body must not be re-lexed
+/// (GNU keeps backtick bodies verbatim at parse time, so `echo `echo $"x"``
+/// dumps nothing). `$((...))` yields its arithmetic inner span.
+fn substitution_span(raw: &str) -> SubstitutionSpan {
+    let bytes = raw.as_bytes();
+    if bytes.first() != Some(&b'$') || bytes.get(1) != Some(&b'(') {
+        return SubstitutionSpan::None;
+    }
+    let Some(close) = paren_close(bytes, 1) else {
+        return SubstitutionSpan::None;
+    };
+    if bytes.get(2) == Some(&b'(') {
+        SubstitutionSpan::Arithmetic(raw[3..close - 1].to_string())
+    } else {
+        SubstitutionSpan::Command(raw[2..close].to_string())
+    }
+}
+
+/// Byte index of the `)` matching the `(` at `open`, honoring quoting the way
+/// GNU parse_matched_pair does while it extracts a substitution span. Returns
+/// None when the span never closes; callers then treat the rest of the text
+/// as the unit, which keeps the scan total on malformed input.
+fn paren_close(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i - 1);
+                }
+            }
+            b'\'' => i = skip_single_quoted(bytes, i + 1),
+            b'"' => i = skip_double_span(bytes, i + 1),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'\\' => i = (i + 2).min(bytes.len()),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn skip_single_quoted(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            return i + 1;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+fn skip_ansi_c_quoted(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => return i + 1,
+            b'\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn skip_backquoted(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'`' => return i + 1,
+            b'\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn skip_double_span(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return i + 1,
+            b'\\' => i = (i + 2).min(bytes.len()),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'$' if bytes.get(i + 1) == Some(&b'{') => i = skip_dollar_brace(bytes, i + 2),
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn skip_dollar_brace(bytes: &[u8], mut i: usize) -> usize {
+    let mut depth = 1usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            b'\'' => i = skip_single_quoted(bytes, i + 1),
+            b'"' => i = skip_double_span(bytes, i + 1),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'\\' => i = (i + 2).min(bytes.len()),
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Renders collected locale strings exactly the way GNU bash prints them
+/// (locale.c locale_expand): plain mode is `"body"` with the raw body text
+/// verbatim (escapes stay escaped, embedded newlines split the output line),
+/// and PO mode is the mk_msgstr form anchored by `#: name:lineno`.
+pub fn render_locale_string_dump(
+    strings: &[(usize, String)],
+    po: bool,
+    source_name: &str,
+) -> String {
+    let mut out = String::new();
+    for (line, body) in strings {
+        if po {
+            let mut escaped = String::new();
+            let mut multiline = false;
+            for ch in body.chars() {
+                match ch {
+                    '\n' => {
+                        escaped.push_str("\\n\"\n\"");
+                        multiline = true;
+                    }
+                    '"' | '\\' => {
+                        escaped.push('\\');
+                        escaped.push(ch);
+                    }
+                    _ => escaped.push(ch),
+                }
+            }
+            if multiline {
+                out.push_str(&format!(
+                    "#: {source_name}:{line}\nmsgid \"\"\n\"{escaped}\"\nmsgstr \"\"\n"
+                ));
+            } else {
+                out.push_str(&format!(
+                    "#: {source_name}:{line}\nmsgid \"{escaped}\"\nmsgstr \"\"\n"
+                ));
+            }
+        } else {
+            out.push('"');
+            out.push_str(body);
+            out.push_str("\"\n");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1552,6 +1952,149 @@ mod tests {
         assert_eq!(
             super::multibyte_char_offsets(&[0xe2, 0x82, 0xac, 0xff, 0x41]),
             vec![0, 3, 4, 5]
+        );
+    }
+}
+
+#[cfg(test)]
+mod dump_strings_tests {
+    // rubash#1977: the collector behind -D / --dump-strings /
+    // --dump-po-strings. Expectations measured against GNU bash
+    // 5.3.20 running the same inputs (the recognition matrix was
+    // first probed case-by-case for the niubash host implementation
+    // this code descends from; the ${...} and arithmetic classes are
+    // the widenings the GNU probes forced).
+    fn dumped(input: &str) -> Vec<(usize, String)> {
+        let mut strings = Vec::new();
+        super::collect_locale_strings(input, 1, &mut strings);
+        strings
+    }
+
+    fn bodies(input: &str) -> Vec<String> {
+        dumped(input).into_iter().map(|(_, body)| body).collect()
+    }
+
+    #[test]
+    fn recognition_matches_gnu_word_lexer() {
+        assert_eq!(bodies("echo $\"plain\""), vec!["plain"]);
+        assert_eq!(bodies("echo a$\"mid\"dle"), vec!["mid"]);
+        assert_eq!(bodies("x=$\"assign.rhs\""), vec!["assign.rhs"]);
+        assert_eq!(bodies("echo $\"one\" $\"two\""), vec!["one", "two"]);
+        assert_eq!(bodies("echo $\"a\"$\"b\""), vec!["a", "b"]);
+        assert!(bodies("# comment with $\"in.comment\" text").is_empty());
+        assert!(bodies("echo '$\"single.quoted\" not locale'").is_empty());
+        assert!(bodies("echo \"$\"dqp\" tail\"").is_empty());
+        assert!(bodies("echo \"a$\"b\"c\"").is_empty());
+        assert!(bodies("echo `echo $\"in.backtick\"`").is_empty());
+        assert!(bodies("echo \\$\"escaped.dollar\"").is_empty());
+        assert_eq!(
+            bodies("cat <<EOF\nheredoc body with $\"in.heredoc\"\nEOF\necho $\"after\""),
+            vec!["after"]
+        );
+    }
+
+    #[test]
+    fn escapes_stay_raw_and_newlines_stay_in_the_body() {
+        // locale.c locale_expand printf("\"%s\"\n", temp) with temp a
+        // verbatim copy of the body.
+        assert_eq!(
+            bodies("echo $\"esc \\\"q1\\\" q2\""),
+            vec!["esc \\\"q1\\\" q2"]
+        );
+        assert_eq!(
+            bodies("echo $\"tail.backslash\\\\\""),
+            vec!["tail.backslash\\\\"]
+        );
+        assert_eq!(bodies("echo $\"multi\nline\""), vec!["multi\nline"]);
+    }
+
+    #[test]
+    fn command_substitutions_are_relexed() {
+        assert_eq!(bodies("echo $(echo $\"in.comsub\")"), vec!["in.comsub"]);
+        assert_eq!(
+            bodies("echo pre$(echo $\"midcomsub\")post"),
+            vec!["midcomsub"]
+        );
+        assert_eq!(
+            bodies("echo \"$(echo $\"quotedcomsub\")\""),
+            vec!["quotedcomsub"]
+        );
+        assert_eq!(
+            bodies("echo $(( $(echo $\"arithcomsub\") + 1 ))"),
+            vec!["arithcomsub"]
+        );
+    }
+
+    #[test]
+    fn dollar_brace_bodies_dump() {
+        // GNU 5.3.20: expansion words inside ${...} are lexed as
+        // words, so their locale strings dump.
+        assert_eq!(
+            bodies("echo ${x:-$\"brace.default\"}"),
+            vec!["brace.default"]
+        );
+        assert_eq!(bodies("echo ${x-$\"brace.dash\"}"), vec!["brace.dash"]);
+        assert_eq!(
+            bodies("echo \"${x:-$\"quoted.default\"}\""),
+            vec!["quoted.default"]
+        );
+        assert_eq!(bodies("echo ${x##$\"pattern\"}"), vec!["pattern"]);
+        assert_eq!(bodies("echo ${arr[$\"subscript\"]}"), vec!["subscript"]);
+        // The unit is still skipped as a span: text after it scans on.
+        assert_eq!(bodies("echo ${x} $\"after\""), vec!["after"]);
+    }
+
+    #[test]
+    fn arithmetic_text_dumps() {
+        // GNU 5.3.20: $((1 + $"a")), ((y = $"b")) and $[1 + $"c"]
+        // all dump the bare locale string.
+        assert_eq!(bodies("echo $((1 + $\"arith\"))"), vec!["arith"]);
+        assert_eq!(bodies("echo $[1 + $\"oldstyle\"]"), vec!["oldstyle"]);
+        // A ${...} default word inside arithmetic text is lexed as a
+        // word too: the walk reaches its $"..." and dumps it.
+        assert_eq!(
+            bodies("echo $(( ${x:-$\"arith.brace\"} + 1 ))"),
+            vec!["arith.brace"]
+        );
+    }
+
+    #[test]
+    fn po_render_matches_gnu_format() {
+        let render = |input: &str| {
+            let strings = dumped(input);
+            super::render_locale_string_dump(&strings, true, "probe.sh")
+        };
+        assert_eq!(
+            render("echo $\"plain\""),
+            "#: probe.sh:1\nmsgid \"plain\"\nmsgstr \"\"\n"
+        );
+        assert_eq!(
+            render("echo $\"esc \\\"q1\\\" q2\""),
+            "#: probe.sh:1\nmsgid \"esc \\\\\\\"q1\\\\\\\" q2\"\nmsgstr \"\"\n"
+        );
+        assert_eq!(
+            render("echo $\"multi\nline\""),
+            "#: probe.sh:1\nmsgid \"\"\n\"multi\\n\"\n\"line\"\nmsgstr \"\"\n"
+        );
+        // One entry per string, anchored on its own line.
+        assert_eq!(
+            render("echo $\"one\" $\"two\"\necho $\"three\""),
+            "#: probe.sh:1\nmsgid \"one\"\nmsgstr \"\"\n\
+             #: probe.sh:1\nmsgid \"two\"\nmsgstr \"\"\n\
+             #: probe.sh:2\nmsgid \"three\"\nmsgstr \"\"\n"
+        );
+        assert_eq!(
+            render("echo $\"\""),
+            "#: probe.sh:1\nmsgid \"\"\nmsgstr \"\"\n"
+        );
+    }
+
+    #[test]
+    fn plain_render_is_the_verbatim_body_in_quotes() {
+        let strings = dumped("echo $\"a\"\necho $\"b c\"");
+        assert_eq!(
+            super::render_locale_string_dump(&strings, false, "probe.sh"),
+            "\"a\"\n\"b c\"\n"
         );
     }
 }

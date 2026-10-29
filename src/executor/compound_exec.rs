@@ -3642,6 +3642,224 @@ impl Executor {
         }
     }
 
+    /// rubash#1584: plan a direct spawn for a simple-command coproc
+    /// whose GNU execution ends in execve of an external program.
+    ///
+    /// GNU execute_cmd.c:2525 execute_coproc make_child(FORK_ASYNC)
+    /// forks once, and the child runs execute_in_subshell on the same
+    /// parse tree: for a simple external command the forked child
+    /// execs the program itself, so the coproc pid ($!, <NAME>_PID)
+    /// IS the program's pid (ps shows comm=cat for `coproc cat`).
+    /// Rubash's respawn route interposes a `rubash -c` wrapper, so $!
+    /// named the wrapper and the program ran as a grandchild — kill
+    /// $! hit the wrapper, and process inspection saw the wrong
+    /// image. This planner admits the direct route only where the
+    /// parent can reproduce the child's view exactly:
+    ///
+    /// * the body is a simple command with no prefix assignments
+    ///   (tempenv binding is the child shell's work);
+    /// * every word's expansion is context-free between parent and
+    ///   coproc child: no command/process substitution and no
+    ///   arithmetic expansion (the child evaluates those AFTER the
+    ///   fork, asynchronously and in its own variable scope), no
+    ///   process-identity dynamics (BASHPID/PPID/BASH_SUBSHELL —
+    ///   the child's values name the coproc process itself), and no
+    ///   RANDOM/SRANDOM draws (the child's sequence is a fork copy;
+    ///   a parent draw would advance the wrong sequence);
+    /// * error placement stays in the child: under `set -u` any
+    ///   expansion at all, and under failglob any glob word, stands
+    ///   down, because a parent-side expansion failure would report
+    ///   (and, for -u, abort) in the parent where GNU's failure is
+    ///   scoped to the coproc child;
+    /// * the expanded head resolves the way the child's dispatch
+    ///   would resolve it, minus the shell: a function, alias, or
+    ///   builtin head stands down (GNU's child runs those AS a
+    ///   shell, so the wrapper's shell image is the faithful one),
+    ///   as does an unresolvable name (the child owns the 127);
+    /// * the resolved file is a kernel-exec'able image (ELF, Mach-O,
+    ///   or a `#!` script): an exec-format failure in GNU reruns
+    ///   the file as a shell script inside the child, which only
+    ///   the respawn route can reproduce.
+    ///
+    /// Every stand-down falls back to the respawn route unchanged,
+    /// so a miss costs process-tree fidelity, never semantics. The
+    /// route is Unix-only for now: the Windows spawn model (no
+    /// fork/exec, handle stdio) keeps the respawn route until its
+    /// own adjudication.
+    fn plan_direct_coproc_command(
+        &mut self,
+        cmd: &CommandNode,
+        coproc_cmd: &crate::parser::CoprocCommand,
+    ) -> Option<(std::path::PathBuf, Vec<String>)> {
+        #[cfg(not(unix))]
+        return {
+            let _ = (cmd, coproc_cmd);
+            None
+        };
+        #[cfg(unix)]
+        self.plan_direct_coproc_command_unix(cmd, coproc_cmd)
+    }
+
+    #[cfg(unix)]
+    fn plan_direct_coproc_command_unix(
+        &mut self,
+        cmd: &CommandNode,
+        coproc_cmd: &crate::parser::CoprocCommand,
+    ) -> Option<(std::path::PathBuf, Vec<String>)> {
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if coproc_cmd.body.is_some()
+                || coproc_cmd.body_kind != crate::parser::CoprocBodyKind::SimpleCommand
+            {
+                return None;
+            }
+            let words = &coproc_cmd.words;
+            if words.is_empty() || words[0].starts_with('-') {
+                return None;
+            }
+            // Prefix assignments (tempenv) bind in the child shell.
+            // The first word that is not assignment-shaped is the
+            // head; any assignment before it stands the route down,
+            // as does an all-assignment body (no command at all).
+            let mut head_index = 0;
+            while head_index < words.len() {
+                let word = &words[head_index];
+                let raw = coproc_cmd
+                    .word_metadata
+                    .get(head_index)
+                    .map(|meta| meta.raw.as_str())
+                    .unwrap_or(word.as_str());
+                let Some(eq) = raw.find('=') else { break };
+                let name = raw[..eq].strip_suffix('+').unwrap_or(&raw[..eq]);
+                if name.is_empty() || !is_shell_name(name) || !raw.starts_with(name) {
+                    break;
+                }
+                head_index += 1;
+            }
+            if head_index > 0 {
+                return None;
+            }
+            let nounset =
+                crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset");
+            let failglob =
+                crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "failglob");
+            for (index, word) in words.iter().enumerate() {
+                let meta = coproc_cmd.word_metadata.get(index);
+                let value = meta.map(|meta| meta.value.as_str()).unwrap_or(word);
+                let raw = meta.map(|meta| meta.raw.as_str()).unwrap_or(word);
+                for text in [word.as_str(), value, raw] {
+                    if text.contains("$(")
+                        || text.contains('`')
+                        || text.contains("<(")
+                        || text.contains(">(")
+                        || text.contains("BASHPID")
+                        || text.contains("PPID")
+                        || text.contains("BASH_SUBSHELL")
+                        || text.contains("RANDOM")
+                        || text.contains("SRANDOM")
+                    {
+                        return None;
+                    }
+                    if nounset && text.contains('$') {
+                        return None;
+                    }
+                    if failglob && (text.contains('*') || text.contains('?') || text.contains('['))
+                    {
+                        return None;
+                    }
+                }
+            }
+            // Redirect targets are expanded by the parent on both
+            // routes, but a process substitution among them is
+            // created for the executing child; an {fd} allocation
+            // binds in the parent shell. Both stay with the respawn.
+            let mut redirect_texts: Vec<&str> = cmd
+                .redirects
+                .iter()
+                .map(|redirect| redirect.target.as_str())
+                .collect();
+            if let Some(redirect_in) = &cmd.redirect_in {
+                redirect_texts.push(redirect_in.target.as_str());
+                if redirect_in.fd_var.is_some() {
+                    return None;
+                }
+            }
+            if cmd
+                .redirects
+                .iter()
+                .any(|redirect| redirect.fd_var.is_some())
+            {
+                return None;
+            }
+            for text in redirect_texts {
+                if text.contains("<(") || text.contains(">(") {
+                    return None;
+                }
+            }
+            // Expand in the parent with the ordinary simple-command
+            // pipeline; the admitted word classes make this a pure
+            // read of the same table the child's snapshot would hold.
+            let mut scratch = CommandNode::new();
+            scratch.line = cmd.line;
+            scratch.logical_line = cmd.logical_line;
+            scratch.words = words.clone();
+            scratch.word_metadata = coproc_cmd.word_metadata.clone();
+            let expanded = self.expand_command_words(&scratch).ok()?;
+            if !expanded.assignments.is_empty() {
+                return None;
+            }
+            let argv = expanded.words;
+            let head = argv.first()?;
+            if self.shell_state.functions.contains_key(head)
+                || self.shell_state.aliases.contains_key(head)
+                || is_shell_builtin_name(head)
+                || is_shell_keyword(head)
+            {
+                return None;
+            }
+            let program = if head.contains('/') {
+                let path = if std::path::Path::new(head).is_absolute() {
+                    std::path::PathBuf::from(head)
+                } else {
+                    self.shell_state.cwd.join(head)
+                };
+                path
+            } else {
+                std::path::PathBuf::from(self.command_path_without_bridge(head, false)?)
+            };
+            let metadata = std::fs::metadata(&program).ok()?;
+            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+                return None;
+            }
+            // Kernel-exec'able image check: ELF, Mach-O (either
+            // endianness, thin or fat), or a `#!` interpreter script.
+            // Anything else fails execve with ENOEXEC, which GNU
+            // answers by running the file as a shell script in the
+            // child — respawn-route territory.
+            let mut magic = [0u8; 4];
+            {
+                use std::io::Read as _;
+                let mut file = std::fs::File::open(&program).ok()?;
+                let read = file.read(&mut magic).ok()?;
+                if read < 2 {
+                    return None;
+                }
+            }
+            let execable = magic[..2] == *b"#!"
+                || magic == [0x7f, b'E', b'L', b'F']
+                || magic == [0xfe, 0xed, 0xfa, 0xce]
+                || magic == [0xfe, 0xed, 0xfa, 0xcf]
+                || magic == [0xce, 0xfa, 0xed, 0xfe]
+                || magic == [0xcf, 0xfa, 0xed, 0xfe]
+                || magic == [0xca, 0xfe, 0xba, 0xbe]
+                || magic == [0xbe, 0xba, 0xfe, 0xca];
+            if !execable {
+                return None;
+            }
+            Some((program, argv))
+        }
+    }
+
     pub(in crate::executor) fn execute_coproc_command(
         &mut self,
         cmd: &CommandNode,
@@ -3677,7 +3895,21 @@ impl Executor {
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
 
-        let mut child = if let Some(body) = &coproc_cmd.body {
+        // rubash#1584: a simple-command coproc that the planner
+        // admits spawns the program itself as the coproc process;
+        // everything below (pipes, stderr plan, coproc redirects,
+        // job registration, endpoint binding) is shared with the
+        // respawn route — only the child image and its environment
+        // differ (an external child gets the ordinary external
+        // environment, not the shell-state snapshot a `rubash -c`
+        // child re-imports).
+        let direct_plan = self.plan_direct_coproc_command(cmd, coproc_cmd);
+        let mut child = if let Some((program, argv)) = &direct_plan {
+            let mut command = Command::new(program);
+            command.args(&argv[1..]);
+            self.apply_external_environment(&CommandNode::new(), &mut command, program);
+            command
+        } else if let Some(body) = &coproc_cmd.body {
             // Compound command body: coproc [NAME] { body; } or ( body )
             let body_text = bash_command_sequence_text(body);
             let mut child = Command::new(&exe);
@@ -3729,67 +3961,73 @@ impl Executor {
             return Ok(());
         };
 
-        for (key, value) in &self.shell_state.env_vars {
-            if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
-                child.env(key, value);
+        // The env snapshot and the rubash-child state keys below are
+        // the respawn route's inheritance transport; a direct child
+        // (rubash#1584) is a foreign program and already received
+        // the ordinary external environment at construction.
+        if direct_plan.is_none() {
+            for (key, value) in &self.shell_state.env_vars {
+                if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
+                    child.env(key, value);
+                }
             }
-        }
-        // GNU coproc forks (execute_cmd.c coproc_getfd -> make_child), so the
-        // coprocess shell inherits the parent's FULL function table — not
-        // just `export -f` names. A DEBUG trap installed before the coproc
-        // (e.g. oh-my-bash's bash-preexec `__bp_preexec_invoke_exec`) fires
-        // inside the child and must resolve (unixwin/rubash#441). Ship a
-        // snapshot as BASH_FUNC_name%% entries: the child's Executor::new
-        // imports them as functions and strips the carrier keys, so the
-        // entries never surface as variables and never leak back into the
-        // parent's table (the parent keeps its own functions untouched).
-        for (name, body) in &self.shell_state.functions {
-            if !is_exportable_function_name(name) {
-                continue;
+            // GNU coproc forks (execute_cmd.c coproc_getfd -> make_child), so the
+            // coprocess shell inherits the parent's FULL function table — not
+            // just `export -f` names. A DEBUG trap installed before the coproc
+            // (e.g. oh-my-bash's bash-preexec `__bp_preexec_invoke_exec`) fires
+            // inside the child and must resolve (unixwin/rubash#441). Ship a
+            // snapshot as BASH_FUNC_name%% entries: the child's Executor::new
+            // imports them as functions and strips the carrier keys, so the
+            // entries never surface as variables and never leak back into the
+            // parent's table (the parent keeps its own functions untouched).
+            for (name, body) in &self.shell_state.functions {
+                if !is_exportable_function_name(name) {
+                    continue;
+                }
+                let def_redirects = self
+                    .shell_state
+                    .function_def_infos
+                    .get(name)
+                    .map(|info| info.def_redirects.as_slice())
+                    .unwrap_or(&[]);
+                child.env(
+                    exported_function_env_name(name),
+                    exported_function_env_value(&body.commands, def_redirects),
+                );
             }
-            let def_redirects = self
-                .shell_state
-                .function_def_infos
-                .get(name)
-                .map(|info| info.def_redirects.as_slice())
-                .unwrap_or(&[]);
+            // Preserve the parent script location for diagnostics emitted by the
+            // coprocess shell, while keeping internal executor state isolated.
+            if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
+                child.env("__RUBASH_SCRIPT_NAME", script);
+                let line = cmd
+                    .line
+                    .map(|line| line.to_string())
+                    .or_else(|| {
+                        self.shell_state
+                            .env_vars
+                            .get("__RUBASH_CURRENT_LINE")
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| "1".to_string());
+                child.env("__RUBASH_CURRENT_LINE", line.clone());
+                // The child re-parses `-c` source from line 1. Preserve the
+                // parent's physical call-site line when assigning child AST lines.
+                let line_offset = line.parse::<usize>().unwrap_or(1).saturating_sub(1);
+                child.env("__RUBASH_LINE_OFFSET", line_offset.to_string());
+            }
+            // Coprocess children own a shell-created stdin pipe. Keep builtin
+            // readers attached to it and let TERM use native termination when a
+            // blocked read cannot consume the shell signal mailbox.
+            child.env(INHERIT_PROCESS_STDIN, "1");
+            child.env("__RUBASH_COPROC_CHILD", "1");
+            // rubash#1074: the coproc body runs in a forked subshell
+            // (execute_in_subshell: subshell_level++), so the child's
+            // BASH_SUBSHELL starts at this shell's depth + 1.
             child.env(
-                exported_function_env_name(name),
-                exported_function_env_value(&body.commands, def_redirects),
+                "__RUBASH_SUBSHELL_DEPTH",
+                (self.shell_state.subshell_depth.get() + 1).to_string(),
             );
         }
-        // Preserve the parent script location for diagnostics emitted by the
-        // coprocess shell, while keeping internal executor state isolated.
-        if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
-            child.env("__RUBASH_SCRIPT_NAME", script);
-            let line = cmd
-                .line
-                .map(|line| line.to_string())
-                .or_else(|| {
-                    self.shell_state
-                        .env_vars
-                        .get("__RUBASH_CURRENT_LINE")
-                        .cloned()
-                })
-                .unwrap_or_else(|| "1".to_string());
-            child.env("__RUBASH_CURRENT_LINE", line.clone());
-            // The child re-parses `-c` source from line 1. Preserve the
-            // parent's physical call-site line when assigning child AST lines.
-            let line_offset = line.parse::<usize>().unwrap_or(1).saturating_sub(1);
-            child.env("__RUBASH_LINE_OFFSET", line_offset.to_string());
-        }
-        // Coprocess children own a shell-created stdin pipe. Keep builtin
-        // readers attached to it and let TERM use native termination when a
-        // blocked read cannot consume the shell signal mailbox.
-        child.env(INHERIT_PROCESS_STDIN, "1");
-        child.env("__RUBASH_COPROC_CHILD", "1");
-        // rubash#1074: the coproc body runs in a forked subshell
-        // (execute_in_subshell: subshell_level++), so the child's
-        // BASH_SUBSHELL starts at this shell's depth + 1.
-        child.env(
-            "__RUBASH_SUBSHELL_DEPTH",
-            (self.shell_state.subshell_depth.get() + 1).to_string(),
-        );
 
         // Create pipes for bidirectional communication
         let stdin_result = std::io::pipe();

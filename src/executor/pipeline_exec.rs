@@ -798,6 +798,10 @@ impl Executor {
             .target
             .strip_prefix(">(")
             .and_then(|target| target.strip_suffix(')'))
+            // rubash#1931: recorded-span admission — a quoted
+            // ">(...)" compound target is a literal filename in GNU,
+            // exactly as on the simple-command path.
+            .filter(|_| super::external_setup::redirect_target_span_is_recorded(redirect))
             .map(str::to_string)
         else {
             return Ok(None);

@@ -111,14 +111,44 @@ pub(super) fn collect_compound_word_value(
     tokens: &[Token],
     index: usize,
 ) -> Option<(String, usize)> {
-    if let Some((process_substitution, next_i)) = process_substitution_word_target(tokens, index) {
-        return Some((process_substitution.target, next_i + 1));
-    }
-
     if let Some((process_substitution, next_i)) =
-        output_process_substitution_word_target(tokens, index)
+        any_process_substitution_word_target(tokens, index)
     {
-        return Some((process_substitution.target, next_i + 1));
+        // rubash#1933: a word that BEGINS with a process substitution
+        // continues across every immediately adjacent fragment — GNU
+        // read_token_word (parse.y:5305) assembles ONE word from the
+        // span and the unspaced text glued to it (`[[ -n <(echo hi)x ]]`
+        // tests the fd path with an `x` suffix). A word-initial span is
+        // its own token run here, so keep consuming following fragments
+        // while they carry no leading whitespace: another span appends
+        // its target, a word-ish fragment appends its value. Fragments
+        // after whitespace start the next word, exactly as before.
+        let mut value = process_substitution.target;
+        let mut cursor = next_i + 1;
+        while let Some(token) = tokens.get(cursor) {
+            if !token.leading_ws.is_empty() {
+                break;
+            }
+            if let Some((more, more_next)) = any_process_substitution_word_target(tokens, cursor) {
+                value.push_str(&more.target);
+                cursor = more_next + 1;
+                continue;
+            }
+            if matches!(
+                token.kind,
+                TokenKind::Word
+                    | TokenKind::Variable
+                    | TokenKind::Assignment
+                    | TokenKind::CommandSubst
+                    | TokenKind::BraceExpand
+            ) {
+                value.push_str(&token.value);
+                cursor += 1;
+                continue;
+            }
+            break;
+        }
+        return Some((value, cursor));
     }
 
     let token = tokens.get(index)?;

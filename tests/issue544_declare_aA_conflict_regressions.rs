@@ -35,6 +35,7 @@ fn run(script: &str) -> (String, String, Option<i32>) {
 }
 
 #[test]
+#[allow(non_snake_case)] // name mirrors the literal `declare -aA` flag pair
 fn combined_aA_with_name_names_minus_a() {
     let (stdout, stderr, rc) = run("declare -aA x");
     assert_eq!(stdout, "");
@@ -46,6 +47,7 @@ fn combined_aA_with_name_names_minus_a() {
 }
 
 #[test]
+#[allow(non_snake_case)] // name mirrors the literal `declare -a -A` flag pair
 fn separate_a_dash_A_with_name_names_minus_a() {
     let (stdout, stderr, rc) = run("declare -a -A x");
     assert_eq!(stdout, "");

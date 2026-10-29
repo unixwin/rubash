@@ -4205,6 +4205,32 @@ impl Executor {
         }
     }
 
+    /// rubash#1646: close the descriptors recorded for `varredir_close`
+    /// by the command that just completed, newest first (GNU closes a
+    /// command's redirections in undo order). Watermark discipline: only
+    /// records at or above `watermark` belong to the finishing command —
+    /// records an enclosing command left pending stay for its own end.
+    /// An entry an external command's undo already closed during
+    /// dispatch is skipped, so a recycled descriptor number is never
+    /// closed by mistake. Errors are swallowed like the shell-exit sweep
+    /// (close_all_persistent_output_process_substitutions): a `>(...)`
+    /// body's own status never fails the owning command.
+    pub(in crate::executor) fn drain_deferred_varredir_closes(&mut self, watermark: usize) {
+        while self.deferred_varredir_closes.len() > watermark {
+            let Some(fd) = self.deferred_varredir_closes.pop() else {
+                break;
+            };
+            let still_open = self
+                .fd_table
+                .entries
+                .get(&fd)
+                .is_some_and(|entry| !entry.closed);
+            if still_open {
+                let _ = self.close_persistent_fd(fd);
+            }
+        }
+    }
+
     fn close_persistent_fd(&mut self, fd: u32) -> Result<(), ExecuteError> {
         self.close_persistent_output_fd(fd)?;
         self.close_persistent_input_fd(fd);
@@ -4470,7 +4496,11 @@ impl Executor {
             )));
         }
         if close_after_command {
-            self.close_persistent_fd(fd)?;
+            // rubash#1646: defer to the owning command's completion like
+            // the redirection form (see execute_dynamic_fd_var_redirect);
+            // closing at application time EBADF'd the command's own
+            // `<&$var` reads.
+            self.deferred_varredir_closes.push(fd);
         }
         Ok(true)
     }
@@ -4562,7 +4592,12 @@ impl Executor {
 
         let close_after_success = |executor: &mut Self, fd: u32| -> Result<(), ExecuteError> {
             if close_after_command {
-                executor.close_persistent_fd(fd)?;
+                // rubash#1646: record only — execute_command closes the
+                // descriptor when the owning command completes (GNU
+                // undo_redirections timing). Closing here, mid-application,
+                // rejected the command's own `>&$var` writes with EBADF
+                // and dropped a `>(...)` consumer's stream wholesale.
+                executor.deferred_varredir_closes.push(fd);
             }
             Ok(())
         };

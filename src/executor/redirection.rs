@@ -8,6 +8,175 @@ use super::*;
 
 /// How a redirect-list rejection classifies, decided by the walker and
 /// consumed by the dispatch sites (rubash#535).
+/// rubash#1930: mask the parts of a RAW redirect target the nounset
+/// gate must not judge: single-quoted spans (and `$'...'`) carry no
+/// expansion at all, and a backslash-escaped character is literal —
+/// GNU's check rides the real expansion (redir.c:298
+/// redirection_expand -> expand_words_no_vars), where those bytes
+/// never produce a parameter reference. The gate scans the raw target
+/// text (the word faces present carrier-encoded text instead), so
+/// present the same contract here: quoted spans collapse to one
+/// space, escaped characters are neutralized, and substitution units
+/// (`$(...)`, `${...}`, backticks) pass through verbatim — the
+/// scanner owns their interiors. Double-quoted spans stay live: a
+/// `$name` inside them IS a parent reference the gate must judge.
+fn mask_redirect_target_quoted_spans(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut masked = String::with_capacity(raw.len());
+    let mut i = 0usize;
+    let mut single = false;
+    let mut double = false;
+    // Consume a quoted span starting at the opening quote chars[i],
+    // appending the single replacement space. Returns the index just
+    // past the closing quote (or the end of input).
+    fn quoted_span_end(chars: &[char], mut i: usize) -> usize {
+        i += 1;
+        while i < chars.len() && chars[i] != '\'' {
+            i += 1;
+        }
+        i.saturating_add(1).min(chars.len())
+    }
+    while i < chars.len() {
+        let ch = chars[i];
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            // Escaped character: literal in both the bare and the
+            // double-quoted state (in double quotes only before
+            // $ ` " \ — before anything else the backslash itself is
+            // literal and the next character keeps its own meaning,
+            // which for the scanner only matters for those four).
+            let escapable = !double || matches!(chars.get(i + 1), Some('$' | '`' | '"' | '\\'));
+            if escapable && i + 1 < chars.len() {
+                masked.push(' ');
+                masked.push(' ');
+                i += 2;
+            } else {
+                masked.push(ch);
+                i += 1;
+            }
+            continue;
+        }
+        if double {
+            match ch {
+                '"' => {
+                    double = false;
+                    masked.push(ch);
+                    i += 1;
+                }
+                '$' if chars.get(i + 1) == Some(&'(') => {
+                    if let Some(end) =
+                        crate::lexer::skip_parenthesized_unit_corrected(&chars, i + 1)
+                    {
+                        masked.extend(chars[i..end].iter());
+                        i = end;
+                    } else {
+                        masked.push(ch);
+                        i += 1;
+                    }
+                }
+                '$' if chars.get(i + 1) == Some(&'{') => {
+                    let rest: String = chars[i + 2..].iter().collect();
+                    if let Some(end) = super::parameter_ops::matching_parameter_brace(&rest) {
+                        masked.extend(chars[i..i + 2 + end + 1].iter());
+                        i += 2 + end + 1;
+                    } else {
+                        masked.push(ch);
+                        i += 1;
+                    }
+                }
+                '`' => {
+                    masked.push(ch);
+                    i += 1;
+                    while i < chars.len() {
+                        let bt = chars[i];
+                        masked.push(bt);
+                        i += 1;
+                        if bt == '\\' && i < chars.len() {
+                            masked.push(chars[i]);
+                            i += 1;
+                            continue;
+                        }
+                        if bt == '`' {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    masked.push(ch);
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        match ch {
+            '\'' => {
+                masked.push(' ');
+                single = true;
+                i += 1;
+            }
+            '"' => {
+                double = true;
+                masked.push(ch);
+                i += 1;
+            }
+            '$' if chars.get(i + 1) == Some(&'\'') => {
+                // $'...': ANSI-C quoting — no parameter expansion
+                // inside, so the span masks like a single-quoted one.
+                masked.push('$');
+                masked.push(' ');
+                i = quoted_span_end(&chars, i + 1);
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                if let Some(end) = crate::lexer::skip_parenthesized_unit_corrected(&chars, i + 1) {
+                    masked.extend(chars[i..end].iter());
+                    i = end;
+                } else {
+                    masked.push(ch);
+                    i += 1;
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                let rest: String = chars[i + 2..].iter().collect();
+                if let Some(end) = super::parameter_ops::matching_parameter_brace(&rest) {
+                    masked.extend(chars[i..i + 2 + end + 1].iter());
+                    i += 2 + end + 1;
+                } else {
+                    masked.push(ch);
+                    i += 1;
+                }
+            }
+            '`' => {
+                masked.push(ch);
+                i += 1;
+                while i < chars.len() {
+                    let bt = chars[i];
+                    masked.push(bt);
+                    i += 1;
+                    if bt == '\\' && i < chars.len() {
+                        masked.push(chars[i]);
+                        i += 1;
+                        continue;
+                    }
+                    if bt == '`' {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                masked.push(ch);
+                i += 1;
+            }
+        }
+    }
+    masked
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::executor) enum RedirectRejection {
     /// A dup/ambiguous/open failure: the command is abandoned with status 1
@@ -372,6 +541,14 @@ impl Executor {
                     &redirect.target_metadata.raw,
                     &redirect.target_metadata.process_substitutions,
                 );
+                // rubash#1930: the raw target still spells its quotes,
+                // and the scanner has no quote state — a `$name` inside
+                // single quotes is literal filename text in GNU
+                // (`echo hi > '$NOPE'` creates the file), not an unbound
+                // reference. Mask the quoted spans (the recorded-span
+                // masking above runs first: a span's own text may carry
+                // quotes the quote masker must not reinterpret).
+                let masked_target = mask_redirect_target_quoted_spans(&masked_target);
                 if let Some(name) = self.nounset_unbound_parameter(&masked_target) {
                     let mut stderr = Vec::new();
                     writeln!(
@@ -738,7 +915,11 @@ impl Executor {
                 && !is_null_device(&target)
                 && dev_stdio_redirect_fd(&target).is_none()
                 && !crate::special_paths::is_net_redirect_target(&target)
-                && !target.starts_with("<(")
+                // rubash#1931: only a parser-recorded (unquoted) span
+                // target is exempt from the open probe — a quoted
+                // "<(...)" target is a literal filename whose failed
+                // open must report here like any other.
+                && !super::external_setup::redirect_target_span_is_recorded(redirect)
                 // Registry classes (rubash#1917/#1900): a synthetic
                 // /proc spelling's mapped path is not the file — the
                 // class's own open face owns its outcome, so this
@@ -773,7 +954,9 @@ impl Executor {
                 && !is_null_device(&target)
                 && dev_stdio_redirect_fd(&target).is_none()
                 && !crate::special_paths::is_net_redirect_target(&target)
-                && !target.starts_with("<(")
+                // rubash#1931: recorded-span exemption only, as in the
+                // ReadWrite probe above.
+                && !super::external_setup::redirect_target_span_is_recorded(redirect)
                 && redirect_target_fd(&target).is_none()
                 // Registry classes (rubash#1917/#1900): synthetic /proc
                 // content and links are validated by the open ladder

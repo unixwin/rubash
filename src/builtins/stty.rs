@@ -15,6 +15,11 @@
 //!                a raw terminal also restores LINE — the closest honest
 //!                mapping of `stty echo`.
 //! - `size`     — `rows cols` from the console screen buffer window.
+//! - `cols` / `columns` / `rows` — the single geometry value (GNU query
+//!   operands, served from the same screen-buffer query so the faces
+//!   never disagree).
+//! - `speed`    — Windows only: the nominal `38400` the bundled applet
+//!   reports (the console has no baud rate; WinuxCmd #1430 family).
 //!
 //! Operands apply left to right, one SetConsoleMode per operand. A
 //! non-console standard input reports the GNU diagnostic and fails;
@@ -88,6 +93,8 @@ fn stty_unix(args: &[String]) -> IdentityToolOutput {
     for arg in args {
         let outcome = match arg.as_str() {
             "size" => stty_size_unix(&mut out.stdout),
+            "cols" | "columns" => stty_dimension_unix(&mut out.stdout, false),
+            "rows" => stty_dimension_unix(&mut out.stdout, true),
             "raw" => set_termios_lflag_bits(!(libc::ICANON | libc::ECHO | libc::ISIG)),
             "-raw" | "cooked" | "sane" => {
                 set_termios_lflag_bits_add(libc::ICANON | libc::ECHO | libc::ISIG)
@@ -138,12 +145,26 @@ fn set_termios_lflag_bits_add(set_mask: libc::tcflag_t) -> Result<(), ()> {
 }
 
 #[cfg(unix)]
-fn stty_size_unix(stdout: &mut Vec<u8>) -> Result<(), ()> {
+fn terminal_winsize() -> Result<libc::winsize, ()> {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     if unsafe { libc::ioctl(0, libc::TIOCGWINSZ as _, &mut ws) } != 0 {
         return Err(());
     }
+    Ok(ws)
+}
+
+#[cfg(unix)]
+fn stty_size_unix(stdout: &mut Vec<u8>) -> Result<(), ()> {
+    let ws = terminal_winsize()?;
     stdout.extend_from_slice(format!("{} {}\n", ws.ws_row, ws.ws_col).as_bytes());
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stty_dimension_unix(stdout: &mut Vec<u8>, rows: bool) -> Result<(), ()> {
+    let ws = terminal_winsize()?;
+    let value = if rows { ws.ws_row } else { ws.ws_col };
+    stdout.extend_from_slice(format!("{value}\n").as_bytes());
     Ok(())
 }
 
@@ -166,6 +187,15 @@ fn stty_windows(args: &[String]) -> IdentityToolOutput {
         let outcome =
             match arg.as_str() {
                 "size" => stty_size(&mut out.stdout),
+                "cols" | "columns" => stty_dimension(&mut out.stdout, false),
+                "rows" => stty_dimension(&mut out.stdout, true),
+                "speed" => {
+                    // The console has no baud rate; report the nominal
+                    // speed the bundled applet reports (WinuxCmd #1430
+                    // family) as a value rather than silence.
+                    out.stdout.extend_from_slice(b"38400\n");
+                    Ok(())
+                }
                 "raw" => set_console_mode_bits(handle, CONSOLE_RAW_MASK, false),
                 "-raw" | "cooked" | "sane" => {
                     set_console_mode_bits(handle, CONSOLE_CANONICAL_MASK, true)
@@ -213,8 +243,14 @@ fn set_console_mode_bits(handle: isize, mask: u32, set: bool) -> Result<(), ()> 
     Ok(())
 }
 
+/// (rows, cols) of the console window, queried on a fresh `CONOUT$`
+/// handle — the reserved console-output device name and the documented
+/// screen-buffer handle. niubash#535: this once opened `"CONOUT"`, a
+/// plain relative file name rather than the reserved device, so the
+/// open failed on every console and the size face reported the
+/// non-terminal diagnostic even in a real terminal.
 #[cfg(windows)]
-fn stty_size(stdout: &mut Vec<u8>) -> Result<(), ()> {
+fn console_window_rows_cols() -> Result<(u32, u32), ()> {
     #[link(name = "kernel32")]
     extern "system" {
         fn CreateFileW(
@@ -254,7 +290,7 @@ fn stty_size(stdout: &mut Vec<u8>) -> Result<(), ()> {
     const FILE_SHARE_READ: u32 = 0x1;
     const FILE_SHARE_WRITE: u32 = 0x2;
     const OPEN_EXISTING: u32 = 3;
-    let mut wide: Vec<u16> = "CONOUT\0".encode_utf16().collect();
+    let mut wide: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
     let console_out = unsafe {
         CreateFileW(
             wide.as_mut_ptr(),
@@ -279,6 +315,20 @@ fn stty_size(stdout: &mut Vec<u8>) -> Result<(), ()> {
     }
     let rows = info.window.bottom as u32 - info.window.top as u32 + 1;
     let cols = info.window.right as u32 - info.window.left as u32 + 1;
+    Ok((rows, cols))
+}
+
+#[cfg(windows)]
+fn stty_size(stdout: &mut Vec<u8>) -> Result<(), ()> {
+    let (rows, cols) = console_window_rows_cols()?;
     stdout.extend_from_slice(format!("{rows} {cols}\n").as_bytes());
+    Ok(())
+}
+
+#[cfg(windows)]
+fn stty_dimension(stdout: &mut Vec<u8>, rows: bool) -> Result<(), ()> {
+    let (row_count, col_count) = console_window_rows_cols()?;
+    let value = if rows { row_count } else { col_count };
+    stdout.extend_from_slice(format!("{value}\n").as_bytes());
     Ok(())
 }

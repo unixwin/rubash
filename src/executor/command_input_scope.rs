@@ -169,6 +169,19 @@ impl Executor {
         // compound scope, so no stream registration or offset write-back
         // is needed. A body that fails to materialize falls through to
         // the existing paths unchanged.
+        // NOTE (rubash#1931 residual): this arm — like the fd walk in
+        // stdin_string_for_command and loop_redirect_input — matches
+        // the target's quote-stripped value, so a QUOTED "<(...)"
+        // compound input target is still spawned here even though GNU
+        // treats it as a literal filename. The simple-command path
+        // admits recorded spans only (external_setup's
+        // redirect_target_span_is_recorded); this compound bind layer
+        // cannot adopt that admission until it grows a literal-target
+        // error channel — declining the spawn today leaves the
+        // compound reading ambient stdin (a hang) instead of the
+        // redirection error GNU reports, which is worse than the
+        // current wrong answer. Recorded as a known adjacent
+        // divergence in the #1931 cluster report.
         if let Some(redirect) = &cmd.redirect_in {
             if redirect.fd.unwrap_or(0) == 0
                 && redirect.fd_var.is_none()
