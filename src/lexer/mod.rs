@@ -2378,15 +2378,27 @@ pub fn stdin_line_ends_with_continuation(input: &str) -> bool {
 /// end-of-file`, make_cmd.c:627) — a REAL delimiter line would be
 /// indistinguishable after the synthesis.
 ///
-/// Refusal cases keep today's behavior: no header-line `)`, a delimiter
-/// line already present (the terminated shapes the rotation owns), an
-/// open substitution introducer on the header line (perf19's refusal
-/// shape), a second `<<` candidate, quotes that are still open at EOF
-/// (a `[`-less unclosed quote is the quote machinery's report), nested
-/// substitutions opened after the candidate, or a candidate deeper than
-/// the outermost substitution. A false refusal only keeps the current
-/// unclosed-EOF report; a false completion would rewrite a line GNU
-/// errors on, so every ambiguity declines.
+/// rubash#2026: the scan also recognizes a `$(` INSIDE a double-quoted
+/// word (GNU parse.y:4172-4174 parse_matched_pair dispatches
+/// `$(...)` to parse_comsub with `~P_DQUOTE` - the nested parse starts
+/// with the outer quote state cleared). The completion then reaches the
+/// quoted faces the per-line quotes gate cannot close (its atomic unit
+/// skip consumes the outer quote's closing `"`, which sits after the
+/// header `)` on line 1, so the gate keeps joining lines to EOF). For a
+/// quoted opener the header-line tail after the `)` must contain the
+/// closing quote - otherwise the word is genuinely unterminated and the
+/// quote machinery's report must stand. A TERMINATED quoted shape
+/// (delimiter line present) rebuilds without the synthesized delimiter
+/// and carries ONE mark, exactly like the unquoted rotation's record.
+///
+/// Refusal cases keep today's behavior: no header-line `)`, an open
+/// substitution introducer on the header line (perf19's refusal shape),
+/// a second `<<` candidate, single quotes still open at EOF, a quoted
+/// opener whose closing quote is missing from the header-line tail,
+/// nested substitutions opened after the candidate, or a candidate
+/// deeper than the outermost substitution. A false refusal only keeps
+/// the current unclosed-EOF report; a false completion would rewrite a
+/// line GNU errors on, so every ambiguity declines.
 fn complete_comsub_heredoc_header_close(input: &str) -> Option<String> {
     if !input.contains("$(") || !input.contains("<<") {
         return None;
@@ -2397,11 +2409,15 @@ fn complete_comsub_heredoc_header_close(input: &str) -> Option<String> {
     let mut double = false;
     let mut escaped = false;
     let mut depth = 0usize;
-    // The `$` index of each currently open `$(`, so the candidate records
-    // the substitution that OWNS the heredoc (the rebuild splices its
-    // marks right after that opener).
-    let mut openers: Vec<usize> = Vec::new();
-    let mut candidate: Option<(usize, usize, usize, usize, String, bool)> = None;
+    // The `$` index plus the double-quote state at entry for each
+    // currently open construct. The candidate records the substitution
+    // that OWNS the heredoc (the rebuild splices its marks right after
+    // that opener); the saved flag is restored when the construct closes
+    // and decides the tail-quote requirement for quoted openers
+    // (parse.y:4174 `~P_DQUOTE`: the nested parse starts with the outer
+    // double-quote state cleared).
+    let mut openers: Vec<(usize, bool)> = Vec::new();
+    let mut candidate: Option<(usize, usize, usize, usize, String, bool, bool, bool)> = None;
     while index < chars.len() {
         let ch = chars[index];
         if escaped {
@@ -2430,22 +2446,28 @@ fn complete_comsub_heredoc_header_close(input: &str) -> Option<String> {
                 double = !double;
                 index += 1;
             }
-            '$' if !double
+            '$' if !single
                 && chars.get(index + 1) == Some(&'(')
                 && chars.get(index + 2) != Some(&'(') =>
             {
+                // A `$(` is live inside double quotes (parse.y:4172-4174),
+                // and the nested parse owns its quote state: clear the
+                // outer double flag for the body, restore it on close.
                 depth += 1;
-                openers.push(index);
+                openers.push((index, double));
+                double = false;
                 index += 2;
             }
             '(' if depth > 0 && !double => {
                 depth += 1;
-                openers.push(usize::MAX);
+                openers.push((usize::MAX, double));
                 index += 1;
             }
             ')' if depth > 0 && !double => {
                 depth = depth.saturating_sub(1);
-                openers.pop();
+                if let Some((_, saved_double)) = openers.pop() {
+                    double = saved_double;
+                }
                 index += 1;
             }
             '<' if depth > 0
@@ -2490,10 +2512,7 @@ fn complete_comsub_heredoc_header_close(input: &str) -> Option<String> {
                         }
                         line_start = line_end + 1;
                     };
-                    if terminated {
-                        return None;
-                    }
-                    let Some(&opener) = openers.last() else {
+                    let Some(&(opener, saved_double)) = openers.last() else {
                         return None;
                     };
                     if opener == usize::MAX {
@@ -2502,13 +2521,27 @@ fn complete_comsub_heredoc_header_close(input: &str) -> Option<String> {
                         // substitution this completion models.
                         return None;
                     }
+                    let paren = facts.header_close_paren.unwrap();
+                    if saved_double {
+                        // The word is double-quoted around the substitution:
+                        // the closing quote must sit in the header-line tail
+                        // after the `)`. Without it the word is genuinely
+                        // unterminated and the quote machinery's EOF report
+                        // is the correct outcome.
+                        let tail: String = chars[paren + 1..facts.header_end].iter().collect();
+                        if !tail.contains('"') {
+                            return None;
+                        }
+                    }
                     candidate = Some((
                         opener,
-                        facts.header_close_paren.unwrap(),
+                        paren,
                         facts.header_end,
                         depth,
                         facts.delimiter,
                         facts.strip_tabs,
+                        saved_double,
+                        terminated,
                     ));
                 }
                 // Resume past the header line either way: its `)` and tail
@@ -2519,28 +2552,48 @@ fn complete_comsub_heredoc_header_close(input: &str) -> Option<String> {
             _ => index += 1,
         }
     }
-    let Some((opener, paren, header_end, depth_at_candidate, delimiter, _strip_tabs)) = candidate
+    let Some((
+        opener,
+        paren,
+        header_end,
+        depth_at_candidate,
+        delimiter,
+        _strip_tabs,
+        _quoted,
+        terminated,
+    )) = candidate
     else {
         return None;
     };
     // The candidate must still be what keeps the line open: nothing may
     // have opened (nested substitution, quote) after it, and the
-    // substitution itself must never have closed.
+    // substitution itself must never have closed. The double flag rides
+    // the opener stack (parse.y:4174 ~P_DQUOTE), so an outer word still
+    // open at EOF would surface as `double == true` here only through a
+    // non-`$(` route the tail-quote rule already declined.
     if depth != depth_at_candidate || single || double {
         return None;
     }
     let glue = crate::executor::markers::IFS_GLUE;
     let mut out: String = chars[..opener + 2].iter().collect();
     out.push(glue);
-    out.push(glue);
+    if !terminated {
+        // The second mark records the eof gather (make_cmd.c:627); a real
+        // delimiter line keeps the single rubash#1982 header-close record.
+        out.push(glue);
+    }
     out.extend(chars[opener + 2..paren].iter());
     // The gathered body: every physical line after the header line ran
-    // into the gather (to end of input).
+    // into the gather (to end of input, or through the terminator line).
     out.extend(chars[header_end..].iter());
-    // The synthesized delimiter line, then the closing `)` on its own
-    // line (print_comsub's reprint order).
-    out.push('\n');
-    out.push_str(&delimiter);
+    if !terminated {
+        // The synthesized delimiter line: GNU's gather consumed the body
+        // to EOF, and the delimiter line gives every downstream text
+        // consumer that same body without re-modeling gather-to-EOF.
+        out.push('\n');
+        out.push_str(&delimiter);
+    }
+    // The closing `)` on its own line (print_comsub's reprint order).
     out.push('\n');
     out.push(')');
     // The header line's tail after the `)` — an outer word's closing
