@@ -346,6 +346,22 @@ impl Executor {
             }
             return File::open("/dev/null").map_err(|e| crate::posix_errors::path_error(target, e));
         }
+        // rubash#1903: the one real open of a WinuxCmd fifo marker is
+        // the read side of the named-pipe rendezvous (it blocks until
+        // a writer connects, like GNU's O_RDONLY fifo open). Probes
+        // (consume == false) skip this arm on purpose: their fallthrough
+        // File::open below opens the marker *file*, which validates
+        // existence without consuming the pairing — the Windows twin
+        // of the #1820 probe carve-out above, except that opening the
+        // marker is itself inert because the rendezvous lives in the
+        // pipe, not the marker.
+        #[cfg(windows)]
+        if consume && crate::winux_fifo::path_is_winux_fifo(&win_path) {
+            return crate::winux_fifo::open_winux_fifo_read(&win_path, &|| {
+                crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+            })
+            .map_err(|e| crate::posix_errors::path_error(target, e));
+        }
         File::open(win_path).map_err(|e| crate::posix_errors::path_error(target, e))
     }
 
@@ -372,7 +388,9 @@ impl Executor {
             Some(FdReadEndpoint::CoprocStdout { fd: file_fd, .. }) => {
                 crate::fd::duplicate_handle(file_fd.handle)
                     .map(crate::fd::handle_to_file)
-                    .map_err(|e| crate::posix_errors::path_error(&file_fd.path.to_string_lossy(), e))
+                    .map_err(|e| {
+                        crate::posix_errors::path_error(&file_fd.path.to_string_lossy(), e)
+                    })
             }
             Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
                 let bytes = self
@@ -661,6 +679,20 @@ impl Executor {
                     }
                 });
         }
+        #[cfg(windows)]
+        if crate::winux_fifo::path_is_winux_fifo(&path) {
+            // rubash#1903: a WinuxCmd fifo marker is not a file to
+            // create/truncate — the open is the write side of the
+            // named-pipe rendezvous. The noclobber refusal above has
+            // already had its say (GNU refuses to clobber any existing
+            // target, fifos included); reaching here means the open is
+            // wanted, and it blocks until a reader arrives, like GNU's
+            // O_WRONLY fifo open (redir.c redir_open).
+            return crate::winux_fifo::open_winux_fifo_write(&path, &|| {
+                crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+            })
+            .map_err(|e| crate::posix_errors::path_error(&target, e));
+        }
         if crate::executor::execution_misc::is_dos_device_path(&path) {
             // niubash#519 family: GNU redir_open's single open() succeeds
             // on a character device because O_TRUNC is a no-op there; the
@@ -697,8 +729,10 @@ impl Executor {
         // Skip the physical open — the bind performs GNU's single
         // open — after the same write-access validation the create's
         // failure would have surfaced. Every caller drops the returned
-        // File, so the /dev/null stand-in is inert.
-        #[cfg(unix)]
+        // File, so the null-device stand-in is inert. rubash#1903: a
+        // WinuxCmd marker is a FIFO for this rule on Windows, with the
+        // marker probe standing in for access(2).
+        #[cfg(any(unix, windows))]
         {
             let path = self.session_path(shell_path_to_windows(
                 &self.redirect_output_path_target(target),
@@ -708,7 +742,14 @@ impl Executor {
                 if let Some(error) = redirect_fifo_access_error(&path, true) {
                     return Err(crate::posix_errors::path_error(target, error));
                 }
-                return File::open("/dev/null");
+                #[cfg(windows)]
+                {
+                    return File::open("NUL");
+                }
+                #[cfg(not(windows))]
+                {
+                    return File::open("/dev/null");
+                }
             }
         }
         let file = self.create_redirect_output(target, clobber)?;
@@ -2199,12 +2240,15 @@ pub(in crate::executor) fn write_pipeline_stream(
     }
 }
 
-/// True when `path` names an existing FIFO (unix). A FIFO open carries
+/// True when `path` names an existing FIFO. A FIFO open carries
 /// rendezvous semantics — a blocking open returns only when the peer
 /// side opens — so every throwaway probe/prepare open of a FIFO
 /// consumes a pairing the one real open needs (GNU opens a redirect
 /// target exactly once: redir.c do_redirection_internal). Windows has
-/// no filesystem FIFOs.
+/// no filesystem FIFO node type, but a WinuxCmd FIFO marker file
+/// (rubash#1903) carries the same rendezvous contract through its
+/// named-pipe bridge, so the marker answers true here and every
+/// carve-out keyed on this predicate covers it.
 pub(in crate::executor) fn redirect_path_is_fifo(path: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
@@ -2213,7 +2257,11 @@ pub(in crate::executor) fn redirect_path_is_fifo(path: &std::path::Path) -> bool
             .map(|meta| meta.file_type().is_fifo())
             .unwrap_or(false);
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        return crate::winux_fifo::path_is_winux_fifo(path);
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         false
@@ -2258,6 +2306,17 @@ pub(in crate::executor) fn redirect_fifo_access_error(
     }
 }
 
+/// Windows twin of the access(2) FIFO probe (rubash#1903): a marker
+/// file validates by plain file opens, which never touch the named
+/// pipe the rendezvous lives in.
+#[cfg(windows)]
+pub(in crate::executor) fn redirect_fifo_access_error(
+    path: &std::path::Path,
+    write: bool,
+) -> Option<std::io::Error> {
+    crate::winux_fifo::marker_access_error(path, write)
+}
+
 /// The setup walk's output probe (create/truncate side effect plus
 /// error surfacing) with the rubash#1820 FIFO carve-out: on a FIFO the
 /// create is a no-op whose blocking open consumes the bind open's
@@ -2268,7 +2327,7 @@ pub(in crate::executor) fn probe_output_redirect(
     target: &str,
     clobber: bool,
 ) -> std::io::Result<()> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let path = executor.session_path(shell_path_to_windows(
             &executor.redirect_output_path_target(target),
@@ -2289,7 +2348,7 @@ pub(in crate::executor) fn probe_output_redirect_append(
     executor: &Executor,
     target: &str,
 ) -> std::io::Result<()> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let path = executor.session_path(shell_path_to_windows(
             target,

@@ -1952,6 +1952,40 @@ impl Executor {
                     shell_path_to_windows(&target, &self.shell_state.env_vars),
                     &self.shell_state.env_vars,
                 ));
+                // rubash#1903: a WinuxCmd fifo marker operand is the
+                // read side of the named-pipe rendezvous, not a file
+                // holding the marker bytes — WinuxCmd's own cat
+                // bridges its operand the same way (file_io), and the
+                // issue's repro (`echo hi > f & cat f`) reads through
+                // whichever cat the ecosystem resolves, so the
+                // emulated reader must meet the writer here. Buffered
+                // like this handler's other operand serves: the read
+                // runs to the writer's EOF, which is the fifo's own
+                // close semantics.
+                #[cfg(windows)]
+                if crate::winux_fifo::path_is_winux_fifo(&win) {
+                    let read = crate::winux_fifo::open_winux_fifo_read(&win, &|| {
+                        crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+                    })
+                    .and_then(|mut file| {
+                        use std::io::Read;
+                        let mut bytes = Vec::new();
+                        file.read_to_end(&mut bytes).map(|_| bytes)
+                    });
+                    match read {
+                        Ok(bytes) => output.extend(bytes),
+                        Err(error) => {
+                            writeln!(
+                                &mut diagnostics,
+                                "cat: {}: {}",
+                                target,
+                                crate::posix_errors::message(&error)
+                            )?;
+                            status = 1;
+                        }
+                    }
+                    continue;
+                }
                 // `<(cmd)` carrier path: the word names a draining stream —
                 // serve the shared remainder (subst.c:7143).
                 let read = match self.procsub_stream_take(&win) {
@@ -2265,14 +2299,7 @@ impl Executor {
         // platform has a real fifo object, so the emulation must not
         // answer at all — decline and let the resolved PATH binary
         // create the fifo (dispatch reaches this handler only when the
-        // name resolved, rubash#1545). The unconditional
-        // `Operation not supported` refusal below is the Windows-only
-        // answer: Windows has no POSIX fifo object, and creating a
-        // regular file instead would silently change semantics (a
-        // fifo's blocking open/read behavior would become an instant
-        // regular-file EOF). GNU coreutils mkfifo reports per-operand
-        // failures and exits 1 — match that honestly:
-        // `mkfifo: cannot create fifo 'NAME': Operation not supported`.
+        // name resolved, rubash#1545).
         #[cfg(not(windows))]
         {
             let _ = cmd;
@@ -2280,19 +2307,35 @@ impl Executor {
         }
         #[cfg(windows)]
         {
-            // -m MODE consumes a value; other options are accepted and
-            // ignored. argv as-is — no second expand_word pass (issue
-            // #555, see external_mkdir). Diagnostics are the emulated
-            // command's own stderr and go through the command's
-            // redirections (rubash#1372/#1725), never straight to the
-            // terminal via the shell's default stderr.
+            // rubash#1903 supersedes the Windows half of the #1725
+            // refusal. That refusal's rationale was that creating a
+            // regular file instead of a fifo "would silently change
+            // semantics (a fifo's blocking open/read behavior would
+            // become an instant regular-file EOF)". The premise is
+            // gone: the shell now recognizes the WinuxCmd fifo marker
+            // and bridges redirect opens of it to the named-pipe
+            // rendezvous (crate::winux_fifo), so creating the marker
+            // in WinuxCmd's on-disk format completes the semantics
+            // instead of faking them — `mkfifo f; echo hi > f & cat f`
+            // works end to end, and WinuxCmd tools bridge the same
+            // marker from their side. The format and diagnostics
+            // mirror WinuxCmd mkfifo.cpp / create_winux_fifo_w so the
+            // two implementations are interchangeable.
+            //
+            // argv as-is — no second expand_word pass (issue #555, see
+            // external_mkdir). Diagnostics are the emulated command's
+            // own stderr and go through the command's redirections
+            // (rubash#1372/#1725), never straight to the terminal via
+            // the shell's default stderr.
+            let mut mode: Option<String> = None;
             let mut mode_value_pending = false;
             let mut no_more_flags = false;
-            let mut failed = false;
-            let mut stderr: Vec<u8> = Vec::new();
+            let mut context_requested = false;
+            let mut operands: Vec<&str> = Vec::new();
             for word in &cmd.words[1..] {
                 let expanded = word.as_str();
                 if mode_value_pending {
+                    mode = Some(expanded.to_string());
                     mode_value_pending = false;
                     continue;
                 }
@@ -2301,16 +2344,74 @@ impl Executor {
                     continue;
                 }
                 if !no_more_flags && expanded.starts_with('-') && expanded != "-" {
-                    if expanded == "-m" {
+                    if expanded == "-m" || expanded == "--mode" {
                         mode_value_pending = true;
+                    } else if let Some(value) = expanded.strip_prefix("--mode=") {
+                        mode = Some(value.to_string());
+                    } else if let Some(value) = expanded.strip_prefix("-m") {
+                        if !value.is_empty() {
+                            mode = Some(value.to_string());
+                        }
+                    } else if expanded == "-Z" || expanded.starts_with("--context") {
+                        context_requested = true;
                     }
+                    // Other options are accepted and ignored, as
+                    // before (GNU's remaining surface here is -v,
+                    // which the #1725 handler also dropped).
                     continue;
                 }
+                operands.push(expanded);
+            }
+            let mut stderr: Vec<u8> = Vec::new();
+            let mut failed = false;
+            if context_requested {
+                // WinuxCmd parity: the context request is refused
+                // before any operand is created.
                 writeln!(
                     stderr,
-                    "mkfifo: cannot create fifo '{expanded}': Operation not supported"
+                    "mkfifo: SELinux security contexts are not supported on Windows"
                 )?;
                 failed = true;
+            } else if operands.is_empty() {
+                writeln!(stderr, "mkfifo: missing operand")?;
+                failed = true;
+            } else if let Some(mode) = &mode {
+                if mode.is_empty() || !mode.chars().all(|ch| ('0'..='7').contains(&ch)) {
+                    writeln!(stderr, "mkfifo: invalid mode '{mode}'")?;
+                    failed = true;
+                }
+            }
+            if !failed {
+                // WinuxCmd's readonly rule: an octal mode without any
+                // write bit (no digit from 02367 anywhere) maps to the
+                // DOS readonly attribute.
+                let readonly = mode.as_deref().is_some_and(|mode| {
+                    !mode.is_empty()
+                        && mode.chars().all(|ch| ('0'..='7').contains(&ch))
+                        && !mode.contains(['0', '2', '3', '6', '7'])
+                });
+                for expanded in operands {
+                    let path = self
+                        .session_path(shell_path_to_windows(expanded, &self.shell_state.env_vars));
+                    // GNU coreutils reports per-operand failures and
+                    // continues with the rest, exiting 1.
+                    if std::fs::metadata(&path).is_ok() {
+                        writeln!(
+                            stderr,
+                            "mkfifo: cannot create fifo '{expanded}': File exists"
+                        )?;
+                        failed = true;
+                        continue;
+                    }
+                    if let Err(error) = crate::winux_fifo::create_winux_fifo(&path, readonly) {
+                        writeln!(
+                            stderr,
+                            "mkfifo: cannot create fifo '{expanded}': {}",
+                            crate::posix_errors::message(&error)
+                        )?;
+                        failed = true;
+                    }
+                }
             }
             self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             self.exit_code = if failed { 1 } else { 0 };

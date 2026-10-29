@@ -5100,3 +5100,222 @@ mod issue_1976 {
         assert_eq!(stdout, "rc=142\nline=[]\n", "stderr:\n{stderr}");
     }
 }
+
+/// rubash#1903: a WinuxCmd `mkfifo` marker was not recognized by shell
+/// redirections — `echo hi > f` truncated the marker as a plain file
+/// and `cat f` read the marker bytes, so the two halves of the
+/// ecosystem never rendezvoused. GNU anchor: a fifo redirect target is
+/// opened exactly once (redir.c do_redirection_internal) and the open
+/// blocks until the peer side opens (fifo open semantics).
+///
+/// The pins cover the shell half of the WinuxCmd protocol
+/// (crate::winux_fifo): marker creation by the emulated `mkfifo`, the
+/// redirect round trip in the issue's exact shape, both blocking-open
+/// directions across two shell processes (the cross-process shape is
+/// what pairs with a WinuxCmd tool on the other side), the append and
+/// redirect-fed read forms, and a marker created OUTSIDE the shell
+/// (the WinuxCmd on-disk format written by hand) being honored.
+#[cfg(windows)]
+mod issue_1903 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// Spawn a shell that is expected to BLOCK (its fifo open has no
+    /// peer yet), with the same airtight environment as run_rubash_in.
+    fn spawn_blocked(dir: &Path, script: &str) -> Child {
+        let path = dir.join("blocked.sh");
+        std::fs::write(&path, script).expect("write blocked script");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+        cmd.arg(path.to_str().expect("utf8 scratch path"))
+            .current_dir(dir)
+            .env_clear()
+            .env("PATH", minimal_path())
+            .env("HOME", dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for name in [
+            "SystemRoot",
+            "SystemDrive",
+            "WINDIR",
+            "COMSPEC",
+            "PATHEXT",
+            "OS",
+            "TEMP",
+            "TMP",
+        ] {
+            if let Ok(value) = std::env::var(name) {
+                cmd.env(name, value);
+            }
+        }
+        cmd.spawn().expect("spawn rubash")
+    }
+
+    fn assert_still_blocked(child: &mut Child, what: &str) {
+        std::thread::sleep(Duration::from_millis(2000));
+        assert!(
+            matches!(child.try_wait(), Ok(None)),
+            "{what}: completed without a peer — the fifo open did not block"
+        );
+    }
+
+    fn marker_bytes_and_attrs(path: &Path) -> (Vec<u8>, u32) {
+        use std::os::windows::fs::MetadataExt;
+        let bytes = std::fs::read(path).expect("read marker");
+        let attrs = std::fs::metadata(path)
+            .expect("marker metadata")
+            .file_attributes();
+        (bytes, attrs)
+    }
+
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x0000_0004;
+    const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+
+    #[test]
+    fn issue1903_mkfifo_creates_winux_marker() {
+        let dir = case_scratch("1903-create");
+        let (stdout, stderr, code) = run(&dir, "mkfifo f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "");
+        let (bytes, attrs) = marker_bytes_and_attrs(&dir.join("f"));
+        assert_eq!(bytes, b"!<fifo>", "marker content");
+        assert_ne!(
+            attrs & FILE_ATTRIBUTE_SYSTEM,
+            0,
+            "marker must carry FILE_ATTRIBUTE_SYSTEM (attrs {attrs:#x})"
+        );
+
+        // Existing target: GNU reports per-operand and exits 1.
+        let (_, stderr, code) = run(&dir, "mkfifo f\n");
+        assert_eq!(code, Some(1));
+        assert!(
+            stderr.contains("mkfifo: cannot create fifo 'f': File exists"),
+            "stderr:\n{stderr}"
+        );
+
+        // No operand: GNU's missing-operand failure (the pre-#1903
+        // handler silently exited 0).
+        let (_, stderr, code) = run(&dir, "mkfifo\n");
+        assert_eq!(code, Some(1));
+        assert!(
+            stderr.contains("mkfifo: missing operand"),
+            "stderr:\n{stderr}"
+        );
+
+        // A mode without any write bit maps to the readonly attribute
+        // (WinuxCmd's rule).
+        let (_, stderr, code) = run(&dir, "mkfifo -m 444 g\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        let (_, attrs) = marker_bytes_and_attrs(&dir.join("g"));
+        assert_ne!(
+            attrs & FILE_ATTRIBUTE_READONLY,
+            0,
+            "-m 444 must set FILE_ATTRIBUTE_READONLY (attrs {attrs:#x})"
+        );
+    }
+
+    #[test]
+    fn issue1903_redirect_round_trip_background_writer() {
+        // The issue's exact shape, several rounds: the rendezvous is a
+        // pairing race by nature, so one pass proves little (the
+        // #1820 pins set this precedent).
+        for round in 0..3 {
+            let dir = case_scratch(&format!("1903-roundtrip-{round}"));
+            let (stdout, stderr, code) = run(&dir, "mkfifo f\necho hi > f &\ncat f\n");
+            assert_eq!(code, Some(0), "round {round} stderr:\n{stderr}");
+            assert_eq!(stdout, "hi\n", "round {round} stderr:\n{stderr}");
+            // The write went through the pipe, not into the marker:
+            // the marker file still holds exactly the marker bytes.
+            let (bytes, _) = marker_bytes_and_attrs(&dir.join("f"));
+            assert_eq!(bytes, b"!<fifo>", "round {round}: marker was written into");
+        }
+    }
+
+    #[test]
+    fn issue1903_read_open_blocks_until_writer_arrives() {
+        let dir = case_scratch("1903-block-read");
+        let (_, stderr, code) = run(&dir, "mkfifo f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        let mut reader = spawn_blocked(&dir, "cat f\n");
+        assert_still_blocked(&mut reader, "cat f with no writer");
+        let (stdout, stderr, code) = run(&dir, "echo hi > f\n");
+        assert_eq!(code, Some(0), "writer stderr:\n{stderr}");
+        assert_eq!(stdout, "");
+        let out = wait_bounded(&mut reader, Duration::from_secs(30));
+        assert!(
+            !out.timed_out,
+            "reader never completed after the writer arrived"
+        );
+        assert_eq!(out.code, Some(0));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+    }
+
+    #[test]
+    fn issue1903_write_open_blocks_until_reader_arrives() {
+        let dir = case_scratch("1903-block-write");
+        let (_, stderr, code) = run(&dir, "mkfifo f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        let mut writer = spawn_blocked(&dir, "echo hi > f\n");
+        assert_still_blocked(&mut writer, "echo hi > f with no reader");
+        let (stdout, stderr, code) = run(&dir, "cat f\n");
+        assert_eq!(code, Some(0), "reader stderr:\n{stderr}");
+        assert_eq!(stdout, "hi\n");
+        let out = wait_bounded(&mut writer, Duration::from_secs(30));
+        assert!(
+            !out.timed_out,
+            "writer never completed after the reader arrived"
+        );
+        assert_eq!(out.code, Some(0));
+    }
+
+    #[test]
+    fn issue1903_append_and_redirect_fed_read_forms() {
+        let dir = case_scratch("1903-forms");
+        // Append form: `>>` is the same write-side rendezvous.
+        let (stdout, stderr, code) = run(&dir, "mkfifo f\necho via-append >> f &\ncat < f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "via-append\n");
+        // Builtin read fed by an input redirect, writer in background.
+        let (stdout, stderr, code) = run(
+            &dir,
+            "mkfifo g\necho line1 > g &\nread x < g\necho \"got=[$x]\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "got=[line1]\n");
+    }
+
+    #[test]
+    fn issue1903_foreign_winux_marker_is_honored() {
+        // A marker in WinuxCmd's on-disk format created OUTSIDE the
+        // shell (here: by hand — content + SYSTEM attribute, the two
+        // things detection keys on) must rendezvous exactly like one
+        // the shell's own mkfifo made. This is the issue's literal
+        // repro: the marker came from the other half of the ecosystem.
+        let dir = case_scratch("1903-foreign");
+        let marker = dir.join("f");
+        std::fs::write(&marker, b"!<fifo>").expect("write foreign marker");
+        let status = Command::new("attrib")
+            .arg("+S")
+            .arg(&marker)
+            .status()
+            .expect("attrib +S");
+        assert!(status.success(), "attrib +S failed");
+        let (stdout, stderr, code) = run(&dir, "echo hi > f &\ncat f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "hi\n");
+    }
+}
