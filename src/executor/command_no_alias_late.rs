@@ -125,14 +125,16 @@ impl Executor {
                 self.execute_external(cmd)
             }
             Some(CmdLateSlot::Uname) => {
-                if self.emulated_external_stands_down("uname") {
+                // Registry-driven stand-down, as in the simple
+                // dispatch (ScriptYield/FailClosed, #2104).
+                if self.registered_stand_down("uname") {
                     return self.execute_external(cmd);
                 }
                 self.exit_code = self.execute_identity_tool(cmd, "uname");
                 Ok(())
             }
             Some(CmdLateSlot::Arch) => {
-                if self.emulated_external_stands_down("arch") {
+                if self.registered_stand_down("arch") {
                     return self.execute_external(cmd);
                 }
                 self.exit_code = self.execute_identity_tool(cmd, "arch");

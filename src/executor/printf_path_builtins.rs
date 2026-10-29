@@ -253,9 +253,12 @@ impl Executor {
     /// information: the engine answers these itself — persona-valued fields
     /// come from `crate::executor::identity` — instead of spawning whatever
     /// `uname.exe` happens to sit on PATH (which also removes the spawn
-    /// cost, #130). Unlike the dirname/basename fast paths there is no
-    /// external fallback: full option parsing is handled in
-    /// `builtins/uname.rs`, so PATH never decides availability.
+    /// cost, #130). Full option parsing is handled in `builtins/uname.rs`.
+    /// Availability follows the registry stand-down policy (rubash#2104):
+    /// the caller reaches this function only when the name does not
+    /// resolve, or resolves to a native image; a resolution landing on a
+    /// script stands the face down so the script runs, as in GNU, where
+    /// no builtin outranks the PATH hit.
     pub(in crate::executor) fn execute_identity_tool(
         &mut self,
         cmd: &CommandNode,

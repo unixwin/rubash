@@ -94,6 +94,63 @@ impl Executor {
             || self.command_path_without_bridge(name, false).is_none()
     }
 
+    /// Stand-down adjudication driven by the command registry's
+    /// two-axis policy (command_registry stand_down, #2036): the
+    /// caller must fall through to a real spawn when this returns
+    /// true. The unresolvable axis reuses the standard predicate
+    /// above — `FailClosed` stands down to the spawn and its 127
+    /// (#1545), any other value keeps the face's answer. The
+    /// resolvable axis reads the row: `Replace` keeps the answer,
+    /// `Yield` stands down, and `ScriptYield` (the identity tools,
+    /// rubash#2104) stands down exactly when the resolution lands
+    /// on a script — GNU findcmd.c:348 search_for_command has no
+    /// uname/arch builtin to outrank the file PATH found, so the
+    /// script is the user's program; a native-image resolution is
+    /// the synced body the emulation stands in for and keeps the
+    /// in-process answer. Faces whose rule is their own machinery
+    /// (the pipeline sed recheck, the spawn stand-in) do not consult
+    /// this helper; their policy values fall through to "answer".
+    pub(in crate::executor) fn registered_stand_down(&self, name: &str) -> bool {
+        use super::command_registry::{ResolvablePolicy, UnresolvablePolicy};
+        let Some(row) = super::command_registry::registry_row(name) else {
+            return self.emulated_external_stands_down(name);
+        };
+        if self.emulated_external_stands_down(name) {
+            return matches!(row.stand_down.unresolvable, UnresolvablePolicy::FailClosed);
+        }
+        match row.stand_down.resolvable {
+            ResolvablePolicy::Yield => true,
+            ResolvablePolicy::ScriptYield => self.resolved_candidate_is_script(name),
+            ResolvablePolicy::Replace
+            | ResolvablePolicy::NotApplicable
+            | ResolvablePolicy::InvertedSed
+            | ResolvablePolicy::HashStandin => false,
+        }
+    }
+
+    /// Whether the bridge-free resolution of `name` (the same
+    /// candidate `registered_stand_down` just found resolvable) is a
+    /// script: a file whose first bytes are `#!`. The candidate path
+    /// goes through the same shell->filesystem mapping the operand
+    /// faces use (session_path over shell_path_to_windows). An
+    /// unreadable candidate answers false — the spawn the caller
+    /// falls back to on the other arms reports such errors itself.
+    fn resolved_candidate_is_script(&self, name: &str) -> bool {
+        use std::io::Read;
+        let Some(found) = self.command_path_without_bridge(name, false) else {
+            return false;
+        };
+        let fs_path = self.session_path(crate::executor::path::shell_path_to_windows(
+            &found,
+            &self.shell_state.env_vars,
+        ));
+        let Ok(mut file) = std::fs::File::open(&fs_path) else {
+            return false;
+        };
+        let mut head = [0u8; 2];
+        file.read_exact(&mut head).is_ok() && &head == b"#!"
+    }
+
     fn command_path_in_dot(&self, name: &str) -> Option<String> {
         if name.contains('/') {
             return None;
