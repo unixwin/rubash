@@ -289,7 +289,16 @@ impl Executor {
             if redirect.fd.unwrap_or(0) == 0 && self.input_fd_redirects_to_process_stdin(&target) {
                 return Ok(());
             }
-            let file = if redirect.append {
+            let file = if redirect.append && crate::special_paths::is_net_redirect_target(&target) {
+                // rubash#2091: a net target has no filesystem path — the
+                // raw open below reported a bare ENOENT (no target
+                // named) and the connection never happened. redir.c
+                // netopen connects once; the socket serves the `<>`
+                // open in both directions (the plain `<` arm reaches
+                // the same class through open_input_redirect's registry
+                // walk).
+                self.open_net_redirect(&target)?
+            } else if redirect.append {
                 let path =
                     self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
                 // niubash#519: CON has no read+write handle; a child's fd 0
