@@ -3201,6 +3201,26 @@ pub(crate) fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
+/// Issue #2093: the literal-file existence gate for the registry's
+/// `SlashKind::RedirectToBuiltin` spellings (/bin and /usr/bin of
+/// echo, printf, pwd). GNU findcmd.c:383-385 treats a slash-bearing
+/// word as an absolute program — search_for_command hands it to execve
+/// verbatim, so when the path names a real file, that FILE answers
+/// (--help/--version banners, no shell-option sensitivity, physical
+/// pwd) and the builtin claim must stand down. The probe is exactly
+/// the literal resolution `find_user_command_uncached`'s slash branch
+/// performs FIRST (anchor_at_session_cwd over shell_path_to_windows,
+/// then executable_candidate) — deliberately without that branch's
+/// Windows basename-PATH fallbacks, so a PATH-resolvable `echo` with
+/// no literal file at the translated spelling keeps the emulated
+/// answer (the Windows no-/bin default stays a redirect). An existing
+/// but non-executable literal file also keeps the redirect, per the
+/// issue's two-clause gate (存在且可执行 -> 真实 exec，缺席 -> 维持改道).
+pub(crate) fn literal_executable_file(spelling: &str, env_vars: &HashMap<String, String>) -> bool {
+    let candidate = anchor_at_session_cwd(shell_path_to_windows(spelling, env_vars), env_vars);
+    executable_candidate(&candidate, env_vars).is_some()
+}
+
 fn executable_candidate(path: &Path, env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     // Extensionless names probe every PATHEXT candidate before the bare file
     // (native wrappers like `code.cmd` win over an extensionless `code`).

@@ -387,17 +387,20 @@ pub(crate) enum SlashKind {
     /// audit flags at §2.1).
     ///
     /// Escape contract (measured + adjudicated in S6, 2026-10-29;
-    /// full text in docs/builtins.md §4.3): the redirect claims ONLY
-    /// the six exact spellings (/bin and /usr/bin of echo, printf,
-    /// pwd) — any other slash spelling execs the named file
-    /// literally, exactly like GNU. The claimed spellings answer
-    /// with BUILTIN semantics unconditionally (no existence check on
-    /// the literal file): on hosts where the spelling names a real
-    /// file, the observable deltas against that file are its
-    /// --help/--version answers, echo's shell-option sensitivity
-    /// (xpg_echo), and pwd's logical default. Kept deliberately:
-    /// on Windows hosts those spellings have no literal file, and
-    /// the layer is what makes /bin/echo-shaped scripts run at all.
+    /// existence gate landed by issue #2093; full text in
+    /// docs/builtins.md §4.3): the redirect claims ONLY the six exact
+    /// spellings (/bin and /usr/bin of echo, printf, pwd) — any other
+    /// slash spelling execs the named file literally, exactly like GNU.
+    /// The claimed spellings answer with BUILTIN semantics only while
+    /// the shell path layer translates the spelling to no existing,
+    /// executable literal file (path.rs `literal_executable_file`, the
+    /// literal probe of find_user_command's slash branch WITHOUT the
+    /// Windows basename-PATH fallbacks); when that file exists the
+    /// faces decline and the file answers, like GNU findcmd.c:383-385
+    /// execve'ing a slash-bearing word verbatim. On hosts where the
+    /// spellings name no file (the Windows no-/bin default) the
+    /// observable deltas against a would-be file are moot and the
+    /// layer is what makes /bin/echo-shaped scripts run at all.
     /// Gating is asymmetric by mechanism: printf/pwd ride the
     /// external-file-builtins host flag (this layer), the echo form
     /// rides the external-shortcut face and does not.

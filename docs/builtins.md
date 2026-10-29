@@ -252,20 +252,22 @@ winuxcmd（176 个外部命令）与 rubash 内置/保留字重叠的命令共 1
   `/usr/bin/printf`、`/bin/pwd`、`/usr/bin/pwd`。任何其他斜杠拼写（相对
   路径、其他目录、伪造路径）一律按字面 exec 该文件，与 GNU 无分歧
   （探针：自备脚本 `/tmp/.../echo` 双边都真跑）。
-- **被认领的拼写无条件以内建语义作答**（不查字面文件是否存在）。在字面
-  文件真实存在的宿主上，与该文件的可观察分歧为：① `--help`/`--version`
-  答复（内建的报错/字面输出 vs 文件的整页帮助/版本横幅）；② `/bin/echo`
-  跟随 shell 的 echo 选项（`shopt -s xpg_echo` 时解释转义，文件版不认
-  shell 选项）；③ `/bin/pwd` 无选项时答逻辑路径，文件版 pwd 对 `$PWD`
-  的采纳更严（符号链尾形答物理路径）。
-- **保留理由（裁定保持）**：Windows 宿主上这些拼写没有字面文件，改道层
-  是 `/bin/echo` 形脚本能跑起来的前提（与 find_user_command 对
-  `/bin/X` 的 basename 命名空间处理同层）。「文件存在则文件赢」的存在性
-  门会改动 Windows 侧解析语义、无法从 Linux 侧验证，作立案草稿交主会话
-  裁定，不在本批动。
+- **被认领的拼写默认以内建语义作答，但带存在性门（#2093，2026-10-29 落地）**：
+  拼写经 shell 路径层翻译（`shell_path_to_windows` → 字面探测
+  `literal_executable_file`，即 find_user_command 斜杠分支的第一跳，不含
+  Windows 的 basename-PATH 兜底）指向**存在且可执行**的字面文件时，改道面
+  落回真实 exec、由该文件作答（`--help`/`--version` 整页横幅、echo 不认
+  shell 选项、pwd 答物理路径）——与 GNU findcmd.c:383-385 对含斜杠词逐字
+  execve 的语义一致；字面文件缺席（Windows 无 /bin 的常态）时维持改道。
+  存在但不可执行的文件也维持改道（按 #2093 两 clause 门裁定）。
+- **保留理由（裁定保持）**：Windows 宿主上这些拼写通常没有字面文件，改道层
+  仍是 `/bin/echo` 形脚本能跑起来的前提（与 find_user_command 对
+  `/bin/X` 的 basename 命名空间处理同层）；存在性门只在字面文件真实
+  存在时才改写解析语义（shell-root 树内捆绑同名工具时，文件赢——同
+  #2093 门语义，实测矩阵见该单 REPORT）。
 - **门控不对称（如实登记）**：printf/pwd 两形走 external_file_builtins
   宿主旗（关则落真实 spawn）；echo 形走 external_inner 捷径面，不受该旗
-  管辖。
+  管辖。存在性门叠加在两族的各自门控之上（echo 门不受宿主旗影响）。
 
 **命令替换内的 builtin 遮蔽（防回归不变量）**：`$(builtin …)` 的外部命令
 解析在 PATH 查找**之前**先按名字判 `is_shell_builtin_name`，并尊重

@@ -986,6 +986,20 @@ impl Executor {
         }
 
         if matches!(cmd.words[0].as_str(), "/bin/echo" | "/usr/bin/echo") {
+            // Issue #2093 (GNU findcmd.c:383-385): a slash-bearing word is
+            // execve'd verbatim, so when the shell path layer translates
+            // this spelling to an existing, executable literal file, that
+            // FILE answers (--help/--version, no xpg_echo) and the emulated
+            // builtin answer must stand down. Declining routes to the real
+            // exec path below, whose own literal probe resolves the same
+            // file. With no literal file the redirect stays (the Windows
+            // no-/bin default, docs/builtins.md §4.3).
+            if crate::executor::path::literal_executable_file(
+                &cmd.words[0],
+                &self.shell_state.env_vars,
+            ) {
+                return Ok(false);
+            }
             // TODO(findcmd.c/execute_cmd.c): On Windows test runs, Bash-style
             // absolute utility paths should resolve through the active shell
             // environment. Keep this echo mapping until command lookup has a
