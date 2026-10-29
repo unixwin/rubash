@@ -30,11 +30,19 @@ fn stamp_env_usize(env_vars: &mut VarTable, key: &str, line: usize) -> bool {
         }
     }
     let rendered = std::str::from_utf8(&buffer[position..]).unwrap_or("0");
-    if env_vars.get(key).map(String::as_str) != Some(rendered) {
-        env_vars.insert(key.to_string(), rendered.to_string());
+    // Reuse the stored key's allocation: `insert(key.to_string(), ...)`
+    // rebuilt the key String on every stamp (two stamps per command in the
+    // reader loop), and the map already owns that key. `get_mut` hashes the
+    // same way, so the only observable difference is the skipped alloc.
+    if let Some(slot) = env_vars.get_mut(key) {
+        if slot.as_str() == rendered {
+            return false;
+        }
+        *slot = rendered.to_string();
         true
     } else {
-        false
+        env_vars.insert(key.to_string(), rendered.to_string());
+        true
     }
 }
 
