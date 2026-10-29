@@ -5,6 +5,7 @@
 // - builtins/common.c get_numeric_arg() / no_args() / sh_neednumarg() /
 //   sh_invalidnum() / sh_erange()
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
@@ -25,6 +26,9 @@ where
         diagnostic_prefix,
         &[],
         1,
+        None,
+        &[],
+        &HashMap::new(),
         &mut io::sink(),
         stderr,
         &mut surplus,
@@ -32,11 +36,15 @@ where
     Ok((status, surplus))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_with_history<E, O>(
     args: &[String],
     diagnostic_prefix: &str,
     entries: &[String],
     history_base: usize,
+    time_format: Option<&str>,
+    stamps: &[String],
+    env_vars: &HashMap<String, String>,
     stdout: &mut O,
     stderr: &mut E,
     surplus: &mut bool,
@@ -166,12 +174,42 @@ where
         .and_then(|arg| arg.trim_start().parse::<i64>().ok())
         .map(|n| n.unsigned_abs() as usize);
     let start = limit.map(|n| entries.len().saturating_sub(n)).unwrap_or(0);
+    // builtins/history.def:400,406 display_history: the per-entry stamp
+    // renders only when HISTTIMEFORMAT is set AND non-empty
+    // (`histtimefmt && *histtimefmt`); the render itself is histtime
+    // (history.def:351-368) over the entry's stamp — strftime of
+    // history_get_time, `<text>: invalid timestamp` for a stamp whose
+    // parse yields no representable time, `??` for a stamp-less entry.
+    // The stamps come in parallel to `entries` from the caller (the
+    // host's entry_timestamps channel, niubash#622, or the engine's
+    // dispatch-time ledger; the session path mirrors this in
+    // history_exec.rs). Format: `%5d%c %s%s` (history.def:409) — the
+    // marker, one space, then the rendered stamp glued to the entry.
+    let time_format = time_format.filter(|format| !format.is_empty());
     for (number, entry) in entries.iter().enumerate().skip(start) {
         // display_history numbers from history_base (lib/readline/history.c):
         // the session path mirrors it with shell.base (history_exec.rs); the
         // provider path carries the host's base through this parameter — a
         // stifled host store keeps its GLOBAL numbers (rubash#2007).
-        writeln!(stdout, "{:>5}  {}", number + history_base, entry)?;
+        match time_format {
+            Some(format) => {
+                let rendered = crate::history::render_timestamp(
+                    stamps.get(number).map(String::as_str),
+                    format,
+                    env_vars,
+                );
+                writeln!(
+                    stdout,
+                    "{:>5}  {}{}",
+                    number + history_base,
+                    rendered,
+                    entry
+                )?;
+            }
+            None => {
+                writeln!(stdout, "{:>5}  {}", number + history_base, entry)?;
+            }
+        }
     }
 
     Ok(EXECUTION_SUCCESS)

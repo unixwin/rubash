@@ -635,6 +635,7 @@ impl Executor {
             process_env_snapshot,
             env_write_journal,
             history_provider: None,
+            provider_stamp_ledger: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         };
         for (fd, (read_h, write_h, path)) in inherited_fd_handles {
             let path = PathBuf::from(path.unwrap_or_default());

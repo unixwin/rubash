@@ -114,6 +114,64 @@ pub trait HistoryProvider: Debug {
     fn last_line_added(&mut self) -> bool {
         false
     }
+    /// The per-entry stamp channel, parallel to [`HistoryProvider::entries`]
+    /// (niubash#622): element i is entry i's `#<unix-seconds>` stamp
+    /// (lib/readline/history.c hist_inittime — every add_history stores
+    /// one on the entry, readline/history.c:322-333). builtins/history.def
+    /// histtime renders it through HISTTIMEFORMAT and histfile.c
+    /// history_write writes it as the `#<epoch>` line before the entry
+    /// (history_write_timestamps, variables.c sv_histtimefmt:6168-6177).
+    ///
+    /// The default is the empty vec: the GNU C initializers again (cf.
+    /// `history_base`/`last_line_added`) — providers predating the channel
+    /// keep compiling, and the engine's own dispatch-time stamp ledger
+    /// (Executor::provider_history_stamps) stands in for them, so old
+    /// hosts still get GNU's interactive shape (an entry is never listed
+    /// without a stamp; the unloaded-file entry takes its read time,
+    /// histfile.c add_history → hist_inittime).
+    ///
+    /// A host that implements this SHOULD also implement
+    /// [`HistoryProvider::write_history_timestamped`] and
+    /// [`HistoryProvider::append_history_timestamped`] (the file faces the
+    /// stamps feed) and parse `#<epoch>` lines in its read faces; a host
+    /// whose file format cannot carry stamp lines keeps the plain write
+    /// default — writing `#<epoch>` lines into a store that would read
+    /// them back as entries is the exact niubash#646 blocker.
+    fn entry_timestamps(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+    /// builtins/history.def WFLAG write_history with the timestamp face:
+    /// when `timestamps` is non-empty it runs parallel to the entry list
+    /// and each entry that carries a stamp is preceded by its `#<epoch>`
+    /// line (histfile.c:738 history_write_slow — the stamp is written
+    /// only when the entry HAS one, `timestamp[0] != 0`; HISTFILESIZE
+    /// still counts command lines, histfile.c:633 `lines +=
+    /// history_write_timestamps` walks the stamps back over their
+    /// entries). `timestamps` is passed (never empty) only when
+    /// HISTTIMEFORMAT exists as a variable (sv_histtimefmt:
+    /// `history_write_timestamps = (v != 0)` — set-but-empty formats
+    /// still arm the write).
+    ///
+    /// The default defers to the plain [`HistoryProvider::write_history`]:
+    /// a store that has not opted into the stamp channel must not find
+    /// `#<epoch>` side lines in its file, where its reader would swallow
+    /// them as entries (the niubash#646 file-face blocker).
+    fn write_history_timestamped(&mut self, path: &str, timestamps: &[String]) -> io::Result<()> {
+        let _ = timestamps;
+        self.write_history(path)
+    }
+    /// builtins/history.def AFLG maybe_append_history with the timestamp
+    /// face: the same `#<epoch>` side lines for the appended tail
+    /// (histfile.c:815 history_append — a stamped entry is two file
+    /// lines). `timestamps` runs parallel to the FULL entry list; the
+    /// appended tail's stamps are its last entries' stamps, judged by the
+    /// host's own pending-set accounting (the engine does not know where
+    /// the host's `history_lines_this_session` boundary sits).
+    /// The default defers to the plain append, like the write face.
+    fn append_history_timestamped(&mut self, path: &str, timestamps: &[String]) -> io::Result<()> {
+        let _ = timestamps;
+        self.append_history(path)
+    }
 }
 
 /// Shared provider handle suitable for injecting into an Executor.
@@ -173,7 +231,7 @@ impl SessionHistory {
 
     /// readline/history.c hist_inittime: the "#<unix-seconds>" stamp
     /// every add_history puts on a new entry.
-    fn now_stamp() -> String {
+    pub(crate) fn now_stamp() -> String {
         let epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())

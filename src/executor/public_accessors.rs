@@ -462,6 +462,51 @@ impl Executor {
         Some(entries)
     }
 
+    /// Reconcile the dispatch-time stamp ledger with the provider list's
+    /// current length (niubash#646). GNU stamps an entry at its add
+    /// (readline/history.c hist_inittime, history.c:322-333); the engine
+    /// observed adds fill the ledger tail with the observation-time stamp
+    /// and removals truncate it. Position-level corrections for mid-list
+    /// surgery are done at the mutating site (`history -d`), which mirrors
+    /// the exact index operations onto the ledger before calling this.
+    pub(crate) fn sync_provider_stamp_ledger(&mut self) {
+        let Some(provider) = self.history_provider.as_ref().cloned() else {
+            return;
+        };
+        let len = match provider.borrow_mut().entries() {
+            Ok(entries) => entries.len(),
+            Err(_) => return,
+        };
+        let mut ledger = self.provider_stamp_ledger.borrow_mut();
+        ledger.truncate(len);
+        while ledger.len() < len {
+            ledger.push(crate::history::SessionHistory::now_stamp());
+        }
+    }
+
+    /// The effective per-entry stamps for the provider list (niubash#646).
+    /// `None` when no provider is installed. The host's own stamp channel
+    /// (`HistoryProvider::entry_timestamps`, niubash#622) wins when it is
+    /// aligned with the list and carries at least one stamp; otherwise the
+    /// engine's dispatch-time ledger stands in (synced first), so a host
+    /// predating the channel still gets GNU's interactive shape: every
+    /// listed entry carries a stamp (the unloaded-file entry takes its
+    /// read time, histfile.c add_history → hist_inittime — a listed
+    /// entry never renders the stamp-less `??` in a stamping shell).
+    pub(crate) fn provider_history_stamps(&mut self) -> Option<Vec<String>> {
+        let provider = self.history_provider.as_ref()?.clone();
+        {
+            let mut provider = provider.borrow_mut();
+            let entries = provider.entries().unwrap_or_default();
+            let host = provider.entry_timestamps();
+            if host.len() == entries.len() && host.iter().any(|stamp| !stamp.is_empty()) {
+                return Some(host);
+            }
+        }
+        self.sync_provider_stamp_ledger();
+        Some(self.provider_stamp_ledger.borrow().clone())
+    }
+
     /// Rewrite the provider's most recent entry while it is still the raw
     /// line the host's editor recorded before execution — the interactive
     /// pre_process_line counterpart of bashhist.c maybe_add_history:
@@ -489,6 +534,9 @@ impl Executor {
             }
         }
         let _ = provider.borrow_mut().replace(entries);
+        // Count-preserving rewrite keeps the stamp; the None arm dropped an
+        // entry — the ledger tail goes with it.
+        self.sync_provider_stamp_ledger();
     }
 
     /// Remove the provider's most recent entry unconditionally (the
@@ -504,6 +552,10 @@ impl Executor {
         };
         entries.pop();
         let _ = provider.borrow_mut().replace(entries);
+        // The vetoed entry's stamp goes with it (GNU: a line recorded only
+        // outside remember_on_history never reaches add_history, so it
+        // never got a stamp to drop).
+        self.sync_provider_stamp_ledger();
     }
 
     /// Host completion hook. Given the in-progress command `line` and the
