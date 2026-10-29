@@ -4118,18 +4118,17 @@ pub fn initialize_interactive_history(executor: &mut Executor) {
     // shell.c init_interactive: interactive shells also default histexpand
     // (set -H) on, so !!/!str expand on each accepted line.
     executor.set_shell_option("histexpand", true);
-    // GNU variables.c/bind_variable defaults: HISTFILE falls back to
-    // ~/.bash_history when unset (bashhist.c reads and appends that
-    // file). Without the default, an unset HISTFILE silently disabled
-    // both the startup load below and the exit save in finish_shell,
-    // losing the whole interactive history (rubash#1216).
-    if executor.get_env("HISTFILE").is_none() {
-        if let Some(home) = executor.get_env("HOME") {
-            if !home.is_empty() {
-                executor.set_env("HISTFILE", &format!("{home}/.bash_history"));
-            }
-        }
-    }
+    // The HISTFILE default is NOT this site's business. GNU defaults
+    // HISTFILE once, at shell_initialize (shell.c:580) — variables.c:654-661
+    // `if (remember_on_history) { name = bash_default_histfile();
+    // set_if_not("HISTFILE", name); }` — BEFORE the startup files run
+    // (shell.c:722), and the load site reads whatever HISTFILE then holds
+    // (bashhist.c:336 get_string_value at load time). Re-defaulting here —
+    // AFTER the startup files — resurrected the default after an rcfile
+    // `unset HISTFILE`, so an unset-redirected session still loaded and
+    // saved the default file (niubash#661); an rcfile reassignment was
+    // honored only by luck of set_if_not. rubash main.rs
+    // apply_interactive_history_defaults now owns the default, pre-startup.
     let Some(session) = executor.get_session_history() else {
         return;
     };

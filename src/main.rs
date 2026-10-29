@@ -1486,6 +1486,16 @@ fn run_script_file_with_init(
     if executor.get_env("__RUBASH_DEBUGGER_MODE").as_deref() == Some("1") {
         start_debugger(executor);
     }
+    // shell.c:546-547: forced_interactive (`-i script`) reaches
+    // init_interactive too, and shell.c:580 shell_initialize then applies
+    // the history-variable defaults (variables.c:654-661) — both BEFORE
+    // the startup files (shell.c:722). Without this arm the engine never
+    // defaults the history option or HISTFILE on the script-file path,
+    // and after the niubash#661 removal of the post-startup re-default
+    // the session would neither load nor save at all.
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+        apply_interactive_history_defaults(executor);
+    }
     let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
     if let Some(status) = run_startup_files(executor, init_file) {
         return finish_shell(executor, status, interactive);
@@ -1558,9 +1568,7 @@ fn apply_init_interactive_defaults(executor: &mut Executor) {
     // defaults run BEFORE the startup files, whose opt-out is the user's
     // word (niubash#660 — the unconditional set made an opted-out shell
     // record and save anyway).
-    if executor.get_env("__RUBASH_SETOPT_history").is_none() {
-        executor.set_shell_option("history", true);
-    }
+    apply_interactive_history_defaults(executor);
     executor.set_shell_option("histexpand", true);
     if executor.get_env("__RUBASH_NO_EDITING").as_deref() == Some("1") {
         return;
@@ -1569,6 +1577,41 @@ fn apply_init_interactive_defaults(executor: &mut Executor) {
         return;
     }
     executor.set_shell_option("emacs", true);
+}
+
+/// The interactive defaults of the history-WRITE family, applied at
+/// startup-option time — before the startup files can override either.
+///
+/// GNU shell.c:1835-1837 init_interactive: `if (enable_history_list == -1)
+/// enable_history_list = 1;` — the option default arms history only when
+/// nothing has set it yet. GNU variables.c:654-661 initialize_shell_variables
+/// (shell.c:580 shell_initialize, right after init_interactive at 547 and
+/// still BEFORE run_startup_files at 722): `if (remember_on_history) {
+/// name = bash_default_histfile(); set_if_not("HISTFILE", name); }` —
+/// bashhist.c:420 bash_default_histfile is the user's ~/.bash_history.
+/// Both are set_if_not-shaped: a preset or an inherited value stands, and
+/// a startup file may freely reassign or unset HISTFILE afterwards — the
+/// post-startup load site (shell.c:806-811) reads whatever HISTFILE then
+/// holds and never re-defaults it (niubash#661: the engine re-defaulted
+/// HISTFILE AFTER the startup files, resurrecting the default after an
+/// rcfile `unset HISTFILE` so the shell loaded and saved the default file
+/// anyway).
+fn apply_interactive_history_defaults(executor: &mut Executor) {
+    if executor.get_env("__RUBASH_SETOPT_history").is_none() {
+        executor.set_shell_option("history", true);
+    }
+    // The remember_on_history gate: the option default above just armed
+    // the carrier when absent, so the carrier now reads "1"/"0".
+    if executor.get_env("__RUBASH_SETOPT_history").as_deref() != Some("1") {
+        return;
+    }
+    if executor.get_env("HISTFILE").is_none() {
+        if let Some(home) = executor.get_env("HOME") {
+            if !home.is_empty() {
+                executor.set_env("HISTFILE", &format!("{home}/.bash_history"));
+            }
+        }
+    }
 }
 
 fn apply_interactive_alias_default(executor: &mut Executor, explicit: Option<bool>) {
