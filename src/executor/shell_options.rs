@@ -930,10 +930,32 @@ impl Executor {
                     Some('n')
                 }
             };
+            // rubash#1902: a File endpoint whose stored path is the
+            // `<(source)` carrier spelling is a process-substitution
+            // pipe reader by construction —
+            // spawn_input_process_substitution_child is the spelling's
+            // only producer and its handle is the spawned body's pipe
+            // (the same judgment initial_pipeline_input documents for
+            // its stage-0 alias fold). The spelling is transport, not
+            // a filesystem path: it must never become the fd target
+            // (the evaluator would re-enter on it as a path and every
+            // predicate would fail). The handle check is the ground
+            // truth that the endpoint really is that pipe; a real path
+            // (a named fifo included) keeps the target treatment.
+            let procsub_pipe = |path: &std::path::Path, handle: crate::fd::HANDLE| -> bool {
+                let spelling = path.to_string_lossy();
+                crate::fd::is_pipe_handle(handle)
+                    && spelling.starts_with("<(")
+                    && spelling.ends_with(')')
+            };
             match &entry.read {
                 Some(FdReadEndpoint::File(file)) => {
                     if let Some(device) = dos_device_class(&file.path) {
                         class = device;
+                        can_r = true;
+                        can_w = true;
+                    } else if procsub_pipe(&file.path, file.handle) {
+                        class = 'p';
                         can_r = true;
                         can_w = true;
                     } else if !file.path.as_os_str().is_empty() {
@@ -985,6 +1007,9 @@ impl Executor {
                         if let Some(device) = dos_device_class(&file.path) {
                             class = device;
                             can_r = true;
+                            can_w = true;
+                        } else if procsub_pipe(&file.path, file.handle) {
+                            class = 'p';
                             can_w = true;
                         } else if !file.path.as_os_str().is_empty() {
                             target = Some(file.path.to_string_lossy().into_owned());
@@ -1063,6 +1088,53 @@ impl Executor {
             self.shell_state
                 .env_vars
                 .insert(format!("{FD_ACCESS_PREFIX}{fd}"), value);
+        }
+        // rubash#1902 (stage face): a pipeline stage whose fd 0 is the
+        // staged FUNCTION_STDIN mirror has NO fd-table row — the stage
+        // funnels clear the slot so the mirror governs the stage's
+        // reads — so the loop above wrote no fd-0 mark and the
+        // evaluator would fall through to the shell's own descriptors.
+        // The stage entry recorded the binding in FD0_STAGE_PIPE
+        // (execute_pipeline_stage / execute_lastpipe_stage, beside the
+        // mirror it stands for); turn it into the fd-0 access mark
+        // here, in the same `prw` vocabulary as the
+        // pipeline_stdin_stream special case above. Two guards, both
+        // GNU's ordering (execute_cmd.c:2620 do_piping first, then the
+        // element's own do_redirections): an fd-table entry that DID
+        // speak for fd 0 (a binding installed inside the stage) wins
+        // over the pipe, and a command carrying a descriptor-class
+        // fd-0 redirect winner keeps that face's current treatment —
+        // its binding is the redirect machinery's to state. Text-class
+        // winners (heredoc / here-string) are pipes in GNU and keep
+        // the mark.
+        let fd0_marked = self
+            .shell_state
+            .env_vars
+            .contains_key(&format!("{FD_TARGET_PREFIX}0"))
+            || self
+                .shell_state
+                .env_vars
+                .contains_key(&format!("{FD_ACCESS_PREFIX}0"));
+        if !fd0_marked
+            && self
+                .shell_state
+                .env_vars
+                .get(FD0_STAGE_PIPE)
+                .map(String::as_str)
+                == Some("1")
+            && !matches!(
+                cmd.and_then(fd0_stdin_redirect_winner),
+                Some(
+                    crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::ReadWrite
+                        | crate::parser::RedirectKind::CloseInput
+                )
+            )
+        {
+            self.shell_state
+                .env_vars
+                .insert(format!("{FD_ACCESS_PREFIX}0"), "prw".to_string());
         }
     }
 
@@ -2604,6 +2676,40 @@ pub(in crate::executor) fn fd0_stdin_redirect_winner(
                 )
         })
         .map(|redirect| redirect.kind.clone())
+}
+
+/// rubash#1902: whether an fd-0 binding that stages the FUNCTION_STDIN
+/// mirror (bind_command_fd0_input's text branch, the flat-subshell
+/// region feed in ast_exec) leaves the pipeline-stage pipe fact
+/// (FD0_STAGE_PIPE) standing. The mirror rebinds fd 0 to the command's
+/// OWN input source, superseding the inter-stage pipe the fact
+/// describes — GNU applies the element's redirections after do_piping
+/// (execute_cmd.c:2620). The fact survives only when that source is
+/// itself a pipe in GNU: heredocs and here-strings are fed through
+/// pipes (redir.c here_document_to_fd), and a process-substitution
+/// target is a pipe whatever its transport (streamed endpoint or
+/// collected text). No fd-0 winner in the redirects list means the
+/// staged text came from the node's heredoc fields — pipes again.
+pub(in crate::executor) fn fd0_mirror_binding_keeps_pipe_fact(cmd: &CommandNode) -> bool {
+    let winner = cmd.redirects.iter().rev().find(|redirect| {
+        redirect.fd.unwrap_or(0) == 0
+            && matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Input
+                    | crate::parser::RedirectKind::DuplicateInput
+                    | crate::parser::RedirectKind::ReadWrite
+                    | crate::parser::RedirectKind::CloseInput
+                    | crate::parser::RedirectKind::HereDoc
+                    | crate::parser::RedirectKind::HereString
+            )
+    });
+    match winner {
+        None => true,
+        Some(redirect) => match redirect.kind {
+            crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => true,
+            _ => redirect.target.starts_with("<("),
+        },
+    }
 }
 
 pub(crate) fn write_stdout_bytes(output: &[u8]) -> io::Result<()> {

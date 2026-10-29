@@ -31,12 +31,19 @@ impl Executor {
             .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .cloned();
+        // rubash#1902: the element's fd 0 is the inter-stage pipe; the
+        // fd-fact sync reads the fact beside the mirror (restored with
+        // it below), like execute_pipeline_stage's installation.
+        let old_stage_pipe_fact = self.shell_state.env_vars.get(FD0_STAGE_PIPE).cloned();
         self.shell_state
             .env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
         self.shell_state
             .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        self.shell_state
+            .env_vars
+            .insert(FD0_STAGE_PIPE.to_string(), "1".to_string());
         // The staged mirror IS the stage's fd 0 (same invariant as
         // execute_pipeline_stage): GNU runs the lastpipe element in the
         // current shell with the pipe dup2'd onto fd 0
@@ -101,6 +108,11 @@ impl Executor {
                 self.fd_table.entries.remove(&0);
             }
         }
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FD0_STAGE_PIPE,
+            old_stage_pipe_fact,
+        );
         restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
         restore_optional_env_var(
             &mut self.shell_state.env_vars,

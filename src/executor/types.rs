@@ -56,6 +56,18 @@ pub const FD_PIPE_PREFIX: &str = "__RUBASH_FD_PIPE_";
 /// tombstone: /proc/self/fd/N is gone and every predicate fails.
 pub const FD_TARGET_PREFIX: &str = "__RUBASH_FD_TARGET_";
 pub const FD_ACCESS_PREFIX: &str = "__RUBASH_FD_ACCESS_";
+/// rubash#1902 (stage face): "1" while a pipeline stage's fd 0 is the
+/// staged FUNCTION_STDIN mirror standing in for the inter-stage pipe
+/// (GNU execute_cmd.c:2620 execute_pipeline + do_piping,
+/// execute_cmd.c:6373: the element's fd 0 IS the pipe). The stage
+/// funnels clear the fd-table slot for the mirror's duration, so the
+/// entries-driven fd-fact sync has no row to classify; the stage entry
+/// installs this fact beside the mirror (and restores it with the
+/// mirror), and sync_fd_alias_facts turns it into the fd-0 access mark
+/// only when no fd-table entry produced one. It rides env_vars like
+/// the marks themselves so stage clones (command_substitution_executor
+/// fork copies) inherit it verbatim.
+pub const FD0_STAGE_PIPE: &str = "__RUBASH_FD0_STAGE_PIPE";
 /// rubash#2042: marks a file-backed open descriptor for the
 /// `test -r /proc/<pid>/fd/N` face. GNU answers -r TRUE for every
 /// live fd magic link regardless of the fd's open mode (measured on

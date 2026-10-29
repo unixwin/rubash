@@ -999,6 +999,16 @@ impl Executor {
                             // stream's production schedule does not
                             // describe it (restored at the boundary).
                             self.timed_stdin = None;
+                            // rubash#1902: the same supersede as
+                            // bind_command_fd0_input's mirror branch —
+                            // the fed text is the region's own input
+                            // source, not an enclosing stage pipe,
+                            // unless the source is itself a pipe (the
+                            // wholesale boundary restore reverts this
+                            // with the rest of the state).
+                            if !super::shell_options::fd0_mirror_binding_keeps_pipe_fact(c) {
+                                self.shell_state.env_vars.remove(FD0_STAGE_PIPE);
+                            }
                         }
                         break;
                     }

@@ -25,6 +25,11 @@ pub(in crate::executor) struct CommandFd0InputGuard {
     /// shadowed (the rebound text is heredoc/herestring/loop input with
     /// no production timing of its own).
     saved_timed_stdin: Option<super::timed_input::SharedTimedInput>,
+    /// rubash#1902: the pipeline-stage fd-0 pipe fact in force when the
+    /// bind began; the mirror branch below may clear it (the rebound
+    /// mirror supersedes the inter-stage pipe), every other branch
+    /// leaves it, and restore puts the entry value back verbatim.
+    saved_stage_pipe_fact: Option<String>,
     /// rubash#1141: when fd 0 was bound to a process-substitution
     /// stream's endpoint, the stream's registered path — restore writes
     /// the endpoint's consumed offset back into the stream.
@@ -160,6 +165,10 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Option<CommandFd0InputGuard>, ExecuteError> {
+        // rubash#1902: snapshot the stage-pipe fact before any branch
+        // can touch it; the guard restores it verbatim (the mirror
+        // branch is the one branch that may clear it, below).
+        let saved_stage_pipe_fact = self.shell_state.env_vars.get(FD0_STAGE_PIPE).cloned();
         // rubash#1141: compound commands (brace group, select, loops)
         // dispatch BEFORE the simple-command materialization gate, so
         // their `< <(...)` redirect_in can still carry the raw
@@ -229,6 +238,7 @@ impl Executor {
                             // branch, so its timing stays valid; restore
                             // writes the same value back.
                             saved_timed_stdin: self.timed_stdin.clone(),
+                            saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
                             procsub_stream_path: None,
                         }));
                     }
@@ -260,6 +270,7 @@ impl Executor {
                             // branch, so its timing stays valid; restore
                             // writes the same value back.
                             saved_timed_stdin: self.timed_stdin.clone(),
+                            saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
                             procsub_stream_path: None,
                         }));
                     }
@@ -307,6 +318,7 @@ impl Executor {
                         saved_function_stdin,
                         saved_function_stdin_offset,
                         saved_timed_stdin: self.timed_stdin.clone(),
+                        saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
                         procsub_stream_path: Some(path),
                     }));
                 }
@@ -332,6 +344,7 @@ impl Executor {
                 // The text channel is untouched in this branch, so its
                 // timing stays valid; restore writes the same value back.
                 saved_timed_stdin: self.timed_stdin.clone(),
+                saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
                 procsub_stream_path: None,
             }));
         }
@@ -355,11 +368,25 @@ impl Executor {
         // text (heredoc / here-string / loop input) — the enclosing
         // stream's production schedule does not describe it.
         let saved_timed_stdin = self.timed_stdin.take();
+        // rubash#1902: the rebound mirror supersedes whatever fd 0 the
+        // enclosing scope had — including a pipeline stage's pipe, whose
+        // fact (FD0_STAGE_PIPE) the stage entry installed. The fact
+        // survives only when this binding's own source is a pipe in GNU
+        // (heredoc / here-string / process substitution); a file or
+        // device text source clears it for the scope's duration, and
+        // the guard restores the stage's fact at scope end. GNU's
+        // ordering is do_piping first, then the command's own
+        // redirections (execute_cmd.c:2620, redir.c
+        // do_redirection_internal).
+        if !super::shell_options::fd0_mirror_binding_keeps_pipe_fact(cmd) {
+            self.shell_state.env_vars.remove(FD0_STAGE_PIPE);
+        }
         Ok(Some(CommandFd0InputGuard {
             saved_fd0_entry,
             saved_function_stdin,
             saved_function_stdin_offset,
             saved_timed_stdin,
+            saved_stage_pipe_fact,
             procsub_stream_path: None,
         }))
     }
@@ -380,6 +407,11 @@ impl Executor {
             &mut self.shell_state.env_vars,
             FUNCTION_STDIN,
             guard.saved_function_stdin,
+        );
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FD0_STAGE_PIPE,
+            guard.saved_stage_pipe_fact,
         );
         restore_optional_env_var(
             &mut self.shell_state.env_vars,
