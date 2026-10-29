@@ -374,12 +374,23 @@ impl Executor {
         if is_closed_redirect_target(&self.expand_redirect_target(redirect)) {
             return None;
         }
-        if let Some(source) = redirect
-            .target
-            .strip_prefix("<(")
-            .and_then(|target| target.strip_suffix(')'))
+        // rubash#2024: recorded-span admission — only a span the parser saw
+        // unquoted is a real substitution; a QUOTED `"<(echo hi)"` loop
+        // input target is a literal filename (GNU parse.y records the span
+        // only for an unquoted `<(`; redir.c:916 redir_open then fails it
+        // ENOENT and the compound is abandoned by the literal-target error
+        // channel, compound_stdin_open_failure, before this staging runs).
+        if redirect.target.starts_with("<(")
+            && redirect.target.ends_with(')')
+            && super::external_setup::redirect_target_span_is_recorded(redirect)
         {
-            return self.process_substitution_output(source);
+            if let Some(source) = redirect
+                .target
+                .strip_prefix("<(")
+                .and_then(|target| target.strip_suffix(')'))
+            {
+                return self.process_substitution_output(source);
+            }
         }
 
         let target = self.expand_redirect_target(redirect);

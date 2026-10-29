@@ -169,23 +169,26 @@ impl Executor {
         // compound scope, so no stream registration or offset write-back
         // is needed. A body that fails to materialize falls through to
         // the existing paths unchanged.
-        // NOTE (rubash#1931 residual): this arm — like the fd walk in
-        // stdin_string_for_command and loop_redirect_input — matches
-        // the target's quote-stripped value, so a QUOTED "<(...)"
-        // compound input target is still spawned here even though GNU
-        // treats it as a literal filename. The simple-command path
-        // admits recorded spans only (external_setup's
-        // redirect_target_span_is_recorded); this compound bind layer
-        // cannot adopt that admission until it grows a literal-target
-        // error channel — declining the spawn today leaves the
-        // compound reading ambient stdin (a hang) instead of the
-        // redirection error GNU reports, which is worse than the
-        // current wrong answer. Recorded as a known adjacent
-        // divergence in the #1931 cluster report.
+        // NOTE (rubash#1931 residual, resolved by rubash#2024): this arm —
+        // like the fd walk in stdin_string_for_command and
+        // loop_redirect_input — used to match the target's quote-stripped
+        // value, so a QUOTED "<(...)" compound input target was spawned
+        // here even though GNU treats it as a literal filename. Admission
+        // is now the same recorded-span check the simple-command path runs
+        // (external_setup's redirect_target_span_is_recorded): the spawn
+        // happens only for a span the parser saw unquoted. A quoted form
+        // never reaches the arm through the compound wrapper — the
+        // literal-target error channel (compound_stdin_open_failure)
+        // reports `<(echo hi): No such file or directory` and abandons the
+        // compound before the bind (GNU redir.c:916 redir_open →
+        // redirection_error, compound terminated without running) — the
+        // gate keeps the arm itself from materializing a literal by value
+        // on the faces that reach it with the channel not yet run.
         if let Some(redirect) = &cmd.redirect_in {
             if redirect.fd.unwrap_or(0) == 0
                 && redirect.fd_var.is_none()
                 && redirect.kind == crate::parser::RedirectKind::Input
+                && super::external_setup::redirect_target_span_is_recorded(redirect)
             {
                 if let Some(source) = redirect
                     .target
@@ -1389,6 +1392,18 @@ impl Executor {
     /// (rubash#137). Mirrors loop_redirect_input's target resolution:
     /// closed targets (`<&-`), process substitutions (`<(`), /dev/fd
     /// aliases, /proc synthetic files and append-creates never fail here.
+    ///
+    /// rubash#2024: the `<(`-shaped skip is recorded-span admission, not a
+    /// raw-prefix blacklist — GNU records a process substitution only when
+    /// the parser saw the `<(` unquoted (parse.y read_token_word; the
+    /// executor-facing metadata is target_metadata.process_substitutions),
+    /// and a QUOTED `"<(echo hi)"` target is a literal filename that
+    /// redir.c:916 redir_open fails ENOENT:
+    /// `<(echo hi): No such file or directory`, compound abandoned, body
+    /// never runs. This probe IS the bind layer's literal-target error
+    /// channel: without it, declining a quoted span's spawn in
+    /// bind_command_fd0_input / loop_redirect_input falls through to the
+    /// ambient stdin and the compound hangs instead of failing.
     pub(in crate::executor) fn compound_stdin_open_failure(
         &mut self,
         cmd: &CommandNode,
@@ -1397,7 +1412,9 @@ impl Executor {
         if redirect.fd.unwrap_or(0) != 0 {
             return None;
         }
-        if redirect.target.starts_with("<(") {
+        if redirect.target.starts_with("<(")
+            && super::external_setup::redirect_target_span_is_recorded(redirect)
+        {
             return None;
         }
         let target = self.expand_redirect_target(redirect);
@@ -1478,10 +1495,15 @@ impl Executor {
         };
         match probe_error {
             None => None,
+            // rubash#2024: path_error shapes the GNU redirection failure
+            // text (`<target>: <strerror>`) and maps the
+            // ERROR_INVALID_NAME a `<`/`>`-bearing literal target
+            // (`"<(echo hi)"`) provokes on Windows to GNU's ENOENT —
+            // redirection_error (redir.c:135) prints the strerror text.
             Some(error) => Some(format!(
-                "{}{target}: {}",
+                "{}{}",
                 self.error_prefix(),
-                crate::posix_errors::message(&error)
+                crate::posix_errors::path_error(&target, error)
             )),
         }
     }
