@@ -323,9 +323,12 @@ fn kill_lingerer(process: &mut std::process::Child) {
 
 #[cfg(any(windows, unix))]
 fn wait_for_windows_pipeline_member(
+    executor: &mut Executor,
     process: &mut std::process::Child,
     downstream: Option<&mut std::process::Child>,
 ) -> Result<std::process::ExitStatus, ExecuteError> {
+    #[cfg(unix)]
+    let _ = executor;
     // Bash waits for the pipeline job to publish each member's status
     // (execute_cmd.c:2620 execute_pipeline forks every left element on
     // pipe(2); jobs.c:3064 wait_for blocks with no wall-clock cap) and never
@@ -370,7 +373,196 @@ fn wait_for_windows_pipeline_member(
             super::read_helpers::note_reaped_child_cpu(process);
             return Ok(lingerer_sigpipe_status());
         }
+        // rubash#2020: poll the engine signal mailbox while blocked — the
+        // Windows port of GNU's handler-installed foreground wait. jobs.c:3064
+        // wait_for installs wait_sigint_handler (jobs.c:3090-3101, handler at
+        // jobs.c:2908) for the wait so a ^C recorded by trap.c:545
+        // trap_handler is OBSERVED while the shell is blocked instead of
+        // sleeping through it, and the job settles 128+SIGINT. The unix
+        // kernel already records group deliveries during a plain wait, so
+        // this poll is Windows-only (unix-face behavior unchanged): the
+        // console event lands in the mailbox (kill.rs note_console_ctrl_c)
+        // but kills no member, so without the poll a pure-external pipeline
+        // ran to natural end before settling. Trapped deliveries are
+        // re-queued by observe and deferred to the command boundary
+        // (execute_cmd.c:643 run_pending_traps), exactly GNU's
+        // trap-completes-first rule.
+        #[cfg(not(unix))]
+        if let Err(error) = executor.observe_signals_while_blocked() {
+            // Untrapped terminating delivery: GNU's ^C is a process-group
+            // signal — every pipeline member dies of it and wait_for
+            // settles the job at once. The mailbox event killed nothing,
+            // so end what this wait can reach the way the group signal
+            // would have: tree-kill the member and its downstream, reap
+            // both (observe already recorded 128+sig in exit_code), and
+            // unwind. Members further right collapse on the broken pipe,
+            // like the lingerer path above.
+            kill_lingerer(process);
+            let _ = process.wait();
+            super::read_helpers::note_reaped_child_cpu(process);
+            if let Some(downstream) = downstream.as_deref_mut() {
+                kill_lingerer(downstream);
+                let _ = downstream.wait();
+                super::read_helpers::note_reaped_child_cpu(downstream);
+            }
+            return Err(error);
+        }
         std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Wait for a pipeline member whose output nobody else waits on — a
+/// pipeline's LAST member (its stdout is the shell's or the capture
+/// drain's, so no downstream can ever make it a broken-pipe lingerer and
+/// the hard-kill window of `wait_for_windows_pipeline_member` must not
+/// apply), or a sequential stage's external child while its output drains
+/// on a reader thread (`wait_pipeline_stage_output`).
+///
+/// rubash#2020: the wait polls the engine signal mailbox between slices
+/// on Windows — the same leg `wait_external_child` already serves for a
+/// single foreground external (#1996's face): jobs.c:3064 wait_for stays
+/// interruptible for a recorded ^C, and the job settles 128+SIGINT
+/// instead of running to the member's natural end. On unix the kernel
+/// delivers the group signal to the members themselves, so the plain
+/// blocking wait stays (unix-face behavior unchanged).
+#[cfg(any(windows, unix))]
+pub(in crate::executor) fn wait_pipeline_member_interruptibly(
+    executor: &mut Executor,
+    process: &mut std::process::Child,
+) -> Result<std::process::ExitStatus, ExecuteError> {
+    #[cfg(not(unix))]
+    {
+        const SLICE: std::time::Duration = std::time::Duration::from_millis(50);
+        loop {
+            if let Some(status) =
+                crate::fd::wait_child_slice(process, SLICE).map_err(ExecuteError::IoError)?
+            {
+                super::read_helpers::note_reaped_child_cpu(process);
+                return Ok(status);
+            }
+            if let Err(error) = executor.observe_signals_while_blocked() {
+                // The mailbox ^C killed no Windows member (the console
+                // event was recorded, not delivered as a group signal):
+                // end the job tree the way GNU's group ^C would have, so
+                // the wait settles 128+sig immediately instead of after
+                // the member's natural end.
+                kill_lingerer(process);
+                let _ = process.wait();
+                super::read_helpers::note_reaped_child_cpu(process);
+                return Err(error);
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        let _ = executor;
+        process.wait().map_err(ExecuteError::IoError)
+    }
+}
+
+/// Wait a sequential pipeline stage's external child while its captured
+/// stdout/stderr drain on reader threads, and hand back the usual
+/// `wait_with_output` shape. The Windows face replaces the inline blocking
+/// drain (the parent used to sit in `read_to_end` for the member's whole
+/// lifetime, where a recorded ^C was never observed — rubash#2020) with a
+/// `spawn_pipe_drain` pair plus `wait_pipeline_member_interruptibly`; on
+/// unix the plain `wait_with_output` stays byte-for-byte.
+#[cfg(any(windows, unix))]
+pub(in crate::executor) fn wait_pipeline_stage_output(
+    executor: &mut Executor,
+    child: &mut std::process::Child,
+) -> Result<std::process::Output, ExecuteError> {
+    #[cfg(not(unix))]
+    {
+        let stdout_drain = child
+            .stdout
+            .take()
+            .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
+        let stderr_drain = child
+            .stderr
+            .take()
+            .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
+        let status = match wait_pipeline_member_interruptibly(executor, child) {
+            Ok(status) => status,
+            Err(error) => {
+                // The tree-kill above closed the pipes, so both drains are
+                // already at EOF; fold them away before unwinding.
+                let _ = join_pipe_drain(stdout_drain);
+                let _ = join_pipe_drain(stderr_drain);
+                return Err(error);
+            }
+        };
+        Ok(std::process::Output {
+            status,
+            stdout: join_pipe_drain(stdout_drain)?,
+            stderr: join_pipe_drain(stderr_drain)?,
+        })
+    }
+    #[cfg(unix)]
+    {
+        let _ = executor;
+        // `wait_with_output` consumes the child, but this signature only
+        // borrows it, so spell out that call's own recipe instead: take
+        // both pipes, drain them on reader threads, wait, then join. The
+        // observable behavior is unchanged — the plain blocking
+        // drain-and-wait, with no mailbox polling on this face.
+        let stdout_drain = child
+            .stdout
+            .take()
+            .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
+        let stderr_drain = child
+            .stderr
+            .take()
+            .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
+        let status = match child.wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = join_pipe_drain(stdout_drain);
+                let _ = join_pipe_drain(stderr_drain);
+                return Err(ExecuteError::IoError(error));
+            }
+        };
+        Ok(std::process::Output {
+            status,
+            stdout: join_pipe_drain(stdout_drain)?,
+            stderr: join_pipe_drain(stderr_drain)?,
+        })
+    }
+}
+
+/// Wait a sequential pipeline stage's external child while ONE merged pipe
+/// (fd 1 and fd 2 on one open description — `2>&1 |`, `|&`) drains on a
+/// reader thread, and hand back (status, merged bytes) in true write
+/// order. The Windows face is rubash#2020's (see
+/// `wait_pipeline_stage_output`); on unix the plain blocking
+/// read-to-EOF-then-wait stays byte-for-byte.
+#[cfg(any(windows, unix))]
+pub(in crate::executor) fn wait_pipeline_stage_merged_output(
+    executor: &mut Executor,
+    child: &mut std::process::Child,
+    mut reader: impl std::io::Read + Send + 'static,
+) -> Result<(std::process::ExitStatus, Vec<u8>), ExecuteError> {
+    #[cfg(not(unix))]
+    {
+        let drain = spawn_pipe_drain(reader, PipelineDrainTarget::Collect);
+        let status = match wait_pipeline_member_interruptibly(executor, child) {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = join_pipe_drain(Some(drain));
+                return Err(error);
+            }
+        };
+        Ok((status, join_pipe_drain(Some(drain))?))
+    }
+    #[cfg(unix)]
+    {
+        let _ = executor;
+        let mut merged = Vec::new();
+        reader
+            .read_to_end(&mut merged)
+            .map_err(ExecuteError::IoError)?;
+        let status = child.wait().map_err(ExecuteError::IoError)?;
+        Ok((status, merged))
     }
 }
 use crate::executor::command_prepare::mixed_assignment_statement_admission;
@@ -2523,7 +2715,7 @@ impl Executor {
             let (head, tail) = processes.split_at_mut(index + 1);
             let member = head.last_mut().expect("member index inside pipeline");
             let downstream = tail.first_mut().expect("downstream member after index");
-            let status = wait_for_windows_pipeline_member(member, Some(downstream))?;
+            let status = wait_for_windows_pipeline_member(self, member, Some(downstream))?;
             results[index] = (
                 String::new(),
                 String::new(),
@@ -2532,7 +2724,7 @@ impl Executor {
         }
         let mut last = processes.pop().expect("pipeline has at least two stages");
         self.note_foreground_wait();
-        let status = last.wait().map_err(ExecuteError::IoError)?;
+        let status = wait_pipeline_member_interruptibly(self, &mut last)?;
         let stdout_bytes = join_pipe_drain(last_stdout)?;
         results[last_index] = (
             crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
@@ -3153,7 +3345,7 @@ impl Executor {
             let (head, tail) = processes.split_at_mut(index + 1);
             let member = head.last_mut().expect("member index inside pipeline");
             let downstream = tail.first_mut().expect("downstream member after index");
-            let status = wait_for_windows_pipeline_member(member, Some(downstream))?;
+            let status = wait_for_windows_pipeline_member(self, member, Some(downstream))?;
             results[index] = (
                 String::new(),
                 String::new(),
@@ -3165,7 +3357,7 @@ impl Executor {
         let mut last = processes.pop().expect("pipeline has at least two stages");
         debug_assert_eq!(processes.len(), last_index);
         self.note_foreground_wait();
-        let status = last.wait().map_err(ExecuteError::IoError)?;
+        let status = wait_pipeline_member_interruptibly(self, &mut last)?;
         let mut stdout_bytes = join_pipe_drain(last_stdout)?;
         stdout_bytes
             .extend(self.finish_dev_fd_operands(std::mem::take(&mut stage_dev_ops[last_index])));
@@ -3386,7 +3578,7 @@ impl Executor {
         for index in 0..tail_index {
             let (head, downstream) = processes.split_at_mut(index + 1);
             let member = head.last_mut().expect("member index inside pipeline");
-            let status = wait_for_windows_pipeline_member(member, downstream.first_mut())?;
+            let status = wait_for_windows_pipeline_member(self, member, downstream.first_mut())?;
             statuses.push(crate::executor::wait_status::process_exit_status(&status));
         }
 
