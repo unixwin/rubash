@@ -201,7 +201,13 @@ impl ShellInvocation {
                     out.interactive = true;
                     i += 1;
                 }
-                "-D" => {
+                "-D" | "+D" => {
+                    // GNU shell.c:960-964: case 'D' fires for either
+                    // sign — `bash +D` dumps exactly like `-D`
+                    // (oracle-probed on 5.3.20; the rubash binary's own
+                    // loop has had both arms since rubash#1977, this
+                    // shared parser only had the minus form, so a niu
+                    // `+D` was swallowed and the script executed).
                     out.dump_strings = true;
                     i += 1;
                 }
@@ -998,6 +1004,16 @@ mod tests {
         assert!(parsed.restricted);
         assert!(parsed.shell_flags.contains(&("verbose".into(), true)));
         assert_eq!(parsed.rc_file.as_deref(), Some("alt.rc"));
+    }
+
+    #[test]
+    fn parses_plus_d_as_dump_strings() {
+        // GNU shell.c:960-964: case 'D' fires for either sign
+        // (oracle-probed: `bash +D script` dumps, never executes).
+        let parsed = ShellInvocation::parse(&["+D".into(), "script.sh".into()]).unwrap();
+        assert!(parsed.dump_strings);
+        assert!(!parsed.dump_po);
+        assert_eq!(parsed.script.as_deref(), Some("script.sh"));
     }
 
     #[test]
