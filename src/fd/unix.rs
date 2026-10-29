@@ -591,7 +591,8 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
         cmd.current_dir(cwd);
     }
     // The spec's env IS the child environment (the caller composes it from
-    // std::env::vars() plus the shell's exported state, then strips what a
+    // the ingested process environment plus the shell's exported state,
+    // then strips what a
     // subshell must not inherit — e.g. the __RUBASH_TRAP* keys, POSIX
     // 2.11: caught traps reset in a subshell). Merging with this process's
     // environment instead would resurrect every stripped key as a stale

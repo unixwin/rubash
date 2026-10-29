@@ -52,9 +52,14 @@ pub(in crate::executor) fn is_shell_keyword(word: &str) -> bool {
 /// `docs/builtins.md` for the authoritative inventory (the doc-sync test
 /// below fails when this table and the doc drift apart).
 ///
-/// Not listed here on purpose (hidden fast-path builtins, which GNU Bash
-/// also reports as external commands): `env`, `sleep`, `dirname`,
-/// `basename` — see docs/builtins.md section 3.
+/// Not listed here on purpose: the fast-path names `sleep`, `dirname`,
+/// `basename` and the hidden identity/console tools `uname`, `arch`,
+/// `stty` — they are not builtins, so the builtin-table faces
+/// (compgen -b, enable) exclude them exactly as GNU's table excludes
+/// them; since #2036 S2 the describe faces (type / command -v)
+/// disclose their in-process claims explicitly instead of reporting
+/// them as plain files. `env` IS listed below: it is rubash's one
+/// extension builtin (docs/builtins.md section 2).
 const BUILTIN_NAMES: &[&str] = &[
     ".",
     ":",
@@ -254,8 +259,10 @@ mod builtin_doc_sync {
             assert!(
                 !BUILTIN_NAMES.contains(&name.as_str()),
                 "`{name}` is listed as fast-path in docs/builtins.md but also present in BUILTIN_NAMES; \
-                 fast-path builtins must stay out of the whitelist so introspection keeps \
-                 reporting them as external (matching GNU bash)"
+                 fast-path names must stay out of the whitelist because they are not builtins — \
+                 the builtin-table faces (compgen -b, enable) must not list them (matching GNU's \
+                 table); their in-process claims are disclosed by the describe faces instead \
+                 (type / command -v, #2036 S2)"
             );
         }
     }

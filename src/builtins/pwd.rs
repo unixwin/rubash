@@ -35,7 +35,9 @@ where
     W: Write,
     E: Write,
 {
-    let env_vars = env::vars().collect::<HashMap<_, _>>();
+    let env_vars: HashMap<_, _> = crate::executor::env_helpers::process_env_pairs()
+        .into_iter()
+        .collect();
     // Standalone entry (no session): the process cwd is the only cwd.
     let cwd = env::current_dir().unwrap_or_default();
     execute_with_env_and_io(args, &env_vars, &cwd, stdout, stderr)

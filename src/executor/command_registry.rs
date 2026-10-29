@@ -12,15 +12,22 @@
 //! synchronization reference (the WinuxCmd OPTION table row or GNU
 //! manual section the row must stay in sync with).
 //!
-//! **S1 is data-first and changes no behavior.** Nothing on any
-//! dispatch path reads this table yet; consumers project from it in
-//! S2 (introspection), S3 (the four dispatch tables) and S4 (pipeline
-//! and comsub faces). The consistency tests at the bottom of this file
-//! pin the table against the live code (the name predicates, the
-//! builtin lists, and literal scans of the scattered claim sites), so
-//! a claim added or dropped anywhere in the engine fails here until
-//! the registry is updated — the registry is the ledger, the code is
-//! still the truth it describes.
+//! **S1 was data-first and changed no behavior.** S2 lands the
+//! first consumers: the introspection faces (the `type`/`command -v`
+//! describe path, `compgen -b`, the `enable` lists and validation,
+//! the completion builtin/keyword/helptopic candidates, and the
+//! fallback describe lists in builtins/type.rs and builtins/command.rs)
+//! project their name lists from this table, and the describe path
+//! reads the per-row `introspection` projection — including the S2
+//! disclosure ruling for claimed names (`Introspection::Emulated`).
+//! Dispatch tables still do not read the registry; they project in
+//! S3 (the four dispatch tables) and S4 (pipeline and comsub faces).
+//! The consistency tests at the bottom of this file pin the table
+//! against the live code (the name predicates, the projected lists,
+//! and literal scans of the scattered claim sites), so a claim added
+//! or dropped anywhere in the engine fails here until the registry
+//! is updated — the registry is the ledger, the code is still the
+//! truth it describes.
 //!
 //! Performance contract (audit §5, C1/C2): the table is a `const`
 //! slice of plain data — no runtime registration, no locks, no hash
@@ -247,12 +254,22 @@ pub(crate) enum EnableN {
 pub(crate) enum Introspection {
     /// Reported as a shell builtin.
     Builtin,
-    /// Reported as the PATH file (or not found) — zero disclosure.
+    /// Disclosed as an in-process emulation of the resolved PATH body
+    /// (#2036 S2 ruling, reversing the S1-era zero-disclosure
+    /// contract): while the row's simple-command claim is live — the
+    /// name resolves and the face's gates are on — `type` prints
+    /// "X is a shell emulation of <path>", `type -t` prints
+    /// `emulation`, `command -V` prints the same sentence and
+    /// `command -v` the bare name. When the claim stands down, the
+    /// plain file answer (or not-found) returns, exactly as dispatch
+    /// behaves. Whether an emulated execution also writes a hash-table
+    /// resolution record is the separate `hash_record` field.
+    Emulated,
+    /// Reported as the PATH file (or not found): the row's claims are
+    /// shape-scoped (pipeline stage / command substitution only) or
+    /// display-only, so the simple-command question honestly gets the
+    /// file answer.
     External,
-    /// Reported as external, but an emulated execution writes a
-    /// PATH-resolution record into the hash table (the only
-    /// half-disclosure, audit §1.4).
-    ExternalWithHashRecord,
     /// Reported as a shell keyword.
     Keyword,
 }
@@ -500,7 +517,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::External,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::AllPlatforms,
         hash_record: HashRecord::No,
         slash_forms: &[],
@@ -515,7 +532,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::External,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::AllPlatforms,
         hash_record: HashRecord::No,
         slash_forms: &[],
@@ -530,14 +547,12 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::External,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::AllPlatforms,
         hash_record: HashRecord::No,
         slash_forms: &[],
         sync_ref: "WinuxCmd stty OPTION table; GNU coreutils 9.4 stty",
-        // audit §0-2: the docs fastpath-list machine block omits stty and
-        // the one-directional sync check does not flag the omission.
-        doc_id: "builtins.md#fastpath-list (omitted — audit gap)",
+        doc_id: "builtins.md#fastpath-list",
     },
     // -- fast paths: sleep / dirname / basename --
     CommandRow {
@@ -551,7 +566,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::External,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::AllPlatforms,
         hash_record: HashRecord::No,
         slash_forms: &[],
@@ -566,7 +581,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::External,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::AllPlatforms,
         hash_record: HashRecord::No,
         slash_forms: &[],
@@ -584,7 +599,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::External,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::AllPlatforms,
         hash_record: HashRecord::No,
         slash_forms: &[],
@@ -600,7 +615,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::ExternalWithHashRecord,
+        introspection: Introspection::Emulated,
         // The host flag gates the simple-command face and, since
         // rubash#2066, the pipeline stage arm; the comsub faces are
         // not flag-gated (audit §1.4/§1.5/§1.6).
@@ -618,7 +633,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::ExternalWithHashRecord,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::HostFlagExternalFileBuiltins,
         hash_record: HashRecord::Yes,
         slash_forms: &[],
@@ -633,7 +648,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::ExternalWithHashRecord,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::HostFlagExternalFileBuiltins,
         hash_record: HashRecord::Yes,
         slash_forms: &[],
@@ -648,7 +663,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::ExternalWithHashRecord,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::HostFlagExternalFileBuiltins,
         hash_record: HashRecord::Yes,
         slash_forms: &[],
@@ -663,7 +678,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::ExternalWithHashRecord,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::HostFlagExternalFileBuiltins,
         hash_record: HashRecord::Yes,
         slash_forms: &[],
@@ -678,7 +693,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::ExternalWithHashRecord,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::HostFlagExternalFileBuiltins,
         hash_record: HashRecord::Yes,
         slash_forms: &[],
@@ -693,7 +708,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::ExternalWithHashRecord,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::HostFlagExternalFileBuiltins,
         hash_record: HashRecord::Yes,
         slash_forms: &[],
@@ -712,7 +727,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::InvertedSed, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::ExternalWithHashRecord,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::HostFlagExternalFileBuiltins,
         hash_record: HashRecord::Yes,
         slash_forms: &[],
@@ -727,7 +742,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::ExternalWithHashRecord,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::HostFlagExternalFileBuiltins,
         hash_record: HashRecord::Yes,
         slash_forms: &[],
@@ -742,7 +757,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::ExternalWithHashRecord,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::HostFlagExternalFileBuiltins,
         hash_record: HashRecord::Yes,
         slash_forms: &[SlashForm::new("/bin/tty", SlashKind::Emulated), SlashForm::new("/usr/bin/tty", SlashKind::Emulated)],
@@ -757,7 +772,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
-        introspection: Introspection::External,
+        introspection: Introspection::Emulated,
         cfg: CfgGate::WindowsOnly,
         // tput records through its own record_tput_resolution, not the
         // layer's hash set (audit §1.4 — the two lists in the layer have
@@ -765,7 +780,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         hash_record: HashRecord::Separate,
         slash_forms: &[SlashForm::new("/bin/tput", SlashKind::Emulated), SlashForm::new("/usr/bin/tput", SlashKind::Emulated)],
         sync_ref: "WinuxCmd tput OPTION table (registration synopsis underreports: -T exists); ncurses tput",
-        doc_id: "builtins.md §4.1 (tput undocumented there — audit gap)",
+        doc_id: "builtins.md §4.1",
     },
     // -- pipeline-only arms --
     CommandRow {
@@ -934,6 +949,61 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
 /// introspection-speed contexts only, per audit §5 C1/C2).
 pub(crate) fn registry_row(name: &str) -> Option<&'static CommandRow> {
     COMMAND_REGISTRY.iter().find(|row| row.name == name)
+}
+
+/// The POSIX special-builtin set, owned by the registry since S2.
+///
+/// GNU's table is name-based, not a flag on the `.` row: the names in
+/// `special_builtins[]` (bash 5.3 `builtins/mkbuiltins.c:148-154`)
+/// get the SPECIAL flag wherever they appear (`mkbuiltins.c:819-820`),
+/// so `source` — the synonym spelling — is special exactly like `.`.
+/// Measured on GNU bash 5.3.20: `enable -s` lists these 16 names, and
+/// in POSIX mode `type` reports each as "a special shell builtin"
+/// (`builtins/type.def:262-270` looks the class up in the builtin
+/// table before functions).
+///
+/// The executor's execution-side predicate
+/// (`support_names::is_posix_special_builtin`) still lacks `source`;
+/// the introspection faces project from THIS set (KD-2, report side
+/// closed in S2), and the consistency tests below pin the remaining
+/// predicate difference at exactly `{"source"}` for S3.
+pub(crate) const SPECIAL_BUILTINS: &[&str] = &[
+    ".", ":", "break", "continue", "eval", "exec", "exit", "export", "readonly", "return", "set",
+    "shift", "source", "times", "trap", "unset",
+];
+
+/// Whether `name` is a POSIX special builtin (registry projection;
+/// report faces only in S2 — dispatch keeps its own predicate).
+pub(crate) fn is_special_builtin(name: &str) -> bool {
+    SPECIAL_BUILTINS.contains(&name)
+}
+
+/// The builtin name list every introspection face projects (registry
+/// rows whose introspection answer is Builtin), in registry order —
+/// the order BUILTIN_NAMES, the old complete.rs SHELL_BUILTINS and
+/// the old enable.rs ALL_BUILTINS all agreed on (KD-1: the copies
+/// lacked `env`; the projection includes it).
+pub(crate) fn introspection_builtin_names() -> Vec<&'static str> {
+    COMMAND_REGISTRY
+        .iter()
+        .filter(|row| row.introspection == Introspection::Builtin)
+        .map(|row| row.name)
+        .collect()
+}
+
+/// Whether `name` belongs to the introspection builtin set.
+pub(crate) fn is_introspection_builtin(name: &str) -> bool {
+    registry_row(name).is_some_and(|row| row.introspection == Introspection::Builtin)
+}
+
+/// The shell keyword list the completion faces project (registry
+/// rows of class Keyword), in registry order.
+pub(crate) fn introspection_keyword_names() -> Vec<&'static str> {
+    COMMAND_REGISTRY
+        .iter()
+        .filter(|row| row.class == ClaimClass::Keyword)
+        .map(|row| row.name)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1228,40 +1298,157 @@ mod registry_consistency {
 
     #[test]
     fn shell_builtins_drift_is_exactly_env() {
-        // KNOWN DRIFT KD-1 (audit M23, extended by S1): TWO more
-        // hand-maintained copies of the GNU-61 list exist outside
-        // BUILTIN_NAMES — complete.rs SHELL_BUILTINS (feeds
-        // compgen -b) and enable.rs ALL_BUILTINS (feeds enable -a and
-        // enable's name validation). Both lack rubash's one extension
-        // builtin, so `env` is a builtin for `type` but invisible to
-        // compgen -b and refused by enable. The registry follows
-        // BUILTIN_NAMES; S2 unifies the introspection source.
-        let builtins = class_rows(ClaimClass::Builtin);
+        // KD-1 / KD-2, closed on the report side by S2 (this test was
+        // the drift pin in S1; it now pins the unified projection).
+        //
+        // KD-1: complete.rs SHELL_BUILTINS (compgen -b) and enable.rs
+        // ALL_BUILTINS (enable -a + validation) were hand copies of
+        // the GNU-61 list lacking `env`. Both consts are gone; the
+        // faces project from the registry. The source scans below keep
+        // a hand copy from silently returning, and the runtime checks
+        // pin the completion face's accessors to the registry order.
         for (src, marker) in [
             (SRC_COMPLETE, "const SHELL_BUILTINS"),
+            (SRC_COMPLETE, "const SHELL_KEYWORDS"),
+            (SRC_COMPLETE, "const HELP_TOPIC_COMPLETIONS"),
             (SRC_ENABLE, "const ALL_BUILTINS"),
+            (SRC_ENABLE, "const SPECIAL_BUILTINS"),
         ] {
-            let list = const_block(src, marker);
-            assert_eq!(list.len(), 61, "{marker}");
-            let only_registry: BTreeSet<String> = builtins.difference(&list).cloned().collect();
-            let only_list: BTreeSet<String> = list.difference(&builtins).cloned().collect();
-            assert_eq!(only_registry, set(&["env"]), "{marker}");
-            assert!(only_list.is_empty(), "{marker} extras: {only_list:?}");
+            assert!(!src.contains(marker), "hand list returned: {marker}");
         }
-        // KNOWN DRIFT KD-2 (S1 find, not in the audit map): enable.rs
-        // keeps a THIRD special-builtin list whose symmetric
-        // difference with the executor predicate's set is exactly
-        // `source` — GNU marks `source` (the `.` synonym) special in
-        // builtins.def, so which side is wrong is an S2/S3
-        // adjudication, not an S1 alignment.
-        let special = const_block(SRC_ENABLE, "const SPECIAL_BUILTINS");
-        let rows: BTreeSet<String> = COMMAND_REGISTRY
+        assert_eq!(
+            crate::builtins::complete::shell_builtin_names(),
+            introspection_builtin_names()
+        );
+        assert_eq!(
+            crate::builtins::complete::shell_keyword_names(),
+            introspection_keyword_names()
+        );
+        // `env` is in the projection (the KD-1 fix): 62 names.
+        let projection = introspection_builtin_names();
+        assert_eq!(projection.len(), 62);
+        assert!(projection.contains(&"env"));
+
+        // KD-2: the registry's special-builtin set is GNU's 16-name
+        // table (mkbuiltins.c:148-154; `enable -s` measurement on GNU
+        // bash 5.3.20), including `source`. The execution-side
+        // predicate still lacks `source` — that remainder is S3's,
+        // pinned here at exactly {"source"} so S3's alignment diffs
+        // against it explicitly.
+        assert_eq!(SPECIAL_BUILTINS.len(), 16);
+        let special = set(SPECIAL_BUILTINS);
+        let builtins = class_rows(ClaimClass::Builtin);
+        assert!(special.is_subset(&builtins), "special set must be builtins");
+        let predicate_rows: BTreeSet<String> = COMMAND_REGISTRY
             .iter()
             .filter(|r| r.function_shadow == FunctionShadow::PosixSpecialBlock)
             .map(|r| r.name.to_string())
             .collect();
-        let diff: BTreeSet<String> = special.symmetric_difference(&rows).cloned().collect();
+        let diff: BTreeSet<String> = special
+            .symmetric_difference(&predicate_rows)
+            .cloned()
+            .collect();
         assert_eq!(diff, set(&["source"]));
+    }
+
+    #[test]
+    fn claim_classes_project_introspection_disclosure() {
+        // S2 disclosure ruling: the simple-command claim classes
+        // (HiddenFastpath / Fastpath / EmulatedExternal) project
+        // Introspection::Emulated — the describe faces disclose the
+        // in-process claim while it is live. The shape-scoped classes
+        // (pipeline-only, comsub-only, the diff shortcut) and the
+        // display bridge keep Introspection::External: `type` answers
+        // the simple-command question, and those rows make no
+        // simple-command claim to disclose.
+        let emulated: BTreeSet<String> = COMMAND_REGISTRY
+            .iter()
+            .filter(|r| r.introspection == Introspection::Emulated)
+            .map(|r| r.name.to_string())
+            .collect();
+        assert_eq!(
+            emulated,
+            set(&[
+                "uname", "arch", "stty", "sleep", "dirname", "basename", "cat", "chmod", "cp",
+                "mkdir", "mkfifo", "rm", "rmdir", "sed", "touch", "tty", "tput",
+            ])
+        );
+        for row in COMMAND_REGISTRY {
+            match row.class {
+                ClaimClass::HiddenFastpath
+                | ClaimClass::Fastpath
+                | ClaimClass::EmulatedExternal => {
+                    assert_eq!(row.introspection, Introspection::Emulated, "{}", row.name)
+                }
+                ClaimClass::PipelineOnly
+                | ClaimClass::ComsubOnly
+                | ClaimClass::Shortcut
+                | ClaimClass::DisplayBridge => {
+                    assert_eq!(row.introspection, Introspection::External, "{}", row.name)
+                }
+                ClaimClass::Builtin => {
+                    assert_eq!(row.introspection, Introspection::Builtin, "{}", row.name)
+                }
+                ClaimClass::Keyword => {
+                    assert_eq!(row.introspection, Introspection::Keyword, "{}", row.name)
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn help_topics_match_registry_projection() {
+        // The help face's topic set is prose data (help_texts.rs) and
+        // cannot be generated from the registry, so it is pinned
+        // against the projection instead: every builtin row is a
+        // topic (S2 added the missing `env` topic — env was a builtin
+        // with no help face), the keyword topics are the head words
+        // GNU has topics for, and the only non-registry topics are
+        // the four measured GNU extras. GNU bash 5.3.20 measurements:
+        // `compgen -A helptopic` lists exactly this equation's
+        // GNU part (77 names), and `help then|fi|esac|do|in|]]|}`
+        // each fail with "no help topics match" — the closing words
+        // of compound commands are not topics in GNU either.
+        let topics = crate::builtins::help::help_topic_names();
+        let topic_set: BTreeSet<String> = topics.iter().map(|s| s.to_string()).collect();
+        assert_eq!(topics.len(), topic_set.len(), "duplicate help topics");
+        let mut expected = class_rows(ClaimClass::Builtin);
+        for head in [
+            "!",
+            "[[ ... ]]",
+            "case",
+            "coproc",
+            "for",
+            "function",
+            "if",
+            "select",
+            "time",
+            "until",
+            "while",
+            "{ ... }",
+        ] {
+            expected.insert(head.to_string());
+        }
+        for extra in ["%", "(( ... ))", "for ((", "variables"] {
+            expected.insert(extra.to_string());
+        }
+        assert_eq!(topic_set, expected);
+        // Every keyword row is either a topic (literally or in its
+        // bracket display form) or a measured GNU non-topic.
+        let non_topics = set(&[
+            "then", "else", "elif", "fi", "esac", "do", "done", "in", "]]", "}",
+        ]);
+        for name in class_rows(ClaimClass::Keyword) {
+            let display = match name.as_str() {
+                "[[" => "[[ ... ]]".to_string(),
+                "{" => "{ ... }".to_string(),
+                other => other.to_string(),
+            };
+            assert!(
+                topic_set.contains(&display) || non_topics.contains(&name),
+                "keyword {name} has no help-topic accounting"
+            );
+        }
     }
 
     // ------------------------------------------- T3/T4/T5: predicates

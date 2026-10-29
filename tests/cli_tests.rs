@@ -4067,7 +4067,12 @@ fn c_command_substitution_captures_type_t_output_without_leak() {
         .expect("run rubash");
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "A=[file]\n");
+    // #2036 S2 disclosure: `cat` carries a live in-process claim in
+    // the bare binary (emulation layer on, cat resolvable), so
+    // `type -t cat` reports `emulation`, not `file`. (This pin's
+    // subject is the capture mechanics; the value follows the
+    // introspection contract.)
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "A=[emulation]\n");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 

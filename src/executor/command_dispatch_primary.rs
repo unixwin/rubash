@@ -236,8 +236,20 @@ impl Executor {
                 }
             }
             "env" => {
-                self.execute_env_command(cmd)?;
-                Ok(())
+                // #2036 S2 (KD-1): env is in BUILTIN_NAMES and, now
+                // that enable's list projects from the same registry,
+                // it is enable-managed like every other builtin. The
+                // per-arm `enable -n` check the sibling arms carry was
+                // never wired here (enable refused the name outright,
+                // so the disabled set could never contain it); without
+                // it, `enable -n env` would report success while
+                // dispatch ignored the disable.
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "env") {
+                    self.execute_external(cmd)
+                } else {
+                    self.execute_env_command(cmd)?;
+                    Ok(())
+                }
             }
             "set" => self.execute_set_command(cmd),
             "getopts" => {
