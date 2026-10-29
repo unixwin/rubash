@@ -125,6 +125,14 @@ jobs:
       - name: Run regression suite (goldens, snapshots, perf canaries)
         run: cargo test --test regression
 
+      # rubash#1026 hard gate (RC audit item 6, ruled 2026-10-28): the live
+      # /dev/tcp loopback pin (exec 3<> + read -u 3) lives in
+      # tests/issue1025_1026_1068_1103_1359_redirect_fd_regressions.rs,
+      # which no CI job executes — its Windows face was never CI-proven.
+      # Run it as its own step so a red here fails this job on its own.
+      - name: Run issue1026 dev/tcp loopback pin (hard gate)
+        run: cargo test --test issue1025_1026_1068_1103_1359_redirect_fd_regressions issue_1026_dev_tcp_live_endpoint_round_trips -- --exact
+
       # Re-record protocol runner leg (see tests/regression.rs module
       # header): record the suite snapshots with THIS runner's engine and
       # upload the bytes. When the comparison step above fails because the

@@ -601,3 +601,28 @@ fn close_runs_exit_trap_and_persistent_procsub_delivery() {
     assert_eq!(read(&dir, "trap.txt"), "trapped\n");
     assert_eq!(read(&dir, "proc.txt"), "hello-procsub\n");
 }
+
+// ---------------------------------------------------------------------------
+// niubash#627: the fd-table enumeration face host completion reads.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn open_fds_reflect_the_session_fd_table() {
+    let mut session = Session::builder().build().expect("session builds");
+    // A fresh session holds exactly the standard trio.
+    assert_eq!(session.executor().open_fds(), vec![0, 1, 2]);
+    // `exec 3>` is a persistent redirection: the fd joins the table
+    // (and therefore the /dev/fd namespace completion enumerates).
+    let outcome = session
+        .run("exec 3>/dev/null", &opts())
+        .expect("exec run succeeds");
+    assert_eq!(outcome.status, 0);
+    assert_eq!(session.executor().open_fds(), vec![0, 1, 2, 3]);
+    // Closing it removes it again — the dynamic tier tracks the
+    // table, not a name list.
+    let outcome = session
+        .run("exec 3>&-", &opts())
+        .expect("close run succeeds");
+    assert_eq!(outcome.status, 0);
+    assert_eq!(session.executor().open_fds(), vec![0, 1, 2]);
+}

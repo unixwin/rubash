@@ -300,6 +300,82 @@ impl Executor {
     /// the in-band carrier the way remove_quoted_nulls drops CTLNUL at
     /// dequote (subst.c:4795+); no [[ ]] context consumes the field-
     /// splitting semantics it encodes.
+    /// rubash#1932: materialize the recorded process-substitution
+    /// spans of a `[[ ]]` operand into `/dev/fd/N` words, the way GNU
+    /// cond_expand_word -> expand_word realizes every operand
+    /// (subst.c process_substitute runs the body and the word becomes
+    /// the fd path) — not only the whole-operand file-test forms
+    /// `conditional_process_substitution_unary` covers. A span in a
+    /// string operand (`[[ <(cmd) =~ fd ]]`, `[[ -n <(cmd) ]]`, an
+    /// embedded `a<(cmd)`) must run its body and splice the fd word
+    /// before the comparison ever sees the operand. Only spans the
+    /// parser recorded for THIS word materialize (the same table the
+    /// nounset mask consults), so a quoted `"<(cmd)"` operand stays
+    /// literal text. The fd words and output carriers register in the
+    /// same command-scoped stores the unary path uses; the
+    /// conditional wrapper drains both.
+    fn materialize_conditional_procsub_spans(&mut self, word: &str) -> String {
+        if !word.contains("<(") && !word.contains(">(") {
+            return word.to_string();
+        }
+        let Some((_, targets)) = self
+            .conditional_procsub_span_targets
+            .iter()
+            .find(|(arg, _)| arg == word)
+        else {
+            return word.to_string();
+        };
+        let targets: Vec<String> = targets.clone();
+        if targets.is_empty() {
+            return word.to_string();
+        }
+        let substitutions = crate::parser::WordMetadata::new(0, word.to_string(), word.to_string())
+            .process_substitutions;
+        let mut materialized = word.to_string();
+        let mut cursor = 0usize;
+        for substitution in substitutions {
+            if !targets.contains(&substitution.target) {
+                continue;
+            }
+            let search_from = cursor.min(materialized.len());
+            let Some(start) = materialized[search_from..]
+                .find(&substitution.target)
+                .map(|offset| offset + search_from)
+            else {
+                continue;
+            };
+            let end = start + substitution.target.len();
+            let word_form = if substitution.output {
+                let Ok(path) = self.empty_process_substitution_temp() else {
+                    continue;
+                };
+                let form = self.process_substitution_output_fd_word(&path);
+                let line = self
+                    .shell_state
+                    .env_vars
+                    .get("__RUBASH_CURRENT_LINE")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|value| *value > 0);
+                self.conditional_output_procsubs
+                    .push((path, substitution.source.clone(), line));
+                form
+            } else if let Some(form) =
+                self.process_substitution_child_fd_word(&substitution.source, None)
+            {
+                form
+            } else if let Some(output) =
+                self.process_substitution_output_bytes(&substitution.source)
+            {
+                self.process_substitution_fd_word(&output)
+            } else {
+                continue;
+            };
+            materialized.replace_range(start..end, &word_form);
+            cursor = start + word_form.len();
+        }
+        materialized
+    }
+
     fn expand_conditional_word(&mut self, word: &str) -> String {
         // rubash#1422: an earlier operand already hit the DISCARD-class
         // error below; GNU abandons the conditional at the first bad
@@ -307,6 +383,12 @@ impl Executor {
         if self.conditional_expansion_error_status.get().is_some() {
             return String::new();
         }
+        // rubash#1932: realize the operand's recorded procsub spans
+        // first — the nounset scan below then judges the fd words (no
+        // span text remains to mask), and the expansion consumes the
+        // same realized text GNU compares.
+        let materialized = self.materialize_conditional_procsub_spans(word);
+        let word = materialized.as_str();
         // GNU cond.c cond_expand_word -> expand_word: a nounset unbound
         // variable (or another FATAL expansion error) in a [[ ]]
         // operand raises FORCE_EOF, exactly as in a simple command's

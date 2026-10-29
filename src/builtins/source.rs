@@ -175,7 +175,12 @@ where
         }
     }
 
-    if matches!(filename, "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0") {
+    // The fd-0 spelling judgment is the registry's (issue rubash#1973):
+    // `fd_alias_target == Some(0)` carries exactly the canonical
+    // spellings the literal table matched — GNU rejects the leading-zero
+    // family on every face, so `. /dev/fd/00` falls through to the
+    // filesystem open and fails ENOENT there, like the oracle.
+    if crate::special_paths::fd_alias_target(filename) == Some(0) {
         // GNU source.def opens /dev/stdin, which in a pipeline is the pipe
         // read end inherited as stdin ("echo x | . /dev/stdin" from
         // source6.sub). Read the shell's stdin instead of resolving a

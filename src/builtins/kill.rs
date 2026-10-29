@@ -848,15 +848,14 @@ pub fn send_signal(pid: u32, signal: i32) -> Result<(), &'static str> {
 ///
 /// Unix: no-op — the kernel `signal_hook` backend already receives SIGINT
 /// for the process; a second injection would double-dispatch.
-pub fn note_console_ctrl_c() {
+pub(crate) fn note_console_ctrl_c() {
     // PLAN row 11 (M-3): this hook is engine plumbing now. The
     // consumed faces are `script_driver::inject_console_ctrl_c`
     // (host handlers) and `Executor::inject_signal` /
-    // `Executor::interrupt` (Tier A). The item stays `pub` only
-    // until niubash's migration lands on master — the pairing
-    // compile compiles niubash master against this tree — and is
-    // demoted to pub(crate) in the follow-up change recorded in
-    // the API ledger.
+    // `Executor::interrupt` (Tier A). Demoted to `pub(crate)`
+    // in the Session-migration follow-up recorded in the API
+    // ledger: niubash's migration consumes the faces above, so
+    // nothing outside this crate names the hook any more.
     #[cfg(not(unix))]
     {
         // Linux mailbox wire format: SIGINT = 2.
@@ -3294,7 +3293,9 @@ pub const BACKGROUND_WRAPPER_FLAG: &str = "--internal-bg-wrapper=";
 /// rubash#873: marks that THIS process's command-line face understands the
 /// background-wrapper handshake — set unconditionally at the top of
 /// `consume_background_wrapper_handshake`, which rubash's own main() calls
-/// at every startup (embedders adopt the same one call). The wrapper spawn
+/// at every startup through the Tier B face
+/// `script_driver::consume_background_wrapper_handshake` (embedders adopt
+/// the same one call through that face). The wrapper spawn
 /// site consults it before splicing `BACKGROUND_WRAPPER_FLAG` into a
 /// respawned child's argv: a host that never consumes must never RECEIVE
 /// the flag, or the child's option parser rejects it and the background
@@ -3385,7 +3386,7 @@ pub fn new_background_wrapper_nonce() -> String {
 /// Hosts that adopt this call opt into receiving the argv channel on their
 /// own wrapper respawns; hosts that never call it get env-only respawns and
 /// the flag never reaches their CLI.
-pub fn consume_background_wrapper_handshake(args: &mut Vec<String>) {
+pub(crate) fn consume_background_wrapper_handshake(args: &mut Vec<String>) {
     BACKGROUND_WRAPPER_FLAG_CONSUMER.store(true, std::sync::atomic::Ordering::Release);
     let nonce = match args
         .get(1)

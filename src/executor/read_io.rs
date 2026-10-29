@@ -747,6 +747,20 @@ impl Executor {
             // GNU read receives raw bytes from redir.c-opened inputs. Keep
             // invalid UTF-8 inside the RAW_BYTE_MARKER carrier instead of
             // dropping the whole record at this boundary.
+            // rubash#1937: a synthetic-link target resolving to a
+            // directory (/proc/self/cwd) — GNU's read fails EISDIR on
+            // the descriptor itself (read.def:911). Record the read
+            // error so the builtin renders
+            // `read: 0: read error: Is a directory` instead of serving
+            // the mapped literal path's unrelated failure. The facts
+            // are a stub off Windows, where the real directory read
+            // below produces the same failure natively.
+            if crate::proc_vfs::proc_unary_facts(&expanded_target)
+                .is_some_and(|facts| facts.is_link && facts.link_target_is_dir)
+            {
+                self.fd_table.read_error = Some("Is a directory".to_string());
+                return None;
+            }
             // Q11 /proc P1: synthetic files are served before the filesystem
             // (docs/proc-vfs-plan.md hook B).
             let input = if let Some(bytes) =
@@ -787,7 +801,21 @@ impl Executor {
         // Here-strings are command-local input. Persistent virtual fds must
         // bypass `stdin_string_for_command`, whose legacy remaining-text view
         // does not advance the shared fd cursor.
-        if cmd.here_string.is_some() {
+        // rubash#1966: the body may live in EITHER store — the parser
+        // places an unnumbered `<<<` in cmd.here_string but a numbered
+        // `0<<<` (and `0<<`) in heredoc_redirects with fd == Some(0)
+        // (parser/redirections.rs assign_here_string_redirect_raw).
+        // stdin_string_for_command_mut resolves both stores (its
+        // fd-0-winner logic owns the ordering); this funnel's admission
+        // check looked only at the unnumbered field, so a numbered
+        // here-string was invisible to `read` and the builtin fell
+        // through to the process stdin (EOF / a block) instead.
+        let has_fd0_body = cmd.here_string.is_some()
+            || cmd
+                .heredoc_redirects
+                .iter()
+                .any(|redirect| redirect.fd == Some(0));
+        if has_fd0_body {
             if let Some(line) = self.stdin_string_for_command_mut(cmd) {
                 self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
                     &line,

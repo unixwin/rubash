@@ -170,11 +170,17 @@ fn golden_nvm_load() {
     nvm_load_timing_gate();
 }
 
-/// One timed `source ./nvm.sh` run in the gate scratch dir; None when
-/// the run fails, times out, or the program cannot be spawned.
-fn nvm_load_timed_run(program: &Path, dir: &Path, limit: Duration) -> Option<Duration> {
+/// One timed run of an arbitrary `-c` script in the gate scratch dir;
+/// None when the run fails, times out, or the program cannot be
+/// spawned.
+fn nvm_load_timed_run_script(
+    program: &Path,
+    dir: &Path,
+    script: &str,
+    limit: Duration,
+) -> Option<Duration> {
     let mut cmd = Command::new(program);
-    cmd.args(["-c", ". ./nvm.sh"])
+    cmd.args(["-c", script])
         .current_dir(dir)
         .env_clear()
         .env("PATH", minimal_path())
@@ -220,17 +226,6 @@ fn gnu_bash_oracle() -> Option<PathBuf> {
 }
 
 fn nvm_load_timing_gate() {
-    // Ratio asserted below, calibrated on the post-#1940-fix tree
-    // (debug build, loaded 2-core dev box): rubash best-of-5 ~0.9 s
-    // vs GNU best-of-5 ~0.035 s, a ~26x gap. The bound keeps ~2x
-    // headroom over that while still failing the pre-fix tree
-    // (~114x). The absolute slack absorbs oracle startup noise on
-    // fast machines where the GNU run is only a few tens of
-    // milliseconds.
-    const MAX_RATIO: f64 = 50.0;
-    const SLACK: Duration = Duration::from_millis(250);
-    const REPS: usize = 5;
-
     let _guard = heavy_lock();
     let Some(oracle) = gnu_bash_oracle() else {
         eprintln!("golden_nvm_load timing gate: no GNU bash oracle found; skipped");
@@ -243,36 +238,67 @@ fn nvm_load_timing_gate() {
     std::fs::copy(root.join(CORPUS_DIR).join("nvm/nvm.sh"), dir.join("nvm.sh"))
         .expect("copy nvm corpus");
 
+    nvm_load_timing_gate_script(&oracle, &dir, ". ./nvm.sh", "plain");
+    // rubash#1961 alias-arm variant: the SAME load with one alias
+    // preset and expand_aliases on. The alias never occurs in nvm.sh,
+    // so the sourced bytes are identical — only the reader arm differs
+    // (pre-#1961 that arm re-derived group completeness per candidate
+    // line and hung past 120 s where the plain arm took ~1 s). The
+    // trailing `ll` command is the non-vacuity tripwire: the run only
+    // exits 0 when alias expansion was actually live for the driver,
+    // so the timing below cannot pass by silently taking the plain
+    // arm. Newlines separate the driver lines because an alias defined
+    // on the same line as its use is not yet in effect (parse.y reads
+    // one command at a time).
+    nvm_load_timing_gate_script(
+        &oracle,
+        &dir,
+        "alias ll='echo alias-live'\nshopt -s expand_aliases\n. ./nvm.sh\nll >/dev/null",
+        "alias-arm",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn nvm_load_timing_gate_script(oracle: &Path, dir: &Path, script: &str, label: &str) {
+    // Ratio asserted below, calibrated on the post-#1940-fix tree
+    // (debug build, loaded 2-core dev box): rubash best-of-5 ~0.9 s
+    // vs GNU best-of-5 ~0.035 s, a ~26x gap. The bound keeps ~2x
+    // headroom over that while still failing the pre-fix tree
+    // (~114x). The absolute slack absorbs oracle startup noise on
+    // fast machines where the GNU run is only a few tens of
+    // milliseconds.
+    const MAX_RATIO: f64 = 50.0;
+    const SLACK: Duration = Duration::from_millis(250);
+    const REPS: usize = 5;
+
     let rubash = PathBuf::from(env!("CARGO_BIN_EXE_rubash"));
     let mut oracle_runs = Vec::new();
     for _ in 0..REPS {
-        match nvm_load_timed_run(&oracle, &dir, Duration::from_secs(60)) {
+        match nvm_load_timed_run_script(oracle, dir, script, Duration::from_secs(60)) {
             Some(d) => oracle_runs.push(d),
             None => {
                 eprintln!(
-                    "golden_nvm_load timing gate: oracle {} failed to source nvm.sh; skipped",
+                    "golden_nvm_load timing gate ({label}): oracle {} failed the run; skipped",
                     oracle.display()
                 );
-                let _ = std::fs::remove_dir_all(&dir);
                 return;
             }
         }
     }
     let mut rubash_runs = Vec::new();
     for _ in 0..REPS {
-        let d = nvm_load_timed_run(&rubash, &dir, Duration::from_secs(120))
+        let d = nvm_load_timed_run_script(&rubash, dir, script, Duration::from_secs(120))
             .expect("rubash must source nvm.sh inside the timing gate");
         rubash_runs.push(d);
     }
-    let _ = std::fs::remove_dir_all(&dir);
     let oracle_best = best_duration(oracle_runs);
     let rubash_best = best_duration(rubash_runs);
     let budget = oracle_best.mul_f64(MAX_RATIO) + SLACK;
     assert!(
         rubash_best <= budget,
-        "nvm.sh load timing gate: rubash best-of-{REPS} {rubash_best:.2?} exceeds \
+        "nvm.sh load timing gate ({label}): rubash best-of-{REPS} {rubash_best:.2?} exceeds \
          {MAX_RATIO}x GNU best-of-{REPS} {oracle_best:.2?} + {SLACK:.2?} slack \
-         (budget {budget:.2?}); rubash#1940 regression class"
+         (budget {budget:.2?}); rubash#1940/#1961 regression class"
     );
 }
 golden_fixture!(golden_redir_operand_battery => "redir-operand-battery", timeout 60, corpus []);
@@ -4980,5 +5006,666 @@ mod issue_1952 {
         );
         assert_eq!(status, Some(0), "stderr:\n{stderr}");
         assert_eq!(stdout, "probe-r3\ncatrc:1\n", "stderr:\n{stderr}");
+    }
+}
+
+/// rubash#2003: a pipeline element 0 whose own fd-0 redirect aliases
+/// another descriptor (`<&N`, `0<&N`, `< /dev/fd/N`) lost its entire
+/// input. GNU forks every element with the shell's own descriptors
+/// (execute_cmd.c:2620 execute_pipeline) and the element applies its
+/// own redirections inside the fork (execute_cmd.c:4617
+/// execute_simple_command -> redir.c do_redirection_internal), so the
+/// element's reads ARE the aliased descriptor's reads, exactly once.
+/// Rubash's stage-0 payload resolution served the alias by draining
+/// the shared descriptor to EOF, while the stage funnels that consume
+/// stdin through the descriptor channel itself (the inline cat arm
+/// re-resolving the redirect, a compound stage binding fd 0 to the
+/// endpoint, function stages on fd-table-sharing clones, the external
+/// spawner materializing the endpoint by handle) then read EOF from
+/// the drained descriptor — `cat < <(seq 5) | wc -l` inside a command
+/// substitution captured 0, `exec 3<file; cat <&3 | wc -l` printed 0.
+/// The payload resolution now materializes the aliased fd's endpoint
+/// (buffered endpoints get their pre-resolution offset back;
+/// handle-backed endpoints are replaced by a buffered endpoint
+/// carrying the payload bytes), restoring single consumption.
+/// Expectations hand-measured against GNU Bash 5.3.20 (the vendored
+/// oracle build) on 2026-10-29; producers use the printf builtin so
+/// the pins stay self-contained.
+mod issue_2003 {
+    use super::*;
+
+    fn run(dir: &Path, code: &str) -> (String, String, Option<i32>) {
+        let out = run_rubash_in(dir, &["-c", code], Duration::from_secs(30));
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// The reported shape: a procsub-fed consumer that is itself
+    /// piped, inside a command substitution.
+    #[test]
+    fn issue2003_comsub_pipeline_keeps_procsub_redirect_payload() {
+        let dir = case_scratch("2003-comsub-wc");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "x=$(cat < <(printf '1\\n2\\n3\\n4\\n5\\n') | wc -l)\n\
+             echo \"count:[$x]\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "count:[5]\n", "stderr:\n{stderr}");
+    }
+
+    /// Same funnel, payload-consuming second stage (grep arm).
+    #[test]
+    fn issue2003_comsub_pipeline_keeps_procsub_redirect_for_grep() {
+        let dir = case_scratch("2003-comsub-grep");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "x=$(cat < <(printf 'a\\nb\\nc\\n') | grep b)\n\
+             echo \"got:[$x]\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "got:[b]\n", "stderr:\n{stderr}");
+    }
+
+    /// Stage 0 with a `<&N` dup of a regular file: the stage reads
+    /// the file through the dup, and the shared cursor is spent
+    /// afterwards (a second identical pipeline sees EOF), like GNU.
+    #[test]
+    fn issue2003_dup_redirect_stage0_delivers_file_payload() {
+        let dir = case_scratch("2003-dup-file");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             cat <&3 | wc -l\n\
+             cat <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n0\n", "stderr:\n{stderr}");
+    }
+
+    /// The `/dev/fd/N` spelling of the same dup.
+    #[test]
+    fn issue2003_devfd_spelling_stage0_delivers_file_payload() {
+        let dir = case_scratch("2003-devfd-file");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             cat < /dev/fd/3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// Stage 0 with a `<&N` dup of a streamed procsub pipe bound by
+    /// an earlier `exec`: the pipe bytes survive the stage-0 payload
+    /// resolution (handle-backed endpoint materialization).
+    #[test]
+    fn issue2003_dup_redirect_stage0_delivers_procsub_pipe() {
+        let dir = case_scratch("2003-dup-procsub");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "exec 3< <(printf '1\\n2\\n3\\n4\\n5\\n')\n\
+             cat <&3 | wc -l\n\
+             cat <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n0\n", "stderr:\n{stderr}");
+    }
+
+    /// A compound stage (read loop) binds fd 0 to the aliased
+    /// endpoint itself; it must read the payload through that bind.
+    #[test]
+    fn issue2003_compound_stage0_dup_redirect_reads_through() {
+        let dir = case_scratch("2003-loop-dup");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             while IFS= read -r l; do echo \"r:$l\"; done <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// A function stage carrying the dup redirect on the call.
+    #[test]
+    fn issue2003_function_stage0_dup_redirect_reads_through() {
+        let dir = case_scratch("2003-func-dup");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "f() { cat; }\n\
+             printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             f <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// The cat `-` operand resolves to the same redirected fd 0.
+    #[test]
+    fn issue2003_cat_dash_operand_reads_redirect_payload() {
+        let dir = case_scratch("2003-cat-dash");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             cat - <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// Control: at stage 1 the element's own dup redirect wins over
+    /// the pipe (single resolution at the stage, no stage-0 payload
+    /// involved) — GNU behavior before and after the fix.
+    #[test]
+    fn issue2003_stage1_dup_redirect_still_wins_over_pipe() {
+        let dir = case_scratch("2003-stage1-dup");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             printf '9\\n8\\n' | cat <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// Control: the direct procsub redirect on a top-level pipeline
+    /// element streamed even before this fix (rubash#1952) and must
+    /// keep working.
+    #[test]
+    fn issue2003_direct_procsub_pipeline_control() {
+        let dir = case_scratch("2003-direct");
+        let (stdout, stderr, status) = run(&dir, "cat < <(printf '1\\n2\\n') | wc -l\n");
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "2\n", "stderr:\n{stderr}");
+    }
+}
+
+/// rubash#1976: the bidirectional netopen face (`exec 3<>/dev/tcp/host/port`)
+/// opened the connection but every fd-3 read AND write failed with
+/// `Invalid argument`. GNU netopen returns ONE connected socket descriptor
+/// that serves both directions of any `/dev/tcp|udp` face (redir.c:660
+/// redir_open calls netopen for RF_DEVTCP/RF_DEVUDP whatever the `<`/`>`/`<>`
+/// spelling; lib/sh/netopen.c:282 netopen → socket + connect at :178
+/// _netopen4, then plain read(2)/write(2) on that fd). Rubash adopts the
+/// socket as the fd slot's raw handle, and the handle byte primitives used
+/// to serve it through ReadFile/WriteFile with a NULL OVERLAPPED — rejected
+/// with ERROR_INVALID_PARAMETER on an overlapped socket handle, so the peer
+/// only ever saw the connection close (EOF). The fd layer now routes socket
+/// handles through the socket API (recv/send, select for bounded waits).
+///
+/// Expectations hand-measured against WSL GNU Bash 5.3.20
+/// (/usr/local/bin/bash, 2026-10-28): the TCP round trip below and the
+/// bounded read on a silent endpoint (`read -t 2 -u 3` → `rc=142`, variable
+/// empty). Complements the issue1026 pin in
+/// tests/issue1025_1026_1068_1103_1359_redirect_fd_regressions.rs (which
+/// stays byte-identical — it is PR #1970's acceptance gate), driven from
+/// script files.
+///
+/// Known follow-up (verified 2026-10-28, out of this issue's handle-shape
+/// scope): a `read -u 3` record off a DATAGRAM (`/dev/udp`) fd still cannot
+/// be served by the byte-wise record loop — GNU routes a socket through the
+/// buffered zreadc chunk reader (read.def:668: a socket is neither tty nor
+/// fd_ispipe, so unbuffered_read stays 0) and zsyncfd keeps the overage
+/// when its rewind lseek fails (lib/sh/zread.c:294-309), while winsock's
+/// recv DISCARDS a datagram larger than the receive buffer entirely
+/// (WSAEMSGSIZE). Serving datagram records needs the chunked keep-overage
+/// reader, a read-builtin buffering-profile change of its own.
+mod issue_1976 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    #[test]
+    fn issue1976_dev_tcp_readwrite_fd_round_trips() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 5];
+            stream.read_exact(&mut buf).expect("read ping");
+            assert_eq!(&buf, b"ping\n");
+            stream.write_all(b"pong\n").expect("write pong");
+        });
+        let dir = case_scratch("1976-tcp");
+        let script = format!(
+            "exec 3<>/dev/tcp/127.0.0.1/{port}\necho ping >&3\nread -u 3 line\necho \"got=[$line]\"\n"
+        );
+        let (stdout, stderr, status) = run(&dir, &script);
+        server.join().expect("server thread");
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "got=[pong]\n", "stderr:\n{stderr}");
+        assert_eq!(stderr, "", "stderr:\n{stderr}");
+    }
+
+    #[test]
+    fn issue1976_read_t_timeout_on_quiet_socket_fd() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        // Accept and stay silent past the read deadline, GNU-side.
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            std::thread::sleep(Duration::from_secs(4));
+            drop(stream);
+        });
+        let dir = case_scratch("1976-quiet");
+        let script = format!(
+            "exec 3<>/dev/tcp/127.0.0.1/{port}\nread -t 2 -u 3 line\necho \"rc=$?\"\necho \"line=[$line]\"\n"
+        );
+        let (stdout, stderr, status) = run(&dir, &script);
+        server.join().expect("server thread");
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "rc=142\nline=[]\n", "stderr:\n{stderr}");
+    }
+}
+mod issue_1584 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// rubash#1584: GNU execute_cmd.c:2525 execute_coproc forks once
+    /// and the child execs a simple external command itself, so $!
+    /// is the program's own pid (comm=cat). The respawn route put a
+    /// `rubash -c` wrapper at $! and ran cat as a grandchild. The
+    /// direct route must keep the data surface byte-identical (fds
+    /// 63/60, echo-back, wait status) while the pid names cat.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_cat_pid_is_cat() {
+        let dir = case_scratch("1584-cat");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc cat\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo \"fds=${COPROC[0]},${COPROC[1]}\"\n\
+             echo hello >&${COPROC[1]}\n\
+             read -u ${COPROC[0]} line\n\
+             echo \"back=$line\"\n\
+             eval \"exec ${COPROC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(
+            stdout, "comm=cat\nfds=63,60\nback=hello\nrc=0\n",
+            "stderr:\n{stderr}"
+        );
+        assert_eq!(stderr, "", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584: `kill $!` must reach the command itself. With
+    /// the wrapper at $! the TERM killed the wrapper (wait still
+    /// reported 143) and the sleep was never signalled.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_kill_reaches_the_command() {
+        let dir = case_scratch("1584-kill");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc sleep 30\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             kill -TERM $p\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=sleep\nrc=143\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584: a slash-path head takes the same direct route.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_slash_path_pid_is_the_program() {
+        let dir = case_scratch("1584-slash");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc /bin/cat\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo yo >&${COPROC[1]}\n\
+             read -u ${COPROC[0]} line\n\
+             echo \"back=$line\"\n\
+             eval \"exec ${COPROC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=cat\nback=yo\nrc=0\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584: an external command with plain arguments is
+    /// direct too (the args are expanded in the parent only because
+    /// the admitted classes make parent expansion identical to the
+    /// child's).
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_external_with_args() {
+        let dir = case_scratch("1584-args");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc grep --line-buffered foo\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo \"xfooy\" >&${COPROC[1]}\n\
+             read -u ${COPROC[0]} line\n\
+             echo \"back=$line\"\n\
+             eval \"exec ${COPROC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=grep\nback=xfooy\nrc=0\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584: a named coproc binds <NAME>_PID to the same
+    /// direct process.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_named_coproc_pid_is_the_program() {
+        let dir = case_scratch("1584-named");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc NC cat\n\
+             p=${NC_PID}\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo hello >&${NC[1]}\n\
+             read -u ${NC[0]} line\n\
+             echo \"back=$line\"\n\
+             eval \"exec ${NC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=cat\nback=hello\nrc=0\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584 (negative control): a builtin coproc keeps a
+    /// shell-image child — GNU's coproc child for `read` is bash
+    /// itself, so the respawn route (comm=rubash) is the faithful
+    /// shape and must not be direct-spawned.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_builtin_keeps_shell_image() {
+        let dir = case_scratch("1584-builtin");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc read x\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo \"someval\" >&${COPROC[1]}\n\
+             eval \"exec ${COPROC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=rubash\nrc=0\n", "stderr:\n{stderr}");
+    }
+}
+
+mod issue_1582 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// rubash#1582 (contract pin, adjudication pending): at a
+    /// spawn-realized level the identity narrative is already
+    /// GNU-consistent — an async subshell's $BASHPID is the pid its
+    /// children observe as $PPID. Any resolution of the flat-level
+    /// projection must preserve this.
+    #[cfg(unix)]
+    #[test]
+    fn issue1582_async_subshell_bashpid_matches_child_ppid() {
+        let dir = case_scratch("1582-async");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "( /bin/sh -c 'echo $PPID > pp.txt'; echo $BASHPID > bp.txt ) &\n\
+             wait $!\n\
+             if [ \"$(cat pp.txt)\" = \"$(cat bp.txt)\" ]; then echo MATCH; else echo DIFFER; fi\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "MATCH\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1582 (contract pin): $PPID is a startup-frozen value
+    /// in GNU (variables.c set_ppid runs once from
+    /// initialize_shell_variables; subshell forks inherit it), and
+    /// rubash matches — a subshell must NOT observe its parent
+    /// shell's pid through $PPID.
+    #[cfg(unix)]
+    #[test]
+    fn issue1582_ppid_is_frozen_in_subshell() {
+        let dir = case_scratch("1582-ppid");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "t=$PPID\n\
+             ( if [ \"$PPID\" = \"$t\" ]; then echo FROZEN; else echo CHANGED; fi )\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "FROZEN\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1582 (contract pin): `kill $BASHPID` inside a flat
+    /// subshell is scoped to that subshell layer (the #1461
+    /// interception): the layer dies by the signal (status 143,
+    /// no survival output) and the parent shell lives on. Any
+    /// projection change that points $BASHPID at the host process
+    /// must keep this kill scoped, never suicidal to the host.
+    #[cfg(unix)]
+    #[test]
+    fn issue1582_kill_own_bashpid_stays_scoped_to_the_subshell() {
+        let dir = case_scratch("1582-kill");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "( kill -TERM $BASHPID; echo SURVIVED )\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "rc=143\n", "stderr:\n{stderr}");
+    }
+}
+
+mod issue_1646 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// rubash#1646 (varredir_close arm): GNU closes a `{var}` descriptor
+    /// when the owning command COMPLETES (redir.c undo_redirections), so
+    /// the command's own `>&$f` write lands and the `>(...)` consumer
+    /// drains it; only a LATER write sees the closed fd. Closing at
+    /// application time (the old behavior) rejected the first write with
+    /// EBADF and the consumer's stream was lost entirely. GNU bash
+    /// 5.3.20 oracle output for this probe: first-rc=0, the second write
+    /// reports Bad file descriptor, file:[one].
+    #[test]
+    fn issue1646_varredir_close_procsub_write_survives_own_command() {
+        let dir = case_scratch("1646-varredir-procsub");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "shopt -s varredir_close\n\
+             echo one {f}> >(cat > out.txt) >&$f\n\
+             echo \"first-rc=$?\"\n\
+             echo two >&$f 2>/dev/null || echo second-failed\n\
+             sleep 0.5\n\
+             echo \"file:[$(cat out.txt)]\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(
+            stdout, "first-rc=0\nsecond-failed\nfile:[one]\n",
+            "stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("Bad file descriptor"),
+            "the post-completion write must report EBADF: {stderr}"
+        );
+    }
+
+    /// rubash#1646 (varredir_close arm, plain-file form of the same
+    /// invariant): a `{f}>file` descriptor closed at application time
+    /// rejected the owning command's write too — first-rc was 1 and the
+    /// file stayed empty. GNU: first-rc=0, second write EBADF, file
+    /// holds exactly the first line.
+    #[test]
+    fn issue1646_varredir_close_plain_file_write_survives_own_command() {
+        let dir = case_scratch("1646-varredir-file");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "shopt -s varredir_close\n\
+             echo one {f}>plain.txt >&$f\n\
+             echo \"first-rc=$?\"\n\
+             echo two >&$f 2>/dev/null || echo second-failed\n\
+             echo \"file:[$(cat plain.txt)]\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(
+            stdout, "first-rc=0\nsecond-failed\nfile:[one]\n",
+            "stderr:\n{stderr}"
+        );
+    }
+
+    /// rubash#1646 (headline form): a persistent `exec {f}> >(...)`
+    /// stream that is never explicitly closed must still reach the
+    /// consumer when the shell exits — GNU's consumer drains at EOF
+    /// (subst.c:6362 process_substitute pipe semantics); the shell-exit
+    /// sweep is rubash's drain point. Byte-exact content check after
+    /// the process has exited.
+    #[test]
+    fn issue1646_persistent_procsub_drains_at_exit() {
+        let dir = case_scratch("1646-exit-drain");
+        let (_stdout, stderr, code) = run(
+            &dir,
+            "exec {f}> >(cat > out.txt)\nprintf 'a\\nb\\nc\\n' >&$f\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        let drained = std::fs::read(dir.join("out.txt")).expect("consumer output exists");
+        assert_eq!(drained, b"a\nb\nc\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1646 (default mode): with varredir_close off (the GNU
+    /// default) the descriptor persists across commands, both writes
+    /// land, and the accumulated stream drains whole at shell exit.
+    #[test]
+    fn issue1646_dynamic_fd_procsub_accumulates_and_drains_at_exit() {
+        let dir = case_scratch("1646-default-drain");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "echo one {f}> >(cat > out.txt) >&$f\necho \"first-rc=$?\"\necho two >&$f\necho \"second-rc=$?\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "first-rc=0\nsecond-rc=0\n", "stderr:\n{stderr}");
+        let drained = std::fs::read(dir.join("out.txt")).expect("consumer output exists");
+        assert_eq!(drained, b"one\ntwo\n", "stderr:\n{stderr}");
+    }
+}
+
+mod issue_1951 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(60),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// rubash#1951: the streamed input-procsub endpoint serves a
+    /// line-wise `while read` loop completely and in order — the count
+    /// over 20k produced lines is exact (the materialized endpoint this
+    /// replaces lost its constant-factor footing entirely: ~0.29ms per
+    /// line at the audit tip). GNU bash 5.3.20 prints the same count.
+    #[test]
+    fn issue1951_procsub_endpoint_while_read_count_exact() {
+        let dir = case_scratch("1951-stream-count");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "n=0\nwhile read -r l; do n=$((n+1)); done < <(seq 1 20000)\necho \"read=$n\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "read=20000\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1951 (content face): lines arrive whole and in order —
+    /// the first, middle and last records read off the endpoint match
+    /// the producer's sequence exactly.
+    #[test]
+    fn issue1951_procsub_endpoint_records_whole_and_ordered() {
+        let dir = case_scratch("1951-stream-order");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "n=0\nfirst= mid= last=\nwhile read -r l; do n=$((n+1)); case $n in 1) first=$l;; 1000) mid=$l;; esac; last=$l; done < <(seq 1 2000)\necho \"$first/$mid/$last/$n\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "1/1000/2000/2000\n", "stderr:\n{stderr}");
     }
 }

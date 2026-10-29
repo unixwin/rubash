@@ -220,10 +220,9 @@ impl Executor {
             }
             if redirect.fd_var.is_some() {
             } else if is_closed_redirect_target(&target) {
-            } else if let Some((source_fd, _)) = redirect_target_fd_and_move(&target) {
-                // `<&N`, the move form `<&N-` (make_cmd.c:704-718) and the
-                // fd-alias paths (/dev/stdin, /dev/fd/0, /proc/self/fd/0):
-                // the builtin keeps reading its current stdin channel — the
+            } else if let Some(source_fd) = dup_spelling_source_fd(&target) {
+                // `<&N`, the move form `<&N-` (make_cmd.c:704-718): the
+                // builtin keeps reading its current stdin channel — the
                 // dup is a no-op for the virtual input model, and the
                 // reject_invalid_redirects gate already validated fd N is
                 // open (redir.c:1115 dup2 EBADF). GNU r_duplicating_input
@@ -231,19 +230,20 @@ impl Executor {
                 // when fd N is closed, so a closed or untracked source must
                 // fail the builtin with `N: Bad file descriptor' instead of
                 // silently succeeding (modernish BUG_SCLOSEDFD probe
-                // `command : <&8' — rubash#258).
+                // `command : <&8' — rubash#258). An fd-alias PATH spelling
+                // (/dev/fd/N, /dev/stdin, /proc/self/fd/N) is NOT a dup
+                // spelling: GNU opens it (redir_open), so it falls through
+                // to the classified probes below, whose closed-alias answer
+                // is the open's ENOENT (rubash#1963).
                 self.validate_builtin_dup_source(source_fd)?;
             } else if redirect.append {
-                OpenOptions::new()
-                    .create(true)
-                    .read(true)
-                    .write(true)
-                    .open(
-                        self.session_path(shell_path_to_windows(
-                            &target,
-                            &self.shell_state.env_vars,
-                        )),
-                    )
+                // `<> word` on fd 0: the classified probe performs the
+                // one O_RDWR open — registry classes first (net /
+                // fd alias / synthetic /proc by write class), plain
+                // files through the same raw open as before
+                // (rubash#1935/#1963/#1964) — with the same
+                // path_error shaping.
+                self.probe_input_redirect_readwrite(&target)
                     .map_err(|e| crate::posix_errors::path_error(&target, e))?;
             } else {
                 self.probe_input_redirect(&target)?;
@@ -260,11 +260,15 @@ impl Executor {
             }
             if redirect.fd_var.is_some() {
             } else if is_closed_redirect_target(&target) {
-            } else if let Some((source_fd, _)) = redirect_target_fd_and_move(&target) {
+            } else if let Some(source_fd) = dup_spelling_source_fd(&target) {
                 // `>&N` / `>&N-` dup (and move) forms: validated by the
                 // reject_invalid_redirects gate; nothing to open here. GNU
                 // redir.c:1152-1160 dup2 EBADF — closed source fails with
-                // `N: Bad file descriptor' (rubash#258 SCLOSEDFD).
+                // `N: Bad file descriptor' (rubash#258 SCLOSEDFD). An
+                // fd-alias PATH spelling is an open, not a dup: it falls
+                // through to create_redirect_output, whose registry arm
+                // answers a closed alias with the open's ENOENT
+                // (rubash#1963).
                 self.validate_builtin_dup_source(source_fd)?;
             } else if redirect.fd.unwrap_or(1) == 1 && target.starts_with('&') {
                 // GNU redir.c:832-838: >&WORD with a non-numeric WORD and
@@ -293,18 +297,10 @@ impl Executor {
                 // (`$FIX/b: No such file or directory`) — the append open's
                 // error needs the same path_error shaping as the truncating
                 // open, or the renderer's message-only text drops the word
-                // (issue #518 background/append repro).
-                self.open_output_fd_append(&target).or_else(|_| {
-                    if is_null_device(&target) {
-                        self.create_redirect_output(&target, true)
-                    } else {
-                        open_redirect_append(&self.session_path(shell_path_to_windows(
-                            &target,
-                            &self.shell_state.env_vars,
-                        )))
-                        .map_err(|e| crate::posix_errors::path_error(&target, e))
-                    }
-                })?;
+                // (issue #518 background/append repro). The open itself
+                // classifies through the registry (rubash#1964).
+                self.open_append_target(&target)
+                    .map_err(|e| crate::posix_errors::path_error(&target, e))?;
             }
         }
 
@@ -335,10 +331,10 @@ impl Executor {
             }
             if redirect.fd_var.is_some() {
             } else if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                open_redirect_append(
-                    &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
-                )
-                .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                // Classified append open (rubash#1964), same
+                // path_error shaping as the fd-1 arm above.
+                self.open_append_target(&target)
+                    .map_err(|e| crate::posix_errors::path_error(&target, e))?;
             }
         }
 
@@ -374,7 +370,7 @@ impl Executor {
                 | crate::parser::RedirectKind::CombinedOutput
                 | crate::parser::RedirectKind::CombinedAppend => {
                     if is_closed_redirect_target(&target) {
-                    } else if let Some((source_fd, _)) = redirect_target_fd_and_move(&target) {
+                    } else if let Some(source_fd) = dup_spelling_source_fd(&target) {
                         self.validate_builtin_dup_source(source_fd)?;
                     } else if !target.starts_with("<(") && !target.starts_with(">(") {
                         self.create_redirect_output(&target, redirect.clobber)?;
@@ -386,22 +382,17 @@ impl Executor {
                         && !target.starts_with("<(")
                         && !target.starts_with(">(")
                     {
-                        self.open_output_fd_append(&target).or_else(|_| {
-                            if is_null_device(&target) {
-                                self.create_redirect_output(&target, true)
-                            } else {
-                                open_redirect_append(&shell_path_to_windows(
-                                    &target,
-                                    &self.shell_state.env_vars,
-                                ))
-                                .map_err(|e| crate::posix_errors::path_error(&target, e))
-                            }
-                        })?;
+                        // Classified append open (rubash#1964); the
+                        // session_path anchoring the fd-1 arm always
+                        // had applies here too — the previous raw
+                        // fallback opened against the process cwd.
+                        self.open_append_target(&target)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                     }
                 }
                 crate::parser::RedirectKind::Input => {
                     if is_closed_redirect_target(&target) {
-                    } else if let Some((source_fd, _)) = redirect_target_fd_and_move(&target) {
+                    } else if let Some(source_fd) = dup_spelling_source_fd(&target) {
                         self.validate_builtin_dup_source(source_fd)?;
                     } else if !target.starts_with("<(") && !target.starts_with(">(") {
                         self.probe_input_redirect(&target)?;
@@ -409,15 +400,19 @@ impl Executor {
                 }
                 crate::parser::RedirectKind::ReadWrite => {
                     if !is_closed_redirect_target(&target)
-                        && redirect_target_fd(&target).is_none()
+                        && (redirect_target_fd(&target).is_none()
+                            || crate::special_paths::fd_alias_target(&target).is_some())
                         && !target.starts_with("<(")
                         && !target.starts_with(">(")
                     {
-                        OpenOptions::new()
-                            .create(true)
-                            .read(true)
-                            .write(true)
-                            .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
+                        // The classified probe performs the one
+                        // O_RDWR open — fd-alias spellings included (a
+                        // closed alias fails ENOENT here instead of
+                        // being skipped silently) and synthetic /proc
+                        // entries by their write class
+                        // (rubash#1935/#1963). `&N` dup spellings stay
+                        // excluded: they name no file to open.
+                        self.probe_input_redirect_readwrite(&target)
                             .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                     }
                 }

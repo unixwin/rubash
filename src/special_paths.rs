@@ -15,11 +15,21 @@
 //!   filesystem), keeping only their own semantic pre-steps (noclobber,
 //!   session-cwd anchoring, consume/probe discipline);
 //! - the per-class query functions ([`is_net_redirect_target`],
-//!   [`is_shell_null_device`], [`fd_alias_target`],
+//!   [`is_shell_null_device`], [`is_zero_device`], [`is_full_device`],
+//!   [`fd_alias_target`],
 //!   [`synthetic_proc_content`], [`is_synthetic_link_path`]) are the
 //!   same judgments in the shapes existing consumers already ask; they
 //!   are defined here once, from the same bodies, so a query answer
 //!   and a classification can never drift apart.
+//!
+//! The judgments are also the registry's public consumer face: glob
+//! asks [`synthetic_proc_dir_entries`] in-crate, and the host's
+//! interactive faces (niubash completion and syntax highlighting,
+//! vfs audit slice S5) ask the classification and the enumeration
+//! faces ([`special_dev_entries`], [`synthetic_proc_dir_entries`])
+//! from outside the crate, so the names a user can complete or gets
+//! styled as paths are exactly the names the open points serve —
+//! never a second, host-side copy of the special-path knowledge.
 //!
 //! Boundary (audit §4.2): the classification *semantics* here are the
 //! shell's own on every platform (GNU invents /dev/tcp, /dev/fd and
@@ -38,7 +48,7 @@
 /// How a path spelling is special to the shell, if it is. The classes
 /// mirror the audit §4.3 registry categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SpecialPathClass {
+pub enum SpecialPathClass {
     /// `/dev/tcp/host/port`, `/dev/udp/host/port` — not a filesystem
     /// path: opening connects a socket (GNU redir.c netopen,
     /// rubash#1026).
@@ -46,9 +56,21 @@ pub(crate) enum SpecialPathClass {
     /// `/dev/null` (plus the DOS spelling `NUL` on Windows) — the
     /// sink/source-of-EOF device; opens route to the mapped device.
     NullDevice,
+    /// `/dev/zero` — the zero device (rubash#1898): reads yield an
+    /// unbounded stream of NUL bytes, writes are discarded. A real
+    /// device on Unix; in the Windows simulation the service faces
+    /// build it (a pump-fed pipe for reads, the null sink for
+    /// writes), so the class is judged on every platform and only
+    /// its construction is platform work.
+    ZeroDevice,
+    /// `/dev/full` — the full device (rubash#1898): reads yield
+    /// zeros like /dev/zero, and every write fails ENOSPC
+    /// (`write error: No space left on device`, sh_chkwrite).
+    FullDevice,
     /// `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N`,
-    /// `/proc/self/fd/N` — an alias for a dup of the named fd in the
-    /// shell's fd table, never a filesystem open.
+    /// `/proc/self/fd/N`, `/proc/<own-pid>/fd/N` — an alias for a dup
+    /// of the named fd in the shell's fd table, never a filesystem
+    /// open.
     FdAlias(u32),
     /// A synthetic /proc file whose bytes the engine generates
     /// (Windows-only simulation; the class is empty off Windows).
@@ -79,11 +101,15 @@ pub(crate) enum SpecialPathClass {
 /// proc generator itself answers `None` for it) — and the alias wins,
 /// exactly as the reference ladder (open_input_redirect_impl) has
 /// always sequenced it.
-pub(crate) fn classify_special_path(target: &str) -> SpecialPathClass {
+pub fn classify_special_path(target: &str) -> SpecialPathClass {
     if is_net_redirect_target(target) {
         SpecialPathClass::NetRedirect
     } else if is_shell_null_device(target) {
         SpecialPathClass::NullDevice
+    } else if is_zero_device(target) {
+        SpecialPathClass::ZeroDevice
+    } else if is_full_device(target) {
+        SpecialPathClass::FullDevice
     } else if let Some(fd) = fd_alias_target(target) {
         SpecialPathClass::FdAlias(fd)
     } else if is_synthetic_link_path(target) {
@@ -105,16 +131,31 @@ pub(crate) fn classify_special_path(target: &str) -> SpecialPathClass {
 /// succeeds even with no listener). Host may be a name (resolved by
 /// the OS) or an address; the port may be numeric or a service name
 /// resolved through /etc/services (getservbyname).
-pub(crate) fn is_net_redirect_target(target: &str) -> bool {
+pub fn is_net_redirect_target(target: &str) -> bool {
     target.starts_with("/dev/tcp/") || target.starts_with("/dev/udp/")
 }
 
 /// Whether `path` spells the null device: the POSIX spelling (with
 /// backslashes normalized, as Windows spellings arrive in both
 /// forms) plus, on Windows, the DOS device name in any case.
-pub(crate) fn is_shell_null_device(path: &str) -> bool {
+pub fn is_shell_null_device(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     normalized == "/dev/null" || (cfg!(windows) && normalized.eq_ignore_ascii_case("NUL"))
+}
+
+/// Whether `path` spells the zero device (rubash#1898): the POSIX
+/// spelling with backslashes normalized, exactly the judgment shape
+/// the null device uses. GNU serves /dev/zero from the kernel device;
+/// the registry judges the spelling on every platform so no face
+/// re-derives it.
+pub(crate) fn is_zero_device(path: &str) -> bool {
+    path.replace('\\', "/") == "/dev/zero"
+}
+
+/// Whether `path` spells the full device (rubash#1898): reads yield
+/// zeros, writes fail ENOSPC. Same judgment shape as the zero device.
+pub(crate) fn is_full_device(path: &str) -> bool {
+    path.replace('\\', "/") == "/dev/full"
 }
 
 /// GNU redir.c opens `/dev/stdin`/`/dev/stdout`/`/dev/stderr`,
@@ -124,7 +165,7 @@ pub(crate) fn is_shell_null_device(path: &str) -> bool {
 /// names are recognized here and flow through the fd-dup machinery
 /// (niubash#118: `>> /dev/stdout` used to land on the CONOUT$ device
 /// path and fail with Permission denied).
-pub(crate) fn fd_alias_target(target: &str) -> Option<u32> {
+pub fn fd_alias_target(target: &str) -> Option<u32> {
     match target {
         "/dev/stdin" => return Some(0),
         "/dev/stdout" => return Some(1),
@@ -133,10 +174,52 @@ pub(crate) fn fd_alias_target(target: &str) -> Option<u32> {
     }
     let fd = target
         .strip_prefix("/dev/fd/")
-        .or_else(|| target.strip_prefix("/proc/self/fd/"))?;
-    (!fd.is_empty() && fd.chars().all(|ch| ch.is_ascii_digit()))
-        .then(|| fd.parse::<u32>().ok())
-        .flatten()
+        .or_else(|| target.strip_prefix("/proc/self/fd/"))
+        .or_else(|| own_pid_fd_tail(target))?;
+    canonical_fd_number(fd)
+}
+
+/// The numeric-pid spelling of the shell's OWN fd directory
+/// (rubash#1974): `/proc/<pid>/fd/N` with pid == this process. GNU
+/// resolves it through procfs exactly like `/proc/self/fd/N` — the
+/// kernel serves the directory under both names — so the registry
+/// judges it here, once, instead of leaving each consumer to grow a
+/// private pid rewrite (the operand face in dev_fd_operands carried
+/// the only copy, and the redirect/test faces classified the spelling
+/// as a plain filesystem path). Foreign pids stay Filesystem: dup'ing
+/// another process's descriptors is a different mechanism than an
+/// alias of the shell's own table. The pid field is canonical decimal
+/// for the same reason the fd field is (procfs serves only canonical
+/// pid directory names).
+fn own_pid_fd_tail(target: &str) -> Option<&str> {
+    let rest = target.strip_prefix("/proc/")?;
+    let (pid, tail) = rest.split_once("/fd/")?;
+    if canonical_fd_number(pid)? != std::process::id() {
+        return None;
+    }
+    Some(tail)
+}
+
+/// The registry's numeric field is canonical decimal — exactly the
+/// spelling set the kernel's fd-alias names use: ASCII digits only, no
+/// sign, no whitespace, and no leading zero ("0" itself excepted).
+///
+/// GNU anchor: on the oracle platform (Linux) bash is built with
+/// HAVE_DEV_FD, so `_redir_special_filenames` (redir.c:601) does not
+/// intercept `/dev/fd/N` and the literal open decides — procfs serves
+/// only canonical names, so `/dev/fd/00`, `/dev/fd/03`, `/dev/fd/007`,
+/// `/proc/self/fd/00` fail ENOENT on every face (cat, redirect,
+/// `test -r`, `source`; issue rubash#1973 oracle probes, bash
+/// 5.3.20). The no-dev-fd fallback (`redir.c:630 redir_special_open`,
+/// `all_digits` general.c:233) likewise never parses a sign.
+fn canonical_fd_number(fd: &str) -> Option<u32> {
+    if !fd.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    if fd.len() > 1 && fd.starts_with('0') {
+        return None;
+    }
+    fd.parse::<u32>().ok()
 }
 
 /// The registry's entry for the synthetic-/proc class: the file's
@@ -145,8 +228,18 @@ pub(crate) fn fd_alias_target(target: &str) -> Option<u32> {
 /// simulation; off Windows it answers `None` and the path falls
 /// through to the real filesystem). Each call generates a fresh
 /// snapshot, matching procfs semantics.
-pub(crate) fn synthetic_proc_content(target: &str) -> Option<Vec<u8>> {
+pub fn synthetic_proc_content(target: &str) -> Option<Vec<u8>> {
     crate::proc_vfs::proc_file_content(target)
+}
+
+/// Whether a write-direction open of a synthetic /proc content entry
+/// succeeds on the real procfs entry (rubash#1935): `Some(false)` for
+/// the 0444 class (the open itself fails EACCES), `Some(true)` for
+/// the 0644 per-pid class (the open succeeds; writes fail later),
+/// `None` when `target` is not synthetic content. The simulation
+/// behind the class is Windows-only, like [`synthetic_proc_content`].
+pub(crate) fn synthetic_proc_write_allowed(target: &str) -> Option<bool> {
+    crate::proc_vfs::proc_content_write_allowed(target)
 }
 
 /// The registry's classification query for the synthetic-link class:
@@ -155,7 +248,7 @@ pub(crate) fn synthetic_proc_content(target: &str) -> Option<Vec<u8>> {
 /// (`proc_vfs::proc_link_target`) because one entry
 /// (`/proc/self/cwd`) resolves through the caller's session state,
 /// which classification must not need.
-pub(crate) fn is_synthetic_link_path(target: &str) -> bool {
+pub fn is_synthetic_link_path(target: &str) -> bool {
     crate::proc_vfs::proc_is_link_path(target)
 }
 
@@ -165,7 +258,7 @@ pub(crate) fn is_synthetic_link_path(target: &str) -> bool {
 /// caller supplies the session cwd's forms for the self/cwd entry.
 /// None when the path is not a live synthetic link or its target
 /// cannot be resolved (dead pid, protected process).
-pub(crate) fn synthetic_link_target(
+pub fn synthetic_link_target(
     target: &str,
     self_cwd: Option<&crate::proc_vfs::ProcSelfCwd>,
 ) -> Option<crate::proc_vfs::ProcLinkTarget> {
@@ -180,8 +273,44 @@ pub(crate) fn synthetic_link_target(
 /// from the one enumeration source in [`crate::proc_vfs`]. Glob and
 /// (later) completion ask here so the names a user can complete are
 /// exactly the names the content and link faces serve.
-pub(crate) fn synthetic_proc_dir_entries(target: &str) -> Option<Vec<String>> {
+pub fn synthetic_proc_dir_entries(target: &str) -> Option<Vec<String>> {
     crate::proc_vfs::proc_dir_entries(target)
+}
+
+/// The listable children of the shell-namespace `/dev` directory:
+/// `(name, is_prefix_dir)`. Interactive completion lists exactly
+/// these names under a `/dev/` prefix (niubash#627, vfs audit §6.4),
+/// so the static completion tier can never promise a spelling the
+/// open points do not serve, nor hide one they do.
+///
+/// Leaf entries are the spellings that classify as a device or fd
+/// alias (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`).
+/// Prefix-dir entries are families whose children are NOT a fixed
+/// name set: `fd` (children are the session's live fd numbers — the
+/// dynamic tier, enumerated from the fd table itself, never from
+/// this list), and `tcp`/`udp` (children are free-text host/port
+/// pairs; the dir itself is listed as the guide form, and nothing
+/// completes past it — GNU has no hostname completion there).
+///
+/// Spellings the registry does not classify — `/dev/tty` today —
+/// are deliberately absent: to the open points they are plain
+/// filesystem paths (the enclave's real directory serves them), so
+/// listing them here would invent a simulation the engine does not
+/// perform. `/dev/zero` and `/dev/full` joined the registry with
+/// the audit-D5 simulation (rubash#1898), so they are listed here
+/// in the same change, as the consistency pin below requires.
+pub fn special_dev_entries() -> &'static [(&'static str, bool)] {
+    &[
+        ("null", false),
+        ("zero", false),
+        ("full", false),
+        ("stdin", false),
+        ("stdout", false),
+        ("stderr", false),
+        ("fd", true),
+        ("tcp", true),
+        ("udp", true),
+    ]
 }
 
 #[cfg(test)]
@@ -211,10 +340,16 @@ mod tests {
         }
         let fd = target
             .strip_prefix("/dev/fd/")
-            .or_else(|| target.strip_prefix("/proc/self/fd/"))?;
-        (!fd.is_empty() && fd.chars().all(|ch| ch.is_ascii_digit()))
-            .then(|| fd.parse::<u32>().ok())
-            .flatten()
+            .or_else(|| target.strip_prefix("/proc/self/fd/"))
+            // Issue rubash#1974: the registry also judges the shell's
+            // own numeric-pid spelling; the mirror carries the same
+            // arm so the battery keeps tripping on drift.
+            .or_else(|| own_pid_fd_tail(target))?;
+        // Issue rubash#1973: the pre-registry body also accepted
+        // leading-zero spellings, which GNU rejects everywhere; the
+        // mirror carries the corrected canonical judgment so the
+        // battery below keeps tripping on any future drift.
+        canonical_fd_number(fd)
     }
 
     fn expected_proc() -> SpecialPathClass {
@@ -266,8 +401,24 @@ mod tests {
             ("/dev/stderr", FdAlias(2)),
             ("/dev/fd/0", FdAlias(0)),
             ("/dev/fd/63", FdAlias(63)),
-            ("/dev/fd/03", FdAlias(3)),
+            ("/dev/fd/10", FdAlias(10)),
             ("/proc/self/fd/2", FdAlias(2)),
+            // Issue rubash#1973: leading-zero fd spellings are NOT fd
+            // aliases — GNU 5.3.20 rejects them on every face (the
+            // oracle's procfs serves only canonical names), so they are
+            // plain filesystem paths that fail ENOENT there.
+            ("/dev/fd/00", Filesystem),
+            ("/dev/fd/01", Filesystem),
+            ("/dev/fd/03", Filesystem),
+            ("/dev/fd/007", Filesystem),
+            ("/dev/fd/000", Filesystem),
+            ("/proc/self/fd/00", Filesystem),
+            ("/proc/self/fd/03", Filesystem),
+            // GNU also rejects signs on every face (redir.c:630
+            // redir_special_open → all_digits); the registry has never
+            // accepted them — kept pinned.
+            ("/dev/fd/+3", Filesystem),
+            ("/proc/self/fd/+3", Filesystem),
             ("/dev/fd/", Filesystem),
             ("/dev/fd/3x", Filesystem),
             ("/dev/fd/-1", Filesystem),
@@ -295,10 +446,14 @@ mod tests {
             // The one overlap family: the fd-alias reading wins over
             // the /proc reading on every platform.
             ("/proc/self/fd/0", FdAlias(0)),
-            // Ordinary paths and not-yet-implemented device spellings
-            // (/dev/zero is audit D5, a later slice) stay Filesystem.
+            // Character devices (rubash#1898): /dev/zero and
+            // /dev/full are registry classes on every platform —
+            // the service faces build them where the OS has none.
+            ("/dev/zero", ZeroDevice),
+            ("/dev/full", FullDevice),
+            ("\\dev\\zero", ZeroDevice),
+            // Ordinary paths stay Filesystem.
             ("/dev/tty", Filesystem),
-            ("/dev/zero", Filesystem),
             ("etc/hosts", Filesystem),
             ("/tmp/x", Filesystem),
             ("", Filesystem),
@@ -329,6 +484,16 @@ mod tests {
                 "null query vs classify for {target:?}"
             );
             assert_eq!(
+                is_zero_device(target),
+                class == ZeroDevice,
+                "zero query vs classify for {target:?}"
+            );
+            assert_eq!(
+                is_full_device(target),
+                class == FullDevice,
+                "full query vs classify for {target:?}"
+            );
+            assert_eq!(
                 fd_alias_target(target),
                 legacy_fd_alias(target),
                 "alias query drift for {target:?}"
@@ -354,6 +519,89 @@ mod tests {
         }
     }
 
+    /// Issue rubash#1973 regression pin: the leading-zero family fails
+    /// fd-alias recognition spelling by spelling (GNU 5.3.20 oracle:
+    /// cat ENOENT, redirect ENOENT, `test -r` false, `source` ENOENT —
+    /// procfs serves only canonical names, so even an OPEN fd 3 does
+    /// not make `/dev/fd/03` resolve), while "0" and the canonical
+    /// multi-digit forms keep their FdAlias answers.
+    #[test]
+    fn issue1973_leading_zero_fd_spellings_are_not_aliases() {
+        for spelling in [
+            "/dev/fd/00",
+            "/dev/fd/01",
+            "/dev/fd/03",
+            "/dev/fd/007",
+            "/dev/fd/000",
+            "/proc/self/fd/00",
+            "/proc/self/fd/03",
+            "/proc/self/fd/007",
+        ] {
+            assert_eq!(
+                fd_alias_target(spelling),
+                None,
+                "leading-zero spelling must not be an fd alias: {spelling:?}"
+            );
+            assert_eq!(
+                classify_special_path(spelling),
+                SpecialPathClass::Filesystem,
+                "leading-zero spelling must classify as filesystem: {spelling:?}"
+            );
+        }
+        for (spelling, fd) in [
+            ("/dev/fd/0", 0),
+            ("/dev/fd/10", 10),
+            ("/dev/fd/63", 63),
+            ("/proc/self/fd/0", 0),
+            ("/proc/self/fd/2", 2),
+        ] {
+            assert_eq!(
+                fd_alias_target(spelling),
+                Some(fd),
+                "canonical spelling must stay an fd alias: {spelling:?}"
+            );
+        }
+    }
+
+    /// Issue rubash#1974 regression pin: the shell's own numeric-pid
+    /// spelling `/proc/<pid>/fd/N` is an fd alias exactly like
+    /// `/proc/self/fd/N` (GNU resolves both through procfs to the same
+    /// descriptor), while a foreign pid's fd directory is NOT an alias
+    /// of the shell's table and a non-canonical pid spelling names no
+    /// procfs directory at all.
+    #[test]
+    fn issue1974_own_pid_fd_spellings_are_aliases() {
+        let pid = std::process::id();
+        for (spelling, fd) in [
+            (format!("/proc/{pid}/fd/0"), 0),
+            (format!("/proc/{pid}/fd/3"), 3),
+            (format!("/proc/{pid}/fd/63"), 63),
+        ] {
+            assert_eq!(
+                fd_alias_target(&spelling),
+                Some(fd),
+                "own-pid spelling must be an fd alias: {spelling:?}"
+            );
+            assert_eq!(
+                classify_special_path(&spelling),
+                SpecialPathClass::FdAlias(fd),
+                "own-pid spelling must classify as fd alias: {spelling:?}"
+            );
+        }
+        // Foreign pid (pid 1 can never be this test process in the
+        // harness, and dup'ing a foreign process's fds is not the
+        // alias mechanism).
+        assert_eq!(fd_alias_target("/proc/1/fd/0"), None);
+        assert_eq!(
+            classify_special_path("/proc/1/fd/0"),
+            SpecialPathClass::Filesystem
+        );
+        // Non-canonical pid and fd fields stay filesystem spellings.
+        assert_eq!(fd_alias_target(&format!("/proc/{pid}/fd/03")), None);
+        assert_eq!(fd_alias_target(&format!("/proc/0{pid}/fd/3")), None);
+        assert_eq!(fd_alias_target("/proc/self/fd/3"), Some(3));
+    }
+
     /// rubash#1900: resolution answers exactly for the link class —
     /// self/cwd passes the caller's session-cwd forms through
     /// untouched, and non-link spellings resolve to None.
@@ -369,5 +617,61 @@ mod tests {
         }
         assert!(synthetic_link_target("/proc/self/status", None).is_none());
         assert!(synthetic_link_target("/etc/passwd", None).is_none());
+    }
+
+    /// niubash#627 (vfs audit §6.5): the listable /dev table must
+    /// agree with the classification judgments in both directions —
+    /// every listed name is special to the open points, and every
+    /// /dev spelling family the registry treats as special is
+    /// listed. Probed over the audit's known /dev vocabulary, so a
+    /// future registry arm (a /dev/zero simulation, audit D5) trips
+    /// this pin until the table is updated in the same change.
+    #[test]
+    fn special_dev_entries_match_classification() {
+        fn family_is_special(name: &str) -> bool {
+            classify_special_path(&format!("/dev/{name}")) != SpecialPathClass::Filesystem
+                || matches!(
+                    classify_special_path(&format!("/dev/{name}/0")),
+                    SpecialPathClass::FdAlias(_)
+                )
+                || classify_special_path(&format!("/dev/{name}/example.invalid/80"))
+                    == SpecialPathClass::NetRedirect
+        }
+
+        let listed: Vec<&str> = special_dev_entries()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        for (name, is_dir) in special_dev_entries() {
+            assert!(
+                family_is_special(name),
+                "listed /dev entry is not special: {name}"
+            );
+            if *is_dir {
+                // A prefix dir's own spelling is a plain directory to
+                // the open points; only its children are special.
+                assert_eq!(
+                    classify_special_path(&format!("/dev/{name}")),
+                    SpecialPathClass::Filesystem,
+                    "prefix dir spelling must stay Filesystem: {name}"
+                );
+            } else {
+                assert_ne!(
+                    classify_special_path(&format!("/dev/{name}")),
+                    SpecialPathClass::Filesystem,
+                    "leaf entry must classify as special: {name}"
+                );
+            }
+        }
+        for name in [
+            "null", "zero", "full", "stdin", "stdout", "stderr", "fd", "tcp", "udp", "tty", "ptmx",
+            "console", "random", "urandom",
+        ] {
+            assert_eq!(
+                listed.contains(&name),
+                family_is_special(name),
+                "/dev table vs classification drift for {name}"
+            );
+        }
     }
 }

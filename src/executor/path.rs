@@ -1566,7 +1566,12 @@ pub fn external_command_for_named_program(
         let lower = name.replace('\\', "/").to_ascii_lowercase();
         let is_sh =
             lower == "sh" || lower == "bash" || lower.ends_with("/sh") || lower.ends_with("/bash");
-        if !cfg!(unix) && is_sh && native_args.len() == 2 && native_args[0] == "-c" && !bash_argv0_supplied {
+        if !cfg!(unix)
+            && is_sh
+            && native_args.len() == 2
+            && native_args[0] == "-c"
+            && !bash_argv0_supplied
+        {
             command.arg(name);
         }
     }
@@ -2216,7 +2221,7 @@ fn is_winuxcmd_applet(program: &Path, env_vars: &HashMap<String, String>) -> boo
 /// Windows file identity for hardlink detection: (volume serial, file
 /// index). Same pair as `builtins/test.rs` `file_identity` for `[ f -ef g ]`.
 #[cfg(windows)]
-fn file_identity(path: &Path) -> Option<(u32, u64)> {
+pub(crate) fn file_identity(path: &Path) -> Option<(u32, u64)> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -3327,6 +3332,29 @@ fn shell_path_to_windows_inner(path: &str, env_vars: &HashMap<String, String>) -
         }
     }
 
+    // /dev/shm is the POSIX shared-memory tmpfs (rubash#1899). It is a
+    // real, writable directory namespace — not a capability device —
+    // so it must not fall into the /dev sentinel arm below (which made
+    // every /dev/shm file an unsupported-device error and sent data
+    // to a literal enclave path instead). Like /var/tmp it plays the
+    // temporary-files role in the simulation: a lazily materialized
+    // directory below the per-user temp base (<temp>/dev/shm), kept
+    // distinct from both /tmp and /var/tmp. This arm sits ahead of the
+    // /dev arm for that reason.
+    if cfg!(windows) && (normalized == "/dev/shm" || normalized.starts_with("/dev/shm/")) {
+        if let Some(shm) = windows_shm_dir() {
+            // Lazy materialization, same discipline as /var/tmp
+            // (rubash#328): create only when a /dev/shm path is
+            // actually resolved.
+            let _ = std::fs::create_dir_all(&shm);
+            return if normalized == "/dev/shm" {
+                shm
+            } else {
+                shm.join(normalized.strip_prefix("/dev/shm/").unwrap_or_default())
+            };
+        }
+    }
+
     // `/dev` is a capability namespace. Only specific /dev paths are mapped
     // on Windows; do not let unsupported fd/tty spellings become ordinary
     // files below the logical root.
@@ -3620,6 +3648,18 @@ pub(in crate::executor) fn windows_var_tmp_dir() -> Option<PathBuf> {
     }
     let base = crate::executor::local_helpers::safe_temp_dir_string();
     Some(PathBuf::from(base).join("var").join("tmp"))
+}
+
+/// The /dev/shm backing directory (rubash#1899): derived from the same
+/// temp base as /var/tmp, in a dev/shm subdirectory so the tmpfs
+/// namespace cannot collide with /tmp, /var/tmp, or unrelated %TEMP%
+/// contents.
+pub(in crate::executor) fn windows_shm_dir() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let base = crate::executor::local_helpers::safe_temp_dir_string();
+    Some(PathBuf::from(base).join("dev").join("shm"))
 }
 
 /// Best-effort creation of the /var/tmp backing directory at shell startup.
@@ -5456,7 +5496,10 @@ mod tests {
             &home_root.join("winuxcmd-other").join("x.exe"),
             &env
         ));
-        assert!(!posix_aware_child(Path::new(r"D:\elsewhere\node.exe"), &env));
+        assert!(!posix_aware_child(
+            Path::new(r"D:\elsewhere\node.exe"),
+            &env
+        ));
 
         // Route 3: the per-tree winuxcmd.exe marker probe — a WinuxCmd
         // installation reached through PATH without any env configuration.
@@ -5471,10 +5514,7 @@ mod tests {
             &usr_bin.join("printf.exe"),
             &HashMap::new()
         ));
-        assert!(!posix_aware_child(
-            &usr_bin.join("fd.exe"),
-            &HashMap::new()
-        ));
+        assert!(!posix_aware_child(&usr_bin.join("fd.exe"), &HashMap::new()));
 
         // Flat (legacy) installation layout: marker directly in the root.
         let flat = std::env::temp_dir().join("rubash-optb-wcmd-flat");
@@ -5520,7 +5560,10 @@ mod tests {
         let ls = usr_bin.join("ls.exe");
 
         // Applet keeps the shell-tree spelling verbatim.
-        assert_eq!(child_argv(&ls, &["/tmp"], &env_vars), vec!["/tmp".to_string()]);
+        assert_eq!(
+            child_argv(&ls, &["/tmp"], &env_vars),
+            vec!["/tmp".to_string()]
+        );
 
         // Third-party gets a native path for the same operand.
         let rg_tmp = child_argv(&rg, &["/tmp"], &env_vars);

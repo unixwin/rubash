@@ -592,7 +592,15 @@ fn virtual_device_test(op: &str, operand: &str) -> Option<bool> {
     if cfg!(unix) && matches!(op, "-O" | "-G") {
         return None;
     }
-    if crate::executor::path::is_shell_null_device(operand) {
+    // rubash#1898: /dev/zero and /dev/full carry the null device's
+    // exact truth table in GNU (measured against the 5.3.20 oracle:
+    // -e -r -w -c true; -x -s -b -f false) — they are the same class
+    // of always-present character device, so one arm serves all
+    // three spellings, judged by the registry.
+    if crate::executor::path::is_shell_null_device(operand)
+        || crate::special_paths::is_zero_device(operand)
+        || crate::special_paths::is_full_device(operand)
+    {
         return Some(match op {
             "-a" | "-e" | "-r" | "-w" | "-c" => true,
             "-x" | "-s" | "-b" | "-p" | "-S" | "-u" | "-g" | "-k" | "-h" | "-L" | "-O" | "-G"
@@ -616,7 +624,12 @@ fn virtual_device_test(op: &str, operand: &str) -> Option<bool> {
         });
     }
 
-    if matches!(operand, "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0") {
+    // The fd-0 spelling judgment is the registry's (issue rubash#1973):
+    // `fd_alias_target == Some(0)` accepts exactly the canonical
+    // spellings the literal table carried — GNU rejects the
+    // leading-zero family on every face, so `test -e /dev/fd/00` falls
+    // through to the filesystem and fails there, like the oracle.
+    if crate::special_paths::fd_alias_target(operand) == Some(0) {
         return Some(match op {
             "-a" | "-e" | "-r" | "-c" => true,
             "-w" | "-x" | "-s" | "-b" | "-p" | "-S" | "-u" | "-g" | "-k" | "-h" | "-L" | "-O"
@@ -627,15 +640,12 @@ fn virtual_device_test(op: &str, operand: &str) -> Option<bool> {
 
     // stdout (fd 1) and stderr (fd 2) are writable virtual devices.
     // GNU test.c `unary_test` checks the actual fd via `sh_eaccess`; in
-    // the test-suite context these fds are open and writable.
+    // the test-suite context these fds are open and writable. Spelling
+    // via the registry (issue rubash#1973), same canonical set the
+    // literal table carried.
     if matches!(
-        operand,
-        "/dev/stdout"
-            | "/proc/self/fd/1"
-            | "/dev/fd/1"
-            | "/dev/stderr"
-            | "/proc/self/fd/2"
-            | "/dev/fd/2"
+        crate::special_paths::fd_alias_target(operand),
+        Some(1) | Some(2)
     ) {
         return Some(match op {
             "-a" | "-e" | "-w" => true,
@@ -666,6 +676,14 @@ fn proc_unary_test(op: &str, operand: &str) -> Option<bool> {
         "-f" => facts.is_file || (facts.is_link && !facts.link_target_is_dir),
         "-h" | "-L" => facts.is_link,
         "-r" => true,
+        // rubash#1936: -w/-x are mode questions the facts now carry
+        // (procfs modes are definitional — see ProcUnaryFacts); they
+        // previously fell through to the filesystem, which has no
+        // such names on Windows and answered false for every entry,
+        // including the writable per-pid files and the executable
+        // exe link.
+        "-w" => facts.writable,
+        "-x" => facts.executable,
         "-s" => facts.is_file || (facts.is_link && !facts.link_target_is_dir),
         _ => return None,
     })

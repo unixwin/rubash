@@ -280,7 +280,7 @@ fn fresh_root(tag: &str) -> PathBuf {
 
 /// Fixed-workload script for the throughput indicator (NOT a benchmark:
 /// one repetition per size, on a shared loaded machine).
-fn workload(i: usize, dir: &Path) -> String {
+fn workload(_i: usize, dir: &Path) -> String {
     let d = shell_path(dir);
     format!(
         "s=0; str=\"\"\n\
@@ -406,7 +406,7 @@ fn multi_session_isolation_matrix() {
         std::fs::create_dir_all(&dir_a).unwrap();
         let da = shell_path(&dir_a);
         let mut a = Executor::new();
-        let mut b = Executor::new();
+        let b = Executor::new();
         run_source(&mut a, &format!("{PROBE}=probe-a"), false);
         let mirrored = std::env::var(PROBE).ok();
         summary.push_str(&format!(

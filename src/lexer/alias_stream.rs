@@ -203,6 +203,7 @@ fn check_reserved_word(
 /// `end` is the buffer index where the pushed text ends; when the scan
 /// position reaches it the alias leaves AL_BEINGEXPANDED and, when the
 /// alias value ended in a blank, PST_ALEXPNEXT is set (parse.y:2098-2107).
+#[derive(Clone)]
 struct Boundary {
     end: usize,
     expander: String,
@@ -1252,4 +1253,1249 @@ fn is_assignment_syntax(word: &str) -> bool {
         i += 1;
     }
     i < chars.len() && chars[i] == '='
+}
+
+// ---------------------------------------------------------------------
+// Streaming alias expansion (rubash#1961).
+//
+// The batch entry points above expand a whole command group at once.
+// The source gather used to re-run that batch expansion AND a full
+// re-lex over the whole accumulated group at EVERY candidate line of
+// the alias-live arm — the O(group^2) disease #1940 fixed for the
+// certified arm. The scanners below drive the same two phases
+// (comsub-body pre-pass, then the parse.y main scan) incrementally:
+// input is fed line by line, each phase advances as far as the
+// available text decides, and output is released only up to a commit
+// watermark — text the scan has provably finished with, which later
+// input can never rewrite (splices only ever target the word currently
+// being scanned, and comsub bodies are rewritten only inside their own
+// extent).
+//
+// A phase PARKS when the next decision needs input that has not been
+// fed yet (an unterminated word/quote/substitution, an operator whose
+// pairing character is still missing, a heredoc body line that has not
+// arrived complete): it stops with its position rewound to the unit
+// start, so a later feed resumes the unit from scratch under the same
+// state. Parking is always safe — the caller falls back to the batch
+// verdict for that candidate. Two shapes cannot be rewound and POISON
+// the scanner instead (the caller then uses the batch verdict for the
+// rest of the group, exactly the pre-#1961 behavior):
+//   - a comsub body whose expansion reached for input beyond what was
+//     fed (an internal extent computation missed during
+//     splice_substitution_body: the closer moved past the fed text);
+//   - a compound-assignment word whose glued continuation word is
+//     unterminated after element words already spliced.
+// While a scanner is not parked, the committed output is EXACTLY the
+// batch expansion of the input fed so far (the differential tests at
+// the bottom of this file pin that identity line by line); while it is
+// parked, the committed output is a prefix of it.
+
+thread_local! {
+    /// Set by the tracked extent wrappers when an extent computation
+    /// inside splice_substitution_body missed (returned None and was
+    /// treated as "to end of buffer").
+    static COMSUB_EXTENT_MISS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn extent_paren_tracked(chars: &[char], open: usize) -> Option<usize> {
+    let resolved = crate::lexer::skip_parenthesized_unit_corrected(chars, open);
+    if resolved.is_none() {
+        COMSUB_EXTENT_MISS.with(|flag| flag.set(true));
+    }
+    resolved
+}
+
+fn extent_funsub_tracked(chars: &[char], open: usize) -> Option<usize> {
+    let resolved = skip_funsub_body(chars, open);
+    if resolved.is_none() {
+        COMSUB_EXTENT_MISS.with(|flag| flag.set(true));
+    }
+    resolved
+}
+
+/// End (index just past the closer) of the single-quoted span starting
+/// at `pos`, or None when the available text ends inside it.
+fn single_quote_end(buf: &[char], pos: usize) -> Option<usize> {
+    let mut index = pos + 1;
+    while index < buf.len() {
+        if buf[index] == '\'' {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// End of the backtick span starting at `pos`, or None when the
+/// available text ends inside it (mirrors skip_backtick's escapes).
+fn backtick_end(buf: &[char], pos: usize) -> Option<usize> {
+    let mut index = pos + 1;
+    while index < buf.len() {
+        match buf[index] {
+            '\\' => index += 2,
+            '`' => return Some(index + 1),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Retry deadline for a span-rescan park: the buffer length at which
+/// the parked unit may be re-scanned. The interval is proportional
+/// to the UNIT's span (buffer end minus park position), not to the
+/// whole buffer: a buffer-proportional interval pushes the retry
+/// past end-of-input on any large group (a unit that closed a line
+/// later would stay "parked" for the rest of the file, and every
+/// later candidate would pay the caller's speculative path). With a
+/// span-proportional interval the total re-scan work stays within a
+/// small multiple of the span, and a unit that closes is retried
+/// within a few KB of fed text. Parking longer is always safe —
+/// this only trades re-scan cost against release latency.
+fn retry_deadline(buffer_len: usize, park_pos: usize) -> usize {
+    let span = buffer_len.saturating_sub(park_pos);
+    buffer_len + (span / 16).max(2048)
+}
+
+/// Streaming form of expand_comsub_alias_bodies: same scan, fed in
+/// pieces. `chars` accumulates every fed char (splice positions stay
+/// absolute); output is released from the commit watermark.
+#[derive(Clone)]
+struct ComsubAliasScanner<'a> {
+    lookup: &'a AliasLookup<'a>,
+    posix: bool,
+    chars: Vec<char>,
+    pos: usize,
+    in_double: bool,
+    commit: usize,
+    released: usize,
+    parked: bool,
+    poisoned: bool,
+    /// Span-proportional retry throttle for span-rescan parks: the
+    /// position of the unit the last drive parked on, whether
+    /// retrying it costs O(span) (a quote/substitution extent
+    /// re-scan), and the input length at which it may be retried
+    /// (see retry_deadline). Without this, a unit spanning N lines
+    /// is re-scanned from its start on every line — the O(span^2)
+    /// shape rubash#1961 exists to remove. Retrying late is safe:
+    /// the scanner simply stays parked meanwhile.
+    park_pos: Option<usize>,
+    park_rescan: bool,
+    retry_at: usize,
+    /// The current park is on a `$(` / `${ ` unit whose extent is not
+    /// decidable yet — the one park class where the batch verdict over
+    /// the accumulated text can still answer "complete" (an alias
+    /// value inside the truncated body contributing its closer), so
+    /// the caller owes it the batch check (see AliasStreamScanner).
+    park_comsub: bool,
+}
+
+impl<'a> ComsubAliasScanner<'a> {
+    fn new(lookup: &'a AliasLookup<'a>, posix: bool) -> Self {
+        Self {
+            lookup,
+            posix,
+            chars: Vec::new(),
+            pos: 0,
+            in_double: false,
+            commit: 0,
+            released: 0,
+            parked: false,
+            poisoned: false,
+            park_pos: None,
+            park_rescan: false,
+            retry_at: 0,
+            park_comsub: false,
+        }
+    }
+
+    fn feed(&mut self, text: &str) {
+        self.chars.extend(text.chars());
+    }
+
+    /// Release the committed output not yet handed out.
+    fn take_output(&mut self) -> String {
+        let out: String = self.chars[self.released..self.commit].iter().collect();
+        self.released = self.commit;
+        out
+    }
+
+    fn drive(&mut self, final_pass: bool) {
+        self.parked = false;
+        if self.poisoned {
+            self.parked = true;
+            return;
+        }
+        if !final_pass
+            && self.park_rescan
+            && self.park_pos == Some(self.pos)
+            && self.chars.len() < self.retry_at
+        {
+            self.parked = true;
+            return;
+        }
+        let mut rescan_park = false;
+        let mut comsub_park = false;
+        while self.pos < self.chars.len() {
+            let pos = self.pos;
+            // The `$` arms below read one and two chars ahead; a `$` at
+            // the very edge of the fed text has no decidable arm yet.
+            if self.chars[pos] == '$' && !final_pass {
+                if pos + 1 >= self.chars.len()
+                    || (self.chars[pos + 1] == '{' && pos + 2 >= self.chars.len())
+                {
+                    self.parked = true;
+                    break;
+                }
+            }
+            match self.chars[pos] {
+                '\\' => {
+                    if pos + 1 >= self.chars.len() && !final_pass {
+                        self.parked = true;
+                        break;
+                    }
+                    self.pos = (pos + 2).min(self.chars.len());
+                }
+                '\'' if !self.in_double => match single_quote_end(&self.chars, pos) {
+                    Some(end) => self.pos = end,
+                    None if !final_pass => {
+                        self.parked = true;
+                        rescan_park = true;
+                        break;
+                    }
+                    None => self.pos = self.chars.len(),
+                },
+                '"' => {
+                    self.in_double = !self.in_double;
+                    self.pos = pos + 1;
+                }
+                '`' if !self.in_double => match backtick_end(&self.chars, pos) {
+                    Some(end) => self.pos = end,
+                    None if !final_pass => {
+                        self.parked = true;
+                        rescan_park = true;
+                        break;
+                    }
+                    None => self.pos = self.chars.len(),
+                },
+                '$' if self.chars.get(pos + 1) == Some(&'(') => {
+                    // Park BEFORE any mutation while the unit's extent
+                    // is not decidable from the fed text; once the
+                    // extent is real, every extent the splice derives
+                    // either closes inside the fed text too (identical
+                    // to the batch run) or misses — which poisons.
+                    if !final_pass
+                        && crate::lexer::skip_parenthesized_unit_corrected(&self.chars, pos + 1)
+                            .is_none()
+                    {
+                        self.parked = true;
+                        rescan_park = true;
+                        comsub_park = true;
+                        break;
+                    }
+                    COMSUB_EXTENT_MISS.with(|flag| flag.set(false));
+                    let mut changed = false;
+                    self.pos = splice_substitution_body(
+                        &mut self.chars,
+                        pos,
+                        self.lookup,
+                        self.posix,
+                        &mut changed,
+                        extent_paren_tracked,
+                    );
+                    if !final_pass && COMSUB_EXTENT_MISS.with(|flag| flag.get()) {
+                        self.poisoned = true;
+                        self.parked = true;
+                        break;
+                    }
+                }
+                '$' if self.chars.get(pos + 1) == Some(&'{')
+                    && self
+                        .chars
+                        .get(pos + 2)
+                        .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|')) =>
+                {
+                    if !final_pass && skip_funsub_body(&self.chars, pos + 1).is_none() {
+                        self.parked = true;
+                        rescan_park = true;
+                        comsub_park = true;
+                        break;
+                    }
+                    COMSUB_EXTENT_MISS.with(|flag| flag.set(false));
+                    let mut changed = false;
+                    self.pos = splice_substitution_body(
+                        &mut self.chars,
+                        pos,
+                        self.lookup,
+                        self.posix,
+                        &mut changed,
+                        extent_funsub_tracked,
+                    );
+                    if !final_pass && COMSUB_EXTENT_MISS.with(|flag| flag.get()) {
+                        self.poisoned = true;
+                        self.parked = true;
+                        break;
+                    }
+                }
+                _ => self.pos = pos + 1,
+            }
+            self.commit = self.pos;
+        }
+        if self.parked {
+            self.park_pos = Some(self.pos);
+            self.park_rescan = rescan_park;
+            self.park_comsub = comsub_park;
+            if rescan_park {
+                self.retry_at = retry_deadline(self.chars.len(), self.pos);
+            }
+        } else {
+            self.park_pos = None;
+            self.park_rescan = false;
+            self.park_comsub = false;
+        }
+    }
+}
+
+/// Scalar scanner state at the start of the word currently being
+/// read, for the compound-assignment continuation rewind (see
+/// MainAliasScanner::drive).
+#[derive(Clone, Copy)]
+struct ScanMark {
+    last: Tok,
+    last2: Tok,
+    alexpnext: bool,
+    casepat: bool,
+    case_needed: usize,
+    expect_in: usize,
+    expect_in_cmd: Tok,
+    cond: usize,
+    open_brace: usize,
+    compassign: usize,
+    expect_heredoc: Option<bool>,
+    bounds_len: usize,
+    expanding_len: usize,
+    splice_count: usize,
+}
+
+/// Streaming form of expand_aliases_in_source's main scan: the same
+/// token walk over a buffer that grows by feeds, with end-of-input
+/// decisions replaced by parks while more input may still arrive.
+#[derive(Clone)]
+struct MainAliasScanner<'a> {
+    lookup: &'a AliasLookup<'a>,
+    posix: bool,
+    extglob: bool,
+    buf: Vec<char>,
+    pos: usize,
+    commit: usize,
+    released: usize,
+    parked: bool,
+    poisoned: bool,
+    expanding: Vec<String>,
+    bounds: Vec<Boundary>,
+    alexpnext: bool,
+    last: Tok,
+    last2: Tok,
+    casepat: bool,
+    case_needed: usize,
+    expect_in: usize,
+    expect_in_cmd: Tok,
+    cond: usize,
+    open_brace: usize,
+    expect_heredoc: Option<bool>,
+    pending_heredocs: Vec<(String, bool)>,
+    compassign: usize,
+    unit_start: usize,
+    mark: Option<ScanMark>,
+    splice_count: usize,
+    /// Span-proportional retry throttle for span-rescan parks (see
+    /// ComsubAliasScanner's fields).
+    park_pos: Option<usize>,
+    park_rescan: bool,
+    retry_at: usize,
+}
+
+impl<'a> MainAliasScanner<'a> {
+    fn new(lookup: &'a AliasLookup<'a>, posix: bool) -> Self {
+        Self {
+            lookup,
+            posix,
+            // Same sampling instant as the batch pass: once, when the
+            // scan starts (nothing executes during a gather, so the
+            // flag cannot move mid-scan).
+            extglob: super::parse_extended_glob(),
+            buf: Vec::new(),
+            pos: 0,
+            commit: 0,
+            released: 0,
+            parked: false,
+            poisoned: false,
+            expanding: Vec::new(),
+            bounds: Vec::new(),
+            alexpnext: false,
+            last: Tok::Start,
+            last2: Tok::Start,
+            casepat: false,
+            case_needed: 0,
+            expect_in: 0,
+            expect_in_cmd: Tok::Start,
+            cond: 0,
+            open_brace: 0,
+            expect_heredoc: None,
+            pending_heredocs: Vec::new(),
+            compassign: 0,
+            unit_start: 0,
+            mark: None,
+            splice_count: 0,
+            park_pos: None,
+            park_rescan: false,
+            retry_at: 0,
+        }
+    }
+
+    fn feed(&mut self, text: &str) {
+        self.buf.extend(text.chars());
+    }
+
+    /// The committed output not yet handed out (chars before the
+    /// commit watermark are final: splices only target the word
+    /// currently being scanned, which starts at or after it).
+    fn take_committed(&mut self) -> String {
+        let out: String = self.buf[self.released..self.commit].iter().collect();
+        self.released = self.commit;
+        out
+    }
+
+    /// All output, committed or not (final pass only).
+    fn rest(&self) -> String {
+        self.buf[self.released..].iter().collect()
+    }
+
+    fn emit(&mut self, tok: Tok) {
+        self.last2 = self.last;
+        self.last = tok;
+        self.alexpnext = false;
+    }
+
+    fn splice(
+        &mut self,
+        ws: usize,
+        end: usize,
+        word: &str,
+        value: &str,
+        expand_next: bool,
+        fd_boundary: bool,
+    ) {
+        splice_alias_value(
+            &mut self.buf,
+            &mut self.bounds,
+            &mut self.expanding,
+            ws,
+            end,
+            word,
+            value,
+            expand_next,
+            fd_boundary,
+        );
+        self.splice_count += 1;
+    }
+
+    fn take_mark(&self) -> ScanMark {
+        ScanMark {
+            last: self.last,
+            last2: self.last2,
+            alexpnext: self.alexpnext,
+            casepat: self.casepat,
+            case_needed: self.case_needed,
+            expect_in: self.expect_in,
+            expect_in_cmd: self.expect_in_cmd,
+            cond: self.cond,
+            open_brace: self.open_brace,
+            compassign: self.compassign,
+            expect_heredoc: self.expect_heredoc,
+            bounds_len: self.bounds.len(),
+            expanding_len: self.expanding.len(),
+            splice_count: self.splice_count,
+        }
+    }
+
+    fn restore_mark(&mut self, mark: ScanMark) {
+        self.last = mark.last;
+        self.last2 = mark.last2;
+        self.alexpnext = mark.alexpnext;
+        self.casepat = mark.casepat;
+        self.case_needed = mark.case_needed;
+        self.expect_in = mark.expect_in;
+        self.expect_in_cmd = mark.expect_in_cmd;
+        self.cond = mark.cond;
+        self.open_brace = mark.open_brace;
+        self.compassign = mark.compassign;
+        self.expect_heredoc = mark.expect_heredoc;
+    }
+
+    fn drive(&mut self, final_pass: bool) {
+        self.parked = false;
+        if self.poisoned {
+            self.parked = true;
+            return;
+        }
+        if !final_pass
+            && self.park_rescan
+            && self.park_pos == Some(self.pos)
+            && self.buf.len() < self.retry_at
+        {
+            self.parked = true;
+            return;
+        }
+        let mut rescan_park = false;
+        while self.pos < self.buf.len() {
+            // shell_getc boundary pops (parse.y:2081 pop_string).
+            while self.bounds.last().is_some_and(|b| self.pos >= b.end) {
+                let b = self.bounds.pop().expect("checked");
+                self.expanding.retain(|name| name != &b.expander);
+                if b.expand_next {
+                    self.alexpnext = true;
+                }
+            }
+            if self.pos >= self.buf.len() {
+                break;
+            }
+            let pos = self.pos;
+            let c = self.buf[pos];
+            if self.compassign > 0 {
+                // Inside `NAME=( ... )` — see the batch scan for the
+                // parse.y:7104 contract this mirrors.
+                match c {
+                    ' ' | '\t' | '\n' | ';' | '&' | '|' | '<' | '>' => self.pos = pos + 1,
+                    '#' => {
+                        // Comments are skipped by the reader, never token input.
+                        if !final_pass && !self.buf[pos..].contains(&'\n') {
+                            self.parked = true;
+                            self.commit = self.unit_start;
+                            break;
+                        }
+                        while self.pos < self.buf.len() && self.buf[self.pos] != '\n' {
+                            self.pos += 1;
+                        }
+                    }
+                    '(' => {
+                        self.compassign += 1;
+                        self.pos = pos + 1;
+                    }
+                    ')' => {
+                        self.compassign -= 1;
+                        self.pos = pos + 1;
+                        if self.compassign == 0 {
+                            let (cont, _) = scan_word(&self.buf, self.pos, self.extglob);
+                            if cont >= self.buf.len() && !final_pass {
+                                // The word glued to the closer is
+                                // unterminated: rewind to the compound
+                                // word's start when nothing spliced or
+                                // popped since (the scan is then exactly
+                                // reproducible), else poison.
+                                let mark = self.mark.expect("word mark");
+                                if mark.splice_count == self.splice_count
+                                    && mark.bounds_len == self.bounds.len()
+                                    && mark.expanding_len == self.expanding.len()
+                                {
+                                    self.restore_mark(mark);
+                                    self.pos = self.unit_start;
+                                } else {
+                                    self.poisoned = true;
+                                }
+                                self.parked = true;
+                                rescan_park = true;
+                                self.commit = self.unit_start;
+                                break;
+                            }
+                            self.pos = cont;
+                            self.emit(Tok::Assign);
+                        }
+                    }
+                    _ => {
+                        let ws = pos;
+                        let (end, quoted) = scan_word(&self.buf, pos, self.extglob);
+                        if end >= self.buf.len() && !final_pass {
+                            self.parked = true;
+                            rescan_park = true;
+                            self.commit = self.unit_start;
+                            break;
+                        }
+                        self.pos = end;
+                        let word: String = self.buf[ws..end].iter().collect();
+                        if self.alexpnext
+                            && !quoted
+                            && !self.expanding.iter().any(|name| name == &word)
+                        {
+                            if let Some((value, expand_next)) = (self.lookup)(&word) {
+                                self.splice(ws, end, &word, &value, expand_next, false);
+                                self.pos = ws;
+                                continue;
+                            }
+                        }
+                        self.emit(Tok::Word);
+                    }
+                }
+                if self.compassign == 0 {
+                    self.commit = self.pos;
+                }
+                continue;
+            }
+            match c {
+                ' ' | '\t' => self.pos = pos + 1,
+                '\n' => {
+                    // After the line carrying a `<<` operator ends, the
+                    // heredoc body lines are consumed verbatim; while
+                    // more lines may arrive, an incomplete body line
+                    // parks the whole newline (state snapshot first).
+                    if !final_pass && !self.pending_heredocs.is_empty() {
+                        let saved_heredocs = self.pending_heredocs.clone();
+                        let (saved_last, saved_last2, saved_alexpnext) =
+                            (self.last, self.last2, self.alexpnext);
+                        self.emit(Tok::Newline);
+                        self.pos = pos + 1;
+                        if !self.consume_heredoc_bodies(false) {
+                            self.pending_heredocs = saved_heredocs;
+                            self.last = saved_last;
+                            self.last2 = saved_last2;
+                            self.alexpnext = saved_alexpnext;
+                            self.pos = pos;
+                            self.parked = true;
+                            self.commit = pos;
+                            break;
+                        }
+                    } else {
+                        self.emit(Tok::Newline);
+                        self.pos = pos + 1;
+                        self.consume_heredoc_bodies(final_pass);
+                    }
+                    self.commit = self.pos;
+                }
+                '#' => {
+                    if !final_pass && !self.buf[pos..].contains(&'\n') {
+                        self.parked = true;
+                        self.commit = pos;
+                        break;
+                    }
+                    while self.pos < self.buf.len() && self.buf[self.pos] != '\n' {
+                        self.pos += 1;
+                    }
+                    self.commit = self.pos;
+                }
+                ';' => {
+                    if !final_pass
+                        && (pos + 1 >= self.buf.len()
+                            || (self.buf[pos + 1] == ';' && pos + 2 >= self.buf.len()))
+                    {
+                        self.parked = true;
+                        self.commit = pos;
+                        break;
+                    }
+                    if pos + 1 < self.buf.len() && self.buf[pos + 1] == ';' {
+                        if pos + 2 < self.buf.len() && self.buf[pos + 2] == '&' {
+                            self.emit(Tok::SemiSemiAnd);
+                            self.casepat = true; // y.tab.c:6118
+                            self.pos = pos + 3;
+                        } else {
+                            self.emit(Tok::SemiSemi);
+                            self.casepat = true; // y.tab.c:6069
+                            self.pos = pos + 2;
+                        }
+                    } else if pos + 1 < self.buf.len() && self.buf[pos + 1] == '&' {
+                        self.emit(Tok::SemiAnd);
+                        self.casepat = true; // y.tab.c:6118
+                        self.pos = pos + 2;
+                    } else {
+                        self.emit(Tok::Semi);
+                        self.pos = pos + 1;
+                    }
+                    self.commit = self.pos;
+                }
+                '&' => {
+                    if !final_pass
+                        && (pos + 1 >= self.buf.len()
+                            || (self.buf[pos + 1] == '>' && pos + 2 >= self.buf.len()))
+                    {
+                        self.parked = true;
+                        self.commit = pos;
+                        break;
+                    }
+                    if pos + 1 < self.buf.len() && self.buf[pos + 1] == '&' {
+                        self.emit(Tok::AndAnd);
+                        self.pos = pos + 2;
+                    } else if pos + 1 < self.buf.len() && self.buf[pos + 1] == '>' {
+                        self.emit(Tok::RedirOp);
+                        self.pos = pos
+                            + if pos + 2 < self.buf.len() && self.buf[pos + 2] == '>' {
+                                3
+                            } else {
+                                2
+                            };
+                    } else {
+                        self.emit(Tok::And);
+                        self.pos = pos + 1;
+                    }
+                    self.commit = self.pos;
+                }
+                '|' => {
+                    if !final_pass && pos + 1 >= self.buf.len() {
+                        self.parked = true;
+                        self.commit = pos;
+                        break;
+                    }
+                    if pos + 1 < self.buf.len() && self.buf[pos + 1] == '|' {
+                        self.emit(Tok::OrOr);
+                        self.pos = pos + 2;
+                    } else if pos + 1 < self.buf.len() && self.buf[pos + 1] == '&' {
+                        self.emit(Tok::BarAnd);
+                        self.pos = pos + 2;
+                    } else {
+                        self.emit(Tok::Pipe);
+                        self.pos = pos + 1;
+                    }
+                    self.commit = self.pos;
+                }
+                '(' => {
+                    if !final_pass && pos + 1 >= self.buf.len() {
+                        self.parked = true;
+                        self.commit = pos;
+                        break;
+                    }
+                    // parse_dparen (y.tab.c:7218)
+                    if pos + 1 < self.buf.len() && self.buf[pos + 1] == '(' {
+                        match match_dparen(&self.buf, pos) {
+                            Some(end) => {
+                                self.emit(Tok::ArithCmd);
+                                self.pos = end;
+                            }
+                            None if !final_pass => {
+                                self.parked = true;
+                                rescan_park = true;
+                                self.commit = pos;
+                                break;
+                            }
+                            None => {
+                                self.emit(Tok::LParen);
+                                self.pos = pos + 1;
+                            }
+                        }
+                    } else {
+                        self.emit(Tok::LParen);
+                        self.pos = pos + 1;
+                    }
+                    self.commit = self.pos;
+                }
+                ')' => {
+                    if self.casepat {
+                        self.casepat = false; // y.tab.c:6146
+                    }
+                    self.emit(Tok::RParen);
+                    self.pos = pos + 1;
+                    self.commit = self.pos;
+                }
+                '<' | '>' => {
+                    if !final_pass
+                        && (pos + 1 >= self.buf.len()
+                            || (c == '<' && self.buf[pos + 1] == '<' && pos + 2 >= self.buf.len()))
+                    {
+                        self.parked = true;
+                        self.commit = pos;
+                        break;
+                    }
+                    if c == '<'
+                        && self.buf.get(pos + 1) == Some(&'<')
+                        && self.buf.get(pos + 2) != Some(&'<')
+                    {
+                        self.expect_heredoc = Some(self.buf.get(pos + 2) == Some(&'-'));
+                    }
+                    self.emit(Tok::RedirOp);
+                    self.pos = pos + redir_op_len(&self.buf, pos);
+                    self.commit = self.pos;
+                }
+                _ => {
+                    // Word token: quoted regions and substitutions stay opaque.
+                    let ws = pos;
+                    self.unit_start = ws;
+                    self.mark = Some(self.take_mark());
+                    let (end, quoted) = scan_word(&self.buf, pos, self.extglob);
+                    if end >= self.buf.len() && !final_pass {
+                        // Unterminated word: nothing has been decided
+                        // yet (scan_word is pure), so park in place.
+                        self.parked = true;
+                        rescan_park = true;
+                        self.commit = ws;
+                        break;
+                    }
+                    self.pos = end;
+                    let word: String = self.buf[ws..end].iter().collect();
+
+                    if self.compassign == 0
+                        && self.last != Tok::RedirOp
+                        && self.buf.get(self.pos) == Some(&'(')
+                        && word.ends_with('=')
+                        && is_assignment_syntax(&word)
+                    {
+                        self.compassign = 1;
+                        self.pos += 1;
+                        self.last2 = Tok::Word;
+                        self.last = Tok::Word;
+                        continue;
+                    }
+
+                    if self.last == Tok::RedirOp && !self.alexpnext {
+                        if let Some(strip_tabs) = self.expect_heredoc.take() {
+                            self.pending_heredocs
+                                .push((dequote_heredoc_delimiter(&word), strip_tabs));
+                        }
+                        self.emit(Tok::RedirTarget);
+                        self.commit = self.pos;
+                        continue;
+                    }
+
+                    if (word.chars().all(|d| d.is_ascii_digit()) && !word.is_empty()
+                        || is_var_redir_name(&word))
+                        && self.pos < self.buf.len()
+                        && (self.buf[self.pos] == '<' || self.buf[self.pos] == '>')
+                        && !self.bounds.iter().any(|b| b.end == end)
+                    {
+                        self.emit(Tok::RedirOp);
+                        self.pos += redir_op_len(&self.buf, self.pos);
+                        self.commit = self.pos;
+                        continue;
+                    }
+
+                    if self.cond > 0 && word == "]]" {
+                        self.cond = self.cond.saturating_sub(1);
+                        self.emit(Tok::CondEnd);
+                        self.commit = self.pos;
+                        continue;
+                    }
+
+                    if word == "in"
+                        && ((self.last == Tok::Word
+                            && matches!(self.last2, Tok::For | Tok::Case | Tok::Select))
+                            || (self.expect_in > 0
+                                && matches!(self.last, Tok::Word | Tok::Newline)))
+                    {
+                        if self.expect_in_cmd == Tok::Case {
+                            self.casepat = true; // y.tab.c:5736
+                            self.case_needed += 1;
+                        }
+                        self.expect_in = self.expect_in.saturating_sub(1);
+                        self.expect_in_cmd = Tok::Start;
+                        self.emit(Tok::In);
+                        self.commit = self.pos;
+                        continue;
+                    }
+                    if word == "do"
+                        && self.last == Tok::Word
+                        && matches!(self.last2, Tok::For | Tok::Select)
+                    {
+                        self.expect_in = self.expect_in.saturating_sub(1);
+                        self.expect_in_cmd = Tok::Start;
+                        self.emit(Tok::Do);
+                        self.commit = self.pos;
+                        continue;
+                    }
+                    if word == "esac" && self.case_needed > 0 && self.last == Tok::In {
+                        self.case_needed -= 1;
+                        self.casepat = false;
+                        self.emit(Tok::Esac);
+                        self.commit = self.pos;
+                        continue;
+                    }
+                    if word == "-p" && self.last == Tok::Time {
+                        self.emit(Tok::TimeOpt);
+                        self.commit = self.pos;
+                        continue;
+                    }
+                    if word == "--" && matches!(self.last, Tok::Time | Tok::TimeOpt) {
+                        self.emit(Tok::TimeIgn);
+                        self.commit = self.pos;
+                        continue;
+                    }
+
+                    if self.posix {
+                        if let Some(tok) = check_reserved_word(
+                            &word,
+                            quoted,
+                            self.last,
+                            &mut self.casepat,
+                            &mut self.case_needed,
+                            &mut self.expect_in,
+                            &mut self.expect_in_cmd,
+                            &mut self.open_brace,
+                            &mut self.cond,
+                        ) {
+                            self.emit(tok);
+                            self.commit = self.pos;
+                            continue;
+                        }
+                    }
+
+                    let eligible = self.alexpnext
+                        || (self.cond == 0 && !self.casepat && command_pos(self.last, self.last2));
+                    if eligible && !quoted && !self.expanding.iter().any(|name| name == &word) {
+                        if let Some((value, expand_next)) = (self.lookup)(&word) {
+                            self.splice(ws, end, &word, &value, expand_next, true);
+                            self.pos = ws;
+                            continue;
+                        }
+                    }
+
+                    if self.last == Tok::RedirOp {
+                        if let Some(strip_tabs) = self.expect_heredoc.take() {
+                            self.pending_heredocs
+                                .push((dequote_heredoc_delimiter(&word), strip_tabs));
+                        }
+                        self.emit(Tok::RedirTarget);
+                        self.commit = self.pos;
+                        continue;
+                    }
+
+                    if !self.posix {
+                        if let Some(tok) = check_reserved_word(
+                            &word,
+                            quoted,
+                            self.last,
+                            &mut self.casepat,
+                            &mut self.case_needed,
+                            &mut self.expect_in,
+                            &mut self.expect_in_cmd,
+                            &mut self.open_brace,
+                            &mut self.cond,
+                        ) {
+                            self.emit(tok);
+                            self.commit = self.pos;
+                            continue;
+                        }
+                    }
+                    if self.cond > 0 {
+                        self.emit(Tok::Word);
+                        self.commit = self.pos;
+                        continue;
+                    }
+                    if is_assignment_syntax(&word)
+                        && command_pos(self.last, self.last2)
+                        && !self.casepat
+                    {
+                        self.emit(Tok::Assign);
+                    } else {
+                        self.emit(Tok::Word);
+                    }
+                    self.commit = self.pos;
+                }
+            }
+        }
+        if self.compassign > 0 {
+            // Stopped inside a compound-assignment word: its text is
+            // not final yet, so the committed prefix is not the whole
+            // expansion of what was fed.
+            self.parked = true;
+        }
+        if self.parked {
+            self.park_pos = Some(self.pos);
+            self.park_rescan = rescan_park;
+            if rescan_park {
+                self.retry_at = retry_deadline(self.buf.len(), self.pos);
+            }
+        } else {
+            self.park_pos = None;
+            self.park_rescan = false;
+            self.commit = self.pos;
+        }
+    }
+
+    /// The batch scan's heredoc body consumption (the `'\n'` arm's
+    /// inner loop): advance over body lines until each pending
+    /// delimiter. With `final_pass` false, a body line whose
+    /// terminator has not been fed yet returns false (park signal)
+    /// BEFORE the line is consumed — its content could still grow,
+    /// and the batch run compares the complete line; with final
+    /// semantics the unterminated last line is compared as-is,
+    /// exactly like the batch loop.
+    fn consume_heredoc_bodies(&mut self, final_pass: bool) -> bool {
+        while let Some((delimiter, strip_tabs)) = self.pending_heredocs.first().cloned() {
+            let line_start = self.pos;
+            let mut line_end = self.pos;
+            while line_end < self.buf.len() && self.buf[line_end] != '\n' {
+                line_end += 1;
+            }
+            if line_end >= self.buf.len() && !final_pass {
+                return false;
+            }
+            let line: String = self.buf[line_start..line_end].iter().collect();
+            let candidate = if strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line.as_str()
+            };
+            self.pos = (line_end + 1).min(self.buf.len());
+            if candidate == delimiter {
+                self.pending_heredocs.remove(0);
+            }
+            if line_end >= self.buf.len() {
+                self.pending_heredocs.clear();
+                break;
+            }
+        }
+        true
+    }
+}
+
+/// The two streaming phases chained: comsub-body pre-pass output
+/// feeds the main scan. This is the source gather's alias-live arm
+/// engine (rubash#1961): it produces the group's expansion
+/// incrementally, line by line, so the completeness verdict can be
+/// taken from the same parked machines the non-alias arm uses instead
+/// of a whole-group re-expansion plus re-lex per candidate line.
+#[derive(Clone)]
+pub(crate) struct AliasStreamScanner<'a> {
+    lookup: &'a AliasLookup<'a>,
+    posix: bool,
+    pre: ComsubAliasScanner<'a>,
+    main: MainAliasScanner<'a>,
+    poisoned: bool,
+    /// Everything ever fed (the poisoned finish path re-expands it
+    /// with the batch entry point).
+    fed: String,
+    /// Chars already handed out through take_committed.
+    taken: usize,
+}
+
+impl<'a> AliasStreamScanner<'a> {
+    pub(crate) fn new(lookup: &'a AliasLookup<'a>, posix: bool) -> Self {
+        Self {
+            lookup,
+            posix,
+            pre: ComsubAliasScanner::new(lookup, posix),
+            main: MainAliasScanner::new(lookup, posix),
+            poisoned: false,
+            fed: String::new(),
+            taken: 0,
+        }
+    }
+
+    /// Feed one raw line (with its '\n' when it has one) and advance
+    /// both phases as far as the fed text decides.
+    pub(crate) fn push_line(&mut self, line: &str) {
+        self.fed.push_str(line);
+        if self.poisoned {
+            return;
+        }
+        self.pre.feed(line);
+        self.pre.drive(false);
+        if self.pre.poisoned {
+            self.poisoned = true;
+            return;
+        }
+        let stage = self.pre.take_output();
+        if !stage.is_empty() {
+            self.main.feed(&stage);
+        }
+        self.main.drive(false);
+        if self.main.poisoned {
+            self.poisoned = true;
+        }
+    }
+
+    /// Newly committed expansion text since the last call.
+    pub(crate) fn take_committed(&mut self) -> String {
+        let out = self.main.take_committed();
+        self.taken += out.chars().count();
+        out
+    }
+
+    /// True while the expansion of everything fed so far is not fully
+    /// decided (a phase is parked inside a unit, or a phase poisoned):
+    /// callers must take completeness verdicts from the batch path.
+    pub(crate) fn parked(&self) -> bool {
+        self.poisoned || self.pre.parked || self.main.parked
+    }
+
+    /// Whether the current park is one where the batch verdict over
+    /// the accumulated raw text can still answer "complete" while the
+    /// streaming machines cannot see the text yet:
+    ///   - a poisoned phase (its buffer may hold a partial rewrite
+    ///     only the batch run can judge), or
+    ///   - the pre-pass parked on a `$(` / `${ ` unit: the batch run
+    ///     expands the truncated body as-is, and an alias value inside
+    ///     it can contribute the unit's closer (the documented
+    ///     `short='echo ok 8 )'` shape), completing the text early.
+    /// Every other park leaves an unterminated unit IN the batch
+    /// expansion itself (an open quote, backtick, word, compound
+    /// assignment, or `((` in the produced text, an operator or `$` at
+    /// the very end of input), where the batch needs-more scan is
+    /// positive by construction — the caller answers those candidates
+    /// "needs more" outright instead of paying for the scan.
+    pub(crate) fn park_needs_batch(&self) -> bool {
+        self.poisoned || (self.pre.parked && self.pre.park_comsub)
+    }
+
+    /// Flush with end-of-input semantics and return the expansion
+    /// remainder not yet taken. Concatenated with everything
+    /// previously taken from take_committed, this is exactly
+    /// expand_aliases_in_source over all fed input.
+    pub(crate) fn finish(mut self) -> String {
+        if self.poisoned {
+            // A poisoned phase may have partially rewritten its
+            // buffer in ways only the full input can judge; the
+            // committed prefix handed out so far is final by the
+            // commit contract, so the batch expansion of everything
+            // fed, minus that prefix, is the exact remainder.
+            let full = expand_aliases_in_source(&self.fed, self.lookup, self.posix);
+            return full.chars().skip(self.taken).collect();
+        }
+        self.pre.drive(true);
+        let stage = self.pre.take_output();
+        if !stage.is_empty() {
+            self.main.feed(&stage);
+        }
+        self.main.drive(true);
+        self.main.rest()
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn lookup_for(
+        table: HashMap<&'static str, (&'static str, bool)>,
+    ) -> impl Fn(&str) -> Option<(String, bool)> {
+        move |word: &str| {
+            table
+                .get(word)
+                .map(|(value, next)| (value.to_string(), *next))
+        }
+    }
+
+    /// Drive the streaming scanner line by line over `source` and
+    /// assert the streaming contract against the batch expander:
+    /// committed output is always a prefix of the batch expansion of
+    /// the input fed so far; whenever the scanner is not parked it is
+    /// EXACTLY that expansion; the final flush completes it.
+    fn assert_stream_matches_batch(source: &str, lookup: &AliasLookup<'_>, posix: bool) {
+        let mut scanner = AliasStreamScanner::new(lookup, posix);
+        let mut committed = String::new();
+        let mut fed = String::new();
+        for line in source.split_inclusive('\n') {
+            scanner.push_line(line);
+            committed.push_str(&scanner.take_committed());
+            fed.push_str(line);
+            let batch = expand_aliases_in_source(&fed, lookup, posix);
+            assert!(
+                batch.starts_with(&committed),
+                "committed {committed:?} is not a prefix of batch {batch:?} after feeding {fed:?}"
+            );
+            if !scanner.parked() {
+                assert_eq!(
+                    committed, batch,
+                    "unparked committed output must equal the batch expansion after {fed:?}"
+                );
+            }
+        }
+        committed.push_str(&scanner.finish());
+        assert_eq!(
+            committed,
+            expand_aliases_in_source(source, lookup, posix),
+            "final streaming expansion must equal the batch expansion of {source:?}"
+        );
+    }
+
+    fn std_table() -> HashMap<&'static str, (&'static str, bool)> {
+        HashMap::from([
+            ("ll", ("ls -l", false)),
+            ("ec", ("echo", false)),
+            ("switch", ("case", false)),
+            ("foo", ("echo 'Error:", false)),
+            ("c", ("< ", false)),
+            ("trail", ("echo ", true)),
+            ("nums", ("echo 0", false)),
+            ("self", ("self -x", false)),
+        ])
+    }
+
+    #[test]
+    fn stream_matches_batch_plain_and_chains() {
+        let table = lookup_for(std_table());
+        let lookup = &table as &AliasLookup<'_>;
+        assert_stream_matches_batch("ll /tmp\nec hi there\n", lookup, false);
+        assert_stream_matches_batch("trail ll\nec one; ll two &\n", lookup, false);
+        assert_stream_matches_batch("self again\nnums>&2\n", lookup, false);
+        assert_stream_matches_batch("echo no aliases here\nplain words stay\n", lookup, false);
+    }
+
+    #[test]
+    fn stream_matches_batch_values_spanning_lines() {
+        let table = lookup_for(std_table());
+        let lookup = &table as &AliasLookup<'_>;
+        // Unclosed quote inside the value continues into the next line.
+        assert_stream_matches_batch("foo bar'\nfoo baz\n", lookup, false);
+        // Value-introduced redirection operator takes the next word as target.
+        assert_stream_matches_batch("ec a2 c file\n", lookup, false);
+    }
+
+    #[test]
+    fn stream_matches_batch_comsub_bodies() {
+        let table = lookup_for(std_table());
+        let lookup = &table as &AliasLookup<'_>;
+        assert_stream_matches_batch("x=$(ec inner)\nec $x\n", lookup, false);
+        assert_stream_matches_batch(
+            "out=$(switch foo in\n  foo) ec hit ;;\nesac)\n",
+            lookup,
+            false,
+        );
+        assert_stream_matches_batch("y=$(ec one\nec two)\nll\n", lookup, false);
+        assert_stream_matches_batch("z=${ ec funsub; }\n", lookup, false);
+    }
+
+    #[test]
+    fn stream_matches_batch_heredocs() {
+        let table = lookup_for(std_table());
+        let lookup = &table as &AliasLookup<'_>;
+        assert_stream_matches_batch(
+            "cat <<EOF\nll not expanded in body\n$(ec in body phase)\nEOF\nll after\n",
+            lookup,
+            false,
+        );
+        assert_stream_matches_batch("cat <<-'EOT'\n\tbody\n\tEOT\nec done\n", lookup, false);
+        assert_stream_matches_batch(
+            "ec start <<A && cat <<B\nbody a\nA\nbody b\nB\n",
+            lookup,
+            false,
+        );
+    }
+
+    #[test]
+    fn stream_matches_batch_compound_assign_and_cond() {
+        let table = lookup_for(std_table());
+        let lookup = &table as &AliasLookup<'_>;
+        assert_stream_matches_batch("arr=(one ll three)\nec ${arr[1]}\n", lookup, false);
+        assert_stream_matches_batch("arr=(\n  ec elem\n  two\n)\nll\n", lookup, false);
+        assert_stream_matches_batch("[[ ll == ll ]] && ec yes\n", lookup, false);
+        assert_stream_matches_batch("case x in\n  a) ec A ;;\n  *) ll ;;\nesac\n", lookup, false);
+    }
+
+    #[test]
+    fn stream_matches_batch_multiline_units() {
+        let table = lookup_for(std_table());
+        let lookup = &table as &AliasLookup<'_>;
+        // Unclosed quote across lines, continued words, open comsub.
+        assert_stream_matches_batch("ec 'one\ntwo'\nll\n", lookup, false);
+        assert_stream_matches_batch("ec a \\\n  b\n", lookup, false);
+        assert_stream_matches_batch("ec $(nested $(deep)\nspan)\n", lookup, false);
+        assert_stream_matches_batch("((arith + 1))\nec after\n", lookup, false);
+        assert_stream_matches_batch("(ec sub\nshell)\n", lookup, false);
+    }
+
+    #[test]
+    fn stream_matches_batch_posix_order() {
+        let mut table = std_table();
+        table.insert("for", ("echo", false));
+        let table = lookup_for(table);
+        let lookup = &table as &AliasLookup<'_>;
+        assert_stream_matches_batch("for i in a b; do ec $i; done\n", lookup, true);
+        assert_stream_matches_batch("for i in a b; do ec $i; done\n", lookup, false);
+    }
 }

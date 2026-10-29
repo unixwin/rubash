@@ -652,6 +652,66 @@ pub fn is_pipe_handle(h: HANDLE) -> bool {
     (unsafe { GetFileType(h) }) == FILE_TYPE_PIPE
 }
 
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetNamedPipeInfo(
+        h: HANDLE,
+        flags: *mut DWORD,
+        in_size: *mut DWORD,
+        out_size: *mut DWORD,
+        instances: *mut DWORD,
+    ) -> BOOL;
+}
+
+/// The handle is a winsock SOCKET: netopen adoption stores the connected
+/// `/dev/tcp|udp` endpoint as the fd's raw handle (rubash#1026), and a
+/// SOCKET reports FILE_TYPE_PIPE too. Discriminator: GetNamedPipeInfo
+/// succeeds only on a named pipe and fails on a socket (the same split
+/// libuv's uv_guess_handle uses to separate UV_NAMED_PIPE from UV_TCP),
+/// so FILE_TYPE_PIPE + GetNamedPipeInfo failure = socket.
+///
+/// This matters because the byte primitives below must not serve a socket
+/// through ReadFile/WriteFile: rubash#1976 — `exec 3<>/dev/tcp/host/port`
+/// opened the connection, then every fd-3 read AND write failed with
+/// `Invalid argument` (ERROR_INVALID_PARAMETER): std's sockets are created
+/// WSA_FLAG_OVERLAPPED, and a synchronous ReadFile/WriteFile with a NULL
+/// OVERLAPPED on an overlapped handle is rejected outright. GNU has one
+/// connected socket descriptor serving both directions of any netopen face
+/// (redir.c:660 redir_open calls netopen for RF_DEVTCP/RF_DEVUDP whatever
+/// the `<`/`>`/`<>` spelling; lib/sh/netopen.c:282 netopen → socket +
+/// connect at :178 _netopen4, then plain read(2)/write(2) on that one fd),
+/// so the socket API (recv/send) is the correct primitive for BOTH
+/// directions here.
+pub fn is_socket_handle(h: HANDLE) -> bool {
+    if !is_pipe_handle(h) {
+        return false;
+    }
+    let mut junk: DWORD = 0;
+    (unsafe { GetNamedPipeInfo(h, &mut junk, &mut junk, &mut junk, &mut junk) }) == 0
+}
+
+/// Run one byte-I/O operation on a socket HANDLE through std's socket API.
+/// `TcpStream::from_raw_socket` is only a recv/send carrier for the raw
+/// handle — the fd table owns the close (close_handle), so the stream is
+/// `ManuallyDrop` and never closesocket'd. recv/send work on an overlapped
+/// socket regardless of the overlap flag (that is how every std::net
+/// endpoint does its I/O), which is exactly what ReadFile/WriteFile cannot
+/// do (rubash#1976). A connected UDP endpoint sends the same way; its
+/// datagram record buffering (winsock recv discards a datagram larger than
+/// the buffer — WSAEMSGSIZE — where POSIX read truncates and GNU serves
+/// records from a chunked zreadc buffer) is a read-builtin concern, not a
+/// primitive one.
+fn socket_io<T>(
+    h: HANDLE,
+    io: impl FnOnce(&mut std::net::TcpStream) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    use std::os::windows::io::FromRawSocket;
+    let mut stream = std::mem::ManuallyDrop::new(unsafe {
+        std::net::TcpStream::from_raw_socket(h as std::os::windows::io::RawSocket)
+    });
+    io(&mut stream)
+}
+
 /// The filesystem path an open disk-file handle refers to, or None for
 /// pipes/consoles/devices. GNU's `open("/proc/self/fd/N", O_RDONLY)` on a
 /// regular-file descriptor performs a FRESH open at offset 0, so callers
@@ -908,6 +968,13 @@ pub fn wait_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
             }
         }
         FILE_TYPE_PIPE => {
+            // rubash#1976: PeekNamedPipe is a named-pipe API — on a
+            // netopen socket it just fails, which degraded every bounded
+            // read to an immediate "Ready" followed by a blocking recv.
+            // select() is the winsock equivalent of the pipe peek loop.
+            if is_socket_handle(h) {
+                return wait_socket_readable(h, timeout);
+            }
             let deadline = std::time::Instant::now() + timeout;
             loop {
                 let mut avail: DWORD = 0;
@@ -939,8 +1006,74 @@ pub fn wait_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
     }
 }
 
+/// Bounded readability wait on a socket handle (rubash#1976): winsock
+/// select() on the one descriptor, the direct analogue of the named-pipe
+/// PeekNamedPipe loop above. `read -t N -u 3` on `/dev/tcp` then times out
+/// while the socket is quiet instead of burning the deadline and blocking
+/// forever. SOCKET_ERROR (winsock uninitialized, closed handle) degrades
+/// to Ready — the same fallback shape as the pipe branch's failed peek.
+fn wait_socket_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
+    #[repr(C)]
+    struct WsaFdSet {
+        fd_count: u32,
+        fd_array: [usize; WSA_FD_SET_SIZE],
+    }
+    #[repr(C)]
+    struct WsaTimeval {
+        tv_sec: i32,
+        tv_usec: i32,
+    }
+    const WSA_FD_SET_SIZE: usize = 64;
+    const SOCKET_ERROR: i32 = -1;
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn select(
+            nfds: i32,
+            readfds: *mut WsaFdSet,
+            writefds: *mut WsaFdSet,
+            exceptfds: *mut WsaFdSet,
+            timeout: *const WsaTimeval,
+        ) -> i32;
+    }
+    // nfds is ignored on Windows; the set carries the descriptor.
+    let mut readfds = WsaFdSet {
+        fd_count: 1,
+        fd_array: [h as usize; WSA_FD_SET_SIZE],
+    };
+    let tv = WsaTimeval {
+        tv_sec: timeout.as_secs().min(i32::MAX as u64) as i32,
+        tv_usec: timeout.subsec_micros() as i32,
+    };
+    match unsafe {
+        select(
+            0,
+            &mut readfds,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &tv,
+        )
+    } {
+        0 => ReadWait::Timeout,
+        n if n > 0 => ReadWait::Ready,
+        _ => ReadWait::Ready,
+    }
+}
+
 /// Read up to `n` bytes; ERROR_BROKEN_PIPE (drained anonymous pipe) is EOF.
 pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
+    // rubash#1976: a netopen endpoint is a socket handle — recv, not
+    // ReadFile (see is_socket_handle). recv returning 0 is the orderly
+    // peer shutdown = EOF GNU's read(2) sees on the netopen descriptor;
+    // the ERROR_BROKEN_PIPE mapping below stays pipe-only.
+    if is_socket_handle(h) {
+        return socket_io(h, |stream| {
+            use std::io::Read as _;
+            let mut buf = vec![0u8; n.max(1)];
+            let got = stream.read(&mut buf)?;
+            buf.truncate(got);
+            Ok(buf)
+        });
+    }
     let mut buf = vec![0u8; n.max(1)];
     let mut got: DWORD = 0;
     let ok = unsafe {
@@ -964,6 +1097,15 @@ pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
 }
 
 pub fn write_all(h: HANDLE, bytes: &[u8]) -> std::io::Result<()> {
+    // rubash#1976: send, not WriteFile, on a netopen endpoint (see
+    // is_socket_handle); write_all loops send until the buffer is out,
+    // the same contract as the WriteFile loop below.
+    if is_socket_handle(h) {
+        return socket_io(h, |stream| {
+            use std::io::Write as _;
+            stream.write_all(bytes)
+        });
+    }
     let mut off = 0usize;
     while off < bytes.len() {
         let mut n: DWORD = 0;

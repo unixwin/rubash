@@ -68,7 +68,7 @@ fn run_source_groups(
     let raw_lines: Vec<&str> = source.split_inclusive('\n').collect();
     let mut index = 0usize;
     let mut ran_any = false;
-    while let Some((pending, start_line, _group_lines, feeder_tokens)) =
+    while let Some((pending, start_line, _group_lines, feeder_tokens, gather_info)) =
         crate::script_driver::read_next_source_group(executor, &raw_lines, &mut index)
     {
         let line_offset = start_line.saturating_sub(1);
@@ -85,8 +85,8 @@ fn run_source_groups(
         // rubash#1940: the completeness verdict is only re-derived here
         // when the gatherer did not already certify THIS text complete.
         // read_next_source_group returns feeder tokens only when its loop
-        // broke at a complete group in the non-alias arm (see its doc:
-        // `broke_complete && !extglob_toggled`), and in that arm
+        // broke at a complete group (see its doc:
+        // `broke_complete && !extglob_toggled`), and in the non-alias arm
         // expand_group_aliases is the identity, so `exec_text` below is
         // byte-identical to the certified `pending`. Re-running
         // index_complete_group then re-scans the whole group text twice
@@ -97,11 +97,28 @@ fn run_source_groups(
         // the ~5.2 s source run (debug, instrumented). GNU's
         // parse_and_execute (builtins/evalstring.c:348) trusts the
         // reader's own complete-command boundary the same way; there is
-        // no second whole-text scan. Groups without certification
-        // (alias-live arm, extglob toggle, EOF-exhausted tail) keep the
-        // exact re-check and routing they had.
-        let gatherer_certified = feeder_tokens.is_some() && exec_text == pre_alias_text;
-        if !gatherer_certified && !index_complete_group(&exec_text, parse_posix) {
+        // no second whole-text scan.
+        //
+        // rubash#1961 extends the same trust two steps further, along
+        // the gather's own GroupGatherInfo: (a) an alias-live group that
+        // broke complete on the gather's incremental machines over the
+        // streaming expansion is certified for the caller's batch
+        // expansion when the two texts are byte-identical
+        // (`certified_expanded`) — the expansion the machines judged IS
+        // this text, so the re-check would re-derive a known verdict;
+        // (b) a group the gather loop exhausted at end of input without
+        // a complete break is known-incomplete from the collector's own
+        // state (`known_incomplete`), so the re-check — which on the
+        // truncated-nvm tail cost ~3 s — is skipped for the routing
+        // decision it could only confirm. Groups with neither (extglob
+        // toggle, parked-fallback breaks) keep the exact re-check and
+        // routing they had.
+        let gatherer_certified = feeder_tokens.is_some()
+            && (exec_text == pre_alias_text
+                || gather_info.certified_expanded.as_deref() == Some(exec_text.as_str()));
+        let group_complete = gatherer_certified
+            || (!gather_info.known_incomplete && index_complete_group(&exec_text, parse_posix));
+        if !group_complete {
             // The incomplete group's text is still the output of
             // expand_group_aliases above — aliases already ran at stream
             // level (parse.y:3249 alias_expand_token fires while reading,
@@ -191,9 +208,13 @@ fn run_source_groups(
         }
         // perf10: reuse the gather feeder's committed tokens when the gather
         // certified them equivalent to a fresh whole-group re-lex
-        // (read_next_source_group's doc: non-alias arm — exec_text is the
-        // pending verbatim there —, complete break, no effective extglob
-        // toggle). GNU anchor: parse.y:3557 read_token streams input once
+        // (read_next_source_group's doc: complete break, no effective
+        // extglob toggle, and the feeder's text is this exec_text — by
+        // identity in the non-alias arm, by the #1961 byte-compare
+        // certification in the alias-live arm; `gatherer_certified`
+        // above is exactly that conjunction, so the reuse is gated on
+        // it and any certification mismatch falls back to the fresh
+        // re-lex). GNU anchor: parse.y:3557 read_token streams input once
         // and never re-tokenizes consumed text; the previous unconditional
         // `tokenize_with_initial_posix(&exec_text, ...)` re-read every byte
         // the feeder had just scanned (perf7: ~1 s of `. ./nvm.sh`, huq
@@ -204,7 +225,7 @@ fn run_source_groups(
         // are identical because both streams are produced by the same
         // feeder code from the same pushes.
         let mut tokens = match feeder_tokens {
-            Some(mut tokens) => {
+            Some(mut tokens) if gatherer_certified => {
                 if tokens
                     .last()
                     .is_some_and(|token| token.kind == crate::lexer::TokenKind::Semicolon)
@@ -213,7 +234,7 @@ fn run_source_groups(
                 }
                 tokens
             }
-            None => crate::lexer::tokenize_with_initial_posix(&exec_text, parse_posix),
+            _ => crate::lexer::tokenize_with_initial_posix(&exec_text, parse_posix),
         };
         if let Some(line) = crate::lexer::heredoc_overflow_line() {
             executor.mark_parse_error();

@@ -685,6 +685,36 @@ impl Session {
     }
 
     // ----------------------------------------------------------
+    // Tier-C internals access (NOT part of the tier-A contract)
+    // ----------------------------------------------------------
+
+    /// The session's executor, read-only: a **tier-C** seam,
+    /// recorded in the API ledger (`docs/api-ledger.md`) and
+    /// explicitly outside the tier-A contract's stability
+    /// promise. It exists for the faces the contract does not
+    /// cover, each recorded in the ledger with its reason: the
+    /// tier-C bind registry behind the host's gated bind
+    /// surface, the parse→transform→execute routes of the
+    /// consumption audit's §3.2 gap (the contract takes source
+    /// text only), and the post-build history-provider install
+    /// the interactive single-stream discipline requires.
+    /// Hosts must prefer the contract faces (the run methods,
+    /// the §5.3 views, the capability traits) wherever one
+    /// exists; this seam is the recorded remainder, and its
+    /// consumer set is expected to shrink, never grow, as the
+    /// contract's coverage grows.
+    pub fn executor(&self) -> &Executor {
+        &self.executor
+    }
+
+    /// The mutable form of [`Session::executor`]: the same
+    /// tier-C seam, for the recorded faces that must drive or
+    /// configure the executor directly.
+    pub fn executor_mut(&mut self) -> &mut Executor {
+        &mut self.executor
+    }
+
+    // ----------------------------------------------------------
     // Internals
     // ----------------------------------------------------------
 

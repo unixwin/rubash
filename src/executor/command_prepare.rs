@@ -2408,7 +2408,17 @@ impl Executor {
                 .get("IFS")
                 .is_some_and(|ifs| ifs.is_empty())
         {
-            return self.shell_state.positional_window_cloned();
+            // rubash#1993: the dollar_at word list this dispatches to
+            // drops entirely-empty parameters (the null-IFS branch of
+            // field_split_positional_values_with_ifs, measured on GNU
+            // 5.3.20) — returning the window verbatim kept an empty
+            // parameter as an empty word.
+            return self
+                .shell_state
+                .positional_window_cloned()
+                .into_iter()
+                .filter(|value| !value.is_empty())
+                .collect();
         }
         if word == "$*"
             && !raw_word_is_quoted(raw)
@@ -2418,7 +2428,13 @@ impl Executor {
                 .get("IFS")
                 .is_some_and(|ifs| ifs.is_empty())
         {
-            return self.shell_state.positional_window_cloned();
+            // rubash#1993: same empty-parameter drop as the `${*}` arm.
+            return self
+                .shell_state
+                .positional_window_cloned()
+                .into_iter()
+                .filter(|value| !value.is_empty())
+                .collect();
         }
         if !declare_assignment_word {
             // GNU param_expand's UNBRACED `$X` nameref branch (subst.c
@@ -3066,7 +3082,16 @@ impl Executor {
         let fragment_quoted = alternate.starts_with('"') && alternate.ends_with('"');
         if outer_double_quoted
             && !fragment_quoted
-            && (alternate.contains("$@") || alternate.contains("${@}"))
+            && (alternate.contains("$@")
+                || alternate.contains("${@}")
+                // rubash#1993: `$*` in the alternate of a double-quoted
+                // ${param+word} carries the same quoted context — GNU
+                // joins it with IFS[0] into the ONE field the affixes
+                // glue to (`"${1+  $*  }"` is `  a b  c  ` for
+                // `set -- "a b" '' c` with IFS unset), it does not
+                // field-split into one word per parameter.
+                || alternate.contains("$*")
+                || alternate.contains("${*}"))
         {
             // GNU subst.c:12026-12035 (expand_word_internal): the enclosing
             // double-quoted ${...} retains one empty field when the used
@@ -3103,7 +3128,18 @@ impl Executor {
                         // through expand_string_for_rhs -> W_SPLITSPACE over
                         // escaped elements: one preserved word per positional
                         // (exp9.sub `${var-$*}` with `set -- abc 'def ghi' jkl`).
-                        return Some(self.shell_state.positional_window_cloned());
+                        // rubash#1993: the split runs on the JOIN spaces, so
+                        // an entirely-empty positional contributes no word
+                        // (measured GNU 5.3.20: `${var-$*}` with
+                        // `set -- "a b" '' c` and IFS= yields [a b][c], not
+                        // [a b][][c]) — the verbatim window kept it.
+                        return Some(
+                            self.shell_state
+                                .positional_window_cloned()
+                                .into_iter()
+                                .filter(|value| !value.is_empty())
+                                .collect(),
+                        );
                     }
                 }
                 Some(ifs) => {

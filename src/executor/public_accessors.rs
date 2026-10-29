@@ -340,22 +340,33 @@ impl Executor {
     /// Tier A signal face (Session API RFC section 6.4; PLAN row
     /// 11, M-3): queue `signal` for this process through the
     /// engine's own delivery machinery — the same queue the
-    /// `kill` builtin's self-deliveries use. The delivery is
-    /// serviced at the next command boundary by the boundary
-    /// poll: a trapped signal runs its trap, an ignored one is
-    /// dropped, an untrapped fatal one ends the run with
-    /// 128 + signal. This replaces the `builtins::kill` console
-    /// hooks as the surface hosts consume; those hooks are the
-    /// engine's internal plumbing from here on.
+    /// `kill` builtin's self-deliveries use. The queue's real
+    /// contract is trap dispatch (measured contract, rubash#1986;
+    /// DECISIONS 2026-10-28 §6.4): the boundary poll services
+    /// the queue at the next command boundary — a trapped signal
+    /// runs its trap; a queued copy of an untrapped signal is
+    /// dropped as stale, because a handler exists only where a
+    /// trap (or the interactive rubash#1662 pin) installed one,
+    /// and it is the signal's kernel form, never the queued
+    /// copy, that ends a non-interactive process. The resident
+    /// fatal set (SIGSEGV, SIGBUS, SIGILL, SIGFPE) does not
+    /// include SIGINT. This replaces the `builtins::kill`
+    /// console hooks as the surface hosts consume; those hooks
+    /// are the engine's internal plumbing from here on.
     pub fn inject_signal(&mut self, signal: i32) {
         crate::builtins::kill::queue_self_signal(signal);
     }
 
     /// Tier A cooperative cancellation (RFC section 6.4): ask
     /// the running execution to end as if SIGINT had arrived —
-    /// an injected SIGINT, serviced at the next command
-    /// boundary with traps honored and the conventional 130
-    /// status for an untrapped interrupt.
+    /// an injected SIGINT, serviced under the contract
+    /// [`Executor::inject_signal`] documents: a trapped INT
+    /// runs its trap at the next command boundary; in an
+    /// interactive session the rubash#1662 handler pin routes
+    /// an untrapped delivery to a DISCARD of the current input
+    /// with status 130 and the session continues; a
+    /// non-interactive untrapped delivery is adjudicated by
+    /// kernel disposition, not by this queue.
     pub fn interrupt(&mut self) {
         self.inject_signal(2);
     }
@@ -549,6 +560,23 @@ impl Executor {
         self.shell_state.completion_specs.get(command).is_some()
             || self.shell_state.completion_specs.get("-D").is_some()
             || self.shell_state.completion_specs.get("-E").is_some()
+    }
+
+    /// The session's open fd numbers, ascending: every fd-table entry
+    /// holding a live read or write endpoint. This is the table the
+    /// `/dev/fd/N` spellings resolve against (the special-path
+    /// registry's fd-alias class), exposed for consumers that
+    /// enumerate that namespace — host completion lists exactly
+    /// these numbers under `/dev/fd/` (niubash#627; vfs audit §6.4:
+    /// the dynamic tier's source is the fd table itself, never a
+    /// name list).
+    pub fn open_fds(&self) -> Vec<u32> {
+        self.fd_table
+            .entries
+            .keys()
+            .copied()
+            .filter(|&fd| self.fd_table.is_open(fd))
+            .collect()
     }
 
     pub fn set_external_file_builtins_enabled(&mut self, enabled: bool) {

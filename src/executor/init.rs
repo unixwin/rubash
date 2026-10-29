@@ -578,6 +578,7 @@ impl Executor {
             redirect_target_single_glob_match: RefCell::new(std::collections::HashSet::new()),
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             fd_var_external_undo: Vec::new(),
+            deferred_varredir_closes: Vec::new(),
             read_deadline: None,
             read_timed_out: false,
             read_interrupted_signal: None,

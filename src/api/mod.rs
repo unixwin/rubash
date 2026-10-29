@@ -34,6 +34,11 @@
 //!   [`SessionEvents`].
 //! - Diagnostics as values: [`Diagnostic`], [`ParseFailure`],
 //!   [`SessionError`].
+//! - One recorded exception to the rule above: the tier-C
+//!   [`Session::executor`] / [`Session::executor_mut`] seam,
+//!   which hands a host the session's executor for the faces
+//!   the contract does not cover (the API ledger names them).
+//!   It is not part of the tier-A stability promise.
 //! - Tier-B syntax: [`SyntaxView`] and friends, produced by
 //!   `Session::parse` — owned view types only. The internal
 //!   `Ast` is not part of Tier A (design Q4) and is not

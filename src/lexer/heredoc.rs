@@ -1,5 +1,6 @@
 use super::token::{Token, TokenKind};
 
+#[derive(Clone)]
 pub(super) struct HereDocDelimiter {
     pub(super) value: String,
     pub(super) quoted: bool,
