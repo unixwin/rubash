@@ -4809,6 +4809,54 @@ impl Executor {
             }
         }
 
+        // rubash#2124: a builtin element carrying a /dev/tcp|udp input
+        // redirect (fd-0 winner or a numbered fd) must run in the
+        // stage subshell, where the simple-command funnel's bind
+        // performs the open — for a net target the open IS the
+        // connect (redir.c do_redirections in the element's fork,
+        // execute_cmd.c:2620). The inline slot arms below apply no
+        // redirections at all, so the connect silently never happened
+        // (`echo hi < /dev/tcp/... | cat` connected zero times). The
+        // external route above already owns non-builtin stages.
+        {
+            let first_raw = command
+                .word_metadata
+                .first()
+                .map(|metadata| metadata.raw.as_str());
+            let builtin_stage = command
+                .words
+                .first()
+                .and_then(|name| {
+                    self.expand_command_word(command, 0, name, first_raw)
+                        .into_iter()
+                        .next()
+                })
+                .is_some_and(|expanded| self.routes_as_builtin(&expanded));
+            if builtin_stage {
+                let has_net_input = command.redirects.iter().any(|redirect| {
+                    redirect.kind == crate::parser::RedirectKind::Input
+                        && !redirect.append
+                        && crate::special_paths::is_net_redirect_target(
+                            &self.expand_redirect_target(redirect),
+                        )
+                }) || command.redirect_in.as_deref().is_some_and(|redirect| {
+                    redirect.kind == crate::parser::RedirectKind::Input
+                        && !redirect.append
+                        && crate::special_paths::is_net_redirect_target(
+                            &self.expand_redirect_target(redirect),
+                        )
+                });
+                if has_net_input {
+                    return self.execute_builtin_pipeline_stage(
+                        command,
+                        input,
+                        streaming_stdin,
+                        live_stdin,
+                    );
+                }
+            }
+        }
+
         // rubash#815 profiler: the pipeline-stage dispatch point (GNU runs
         // every element through execute_simple_command in its forked child,
         // execute_cmd.c:2620 execute_pipeline -> 4617). Armed TENTATIVE like

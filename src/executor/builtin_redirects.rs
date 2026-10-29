@@ -169,6 +169,254 @@ impl Executor {
         Ok(None)
     }
 
+    /// rubash#2124: does the simple-command dispatch bind apply to
+    /// this command — i.e. will it execute in-process (builtin or
+    /// function), so no spawn setup will bind its redirects? `exec`
+    /// is excluded: its own machinery applies its redirects
+    /// (including the net arms in trap_exec.rs) and makes them
+    /// persistent. A `command`/`builtin` prefix routes by its operand
+    /// word. Jobspecs are excluded (rewritten onto the job's own
+    /// context). The class test is the same one the tempenv binding
+    /// decision uses (is_shell_builtin_name / function lookup).
+    fn simple_command_net_bind_applies(&self, cmd: &CommandNode) -> bool {
+        let Some(word) = cmd.words.first() else {
+            // A null command's redirections are performed by the
+            // shell itself (redir.c do_redirections on the node).
+            return true;
+        };
+        if word == "exec" || word.starts_with('%') {
+            return false;
+        }
+        let mut effective: &str = word.as_str();
+        if word == "command" || word == "builtin" {
+            let mut operand: Option<&str> = None;
+            for next in &cmd.words[1..] {
+                if operand.is_none() && matches!(next.as_str(), "-p" | "-v" | "-V" | "--") {
+                    continue;
+                }
+                operand = Some(next.as_str());
+                break;
+            }
+            let Some(operand) = operand else {
+                // Bare `command` / `builtin`: a null command again.
+                return true;
+            };
+            effective = operand;
+        }
+        if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, effective) {
+            return false;
+        }
+        is_shell_builtin_name(effective) || self.function_name_for_command_word(effective).is_some()
+    }
+
+    /// rubash#2124: GNU redir.c do_redirections performs the open of
+    /// EVERY redirection before the command body runs, for every
+    /// command class — for a /dev/tcp|udp target the open IS the
+    /// connect (redir.c redir_open -> netopen). rubash's in-process
+    /// funnels only ever PROBE a winning net input (the #1950
+    /// validate-by-resolution rule: a probe must not connect, the
+    /// bind performs the one open), and the external spawn setup is
+    /// the only bind most faces got — so a builtin's winning net
+    /// input never connected at all: no connection, no data, and a
+    /// refused connect silently rc 0. This is the in-process bind,
+    /// run by the simple-command funnel for builtin/function/null
+    /// routes: the fd-0 winner (fd-0 losers were already settled by
+    /// the reject gate, rubash#2098) and every numbered (fd >= 3)
+    /// net Input entry connect exactly once, in list order, and the
+    /// surviving socket binds on its fd for the body's duration.
+    /// ReadWrite (`<>`) survivors bind the one connected socket on
+    /// both endpoints of their fd (redir.c r_input_output).
+    /// On a connect failure the diagnostic is rendered through the
+    /// command's fd-2 routing (connect_net_stream already emitted
+    /// its pre-line), exit_code is set to 1, and Err(()) tells the
+    /// funnel to skip the dispatch, like a gate rejection.
+    pub(in crate::executor) fn bind_simple_command_net_inputs(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<Vec<(u32, Option<crate::executor::fd_table::FdEntry>)>, ()> {
+        if !self.simple_command_net_bind_applies(cmd) {
+            return Ok(Vec::new());
+        }
+        // (fd, target) connects to perform, in order: numbered
+        // entries first as they appear, then the fd-0 winner — the
+        // per-fd survivor binds; a numbered fd superseded by a
+        // non-net entry drops out (that face's own machinery owns
+        // the fd), exactly like do_redirections' ordered dup2s.
+        // The bool marks a ReadWrite (`<>`) survivor: its socket
+        // binds on both endpoints of the fd (redir.c r_input_output
+        // is one O_RDWR descriptor).
+        let mut numbered: std::collections::HashMap<u32, (std::fs::File, String, bool)> =
+            std::collections::HashMap::new();
+        for redirect in &cmd.redirects {
+            if redirect.fd_var.is_some() {
+                continue;
+            }
+            let Some(fd) = redirect.fd else { continue };
+            if fd < 3 {
+                continue;
+            }
+            match redirect.kind {
+                crate::parser::RedirectKind::Input if !redirect.append => {
+                    let target = self.expand_redirect_target(redirect);
+                    if is_closed_redirect_target(&target) {
+                        numbered.remove(&fd);
+                    } else if crate::special_paths::is_net_redirect_target(&target) {
+                        match self.open_net_redirect(&target) {
+                            Ok(file) => {
+                                numbered.insert(fd, (file, target, false));
+                            }
+                            Err(error) => {
+                                self.net_input_bind_failure(cmd, &error);
+                                return Err(());
+                            }
+                        }
+                    } else {
+                        numbered.remove(&fd);
+                    }
+                }
+                crate::parser::RedirectKind::ReadWrite => {
+                    let target = self.expand_redirect_target(redirect);
+                    if is_closed_redirect_target(&target) {
+                        numbered.remove(&fd);
+                    } else if crate::special_paths::is_net_redirect_target(&target) {
+                        match self.open_net_redirect(&target) {
+                            Ok(file) => {
+                                numbered.insert(fd, (file, target, true));
+                            }
+                            Err(error) => {
+                                self.net_input_bind_failure(cmd, &error);
+                                return Err(());
+                            }
+                        }
+                    } else {
+                        numbered.remove(&fd);
+                    }
+                }
+                crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::CloseInput => {
+                    numbered.remove(&fd);
+                }
+                _ => {}
+            }
+        }
+        // fd-0 winner, over the gate's candidate order (the ordered
+        // list, then the mirror fields not already present in it).
+        let semantic_key = |redirect: &crate::parser::Redirect| {
+            format!(
+                "{:?}\x1f{}\x1f{:?}\x1f{}",
+                redirect.kind, redirect.operator, redirect.fd, redirect.target
+            )
+        };
+        let mut candidates: Vec<&crate::parser::Redirect> = cmd.redirects.iter().collect();
+        let mut seen_keys: std::collections::HashSet<String> =
+            candidates.iter().map(|r| semantic_key(r)).collect();
+        for redirect in [cmd.redirect_in.as_deref()].into_iter().flatten() {
+            if seen_keys.insert(semantic_key(redirect)) {
+                candidates.push(redirect);
+            }
+        }
+        let winner = candidates.iter().rev().find(|redirect| {
+            redirect.fd.unwrap_or(0) == 0
+                && matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::ReadWrite
+                        | crate::parser::RedirectKind::CloseInput
+                        | crate::parser::RedirectKind::HereDoc
+                        | crate::parser::RedirectKind::HereString
+                )
+        });
+        let mut saved: Vec<(u32, Option<crate::executor::fd_table::FdEntry>)> = Vec::new();
+        if let Some(redirect) = winner {
+            // A `<>` winner arrives either as a ReadWrite entry or as
+            // the Input mirror with the append flag set (the two
+            // representations function_call_stdin also distinguishes).
+            let readwrite = redirect.kind == crate::parser::RedirectKind::ReadWrite
+                || (redirect.kind == crate::parser::RedirectKind::Input && redirect.append);
+            let plain_input =
+                redirect.kind == crate::parser::RedirectKind::Input && !redirect.append;
+            if plain_input || readwrite {
+                let target = self.expand_redirect_target(redirect);
+                if crate::special_paths::is_net_redirect_target(&target) {
+                    match self.open_net_redirect(&target) {
+                        Ok(file) => {
+                            self.bind_net_input_fd(&mut saved, 0, &target, file, readwrite);
+                        }
+                        Err(error) => {
+                            self.restore_simple_command_net_inputs(saved);
+                            self.net_input_bind_failure(cmd, &error);
+                            return Err(());
+                        }
+                    }
+                }
+            }
+        }
+        for (fd, (file, target, readwrite)) in numbered {
+            self.bind_net_input_fd(&mut saved, fd, &target, file, readwrite);
+        }
+        Ok(saved)
+    }
+
+    fn bind_net_input_fd(
+        &mut self,
+        saved: &mut Vec<(u32, Option<crate::executor::fd_table::FdEntry>)>,
+        fd: u32,
+        target: &str,
+        file: std::fs::File,
+        readwrite: bool,
+    ) {
+        if !saved.iter().any(|(saved_fd, _)| *saved_fd == fd) {
+            saved.push((fd, self.fd_table.entries.get(&fd).cloned()));
+        }
+        let file_fd = FileFd::from_file(file, target.into());
+        self.fd_table
+            .open_input(fd, FdReadEndpoint::File(file_fd.clone()), false);
+        if readwrite {
+            // redir.c r_input_output: ONE open file description
+            // serves both directions of the slot — the same FileFd
+            // backs the write endpoint too (the shape
+            // set_fd_readwrite_file's net arm installs).
+            self.fd_table
+                .open_output(fd, FdWriteEndpoint::File(file_fd), false);
+        }
+        if !self.dispatch_net_bound_fds.contains(&fd) {
+            self.dispatch_net_bound_fds.push(fd);
+        }
+    }
+
+    fn net_input_bind_failure(&mut self, cmd: &CommandNode, error: &std::io::Error) {
+        let mut line = Vec::new();
+        let _ = writeln!(
+            &mut line,
+            "{}{}",
+            self.error_prefix(),
+            crate::posix_errors::message(error)
+        );
+        let _ = self.write_redirect_diagnostic_routed(cmd, &line);
+        self.exit_code = 1;
+    }
+
+    /// The unwind half of bind_simple_command_net_inputs: put back
+    /// exactly the fd-table entries the bind displaced (GNU
+    /// execute_cmd.c undo_redirections for the in-process classes).
+    pub(in crate::executor) fn restore_simple_command_net_inputs(
+        &mut self,
+        saved: Vec<(u32, Option<crate::executor::fd_table::FdEntry>)>,
+    ) {
+        for (fd, entry) in saved {
+            match entry {
+                Some(entry) => {
+                    self.fd_table.entries.insert(fd, entry);
+                }
+                None => {
+                    self.fd_table.entries.remove(&fd);
+                }
+            }
+            self.dispatch_net_bound_fds.retain(|bound| *bound != fd);
+        }
+    }
+
     pub(in crate::executor) fn write_builtin_not_found(
         &mut self,
         cmd: &CommandNode,

@@ -197,7 +197,20 @@ impl Executor {
         let result = if redirect_rejected {
             Ok(())
         } else {
-            self.execute_prepared_command(cmd)
+            // rubash#2124: GNU redir.c do_redirections opens a winning
+            // /dev/tcp|udp input redirect before the body runs, for
+            // in-process classes too — the funnel's bind performs the
+            // one connect and binds the socket for the dispatch; a
+            // failed connect was already diagnosed there (status 1)
+            // and skips the dispatch like a gate rejection.
+            match self.bind_simple_command_net_inputs(cmd) {
+                Ok(saved_net_binds) => {
+                    let result = self.execute_prepared_command(cmd);
+                    self.restore_simple_command_net_inputs(saved_net_binds);
+                    result
+                }
+                Err(()) => Ok(()),
+            }
         };
         let external_ran = self.external_dispatch_ran.get();
         self.external_dispatch_ran.set(saved_external_marker);

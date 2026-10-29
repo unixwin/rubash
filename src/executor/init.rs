@@ -498,6 +498,7 @@ impl Executor {
             defer_locale_assignment_warnings: Cell::new(false),
             deferred_locale_assignment_binds: Vec::new(),
             external_dispatch_ran: Cell::new(false),
+            dispatch_net_bound_fds: Vec::new(),
             pipestatus_write_absorbed: Cell::new(false),
             tempenv_pipestatus_state: None,
             command_scoped_procsub_input_fds: Vec::new(),
