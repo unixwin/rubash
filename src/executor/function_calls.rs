@@ -1392,6 +1392,23 @@ impl Executor {
             }
             return Ok((None, false, None));
         }
+        // rubash#2124: a /dev/tcp|udp call target is not a filesystem
+        // object — the metadata classification below fell through to
+        // the non-regular arm and FileFd::open_read reported it
+        // ENOENT. GNU redir.c do_redirections connects it (redir_open
+        // -> netopen) and binds it on fd 0 for the body's duration.
+        // open_net_redirect's error already carries the path-shaped
+        // message (the connect pre-line was emitted by the connect).
+        if crate::special_paths::is_net_redirect_target(&target) {
+            let file = self.open_net_redirect(&target)?;
+            let saved = self.fd_table.entries.get(&0).cloned();
+            self.fd_table.open_input(
+                0,
+                FdReadEndpoint::File(FileFd::from_file(file, target.clone().into())),
+                false,
+            );
+            return Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })));
+        }
         let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
         if !std::fs::metadata(&path)
             .map(|m| m.is_file())

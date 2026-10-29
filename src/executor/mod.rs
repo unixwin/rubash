@@ -673,6 +673,14 @@ pub struct Executor {
     /// tempenv cell). Saved/restored around each dispatch so nested
     /// commands cannot leak their class into the enclosing one.
     external_dispatch_ran: Cell<bool>,
+    /// rubash#2124: fds the simple-command dispatch bind
+    /// (bind_simple_command_net_inputs) has bound to a connected
+    /// /dev/tcp|udp stream for the command currently executing. The
+    /// read builtin's own net serve consults this so a winning net
+    /// input is connected exactly once — by the bind, not again by
+    /// the serve. Entries are pushed by the bind and removed by its
+    /// restore, so the set is empty outside a bound dispatch.
+    dispatch_net_bound_fds: Vec<u32>,
     /// rubash#1525: set by the simple-command funnel when it has
     /// already performed this command's PIPESTATUS completion write
     /// against the still-bound tempenv cell; the ast_exec loop's
