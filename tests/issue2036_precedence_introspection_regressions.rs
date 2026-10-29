@@ -12,6 +12,13 @@
 //! Unix-only: the fake-body shapes are PATH shell scripts and the stty
 //! expectations are the Linux ioctl texts the audit measured. The
 //! Windows-side three-way differential battery is audit win-diff/ (pkg10).
+//!
+//! S2 update: the introspection section no longer pins the
+//! zero-disclosure contract. Under the S2 ruling the describe faces
+//! disclose a live in-process claim (`type -t` -> `emulation`,
+//! `type X` -> "X is a shell emulation of <path>"), and the KD-1
+//! drift pins (compgen -b / enable lacking `env`) turned positive:
+//! every introspection face projects from the single registry.
 
 #![cfg(unix)]
 
@@ -351,7 +358,8 @@ fn issue2036_shape12_escape_hatches_spawn() {
 /// Shape 13 + enable faces: `type -t echo` reports builtin;
 /// `enable -n echo` releases echo to the PATH body; `enable stty` /
 /// `enable cat` refuse with the not-a-builtin diagnostic (the emulated
-/// names are not enable-manageable — introspection stays external).
+/// names are not builtins and stay unmanageable by enable — their
+/// claims are disclosed by the describe faces, not the builtin table).
 #[test]
 fn issue2036_shape13_enable_faces() {
     let rig = rig("s13");
@@ -376,53 +384,110 @@ fn issue2036_shape13_enable_faces() {
         out.stdout
     );
     assert!(out.stdout.contains("cat_rc=1"), "{}", out.stdout);
-    // The KD-1 wart from the other side: env IS a builtin (shape: type
-    // says so) yet enable refuses to manage it, because enable's own
-    // ALL_BUILTINS list lacks env (S1 find; S2 adjudicates).
+    // KD-1, closed by S2: env is in the registry projection every
+    // face reads, so enable manages it like any other builtin — and
+    // the disable is real, not a report-only state: after
+    // `enable -n env` the describe face stops reporting the builtin
+    // and dispatch falls through to the PATH body (the fakebin script
+    // here). Before the disable, the bare name runs the in-process
+    // env (its output is the environment, never the fake's marker).
+    write_fake(&rig.root.join("fakebin"), "env", "#!/bin/sh\necho FAKE-env\n");
     let out = run(
         &rig.root,
         &rig.fake_path,
-        "enable env 2>&1; echo env_rc=$?; enable -n env 2>&1; echo envn_rc=$?",
+        "enable env; echo env_rc=$?; env >/dev/null; echo on_rc=$?; \
+         enable -n env; echo envn_rc=$?; echo t=$(type -t env); echo off=$(env)",
     );
-    assert!(
-        out.stdout.contains("enable: env: not a shell builtin"),
-        "{}",
-        out.stdout
-    );
-    assert!(out.stdout.contains("env_rc=1"), "{}", out.stdout);
-    assert!(out.stdout.contains("envn_rc=1"), "{}", out.stdout);
+    assert!(out.stdout.contains("env_rc=0"), "{}", out.stdout);
+    assert!(out.stdout.contains("on_rc=0"), "{}", out.stdout);
+    assert!(out.stdout.contains("envn_rc=0"), "{}", out.stdout);
+    assert!(out.stdout.contains("t=file"), "{}", out.stdout);
+    assert!(out.stdout.contains("off=FAKE-env"), "{}", out.stdout);
 }
 
 // ------------------------------------------------------- §3.1 introspection
 
-const EMULATED_OR_FAST_NAMES: &[&str] = &[
+/// Names whose simple-command claim the shell takes in-process
+/// (registry classes HiddenFastpath / Fastpath / EmulatedExternal):
+/// while the claim is live they must disclose it (S2 ruling).
+const SIMPLE_CLAIM_NAMES: &[&str] = &[
     "stty", "uname", "arch", "sleep", "dirname", "basename", "cat", "sed", "mkdir", "touch",
-    "chmod", "cp", "rm", "rmdir", "mkfifo", "tty", "tput", "head", "grep", "wc", "tr", "yes",
-    "diff", "mktemp", "sort",
+    "chmod", "cp", "rm", "rmdir", "mkfifo", "tty",
 ];
 
-/// §3.1: every emulated/fast-path name introspects as a plain external
-/// file on all of type -t / command -v (zero disclosure, #154 contract).
+/// Names claimed only in other shapes (pipeline stage, command
+/// substitution, the diff shortcut) — plus `tput`, whose claim is
+/// Windows-only and therefore not live on this unix battery. For all
+/// of these the simple-command question honestly gets the file answer.
+const SHAPE_SCOPED_NAMES: &[&str] = &[
+    "head", "grep", "wc", "tr", "yes", "diff", "mktemp", "sort", "tput",
+];
+
+/// §3.1 as adjudicated by S2: the zero-disclosure contract is
+/// reversed. A live simple-command claim reports `emulation` on
+/// type -t, the sentence "X is a shell emulation of <path>" on
+/// type / command -V, and the bare name on command -v (invoking the
+/// name reproduces the in-process behavior; invoking the path would
+/// not). Shape-scoped claims keep the file answer.
 #[test]
 fn issue2036_introspection_emulated_names_report_file() {
     let dir = scratch("intro");
     let path = std::env::var("PATH").unwrap_or_default();
     let mut script = String::new();
-    for n in EMULATED_OR_FAST_NAMES {
+    for n in SIMPLE_CLAIM_NAMES.iter().chain(SHAPE_SCOPED_NAMES) {
         script.push_str(&format!("echo {n}=\"$(type -t {n} 2>&1)\"\n"));
     }
     let out = run(&dir, &path, &script);
-    for n in EMULATED_OR_FAST_NAMES {
+    for n in SIMPLE_CLAIM_NAMES {
+        assert!(
+            out.stdout.contains(&format!("{n}=emulation")),
+            "{n} must disclose its live claim, got: {}",
+            out.stdout
+        );
+    }
+    for n in SHAPE_SCOPED_NAMES {
         assert!(
             out.stdout.contains(&format!("{n}=file")),
             "{n} must introspect as file, got: {}",
             out.stdout
         );
     }
-    // command -v agrees: a PATH path, never the bare name.
-    let out = run(&dir, &path, "command -v stty; command -v cat");
-    assert!(out.stdout.contains("/stty"), "{}", out.stdout);
-    assert!(out.stdout.contains("/cat"), "{}", out.stdout);
+    // The verbose and reusable forms of the disclosure.
+    let out = run(
+        &dir,
+        &path,
+        "type stty; command -V cat; echo v=$(command -v stty); type -p stty; echo p_rc=$?",
+    );
+    assert!(
+        out.stdout.contains("stty is a shell emulation of /"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("cat is a shell emulation of /"),
+        "{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("v=stty"), "{}", out.stdout);
+    // type -p on a claim is silent-but-found, like a builtin: the
+    // whole run prints exactly the four expected lines.
+    assert!(out.stdout.contains("p_rc=0"), "{}", out.stdout);
+    assert_eq!(out.stdout.lines().count(), 4, "{}", out.stdout);
+    // type -a prints the claim line AND the file line(s).
+    let out = run(&dir, &path, "type -a stty");
+    assert!(
+        out.stdout.contains("stty is a shell emulation of /"),
+        "{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("stty is /"), "{}", out.stdout);
+    // Stand-down honesty: when the name does not resolve, no claim is
+    // reported — the not-found answer returns (the claim is an
+    // existence gate, exactly as dispatch behaves).
+    let empty = scratch("introempty");
+    let out = run(&dir, empty.to_str().unwrap(), "echo t=\"$(type -t stty)\"; type stty 2>/dev/null; echo rc=$?");
+    assert!(out.stdout.contains("t=\n"), "{}", out.stdout);
+    assert!(out.stdout.contains("rc=1"), "{}", out.stdout);
 }
 
 /// §3.1: `env` is the one honest exception — a real (rubash-extension)
@@ -445,18 +510,18 @@ fn issue2036_introspection_env_reports_builtin() {
     assert!(out.stdout.contains("v=env"), "{}", out.stdout);
 }
 
-/// §3.1 + audit M23: `compgen -b` reads a second, hand-maintained list
-/// that has drifted from BUILTIN_NAMES by exactly one name: `env` is a
-/// builtin for `type` but missing from `compgen -b`. WART: S2 unifies
-/// the introspection source; this pin holds the current drift so the
-/// unification diffs against it explicitly.
+/// §3.1 + audit M23, as adjudicated by S2 (KD-1 closed): `compgen -b`
+/// projects from the same registry as every other introspection
+/// face — the hand-maintained second list that lacked `env` is gone,
+/// so the full 62-name builtin set (GNU 61 + the env extension) is
+/// listed. (This pin was the drift pin in S1; it is positive now.)
 #[test]
 fn issue2036_introspection_compgen_b_known_drift_env() {
     let dir = scratch("introcg");
     let path = std::env::var("PATH").unwrap_or_default();
     let out = run(&dir, &path, "compgen -b | sort | tr '\\n' ' '; echo");
     let expected = ". : [ alias bg bind break builtin caller cd command compgen complete \
-                    compopt continue declare dirs disown echo enable eval exec exit export \
+                    compopt continue declare dirs disown echo enable env eval exec exit export \
                     false fc fg getopts hash help history jobs kill let local logout mapfile \
                     popd printf pushd pwd read readarray readonly return set shift shopt \
                     source suspend test times trap true type typeset ulimit umask unalias \
@@ -464,17 +529,15 @@ fn issue2036_introspection_compgen_b_known_drift_env() {
     assert_eq!(
         out.stdout.trim_end(),
         expected.trim_end(),
-        "compgen -b drift changed"
+        "compgen -b projection changed"
     );
 }
 
-/// §3.1 + audit M23 (extended by S1): `enable -a` reads ANOTHER
-/// hand-maintained GNU-61 list (builtins/enable.rs ALL_BUILTINS) that
-/// has drifted the same way — it lists 61 names and `env` is missing,
-/// so env is a builtin `type` reports but `enable` will not manage
-/// (`enable env` / `enable -n env` both refuse "not a shell builtin",
-/// pinned in the shape-13 test). WART: S2 unifies the introspection
-/// source; these pins hold the current drift explicitly.
+/// §3.1 + audit M23 (extended by S1), as adjudicated by S2 (KD-1
+/// closed): `enable -a` projects from the registry like every other
+/// face — 62 names including `env`, and `enable env` / `enable -n env`
+/// manage it (pinned in the shape-13 test). The claimed-but-not-builtin
+/// names stay unlisted: they are not builtins.
 #[test]
 fn issue2036_introspection_enable_a_lists_builtins_only() {
     let dir = scratch("introena");
@@ -488,10 +551,11 @@ fn issue2036_introspection_enable_a_lists_builtins_only() {
                 .or_else(|| l.strip_prefix("enable -n "))
         })
         .collect();
-    assert_eq!(names.len(), 61, "enable -a rows: {:?}", names);
+    assert_eq!(names.len(), 62, "enable -a rows: {:?}", names);
     assert!(
-        !names.contains(&"env"),
-        "KD-1 wart: env currently missing from enable -a"
+        names.contains(&"env"),
+        "env must be listed (KD-1 closed): {:?}",
+        names
     );
     for n in ["stty", "cat", "sleep", "uname"] {
         assert!(!names.contains(&n), "{n} must not be listed");

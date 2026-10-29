@@ -184,8 +184,9 @@ mod alias_helpers;
 pub(crate) mod assignment_helpers;
 mod ast_exec;
 mod builtin_names;
-#[allow(dead_code)] // rubash#2036 S1: data-first landing; consumers arrive in S2–S4.
-mod command_registry;
+#[allow(dead_code)]
+// rubash#2036: S2 introspection consumers landed; some fields/accessors await S3/S4.
+pub(crate) mod command_registry;
 mod command_subst_helpers;
 mod command_text;
 mod env_helpers;

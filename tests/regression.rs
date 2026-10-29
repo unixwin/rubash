@@ -2964,11 +2964,15 @@ fn shift_bad_operand_status_matches_gnu() {
 /// script probing `command -v setopt` to detect zsh must get the GNU
 /// answer. After the removal `setopt x` is command-not-found (127),
 /// `builtin setopt x` is not-a-shell-builtin (1), and `enable -a` lists
-/// exactly GNU's 61 builtin names.
+/// no zsh-ism. The list itself is the unified registry projection
+/// (#2036 S2): GNU's 61 names plus rubash's one extension builtin
+/// `env` = 62. (The count was 61 while enable's hand-maintained list
+/// lacked env — the KD-1 drift; GNU's own 61 excludes env because GNU
+/// has no env builtin.)
 /// GNU 5.3.0 differential (WSL stdin probe 2026-10-18):
 ///   command -v setopt    -> rc 1, no output   (was "setopt", rc 0)
 ///   command -v unsetopt  -> rc 1, no output   (was "unsetopt", rc 0)
-///   enable -a | wc -l    -> 61                (was 64 on Windows)
+///   enable -a | wc -l    -> 61 on GNU (no env builtin there)
 #[test]
 fn zsh_option_builtins_are_gone() {
     let dir = case_scratch("759.setopt");
@@ -2985,11 +2989,14 @@ fn zsh_option_builtins_are_gone() {
     let mut lines = stdout.lines();
     assert_eq!(lines.next(), Some("v:1"), "command -v setopt misses");
     assert_eq!(lines.next(), Some("v:1"), "command -v unsetopt misses");
-    let listed = lines.filter(|line| !line.trim().is_empty()).count();
+    let rest = stdout.lines().skip(2).collect::<Vec<_>>().join("\n");
+    let listed = rest.lines().filter(|line| !line.trim().is_empty()).count();
     assert_eq!(
-        listed, 61,
-        "enable -a must list exactly GNU's 61 builtin names: {stdout}"
+        listed, 62,
+        "enable -a must list the 62-name registry projection (GNU 61 + env): {stdout}"
     );
+    assert!(rest.contains("enable env\n"), "env listed: {stdout}");
+    assert!(!rest.contains("setopt"), "no zsh-isms listed: {stdout}");
 
     let out = run_rubash_in(
         &dir,
