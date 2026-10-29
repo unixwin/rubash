@@ -233,7 +233,10 @@ impl Executor {
         // gives: the 0444 class fails the open EACCES (redir.c
         // r_input_output on the real entry); the 0644 class binds —
         // reads serve the generated snapshot through the byte
-        // channel, writes land in the absorbed sink.
+        // channel, writes fail EINVAL through the symbolic
+        // ProcContentWrite endpoint (rubash#2042: GNU's procfs 0644
+        // open succeeds and its writes fail EINVAL; the absorbed
+        // sink made them silently succeed).
         if let Some(allowed) = crate::special_paths::synthetic_proc_write_allowed(target) {
             if !allowed {
                 return Err(io::Error::new(
@@ -243,10 +246,8 @@ impl Executor {
             }
             let bytes = crate::special_paths::synthetic_proc_content(target).unwrap_or_default();
             self.set_fd_input_bytes(fd, bytes, dynamic);
-            let sink = Self::synthetic_proc_write_sink(false)?;
-            let file_fd = FileFd::from_file(sink, target.into());
             self.fd_table
-                .open_output(fd, FdWriteEndpoint::File(file_fd), dynamic);
+                .open_output(fd, FdWriteEndpoint::ProcContentWrite, dynamic);
             self.shell_state.env_vars.remove(&fd_closed_key(fd));
             self.shell_state
                 .env_vars
@@ -365,6 +366,28 @@ impl Executor {
                 self.fd_table
                     .open_output(fd, FdWriteEndpoint::File(file_fd), dynamic);
             }
+            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+            self.shell_state
+                .env_vars
+                .remove(&fd_output_process_substitution_key(fd));
+            self.shell_state.env_vars.insert(fd_output_key(fd), target);
+            return Ok(());
+        }
+        // rubash#1935 + rubash#2042: synthetic /proc content — the
+        // 0444 class fails the open EACCES; the 0644 class binds the
+        // symbolic ProcContentWrite endpoint (GNU's procfs open
+        // succeeds and its writes fail EINVAL; the fall-through below
+        // would create a phantom enclave file at the literal path and
+        // its writes would silently succeed).
+        if let Some(allowed) = crate::special_paths::synthetic_proc_write_allowed(&target) {
+            if !allowed {
+                return Err(crate::posix_errors::path_error(
+                    &target,
+                    io::Error::new(io::ErrorKind::PermissionDenied, "Permission denied"),
+                ));
+            }
+            self.fd_table
+                .open_output(fd, FdWriteEndpoint::ProcContentWrite, dynamic);
             self.shell_state.env_vars.remove(&fd_closed_key(fd));
             self.shell_state
                 .env_vars
@@ -4017,6 +4040,21 @@ impl Executor {
                 self.shell_state
                     .env_vars
                     .insert(fd_output_key(target_fd), "/dev/full".to_string());
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_output_process_substitution_key(target_fd));
+            }
+            Some(FdWriteEndpoint::ProcContentWrite) => {
+                // rubash#2042: the ledger records a canonical 0644
+                // spelling, so a respawned child re-derives the same
+                // write class from the registry (the endpoint itself
+                // carries no spelling — the class, not the pid, is
+                // what travels; same device-spelling precedent as the
+                // /dev/full arm above).
+                self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                self.shell_state
+                    .env_vars
+                    .insert(fd_output_key(target_fd), "/proc/self/status".to_string());
                 self.shell_state
                     .env_vars
                     .remove(&fd_output_process_substitution_key(target_fd));

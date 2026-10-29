@@ -1157,6 +1157,12 @@ impl Executor {
                 // themselves carry the exact ENOSPC shape).
                 return Self::synthetic_proc_write_sink(true);
             }
+            FdWriteEndpoint::ProcContentWrite => {
+                // rubash#2042: an append-dup of a 0644-class synthetic
+                // /proc binding — same deep edge, same absorbed sink;
+                // the bound write faces carry the exact EINVAL shape.
+                return Self::synthetic_proc_write_sink(true);
+            }
             FdWriteEndpoint::File(_) => unreachable!("handled above"),
         };
         if is_null_device(&path.to_string_lossy()) {
@@ -1331,6 +1337,12 @@ impl Executor {
                 // platform (Windows' error table has no ENOSPC).
                 return Err(io::Error::new(io::ErrorKind::Other, "No space left on device").into());
             }
+            FdWriteEndpoint::ProcContentWrite => {
+                // rubash#2042: every write to a 0644-class synthetic
+                // /proc binding fails EINVAL (procfs content without
+                // a write handler), same payload contract.
+                return Err(io::Error::new(io::ErrorKind::Other, "Invalid argument").into());
+            }
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 let mut file = OpenOptions::new().create(true).append(true).open(path)?;
                 file.write_all(output)?;
@@ -1475,6 +1487,10 @@ impl Executor {
             // write fails ENOSPC and is lost, exactly GNU's outcome
             // for a failing builtin_error write.
             FdWriteEndpoint::FullDevice => Ok(()),
+            // rubash#2042: fd 2 bound to a 0644-class synthetic /proc
+            // entry — the diagnostic write fails EINVAL and is lost,
+            // the same GNU outcome for the failing stderr write.
+            FdWriteEndpoint::ProcContentWrite => Ok(()),
             FdWriteEndpoint::File(file_fd) => crate::fd::write_all(file_fd.handle, output),
         };
         let _ = result;
@@ -1568,6 +1584,12 @@ impl Executor {
                 // the sh_chkwrite rendering is exact on every
                 // platform (Windows' error table has no ENOSPC).
                 return Err(io::Error::new(io::ErrorKind::Other, "No space left on device").into());
+            }
+            FdWriteEndpoint::ProcContentWrite => {
+                // rubash#2042: every write to a 0644-class synthetic
+                // /proc binding fails EINVAL (procfs content without
+                // a write handler), same payload contract.
+                return Err(io::Error::new(io::ErrorKind::Other, "Invalid argument").into());
             }
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 let mut file = OpenOptions::new().create(true).append(true).open(path)?;

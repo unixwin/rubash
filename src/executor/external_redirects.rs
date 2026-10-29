@@ -275,9 +275,13 @@ impl Executor {
                 // legacy spawn plumbing. A /dev/full binding
                 // (rubash#1898) declines the same way — the legacy
                 // route reopens the spelling into the absorbed sink.
+                // rubash#2042: a 0644-class synthetic /proc binding
+                // declines identically (same platform ceiling — the
+                // child's handle cannot fail EINVAL per write).
                 FdWriteEndpoint::CoprocStdin { .. }
                 | FdWriteEndpoint::ProcessSubstitution { .. }
-                | FdWriteEndpoint::FullDevice => return Ok(None),
+                | FdWriteEndpoint::FullDevice
+                | FdWriteEndpoint::ProcContentWrite => return Ok(None),
             };
             if !is_default_slot(&slot) {
                 compound_bound_fds.push(fd);
@@ -338,7 +342,8 @@ impl Executor {
                 FdWriteEndpoint::File(_) => None,
                 FdWriteEndpoint::CoprocStdin { .. }
                 | FdWriteEndpoint::ProcessSubstitution { .. }
-                | FdWriteEndpoint::FullDevice => None,
+                | FdWriteEndpoint::FullDevice
+                | FdWriteEndpoint::ProcContentWrite => None,
             }
         };
 
