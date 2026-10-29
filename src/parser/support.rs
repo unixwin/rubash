@@ -95,12 +95,36 @@ pub(super) struct WordScans {
 
 impl WordScans {
     pub fn run(value: &str, raw: &str) -> Self {
+        // Provably-empty admission (rubash#117 whitelist discipline): each
+        // scan below already gates on its own trigger byte — `*`/`?`/`[`
+        // for pathname patterns, `(` for extglob and process substitutions
+        // — so a value/raw pair carrying NONE of those bytes answers all
+        // three empty. One combined byte pass replaces the seven separate
+        // `contains` scans the ordinary word (`echo value_1`) used to pay;
+        // a false admission is impossible and a miss only costs the scans.
+        // GNU parse.y:5305 read_token_word builds the word once and runs no
+        // expansion analysis at parse time; these scans are the executor's
+        // metadata source, so skipping a provably-empty one is identity.
+        if !word_may_carry_parse_scans(value) && !word_may_carry_parse_scans(raw) {
+            return Self {
+                extglob_patterns: Vec::new(),
+                pathname_patterns: Vec::new(),
+                process_substitutions: Vec::new(),
+            };
+        }
         Self {
             extglob_patterns: extglob_patterns_in_word_with_raw(value, raw),
             pathname_patterns: pathname_patterns_in_word(value, raw),
             process_substitutions: process_substitutions_in_word_with_raw(value, raw),
         }
     }
+}
+
+#[inline]
+fn word_may_carry_parse_scans(text: &str) -> bool {
+    text.as_bytes()
+        .iter()
+        .any(|byte| matches!(*byte, b'*' | b'?' | b'[' | b'('))
 }
 
 pub(super) fn build_word_metadata(word_index: usize, value: &str, raw: &str) -> WordMetadata {
