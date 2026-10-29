@@ -198,6 +198,39 @@ fn issue_1359_autofd_write_redirect_keeps_stdout_intact_and_ordered() {
 }
 
 #[test]
+fn issue_1894_unresolvable_host_reports_name_line_then_invalid_argument() {
+    // GNU _netopen6 (lib/sh/netopen.c:205) reports a getaddrinfo
+    // failure through internal_error BEFORE the redirection_error
+    // line: `{host}: Name or service not known`, then the target line
+    // carries EINVAL (netopen.c:227). A 300-char host name fails
+    // resolution locally on every resolver (no DNS traffic), which
+    // keeps the pin deterministic offline; oracle-verified against
+    // GNU bash 5.3.20.
+    let host = "a".repeat(300);
+    let (stdout, stderr, _code) = run_c(&format!("( exec 3<>/dev/tcp/{host}/80; echo rc=$? )"));
+    assert_eq!(stdout, "rc=1\n");
+    assert!(
+        stderr.contains(&format!("{host}: Name or service not known")),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("/dev/tcp/{host}/80: Invalid argument")),
+        "stderr: {stderr}"
+    );
+    // The empty host is the same EAI_NONAME shape with an empty name.
+    let (stdout, stderr, _code) = run_c("( exec 3<>/dev/tcp//59998; echo rc=$? )");
+    assert_eq!(stdout, "rc=1\n");
+    assert!(
+        stderr.contains(": Name or service not known"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("/dev/tcp//59998: Invalid argument"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
 fn issue_1895_multi_slash_target_splits_at_first_slash() {
     // GNU netopen splits at the FIRST slash (lib/sh/netopen.c:291
     // strchr): host `a`, service `b/80` — the service word fails, so
