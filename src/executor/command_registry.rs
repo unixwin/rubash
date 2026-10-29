@@ -25,9 +25,21 @@
 //! this module are each entry's claim set, pinned against the rows
 //! by the consistency tests, and the four dispatch functions match
 //! on slots with their historical bodies and arm order (including
-//! the late table's function-guard position) unchanged. The
-//! pipeline and comsub faces still do not read the registry; they
-//! project in S4.
+//! the late table's function-guard position) unchanged.
+//! S4 projects the pipeline and comsub faces the same way —
+//! PIPELINE_STAGE / PIPELINE_PRECHECK / PIPELINE_STANDIN /
+//! TIMED_PRODUCER / TIMED_CONSUMER / TIMED_FOLLOWUP for
+//! pipeline_exec, COMSUB_WORD for command_substitution,
+//! COMSUB_TIMED / COMSUB_HEREDOC for
+//! command_substitution_pipelines, COMSUB_FRONT for
+//! command_substitution_values — and sinks the stand-down field per
+//! face: an ImplRef may now carry its own StandDown when the face's
+//! measured rule diverges from the row's (the four adjudicated
+//! cells: pipeline cat, comsub basename, timed-consumer sleep, the
+//! mktemp word arm). No stand_down value changes anywhere in S4;
+//! the per-face records state the rules the code already follows.
+//! KD-5 (tput's HashRecord::Separate) is dispositioned on that
+//! variant below: Separate stays.
 //! The consistency tests at the bottom of this file pin the table
 //! against the live code (the name predicates, the projected lists,
 //! and literal scans of the scattered claim sites), so a claim added
@@ -48,10 +60,15 @@
 //! what happens when it does not resolve — the standard predicate
 //! (`emulated_external_stands_down`) fails closed to a real spawn and
 //! its 127. The policy value `Yield` (real body wins when resolvable)
-//! exists in the design space for the S3/S4 adjudication and is used
-//! by **no** row today; two cells are non-standard and flagged on
-//! their rows: the pipeline sed arm's inverted recheck and the comsub
-//! basename arm's unchecked cell (audit B1).
+//! is used by **no** row; since S4 it is used by exactly one face —
+//! the pipeline cat face, whose net policy is set by the concurrent
+//! direct-spawn planner ahead of the arm (see the cat row). The
+//! non-standard cells are flagged on their rows and, since S4, in
+//! the per-face StandDown records: the pipeline sed arm's inverted
+//! recheck (row level), the comsub basename arm's unchecked cell
+//! (audit B1), the timed-consumer sleep model's unchecked cell
+//! (KD-4), and the mktemp word arm's shape-only admission (S3
+//! §3.1/§5.4).
 
 /// Which family claims the name (audit §6.2 `class`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,15 +140,36 @@ pub(crate) enum Entry {
 /// One implementation of a name at one entry point: the entry plus a
 /// source pointer naming the owning code (file/function level), so a
 /// reader can find the implementation from the registry alone.
+///
+/// `stand_down` is the S4 per-face sink (audit §6.2's field set, S3
+/// REPORT §3.2/§5.4): `None` means the face follows the row's
+/// StandDown; `Some` records the face's own measured two-axis rule
+/// for the adjudicated cells where it diverges from the row. The
+/// consistency tests pin the exact set of faces carrying an override
+/// so a new per-face divergence cannot land silently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ImplRef {
     pub entry: Entry,
     pub impl_id: &'static str,
+    pub stand_down: Option<StandDown>,
 }
 
 impl ImplRef {
     pub(crate) const fn new(entry: Entry, impl_id: &'static str) -> Self {
-        Self { entry, impl_id }
+        Self {
+            entry,
+            impl_id,
+            stand_down: None,
+        }
+    }
+
+    /// Attach this face's own stand-down record (see the field doc).
+    pub(crate) const fn with_stand_down(self, stand_down: StandDown) -> Self {
+        Self {
+            entry: self.entry,
+            impl_id: self.impl_id,
+            stand_down: Some(stand_down),
+        }
     }
 }
 
@@ -174,10 +212,11 @@ pub(crate) enum Admission {
 pub(crate) enum ResolvablePolicy {
     /// The emulation answers, replacing the resolved body.
     Replace,
-    /// The real body wins. **No row uses this today** — it is the
-    /// policy value S3/S4 may assign per name when they adjudicate
-    /// the two-axis table; the consistency tests pin its absence so
-    /// the adjudication diffs against an explicit zero.
+    /// The real body wins. **No row uses this** — since S4 exactly
+    /// one face does: the pipeline cat face carries it as a per-face
+    /// record (the concurrent planner, not the arm, yields). The
+    /// consistency tests pin the row-level absence and the exact
+    /// per-face set so either can only change deliberately.
     Yield,
     /// The pipeline sed arm: answers only when the name is
     /// hash-resolved but the PATH walk misses (an inverted recheck
@@ -198,17 +237,19 @@ pub(crate) enum UnresolvablePolicy {
     /// a real spawn (which reports 127) — the standard predicate.
     FailClosed,
     /// Never consults the predicate: the face answers even when the
-    /// name is unresolvable. Exactly one cell today (comsub basename,
-    /// audit B1), flagged on its row.
+    /// name is unresolvable. No row uses this; since S4 exactly
+    /// three faces carry it as per-face records (comsub basename —
+    /// audit B1, the timed-consumer sleep model — KD-4, and the
+    /// mktemp word arm), pinned by the consistency tests.
     Unchecked,
     /// The face never consults resolution.
     NotApplicable,
 }
 
-/// The two-axis stand-down policy of a row (audit §6.2 `stand_down`).
-/// Per-face divergences from the row value are flagged on the
-/// diverging face's ImplRef text until S3/S4 give the field per-entry
-/// structure.
+/// The two-axis stand-down policy (audit §6.2 `stand_down`). A row
+/// carries the policy of its principal face; a face whose measured
+/// rule diverges carries its own value on its ImplRef (S4 per-face
+/// sink — see ImplRef::stand_down).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StandDown {
     pub resolvable: ResolvablePolicy,
@@ -305,6 +346,20 @@ pub(crate) enum HashRecord {
     /// Recorded through a name-specific path outside the layer's set
     /// (tput's record_tput_resolution — the two lists in the layer
     /// have already diverged on exactly this, audit §1.4).
+    ///
+    /// KD-5 disposition (S4): **Separate stays.** The route records
+    /// find_user_command's resolution under the same guards as the
+    /// layer's block (slash-free name, hashall, temp-PATH
+    /// suppression) from exactly the two faces that can
+    /// answer tput in-process — the ExternalFile arm and the
+    /// PipelineStage arm — and only for ADMITTED invocations. Folding
+    /// tput into the layer's `emulated` set would move the record to
+    /// the layer's pre-dispatch point, i.e. record non-admitted
+    /// invocations too: a behavior change, outside any projection
+    /// slice. The ComsubFront face records nothing (its own comment
+    /// notes the parity with the tty front arm). The consistency
+    /// tests pin tput as the unique Separate row and pin the route's
+    /// definition + both call sites.
     Separate,
 }
 
@@ -564,11 +619,12 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
     CommandRow {
         name: "sleep",
         class: ClaimClass::Fastpath,
-        impls: &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary -> builtins/sleep.rs (interruptible virtual-child wait)"), ImplRef::new(Entry::TimedProducer, "pipeline_exec::timed_pipeline_step (stand-down checked)"), ImplRef::new(Entry::TimedConsumer, "pipeline_exec::timed_read_consumer_output (stand-down NOT checked)"), ImplRef::new(Entry::TimedFollowup, "pipeline_exec::timed_followup_keeps_stream")],
+        impls: &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary -> builtins/sleep.rs (interruptible virtual-child wait)"), ImplRef::new(Entry::TimedProducer, "pipeline_exec::timed_pipeline_step (stand-down checked)"), ImplRef::new(Entry::TimedConsumer, "pipeline_exec::timed_read_consumer_output. Per-face stand_down (KD-4, S3 §3.2-c, S4 sink): the consumer model NEVER consults the stand-down predicate — its sleep is a modeled delay inside the read -t consumer body, not a resolution claim — so it answers for an unresolvable sleep exactly as for a resolvable one (Unchecked). The producer face (TimedProducer) checks the predicate and declines (row policy). This producer-checks/consumer-doesn't split is a model-only divergence, KEPT deliberately: the timed entries are semantic models, not dispatch (audit R6), and making the consumer consult resolution would mistranslate 'unresolvable' into a timing verdict").with_stand_down(StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::Unchecked)), ImplRef::new(Entry::TimedFollowup, "pipeline_exec::timed_followup_keeps_stream")],
         admission: Admission::SleepDuration,
         // Row policy = the simple-command face; the timed-consumer model
-        // diverges (it never consults the predicate, audit §1.5) and is
-        // flagged on its ImplRef above until S4 adjudicates it.
+        // diverges (it never consults the predicate, audit §1.5) and
+        // carries its own per-face record on its ImplRef above
+        // (KD-4, adjudicated in S4: model-only divergence, kept).
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
@@ -597,11 +653,11 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
     CommandRow {
         name: "basename",
         class: ClaimClass::Fastpath,
-        impls: &[ImplRef::new(Entry::SimpLate, "command_dispatch_late -> printf_path_builtins (simple_path_tool_operands, <=2 operands)"), ImplRef::new(Entry::CmdLate, "command_no_alias_late -> printf_path_builtins (simple_path_tool_operands)"), ImplRef::new(Entry::ComsubWord, "command_substitution word arm (independent impl; no operand cap; stand-down NOT checked)")],
+        impls: &[ImplRef::new(Entry::SimpLate, "command_dispatch_late -> printf_path_builtins (simple_path_tool_operands, <=2 operands)"), ImplRef::new(Entry::CmdLate, "command_no_alias_late -> printf_path_builtins (simple_path_tool_operands)"), ImplRef::new(Entry::ComsubWord, "command_substitution word arm (independent impl; no operand cap; stand-down NOT checked). Per-face stand_down (KD-3, audit B1, S4 sink): Replace/Unchecked — the arm answers on word shape alone. Registration only: the ruled change of the unresolvable axis to FailClosed lands in S5 with #2043/#2046, NOT in this projection slice").with_stand_down(StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::Unchecked))],
         admission: Admission::SimplePathOperands,
-        // Row policy = the simple/command faces. The comsub word arm is
-        // Replace/Unchecked (audit B1) — the one unchecked cell in the
-        // table; S4 must adjudicate it explicitly, not normalize it away.
+        // Row policy = the simple/command faces. The comsub word arm's
+        // own rule (Replace/Unchecked, audit B1) is recorded per-face
+        // on its ImplRef (S4 sink); its FailClosed change is S5's.
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
@@ -616,7 +672,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
     CommandRow {
         name: "cat",
         class: ClaimClass::EmulatedExternal,
-        impls: &[ImplRef::new(Entry::ExternalFile, "external_file_builtins (parse_cat_argv, shared with the pipeline arm)"), ImplRef::new(Entry::PipelineStage, "pipeline_exec stage arm (shared parse_cat_argv)"), ImplRef::new(Entry::ComsubWord, "command_substitution word arm (file operands only, stand-down checked)"), ImplRef::new(Entry::ComsubTimed, "command_substitution_pipelines timed arm (stand-down checked)"), ImplRef::new(Entry::ComsubHeredoc, "command_substitution_pipelines heredoc producer (stand-down checked)"), ImplRef::new(Entry::ExternalShortcut, "external_inner::handle_external_shortcuts (hash/checkhash special case)"), ImplRef::new(Entry::DisplayBridge, "lookup_paths display bridge (windows; type/command -v only, never executes)")],
+        impls: &[ImplRef::new(Entry::ExternalFile, "external_file_builtins (parse_cat_argv, shared with the pipeline arm)"), ImplRef::new(Entry::PipelineStage, "pipeline_exec stage arm (shared parse_cat_argv). Per-face stand_down is the FACE's net rule (S3 §3.2-a, S4 sink): ahead of the sequential stage executor, the concurrent direct-spawn planner (concurrent_external_stage_spec) claims any member whose head resolves via find_user_command and spawns the candidate directly, format-blind — a resolvable candidate therefore RUNS at this face, whether it is an ELF image or a #! script (Yield); the arm below is Replace and governs only planner-declined members (measured on master 03ae580d: forced-sequential shapes answer in-process for both candidate shapes). The simple-command face has no planner: it replaces both shapes (row policy). Unresolvable declines through the pre-check to a real spawn (FailClosed)").with_stand_down(StandDown::new(ResolvablePolicy::Yield, UnresolvablePolicy::FailClosed)), ImplRef::new(Entry::ComsubWord, "command_substitution word arm (file operands only, stand-down checked)"), ImplRef::new(Entry::ComsubTimed, "command_substitution_pipelines timed arm (stand-down checked)"), ImplRef::new(Entry::ComsubHeredoc, "command_substitution_pipelines heredoc producer (stand-down checked)"), ImplRef::new(Entry::ExternalShortcut, "external_inner::handle_external_shortcuts (hash/checkhash special case)"), ImplRef::new(Entry::DisplayBridge, "lookup_paths display bridge (windows; type/command -v only, never executes)")],
         admission: Admission::CatArgv,
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
@@ -782,7 +838,8 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         cfg: CfgGate::WindowsOnly,
         // tput records through its own record_tput_resolution, not the
         // layer's hash set (audit §1.4 — the two lists in the layer have
-        // already diverged on exactly this name).
+        // already diverged on exactly this name). KD-5 dispositioned in
+        // S4: Separate stays (see HashRecord::Separate's doc).
         hash_record: HashRecord::Separate,
         slash_forms: &[SlashForm::new("/bin/tput", SlashKind::Emulated), SlashForm::new("/usr/bin/tput", SlashKind::Emulated)],
         sync_ref: "WinuxCmd tput OPTION table (registration synopsis underreports: -T exists); ncurses tput",
@@ -872,8 +929,11 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
     CommandRow {
         name: "mktemp",
         class: ClaimClass::ComsubOnly,
-        impls: &[ImplRef::new(Entry::ComsubWord, "command_substitution word arm (in-process file creation)")],
+        impls: &[ImplRef::new(Entry::ComsubWord, "command_substitution word arm (in-process file creation). Per-face stand_down (S3 §3.1/§5.4 unexamined cell, S4 sink): the word arm admits on CALL SHAPE alone (-d/-t/template parse + TMPDIR creation) and consults neither emulated_external_stands_down nor the host flag — a resolvable real mktemp does not win inside $() (Replace), and an unresolvable one still gets the in-process answer (Unchecked). The ComsubFront face is the complementary half: it refuses mktemp (two decline markers in command_substitution_values) so this arm, or full execution, owns the body").with_stand_down(StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::Unchecked))],
         admission: Admission::Full,
+        // Row policy stays NotApplicable: there is no row-level face —
+        // simple commands spawn the real binary, and the one in-process
+        // face carries its actual rule per-face on its ImplRef above.
         stand_down: StandDown::new(ResolvablePolicy::NotApplicable, UnresolvablePolicy::NotApplicable),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
@@ -1393,6 +1453,265 @@ pub(crate) fn cmd_late_dispatch_slot(word: &str) -> Option<CmdLateSlot> {
     dispatch_slot(CMD_LATE_DISPATCH, word)
 }
 
+// ------------------------------------------------------------ S4: pipeline
+// + comsub
+//
+// The pipeline and command-substitution faces (audit M10–M18)
+// project from the registry in S4, in the S3 shape: each table is
+// an entry's claim set in typed form, sorted by name, and the
+// consumer matches on the slot with its historical bodies verbatim.
+// The PipelineStage claim set is larger than the stage table: five
+// of its names (`.`, cd, command, exec, source) are claimed by the
+// restricted-command guard `restricted_command_error`, which the
+// stage executor consults ahead of the match — the stage table
+// carries the thirteen names the match itself answers, and the
+// consistency tests pin the guard five as the table's listed
+// exception. COMSUB_WORD likewise omits one claim: `cd`, whose
+// ComsubWord face is the source-shape idiom
+// (command_substitution_cd_pwd_shape), not a first-word chain arm.
+// The timed and front tables include the tty/tput rows' registered
+// slash forms as entries mapping to the same slot, since those
+// evaluators key on the expanded word, slashes included.
+//
+// Performance contract unchanged (audit §5 C1/C2): const slices,
+// one binary search per lookup, nothing mutable at runtime — the
+// pipe 0.05x / comsub 0.11x leads are these arms, so a lookup must
+// stay cheaper than the work it gates.
+
+/// A pipeline stage arm (execute_pipeline_stage_inner).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PipelineSlot {
+    TrueColon,
+    False,
+    Echo,
+    Printf,
+    Trap,
+    Head,
+    Cat,
+    Sed,
+    Grep,
+    Wc,
+    Tr,
+    Tput,
+}
+
+/// The PipelineStage claims the stage match answers, sorted by
+/// name (the restricted-guard five are the listed exception — see
+/// the section header).
+pub(crate) const PIPELINE_STAGE: &[(&str, PipelineSlot)] = &[
+    (":", PipelineSlot::TrueColon),
+    ("cat", PipelineSlot::Cat),
+    ("echo", PipelineSlot::Echo),
+    ("false", PipelineSlot::False),
+    ("grep", PipelineSlot::Grep),
+    ("head", PipelineSlot::Head),
+    ("printf", PipelineSlot::Printf),
+    ("sed", PipelineSlot::Sed),
+    ("tput", PipelineSlot::Tput),
+    ("tr", PipelineSlot::Tr),
+    ("trap", PipelineSlot::Trap),
+    ("true", PipelineSlot::TrueColon),
+    ("wc", PipelineSlot::Wc),
+];
+
+/// The stage-table slot for `word`, if the stage match claims it
+/// (registry PipelineStage projection, guard five excluded).
+pub(crate) fn pipeline_stage_slot(word: &str) -> Option<PipelineSlot> {
+    dispatch_slot(PIPELINE_STAGE, word)
+}
+
+/// The stage pre-check set: the non-builtin PipelineStage claims,
+/// whose stages decline to a real spawn when the name stands down
+/// (execute_pipeline_stage_inner's fail-closed gate), sorted.
+pub(crate) const PIPELINE_PRECHECK: &[&str] = &["cat", "grep", "head", "sed", "tput", "tr", "wc"];
+
+/// Whether the stage pre-check claims `word`.
+pub(crate) fn pipeline_precheck_claims(word: &str) -> bool {
+    PIPELINE_PRECHECK.binary_search(&word).is_ok()
+}
+
+/// The spawn stand-in set (registry PipelineStandIn claims),
+/// sorted: names the concurrent planner may replace with the
+/// internal sentinel program when only the hash table resolves
+/// them.
+pub(crate) const PIPELINE_STANDIN: &[&str] = &["head", "wc", "yes"];
+
+/// Whether the spawn stand-in claims `word`.
+pub(crate) fn pipeline_standin_claims(word: &str) -> bool {
+    PIPELINE_STANDIN.binary_search(&word).is_ok()
+}
+
+/// A timed-producer arm (pipeline_exec::timed_pipeline_step).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TimedProducerSlot {
+    TrueColon,
+    Sleep,
+    Echo,
+}
+
+/// The TimedProducer claim set, sorted by name.
+pub(crate) const TIMED_PRODUCER: &[(&str, TimedProducerSlot)] = &[
+    (":", TimedProducerSlot::TrueColon),
+    ("echo", TimedProducerSlot::Echo),
+    ("sleep", TimedProducerSlot::Sleep),
+    ("true", TimedProducerSlot::TrueColon),
+];
+
+/// The timed-producer slot for `word` (registry TimedProducer
+/// projection).
+pub(crate) fn timed_producer_slot(word: &str) -> Option<TimedProducerSlot> {
+    dispatch_slot(TIMED_PRODUCER, word)
+}
+
+/// A timed-consumer body command (timed_read_consumer_output).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TimedConsumerSlot {
+    Sleep,
+    Read,
+}
+
+/// The TimedConsumer claim set, sorted by name.
+pub(crate) const TIMED_CONSUMER: &[(&str, TimedConsumerSlot)] = &[
+    ("read", TimedConsumerSlot::Read),
+    ("sleep", TimedConsumerSlot::Sleep),
+];
+
+/// The timed-consumer slot for `word` (registry TimedConsumer
+/// projection).
+pub(crate) fn timed_consumer_slot(word: &str) -> Option<TimedConsumerSlot> {
+    dispatch_slot(TIMED_CONSUMER, word)
+}
+
+/// The TimedFollowup claim set, sorted by name: body commands
+/// after a timed `read` that keep the modeled stream.
+pub(crate) const TIMED_FOLLOWUP: &[&str] = &[":", "echo", "false", "printf", "sleep", "true"];
+
+/// Whether the timed follow-up classification claims `word`.
+pub(crate) fn timed_followup_claims(word: &str) -> bool {
+    TIMED_FOLLOWUP.binary_search(&word).is_ok()
+}
+
+/// A word-level comsub arm (expand_command_substitution_inner).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComsubWordSlot {
+    True,
+    Colon,
+    False,
+    Echo,
+    Printf,
+    Cat,
+    Basename,
+    UMask,
+    ULimit,
+    Pwd,
+    Type,
+    Kill,
+    Mktemp,
+}
+
+/// The ComsubWord claims the first-word chain answers, sorted by
+/// name (`cd` is the listed exception — see the section header).
+pub(crate) const COMSUB_WORD: &[(&str, ComsubWordSlot)] = &[
+    (":", ComsubWordSlot::Colon),
+    ("basename", ComsubWordSlot::Basename),
+    ("cat", ComsubWordSlot::Cat),
+    ("echo", ComsubWordSlot::Echo),
+    ("false", ComsubWordSlot::False),
+    ("kill", ComsubWordSlot::Kill),
+    ("mktemp", ComsubWordSlot::Mktemp),
+    ("printf", ComsubWordSlot::Printf),
+    ("pwd", ComsubWordSlot::Pwd),
+    ("true", ComsubWordSlot::True),
+    ("type", ComsubWordSlot::Type),
+    ("ulimit", ComsubWordSlot::ULimit),
+    ("umask", ComsubWordSlot::UMask),
+];
+
+/// The word-chain slot for `word` (registry ComsubWord projection,
+/// `cd` excluded).
+pub(crate) fn comsub_word_slot(word: &str) -> Option<ComsubWordSlot> {
+    dispatch_slot(COMSUB_WORD, word)
+}
+
+/// A timed comsub arm (timed_command_substitution_inner).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComsubTimedSlot {
+    TrueColon,
+    False,
+    Echo,
+    Printf,
+    Tty,
+    Cat,
+}
+
+/// The ComsubTimed claim set, sorted by name, including the tty
+/// row's registered slash forms (the evaluator keys on the
+/// expanded word).
+pub(crate) const COMSUB_TIMED: &[(&str, ComsubTimedSlot)] = &[
+    ("/bin/tty", ComsubTimedSlot::Tty),
+    ("/usr/bin/tty", ComsubTimedSlot::Tty),
+    (":", ComsubTimedSlot::TrueColon),
+    ("cat", ComsubTimedSlot::Cat),
+    ("echo", ComsubTimedSlot::Echo),
+    ("false", ComsubTimedSlot::False),
+    ("printf", ComsubTimedSlot::Printf),
+    ("true", ComsubTimedSlot::TrueColon),
+    ("tty", ComsubTimedSlot::Tty),
+];
+
+/// The timed-comsub slot for `word` (registry ComsubTimed
+/// projection).
+pub(crate) fn comsub_timed_slot(word: &str) -> Option<ComsubTimedSlot> {
+    dispatch_slot(COMSUB_TIMED, word)
+}
+
+/// A heredoc comsub producer arm (heredoc_comsub_produce / _plan).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComsubHeredocSlot {
+    Cat,
+    Sort,
+}
+
+/// The ComsubHeredoc claim set, sorted by name.
+pub(crate) const COMSUB_HEREDOC: &[(&str, ComsubHeredocSlot)] = &[
+    ("cat", ComsubHeredocSlot::Cat),
+    ("sort", ComsubHeredocSlot::Sort),
+];
+
+/// The heredoc-producer slot for `word` (registry ComsubHeredoc
+/// projection).
+pub(crate) fn comsub_heredoc_slot(word: &str) -> Option<ComsubHeredocSlot> {
+    dispatch_slot(COMSUB_HEREDOC, word)
+}
+
+/// A comsub front-face arm (command_substitution_values: the tty
+/// stdio special case and the windows tput whitelist arm).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComsubFrontSlot {
+    Tty,
+    Tput,
+}
+
+/// The ComsubFront claim set, sorted by name, including both
+/// rows' registered slash forms (the front face keys on the
+/// expanded word). The pipeline tput routing predicate
+/// (tput_inline_stage) reads the same registered form family
+/// through this table: its set is the tput entries.
+pub(crate) const COMSUB_FRONT: &[(&str, ComsubFrontSlot)] = &[
+    ("/bin/tput", ComsubFrontSlot::Tput),
+    ("/bin/tty", ComsubFrontSlot::Tty),
+    ("/usr/bin/tput", ComsubFrontSlot::Tput),
+    ("/usr/bin/tty", ComsubFrontSlot::Tty),
+    ("tput", ComsubFrontSlot::Tput),
+    ("tty", ComsubFrontSlot::Tty),
+];
+
+/// The front-face slot for `word` (registry ComsubFront
+/// projection).
+pub(crate) fn comsub_front_slot(word: &str) -> Option<ComsubFrontSlot> {
+    dispatch_slot(COMSUB_FRONT, word)
+}
+
 #[cfg(test)]
 mod registry_consistency {
     //! The registry is a ledger of claims the code makes; these tests
@@ -1651,23 +1970,110 @@ mod registry_consistency {
         for name in &conflict34 {
             assert!(names.contains(name), "{name} missing from registry");
         }
-        // The audit's headline in executable form: no face yields to a
-        // resolved real body today. S3/S4 adjudication changes rows
-        // one by one and updates this pin deliberately.
+        // The audit's headline in executable form, at ROW level: no
+        // row yields to a resolved real body. The one per-face Yield
+        // (the pipeline cat face, whose planner yields) is a face
+        // record, pinned exactly in
+        // per_face_stand_down_records_are_exact below.
         assert!(
             COMMAND_REGISTRY
                 .iter()
                 .all(|r| r.stand_down.resolvable != ResolvablePolicy::Yield),
             "a row started yielding — update this pin with the adjudication reference"
         );
-        // The one unchecked cell: comsub basename (audit B1) is a
-        // per-face divergence recorded on the face, not the row; the
-        // row-level unchecked set must stay empty until S4 rules.
+        // Same discipline for Unchecked: the row-level set stays
+        // empty; the unchecked cells (comsub basename B1,
+        // timed-consumer sleep KD-4, mktemp word arm) are per-face
+        // records, pinned exactly in the same test below.
         assert!(
             COMMAND_REGISTRY
                 .iter()
                 .all(|r| r.stand_down.unresolvable != UnresolvablePolicy::Unchecked),
-            "row-level Unchecked is reserved; per-face cells ride their ImplRef text in S1"
+            "row-level Unchecked is reserved; per-face cells are ImplRef stand_down records (S4)"
+        );
+    }
+
+    #[test]
+    fn per_face_stand_down_records_are_exact() {
+        // S4 per-face sink: exactly four faces carry their own
+        // StandDown record — the adjudicated cells whose measured
+        // rule diverges from their row's (S3 REPORT §3.2-a/b/c and
+        // §3.1). Every other ImplRef in the table inherits its row
+        // policy (stand_down == None), so this set is the complete
+        // per-face divergence ledger; adding a fifth cell requires
+        // updating this pin with its adjudication reference.
+        let mut recorded: Vec<(&str, Entry, StandDown)> = COMMAND_REGISTRY
+            .iter()
+            .flat_map(|row| {
+                row.impls
+                    .iter()
+                    .filter_map(move |imp| imp.stand_down.map(|sd| (row.name, imp.entry, sd)))
+            })
+            .collect();
+        recorded.sort_by_key(|(name, entry, _)| (*name, format!("{entry:?}")));
+        let expected = vec![
+            // KD-3 / audit B1: registration only in S4; the
+            // FailClosed behavior change is S5's (#2043/#2046).
+            (
+                "basename",
+                Entry::ComsubWord,
+                StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::Unchecked),
+            ),
+            // S3 §3.2-a: the face's net rule — the concurrent
+            // planner yields to a resolvable candidate of either
+            // shape; the arm replaces planner-declined members.
+            (
+                "cat",
+                Entry::PipelineStage,
+                StandDown::new(ResolvablePolicy::Yield, UnresolvablePolicy::FailClosed),
+            ),
+            // S3 §3.1/§5.4: the word arm admits on shape alone.
+            (
+                "mktemp",
+                Entry::ComsubWord,
+                StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::Unchecked),
+            ),
+            // KD-4 / S3 §3.2-c: the consumer model never consults
+            // the predicate (model-only divergence, kept).
+            (
+                "sleep",
+                Entry::TimedConsumer,
+                StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::Unchecked),
+            ),
+        ];
+        assert_eq!(recorded, expected);
+    }
+
+    #[test]
+    fn tput_hash_record_separate_route_is_pinned() {
+        // KD-5 disposition (S4): HashRecord::Separate stays, and
+        // tput is its unique row. The route is
+        // external_file_builtins::record_tput_resolution, called
+        // from exactly the two admitted in-process faces (the
+        // ExternalFile arm there, the PipelineStage arm in
+        // pipeline_exec); the ComsubFront face records nothing.
+        let separate: Vec<&str> = COMMAND_REGISTRY
+            .iter()
+            .filter(|r| r.hash_record == HashRecord::Separate)
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(separate, vec!["tput"]);
+        assert_eq!(
+            SRC_EXTERNAL_FILE
+                .matches("fn record_tput_resolution")
+                .count(),
+            1,
+            "the Separate route's definition"
+        );
+        assert_eq!(
+            SRC_EXTERNAL_FILE.matches("record_tput_resolution(").count(),
+            2,
+            "definition + the ExternalFile arm's call"
+        );
+        assert_eq!(
+            SRC_PIPELINE.matches("record_tput_resolution(").count(),
+            1,
+            "the PipelineStage arm's call"
         );
     }
 
@@ -2047,15 +2453,54 @@ mod registry_consistency {
 
     // ------------------------------------- T8: pipeline faces
 
+    /// Name set of a slot table, asserting the sorted /
+    /// duplicate-free shape the binary-search lookups depend on
+    /// (the S3 data-pin shape).
+    fn slot_table_names<S: Copy>(table: &[(&str, S)]) -> BTreeSet<String> {
+        let names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted, "slot table not sorted");
+        let out: BTreeSet<String> = names.iter().map(|s| s.to_string()).collect();
+        assert_eq!(out.len(), names.len(), "slot table has duplicates");
+        out
+    }
+
+    fn str_table_names(table: &[&str]) -> BTreeSet<String> {
+        let mut sorted: Vec<&str> = table.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(table, &sorted[..], "name table not sorted");
+        let out: BTreeSet<String> = table.iter().map(|s| s.to_string()).collect();
+        assert_eq!(out.len(), table.len(), "name table has duplicates");
+        out
+    }
+
     #[test]
     fn pipeline_stage_arms_match_registry() {
-        let body = window(SRC_PIPELINE, "fn execute_pipeline_stage_inner", "\n    fn ");
-        let scanned = only_registered(claim_literals(body));
-        assert_eq!(scanned, claims(Entry::PipelineStage));
-        // The stage pre-check stand-down list (the seven emulated
-        // names) equals the non-builtin PipelineStage rows.
-        let precheck = matches_block_containing(SRC_PIPELINE, "\"head\" | \"cat\" | \"sed\"");
-        let expected: BTreeSet<String> = COMMAND_REGISTRY
+        // S4: the stage face is data now (the S3 pin shape): the
+        // stage table's name set equals the PipelineStage claims
+        // minus the restricted-guard five, whose claims are the
+        // `restricted_command_error` guard the stage executor
+        // consults ahead of the match — the table's one listed
+        // exception, pinned both directions plus a scan proving
+        // each guard name is still keyed inside that function.
+        let guard_five = set(&[".", "cd", "command", "exec", "source"]);
+        let mut expected = claims(Entry::PipelineStage);
+        for name in &guard_five {
+            assert!(expected.remove(name), "{name} must claim PipelineStage");
+        }
+        assert_eq!(slot_table_names(PIPELINE_STAGE), expected);
+        let guard_body = window(SRC_PIPELINE, "fn restricted_command_error", "\n    fn ");
+        let guard_scanned = only_registered(claim_literals(guard_body));
+        assert!(
+            guard_five.is_subset(&guard_scanned),
+            "guard claims missing: {:?}",
+            guard_five.difference(&guard_scanned).collect::<Vec<_>>()
+        );
+        // The stage pre-check set (the seven emulated names) equals
+        // the non-builtin PipelineStage rows; the spawn stand-in
+        // set equals the PipelineStandIn claims.
+        let expected_precheck: BTreeSet<String> = COMMAND_REGISTRY
             .iter()
             .filter(|r| {
                 r.class != ClaimClass::Builtin
@@ -2063,36 +2508,104 @@ mod registry_consistency {
             })
             .map(|r| r.name.to_string())
             .collect();
-        assert_eq!(precheck, expected);
-        // The spawn stand-in set.
-        let standin = matches_block_containing(SRC_PIPELINE, "\"yes\" | \"head\" | \"wc\"");
-        assert_eq!(standin, claims(Entry::PipelineStandIn));
+        assert_eq!(str_table_names(PIPELINE_PRECHECK), expected_precheck);
+        assert_eq!(
+            str_table_names(PIPELINE_STANDIN),
+            claims(Entry::PipelineStandIn)
+        );
+        // The lookups agree with the tables over every registered
+        // name (the stage executor calls these, not the tables).
+        for name in registry_names() {
+            assert_eq!(
+                pipeline_stage_slot(&name).is_some(),
+                expected.contains(&name),
+                "stage slot drift: {name}"
+            );
+            assert_eq!(
+                pipeline_precheck_claims(&name),
+                expected_precheck.contains(&name),
+                "precheck drift: {name}"
+            );
+            assert_eq!(
+                pipeline_standin_claims(&name),
+                claims(Entry::PipelineStandIn).contains(&name),
+                "standin drift: {name}"
+            );
+        }
+        assert!(pipeline_stage_slot("rubash-no-such-name").is_none());
+        // Shadow-arm guard (the S1 direction of this pin): the
+        // stage body may not (re)introduce a claim its entry does
+        // not project. Arm bodies still reference names in calls
+        // (the sed recheck's find_user_command("sed")), which is
+        // why this direction is a subset check.
+        let body = window(SRC_PIPELINE, "fn execute_pipeline_stage_inner", "\n    fn ");
+        let scanned = only_registered(claim_literals(body));
+        let claimed = claims(Entry::PipelineStage);
+        assert!(
+            scanned.is_subset(&claimed),
+            "shadow claim in stage body: {:?}",
+            scanned.difference(&claimed).collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn timed_models_match_registry() {
+        // S4 data pins for the three timed faces (producer /
+        // consumer / followup), same shape as the stage pin.
+        assert_eq!(
+            slot_table_names(TIMED_PRODUCER),
+            claims(Entry::TimedProducer)
+        );
+        assert_eq!(
+            slot_table_names(TIMED_CONSUMER),
+            claims(Entry::TimedConsumer)
+        );
+        assert_eq!(
+            str_table_names(TIMED_FOLLOWUP),
+            claims(Entry::TimedFollowup)
+        );
+        for name in registry_names() {
+            assert_eq!(
+                timed_producer_slot(&name).is_some(),
+                claims(Entry::TimedProducer).contains(&name),
+                "producer drift: {name}"
+            );
+            assert_eq!(
+                timed_consumer_slot(&name).is_some(),
+                claims(Entry::TimedConsumer).contains(&name),
+                "consumer drift: {name}"
+            );
+            assert_eq!(
+                timed_followup_claims(&name),
+                claims(Entry::TimedFollowup).contains(&name),
+                "followup drift: {name}"
+            );
+        }
+        // Shadow-arm guards on the two model bodies.
         let producer = window(
             SRC_PIPELINE,
             "fn timed_pipeline_step",
             "\n    fn timed_read_consumer_output",
         );
-        assert_eq!(
-            only_registered(claim_literals(producer)),
-            claims(Entry::TimedProducer)
+        let scanned = only_registered(claim_literals(producer));
+        let claimed = claims(Entry::TimedProducer);
+        assert!(
+            scanned.is_subset(&claimed),
+            "shadow claim in producer: {:?}",
+            scanned.difference(&claimed).collect::<Vec<_>>()
         );
         let consumer = window(
             SRC_PIPELINE,
             "fn timed_read_consumer_output",
             "\n    fn timed_read_options",
         );
-        assert_eq!(
-            only_registered(claim_literals(consumer)),
-            claims(Entry::TimedConsumer)
-        );
-        let followup = window(SRC_PIPELINE, "fn timed_followup_keeps_stream", "\nfn ");
-        assert_eq!(
-            matches_block_containing(followup, "\"echo\" | \"printf\""),
-            claims(Entry::TimedFollowup)
+        let scanned = only_registered(claim_literals(consumer));
+        let mut claimed = claims(Entry::TimedConsumer);
+        claimed.extend(claims(Entry::TimedFollowup));
+        assert!(
+            scanned.is_subset(&claimed),
+            "shadow claim in consumer: {:?}",
+            scanned.difference(&claimed).collect::<Vec<_>>()
         );
     }
 
@@ -2100,39 +2613,124 @@ mod registry_consistency {
 
     #[test]
     fn comsub_word_arms_match_registry() {
+        // S4: the word chain is data now. The table's name set
+        // equals the ComsubWord claims minus `cd` — the listed
+        // exception: cd's ComsubWord face is the source-shape idiom
+        // (command_substitution_cd_pwd_shape), not a first-word
+        // chain arm. The shape function keeps its key literals;
+        // the scan below pins them exactly ({cd, pwd} — both
+        // ComsubWord claims).
+        let mut expected = claims(Entry::ComsubWord);
+        assert!(expected.remove("cd"), "cd must claim ComsubWord");
+        assert_eq!(slot_table_names(COMSUB_WORD), expected);
+        for name in registry_names() {
+            assert_eq!(
+                comsub_word_slot(&name).is_some(),
+                expected.contains(&name),
+                "word slot drift: {name}"
+            );
+        }
+        let shape = window(SRC_COMSUB, "fn command_substitution_cd_pwd_shape", "\nfn ");
+        assert_eq!(only_registered(claim_literals(shape)), set(&["cd", "pwd"]));
+        // Shadow-arm guard: the whole evaluator file may not
+        // (re)introduce a claim outside the ComsubWord set.
         let scanned = only_registered(claim_literals(SRC_COMSUB));
-        assert_eq!(scanned, claims(Entry::ComsubWord));
-    }
-
-    #[test]
-    fn comsub_timed_and_heredoc_match_registry() {
-        let scanned = only_registered(normalized(claim_literals(SRC_COMSUB_PIPELINES)));
-        let mut expected = claims(Entry::ComsubTimed);
-        expected.extend(claims(Entry::ComsubHeredoc));
-        // Known non-claims in this file, pinned both directions so a
-        // real claim cannot hide behind them: "mktemp" is a negative
-        // guard in the heredoc producer; "time" is the leading
-        // time-prefix skip in the timed word scan.
-        let diff: BTreeSet<String> = scanned.difference(&expected).cloned().collect();
-        assert_eq!(diff, set(&["mktemp", "time"]));
+        let claimed = claims(Entry::ComsubWord);
         assert!(
-            expected.is_subset(&scanned),
-            "missing: {:?}",
-            expected.difference(&scanned).collect::<Vec<_>>()
+            scanned.is_subset(&claimed),
+            "shadow claim in comsub word evaluator: {:?}",
+            scanned.difference(&claimed).collect::<Vec<_>>()
         );
     }
 
     #[test]
+    fn comsub_timed_and_heredoc_match_registry() {
+        // S4 data pins: the timed table's normalized name set
+        // equals the ComsubTimed claims and its slash entries are
+        // exactly the tty row's registered slash forms; the
+        // heredoc table equals the ComsubHeredoc claims.
+        assert_eq!(
+            normalized(slot_table_names(COMSUB_TIMED)),
+            claims(Entry::ComsubTimed)
+        );
+        let timed_slashes: BTreeSet<String> = COMSUB_TIMED
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| name.starts_with('/'))
+            .map(str::to_string)
+            .collect();
+        let tty_forms: BTreeSet<String> = registry_row("tty")
+            .expect("tty row")
+            .slash_forms
+            .iter()
+            .map(|f| f.form.to_string())
+            .collect();
+        assert_eq!(timed_slashes, tty_forms);
+        assert_eq!(comsub_timed_slot("tty"), Some(ComsubTimedSlot::Tty));
+        assert_eq!(comsub_timed_slot("/bin/tty"), Some(ComsubTimedSlot::Tty));
+        assert_eq!(
+            comsub_timed_slot("/usr/bin/tty"),
+            Some(ComsubTimedSlot::Tty)
+        );
+        assert_eq!(
+            slot_table_names(COMSUB_HEREDOC),
+            claims(Entry::ComsubHeredoc)
+        );
+        assert_eq!(comsub_heredoc_slot("cat"), Some(ComsubHeredocSlot::Cat));
+        assert_eq!(comsub_heredoc_slot("sort"), Some(ComsubHeredocSlot::Sort));
+        // Shadow-arm guard on the whole pipelines file, with the
+        // known non-claims pinned exactly so a real claim cannot
+        // hide behind them: "mktemp" is the word arm implementation
+        // home's own name key (its claim is the ComsubWord entry,
+        // projected by COMSUB_WORD) plus the heredoc producer's
+        // negative guard; "time" is the leading time-prefix skip
+        // in the timed wrapper.
+        let scanned = only_registered(normalized(claim_literals(SRC_COMSUB_PIPELINES)));
+        let mut expected = claims(Entry::ComsubTimed);
+        expected.extend(claims(Entry::ComsubHeredoc));
+        let diff: BTreeSet<String> = scanned.difference(&expected).cloned().collect();
+        assert_eq!(diff, set(&["mktemp", "time"]));
+    }
+
+    #[test]
     fn comsub_front_face_matches_registry() {
+        // S4 data pins: the front table's normalized name set
+        // equals the ComsubFront claims; its slash entries are
+        // exactly the two rows' registered slash forms.
+        assert_eq!(
+            normalized(slot_table_names(COMSUB_FRONT)),
+            claims(Entry::ComsubFront)
+        );
+        let front_slashes: BTreeSet<String> = COMSUB_FRONT
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| name.starts_with('/'))
+            .map(str::to_string)
+            .collect();
+        let mut row_forms: BTreeSet<String> = BTreeSet::new();
+        for name in ["tput", "tty"] {
+            row_forms.extend(
+                registry_row(name)
+                    .expect("front row")
+                    .slash_forms
+                    .iter()
+                    .map(|f| f.form.to_string()),
+            );
+        }
+        assert_eq!(front_slashes, row_forms);
+        for (word, slot) in COMSUB_FRONT {
+            assert_eq!(comsub_front_slot(word), Some(*slot), "{word}");
+        }
+        assert_eq!(comsub_front_slot("cat"), None);
+        // Shadow-arm guard on the whole front-face file, known
+        // non-claims pinned exactly: "command" is the describe key
+        // and the builtin pre-block's negative guard; "mktemp"
+        // appears only as decline markers (the front face refuses
+        // it so the word-level arm can claim it).
         let scanned = only_registered(normalized(claim_literals(SRC_COMSUB_VALUES)));
         let expected = claims(Entry::ComsubFront);
-        // Known non-claims, pinned both directions: "command" is a
-        // negative guard on the front face's first word; "mktemp"
-        // appears only as decline markers (the front face refuses it
-        // so the word-level arm can claim it).
         let diff: BTreeSet<String> = scanned.difference(&expected).cloned().collect();
         assert_eq!(diff, set(&["command", "mktemp"]));
-        assert!(expected.is_subset(&scanned));
     }
 
     // ------------------------------------- T12/T13: bridge/shortcuts
