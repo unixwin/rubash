@@ -198,6 +198,21 @@ fn issue_1359_autofd_write_redirect_keeps_stdout_intact_and_ordered() {
 }
 
 #[test]
+fn issue_1896_service_alias_resolves_like_getservbyname() {
+    // `www` is http's alias in the services database on unix
+    // (/etc/services) and on Windows (drivers\etc\services) alike.
+    // Nothing listens on port 80 in the test environment, so a
+    // RESOLVED alias surfaces as Connection refused; an unresolved
+    // one would surface as the Servname diagnostic instead (GNU
+    // netopen's service lookup is getservbyname, which walks the
+    // alias column — lib/sh/netopen.c:135).
+    let (stdout, stderr, _code) = run_c("( exec 3<>/dev/tcp/127.0.0.1/www; echo rc=$? )");
+    assert_eq!(stdout, "rc=1\n");
+    assert!(stderr.contains("Connection refused"), "stderr: {stderr}");
+    assert!(!stderr.contains("Servname"), "stderr: {stderr}");
+}
+
+#[test]
 fn issue_1359_autofd_write_redirect_from_function_and_group() {
     let dir = scratch("autofd2");
     // Function form: writing to $f inside the function lands in the file.

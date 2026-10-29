@@ -50,7 +50,12 @@ fn resolve_net_service_port(port_text: &str, udp: bool) -> Option<u16> {
         let (Some(name), Some(port_proto)) = (fields.next(), fields.next()) else {
             continue;
         };
-        if name != port_text {
+        // GNU's service resolution is getservbyname (via getaddrinfo),
+        // which matches the entry's alias column as well as its
+        // primary name (rubash#1896: `www` resolves http's port,
+        // `mail` smtp's). The remaining fields after port/proto are
+        // the aliases.
+        if name != port_text && !fields.any(|alias| alias == port_text) {
             continue;
         }
         let Some((port, service_proto)) = port_proto.split_once('/') else {
