@@ -6061,8 +6061,14 @@ mod issue_1905 {
 
     #[test]
     fn issue1905_operand_materializes_in_a_pipeline_stage() {
-        let (stdout, stderr, code) =
-            run_script("1905-pipeline", "findstr /B \"cpu \" /proc/stat | wc -l\n");
+        // /C: pins findstr's phrase form: a plain quoted string is
+        // term-split on spaces by findstr itself, which would make
+        // the count depend on the runner's core count (the stat
+        // snapshot carries one `cpuN` line per core).
+        let (stdout, stderr, code) = run_script(
+            "1905-pipeline",
+            "findstr /B /C:\"cpu \" /proc/stat | wc -l\n",
+        );
         assert_eq!(code, Some(0), "stderr:\n{stderr}");
         assert_eq!(stdout.trim(), "1", "stdout:\n{stdout}");
     }
