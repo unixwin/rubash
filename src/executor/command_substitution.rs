@@ -1028,10 +1028,18 @@ impl Executor {
                     Err(error) => {
                         status = 1;
                         // rubash#1949: report the read's real strerror,
-                        // unquoted — GNU cat names the actual errno
-                        // (`Is a directory`, `Not a directory`, ELOOP),
-                        // never a blanket ENOENT.
-                        eprintln!("cat: {}: {}", path, crate::posix_errors::message(&error));
+                        // never a blanket ENOENT — GNU cat names the actual
+                        // errno (`Is a directory`, `Not a directory`, ELOOP).
+                        // rubash#2027: GNU cat renders the operand through
+                        // quotef (coreutils cat.c `error (0, errno, "%s",
+                        // quotef (name))`), so an operand holding shell
+                        // special characters prints quoted:
+                        // `cat: '<(echo hi)': No such file or directory`.
+                        eprintln!(
+                            "cat: {}: {}",
+                            gnu_cat_quoted_operand(&path),
+                            crate::posix_errors::path_strerror(&path, &error)
+                        );
                     }
                 }
             }
@@ -2658,6 +2666,40 @@ fn restore_old_style_backtick_markers(value: &str) -> String {
 
 fn readfile_path_is_quoted(path: &str) -> bool {
     path.chars().any(|ch| matches!(ch, '\'' | '"' | '\\'))
+}
+
+/// GNU cat's quotef rendering of an operand in its open/read diagnostics
+/// (rubash#2027; coreutils gnulib quotearg shell-escape style, measured
+/// against coreutils 9.4: `/tmp`, `./missing`, `a+b`, `a,b`, `a@b`, `a%b`,
+/// `a~b`, `a#b`, `a{b` print bare, while `a:b`, `a=b`, `a^b`, `a[b`, `a b`,
+/// `a"b`, `x*y`, `<(echo hi)` print single-quoted). An operand is printed
+/// verbatim only when every character is in that shell-safe set; anything
+/// else wraps the WHOLE operand in `'...'`, with an embedded `'` broken as
+/// `'` + `\'` + `'` the way shell single-quote escaping does.
+pub(in crate::executor) fn gnu_cat_quoted_operand(path: &str) -> String {
+    let safe = |ch: char| {
+        ch.is_alphanumeric()
+            || matches!(
+                ch,
+                '_' | '.' | '/' | '-' | '+' | ',' | '@' | '%' | '~' | '#' | '{' | '}'
+            )
+    };
+    if path.chars().all(safe) {
+        return path.to_string();
+    }
+    let mut quoted = String::with_capacity(path.len() + 2);
+    quoted.push('\'');
+    for ch in path.chars() {
+        if ch == '\'' {
+            // `'` cannot appear inside a single-quoted shell string; the
+            // escape spelling quotearg emits is `'\''`.
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn command_substitution_result_status(result: Result<(), ExecuteError>, exit_code: i32) -> i32 {

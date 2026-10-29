@@ -17,6 +17,51 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 /// `cat <<\)` has `)` as the delimiter (backslash-quoted), so the `)` is
 /// NOT the command-substitution closer.  `cat <<EOF)` has `EOF` as the
 /// delimiter and `)` as the closer.
+/// The delimiter word of the source's first `<<` header line, dequoted the
+/// way the heredoc machinery compares body lines (rubash#2025): quote bytes
+/// are syntax and drop out, a backslash contributes its escaped byte. Used
+/// by the eof-gather warning arm, which must name the delimiter GNU's
+/// `here-document ... (wanted `X')` report carries (make_cmd.c:627).
+fn heredoc_header_delimiter_word(header: &str) -> Option<String> {
+    let ll_pos = header.find("<<")?;
+    let after = &header[ll_pos + 2..];
+    let after = after.strip_prefix('-').unwrap_or(after);
+    let after = after.trim_start();
+    let bytes = after.as_bytes();
+    let mut delimiter: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'\\' && i + 1 < bytes.len() {
+            delimiter.push(bytes[i + 1]);
+            i += 2;
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            let quote = byte;
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                delimiter.push(bytes[i]);
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        if byte.is_ascii_whitespace() || matches!(byte, b';' | b'|' | b'&' | b')' | b'<' | b'>') {
+            break;
+        }
+        delimiter.push(byte);
+        i += 1;
+    }
+    if delimiter.is_empty() {
+        None
+    } else {
+        String::from_utf8(delimiter).ok()
+    }
+}
+
 fn heredoc_header_closes_command_substitution(source: &str) -> bool {
     let Some(header) = source.lines().next() else {
         return false;
@@ -355,6 +400,18 @@ impl Executor {
         let first_line_end = source.find('\n').unwrap_or(source.len());
         let header_close_marked =
             source[..first_line_end].contains(crate::executor::markers::IFS_GLUE);
+        // rubash#2025: a SECOND mark on the first line records that the
+        // gather ran to end of input (complete_comsub_heredoc_header_close
+        // synthesizes the delimiter line it consumed to EOF), so the
+        // delimited-by-end-of-file warning must fire from this plan too —
+        // GNU emits it at parse time (make_cmd.c:627 via
+        // parse.y:4563-4567 gather_here_documents), entry-independently
+        // like the header-close warning above.
+        let eof_gather_marked = header_close_marked
+            && source[..first_line_end]
+                .matches(crate::executor::markers::IFS_GLUE)
+                .count()
+                >= 2;
         let closed_by_paren = source[first_line_end..].contains(crate::executor::markers::IFS_GLUE);
         let source = source.replace(crate::executor::markers::IFS_GLUE, "");
         let source = self.comsub_body_alias_splice_extracted(&source);
@@ -387,6 +444,43 @@ impl Executor {
             eprintln!(
                 "{}warning: command substitution: 1 unterminated here-document",
                 self.error_prefix_for_line(start_line)
+            );
+        }
+        if eof_gather_marked {
+            // GNU make_cmd.c:627 make_here_document, driven by
+            // parse.y:4563-4567 parse_comsub's gather_here_documents: the
+            // pending heredoc hit end of input before its delimiter line,
+            // so the reader warns per heredoc — at the line the gather
+            // ended (the command's start line plus the body lines it
+            // consumed) — and still runs the command with the gathered
+            // body. The synthesized delimiter in the source gives every
+            // downstream consumer that body; this arm owns only the
+            // warning.
+            let header = source.lines().next().unwrap_or("");
+            let wanted = heredoc_header_delimiter_word(header).unwrap_or_default();
+            let start_line = self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_CMD_START_LINE")
+                .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE"))
+                .and_then(|line| line.parse::<usize>().ok())
+                .unwrap_or(1);
+            let strip_tabs = header.contains("<<-");
+            let body_line_count = source
+                .lines()
+                .skip(1)
+                .take_while(|line| {
+                    let comparable = if strip_tabs {
+                        line.trim_start_matches('\t')
+                    } else {
+                        *line
+                    };
+                    comparable != wanted
+                })
+                .count();
+            eprintln!(
+                "{}warning: here-document at line {start_line} delimited by end-of-file (wanted `{wanted}')",
+                self.error_prefix_for_line(start_line + body_line_count)
             );
         }
         // The cat/heredoc-optimized comsub paths re-derive the here-document
