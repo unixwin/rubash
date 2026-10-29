@@ -563,7 +563,7 @@ impl Executor {
                 .get("__RUBASH_POSIX_MODE")
                 .map(String::as_str)
                 == Some("1")
-                && (is_posix_special_builtin(command) || command == "source"))
+                && is_posix_special_builtin(command))
     }
 
     /// Whether this command is an attribute builtin whose GNU flow absorbs

@@ -470,7 +470,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
     builtin("set", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias")], FunctionShadow::PosixSpecialBlock),
     builtin("shift", &[ImplRef::new(Entry::SimpLate, "command_dispatch_late"), ImplRef::new(Entry::CmdPrimary, "command_no_alias")], FunctionShadow::PosixSpecialBlock),
     builtin("shopt", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias")], FunctionShadow::Allow),
-    builtin("source", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias"), ImplRef::new(Entry::PipelineStage, "pipeline_exec stage restricted-shell refusal guard")], FunctionShadow::Allow),
+    builtin("source", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias"), ImplRef::new(Entry::PipelineStage, "pipeline_exec stage restricted-shell refusal guard")], FunctionShadow::PosixSpecialBlock),
     builtin("suspend", &[ImplRef::new(Entry::SimpLate, "command_dispatch_late"), ImplRef::new(Entry::CmdLate, "command_no_alias_late")], FunctionShadow::Allow),
     builtin("test", &[ImplRef::new(Entry::SimpLate, "command_dispatch_late"), ImplRef::new(Entry::CmdLate, "command_no_alias_late")], FunctionShadow::Allow),
     builtin("times", &[ImplRef::new(Entry::SimpLate, "command_dispatch_late"), ImplRef::new(Entry::CmdLate, "command_no_alias_late")], FunctionShadow::PosixSpecialBlock),
@@ -960,17 +960,19 @@ pub(crate) fn registry_row(name: &str) -> Option<&'static CommandRow> {
 /// table before functions).
 ///
 /// The executor's execution-side predicate
-/// (`support_names::is_posix_special_builtin`) still lacks `source`;
-/// the introspection faces project from THIS set (KD-2, report side
-/// closed in S2), and the consistency tests below pin the remaining
-/// predicate difference at exactly `{"source"}` for S3.
+/// (`support_names::is_posix_special_builtin`) names the same 16 —
+/// KD-2 closed on the execution side in S3 (the predicate gained
+/// `source`; the registry row's function-shadow rule and the
+/// consistency pins below moved with it).
 pub(crate) const SPECIAL_BUILTINS: &[&str] = &[
     ".", ":", "break", "continue", "eval", "exec", "exit", "export", "readonly", "return", "set",
     "shift", "source", "times", "trap", "unset",
 ];
 
 /// Whether `name` is a POSIX special builtin (registry projection;
-/// report faces only in S2 — dispatch keeps its own predicate).
+/// the introspection faces read this set, the execution side reads
+/// `support_names::is_posix_special_builtin` — the same 16 names
+/// since S3, pinned equal by the consistency tests).
 pub(crate) fn is_special_builtin(name: &str) -> bool {
     SPECIAL_BUILTINS.contains(&name)
 }
@@ -1328,10 +1330,11 @@ mod registry_consistency {
 
         // KD-2: the registry's special-builtin set is GNU's 16-name
         // table (mkbuiltins.c:148-154; `enable -s` measurement on GNU
-        // bash 5.3.20), including `source`. The execution-side
-        // predicate still lacks `source` — that remainder is S3's,
-        // pinned here at exactly {"source"} so S3's alignment diffs
-        // against it explicitly.
+        // bash 5.3.20), including `source`. S1–S2 pinned the
+        // execution-side difference at exactly {"source"}; S3 closed
+        // it (the predicate gained `source` and this row set moved
+        // with it), so the symmetric difference is now empty and the
+        // two sets must stay equal.
         assert_eq!(SPECIAL_BUILTINS.len(), 16);
         let special = set(SPECIAL_BUILTINS);
         let builtins = class_rows(ClaimClass::Builtin);
@@ -1345,7 +1348,8 @@ mod registry_consistency {
             .symmetric_difference(&predicate_rows)
             .cloned()
             .collect();
-        assert_eq!(diff, set(&["source"]));
+        assert_eq!(diff, BTreeSet::new());
+        assert_eq!(predicate_rows, special);
     }
 
     #[test]
@@ -1480,7 +1484,11 @@ mod registry_consistency {
             .map(|r| r.name.to_string())
             .collect();
         assert_eq!(positives, rows);
-        assert_eq!(positives.len(), 15);
+        // GNU's 16-name table (mkbuiltins.c:148-154); `source` joined
+        // in S3 (KD-2) — before that this pin read 15 with the
+        // difference carried explicitly.
+        assert_eq!(positives.len(), 16);
+        assert_eq!(positives, set(SPECIAL_BUILTINS));
     }
 
     #[test]
