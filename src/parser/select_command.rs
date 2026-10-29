@@ -9,6 +9,31 @@ pub(super) fn parse_select_command(
 ) -> Option<(CommandNode, usize)> {
     // Parse `select name [in words ...]; do body; done`
     let variable_token = tokens.get(start + 1)?;
+    if !matches!(
+        variable_token.kind,
+        TokenKind::Word | TokenKind::Variable | TokenKind::Keyword
+    ) {
+        // GNU parse.y:979 (`SELECT WORD newline_list DO ...`): the
+        // name slot admits exactly a WORD — the `for` name slot's twin
+        // (rubash#2108 face A: `select; do ...` blames `;', `select
+        // > f; do ...` blames `>'). Returning None degraded the head
+        // to the word path, which walked on to `do' and blamed IT
+        // instead. End of input and a bare newline keep the None
+        // fall-through, as in parse_for_command: no token to blame /
+        // the dangling-head diagnostic owns the shape.
+        if variable_token.kind == TokenKind::Eof
+            || (variable_token.kind == TokenKind::Semicolon && variable_token.line_break)
+        {
+            return None;
+        }
+        return Some(head_unexpected_token_node(
+            tokens,
+            start,
+            start + 1,
+            source,
+            source_line_offset,
+        ));
+    }
     // GNU keeps the loop variable name as the raw word text — quote removal
     // does not apply to the name position (`select f\1 in ...` reports
     // `f\1': not a valid identifier`, errors.tests line 51). Valid
@@ -18,12 +43,6 @@ pub(super) fn parse_select_command(
     } else {
         variable_token.raw.clone()
     };
-    if !matches!(
-        tokens.get(start + 1)?.kind,
-        TokenKind::Word | TokenKind::Variable | TokenKind::Keyword
-    ) {
-        return None;
-    }
     if tokens.get(start + 1)?.kind == TokenKind::Keyword
         && matches!(tokens.get(start + 1)?.value.as_str(), "do" | "done" | "in")
     {
@@ -147,6 +166,42 @@ pub(super) fn parse_select_command(
                 words.push(word);
                 i = next_i;
                 continue;
+            }
+            // GNU parse.y:526-529 (`word_list: WORD | word_list WORD`)
+            // admits WORD tokens only, so an operator token the collect
+            // above could not take as a word is the syntax-error token
+            // at its own position (parse.y:1007 for the `select`
+            // production; rubash#2108 face B, the `for` twin: `select
+            // s in a b | cat` blames `|'). The loop used to step over
+            // this whole class silently — the operator vanished, its
+            // target was collected as a list word, and a bogus loop
+            // ran. The gate sits AFTER the collect, so word forms that
+            // begin with an operator-shaped token are already taken:
+            // process substitutions (word text in GNU's lexer) and
+            // quoted or escaped operator spellings (Word tokens here,
+            // never operator kinds).
+            if matches!(
+                tokens[i].kind,
+                TokenKind::Pipe
+                    | TokenKind::PipeErr
+                    | TokenKind::And
+                    | TokenKind::Or
+                    | TokenKind::Background
+                    | TokenKind::RedirectIn
+                    | TokenKind::RedirectOut
+                    | TokenKind::Append
+                    | TokenKind::RedirectErr
+                    | TokenKind::RedirectErrAppend
+                    | TokenKind::HereDoc
+                    | TokenKind::HereString
+            ) {
+                return Some(head_unexpected_token_node(
+                    tokens,
+                    start,
+                    i,
+                    source,
+                    source_line_offset,
+                ));
             }
             i += 1;
         }
@@ -317,7 +372,7 @@ fn head_unexpected_token_node(
         "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
         format!(
             "{}{}{}",
-            token.value,
+            near_blame_text(token),
             crate::executor::markers::PARSE_ERROR_FIELD_SEP,
             token.position
         ),

@@ -210,6 +210,36 @@ pub(super) fn is_unquoted_operator(token: &Token, value: &str) -> bool {
     token.value == value && token.raw == value
 }
 
+/// The blame text for an unexpected-token report on `token`. GNU's
+/// lexer returns the digit run of a numbered redirection as its own
+/// IO_NUMBER token (parse.y read_token), so an unexpected numbered
+/// redirection is blamed by its number alone (`for i in 1 2>err`
+/// blames `2'); this lexer fuses number and operator into one token
+/// whose value is the fused spelling (`2>'), so the report takes the
+/// digit run back off the front (rubash#2108).
+pub(super) fn near_blame_text(token: &Token) -> String {
+    if matches!(
+        token.kind,
+        TokenKind::RedirectIn
+            | TokenKind::RedirectOut
+            | TokenKind::Append
+            | TokenKind::RedirectErr
+            | TokenKind::RedirectErrAppend
+            | TokenKind::HereDoc
+            | TokenKind::HereString
+    ) {
+        let digits: String = token
+            .value
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            return digits;
+        }
+    }
+    token.value.clone()
+}
+
 pub(super) fn is_case_end_keyword(tokens: &[Token], index: usize) -> bool {
     if !is_keyword(tokens, index, "esac") {
         return false;
