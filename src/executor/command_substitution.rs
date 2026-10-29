@@ -1039,7 +1039,9 @@ impl Executor {
             return output.trim_capture_terminator().to_string();
         }
 
-        if word_slot == Some(ComsubWordSlot::Basename) {
+        if word_slot == Some(ComsubWordSlot::Basename)
+            && !self.emulated_external_stands_down("basename")
+        {
             // rubash#2043 A2/A3: this arm used to be a second, divergent
             // basename implementation — it silently dropped operands
             // past the second, treated option words as the path, kept a
@@ -1055,6 +1057,14 @@ impl Executor {
             // result and diagnostics (subst.c:7143
             // command_substitute: the arm is an accelerator for exactly
             // the shapes it can answer byte-identically, nothing more).
+            //
+            // rubash#2046 B1 (S3-adjudicated, DECISIONS 2026-10-29):
+            // the arm's gate above consults the same stand-down
+            // predicate as the sibling cat arm — the projection's
+            // Unchecked cell for this face is now FailClosed. When
+            // PATH holds no basename the arm declines and full
+            // execution answers 127 like GNU (and like this
+            // evaluator's dirname shape, which has no arm at all).
             let expanded: Vec<String> = words[1..]
                 .iter()
                 .map(|word| self.expand_word(word))

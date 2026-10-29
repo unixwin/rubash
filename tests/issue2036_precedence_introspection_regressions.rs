@@ -391,7 +391,11 @@ fn issue2036_shape13_enable_faces() {
     // and dispatch falls through to the PATH body (the fakebin script
     // here). Before the disable, the bare name runs the in-process
     // env (its output is the environment, never the fake's marker).
-    write_fake(&rig.root.join("fakebin"), "env", "#!/bin/sh\necho FAKE-env\n");
+    write_fake(
+        &rig.root.join("fakebin"),
+        "env",
+        "#!/bin/sh\necho FAKE-env\n",
+    );
     let out = run(
         &rig.root,
         &rig.fake_path,
@@ -485,7 +489,11 @@ fn issue2036_introspection_emulated_names_report_file() {
     // reported — the not-found answer returns (the claim is an
     // existence gate, exactly as dispatch behaves).
     let empty = scratch("introempty");
-    let out = run(&dir, empty.to_str().unwrap(), "echo t=\"$(type -t stty)\"; type stty 2>/dev/null; echo rc=$?");
+    let out = run(
+        &dir,
+        empty.to_str().unwrap(),
+        "echo t=\"$(type -t stty)\"; type stty 2>/dev/null; echo rc=$?",
+    );
     assert!(out.stdout.contains("t=\n"), "{}", out.stdout);
     assert!(out.stdout.contains("rc=1"), "{}", out.stdout);
 }
@@ -623,22 +631,29 @@ fn issue2036_hash_record_after_emulated_runs() {
 
 // ------------------------------------------------------- stand-down warts
 
-/// Audit B1 (§3.3): the comsub basename arm does NOT consult the
-/// stand-down predicate — with PATH=/nonexistent it still answers,
-/// while the simple-command form of the same name stands down to 127,
-/// and the comsub dirname shape (no arm) also fails. WART: S4 must
-/// adjudicate this cell explicitly; pinned as-is until then.
+/// Audit B1 (§3.3), S3-adjudicated FailClosed and FIXED in S5
+/// (rubash#2046): the comsub basename arm now consults the same
+/// stand-down predicate as the cat arm. With PATH=/nonexistent the
+/// substitution fails closed — empty value, status 127 — exactly
+/// like the simple-command form of the same name and like the comsub
+/// dirname shape (no arm). This pin replaces the wart pin that held
+/// the pre-fix answer (`comsub_basename=c`) until adjudication.
 #[test]
-fn issue2036_wart_comsub_basename_ignores_stand_down() {
+fn issue2036_comsub_basename_stands_down() {
     let dir = scratch("w1");
     let out = run(
         &dir,
         "/nonexistent",
-        "echo comsub_basename=$(basename /a/b/c); \
+        "comsub_basename=$(basename /a/b/c); \
+         echo \"val=[$comsub_basename] rc=$?\"; \
          basename /a/b/c 2>&1; echo simp_rc=$?; \
          echo comsub_dirname=$(dirname /a/b/c 2>&1); echo done",
     );
-    assert!(out.stdout.contains("comsub_basename=c"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("val=[] rc=127"),
+        "comsub basename must fail closed (empty value, status 127): {}",
+        out.stdout
+    );
     assert!(out.stdout.contains("simp_rc=127"), "{}", out.stdout);
     assert!(
         !out.stdout.contains("comsub_dirname=/a/b"),

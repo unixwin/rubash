@@ -71,7 +71,10 @@ jobs:
       # execution home (the Windows three-way run is the win-diff
       # battery, pkg10 H cell).
       - name: Run 2036 sync corpus tests
-        run: cargo nextest run --test issue2036_s5_sync_corpus --profile ci
+        run: >-
+          cargo nextest run --test issue2036_s5_sync_corpus
+          --test issue2043_sync_a_class_regressions
+          --test issue2046_sync_b_class_regressions --profile ci
 
       - name: Run compatibility CLI tests
         continue-on-error: true
