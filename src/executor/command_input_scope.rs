@@ -80,10 +80,15 @@ impl Executor {
                 let _ = self.execute_dynamic_fd_var_redirect(redirect, false)?;
             }
         }
-        let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
-        if let Some((index, name)) = self.compound_output_dup_bad_fd(cmd) {
+        // The dup preflight runs before ANY bind so the abandonment it
+        // triggers leaves no half-applied descriptor state, and its
+        // left-to-right walk reports the FIRST failing dup in list order
+        // like GNU do_redirections (output side rubash#263/#266, input
+        // side rubash#2030).
+        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
             return self.abandon_compound_for_dup_bad_fd(cmd, index, &name);
         }
+        let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
         let saved_output = self.open_compound_output_redirects(cmd)?;
         let result = self.with_command_input_redirects_inner(cmd, execute);
         self.restore_compound_output_redirects(saved_output);
@@ -1523,10 +1528,13 @@ impl Executor {
         cmd: &CommandNode,
         body: impl FnOnce(&mut Executor) -> Result<T, ExecuteError>,
     ) -> Result<T, ExecuteError> {
-        let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
-        if let Some((index, name)) = self.compound_output_dup_bad_fd(cmd) {
+        // Same preflight-first discipline as with_command_input_redirects:
+        // the walk is pure, and the abandonment it triggers must not race
+        // half-applied binds.
+        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
             return self.abandon_compound_for_dup_bad_fd(cmd, index, &name);
         }
+        let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
         let saved_output = self.open_compound_output_redirects(cmd)?;
         // rubash#1867: the numbered heredoc/herestring entries stage
         // through the same wrap as every other compound — a definition
@@ -1562,14 +1570,15 @@ impl Executor {
     /// descriptor`, and ABANDONS the compound without running the body —
     /// the element's status is 1 (WSL 5.3.0 probe: `{ printf X >&2; } 2>&3
     /// 3>&1 | cat` prints the diagnostic once, the pipe stays empty,
-    /// PIPESTATUS[0] = 1). The open walk itself
-    /// (`open_compound_output_redirects_inner` → fd_table::dup_output)
-    /// cannot express the abandonment, so the callers preflight the list
-    /// (`compound_output_dup_bad_fd`) and route the failure here. The
-    /// diagnostic goes through the fd 2 binding only the redirects BEFORE
-    /// the failing dup installed (`{ :; } 2>/dev/null 2>&3` is silent),
-    /// because do_redirections stops at the failing step.
-    fn abandon_compound_for_dup_bad_fd<T: Default>(
+    /// PIPESTATUS[0] = 1). The open walks themselves
+    /// (open_compound_numbered_input_redirects /
+    /// open_compound_output_redirects_inner → fd_table dup) cannot express
+    /// the abandonment, so the callers preflight the list
+    /// (`compound_dup_bad_fd`) and route the failure here. The diagnostic
+    /// goes through the fd 2 binding only the redirects BEFORE the failing
+    /// dup installed (`{ :; } 2>/dev/null 2>&3` is silent), because
+    /// do_redirections stops at the failing step.
+    pub(in crate::executor) fn abandon_compound_for_dup_bad_fd<T: Default>(
         &mut self,
         cmd: &CommandNode,
         index: usize,
@@ -1591,13 +1600,28 @@ impl Executor {
         Ok(T::default())
     }
 
-    /// Ordered preflight of a compound's output-dup redirects: the first
-    /// `M>&N` (or `M>&N-`) whose source fd N is not open — judged with the
-    /// same left-to-right opened/closed tracking as the simple-command
-    /// preflight (`command_output_redirect_fails` /
+    /// Ordered preflight of a compound's dup redirects — both sides in ONE
+    /// left-to-right walk, because GNU do_redirections applies the list in
+    /// order and stops at the first failing step (redir.c:255-260): the
+    /// first `M>&N`/`M<&N` (or `M>&N-`/`M<&N-` move) whose source fd N is
+    /// not open — judged with the same opened/closed tracking as the
+    /// simple-command preflight (`command_output_redirect_fails` /
     /// `dup_source_fd_open`) — returns `(index, diagnostic name)`. Pure:
     /// opens nothing, dups nothing.
-    fn compound_output_dup_bad_fd(&self, cmd: &CommandNode) -> Option<(usize, String)> {
+    ///
+    /// rubash#2030 (input side): a compound-level `<&N` whose source is
+    /// unbound used to dup silently (`let _ = dup_input`) and the level
+    /// fell back to the ambient descriptor — `{ while read x; …; done
+    /// <&3; }` read the pipeline's stdin instead of dying. GNU redir.c
+    /// do_redirection_internal (case r_duplicating_input, redir.c:1179
+    /// `dup2 (redir_fd, redirector) < 0 → return (errno)`) fails EBADF and
+    /// redirection_error (redir.c:149-158) names the SOURCE fd — WSL 5.3
+    /// probe: `done <&3` and `done 5<&3` with fd 3 closed both print
+    /// `3: Bad file descriptor`, the loop never runs, status 1.
+    pub(in crate::executor) fn compound_dup_bad_fd(
+        &self,
+        cmd: &CommandNode,
+    ) -> Option<(usize, String)> {
         let mut opened: HashMap<u32, bool> = HashMap::new();
         for (index, redirect) in cmd.redirects.iter().enumerate() {
             if redirect.fd_var.is_some() {
@@ -1611,14 +1635,22 @@ impl Executor {
                 | crate::parser::RedirectKind::CloseOutput => redirect.fd.unwrap_or(1),
                 crate::parser::RedirectKind::CombinedOutput
                 | crate::parser::RedirectKind::CombinedAppend => 1,
-                _ => continue,
+                crate::parser::RedirectKind::Input
+                | crate::parser::RedirectKind::ReadWrite
+                | crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::CloseInput
+                | crate::parser::RedirectKind::HereDoc
+                | crate::parser::RedirectKind::HereString => redirect.fd.unwrap_or(0),
+                crate::parser::RedirectKind::Unknown => continue,
             };
             let target = self.expand_redirect_target(redirect);
             match redirect.kind {
-                crate::parser::RedirectKind::CloseOutput => {
+                crate::parser::RedirectKind::CloseOutput
+                | crate::parser::RedirectKind::CloseInput => {
                     opened.insert(fd, false);
                 }
-                crate::parser::RedirectKind::DuplicateOutput => {
+                crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::DuplicateOutput => {
                     if is_closed_redirect_target(&target) {
                         opened.insert(fd, false);
                         continue;
@@ -1654,6 +1686,10 @@ impl Executor {
                 }
                 // Output | Append | ClobberOutput: a file open binds its
                 // redirector; an fd-alias name (/dev/fd/N) dups the alias.
+                // Input | ReadWrite | HereDoc | HereString: the same — a
+                // file/alias open or staged stdin-body text binds the
+                // redirector (the open walk reports its own failures), so
+                // it counts as open for a later dup's source check.
                 _ => {
                     if is_closed_redirect_target(&target) {
                         opened.insert(fd, false);

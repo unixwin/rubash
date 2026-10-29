@@ -2554,6 +2554,16 @@ impl Executor {
             self.exit_code = 1;
             return Ok(1);
         }
+        // rubash#2030: the same dup preflight the compound wrappers run —
+        // an `exec` whose `<&N` source is unbound fails EBADF (`N: Bad
+        // file descriptor`, redir.c:1179 dup2 + redir.c:149-158
+        // redirection_error), the command is not exec'd, and the shell
+        // continues at status 1 (GNU exec.def exec_builtin: a failed
+        // do_redirections returns before the execve).
+        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
+            self.abandon_compound_for_dup_bad_fd::<()>(cmd, index, &name)?;
+            return Ok(1);
+        }
         // `<&N` dups and numbered input redirects are real descriptor
         // operations on the spawn's fd table (the numbered path already
         // applies them for compounds; open_compound_numbered_input_redirects
