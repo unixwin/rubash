@@ -26,7 +26,7 @@ pub(crate) const TRAP_ORIG_IGNORES: &str = "__RUBASH_TRAP_ORIG_IGN";
 /// `pub(crate)` alongside [`TRAP_PREFIX`] for the same fast-driver gate,
 /// which skips exactly this metadata key (and [`TRAP_ORIG_IGNORES`]).
 pub(crate) const TRAP_RESET: &str = "__RUBASH_TRAP_RESET";
-const EX_USAGE: i32 = 2;
+pub(crate) const EX_USAGE: i32 = 2;
 /// GNU's internal EX_USAGE (builtins/common.h): what trap.def returns before
 /// execute_cmd.c:4886-4888 converts it for `$?`. It exceeds EX_SHERRBASE,
 /// which is exactly what the execute_trap wrapper's special_builtin_failed

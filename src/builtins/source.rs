@@ -101,6 +101,10 @@ where
             if matches!(error, SourceParseError::HelpRequested) {
                 crate::builtins::help::print_builtin_help(command_name, &mut *stdout)?;
                 executor.set_exit_code(2);
+                // rubash#2117: CHECK_HELPOPT returns EX_USAGE (258 >
+                // EX_SHERRBASE) — execute_cmd.c:4886-4888 marks
+                // special_builtin_failed for the completion.
+                executor.mark_special_builtin_failed();
                 return Ok(());
             }
             match error {
@@ -133,6 +137,12 @@ where
                 "{command_name}: usage: {command_name} [-p path] filename [arguments]"
             )?;
             executor.set_exit_code(2);
+            // rubash#2117: GNU builtins/source.def returns EX_USAGE
+            // (258 > EX_SHERRBASE) for every face in this arm — the
+            // getopt default (:133-137), a missing -p argument and a
+            // missing filename (:143-147) — which execute_cmd.c:4886-4888
+            // marks special_builtin_failed.
+            executor.mark_special_builtin_failed();
             return Ok(());
         }
     };

@@ -291,31 +291,41 @@ impl Executor {
             &mut stderr,
         )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
-        // GNU execute_cmd.c:4886-4888: a special builtin whose status exceeds
-        // EX_SHERRBASE has it converted (EX_USAGE 258 -> EX_BADUSAGE 2) and
-        // sets special_builtin_failed, so a POSIX non-interactive shell exits
-        // on `trap USR1` (the usage failure the posix reset-by-name rule
-        // raises). Mirrors the execute_set/unset wrappers. The direct/late
-        // dispatch arms for `trap` do not consult the flag, so this wrapper
-        // applies the execute_cmd.c:1004-1017 gate itself.
+        // GNU execute_cmd.c:4886-4888: a special builtin whose status
+        // exceeds EX_SHERRBASE has it converted (EX_USAGE 258 ->
+        // EX_BADUSAGE 2, EX_UTILERROR 263 -> EXECUTION_FAILURE 1) and
+        // marks special_builtin_failed; the :1004-1017 check then exits
+        // a non-interactive POSIX shell in an untested context. trap's
+        // layer returns the RAW code only from the POSIX reset-by-name
+        // face (builtins/trap.rs EX_USAGE_INTERNAL, `trap USR1`); its
+        // other usage faces (invalid option, -p with -P, -P without a
+        // signal, a single non-signal argument) return the converted
+        // EX_USAGE (2) — and within trap's status vocabulary 2 is only
+        // ever a usage face (bad signal specs are EXECUTION_FAILURE),
+        // so both conventions mark the failure here.
+        //
+        // rubash#2117: the exit itself is adjudicated by the ONE gate
+        // in execute_materialized_command. This wrapper previously
+        // converted inline (an immediate ExitCode when posix +
+        // non-interactive), which pre-empted the gate's tested-context
+        // (execute_cmd.c:1004's ignore_return/invert), `command'-builtin
+        // suppression (execute_cmd.c:4657-4666) and ERR-trap
+        // adjudication: `trap USR1 || x`, `command trap USR1` and a
+        // benign ERR trap all exited where GNU continues. Every
+        // dispatch arm for `trap` (late slot, direct `builtin' route,
+        // `command' re-dispatch) completes inside an enclosing simple
+        // command whose gate — or, for `command', the re-dispatch's
+        // flag clear — owns the verdict, so marking is sufficient.
         if status > 256 {
             self.special_builtin_failed.set(true);
             let converted = match status {
                 258..=259 => 2, // EX_USAGE, EX_BADSYNTAX -> EX_BADUSAGE
                 _ => 1,         // EX_UTILERROR etc. -> EXECUTION_FAILURE
             };
-            if self.posix_mode_enabled()
-                && self
-                    .shell_state
-                    .env_vars
-                    .get("__RUBASH_INTERACTIVE")
-                    .map(String::as_str)
-                    != Some("1")
-            {
-                self.exit_code = converted;
-                return Err(ExecuteError::ExitCode(converted));
-            }
             return Ok(converted);
+        }
+        if status == crate::builtins::trap::EX_USAGE {
+            self.special_builtin_failed.set(true);
         }
         Ok(status)
     }

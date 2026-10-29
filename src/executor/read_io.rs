@@ -652,6 +652,23 @@ impl Executor {
             // the serve like the dangling-alias face above
             // (rubash#721).
             if crate::special_paths::is_net_redirect_target(&expanded_target) {
+                // rubash#2124: the simple-command funnel's bind may
+                // already have connected this command's winning net
+                // input and bound it on fd 0 — serve the bound
+                // endpoint instead of connecting a second time. The
+                // serve result is authoritative: the endpoint IS this
+                // target's stream, so its EOF is the read's EOF.
+                if self.dispatch_net_bound_fds.contains(&0) {
+                    return self.read_virtual_fd_stdin(
+                        0,
+                        silent,
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                        escape_aware,
+                        raw,
+                    );
+                }
                 match self.open_net_redirect(&expanded_target) {
                     Ok(file) => {
                         let file = FileFd::from_file(file, expanded_target.clone().into());

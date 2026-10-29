@@ -142,7 +142,37 @@ impl Executor {
         // child inheritance — so bind fd 0 to the handle instead of
         // slurping the text mirror. Text-production sources (procsubs,
         // heredocs, here-strings, /dev-aliases) keep the mirror below.
-        let Some(guard) = self.bind_command_fd0_input(cmd)? else {
+        let guard = match self.bind_command_fd0_input(cmd) {
+            Ok(guard) => guard,
+            Err(error) => {
+                // rubash#2124: the bind's net arm reports a refused
+                // /dev/tcp|udp connect as an io error — a compound
+                // abandoned by a failed fd-0 open takes the same
+                // shape as the open-failure channel above (diagnostic
+                // through the command's fd-2 routing, status 1, body
+                // never runs; GNU redir.c redirection_error). Other
+                // bind errors keep their propagation.
+                let net_fd0 = cmd.redirect_in.as_deref().is_some_and(|redirect| {
+                    redirect.fd.unwrap_or(0) == 0
+                        && crate::special_paths::is_net_redirect_target(
+                            &self.expand_redirect_target(redirect),
+                        )
+                });
+                if !net_fd0 {
+                    return Err(error);
+                }
+                let message = match &error {
+                    ExecuteError::IoError(io_error) => crate::posix_errors::message(io_error),
+                    other => other.to_string(),
+                };
+                let mut stderr = Vec::new();
+                let _ = writeln!(&mut stderr, "{}{}", self.error_prefix(), message.trim_end());
+                self.write_redirected_command_stderr(cmd, &stderr)?;
+                self.exit_code = 1;
+                return Ok(T::default());
+            }
+        };
+        let Some(guard) = guard else {
             return execute(self);
         };
         let result = execute(self);
@@ -320,6 +350,48 @@ impl Executor {
                         saved_timed_stdin: self.timed_stdin.clone(),
                         saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
                         procsub_stream_path: Some(path),
+                    }));
+                }
+            }
+        }
+        // rubash#2124: a winning /dev/tcp|udp fd-0 input on a compound
+        // never reached a bind: compound_fd0_stream_file classifies
+        // the target by filesystem metadata (a socket target is not a
+        // regular file, so it returns None) and the text fallback
+        // staged an empty string. GNU redir.c do_redirections opens
+        // it — redir_open -> netopen connects — before the body runs.
+        // Connect once here and bind the socket on fd 0 for the
+        // body's duration; a failed connect returns the path-shaped
+        // io error open_net_redirect already carries (the connect
+        // pre-line was emitted by connect_net_stream).
+        if let Some(redirect) = &cmd.redirect_in {
+            if redirect.fd.unwrap_or(0) == 0
+                && redirect.fd_var.is_none()
+                && matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+                )
+            {
+                let target = self.expand_redirect_target(redirect);
+                if crate::special_paths::is_net_redirect_target(&target) {
+                    let file = self.open_net_redirect(&target)?;
+                    let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+                    let saved_function_stdin =
+                        self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
+                    let saved_function_stdin_offset = self
+                        .shell_state
+                        .env_vars
+                        .get(FUNCTION_STDIN_OFFSET)
+                        .cloned();
+                    let file_fd = FileFd::from_file(file, target.into());
+                    self.fd_table
+                        .open_input(0, FdReadEndpoint::File(file_fd), false);
+                    return Ok(Some(CommandFd0InputGuard {
+                        saved_fd0_entry,
+                        saved_function_stdin,
+                        saved_function_stdin_offset,
+                        saved_timed_stdin: self.timed_stdin.clone(),
+                        procsub_stream_path: None,
                     }));
                 }
             }
@@ -601,6 +673,17 @@ impl Executor {
                         .map_err(|error| crate::posix_errors::path_error(&target, error))?;
                     self.set_fd_input_file(fd, file, true);
                 }
+            } else if crate::special_paths::is_net_redirect_target(&target) {
+                // rubash#2124: a /dev/tcp|udp target on a numbered fd
+                // of a compound or function call — GNU redir.c
+                // do_redirections connects it (redir_open ->
+                // netopen); the plain-file open below reported it
+                // ENOENT. The raw form is used because this ladder
+                // shapes its own errors with path_error.
+                let file = self
+                    .open_net_redirect_raw(&target)
+                    .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                self.set_fd_input_file(fd, FileFd::from_file(file, target.clone().into()), true);
             } else {
                 // niubash#177: same operand resolution as
                 // open_input_redirect — a virtual-root input operand may
@@ -1486,6 +1569,15 @@ impl Executor {
         }
         let target = self.expand_redirect_target(redirect);
         if super::execution_misc::is_closed_redirect_target(&target) {
+            return None;
+        }
+        // rubash#2124: a /dev/tcp|udp target is not a filesystem
+        // object — the plain File::open probe below reports it
+        // ENOENT, which is spurious. The compound bind
+        // (bind_command_fd0_input) connects the net target and owns
+        // its outcome, success or failure, like GNU redir.c
+        // do_redirections.
+        if crate::special_paths::is_net_redirect_target(&target) {
             return None;
         }
         if let Some(source) = super::execution_misc::dev_stdio_redirect_fd(&target) {

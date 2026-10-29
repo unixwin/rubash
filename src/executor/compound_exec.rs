@@ -2055,6 +2055,9 @@ impl Executor {
         // timed command's inner dispatch — clear any stale value before
         // the inner runs (the mark is taken right after it below).
         self.errexit_status_converted.set(false);
+        // rubash#2117: the POSIX special-builtin conversion mark is
+        // scoped the same way; the ast_exec time branch takes it.
+        self.posix_special_status_converted.set(false);
         // rubash#1218: in posix mode a dash word right after `time`
         // means `time` was never a keyword (GNU parse.y), so the
         // reconstructed command (`time`, the prefix words, then the
@@ -2121,6 +2124,7 @@ impl Executor {
         // below runs its own commands first; their conversions must not
         // be mistaken for the inner command's).
         self.errexit_status_converted.set(false);
+        self.posix_special_status_converted.set(false);
         // Snapshot the parse-error latch: a parse-diagnostic ExitCode(2)
         // out of the inner dispatch means the timed command never
         // executed (GNU reports no timing for it), unlike a genuine
@@ -2185,6 +2189,7 @@ impl Executor {
                     // must not be read as the inner command's
                     // conversion mark.
                     self.errexit_status_converted.set(false);
+                    self.posix_special_status_converted.set(false);
                     self.execute_command(&time_command.command)
                 }
                 Err(error) => Err(error),
