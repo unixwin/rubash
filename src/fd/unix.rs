@@ -18,6 +18,15 @@ use std::os::fd::{FromRawFd, RawFd};
 
 pub type HANDLE = RawFd; // isize-compatible integer fd
 
+/// niubash#519: DOS device names (CON, CONIN$, NUL, COMx, …) are a
+/// Windows spelling class — no path is one off Windows. Stub mirror of
+/// `windows_impl::is_dos_device_path` so `crate::fd` consumers resolve
+/// on every target (the executor's own wrapper documents the same
+/// "always false off Windows" contract).
+pub fn is_dos_device_path(_path: &std::path::Path) -> bool {
+    false
+}
+
 pub fn close_handle(h: HANDLE) {
     // fd 0/1/2 are the process's live stdio; closing them is the caller's
     // explicit decision and happens through other paths.
