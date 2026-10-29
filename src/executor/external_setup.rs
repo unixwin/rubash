@@ -1270,6 +1270,12 @@ impl Executor {
             !(key.starts_with("__RUBASH_TRAP") && key != crate::builtins::trap::TRAP_ORIG_IGNORES)
         });
         env_map.insert("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string());
+        // rubash#2136: the provenance stamp the child's init validates
+        // against its actual parent (init.rs).
+        env_map.insert(
+            super::RESPAWN_SPAWNER_PID_KEY.to_string(),
+            super::spawner_stamp_value(),
+        );
         // rubash#2032: process_substitute's consumer is a forked child
         // (subst.c:6362), so it inherits the parent's positional
         // parameters (POSITIONAL_PARAMS_TRANSPORT).

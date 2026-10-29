@@ -1883,7 +1883,8 @@ impl Executor {
         // opens here too; routes that fall through to
         // expand_command_substitution_with_context nest a second,
         // inner bracket harmlessly.
-        let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        let _hashed_fork =
+            crate::executor::path::hashed_cache_fork_guard(&self.shell_state.env_vars);
         // GNU command_substitute (subst.c:7143) runs the body in a subshell:
         // arithmetic subscript writes queued inside never reach the parent
         // environment. Scope the deferred-write queue to this substitution.

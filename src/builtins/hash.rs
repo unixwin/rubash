@@ -193,7 +193,7 @@ where
         env_vars.remove(HASH_TABLE);
         // The internal lookup cache holds the same remembered locations,
         // so it must be dropped too or misses/hits stay stale.
-        crate::executor::path::clear_command_lookup_cache();
+        crate::executor::path::clear_command_lookup_cache(env_vars);
         if names.is_empty() {
             return Ok(EXECUTION_SUCCESS);
         }
@@ -308,7 +308,7 @@ where
                 (pathname.to_string(), 0, next_hash_seq(&table)),
             );
             let cached_path = crate::executor::path::shell_path_to_windows(pathname, env_vars);
-            crate::executor::path::set_command_lookup_cache(name, Some(cached_path));
+            crate::executor::path::set_command_lookup_cache(name, Some(cached_path), env_vars);
         }
         store_hash_table(env_vars, &table);
         return Ok(status);
@@ -333,7 +333,7 @@ where
                 // from the hash table. The internal lookup cache holds the
                 // same information and must be invalidated in lockstep or the
                 // next `find_user_command(name)` returns the stale path.
-                crate::executor::path::remove_command_lookup_cache(name);
+                crate::executor::path::remove_command_lookup_cache(name, env_vars);
             }
         }
         store_hash_table(env_vars, &table);
@@ -418,7 +418,7 @@ where
             }
             // Drop any stale remembered location so the PATH scan is
             // authoritative.
-            crate::executor::path::remove_command_lookup_cache(name);
+            crate::executor::path::remove_command_lookup_cache(name, env_vars);
             match crate::executor::path::find_user_command(name, env_vars) {
                 Some(path) => {
                     let path_string = path.to_string_lossy().to_string();
@@ -455,7 +455,7 @@ pub(crate) fn set_hashed_path(env_vars: &mut VarTable, name: &str, path: &str) {
     // BASH_CMDS[name]=value mirrors `hash -p value name`; keep the internal
     // lookup cache in sync so find_user_command(name) returns value.
     let cached_path = crate::executor::path::shell_path_to_windows(path, env_vars);
-    crate::executor::path::set_command_lookup_cache(name, Some(cached_path));
+    crate::executor::path::set_command_lookup_cache(name, Some(cached_path), env_vars);
 }
 
 pub(crate) fn remove_hashed_path(env_vars: &mut VarTable, name: &str) {
@@ -464,7 +464,7 @@ pub(crate) fn remove_hashed_path(env_vars: &mut VarTable, name: &str) {
     store_hash_table(env_vars, &table);
     // unset 'BASH_CMDS[name]' mirrors `hash -d name`; drop the internal cache
     // entry so the next lookup re-scans PATH.
-    crate::executor::path::remove_command_lookup_cache(name);
+    crate::executor::path::remove_command_lookup_cache(name, env_vars);
 }
 
 pub(crate) fn hashed_path(env_vars: &HashMap<String, String>, name: &str) -> Option<String> {
@@ -609,7 +609,7 @@ pub(crate) fn flush_command_hash_table(env_vars: &mut VarTable) {
     // The process-global lookup cache mirrors this table in its
     // `hashed` map; both stores must die together or the next lookup
     // would serve the stale location the flush just forgot.
-    crate::executor::path::flush_command_lookup_cache_hashed();
+    crate::executor::path::flush_command_lookup_cache_hashed(env_vars);
 }
 
 /// GNU hashlib.c:254: a hash_search hit increments times_found — every
@@ -642,7 +642,7 @@ pub(crate) fn record_standard_path_resolution(
     );
     store_hash_table(env_vars, &table);
     let cached_path = crate::executor::path::shell_path_to_windows(shell_path, env_vars);
-    crate::executor::path::set_command_lookup_cache(name, Some(cached_path));
+    crate::executor::path::set_command_lookup_cache(name, Some(cached_path), env_vars);
 }
 
 /// GNU findcmd.c:365-426: a command resolution that hits hashed_filenames

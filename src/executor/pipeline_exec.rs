@@ -4274,7 +4274,8 @@ impl Executor {
         let _sigpipe_block = crate::builtins::kill::sigpipe_block_guard();
         // rubash#1551: a pipeline element is a forked child (see the
         // RANDOM bracket below) — its hash-table writes stay inside it.
-        let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        let _hashed_fork =
+            crate::executor::path::hashed_cache_fork_guard(&self.shell_state.env_vars);
         // rubash#2126: same fork argument for the evalstring tracker
         // bit — a stage's dispatches happen in the forked element, so
         // the parent's this_shell_builtin (builtins/common.c:70) is
@@ -4382,6 +4383,9 @@ impl Executor {
         // expose it the same way while the inline arms run so fd-alias
         // redirections like `cat < /dev/stdin` (niubash#118) resolve to the
         // stage input instead of the process's own stdin handle.
+        // rubash#1902: the fd-0 stage-pipe fact rides the same
+        // save/restore bracket (see the mirror installation below).
+        let old_stage_pipe_fact = self.shell_state.env_vars.get(FD0_STAGE_PIPE).cloned();
         let old_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
         let old_stdin_offset = self
             .shell_state
@@ -4430,6 +4434,20 @@ impl Executor {
             self.shell_state
                 .env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+            // rubash#1902: the staged mirror IS the stage's fd 0 and the
+            // fd-table slot is cleared below, so the fd-fact sync has no
+            // entry to classify — record what the mirror stands for.
+            // When the mirror carries an upstream stage's payload (or a
+            // text-production payload: heredoc / here-string / procsub,
+            // all pipes in GNU) fd 0 is the pipe; the inherit arm instead
+            // hands the element the ambient fd 0 itself, whose fact an
+            // outer stage's installation (or no installation) already
+            // states, so it is left untouched.
+            if !stdin_inherit {
+                self.shell_state
+                    .env_vars
+                    .insert(FD0_STAGE_PIPE.to_string(), "1".to_string());
+            }
             Some(self.fd_table.entries.remove(&0))
         };
         self.pipeline_stdin_consumed.set(None);
@@ -4513,6 +4531,11 @@ impl Executor {
                 .unwrap_or(0);
             self.pipeline_stdin_consumed.set(Some(measured));
         }
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FD0_STAGE_PIPE,
+            old_stage_pipe_fact,
+        );
         restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
         restore_optional_env_var(
             &mut self.shell_state.env_vars,

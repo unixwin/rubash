@@ -97,7 +97,10 @@ mod getopts_enable;
 pub mod identity;
 mod init;
 
-pub use init::RESPAWNED_CHILD;
+pub(crate) use init::spawner_stamp_value;
+pub use init::{
+    respawn_provenance_validated_from_process_env, RESPAWNED_CHILD, RESPAWN_SPAWNER_PID_KEY,
+};
 pub mod profiler;
 // rubash#331: the binary crate renders its self-produced path values
 // (BASH, argv[0]-derived $0) through the same POSIX-form display the

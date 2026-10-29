@@ -856,6 +856,288 @@ impl Executor {
         }
     }
 
+    /// rubash#1902: GNU's `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and
+    /// `/dev/fd/N` faces answer the fd FACT, never a name constant —
+    /// sh_eaccess routes path_is_devfd operands (eaccess.c:63-77) through
+    /// sh_stataccess (eaccess.c:116), whose sh_stat (eaccess.c:80) stats
+    /// the currently bound descriptor and checks the mode bits of what it
+    /// found: fd 0 bound to a writable file makes `test -w /dev/stdin`
+    /// true, a 444 file makes it false. The builtin only receives
+    /// env_vars, so mirror the fd table right before test/[[ runs —
+    /// same channel as the terminal and pipe marks:
+    /// - a File-bound fd carries its target path in __RUBASH_FD_TARGET_<fd>
+    ///   and every file predicate answers from the referent (the procfs
+    ///   symlink semantics);
+    /// - every other open fd carries its device class and mode bits in
+    ///   __RUBASH_FD_ACCESS_<fd>;
+    /// - an entry the shell closed carries an empty value (the
+    ///   /proc/self/fd/N ENOENT face). An fd with no entry at all was
+    ///   never opened, where the marks are simply not consulted.
+    /// Rewritten fresh each call, like the other marks.
+    pub(in crate::executor) fn sync_fd_alias_facts(&mut self, cmd: Option<&CommandNode>) {
+        self.shell_state.env_vars.retain(|key, _| {
+            !key.starts_with(FD_TARGET_PREFIX) && !key.starts_with(FD_ACCESS_PREFIX)
+        });
+        for (fd, entry) in &self.fd_table.entries {
+            if entry.closed {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_ACCESS_PREFIX}{fd}"), String::new());
+                continue;
+            }
+            // Streaming pipeline tail (rubash#761): the consumer pipe is
+            // the stage's descriptor 0 — GNU dup2's it on (execute_cmd.c),
+            // and its fifo mode carries owner r+w. The fd table still
+            // holds whatever `exec` bound earlier, so it must not answer
+            // here; a stage command with its own `< file` re-dup2's first
+            // (redir.c) and the table entry IS the truth again.
+            if *fd == 0
+                && self.pipeline_stdin_stream.is_some()
+                && cmd
+                    .and_then(|command| command.redirect_in.as_ref())
+                    .is_none()
+            {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_ACCESS_PREFIX}{fd}"), "prw".to_string());
+                continue;
+            }
+            // The read endpoint wins when both ends are bound: GNU stats
+            // one inode (a `<>` pair shares it), and the read side is the
+            // one the stdio spellings name first.
+            let mut class = 'f';
+            let mut can_r = false;
+            let mut can_w = false;
+            let can_x;
+            let mut target: Option<String> = None;
+            // A DOS device binding (NUL for /dev/null, CONIN$ for a
+            // console stdin) has no stat-able path — the bind may store
+            // the device name cwd-joined (a `< /dev/null` File endpoint
+            // records `<cwd>\NUL`), so judge the FILE NAME and emit the
+            // device class instead of a target the evaluator cannot
+            // resolve (metadata() fails on it while open() succeeds
+            // through the kernel's NUL magic — the two faces disagreed,
+            // which is exactly what the marks must not do).
+            let dos_device_class = |path: &std::path::Path| -> Option<char> {
+                let name = path.file_name()?;
+                if !crate::fd::is_dos_device_path(std::path::Path::new(name)) {
+                    return None;
+                }
+                let upper = name.to_string_lossy().to_ascii_uppercase();
+                if matches!(upper.as_str(), "CON" | "CONIN$" | "CONOUT$") {
+                    Some('c')
+                } else {
+                    Some('n')
+                }
+            };
+            // rubash#1902: a File endpoint whose stored path is the
+            // `<(source)` carrier spelling is a process-substitution
+            // pipe reader by construction —
+            // spawn_input_process_substitution_child is the spelling's
+            // only producer and its handle is the spawned body's pipe
+            // (the same judgment initial_pipeline_input documents for
+            // its stage-0 alias fold). The spelling is transport, not
+            // a filesystem path: it must never become the fd target
+            // (the evaluator would re-enter on it as a path and every
+            // predicate would fail). The handle check is the ground
+            // truth that the endpoint really is that pipe; a real path
+            // (a named fifo included) keeps the target treatment.
+            let procsub_pipe = |path: &std::path::Path, handle: crate::fd::HANDLE| -> bool {
+                let spelling = path.to_string_lossy();
+                crate::fd::is_pipe_handle(handle)
+                    && spelling.starts_with("<(")
+                    && spelling.ends_with(')')
+            };
+            match &entry.read {
+                Some(FdReadEndpoint::File(file)) => {
+                    if let Some(device) = dos_device_class(&file.path) {
+                        class = device;
+                        can_r = true;
+                        can_w = true;
+                    } else if procsub_pipe(&file.path, file.handle) {
+                        class = 'p';
+                        can_r = true;
+                        can_w = true;
+                    } else if !file.path.as_os_str().is_empty() {
+                        target = Some(file.path.to_string_lossy().into_owned());
+                    } else if crate::fd::is_pipe_handle(file.handle) {
+                        class = 'p';
+                        can_r = true;
+                        can_w = true;
+                    } else {
+                        class = 'f';
+                        can_r = true;
+                    }
+                }
+                // The inherited stdin is a console or the parent's pipe
+                // end (an invocation `< file` binds File above); both
+                // inodes carry owner r+w bits.
+                Some(FdReadEndpoint::InheritedProcessStdin) => {
+                    class = if self.stdin_source_is_terminal() {
+                        'c'
+                    } else {
+                        'p'
+                    };
+                    can_r = true;
+                    can_w = true;
+                }
+                // TextInput pipes (text feeds, process substitution,
+                // coproc stdout): fifo prw-r--r--.
+                Some(
+                    FdReadEndpoint::Text(_)
+                    | FdReadEndpoint::ProcessSubstitution(_)
+                    | FdReadEndpoint::CoprocStdout { .. },
+                ) => {
+                    class = 'p';
+                    can_r = true;
+                    can_w = true;
+                }
+                // The synthetic /proc/self/cwd bind (rubash#1937): GNU
+                // opened the directory O_RDONLY — mode 755.
+                Some(FdReadEndpoint::Directory) => {
+                    class = 'd';
+                    can_r = true;
+                    can_w = true;
+                }
+                None => {}
+            }
+            match &entry.write {
+                Some(FdWriteEndpoint::File(file)) => {
+                    if target.is_none() {
+                        if let Some(device) = dos_device_class(&file.path) {
+                            class = device;
+                            can_r = true;
+                            can_w = true;
+                        } else if procsub_pipe(&file.path, file.handle) {
+                            class = 'p';
+                            can_w = true;
+                        } else if !file.path.as_os_str().is_empty() {
+                            target = Some(file.path.to_string_lossy().into_owned());
+                        } else if crate::fd::is_pipe_handle(file.handle) {
+                            class = 'p';
+                            can_w = true;
+                        } else {
+                            can_w = true;
+                        }
+                    }
+                }
+                Some(FdWriteEndpoint::Stdout) => {
+                    if self.stdout_sink_is_terminal() {
+                        class = 'c';
+                    } else if class == 'f' {
+                        class = 'p';
+                    }
+                    can_w = true;
+                }
+                Some(FdWriteEndpoint::Stderr) => {
+                    if crate::fd::is_console_handle(crate::fd::process_std_handle(2)) {
+                        class = 'c';
+                    } else if class == 'f' {
+                        class = 'p';
+                    }
+                    can_w = true;
+                }
+                Some(
+                    FdWriteEndpoint::CoprocStdin { .. }
+                    | FdWriteEndpoint::ProcessSubstitution { .. },
+                ) => {
+                    class = 'p';
+                    can_w = true;
+                }
+                // rubash#1898: the bind is symbolic but the underlying
+                // inode is the null device, crw-rw-rw-.
+                Some(FdWriteEndpoint::FullDevice) => {
+                    class = 'n';
+                    can_r = true;
+                    can_w = true;
+                }
+                // rubash#2042 (master face met at the #2088 takeover
+                // merge): the bind is symbolic but the underlying inode
+                // is a 0644-class synthetic /proc regular file — writes
+                // fail EINVAL, but the fd's facts are the file's: the
+                // generic-file class, readable by inode mode (the same
+                // measurement FD_FILE_PREFIX carries). A class the read
+                // side already settled (a <> pair shares one inode)
+                // stands; only the default class gains the read bit.
+                Some(FdWriteEndpoint::ProcContentWrite) => {
+                    if class == 'f' {
+                        can_r = true;
+                    }
+                    can_w = true;
+                }
+                None => {}
+            }
+            if let Some(target) = target {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_TARGET_PREFIX}{fd}"), target);
+                continue;
+            }
+            can_x = class == 'd';
+            let mut value = String::new();
+            value.push(class);
+            if can_r {
+                value.push('r');
+            }
+            if can_w {
+                value.push('w');
+            }
+            if can_x {
+                value.push('x');
+            }
+            self.shell_state
+                .env_vars
+                .insert(format!("{FD_ACCESS_PREFIX}{fd}"), value);
+        }
+        // rubash#1902 (stage face): a pipeline stage whose fd 0 is the
+        // staged FUNCTION_STDIN mirror has NO fd-table row — the stage
+        // funnels clear the slot so the mirror governs the stage's
+        // reads — so the loop above wrote no fd-0 mark and the
+        // evaluator would fall through to the shell's own descriptors.
+        // The stage entry recorded the binding in FD0_STAGE_PIPE
+        // (execute_pipeline_stage / execute_lastpipe_stage, beside the
+        // mirror it stands for); turn it into the fd-0 access mark
+        // here, in the same `prw` vocabulary as the
+        // pipeline_stdin_stream special case above. Two guards, both
+        // GNU's ordering (execute_cmd.c:2620 do_piping first, then the
+        // element's own do_redirections): an fd-table entry that DID
+        // speak for fd 0 (a binding installed inside the stage) wins
+        // over the pipe, and a command carrying a descriptor-class
+        // fd-0 redirect winner keeps that face's current treatment —
+        // its binding is the redirect machinery's to state. Text-class
+        // winners (heredoc / here-string) are pipes in GNU and keep
+        // the mark.
+        let fd0_marked = self
+            .shell_state
+            .env_vars
+            .contains_key(&format!("{FD_TARGET_PREFIX}0"))
+            || self
+                .shell_state
+                .env_vars
+                .contains_key(&format!("{FD_ACCESS_PREFIX}0"));
+        if !fd0_marked
+            && self
+                .shell_state
+                .env_vars
+                .get(FD0_STAGE_PIPE)
+                .map(String::as_str)
+                == Some("1")
+            && !matches!(
+                cmd.and_then(fd0_stdin_redirect_winner),
+                Some(
+                    crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::ReadWrite
+                        | crate::parser::RedirectKind::CloseInput
+                )
+            )
+        {
+            self.shell_state
+                .env_vars
+                .insert(format!("{FD_ACCESS_PREFIX}0"), "prw".to_string());
+        }
+    }
+
     /// isatty() verdict for an expanded redirect target: `&N` and the
     /// /dev/fd/N aliases consult fd N's bound endpoint; a path is probed
     /// read-only (no create/truncate side effect) and judged by
@@ -2394,6 +2676,40 @@ pub(in crate::executor) fn fd0_stdin_redirect_winner(
                 )
         })
         .map(|redirect| redirect.kind.clone())
+}
+
+/// rubash#1902: whether an fd-0 binding that stages the FUNCTION_STDIN
+/// mirror (bind_command_fd0_input's text branch, the flat-subshell
+/// region feed in ast_exec) leaves the pipeline-stage pipe fact
+/// (FD0_STAGE_PIPE) standing. The mirror rebinds fd 0 to the command's
+/// OWN input source, superseding the inter-stage pipe the fact
+/// describes — GNU applies the element's redirections after do_piping
+/// (execute_cmd.c:2620). The fact survives only when that source is
+/// itself a pipe in GNU: heredocs and here-strings are fed through
+/// pipes (redir.c here_document_to_fd), and a process-substitution
+/// target is a pipe whatever its transport (streamed endpoint or
+/// collected text). No fd-0 winner in the redirects list means the
+/// staged text came from the node's heredoc fields — pipes again.
+pub(in crate::executor) fn fd0_mirror_binding_keeps_pipe_fact(cmd: &CommandNode) -> bool {
+    let winner = cmd.redirects.iter().rev().find(|redirect| {
+        redirect.fd.unwrap_or(0) == 0
+            && matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Input
+                    | crate::parser::RedirectKind::DuplicateInput
+                    | crate::parser::RedirectKind::ReadWrite
+                    | crate::parser::RedirectKind::CloseInput
+                    | crate::parser::RedirectKind::HereDoc
+                    | crate::parser::RedirectKind::HereString
+            )
+    });
+    match winner {
+        None => true,
+        Some(redirect) => match redirect.kind {
+            crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => true,
+            _ => redirect.target.starts_with("<("),
+        },
+    }
 }
 
 pub(crate) fn write_stdout_bytes(output: &[u8]) -> io::Result<()> {
