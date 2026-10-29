@@ -233,6 +233,19 @@ pub(crate) fn is_shell_option(name: &str) -> bool {
     SHELL_OPTIONS.iter().any(|option| option.name == name)
 }
 
+/// Flag-only shell options: owned by the single-letter `shell_flags[]`
+/// table (GNU flags.c:168-204; the sole current instance is `restricted`
+/// at flags.c:182 `{ 'r', &restricted }`) and armed through change_flag's
+/// letter branch (`set -r`, the set builtin's `r` arm), but absent from
+/// the `set -o` enumeration (GNU set.def:194-237 o_options[]) and from
+/// SHELLOPTS — so [`is_shell_option`] rejects them by design. The state
+/// view consults this predicate so a legal flag-only name resolves to
+/// the same `set_shell_option` machinery instead of falling through both
+/// families as unknown (rubash#2040).
+pub(crate) fn is_flag_only_shell_option(name: &str) -> bool {
+    matches!(name, "restricted")
+}
+
 // Consumed previously by the completion setopt action, which now carries its
 // own GNU-aligned table (see builtins/complete.rs).
 #[allow(dead_code)]

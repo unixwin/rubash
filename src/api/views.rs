@@ -373,10 +373,22 @@ impl OptionsView<'_> {
         self.executor.view_option_enabled(name)
     }
 
-    /// Set one option by name; false when the name is unknown to
-    /// both families (no state changes then).
+    /// Set one option by name; false when the name is unknown to both
+    /// families, or when the flip itself is refused (no state changes
+    /// then). Flag-only shell options (the `restricted` of GNU
+    /// flags.c shell_flags[]) go through the same `set_shell_option`
+    /// machinery the `set -r` builtin branch uses (rubash#2040), with
+    /// GNU's one-way gate intact: change_flag refuses FLAG_OFF while
+    /// the option is on (flags.c:231-233).
     pub fn set(&mut self, name: &str, enabled: bool) -> bool {
         if self.executor.is_shell_option(name) {
+            self.executor.set_shell_option(name, enabled);
+            true
+        } else if crate::builtins::set::is_flag_only_shell_option(name) {
+            let armed = self.executor.view_option_enabled(name) == Some(true);
+            if armed && !enabled {
+                return false;
+            }
             self.executor.set_shell_option(name, enabled);
             true
         } else {
