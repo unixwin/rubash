@@ -141,12 +141,24 @@ impl Executor {
                     self.probe_input_redirect(&target).map(|_| ())
                 }
                 RedirectKind::ReadWrite => {
-                    if !plain_file_target {
+                    if crate::special_paths::is_net_redirect_target(&target) {
+                        // rubash#1967: the generic probe below opens
+                        // the target as a filesystem path (with the
+                        // create side effect on the mapped
+                        // pseudo-path); a net target's setup question
+                        // is resolution only — the funnel's bind
+                        // (open_net_redirect) performs the one connect
+                        // GNU's do_redirections performs.
+                        self.validate_net_redirect_target(&target)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))
+                            .map(|_| ())
+                    } else if !plain_file_target {
                         continue;
+                    } else {
+                        self.probe_input_redirect_readwrite(&target)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))
+                            .map(|_| ())
                     }
-                    self.probe_input_redirect_readwrite(&target)
-                        .map_err(|e| crate::posix_errors::path_error(&target, e))
-                        .map(|_| ())
                 }
                 _ => continue,
             };

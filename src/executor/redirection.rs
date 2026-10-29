@@ -1770,6 +1770,19 @@ impl Executor {
             let open_result: Result<(), std::io::Error> =
                 match fifo_validation {
                     Some(result) => result,
+                    None if crate::special_paths::is_net_redirect_target(&target) => {
+                        // rubash#1967: net twin of the #1868 FIFO
+                        // validation above — this walk's create would
+                        // CONNECT and drop the File (only the Path is
+                        // kept in the state), and the flush's open
+                        // connects again: two connections where GNU's
+                        // do_redirections opens once. Validate by
+                        // resolution; the flush open is the single
+                        // connect, and a refusal surfaces there with
+                        // the same diagnostic.
+                        self.validate_net_redirect_target(&target)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))
+                    }
                     None if redirect.append => {
                         // GNU redir.c redirection_error (redir.c:149-176) carries the
                         // failed open's target word (`$FIX/b: No such file or

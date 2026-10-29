@@ -412,3 +412,27 @@ fn issue_1950_comsub_cat_opens_exactly_one_connection() {
     assert_eq!(code, Some(0));
     assert_eq!(connections.len(), 1, "connections: {connections:?}");
 }
+#[test]
+fn issue_1967_null_command_output_redirect_opens_exactly_one_connection() {
+    // `: > /dev/tcp/...` performs GNU's one open (the connection
+    // itself is the side effect) and succeeds; a setup probe must
+    // not add a second, phantom connection.
+    let (port, log, stop, server) = start_counting_server();
+    let (stdout, stderr, code) = run_c(&format!(": > /dev/tcp/127.0.0.1/{port}; echo rc=$?"));
+    let connections = counting_server_result(&log, &stop, server);
+    assert_eq!(stdout, "rc=0\n", "stderr: {stderr}");
+    assert_eq!(code, Some(0));
+    assert_eq!(connections.len(), 1, "connections: {connections:?}");
+    assert_eq!(connections[0], Vec::<u8>::new());
+}
+
+#[test]
+fn issue_1967_echo_output_redirect_opens_one_connection_and_delivers() {
+    let (port, log, stop, server) = start_counting_server();
+    let (stdout, stderr, code) = run_c(&format!("echo hi > /dev/tcp/127.0.0.1/{port}"));
+    let connections = counting_server_result(&log, &stop, server);
+    assert_eq!(stdout, "", "stderr: {stderr}");
+    assert_eq!(code, Some(0));
+    assert_eq!(connections.len(), 1, "connections: {connections:?}");
+    assert_eq!(connections[0], b"hi\n".to_vec());
+}

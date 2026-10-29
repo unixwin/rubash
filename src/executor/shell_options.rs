@@ -777,6 +777,19 @@ impl Executor {
         target: &str,
         clobber: bool,
     ) -> io::Result<File> {
+        // rubash#1967: on a net target the prepare phase's connect is
+        // the same phantom as the FIFO's prepare open below — dropped
+        // unused while the bind phase connects again. Validate by
+        // resolution; the bind performs GNU's single open. Every
+        // caller drops the returned File, so the stand-in is inert.
+        if crate::special_paths::is_net_redirect_target(target) {
+            self.validate_net_redirect_target(target)
+                .map_err(|e| crate::posix_errors::path_error(target, e))?;
+            return File::open(shell_path_to_windows(
+                "/dev/null",
+                &self.shell_state.env_vars,
+            ));
+        }
         // rubash#1820: on a FIFO the prepare phase's create is a
         // semantic no-op (O_TRUNC/O_CREAT do nothing to a fifo) whose
         // blocking open consumes the rendezvous pairing the bind phase
@@ -2355,6 +2368,17 @@ pub(in crate::executor) fn probe_output_redirect(
     target: &str,
     clobber: bool,
 ) -> std::io::Result<()> {
+    // rubash#1967: a net target's probe must not connect — the probe
+    // connection is dropped unwritten while the bind's own open
+    // connects again, so the peer sees two connections where GNU's
+    // do_redirections (redir.c do_redirection_internal) opens one.
+    // Validate by resolution; the one real open performs the
+    // connect and surfaces a refusal with the same diagnostic.
+    if crate::special_paths::is_net_redirect_target(target) {
+        return executor
+            .validate_net_redirect_target(target)
+            .map_err(|e| crate::posix_errors::path_error(target, e));
+    }
     #[cfg(unix)]
     {
         let path = executor.session_path(shell_path_to_windows(
@@ -2376,6 +2400,12 @@ pub(in crate::executor) fn probe_output_redirect_append(
     executor: &Executor,
     target: &str,
 ) -> std::io::Result<()> {
+    // rubash#1967: net arm of the same carve-out as probe_output_redirect.
+    if crate::special_paths::is_net_redirect_target(target) {
+        return executor
+            .validate_net_redirect_target(target)
+            .map_err(|e| crate::posix_errors::path_error(target, e));
+    }
     #[cfg(unix)]
     {
         let path = executor.session_path(shell_path_to_windows(
