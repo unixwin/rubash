@@ -816,6 +816,9 @@ impl Executor {
                 self.evalerror_exit_toomany_pending.set(false);
                 self.evalerror_line.set(None);
             }
+            // Resolved once here and reused by the `-n` gates below (the
+            // dispatch branch already needed this lookup per command).
+            let noexec = self.noexec_enabled();
             if self.evalerror_exec_depth.get() == 1 {
                 // rubash#1494: one tick of the notification-lag clock per
                 // top-level reader command; the refresh below applies
@@ -830,11 +833,16 @@ impl Executor {
                 // escapes under (GNU reads newline-terminated lists one at
                 // a time; the first command of a line fixes the read-time
                 // locale for every word the reader pulls in that list).
+                // rubash#353's record feeds `$'...'` re-derivation at
+                // EXPANSION time; `-n` never expands (and noexec is sticky),
+                // so the per-command insert is dead state there.
                 if let Some(line) = command.line {
-                    self.line_lex_locales
-                        .borrow_mut()
-                        .entry(line)
-                        .or_insert_with(crate::locale::locale_name);
+                    if !noexec {
+                        self.line_lex_locales
+                            .borrow_mut()
+                            .entry(line)
+                            .or_insert_with(crate::locale::locale_name);
+                    }
                 }
                 // GNU eval.c:181 (reader_loop/parse_and_execute): stdin_redir
                 // is cleared before each top-level command, so a redirected
@@ -856,14 +864,25 @@ impl Executor {
                 // :2450) — <name> and <name>_PID unbind unconditionally, so
                 // `cat <&${A[0]}` for a reaped coproc reports `ambiguous
                 // redirect` (rubash#1023).
-                self.refresh_background_jobs()?;
+                //
+                // `-n`: GNU eval.c parse_command runs only
+                // run_pending_traps(); notify_and_cleanup (eval.c:236-238) is
+                // interactive-reader-only and reaping lives in the
+                // execute_command wait paths, so the trap dispatch below
+                // stays and these two do not run.
+                if !noexec {
+                    self.refresh_background_jobs()?;
+                }
                 self.run_pending_signal_traps()?;
                 // GNU eval.c:355 runs notify_and_cleanup after each top-level
                 // command: children killed by a signal get their stderr
                 // notice here (rubash#229, jobs.c:4625 notify_of_job_status).
                 // At this point __RUBASH_CURRENT_LINE is still the previous
                 // command's line, matching GNU's line_number at notify time.
-                self.report_pending_signal_notices()?;
+                // (no notice point without execute_command)
+                if !noexec {
+                    self.report_pending_signal_notices()?;
+                }
             }
             let _t_chain = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_CHAIN);
             // GNU `line_number` advances only while the reader parses each
@@ -875,7 +894,7 @@ impl Executor {
                 self.ambient_line.set(command.end_line.or(command.line));
             }
             self.set_current_line(command);
-            if self.noexec_enabled() {
+            if noexec {
                 // GNU shell.c/parse.y: `-n` (noexec) skips execution but the
                 // reader still parses each command — parse-time diagnostics
                 // (heredoc EOF warnings, syntax errors, unclosed compounds)
