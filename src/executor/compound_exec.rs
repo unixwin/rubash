@@ -862,6 +862,13 @@ impl Executor {
             }
         }
         env_map.insert("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string());
+        // rubash#2136: the provenance stamp the child's init validates
+        // against its actual parent (init.rs) — this process's own pid,
+        // which is the pid the spawned child will observe via getppid.
+        env_map.insert(
+            super::RESPAWN_SPAWNER_PID_KEY.to_string(),
+            super::spawner_stamp_value(),
+        );
         // rubash#2032: GNU's forked async/subshell child inherits the
         // parent's positional parameters (execute_cmd.c:1576
         // execute_in_subshell runs a whole-copy fork); stamp the live
@@ -4088,6 +4095,9 @@ impl Executor {
             // blocked read cannot consume the shell signal mailbox.
             child.env(INHERIT_PROCESS_STDIN, "1");
             child.env("__RUBASH_COPROC_CHILD", "1");
+            // rubash#2136: provenance stamp — the child's init validates
+            // the coproc claim against its actual parent (init.rs).
+            child.env(super::RESPAWN_SPAWNER_PID_KEY, super::spawner_stamp_value());
             // rubash#1074: the coproc body runs in a forked subshell
             // (execute_in_subshell: subshell_level++), so the child's
             // BASH_SUBSHELL starts at this shell's depth + 1.

@@ -3314,6 +3314,18 @@ impl Executor {
         // __RUBASH_SCRIPT_NAME at all (init.rs), the same stamp the
         // output-substitution spawn carries.
         child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
+        // rubash#2136: the provenance stamp the child's init validates
+        // against its actual parent (init.rs).
+        child.env(super::RESPAWN_SPAWNER_PID_KEY, super::spawner_stamp_value());
+        // subst.c:6362 process_substitute: the producer is a forked
+        // child one subshell level deeper than its parent, like the
+        // consumer form (external_setup.rs) — this builder never
+        // stamped the depth, so the child's $BASH_SUBSHELL read 0
+        // where GNU reads parent + 1.
+        child.env(
+            "__RUBASH_SUBSHELL_DEPTH",
+            (self.shell_state.subshell_depth.get() + 1).to_string(),
+        );
         // rubash#2032: process_substitute's producer is a forked child
         // (subst.c:6362), so it inherits the parent's positional
         // parameters (POSITIONAL_PARAMS_TRANSPORT). Before this stamp

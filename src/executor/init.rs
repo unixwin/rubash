@@ -27,9 +27,231 @@ fn shell_pwd_display_impl(path: &str) -> String {
 }
 /// Process-global flag: this process is a respawned internal `rubash -c`
 /// child (the __RUBASH_SHELL_PID/__RUBASH_COPROC_CHILD marker was seen at
-/// Executor::new). Read by main.rs apply_startup_job_control.
+/// Executor::new AND its provenance validated — see
+/// [`respawn_provenance_validated`]). Read by main.rs
+/// apply_startup_job_control.
 pub static RESPAWNED_CHILD: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// Transport key stamping the DIRECT spawner's identity on every
+/// fork-shaped respawn (async/subshell wrapper, coproc, both
+/// process-substitution forms): its process id, plus its kernel start
+/// time where the platform exposes one (see [`spawner_stamp_value`]).
+/// rubash#2136: the provenance claims
+/// (`__RUBASH_SHELL_PID`, `__RUBASH_COPROC_CHILD`) and the state they
+/// unlock (`$$` adoption, BASH_SUBSHELL/BASHPID seeds, the positional
+/// transport) are only honored when this stamp names the process that
+/// actually spawned us — the same getppid cross-check the PDEATHSIG
+/// arming uses (rubash#867). Before the stamp existed, the claim keys
+/// alone opened the gate, so any parent could forge a child's `$$`,
+/// seed its positional parameters, or rewrite its subshell depth by
+/// exporting two strings.
+pub const RESPAWN_SPAWNER_PID_KEY: &str = "__RUBASH_SPAWNER_PID";
+
+/// The parent process id of this process, where the platform exposes it
+/// cheaply. Windows enumerates a Toolhelp snapshot, so callers invoke
+/// this only when a provenance claim is actually present.
+pub(crate) fn parent_process_id() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: getppid has no failure mode; it returns 1 (or the
+        // subreaper) for an orphaned process.
+        let pid = unsafe { libc::getppid() };
+        if pid > 0 {
+            return Some(pid as u32);
+        }
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let own = std::process::id();
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..unsafe { std::mem::zeroed() }
+        };
+        let mut result = None;
+        unsafe {
+            if Process32FirstW(snapshot, &mut entry) != 0 {
+                loop {
+                    if entry.th32ProcessID == own {
+                        result = Some(entry.th32ParentProcessID);
+                        break;
+                    }
+                    if Process32NextW(snapshot, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snapshot);
+        }
+        return result;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
+/// The value a fork-shaped spawn site stamps under
+/// [`RESPAWN_SPAWNER_PID_KEY`]: the spawner's own pid, plus — on Linux —
+/// its kernel start time (`/proc/self/stat` field 22, clock ticks since
+/// boot) so a validated child can tell the spawner apart from an
+/// unrelated process that later reused the pid.
+pub(crate) fn spawner_stamp_value() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some((_, Some(start), _)) = linux_proc_stat(std::process::id()) {
+            return format!("{}:{start}", std::process::id());
+        }
+    }
+    std::process::id().to_string()
+}
+
+/// Parse a spawner stamp into (pid, optional kernel start time).
+fn parse_spawner_stamp(value: &str) -> Option<(u32, Option<u64>)> {
+    match value.split_once(':') {
+        Some((pid, start)) => Some((pid.parse().ok()?, start.parse().ok())),
+        None => Some((value.parse().ok()?, None)),
+    }
+}
+
+/// Linux `/proc/<pid>/stat`: the process state letter, kernel start
+/// time, and virtual memory size. The comm in parentheses may contain
+/// spaces or parentheses, so fields are counted from the LAST ')':
+/// state is the first field after it, starttime the 20th (stat field
+/// 22 overall), vsize the 21st (field 23).
+#[cfg(target_os = "linux")]
+fn linux_proc_stat(pid: u32) -> Option<(char, Option<u64>, Option<u64>)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let start = fields.nth(18).and_then(|token| token.parse::<u64>().ok());
+    let vsize = fields.next().and_then(|token| token.parse::<u64>().ok());
+    Some((state, start, vsize))
+}
+
+/// Whether the stamped spawner is GONE — the orphan clause of
+/// [`respawn_provenance_validated`]. A zombie does not count as alive:
+/// an exited-but-unreaped spawner answers `kill(pid, 0)` and
+/// `OpenProcess` exactly like a live one, but it will never run again.
+/// Neither does an unrelated process that REUSED the dead spawner's
+/// pid: where the stamp carries the spawner's kernel start time, a
+/// live process whose start time differs is a reuser, not the spawner
+/// (pid reuse inside the orphan window is routine under parallel test
+/// load, and mistaking the reuser for a live spawner would strand a
+/// genuine orphan's provenance).
+fn stamped_spawner_gone(pid: u32, stamp_start: Option<u64>) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match linux_proc_stat(pid) {
+            None => true,
+            Some((state, start, vsize)) => {
+                // Z/X: zombie or dead. vsize 0: the process has already
+                // released its address space in do_exit but its state
+                // letter has not flipped to Z yet — the window in which
+                // a just-orphaned child (already reparented to init,
+                // which happens before the Z flip becomes visible) sees
+                // its spawner as still "running". No live user process
+                // has a zero address space, so this cannot misfire.
+                matches!(state, 'Z' | 'X')
+                    || vsize == Some(0)
+                    || matches!((stamp_start, start), (Some(want), Some(got)) if want != got)
+            }
+        }
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let _ = stamp_start;
+        // SAFETY: signal 0 performs the existence/permission check
+        // without delivering anything. (A zombie still answers here, so
+        // on these platforms the orphan clause only fires once the
+        // spawner has also been reaped.)
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if rc == 0 {
+            return false;
+        }
+        return std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM);
+    }
+    #[cfg(windows)]
+    {
+        let _ = stamp_start;
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return true;
+        }
+        let mut exit_code = 0u32;
+        // STILL_ACTIVE: the spawner has not exited yet.
+        let live = unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0 && exit_code == 259;
+        unsafe { CloseHandle(handle) };
+        return !live;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = stamp_start;
+        false
+    }
+}
+
+/// Decide whether a respawn provenance claim is established by this
+/// process's actual parentage (rubash#2136). The claim keys and their
+/// transported state ride the environment, which any parent can write,
+/// so the strings alone prove nothing; the spawner stamp must agree
+/// with a fact only the real spawner and the kernel share:
+///
+/// * the stamp names our live parent (`getppid()`), or
+/// * we were orphaned to the namespace init (ppid 1) and the stamped
+///   spawner is gone — the async child whose shell exited while it
+///   started. A live unrelated parent fails both arms, which is what
+///   makes a leaked or planted claim in a normal session inert.
+///
+/// A parent that deliberately stamps its own pid is in the same trust
+/// class GNU extends to BASH_ENV/SHELLOPTS: it already controls the
+/// child's whole environment and command line.
+pub(crate) fn respawn_provenance_validated(
+    claim_present: bool,
+    spawner_stamp: Option<(u32, Option<u64>)>,
+) -> bool {
+    if !claim_present {
+        return false;
+    }
+    let Some((stamp_pid, stamp_start)) = spawner_stamp else {
+        return false;
+    };
+    match parent_process_id() {
+        Some(ppid) if ppid == stamp_pid => true,
+        Some(1) => stamped_spawner_gone(stamp_pid, stamp_start),
+        _ => false,
+    }
+}
+
+/// [`respawn_provenance_validated`] against the live process
+/// environment — the form main.rs needs before `Executor::new` imports
+/// it (the async-child entry face, rubash#2134).
+pub fn respawn_provenance_validated_from_process_env() -> bool {
+    let claim = std::env::var_os("__RUBASH_SHELL_PID").is_some()
+        || std::env::var("__RUBASH_COPROC_CHILD").as_deref() == Ok("1");
+    let stamp = std::env::var(RESPAWN_SPAWNER_PID_KEY)
+        .ok()
+        .and_then(|value| parse_spawner_stamp(&value));
+    respawn_provenance_validated(claim, stamp)
+}
 
 impl Executor {
     pub fn new() -> Self {
@@ -228,18 +450,37 @@ impl Executor {
         }
         env_vars.remove("__RUBASH_CURRENT_FUNCTION");
         env_vars.remove("__RUBASH_IN_SOURCE");
-        let internal_respawn = env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str)
-            == Some("1")
-            || env_vars.contains_key("__RUBASH_SHELL_PID");
+        // rubash#2136: a respawn provenance claim is honored only when
+        // the spawner stamp agrees with this process's actual parent
+        // (respawn_provenance_validated). An unvalidated claim is
+        // indistinguishable from a planted one, so every piece of state
+        // the claim unlocks below — `$$` adoption, the subshell-depth
+        // and BASHPID seeds, the positional transport, the startup
+        // door — falls back to the plain top-level defaults, while the
+        // keys themselves are still consumed so they never surface as
+        // shell variables or ride the process-env mirror into children.
+        let coproc_child_claimed =
+            env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str) == Some("1");
+        let provenance_claim = coproc_child_claimed || env_vars.contains_key("__RUBASH_SHELL_PID");
+        let spawner_stamp = env_vars
+            .get(RESPAWN_SPAWNER_PID_KEY)
+            .and_then(|value| parse_spawner_stamp(value));
+        let internal_respawn = respawn_provenance_validated(provenance_claim, spawner_stamp);
+        env_vars.remove(RESPAWN_SPAWNER_PID_KEY);
+        env_vars.remove("__RUBASH_COPROC_CHILD");
         // rubash#1074: a respawned `&`/coproc child is GNU's forked subshell
         // (execute_cmd.c:1576 execute_in_subshell: subshell_level++ in the
         // child), so BASH_SUBSHELL inside it is parent_depth + 1, not 0.
         // The spawn sites carry the target depth in this marker; consume it
         // here so it never surfaces as a shell variable.
-        let respawned_subshell_depth = env_vars
-            .get("__RUBASH_SUBSHELL_DEPTH")
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(0);
+        let respawned_subshell_depth = if internal_respawn {
+            env_vars
+                .get("__RUBASH_SUBSHELL_DEPTH")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0)
+        } else {
+            0
+        };
         env_vars.remove("__RUBASH_SUBSHELL_DEPTH");
         // G-03/G-01: the init-time process-env clears route through
         // mirror_env_remove — journaled to this executor's lineage
@@ -264,6 +505,8 @@ impl Executor {
         env_vars.remove(crate::executor::path::COMPATIBLE_SHELL_PATH_ENV);
         mirror_env_remove("__RUBASH_CURRENT_FUNCTION");
         mirror_env_remove("__RUBASH_IN_SOURCE");
+        mirror_env_remove(RESPAWN_SPAWNER_PID_KEY);
+        mirror_env_remove("__RUBASH_COPROC_CHILD");
         if !internal_respawn {
             mirror_env_remove("__RUBASH_SCRIPT_NAME");
             mirror_env_remove("__RUBASH_ARGV0_AFTER_UNSET");
@@ -277,11 +520,21 @@ impl Executor {
             &std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         );
 
-        let shell_pid = env_vars
-            .get("__RUBASH_SHELL_PID")
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or_else(std::process::id);
+        // rubash#2136: the stamped pid is adopted as `$$` only for a
+        // validated respawn (GNU fork semantics: a forked child's `$$`
+        // stays the main shell's pid, variables.c). An ambient copy at a
+        // top-level entry named a process that may not even exist; the
+        // shell's own pid is the only honest default there.
+        let shell_pid = if internal_respawn {
+            env_vars
+                .get("__RUBASH_SHELL_PID")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or_else(std::process::id)
+        } else {
+            std::process::id()
+        };
         env_vars.remove("__RUBASH_SHELL_PID");
+        mirror_env_remove("__RUBASH_SHELL_PID");
 
         // rubash#1095: an async-wrapper spawn (compound_exec.rs) already is
         // GNU's single async/subshell fork (execute_cmd.c:701), so the
@@ -290,14 +543,22 @@ impl Executor {
         // get_bashpid = getpid). Ordinary shells see neither key and keep
         // depth 0 / origin 0. Stripped like __RUBASH_SHELL_PID so they
         // never surface as shell variables.
-        let bg_depth = env_vars
-            .get("__RUBASH_BG_DEPTH")
-            .and_then(|value| value.parse::<usize>().ok());
+        let bg_depth = if internal_respawn {
+            env_vars
+                .get("__RUBASH_BG_DEPTH")
+                .and_then(|value| value.parse::<usize>().ok())
+        } else {
+            None
+        };
         env_vars.remove("__RUBASH_BG_DEPTH");
         mirror_env_remove("__RUBASH_BG_DEPTH");
-        let bg_bashpid_base = env_vars
-            .get("__RUBASH_BG_BASHPID_BASE")
-            .and_then(|value| value.parse::<usize>().ok());
+        let bg_bashpid_base = if internal_respawn {
+            env_vars
+                .get("__RUBASH_BG_BASHPID_BASE")
+                .and_then(|value| value.parse::<usize>().ok())
+        } else {
+            None
+        };
         env_vars.remove("__RUBASH_BG_BASHPID_BASE");
         mirror_env_remove("__RUBASH_BG_BASHPID_BASE");
 
@@ -367,30 +628,29 @@ impl Executor {
             mirror_env_remove(key);
             false
         });
-        let owns_signal_mailbox =
-            if env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str) == Some("1") {
-                // A blocked coprocess reader cannot consume a queued TERM,
-                // so the child never owns the mailbox registration. The
-                // startup signal-policy capture is a separate step and
-                // must still run: on Unix the registration call is the
-                // only other trigger for capture_entry_and_policy, and
-                // skipping it left the exec image's runtime SIG_IGN for
-                // SIGPIPE in place — the child's writes to a dead coproc
-                // pipe then surfaced as reported-and-continued io errors
-                // where GNU's forked child dies silently on the signal
-                // (rubash#1882; the #1333 disposition reset is part of
-                // the capture).
-                crate::builtins::kill::capture_entry_policy_without_mailbox();
-                false
-            } else {
-                // startup21: registration moved off the critical path —
-                // create_dir_all + marker write cost ~0.5ms per spawn and
-                // only cross-process kill consults the marker. Drop joins
-                // the registration thread before unregistering, so the
-                // marker never outlives a normally exiting shell.
-                crate::builtins::kill::register_signal_mailbox_async(std::process::id());
-                true
-            };
+        let owns_signal_mailbox = if coproc_child_claimed && internal_respawn {
+            // A blocked coprocess reader cannot consume a queued TERM,
+            // so the child never owns the mailbox registration. The
+            // startup signal-policy capture is a separate step and
+            // must still run: on Unix the registration call is the
+            // only other trigger for capture_entry_and_policy, and
+            // skipping it left the exec image's runtime SIG_IGN for
+            // SIGPIPE in place — the child's writes to a dead coproc
+            // pipe then surfaced as reported-and-continued io errors
+            // where GNU's forked child dies silently on the signal
+            // (rubash#1882; the #1333 disposition reset is part of
+            // the capture).
+            crate::builtins::kill::capture_entry_policy_without_mailbox();
+            false
+        } else {
+            // startup21: registration moved off the critical path —
+            // create_dir_all + marker write cost ~0.5ms per spawn and
+            // only cross-process kill consults the marker. Drop joins
+            // the registration thread before unregistering, so the
+            // marker never outlives a normally exiting shell.
+            crate::builtins::kill::register_signal_mailbox_async(std::process::id());
+            true
+        };
 
         let mut executor = Self {
             shell_state: ShellState {
