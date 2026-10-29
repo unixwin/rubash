@@ -1039,24 +1039,48 @@ impl Executor {
             return output.trim_capture_terminator().to_string();
         }
 
-        if word_slot == Some(ComsubWordSlot::Basename) {
-            let Some(path) = words.get(1).map(|word| self.expand_word(word)) else {
-                self.last_command_substitution_status.set(Some(1));
-                return String::new();
-            };
-            let trimmed = path.trim_end_matches(['/', '\\']);
-            let name = trimmed
-                .rsplit(['/', '\\'])
-                .next()
-                .filter(|name| !name.is_empty())
-                .unwrap_or(trimmed);
-            let suffix = words.get(2).map(|word| self.expand_word(word));
-            let output = suffix
-                .as_deref()
-                .and_then(|suffix| name.strip_suffix(suffix))
-                .unwrap_or(name);
-            self.last_command_substitution_status.set(Some(0));
-            return output.to_string();
+        if word_slot == Some(ComsubWordSlot::Basename)
+            && !self.emulated_external_stands_down("basename")
+        {
+            // rubash#2043 A2/A3: this arm used to be a second, divergent
+            // basename implementation — it silently dropped operands
+            // past the second, treated option words as the path, kept a
+            // suffix the simple face strips (and stripped one it keeps),
+            // and never produced a diagnostic. The arm now shares the
+            // simple face's exact machinery (rubash#2036 consolidation):
+            // expand the argv, admit only what
+            // simple_path_tool_operands admits with 1..=2 operands, and
+            // compute with basename_value / strip_basename_suffix.
+            // Every other shape — extra operands, option words, no
+            // operand — declines to full execution below, where the
+            // simple face and then the real basename answer with GNU's
+            // result and diagnostics (subst.c:7143
+            // command_substitute: the arm is an accelerator for exactly
+            // the shapes it can answer byte-identically, nothing more).
+            //
+            // rubash#2046 B1 (S3-adjudicated, DECISIONS 2026-10-29):
+            // the arm's gate above consults the same stand-down
+            // predicate as the sibling cat arm — the projection's
+            // Unchecked cell for this face is now FailClosed. When
+            // PATH holds no basename the arm declines and full
+            // execution answers 127 like GNU (and like this
+            // evaluator's dirname shape, which has no arm at all).
+            let expanded: Vec<String> = words[1..]
+                .iter()
+                .map(|word| self.expand_word(word))
+                .collect();
+            if let Some(operands) =
+                super::printf_path_builtins::simple_path_tool_operands(&expanded)
+            {
+                if !operands.is_empty() && operands.len() <= 2 {
+                    let mut value = super::printf_path_builtins::basename_value(operands[0]);
+                    if let Some(suffix) = operands.get(1) {
+                        value = super::printf_path_builtins::strip_basename_suffix(&value, suffix);
+                    }
+                    self.last_command_substitution_status.set(Some(0));
+                    return value;
+                }
+            }
         }
 
         if let Some(output) = self.command_describe_substitution_output(&words) {

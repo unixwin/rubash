@@ -332,6 +332,7 @@ impl Executor {
         let mut no_more_flags = false;
         let mut parents = false;
         let mut failed = false;
+        let mut operands = 0usize;
         // coreutils diagnostics are the emulated command's own stderr:
         // they go through the command's redirections like any external
         // command's output (rubash#1372: `mkdir ... >f 2>&1` must create
@@ -392,6 +393,7 @@ impl Executor {
             // parent must fail ENOENT without -p, not silently create
             // the whole chain (on the Android/Termux host it surfaced as
             // a bogus EROFS instead).
+            operands += 1;
             let path =
                 self.session_path(shell_path_to_windows(&expanded, &self.shell_state.env_vars));
             let result = if parents {
@@ -408,6 +410,16 @@ impl Executor {
                 )?;
                 failed = true;
             }
+        }
+        if operands == 0 {
+            // GNU coreutils 9.4 mkdir.c: an invocation whose words are
+            // all options (or a bare `--`) has no operand — it reports
+            // `mkdir: missing operand` and exits 1. The loop above
+            // silently succeeded with rc 0 on that shape (rubash#2043
+            // A1: a fake success on an error input).
+            writeln!(stderr, "mkdir: missing operand")?;
+            writeln!(stderr, "Try 'mkdir --help' for more information.")?;
+            failed = true;
         }
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         self.exit_code = i32::from(failed);

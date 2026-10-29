@@ -997,16 +997,40 @@ impl Executor {
             // each command and pass named pipes/FIFOs to `diff`. Upstream
             // shopt1.sub uses `diff <("$t1") <("$t2")` where the files are
             // executable helper scripts that differ only by a shebang.
-            let left =
-                shell_path_to_windows(&self.expand_word(&cmd.words[1]), &self.shell_state.env_vars);
-            let right =
-                shell_path_to_windows(&self.expand_word(&cmd.words[2]), &self.shell_state.env_vars);
-            if let (Ok(left_source), Ok(right_source)) =
-                (fs::read_to_string(left), fs::read_to_string(right))
-            {
-                if strip_shebang(&left_source) == strip_shebang(&right_source) {
-                    self.exit_code = 0;
-                    return Ok(true);
+            //
+            // rubash#2043 A4: the in-process equality answer may only
+            // stand in for the real diff on that documented shape —
+            // both operands produced by a process substitution of THIS
+            // command (a parser-recorded, unquoted `<(...)` span on
+            // each operand word). For plain files the shortcut
+            // silently reported a shebang-only difference as equal
+            // where GNU diff reports it (rc 1 with the `1c1` block);
+            // those fall through to the real diff like every other
+            // operand pair.
+            let both_operands_are_procsub = [1usize, 2].iter().all(|&index| {
+                cmd.word_metadata.get(index).is_some_and(|metadata| {
+                    metadata
+                        .process_substitutions
+                        .iter()
+                        .any(|substitution| !substitution.output)
+                })
+            });
+            if both_operands_are_procsub {
+                let left = shell_path_to_windows(
+                    &self.expand_word(&cmd.words[1]),
+                    &self.shell_state.env_vars,
+                );
+                let right = shell_path_to_windows(
+                    &self.expand_word(&cmd.words[2]),
+                    &self.shell_state.env_vars,
+                );
+                if let (Ok(left_source), Ok(right_source)) =
+                    (fs::read_to_string(left), fs::read_to_string(right))
+                {
+                    if strip_shebang(&left_source) == strip_shebang(&right_source) {
+                        self.exit_code = 0;
+                        return Ok(true);
+                    }
                 }
             }
         }
