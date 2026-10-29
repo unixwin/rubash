@@ -42,7 +42,7 @@ impl Executor {
         }
         let mut overrides: Vec<(usize, String)> = Vec::new();
         let mut has_t = false;
-        let mut has_fd_path = false;
+        let mut has_fd_alias = false;
         let mut index = 0;
         // rubash#1202: the -v subscript rewrite's evalerror diagnostic is
         // a diagnostic OF THIS BUILTIN (GNU test.c via execute_cmd.c
@@ -55,16 +55,22 @@ impl Executor {
             if current == "-t" {
                 has_t = true;
             }
-            // rubash#2042: the admission question is the REGISTRY's —
-            // every spelling fd_alias_target serves (`/dev/fd/N`,
-            // `/proc/self/fd/N`, the numeric-pid `/proc/<pid>/fd/N`
-            // of rubash#1974, `/dev/std*`). The prefix list here
-            // predated #1974's numeric-pid spelling, so a test/[ whose
-            // only fd operand was `/proc/$$/fd/N` skipped the mark
-            // refresh and read whatever a PREVIOUS test had left in
-            // the env (deterministically stale at the first dispatch).
-            if crate::special_paths::fd_alias_target(current).is_some() {
-                has_fd_path = true;
+            // rubash#1902 + #2042 (union at the takeover merge): the
+            // /dev/std* spellings are fd aliases too; /proc/<pid>/fd/N
+            // needs the registry's own-pid judgment, which the second
+            // branch takes from fd_alias_target — the same registry
+            // question #2042 asks (its numeric-pid spelling included),
+            // so no fd-alias operand can slip past the mark refresh
+            // and read a previous test's stale marks.
+            if current.starts_with("/dev/fd/")
+                || current.starts_with("/proc/self/fd/")
+                || current.starts_with("/dev/std")
+            {
+                has_fd_alias = true;
+            } else if current.starts_with("/proc/")
+                && crate::special_paths::fd_alias_target(current).is_some()
+            {
+                has_fd_alias = true;
             }
             // Operands are skipped after a `-v` (GNU test.c unary_operator
             // consumes the next word), so the operator test never sees a
@@ -135,11 +141,14 @@ impl Executor {
             self.sync_fd_terminal_marks(Some(cmd));
         }
         // Same fused-scan economy for the pipe marks (__RUBASH_FD_PIPE_<fd>,
-        // consumed by the /dev/fd/N operand arm in builtins/test.rs):
-        // refresh only when an argument actually spells an fd path
-        // (rubash#1467).
-        if has_fd_path {
+        // consumed by the /dev/fd/N operand arm in builtins/test.rs) and the
+        // fd-alias facts (__RUBASH_FD_TARGET_<fd> / __RUBASH_FD_ACCESS_<fd>,
+        // rubash#1902 — the stdio spellings and /proc/<pid>/fd/N join the
+        // operand set): refresh only when an argument actually spells an
+        // fd alias.
+        if has_fd_alias {
             self.sync_fd_pipe_marks();
+            self.sync_fd_alias_facts(Some(cmd));
         }
         // GNU execute_cmd.c: test's diagnostics go to the shell's CURRENTLY
         // BOUND fd 2 (redir.c) — an enclosing `exec 2>/dev/null` contains
