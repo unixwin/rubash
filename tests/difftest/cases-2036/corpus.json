@@ -534,12 +534,13 @@
    "name": "cat",
    "face": "emulated",
    "status": "gnu",
-   "ref": "emulation declines --version to the real body; version digits are the runner's coreutils, the brand line is the contract",
+   "ref": "emulation declines --version to the real body",
    "path": "system",
    "script": "cat --version | head -n 1",
+   "note": "the banner belongs to the HOST toolset, not the engine: locally 'cat (GNU coreutils) 9.4', on the ubuntu CI image 'cat (uutils coreutils) 0.10.0'. The engine's contract is the decline itself — a real tool's banner answers — so the expectation anchors only on the shared 'cat (' prefix. (First CI run of this corpus failed this cell with the GNU brand pinned verbatim.)",
    "expect": {
     "rc": 0,
-    "stdout_contains": "(GNU coreutils)"
+    "stdout_contains": "cat ("
    }
   },
   {
@@ -670,13 +671,14 @@
    "name": "chmod",
    "face": "emulated",
    "status": "gnu",
-   "ref": "audit section 3.2 measured GNU-equal",
+   "ref": "emulation declines the no-operand shape to the real body",
    "path": "system",
    "script": "chmod; echo rc=$?",
+   "note": "diagnostic text belongs to the HOST toolset: locally GNU coreutils 9.4 'chmod: missing operand' + Try line; the ubuntu CI image's uutils chmod prints a clap-style usage error. The engine's contract is the decline + rc 1; the expectation anchors on the tool name only. (Same CI failure class as cat-version.)",
    "expect": {
     "rc": 0,
     "stdout": "rc=1\n",
-    "stderr": "chmod: missing operand\nTry 'chmod --help' for more information.\n"
+    "stderr_contains": "chmod"
    }
   },
   {
@@ -839,13 +841,14 @@
    "name": "rmdir",
    "face": "emulated",
    "status": "gnu",
-   "ref": "audit section 3.2 measured GNU-equal",
+   "ref": "emulation declines the no-operand shape to the real body",
    "path": "system",
    "script": "rmdir; echo rc=$?",
+   "note": "host-toolset diagnostic, as chmod-missing: locally GNU 'rmdir: missing operand' + Try line; uutils rmdir prints a clap-style usage error. Contract = decline + rc 1.",
    "expect": {
     "rc": 0,
     "stdout": "rc=1\n",
-    "stderr": "rmdir: missing operand\nTry 'rmdir --help' for more information.\n"
+    "stderr_contains": "rmdir"
    }
   },
   {

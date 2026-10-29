@@ -43,6 +43,14 @@ transcribe expectations from the engine's current output for
   stand_down Replace cell) or not yet ruled (#2046 B2/B3/C1/C2); the
   GNU measurement is recorded in the case's `gnu` field. A registered
   case may only change with the ruling that owns it.
+- Host-tool rule: for shapes the engine *declines* to the real body
+  (e.g. `cat --version`, no-operand `chmod`/`rmdir`), the output text
+  belongs to the host toolset, which is not part of the engine's
+  contract — GNU coreutils on one machine, uutils on the ubuntu CI
+  image. Those cases anchor on status plus a toolset-independent
+  substring only, with the locally measured GNU text kept in the
+  case's `note`. Expectations produced by the engine itself (builtin
+  and emulation diagnostics) are pinned verbatim.
 
 ## Attribution correction (S4 four-quadrant measurement)
 
