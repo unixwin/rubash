@@ -51,18 +51,14 @@
    "id": "env-u-path",
    "name": "env",
    "face": "builtin",
-   "status": "registered",
-   "ref": "#2046 B2 (unruled; registered only, no behavior change)",
+   "status": "gnu",
+   "ref": "#2046 B2 (ruled align GNU/WinuxCmd, DECISIONS 2026-10-29; fixed S6: PATH absent from the composed env resolves through the execvp default path)",
    "path": "system",
    "script": "env -u PATH printenv PATH; echo rc=$?",
    "expect": {
     "rc": 0,
-    "stdout": "rc=127\n",
-    "stderr": "env: failed to run command 'printenv': No such file or directory\n"
-   },
-   "gnu": {
-    "rc": 0,
-    "stdout": "rc=1\n"
+    "stdout": "rc=1\n",
+    "stderr": ""
    }
   },
   {
@@ -189,18 +185,14 @@
    "id": "uname-help",
    "name": "uname",
    "face": "hidden-fastpath",
-   "status": "registered",
-   "ref": "#2046 C1 (unruled; registered only, no behavior change)",
+   "status": "gnu",
+   "ref": "#2046 C1 (ruled align GNU/WinuxCmd, DECISIONS 2026-10-29; fixed S6: full coreutils 9.4 help text, no more two-line short answer)",
    "path": "system",
    "script": "uname --help",
    "expect": {
     "rc": 0,
-    "stdout": "Usage: uname [OPTION]...\nPrint certain system information.  With no OPTION, same as -s.\n",
+    "stdout": "Usage: uname [OPTION]...\nPrint certain system information.  With no OPTION, same as -s.\n\n  -a, --all                print all information, in the following order,\n                             except omit -p and -i if unknown:\n  -s, --kernel-name        print the kernel name\n  -n, --nodename           print the network node hostname\n  -r, --kernel-release     print the kernel release\n  -v, --kernel-version     print the kernel version\n  -m, --machine            print the machine hardware name\n  -p, --processor          print the processor type (non-portable)\n  -i, --hardware-platform  print the hardware platform (non-portable)\n  -o, --operating-system   print the operating system\n      --help        display this help and exit\n      --version     output version information and exit\n\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/uname>\nor available locally via: info '(coreutils) uname invocation'\n",
     "stderr": ""
-   },
-   "gnu": {
-    "rc": 0,
-    "stdout": "Usage: uname [OPTION]...\nPrint certain system information.  With no OPTION, same as -s.\n\n  -a, --all                print all information, in the following order,\n                             except omit -p and -i if unknown:\n  -s, --kernel-name        print the kernel name\n  -n, --nodename           print the network node hostname\n  -r, --kernel-release     print the kernel release\n  -v, --kernel-version     print the kernel version\n  -m, --machine            print the machine hardware name\n  -p, --processor          print the processor type (non-portable)\n  -i, --hardware-platform  print the hardware platform (non-portable)\n  -o, --operating-system   print the operating system\n      --help        display this help and exit\n      --version     output version information and exit\n\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/uname>\nor available locally via: info '(coreutils) uname invocation'\n"
    }
   },
   {
@@ -220,16 +212,11 @@
    "id": "arch-extra",
    "name": "arch",
    "face": "hidden-fastpath",
-   "status": "registered",
-   "ref": "#2046 C2 (unruled; registered only, no behavior change)",
+   "status": "gnu",
+   "ref": "#2046 C2 (ruled align GNU/WinuxCmd, DECISIONS 2026-10-29; fixed S6: diagnostic quotes are C-locale ASCII)",
    "path": "system",
    "script": "arch extra; echo rc=$?",
    "expect": {
-    "rc": 0,
-    "stdout": "rc=1\n",
-    "stderr": "arch: extra operand ‘extra’\nTry 'arch --help' for more information.\n"
-   },
-   "gnu": {
     "rc": 0,
     "stdout": "rc=1\n",
     "stderr": "arch: extra operand 'extra'\nTry 'arch --help' for more information.\n"
@@ -239,16 +226,11 @@
    "id": "stty-badopt",
    "name": "stty",
    "face": "hidden-fastpath",
-   "status": "registered",
-   "ref": "#2046 B3 (unruled; registered only, no behavior change)",
+   "status": "gnu",
+   "ref": "#2046 B3 (ruled align GNU/WinuxCmd, DECISIONS 2026-10-29; fixed S6: full operand validation before any device contact)",
    "path": "system",
    "script": "stty -Z; echo rc=$?",
    "expect": {
-    "rc": 0,
-    "stdout": "rc=1\n",
-    "stderr": "stty: 'standard input': Inappropriate ioctl for device\n"
-   },
-   "gnu": {
     "rc": 0,
     "stdout": "rc=1\n",
     "stderr": "stty: invalid argument '-Z'\nTry 'stty --help' for more information.\n"

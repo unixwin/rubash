@@ -371,7 +371,23 @@ pub(crate) enum SlashKind {
     Emulated,
     /// The slash form is renamed and redirected to the true builtin
     /// (GNU would execve the real body — an escape-contract wart the
-    /// audit flags at §2.1, adjudicated in S3/S4).
+    /// audit flags at §2.1).
+    ///
+    /// Escape contract (measured + adjudicated in S6, 2026-10-29;
+    /// full text in docs/builtins.md §4.3): the redirect claims ONLY
+    /// the six exact spellings (/bin and /usr/bin of echo, printf,
+    /// pwd) — any other slash spelling execs the named file
+    /// literally, exactly like GNU. The claimed spellings answer
+    /// with BUILTIN semantics unconditionally (no existence check on
+    /// the literal file): on hosts where the spelling names a real
+    /// file, the observable deltas against that file are its
+    /// --help/--version answers, echo's shell-option sensitivity
+    /// (xpg_echo), and pwd's logical default. Kept deliberately:
+    /// on Windows hosts those spellings have no literal file, and
+    /// the layer is what makes /bin/echo-shaped scripts run at all.
+    /// Gating is asymmetric by mechanism: printf/pwd ride the
+    /// external-file-builtins host flag (this layer), the echo form
+    /// rides the external-shortcut face and does not.
     RedirectToBuiltin,
 }
 
@@ -605,6 +621,11 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         class: ClaimClass::HiddenFastpath,
         impls: &[ImplRef::new(Entry::SimpLate, "command_dispatch_late -> printf_path_builtins::execute_console_mode_tool (builtins/stty.rs)"), ImplRef::new(Entry::CmdLate, "command_no_alias_late -> printf_path_builtins::execute_console_mode_tool")],
         admission: Admission::Full,
+        // The Yield evaluation cell (S3) is CLOSED as keep-Replace:
+        // user ruling 2026-10-29 — stty stays the engine builtin for
+        // now; re-evaluate only if real problems surface. The S6
+        // registration of that decision lives here and in
+        // docs/builtins.md's fastpath table.
         stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,

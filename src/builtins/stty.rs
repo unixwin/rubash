@@ -21,10 +21,12 @@
 //! - `speed`    — Windows only: the nominal `38400` the bundled applet
 //!   reports (the console has no baud rate; WinuxCmd #1430 family).
 //!
-//! Operands apply left to right, one SetConsoleMode per operand. A
-//! non-console standard input reports the GNU diagnostic and fails;
-//! unknown operands report `invalid argument` and fail (coreutils stty
-//! wording). Documented divergences: `-a`/`-g` and the per-flag termios
+//! Operands are validated as a whole before the device is touched
+//! (rubash#2046 B3: an unknown operand reports `invalid argument`,
+//! coreutils stty wording, even on a non-terminal stdin); valid
+//! operands then apply left to right, one SetConsoleMode per operand.
+//! A non-console standard input reports the GNU diagnostic and fails.
+//! Documented divergences: `-a`/`-g` and the per-flag termios
 //! operands (`cs8`, `min 1`, ...) have no console-mode equivalent and are
 //! reported as invalid arguments.
 //!
@@ -51,8 +53,33 @@ const CONSOLE_RAW_MASK: u32 = ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PRO
 #[cfg(windows)]
 const CONSOLE_CANONICAL_MASK: u32 = ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT;
 
-/// stty(1). Operands apply left to right; the first failure (bad operand or
-/// a non-terminal stdin) stops the walk with status 1.
+/// The GNU validation-order contract (rubash#2046 B3): every operand
+/// is validated BEFORE the device is touched. coreutils stty parses
+/// the whole operand list first, so on a non-terminal stdin
+/// `stty -Z` still reports `invalid argument '-Z'` (plus the Try
+/// line) instead of the ioctl diagnostic; only an all-valid list
+/// reaches the terminal probe. The first invalid operand in argv
+/// order is the one reported.
+fn first_invalid_operand<'a>(args: &'a [String], valid: &[&str]) -> Option<&'a str> {
+    args.iter()
+        .map(String::as_str)
+        .find(|arg| !valid.contains(arg))
+}
+
+fn invalid_argument_output(operand: &str) -> IdentityToolOutput {
+    IdentityToolOutput {
+        status: 1,
+        stdout: Vec::new(),
+        stderr: format!(
+            "stty: invalid argument '{operand}'\nTry 'stty --help' for more information.\n"
+        )
+        .into_bytes(),
+    }
+}
+
+/// stty(1). Operands are validated as a whole first (see
+/// `first_invalid_operand`), then applied left to right; the first
+/// device failure stops the walk with status 1.
 pub fn execute_stty(args: &[String]) -> IdentityToolOutput {
     #[cfg(windows)]
     {
@@ -75,6 +102,22 @@ pub fn execute_stty(args: &[String]) -> IdentityToolOutput {
 
 #[cfg(unix)]
 fn stty_unix(args: &[String]) -> IdentityToolOutput {
+    // Validation precedes the device (rubash#2046 B3): the operand
+    // set this face answers is validated as a whole before isatty.
+    // The dump options (-a/--all, -g/--save) count as valid HERE
+    // even though the apply walk below still reports them (the
+    // module header's documented divergence): both references treat
+    // them as options, and S5's corpus registered their non-terminal
+    // shape as the device diagnostic — a valid option must reach
+    // the device probe, exactly like GNU. Their apply-time support
+    // is a separate face and changes nothing about ordering.
+    const VALID: &[&str] = &[
+        "size", "cols", "columns", "rows", "raw", "-raw", "cooked", "sane", "-echo", "echo", "-a",
+        "--all", "-g", "--save",
+    ];
+    if let Some(bad) = first_invalid_operand(args, VALID) {
+        return invalid_argument_output(bad);
+    }
     // GNU coreutils stty behavior (not bash source): a non-terminal
     // standard input fails every operand form, including bare `stty` and
     // `stty size`, with this diagnostic and status 1. isatty(0) is the
@@ -101,11 +144,12 @@ fn stty_unix(args: &[String]) -> IdentityToolOutput {
             }
             "-echo" => set_termios_lflag_bits(!libc::ECHO),
             "echo" => set_termios_lflag_bits_add(libc::ECHO),
+            // Unreachable while the validation pre-pass above and
+            // this match cover the same operand set; kept in the
+            // shared GNU text so a future set drift still reports
+            // the adjudicated shape instead of a local variant.
             other => {
-                out.stderr
-                    .extend_from_slice(format!("stty: invalid argument '{other}'\n").as_bytes());
-                out.status = 1;
-                return out;
+                return invalid_argument_output(other);
             }
         };
         if outcome.is_err() {
@@ -170,6 +214,16 @@ fn stty_dimension_unix(stdout: &mut Vec<u8>, rows: bool) -> Result<(), ()> {
 
 #[cfg(windows)]
 fn stty_windows(args: &[String]) -> IdentityToolOutput {
+    // Validation precedes the device (rubash#2046 B3), exactly as on
+    // the unix face: a bad operand reports `invalid argument` even
+    // when stdin is not a console at all.
+    const VALID: &[&str] = &[
+        "size", "cols", "columns", "rows", "speed", "raw", "-raw", "cooked", "sane", "-echo",
+        "echo", "-a", "--all", "-g", "--save",
+    ];
+    if let Some(bad) = first_invalid_operand(args, VALID) {
+        return invalid_argument_output(bad);
+    }
     let mut out = IdentityToolOutput {
         status: 0,
         stdout: Vec::new(),
@@ -207,12 +261,11 @@ fn stty_windows(args: &[String]) -> IdentityToolOutput {
                     set_console_mode_bits(handle, ENABLE_LINE_INPUT, true)
                         .and(set_console_mode_bits(handle, ENABLE_ECHO_INPUT, true))
                 }
+                // Unreachable while the validation pre-pass and
+                // this match cover the same operand set; kept in
+                // the shared GNU text (see the unix face).
                 other => {
-                    out.stderr.extend_from_slice(
-                        format!("stty: invalid argument '{other}'\n").as_bytes(),
-                    );
-                    out.status = 1;
-                    return out;
+                    return invalid_argument_output(other);
                 }
             };
         if outcome.is_err() {
