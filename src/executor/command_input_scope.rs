@@ -391,6 +391,11 @@ impl Executor {
                         saved_function_stdin,
                         saved_function_stdin_offset,
                         saved_timed_stdin: self.timed_stdin.clone(),
+                        // This branch (from the #2124 merge) does not touch
+                        // FD0_STAGE_PIPE, so the guard restores exactly the
+                        // fact it found — same shape as the compound-stream
+                        // branch below.
+                        saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
                         procsub_stream_path: None,
                     }));
                 }
