@@ -12,7 +12,25 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 
+/// Drop environment entries Windows can hand a process but Unicode cannot represent.
+///
+/// An inherited entry can hold an unpaired surrogate, and `std::env::vars()` panics on one
+/// (`library/std/src/env.rs`). GNU bash reads its environment as bytes and carries an entry it cannot
+/// decode as an opaque string; this engine's variable table is Unicode, so the honest equivalent is to
+/// lose that one variable rather than abort before the first command runs.
+fn drop_undecodable_environment_entries() {
+    let undecodable = std::env::vars_os()
+        .filter(|(name, value)| name.to_str().is_none() || value.to_str().is_none())
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    for name in undecodable {
+        std::env::remove_var(name);
+    }
+}
+
 fn main() {
+    drop_undecodable_environment_entries();
+
     let handle = std::thread::Builder::new()
         .name("rubash-main".to_string())
         // GNU variables.c FUNCNEST: 0/unset means no limit, so recursion
