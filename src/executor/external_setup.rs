@@ -1241,7 +1241,10 @@ impl Executor {
         // merged with the shell's env_vars, `__RUBASH_*` keys crossing only
         // through the spawn-inherited whitelist, and the parent's caught
         // traps cancelled for the child (subst.c:6421).
-        let mut env_map: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        let mut env_map: std::collections::BTreeMap<String, String> =
+            crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
                 env_map.insert(key.clone(), value.clone());

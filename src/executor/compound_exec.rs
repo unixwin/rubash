@@ -763,7 +763,10 @@ impl Executor {
             .unwrap_or_else(|| "rubash".into());
         // Environment block for the child: process env merged with the
         // shell's env_vars (same filter the old Command::env loop applied).
-        let mut env_map: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        let mut env_map: std::collections::BTreeMap<String, String> =
+            crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
                 env_map.insert(key.clone(), value.clone());
@@ -782,7 +785,7 @@ impl Executor {
         // Strip by the KEYS PRESENT IN env_map, not the live trap table:
         // stale OS-env copies of removed traps (the std::env mirror writes
         // through setattr apply.rs but is not cleaned on trap removal) ride
-        // into env_map via std::env::vars() above, and a strip driven by
+        // into env_map via the process-env ingest above, and a strip driven by
         // env_vars would leave them (trap.tests: __RUBASH_TRAP_SIGHUP/
         // __RUBASH_TRAP_SIGUSR2 leaked into the monitored `sleep N &`
         // children after `trap - HUP`/`trap - USR2` had cleared the table).

@@ -61,7 +61,11 @@ impl Executor {
         let process_env_snapshot: HashMap<String, String> = if process_exit {
             HashMap::new()
         } else {
-            crate::executor::local_helpers::with_process_state_lock(|| std::env::vars().collect())
+            crate::executor::local_helpers::with_process_state_lock(|| {
+                crate::executor::env_helpers::process_env_pairs()
+                    .into_iter()
+                    .collect()
+            })
         };
         // G-03: this executor's process-env write journal, pushed for the
         // rest of construction so the init-time __RUBASH_* clears below
@@ -74,7 +78,11 @@ impl Executor {
         // lists a parent rubash left in the environment — the structured
         // form of the cross-process attribute transport.
         let mut env_vars = if process_exit {
-            crate::shell::var_table::VarTable::from_values(std::env::vars().collect())
+            crate::shell::var_table::VarTable::from_values(
+                crate::executor::env_helpers::process_env_pairs()
+                    .into_iter()
+                    .collect(),
+            )
         } else {
             crate::shell::var_table::VarTable::from_values(process_env_snapshot.clone())
         };

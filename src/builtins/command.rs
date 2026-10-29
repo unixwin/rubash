@@ -4,7 +4,6 @@
 //! - builtins/command.def (`command_builtin`)
 
 use std::collections::HashMap;
-use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -219,7 +218,9 @@ fn find_in_path(name: &str, use_standard_path: bool) -> Option<PathBuf> {
     // find_user_command (findcmd.c:247) — the same FS_EXEC_PREFERRED +
     // file_to_lose_on walk the executor uses to run commands. Delegating
     // to crate::executor::path keeps describe and execute on one lookup.
-    let mut env_vars: HashMap<String, String> = env::vars().collect();
+    let mut env_vars: HashMap<String, String> = crate::executor::env_helpers::process_env_pairs()
+        .into_iter()
+        .collect();
     if use_standard_path {
         env_vars.insert(
             "PATH".to_string(),
