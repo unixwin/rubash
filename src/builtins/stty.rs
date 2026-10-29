@@ -68,7 +68,9 @@
 //! the gfmt restore (`stty $(stty -g)`) are not admitted (invalid
 //! argument) on either face; diagnostics keep the established one-error
 //! wording, with GNU's `Try 'stty --help'` hint after invalid argument
-//! and no hint after invalid integer (both probed).
+//! and no hint after invalid integer (both probed). On macOS the baud
+//! table stops at 38400: Darwin's libc provides no B57600+ constants,
+//! so higher bare-decimal rates are invalid arguments there.
 //!
 //! The mode persists on the console handle after the builtin returns, so a
 //! menu script's `stty raw -echo` stays in force for every later `read` —
@@ -836,20 +838,39 @@ fn baud_to_const(value: u32) -> Result<libc::speed_t, ()> {
         9600 => Ok(libc::B9600),
         19200 => Ok(libc::B19200),
         38400 => Ok(libc::B38400),
+        // The extended Bxxx constants (B57600 and up) exist in the
+        // Linux/Android libc only — Darwin's libc stops at B38400, so
+        // higher bare-decimal rates are invalid arguments there
+        // (documented divergence, module header).
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         57600 => Ok(libc::B57600),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         115200 => Ok(libc::B115200),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         230400 => Ok(libc::B230400),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         460800 => Ok(libc::B460800),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         500000 => Ok(libc::B500000),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         576000 => Ok(libc::B576000),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         921600 => Ok(libc::B921600),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         1000000 => Ok(libc::B1000000),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         1152000 => Ok(libc::B1152000),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         1500000 => Ok(libc::B1500000),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         2000000 => Ok(libc::B2000000),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         2500000 => Ok(libc::B2500000),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         3000000 => Ok(libc::B3000000),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         3500000 => Ok(libc::B3500000),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         4000000 => Ok(libc::B4000000),
         _ => Err(()),
     }
@@ -877,20 +898,36 @@ fn baud_from_const(baud: libc::speed_t) -> Option<u32> {
         libc::B9600 => 9600,
         libc::B19200 => 19200,
         libc::B38400 => 38400,
+        // Extended constants: Linux/Android libc only (see baud_to_const).
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B57600 => 57600,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B115200 => 115200,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B230400 => 230400,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B460800 => 460800,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B500000 => 500000,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B576000 => 576000,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B921600 => 921600,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B1000000 => 1000000,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B1152000 => 1152000,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B1500000 => 1500000,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B2000000 => 2000000,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B2500000 => 2500000,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B3000000 => 3000000,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B3500000 => 3500000,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         libc::B4000000 => 4000000,
         _ => return None,
     })
@@ -964,11 +1001,15 @@ fn visible_cc(cc: u8) -> String {
     }
     if ch < 0x20 {
         out.push('^');
-        out.push((ch + 0x40) as char);
+        // ch < 0x20 here, so ch + 0x40 lands in 0x40..=0x5F: ASCII by
+        // construction, never a UTF-8 continuation byte.
+        out.push(char::from(ch + 0x40));
     } else if ch == 0x7f {
         out.push_str("^?");
     } else {
-        out.push(ch as char);
+        // The >= 0x80 band was stripped above and the branches exclude
+        // < 0x20 and 0x7F, so ch is in 0x20..=0x7E: ASCII printable.
+        out.push(char::from(ch));
     }
     out
 }
