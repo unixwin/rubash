@@ -801,6 +801,18 @@ pub struct Executor {
     /// not against the map value (rubash perf12: the map-value gate
     /// produced stale alias/declare line numbers after an ambient restore).
     line_env_os_value: std::cell::RefCell<Option<String>>,
+    /// #682 stamped-by-caller contract: the execute_ast command loop stamps
+    /// `__RUBASH_CURRENT_LINE`/`__RUBASH_CMD_START_LINE` for the node it is
+    /// about to dispatch (GNU stamps line_number once per command,
+    /// execute_cmd.c SET_LINE_NUMBER); the funnel's own re-stamp recomputes
+    /// the identical value from the same node and the same ambient line, so
+    /// when this flag is set the funnel skips its copy. Only the ast_exec
+    /// loop sets it — immediately before its funnel call, and only when no
+    /// DEBUG fire / debugger seam ran this iteration (a trap action leaves
+    /// its own lines behind, and the funnel's re-stamp is then GNU's
+    /// post-trap SET_LINE_NUMBER and must run). Consumed on entry, so a
+    /// nested execute_command always stamps normally.
+    pre_stamped_line: std::cell::Cell<bool>,
     /// The background direct-spawn eligibility gate (#809) expands the async
     /// command's words in the PARENT as a probe; GNU expands the forked
     /// child's words inside the child, so the parent never observes a
