@@ -201,7 +201,13 @@ impl ShellInvocation {
                     out.interactive = true;
                     i += 1;
                 }
-                "-D" => {
+                "-D" | "+D" => {
+                    // GNU shell.c:960-964: case 'D' fires for either
+                    // sign — `bash +D` dumps exactly like `-D`
+                    // (oracle-probed on 5.3.20; the rubash binary's own
+                    // loop has had both arms since rubash#1977, this
+                    // shared parser only had the minus form, so a niu
+                    // `+D` was swallowed and the script executed).
                     out.dump_strings = true;
                     i += 1;
                 }
@@ -464,7 +470,15 @@ impl ShellInvocation {
             // `__RUBASH_` env filter).
             executor.set_env(crate::script_driver::READ_STDIN_MARKER, "1");
         }
-        executor.set_positional_params(self.positional_params.clone());
+        // rubash#2032: an internal respawn's birth seed carries the
+        // fork-inherited positional window (Executor::new consumed
+        // POSITIONAL_PARAMS_TRANSPORT); the respawn argv is just
+        // `-c source`, so this invocation's empty parameter list must
+        // not clear the seed. An invocation that DOES carry parameters
+        // wins verbatim, as before.
+        if !self.positional_params.is_empty() || executor.positional_params().is_empty() {
+            executor.set_positional_params(self.positional_params.clone());
+        }
         Ok(())
     }
 
@@ -990,6 +1004,16 @@ mod tests {
         assert!(parsed.restricted);
         assert!(parsed.shell_flags.contains(&("verbose".into(), true)));
         assert_eq!(parsed.rc_file.as_deref(), Some("alt.rc"));
+    }
+
+    #[test]
+    fn parses_plus_d_as_dump_strings() {
+        // GNU shell.c:960-964: case 'D' fires for either sign
+        // (oracle-probed: `bash +D script` dumps, never executes).
+        let parsed = ShellInvocation::parse(&["+D".into(), "script.sh".into()]).unwrap();
+        assert!(parsed.dump_strings);
+        assert!(!parsed.dump_po);
+        assert_eq!(parsed.script.as_deref(), Some("script.sh"));
     }
 
     #[test]

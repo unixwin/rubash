@@ -21,9 +21,12 @@ rubash 对一个命令词按优先级做三层处理：
    直接在进程内执行，不创建子进程。
 2. **Fast-path builtin（隐藏）**：**不在**白名单内，仅在参数形态简单时进程内
    快速执行；复杂参数回退到外部命令（由 winuxcmd 提供）。这是 Windows 下
-   减少进程创建开销的优化。introspection（`type`、`command -v`、`enable`）
-   将其报告为外部命令——与 GNU Bash 的报告结果一致（bash 中这些本来就是
-   外部命令）。
+   减少进程创建开销的优化。introspection 口径（#2036 S2 裁定）：它们不是
+   builtin，`compgen -b` / `enable` 的名单不含它们（与 GNU 的 builtin 表
+   一致）；但 describe 面（`type`、`command -v`）必须如实披露进程内
+   接管——接管生效时 `type X` 报告 `X is a shell emulation of <path>`、
+   `type -t X` 报告 `emulation`；接管因名字不可解析而 stand-down 时，
+   如实回落文件 / 未找到答案。
 3. **外部命令**：沿 PATH 查找，由 winuxcmd 提供。
 
 ## 二、真 builtin 清单（62 项）
@@ -113,7 +116,10 @@ wait
 ## 三、Fast-Path（隐藏 builtin）清单
 
 以下命令在参数形态简单时进程内执行，否则回退外部 winuxcmd 命令。
-**有意不进 `is_shell_builtin_name` 白名单**，以保持 introspection 与 bash 一致。
+**有意不进 `is_shell_builtin_name` 白名单**：它们不是 builtin，白名单外
+的身份保证 builtin 表类内省面（`compgen -b`、`enable`）与 GNU 一致；
+describe 面自 #2036 S2 起如实披露接管（`type` 报 emulation 形态），
+不再假装是外部文件。
 
 <!-- fastpath-list
 sleep
@@ -121,6 +127,7 @@ dirname
 basename
 uname
 arch
+stty
 -->
 
 | 命令 | fast-path 实现位置 | 回退行为 | 备注 |
@@ -130,6 +137,7 @@ arch
 | `basename` | `executor/printf_path_builtins.rs` | `execute_external`（winuxcmd `basename`） | 同上 |
 | `uname` | `builtins/uname.rs`（身份人设字段取自 `executor/identity.rs`） | 无（内置完整选项解析） | rubash#154：身份不外包给 PATH |
 | `arch` | `builtins/uname.rs`（`uname -m` 语义） | 无 | 同上 |
+| `stty` | `builtins/stty.rs`（`execute_console_mode_tool`） | `execute_external`（stand-down 时） | 控制台模式工具，与 uname/arch 同族（#154）；stand_down=Replace 为已裁保持——用户 2026-10-29 确认 stty 暂用内建、不翻 Yield，评估格就此关闭，有实测问题再重评 |
 
 `env` 是唯一的混合形态：它在白名单内（属第二节真 builtin，`type env` 报告为
 builtin），但实现是进程内执行 coreutils 语义、**没有外部回退路径**。它不进
@@ -182,14 +190,27 @@ tr
 
 除下述 13 个重叠命令外，还有一层**只在本进程内模拟、默认不回退外部命令**
 的文件命令：`cp` `rm` `rmdir` `mkdir` `touch` `chmod` `cat` `sed`（简单参数）
-`mkfifo` `tty`。它们由 `executor/external_file_builtins.rs` 实现，
-`external_file_builtins_enabled` 默认开启（init.rs），仅测试代码会关闭。
+`mkfifo` `tty` `tput`（仅 Windows）。它们由 `executor/external_file_builtins.rs` 实现，
+`external_file_builtins_enabled` 默认开启（init.rs），宿主经
+`Executor::set_external_file_builtins_enabled` 调节；全仓实际调用面只有测试会关闭。
 
 关键事实：
 
-- **裸跑 rubash.exe（83 套件 harness 即如此）时这层模拟生效**，上面表里的
-  重叠判定不适用；产品 niubash（niubash-runtime/shell.rs:253）会关闭该层，
-  让 winuxcmd 的同名命令接管。两侧因此行为可能不同。
+- **introspection 披露（#2036 S2）**：该层启用且名字可解析时，`type X`
+  报告 `X is a shell emulation of <path>`、`type -t X` 报告 `emulation`、
+  `command -v X` 报告裸名；该层被宿主关闭或名字不可解析（stand-down）
+  时回落文件 / 未找到答案。第三节 fast-path 同口径。
+
+- **宿主契约（#2045 收口，2026-10-29 按代码复核）**：裸跑 rubash.exe
+  （83 套件 harness 即如此）与产品 niubash **都保持该层开启**——旧版此节
+  称「产品 niubash 会关闭该层」与代码不符，已按代码对齐。niubash 的现行
+  态是刻意留开：niubash-runtime/src/shell.rs 的 "P1 spawn takeover"
+  注释在案——曾在此关闭时，POSIX PATH（=/usr/bin:/bin）下脚本套件的
+  spawn 被宿主 command-not-found 处理器吞成 127，故裁定不关。开关两态
+  的行为账：开启 = 名字可解析时由进程内模拟作答（让路规则见注册表
+  stand_down 两轴）；关闭 = 简单命令面与管线 stage 臂（#2066 起同门）
+  全部落真实 spawn，comsub 面不由此门管辖。差分覆盖：S5 三方语料钉
+  默认开态，关态由 issue2066 / issue2036_s4 两组钉钉住。
 - 模拟实现必须对齐 GNU coreutils 的 stdout/rc（ledger 只计 stdout），错误
   措辞按子进程 stderr 形式输出（无 shell 前缀、走缓冲 stderr 通道，
   `2>/dev/null` 可捕获）。2026-09-10 已按 GNU 差分探针根治：cp `/dev/null`
@@ -221,6 +242,30 @@ winuxcmd（176 个外部命令）与 rubash 内置/保留字重叠的命令共 1
 `/usr/bin/env` 等显式形式仍走 winuxcmd 外部版本。2026-09-08 已对重叠命令的
 行为（选项、转义、格式化、信号、jobspec、TIMEFORMAT）完成逐项比对，结论：
 对齐。详细判定见工作区审计报告。
+
+### 4.3 斜杠形逃逸契约（echo/printf/pwd 的 RedirectToBuiltin 组）
+
+审计 §3.2-e 遗留格，S6 实测 + 裁定（2026-10-29，Linux 同机、GNU bash
+5.3.20 + coreutils 9.4 对照，探针账见 S6 报告）：
+
+- **认领面只有六个精确拼写**：`/bin/echo`、`/usr/bin/echo`、`/bin/printf`、
+  `/usr/bin/printf`、`/bin/pwd`、`/usr/bin/pwd`。任何其他斜杠拼写（相对
+  路径、其他目录、伪造路径）一律按字面 exec 该文件，与 GNU 无分歧
+  （探针：自备脚本 `/tmp/.../echo` 双边都真跑）。
+- **被认领的拼写无条件以内建语义作答**（不查字面文件是否存在）。在字面
+  文件真实存在的宿主上，与该文件的可观察分歧为：① `--help`/`--version`
+  答复（内建的报错/字面输出 vs 文件的整页帮助/版本横幅）；② `/bin/echo`
+  跟随 shell 的 echo 选项（`shopt -s xpg_echo` 时解释转义，文件版不认
+  shell 选项）；③ `/bin/pwd` 无选项时答逻辑路径，文件版 pwd 对 `$PWD`
+  的采纳更严（符号链尾形答物理路径）。
+- **保留理由（裁定保持）**：Windows 宿主上这些拼写没有字面文件，改道层
+  是 `/bin/echo` 形脚本能跑起来的前提（与 find_user_command 对
+  `/bin/X` 的 basename 命名空间处理同层）。「文件存在则文件赢」的存在性
+  门会改动 Windows 侧解析语义、无法从 Linux 侧验证，作立案草稿交主会话
+  裁定，不在本批动。
+- **门控不对称（如实登记）**：printf/pwd 两形走 external_file_builtins
+  宿主旗（关则落真实 spawn）；echo 形走 external_inner 捷径面，不受该旗
+  管辖。
 
 **命令替换内的 builtin 遮蔽（防回归不变量）**：`$(builtin …)` 的外部命令
 解析在 PATH 查找**之前**先按名字判 `is_shell_builtin_name`，并尊重

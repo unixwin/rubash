@@ -13,73 +13,6 @@ const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
 
 const DISABLED_BUILTINS: &str = "__RUBASH_DISABLED_BUILTINS";
-const ALL_BUILTINS: &[&str] = &[
-    ".",
-    ":",
-    "[",
-    "alias",
-    "bg",
-    "bind",
-    "break",
-    "builtin",
-    "caller",
-    "cd",
-    "command",
-    "compgen",
-    "complete",
-    "compopt",
-    "continue",
-    "declare",
-    "dirs",
-    "disown",
-    "echo",
-    "enable",
-    "eval",
-    "exec",
-    "exit",
-    "export",
-    "false",
-    "fc",
-    "fg",
-    "getopts",
-    "hash",
-    "help",
-    "history",
-    "jobs",
-    "kill",
-    "let",
-    "local",
-    "logout",
-    "mapfile",
-    "popd",
-    "printf",
-    "pushd",
-    "pwd",
-    "read",
-    "readarray",
-    "readonly",
-    "return",
-    "set",
-    "shift",
-    "shopt",
-    "source",
-    "suspend",
-    "test",
-    "times",
-    "trap",
-    "true",
-    "type",
-    "typeset",
-    "ulimit",
-    "umask",
-    "unalias",
-    "unset",
-    "wait",
-];
-const SPECIAL_BUILTINS: &[&str] = &[
-    ".", ":", "break", "continue", "eval", "exec", "exit", "export", "readonly", "return", "set",
-    "shift", "source", "times", "trap", "unset",
-];
 
 pub fn execute(args: &[String], env_vars: &mut VarTable) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
@@ -228,7 +161,7 @@ where
     if operands.is_empty() || reusable {
         if special_only {
             let disabled = disabled_builtins(env_vars);
-            for name in SPECIAL_BUILTINS {
+            for name in crate::executor::command_registry::SPECIAL_BUILTINS {
                 if disable {
                     if disabled.iter().any(|disabled| disabled == name) {
                         writeln!(stdout, "enable -n {name}")?;
@@ -243,7 +176,7 @@ where
             }
         } else {
             let disabled = disabled_builtins(env_vars);
-            for name in ALL_BUILTINS {
+            for name in crate::executor::command_registry::introspection_builtin_names() {
                 if disabled.iter().any(|disabled| disabled == name) {
                     if list_all {
                         writeln!(stdout, "enable -n {name}")?;
@@ -323,7 +256,10 @@ fn set_disabled_builtins(env_vars: &mut VarTable, disabled: &[String]) {
 }
 
 fn is_builtin(name: &str) -> bool {
-    ALL_BUILTINS.contains(&name)
+    // The registry projection (rubash#2036 S2): `env` is a builtin
+    // here too — KD-1's third face. The hand ALL_BUILTINS copy that
+    // lacked env is gone.
+    crate::executor::command_registry::is_introspection_builtin(name)
 }
 
 fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {

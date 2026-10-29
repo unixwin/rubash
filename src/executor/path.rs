@@ -230,7 +230,7 @@ fn anchor_at_session_cwd(candidate: PathBuf, env_vars: &HashMap<String, String>)
     candidate
 }
 
-fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
+pub(crate) fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
     const ENV_KEYS: &[&str] = &[
         "PATH",
         // G-02: cached lookup results are anchored at the session cwd
@@ -1295,7 +1295,18 @@ fn push_external_args(command: &mut Command, args: &[String]) {
 #[cfg(windows)]
 fn windows_program_is_posix_runtime_hosted(command: &Command) -> bool {
     let program = command.get_program();
-    let Some(directory) = std::path::Path::new(program).parent() else {
+    program_dir_hosts_posix_runtime(std::path::Path::new(program))
+}
+
+/// Whether a program at `program` is hosted by an MSYS2/Cygwin POSIX
+/// runtime, detected by the runtime DLL shipping beside it — the
+/// path-shaped form of [`windows_program_is_posix_runtime_hosted`] for
+/// consumers that classify a child before a `Command` exists (the
+/// rubash#1905 operand policy in `proc_operands`). A failed lookup
+/// classifies the program as native.
+#[cfg(windows)]
+pub(in crate::executor) fn program_dir_hosts_posix_runtime(program: &Path) -> bool {
+    let Some(directory) = program.parent() else {
         return false;
     };
     ["msys-2.0.dll", "cygwin1.dll"].iter().any(|dll| {
@@ -1305,6 +1316,77 @@ fn windows_program_is_posix_runtime_hosted(command: &Command) -> bool {
             .map(|meta| meta.is_file())
             .unwrap_or(false)
     })
+}
+
+#[cfg(not(windows))]
+pub(in crate::executor) fn program_dir_hosts_posix_runtime(_program: &Path) -> bool {
+    false
+}
+
+/// rubash#1905: whether a child spawned for `program` resolves
+/// synthetic /proc spellings through a layer of its own, so the spawn
+/// boundary must hand such operands over VERBATIM instead of
+/// materializing them (see `executor::proc_operands`). Three classes
+/// own a namespace the shell must not rewrite into:
+///
+/// - namespace bridges (wsl/ssh/scp/sftp): the argv is interpreted in
+///   another filesystem namespace entirely (final ruling 2026-10-27
+///   item (a), the same axis the translation funnel honors);
+/// - MSYS2/Cygwin-runtime-hosted tools: their runtime serves a live
+///   /proc of its own (and answers `self` as the reader) — a shell
+///   snapshot would replace its format face and strip its self
+///   semantics;
+/// - scripts a POSIX-layer shell will interpret (`should_run_with_shell`
+///   minus the cmd/PowerShell-hosted forms): the interpreter owns the
+///   namespace (a rubash respawn carries the simulation itself; a
+///   shebang to an MSYS bash carries that runtime's /proc). Batch and
+///   PowerShell scripts are excluded from this arm: their hosts are
+///   native programs with no /proc layer, so their operands take the
+///   materialization like any native child's.
+///
+/// Everything else — native programs and the WinuxCmd family
+/// (`posix_aware_child` means it speaks shell-namespace PATH SPELLINGS;
+/// its native_path layer has /dev faces but no /proc) — has no /proc
+/// layer and receives materialized operands. Off Windows the question
+/// is empty (real procfs serves every child), so the stub answers
+/// false and the materialization pass stays inert there.
+#[cfg(windows)]
+pub(in crate::executor) fn child_resolves_synthetic_proc(program: &Path) -> bool {
+    is_namespace_bridge_program(program)
+        || program_dir_hosts_posix_runtime(program)
+        || (should_run_with_shell(program)
+            && !is_windows_batch_file(program)
+            && !is_windows_powershell_script(program))
+}
+
+#[cfg(not(windows))]
+pub(in crate::executor) fn child_resolves_synthetic_proc(_program: &Path) -> bool {
+    false
+}
+
+/// rubash#1905: the argument positions the operand materialization
+/// must leave alone for a given child — the data-primary positions
+/// (grep/sed/awk pattern words and kin) when the child is of the
+/// WinuxCmd class, exactly the protection the translation funnel
+/// applies to that class in `external_command_for_named_program`.
+/// Data is not an operand even when it is shaped like a path. For
+/// every other child class the dialect already translates
+/// path-shaped words wholesale (Option B), so the set is empty.
+pub(in crate::executor) fn synthetic_proc_skip_positions(
+    program: &Path,
+    env_vars: &HashMap<String, String>,
+    command_name: Option<&str>,
+    args: &[String],
+) -> std::collections::HashSet<usize> {
+    #[cfg(windows)]
+    {
+        if posix_aware_child(program, env_vars) {
+            return argv_data_primary_positions(command_name, args);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (program, env_vars, command_name, args);
+    std::collections::HashSet::new()
 }
 
 /// Quote one argument for a Windows command line so the child's argv sees
@@ -1416,10 +1498,25 @@ pub fn external_command_for_named_program(
     // native funnel (external_argument_path), exactly like a native
     // child's argv.
     #[cfg(windows)]
-    let data_primary_positions = if posix_aware {
-        argv_data_primary_positions(command_name, args)
-    } else {
+    let data_primary_positions = if argv_dialect_legacy(env_vars) {
         std::collections::HashSet::new()
+    } else {
+        // rubash#2063 (dsh-bash-native patch 0001, SpookyWaste): the set
+        // is a property of the tool's grammar, not of the child's path
+        // layer, so EVERY child class gets it — until now only the
+        // POSIX-aware class computed it, and a native child's
+        // pattern/script/program text was rewritten by both funnels
+        // below while the bundled toolchain's copies stayed protected.
+        // The legacy hatch keeps gating the mask with the rest of the
+        // Option B bundle, exactly as the posix_aware gate did. The
+        // grammar key is the caller's typed word (every production
+        // spawn route hands one in); the one route that hands in no
+        // word (external_command_for_program) keys the table on the
+        // program's own file stem instead — the grammar belongs to
+        // the program that runs.
+        let grammar_key =
+            command_name.or_else(|| program.file_stem().and_then(|stem| stem.to_str()));
+        argv_data_primary_positions(grammar_key, args)
     };
     let native_args = args
         .iter()
@@ -1441,13 +1538,14 @@ pub fn external_command_for_named_program(
             // Third-party tree members (rg/bat/fd/shim) are NOT posix_aware
             // and take this funnel (D6). Every other child class (native
             // exes, cmd, MSYS/Cygwin tools) is untouched and still gets the
-            // native form.
+            // native form. A data-primary word (rubash#2063) is not a path
+            // in any child class, so it skips this funnel too.
             #[cfg(windows)]
             if namespace_bridge {
                 return arg.clone();
             }
             #[cfg(windows)]
-            if !posix_aware {
+            if !posix_aware && !data_primary_positions.contains(&position) {
                 if let Some(translated) =
                     translated_virtual_system_root_argument(arg, shell_wrapped, env_vars)
                 {
@@ -1471,6 +1569,15 @@ pub fn external_command_for_named_program(
                 }
                 external_argument_path(arg, env_vars)
             } else {
+                #[cfg(windows)]
+                {
+                    // rubash#2063: a data-primary word is not a path,
+                    // whatever the child class — it reaches a native
+                    // child verbatim, exactly like a POSIX-aware one.
+                    if data_primary_positions.contains(&position) {
+                        return arg.clone();
+                    }
+                }
                 external_argument_path(arg, env_vars)
             }
         })
@@ -1864,7 +1971,7 @@ fn argv_dialect_legacy(env_vars: &HashMap<String, String>) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("legacy"))
 }
 
-/// unixwin/rubash#592: the argv indices of a POSIX-aware child's arguments
+/// unixwin/rubash#592: the argv indices of a child's arguments
 /// that are DATA by the tool's own grammar — pattern/script/program text
 /// whose bytes must cross the boundary verbatim (invariant C, niubash#62:
 /// the shell cannot separate `ls /d/` from `grep -F "/h/"` by shape). Two
@@ -6149,11 +6256,79 @@ mod tests {
             vec!["/a/b/c.txt".to_string(), ".txt".to_string()],
         );
         // Without a command name (external_command_for_program route) the
-        // grammar is unknown: nothing is masked, shapes translate.
+        // grammar keys on the program's own file stem (rubash#2063); `ls`
+        // is not a grammar tool, so nothing is masked, shapes translate.
         assert_eq!(
             child_argv(&applet, &["/d/repo/x"], &env_vars),
             vec![r"D:\repo\x".to_string()],
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn data_primary_positions_hold_for_native_children() {
+        // rubash#2063 (dsh-bash-native patch 0001, SpookyWaste): a
+        // third-party suite is never `posix_aware`, so its operands
+        // still take the native funnel; the pattern/script/program
+        // positions are grammar properties of the tool and must stay
+        // verbatim for this child class too.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+
+        // The production spawn routes hand the typed command word to
+        // the funnel and the table keys on it; this name-less helper
+        // hands in no word, so the executable's own file stem
+        // identifies the grammar instead.
+        let argv_for = |program: &Path, args: &[&str]| {
+            let owned = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+            let (command, _) = external_command_for_program(program, &owned, &env_vars);
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let grep = PathBuf::from(r"C:\tools\grep.exe");
+        let argv = argv_for(&grep, &["-F", "/tmp/pat", "/tmp/file.txt"]);
+        assert_eq!(argv[0], "-F");
+        assert_eq!(argv[1], "/tmp/pat", "the grep pattern stays verbatim");
+        assert_ne!(
+            argv[2], "/tmp/file.txt",
+            "the file operand still translates"
+        );
+
+        let sed = PathBuf::from(r"C:\tools\sed.exe");
+        let argv = argv_for(&sed, &["-n", "/tmp/x/p", "/tmp/file.txt"]);
+        assert_eq!(argv[1], "/tmp/x/p", "the sed script stays verbatim");
+
+        let awk = PathBuf::from(r"C:\tools\awk.exe");
+        let argv = argv_for(&awk, &["/tmp/x/{print}", "/tmp/file.txt"]);
+        assert_eq!(argv[0], "/tmp/x/{print}", "the awk program stays verbatim");
+
+        // `-e` carries data; `-f` carries a path, so only the former
+        // stays verbatim.
+        let argv = argv_for(&grep, &["-e", "/tmp/pat", "/tmp/file.txt"]);
+        assert_eq!(
+            argv[1], "/tmp/pat",
+            "a -e pattern is data and stays verbatim"
+        );
+        assert_ne!(
+            argv[2], "/tmp/file.txt",
+            "the file operand still translates"
+        );
+        let argv = argv_for(&grep, &["-f", "/tmp/pats.txt", "/tmp/file.txt"]);
+        assert_ne!(
+            argv[1], "/tmp/pats.txt",
+            "a pattern file is a path and translates"
+        );
+
+        // Drive-shaped data skips the second (native) funnel verbatim
+        // too, while a drive-shaped file operand still translates.
+        let argv = argv_for(&grep, &["-F", "/c/pat", "/c/file.txt"]);
+        assert_eq!(argv[1], "/c/pat", "the drive-shaped pattern stays verbatim");
+        assert_eq!(argv[2], r"C:\file.txt", "the file operand still translates");
 
         let _ = fs::remove_dir_all(&root);
     }

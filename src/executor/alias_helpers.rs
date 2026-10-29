@@ -360,6 +360,13 @@ fn apply_simple_sed_substitutions(input: &str, scripts: &[&str]) -> Option<Strin
     for script in scripts {
         if let Some(rest) = script.strip_suffix('d').filter(|_| script.len() > 1) {
             if let Ok(line_number) = rest.trim().parse::<usize>() {
+                if line_number == 0 {
+                    // GNU sed rejects address 0 outright ("invalid usage
+                    // of line address 0", exit 1); decline so the real
+                    // sed delivers that error instead of this engine
+                    // silently treating `0d` as a no-op (rubash#2065).
+                    return None;
+                }
                 delete_lines.push(line_number);
                 continue;
             }
@@ -373,9 +380,16 @@ fn apply_simple_sed_substitutions(input: &str, scripts: &[&str]) -> Option<Strin
     // internal sed silently shadowed the real one with wrong output
     // (rubash#1462). GNU sed either handles the pattern or errors —
     // both live on the external path this None selects.
-    for (pattern, _, _) in &substitutions {
+    for (pattern, replacement, _) in &substitutions {
         let pattern_chars: Vec<char> = pattern.chars().collect();
-        if parse_bre(&pattern_chars).is_none() {
+        // Same acceptance as parse_bre, but keeps the group count the
+        // replacement validation below is bounded by.
+        let mut group_count = 0usize;
+        match parse_bre_atoms(&pattern_chars, 0, &mut group_count, false) {
+            Some((_, next)) if next == pattern_chars.len() => {}
+            _ => return None,
+        }
+        if !replacement_escapes_supported(replacement, group_count) {
             return None;
         }
     }
@@ -399,23 +413,63 @@ fn apply_simple_sed_substitutions(input: &str, scripts: &[&str]) -> Option<Strin
     Some(output)
 }
 
-fn parse_sed_substitutions(script: &str) -> Option<Vec<(&str, &str, bool)>> {
-    let substitutions = script
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                None
-            } else {
-                parse_sed_substitution(line)
+/// Whether every backslash escape in an `s` replacement is one this
+/// engine replicates byte-for-byte: `\n`, `\t`, `\1`-`\9` bounded by
+/// the pattern's group count, and a backslash quoting an ASCII
+/// non-alphanumeric (`\&`, `\\`, an escaped delimiter, ...). GNU sed
+/// errors on a reference past the last group, expands `\0` to the
+/// whole match, folds case for `\U \L \u \l \E`, and maps `\a \f \r
+/// \v` to control characters — none of which expand_sed_replacement
+/// does, so those decline here instead of being silently literalized
+/// by its catch-all (rubash#2065, same flip as the pattern side).
+fn replacement_escapes_supported(replacement: &str, group_count: usize) -> bool {
+    let mut chars = replacement.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            continue;
+        }
+        match chars.next() {
+            Some('n' | 't') => {}
+            Some(digit @ '1'..='9') => {
+                if digit as usize - '0' as usize > group_count {
+                    return false;
+                }
             }
-        })
-        .collect::<Vec<_>>();
-    if substitutions.is_empty() {
-        parse_sed_substitution(script).map(|substitution| vec![substitution])
-    } else {
-        Some(substitutions)
+            Some(other) if other.is_ascii() && !other.is_ascii_alphanumeric() => {}
+            _ => return false,
+        }
     }
+    true
+}
+
+fn parse_sed_substitutions(script: &str) -> Option<Vec<(&str, &str, bool)>> {
+    let mut substitutions = Vec::new();
+    let mut saw_unparsable_line = false;
+    for line in script.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match parse_sed_substitution(line) {
+            Some(substitution) => substitutions.push(substitution),
+            None => {
+                saw_unparsable_line = true;
+                break;
+            }
+        }
+    }
+    if !substitutions.is_empty() {
+        // A script only partly understood must decline whole: the old
+        // filter_map silently dropped lines it could not parse (a
+        // `y/.../.../` or address command sharing a multi-line script
+        // with one good substitution) and answered the remainder as
+        // if it were the entire script (rubash#2065).
+        if saw_unparsable_line {
+            return None;
+        }
+        return Some(substitutions);
+    }
+    parse_sed_substitution(script).map(|substitution| vec![substitution])
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -462,7 +516,13 @@ struct BrePiece {
 // `[...]` classes, `\(...\)` subexpressions, `\1`-`\9` backreferences, and the
 // GNU `\+`/`\?` extensions. Anything outside this surface (`\{...\}`
 // intervals, `\|` alternation) fails the parse and the caller falls through
-// to the real `sed` binary.
+// to the real `sed` binary. The backslash dispatch is a whitelist: besides
+// the arms above, only `\n`, `\t`, and a backslash quoting an ASCII
+// non-alphanumeric (POSIX.1-2017 §9.3.4: the backslash removes any special
+// meaning from an ordinary character) are replicated; every other escape
+// (the GNU `\b \B \w \W \s \S \< \> \` \'` anchors/classes, `\a \f \r \v`,
+// and letters GNU leaves undefined) fails the parse the same way
+// (rubash#2065).
 fn parse_bre(pattern: &[char]) -> Option<Vec<BrePiece>> {
     let mut group_count = 0usize;
     let (atoms, next) = parse_bre_atoms(pattern, 0, &mut group_count, false)?;
@@ -493,6 +553,29 @@ fn named_char_class_ranges(name: &str) -> Option<Vec<(char, char)>> {
         _ => return None,
     };
     Some(ranges.to_vec())
+}
+
+/// Read one bracket-expression item character at `index`, returning
+/// the character and the index just past it. Backslash inside a
+/// bracket expression follows its own GNU rules, not the pattern
+/// dispatch's (rubash#2065 census against GNU sed): `\n` and `\t`
+/// denote the control character (and can bound a range, `[\t-z]`),
+/// `\\` denotes the backslash itself, and every other escape
+/// declines the parse — the remaining letters are irregular in GNU
+/// (`[\a]` matches the BEL character, `[\d]` silently swallows the
+/// backslash, `[\b]` keeps it as a member), so no single literal
+/// reading is byte-exact for them.
+fn parse_bre_class_item(pattern: &[char], index: usize) -> Option<(char, usize)> {
+    let item = *pattern.get(index)?;
+    if item != '\\' {
+        return Some((item, index + 1));
+    }
+    match pattern.get(index + 1) {
+        Some('n') => Some(('\n', index + 2)),
+        Some('t') => Some(('\t', index + 2)),
+        Some('\\') => Some(('\\', index + 2)),
+        _ => None,
+    }
 }
 
 fn parse_bre_atoms(
@@ -546,8 +629,26 @@ fn parse_bre_atoms(
                     }
                     'n' => atoms.push(BreAtom::EscapedChar('\n')),
                     't' => atoms.push(BreAtom::EscapedChar('\t')),
-                    '{' | '|' => return None,
-                    other => atoms.push(BreAtom::EscapedChar(other)),
+                    // GNU-special despite being punctuation: interval
+                    // and alternation (never implemented here), and
+                    // the word/buffer anchors `\<` `\>` `` \` `` `\'`
+                    // — the quoting rule below must not literalize
+                    // them into the characters `<`, `>`, '`', '\''
+                    // (rubash#2065).
+                    '{' | '|' | '<' | '>' | '`' | '\'' => return None,
+                    // Whitelist tail (rubash#2065): a backslash quoting
+                    // an ASCII non-alphanumeric is the one remaining
+                    // escape class replicated byte-for-byte (the quoted
+                    // character is literal). Every other escape
+                    // declines the whole parse so the real sed answers:
+                    // the old catch-all literalized the GNU extension
+                    // family (`\b` read as the letter b, in both
+                    // directions — over- and under-matching) and the
+                    // `\a \f \r \v` character escapes.
+                    other if other.is_ascii() && !other.is_ascii_alphanumeric() => {
+                        atoms.push(BreAtom::EscapedChar(other))
+                    }
+                    _ => return None,
                 }
             }
             '[' => {
@@ -593,14 +694,21 @@ fn parse_bre_atoms(
                             continue;
                         }
                     }
-                    let lo = item;
-                    index += 1;
+                    let (lo, next) = parse_bre_class_item(pattern, index)?;
+                    index = next;
                     if pattern.get(index) == Some(&'-')
                         && pattern.get(index + 1).is_some_and(|c| *c != ']')
                     {
                         index += 1;
-                        let hi = pattern[index];
-                        index += 1;
+                        let (hi, next) = parse_bre_class_item(pattern, index)?;
+                        index = next;
+                        if hi < lo {
+                            // GNU sed rejects a reversed range
+                            // ("Invalid range end", exit 1); decline
+                            // instead of silently never matching
+                            // (rubash#2065 census).
+                            return None;
+                        }
                         ranges.push((lo, hi));
                     } else {
                         ranges.push((lo, lo));
@@ -746,6 +854,18 @@ fn bre_match_repetitions(
                 if let Some(end) =
                     bre_match_repetitions(piece, rest, text, next, &mut trial, count + 1, min, max)
                 {
+                    *captures = trial;
+                    return Some(end);
+                }
+            } else if count + 1 >= min {
+                // A zero-width repetition — the empty arm of `a\?`, or
+                // a group whose body matched empty — completes this
+                // piece but cannot repeat further. The old `next >
+                // pos` guard discarded it outright, so `a\?b` never
+                // matched "b" and `\(a*\)b` never matched "b" at all
+                // (rubash#2065 census).
+                let mut trial = trial;
+                if let Some(end) = bre_match_pieces(rest, text, pos, &mut trial) {
                     *captures = trial;
                     return Some(end);
                 }
@@ -919,10 +1039,15 @@ fn split_escaped_separator(value: &str, separator: char) -> Option<(&str, &str)>
 }
 
 fn apply_simple_sed_line(line: &str, pattern: &str, replacement: &str, global: bool) -> String {
+    // Only the rubash-internal marker bytes are unmarked here; the
+    // pattern text itself is the user's, verbatim. An earlier
+    // `\\.` -> `\.` rewrite corrupted the GNU shape `\\.` (escaped
+    // backslash + any-char) on the verbatim argv faces in both
+    // directions (rubash#2065): `s/\\./X/` matched a literal dot and
+    // missed a real backslash.
     let pattern = pattern
         .replace(DATA_DOLLAR, "$")
-        .replace(crate::executor::markers::CTLESC, "")
-        .replace(r"\\.", r"\.");
+        .replace(crate::executor::markers::CTLESC, "");
     bre_substitute(line, &pattern, replacement, global).unwrap_or_else(|| line.to_string())
 }
 

@@ -116,6 +116,12 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
         self.refresh_background_jobs()?;
+        // GNU's jobs listing disposes dead coprocs before printing
+        // (jobs.c list_all_jobs/list_one_job call cleanup_dead_jobs,
+        // which reaps coprocs) — the same disposal point as the wait
+        // family (rubash#2053).
+        let _ = self.apply_pending_job_completions(true);
+        self.flush_pending_coproc_retirements();
         let mut stderr = Vec::new();
         let action = crate::builtins::jobs::execute_with_io(
             &cmd.words[1..],
@@ -922,19 +928,33 @@ impl Executor {
         // GNU execute_cmd.c:3267 REAP() runs once per loop iteration; an
         // empty table makes the scan plus cleanup below no-ops, so skip the
         // consults too. Any `&` spawn restores the full path next iteration.
-        if self.shell_state.job_table.jobs.is_empty() {
-            return;
-        }
         let interactive = self
             .shell_state
             .env_vars
             .contains_key("__RUBASH_INTERACTIVE");
         let job_control =
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor");
-        if !interactive || !job_control {
+        if interactive && job_control {
+            return;
+        }
+        if !self.shell_state.job_table.jobs.is_empty() {
             self.shell_state
                 .job_table
                 .reap_dead_jobs(self.shell_state.last_background_pid);
+        }
+        // rubash#2053: GNU's reap_dead_jobs disposes dead coprocs in
+        // the same motion (jobs.c cleanup_dead_jobs -> coproc_reap),
+        // so a loop iteration is a coproc disposal point too: a death
+        // recorded by the sweep is retired here, before the next
+        // iteration's commands expand. Without this arm a dead
+        // coproc's vars survived an entire builtin-only loop, where
+        // GNU tears them down per iteration (execute_cmd.c REAP() at
+        // :3105/:3267/:3606/:3838).
+        if !self.shell_state.coproc_names.is_empty() || !self.pending_coproc_retirements.is_empty()
+        {
+            let _ = self.refresh_background_jobs();
+            let _ = self.apply_pending_job_completions(true);
+            self.flush_pending_coproc_retirements();
         }
     }
 
@@ -1099,6 +1119,11 @@ impl Executor {
     /// the EXIT trap runs (GNU's notice precedes run_exit_trap).
     pub(crate) fn flush_job_notifications_at_stream_end(&mut self) -> Result<(), ExecuteError> {
         self.refresh_background_jobs()?;
+        // Stream end is the final disposal point (GNU coproc_flush
+        // disposes unconditionally at shell exit): retire whatever
+        // completions were recorded but never reached a disposal
+        // point during the stream.
+        self.flush_pending_coproc_retirements();
         self.report_pending_signal_notices()
     }
 
@@ -1176,6 +1201,18 @@ impl Executor {
     pub(in crate::executor) fn note_foreground_wait(&self) {
         self.foreground_wait_count
             .set(self.foreground_wait_count.get() + 1);
+    }
+
+    /// A whole-command emulation (external file builtins, host
+    /// handler, same-shell script, /bin/echo stand-in) just ran a
+    /// command GNU executes as a forked child: its completion is the
+    /// same reap/disposal observation point as that child's wait_for
+    /// (jobs.c:3064/3385), exactly like the emulated sleep fast path
+    /// in command_dispatch_primary. Without the mark, a coproc death
+    /// during an emulated `cat` would never reach a disposal point
+    /// (rubash#2053).
+    pub(in crate::executor) fn note_emulated_foreground_wait(&self) {
+        self.note_foreground_wait();
     }
 
     fn refresh_background_jobs_impl(&mut self, force_observe: bool) -> Result<(), ExecuteError> {
@@ -1289,10 +1326,31 @@ impl Executor {
                 }
             }
             self.join_coproc_stderr_forwarder(pid)?;
-            // Coproc disposal is per-command by contract (rubash#1023),
-            // and at an observation point a completion applies at once;
+            // At an observation point a completion applies at once;
             // anything else is stashed until the next observation
-            // point (see the waitchld-lag note above).
+            // point (see the waitchld-lag note above). Coproc
+            // completions follow the SAME gate (rubash#2053/#2057):
+            // GNU keeps the reap and the disposal in separate hands —
+            // waitchld records the status (execute_cmd.c:2326
+            // coproc_setstatus saves c_status; jobs.c bgpids for job
+            // children) and coproc_reap disposes only an already-reaped
+            // coproc, from cleanup points (jobs.c:1342
+            // cleanup_dead_jobs). A sweep that discovers a coproc death
+            // with its own try_wait and applies it in the same motion
+            // runs BEFORE the next command expands, so the recorded
+            // completion can steal that command's operand: `wait
+            // $C_PID` then meets a half-retired coproc, and `exec
+            // {C[1]}>&-` loses the array and reports an ambiguous
+            // redirect. The retirement half is therefore deferred
+            // separately (pending_coproc_retirements): it runs only
+            // at disposal points — a refresh that observed a
+            // foreground wait, or stream end. The earlier #1023
+            // contract (a dead coproc's vars are gone before the next
+            // command expands) is about deaths OBSERVED at a blocking
+            // point — the reader's foreground wait that preceded the
+            // boundary: that wait's refresh carries the foreground
+            // mark, so the retirement still lands before that next
+            // expansion.
             //
             // rubash#1604: one exception to "applies at once" — a job
             // the shell's OWN kill fatally signalled during this same
@@ -1310,12 +1368,22 @@ impl Executor {
                 && term_signal.is_some()
                 && !self.shell_state.coproc_names.contains_key(&pid)
                 && self.shell_state.job_table.take_fresh_fatal(pid);
-            if !fresh_fatal && (observe || self.shell_state.coproc_names.contains_key(&pid)) {
+            if !fresh_fatal && observe {
                 self.apply_job_completion(pid, status, term_signal)?;
             } else {
                 self.pending_job_completions
                     .push((pid, status, term_signal));
             }
+        }
+        // rubash#2053/#2057: a refresh that observed a foreground
+        // wait is one of GNU's coproc disposal points (the
+        // notify_and_cleanup inside wait_for, jobs.c:3385) — retire
+        // the coprocs whose completions have been recorded, including
+        // any recorded by this very refresh. A refresh that observed
+        // nothing (bare boundary) leaves them pending, so the next
+        // command still expands <name>/<name>_PID and {name[i]}.
+        if force_observe || foreground_blocked {
+            self.flush_pending_coproc_retirements();
         }
         Ok(())
     }
@@ -1391,8 +1459,32 @@ impl Executor {
         self.shell_state.job_table.mark_completed(pid, status);
         self.flush_timed_coproc_report(pid);
         self.run_sigchld_trap_for_reaped_child()?;
-        self.retire_completed_coproc(pid);
+        // rubash#2053/#2057: the completion is now visible (status
+        // recorded), but the coproc's retirement is a separate step
+        // on GNU's disposal cadence — see pending_coproc_retirements
+        // in mod.rs. flush_pending_coproc_retirements performs it at
+        // the next disposal point.
+        if self.shell_state.coproc_names.contains_key(&pid)
+            && !self.pending_coproc_retirements.contains(&pid)
+        {
+            self.pending_coproc_retirements.push(pid);
+        }
         Ok(())
+    }
+
+    /// Perform deferred coproc retirements (GNU coproc_reap via
+    /// cleanup_dead_jobs: vars unbound, endpoints closed). Called at
+    /// disposal points only: a refresh that observed a foreground
+    /// wait (force_observe, or foreground_wait_count moved), and at
+    /// stream end.
+    fn flush_pending_coproc_retirements(&mut self) {
+        if self.pending_coproc_retirements.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_coproc_retirements);
+        for pid in pending {
+            self.retire_completed_coproc(pid);
+        }
     }
 
     fn join_coproc_stderr_forwarder(&mut self, pid: u32) -> Result<(), ExecuteError> {

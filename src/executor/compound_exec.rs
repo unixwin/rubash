@@ -57,6 +57,27 @@ pub(in crate::executor) fn rubash_spawn_inherited_state(key: &str) -> bool {
     key.starts_with("__RUBASH_SETOPT_") || KEYS.contains(&key)
 }
 
+/// Transport key for the fork-inherited positional parameters. GNU fork
+/// children inherit the parent's dollar_vars verbatim (variables.c), but
+/// a respawned `rubash -c` child re-imports only its process
+/// environment, so every fork-shaped spawn (async/subshell wrapper,
+/// coproc, both process-substitution forms) stamps the live positional
+/// window under this key and `Executor::new` consumes and strips it for
+/// internal respawns (init.rs). Without the stamp the child's body saw
+/// `$#` = 0 — bats-exec-suite read `"$@"` inside `< <(...)` as one empty
+/// word and ran zero tests (rubash#2032). The value rides the indexed
+/// array storage codec (`format_indexed_array_values`/`array_values`),
+/// the same round-trip the array-variable transport uses.
+pub(in crate::executor) const POSITIONAL_PARAMS_TRANSPORT: &str = "__RUBASH_POSITIONAL_PARAMS";
+
+impl Executor {
+    /// The live positional window (`shift`-visible `$1..$#`) rendered
+    /// for a fork-shaped respawn; see POSITIONAL_PARAMS_TRANSPORT.
+    pub(in crate::executor) fn positional_params_transport_value(&self) -> String {
+        format_indexed_array_values(self.shell_state.positional_window().to_vec())
+    }
+}
+
 /// GNU jobs.c:2455/2460 pipeline_pgrp at fork time, recorded as j->pgrp
 /// (jobs.c:649) and substituted by `jobs -x` (builtins/jobs.def
 /// execute_list_with_replacements `itos (j->pgrp)`, rubash#1096): with job
@@ -742,7 +763,10 @@ impl Executor {
             .unwrap_or_else(|| "rubash".into());
         // Environment block for the child: process env merged with the
         // shell's env_vars (same filter the old Command::env loop applied).
-        let mut env_map: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        let mut env_map: std::collections::BTreeMap<String, String> =
+            crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
                 env_map.insert(key.clone(), value.clone());
@@ -761,7 +785,7 @@ impl Executor {
         // Strip by the KEYS PRESENT IN env_map, not the live trap table:
         // stale OS-env copies of removed traps (the std::env mirror writes
         // through setattr apply.rs but is not cleaned on trap removal) ride
-        // into env_map via std::env::vars() above, and a strip driven by
+        // into env_map via the process-env ingest above, and a strip driven by
         // env_vars would leave them (trap.tests: __RUBASH_TRAP_SIGHUP/
         // __RUBASH_TRAP_SIGUSR2 leaked into the monitored `sleep N &`
         // children after `trap - HUP`/`trap - USR2` had cleared the table).
@@ -838,6 +862,14 @@ impl Executor {
             }
         }
         env_map.insert("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string());
+        // rubash#2032: GNU's forked async/subshell child inherits the
+        // parent's positional parameters (execute_cmd.c:1576
+        // execute_in_subshell runs a whole-copy fork); stamp the live
+        // window for the child's init to seed (POSITIONAL_PARAMS_TRANSPORT).
+        env_map.insert(
+            POSITIONAL_PARAMS_TRANSPORT.to_string(),
+            self.positional_params_transport_value(),
+        );
         // rubash#1074: the wrapper child is one subshell level deeper than
         // this shell (execute_in_subshell's subshell_level++); carry the
         // target depth so the child's BASH_SUBSHELL starts at parent + 1.
@@ -1411,6 +1443,15 @@ impl Executor {
         // foreground-classification path owns it, so stay out.
         #[cfg(unix)]
         if super::external_inner::is_enoexec_candidate(&program) {
+            return None;
+        }
+        // rubash#1905: a word naming a synthetic /proc operand needs
+        // the spawn-boundary materialization the foreground external
+        // path owns (proc_operands); the direct spawn has no operand
+        // plumbing, so the shape keeps the wrapper, whose child
+        // serves the operand there — the same decline family as
+        // process substitutions above.
+        if crate::executor::proc_operands::args_name_synthetic_proc(&expanded.words) {
             return None;
         }
         Some((program, expanded.words))
@@ -3419,6 +3460,15 @@ impl Executor {
             self.shell_state.loop_depth += 1;
             let result = self.execute_ast_inner(body);
             self.shell_state.loop_depth -= 1;
+            // GNU execute_cmd.c:3838 REAP() (execute_while_or_until):
+            // dead jobs — and, via cleanup_dead_jobs -> coproc_reap,
+            // dead coprocs (rubash#2053) — are silently reaped after
+            // every while/until body in a non-interactive or
+            // non-job-control shell. The alias-reparse path had this
+            // call (alias_loops.rs); the AST path missed it, so a
+            // coproc that died during a while loop kept its variables
+            // for the whole loop.
+            self.reap_dead_jobs_after_loop_body();
             self.run_pending_signal_traps()?;
             match result {
                 Ok(()) => {
@@ -4020,6 +4070,14 @@ impl Executor {
                 let line_offset = line.parse::<usize>().unwrap_or(1).saturating_sub(1);
                 child.env("__RUBASH_LINE_OFFSET", line_offset.to_string());
             }
+            // rubash#2032: the coproc child is a GNU fork (execute_cmd.c
+            // coproc_getfd -> make_child), so it inherits the parent's
+            // positional parameters like every other fork-shaped respawn
+            // (POSITIONAL_PARAMS_TRANSPORT).
+            child.env(
+                POSITIONAL_PARAMS_TRANSPORT,
+                self.positional_params_transport_value(),
+            );
             // Coprocess children own a shell-created stdin pipe. Keep builtin
             // readers attached to it and let TERM use native termination when a
             // blocked read cannot consume the shell signal mailbox.
@@ -4451,6 +4509,10 @@ impl Executor {
             // stderr writes are absorbed (the ENOSPC profile cannot
             // cross the spawn boundary; the in-shell faces carry it).
             Some(FdWriteEndpoint::FullDevice) => CoprocStderrPlan::Direct(Stdio::null()),
+            // rubash#2042: fd 2 bound to a 0644-class synthetic /proc
+            // content entry — same boundary: the EINVAL write profile
+            // cannot cross into the child's handle; writes absorb.
+            Some(FdWriteEndpoint::ProcContentWrite) => CoprocStderrPlan::Direct(Stdio::null()),
         }
     }
 
@@ -4783,6 +4845,10 @@ impl Executor {
             ),
             // rubash#1898: mirrors the plan's /dev/full arm.
             Some(FdWriteEndpoint::FullDevice) => CoprocFdSpec::Null,
+            // rubash#2042: mirrors the plan's synthetic-/proc arm —
+            // the child's stderr writes absorb (Null), exactly like
+            // the /dev/full binding's ENOSPC ceiling.
+            Some(FdWriteEndpoint::ProcContentWrite) => CoprocFdSpec::Null,
         })
     }
 

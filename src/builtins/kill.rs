@@ -334,6 +334,16 @@ pub const SIGQUIT_NUMBER: i32 = libc::SIGQUIT;
 #[cfg(not(unix))]
 pub const SIGQUIT_NUMBER: i32 = 3;
 
+/// The platform's SIGINT number for dispatch paths that poll the pending
+/// queue (the winux fifo rendezvous wait, rubash#1903). Linux: 2; Darwin/
+/// BSD also number it 2. The non-unix value keeps the Windows file-mailbox
+/// wire format's Linux numbering by contract (see SIGNALS above).
+#[cfg(unix)]
+pub const SIGINT_NUMBER: i32 = libc::SIGINT;
+/// Non-unix (Windows mailbox wire format, Linux numbering by contract).
+#[cfg(not(unix))]
+pub const SIGINT_NUMBER: i32 = 2;
+
 pub fn execute(args: &[String]) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();

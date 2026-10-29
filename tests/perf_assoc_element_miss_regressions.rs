@@ -95,6 +95,83 @@ fn assoc_miss_operator_forms_and_storage_shape() {
     assert_eq!(stderr, "");
 }
 
+/// rubash#2004: the `${#name[key]}` LENGTH leg must be settled by the
+/// typed cell too — hit, miss, and set-but-empty — not re-derived from
+/// the serialized storage (whole-storage clone + rehash + linear scan
+/// per call, Θ(n) in the table size, hit AND miss). Values verified
+/// against GNU bash 5.3.20.
+#[test]
+fn assoc_length_hit_miss_and_empty_hit() {
+    let (code, stdout, stderr) = run_script(
+        "declare -A m=()\n\
+         for ((j=0; j<50; j++)); do m[key$j]=val$j; done\n\
+         m[empty]=\n\
+         echo \"len-hit=[${#m[key25]}] len-miss=[${#m[nope]}] len-emptyhit=[${#m[empty]}]\"\n\
+         unset 'm[key25]'\n\
+         echo \"after-unset=[${#m[key25]}]\"\n",
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        stdout,
+        "len-hit=[5] len-miss=[0] len-emptyhit=[0]\nafter-unset=[0]\n"
+    );
+    assert_eq!(stderr, "");
+}
+
+/// rubash#2004: a side-effecting subscript in a length read is
+/// evaluated exactly once per expansion, on the hit leg and on the
+/// settled-miss leg (GNU subst.c:9777 parameter_brace_expand evaluates
+/// the subscript once, then assoc.c assoc_reference does one lookup).
+#[test]
+fn assoc_length_subscript_evaluated_once_hit_and_miss() {
+    let (code, stdout, stderr) = run_script(
+        "declare -A m=()\n\
+         for ((j=0; j<50; j++)); do m[key$j]=val$j; done\n\
+         i=0\n\
+         echo \"se-hit=[${#m[key$((i++))]}] i=$i\"\n\
+         echo \"se-miss=[${#m[no$((i++))]}] i=$i\"\n",
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "se-hit=[4] i=1\nse-miss=[0] i=2\n");
+    assert_eq!(stderr, "");
+}
+
+/// rubash#2004: the nameref-cell length leg (`declare -n ref=m`;
+/// `${#ref[key]}`) takes the same settled lookup, and a value with
+/// multibyte text measures like GNU's `${#}`.
+#[test]
+fn assoc_length_through_nameref_and_multibyte_value() {
+    let (code, stdout, stderr) = run_script(
+        "declare -A m=()\n\
+         for ((j=0; j<50; j++)); do m[key$j]=val$j; done\n\
+         m[uni]=héllo\n\
+         declare -n ref=m\n\
+         echo \"ref-hit=[${#ref[key7]}] ref-miss=[${#ref[zz]}] uni=[${#m[uni]}]\"\n",
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "ref-hit=[4] ref-miss=[0] uni=[6]\n");
+    assert_eq!(stderr, "");
+}
+
+/// rubash#2004: the empty-key `bad array subscript` error
+/// (subst.c:7545-7552) fires before any lookup, settled or not.
+#[test]
+fn assoc_length_empty_key_still_errors() {
+    let (code, stdout, stderr) = run_script(
+        "declare -A w=([a]=x)\n\
+         unset e\n\
+         echo \"before\"\n\
+         echo \"emptykey=[${#w[$e]}]\"\n\
+         echo \"after rc=$?\"\n",
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "before\nafter rc=1\n");
+    assert!(
+        stderr.contains("[$e]: bad array subscript"),
+        "stderr was: {stderr}"
+    );
+}
+
 /// The settled-miss shortcut must also hold for function-local
 /// assoc arrays and through a nameref to the array.
 #[test]

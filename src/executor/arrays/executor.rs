@@ -212,6 +212,73 @@ impl Executor {
         )
     }
 
+    /// rubash#2004: the settled assoc answer for a caller that already
+    /// holds the EVALUATED key — the `${#name[key]}` length legs, which
+    /// expand the subscript exactly once themselves (re-deriving it from
+    /// the expression text here would double-evaluate a side-effecting
+    /// subscript, the bug the F3 fix removed from the plain path).
+    /// Admission and authority mirror the typed assoc fetch in
+    /// `array_element_parameter_value_uncached` exactly: nameref resolved
+    /// to its storage name, assoc mark judged on the storage name, the
+    /// rubash#1510 freshness gate, and a structured assoc cell present —
+    /// then the cell (a complete mirror of the render, rubash#616
+    /// Phase 1a invariant) answers hit AND miss authoritatively:
+    /// `Some(Some(value))` / `Some(None)`. `None` = not settled; the
+    /// caller runs its storage leg unchanged. GNU anchor: assoc.c
+    /// assoc_reference is a single hash lookup, hit or miss — the storage
+    /// leg this bypasses cloned the whole render and re-hashed +
+    /// linear-scanned it on EVERY `${#m[k]}` call (measured on master
+    /// 16a42d78, Linux same-machine: length of a hit or missed key at
+    /// n=10000 cost 479-1115us per call vs GNU 4-16us, growing ~x5-11
+    /// per 10x of table size).
+    pub(in crate::executor) fn assoc_element_value_settled(
+        &self,
+        array_name: &str,
+        key: &str,
+    ) -> Option<Option<String>> {
+        let pre_attrs = self.shell_state.env_vars.attr_of(array_name);
+        let storage_owned: String;
+        let storage_name: &str = if pre_attrs.nameref {
+            match self.resolved_variable_name(array_name) {
+                Some(resolved) => {
+                    storage_owned = resolved;
+                    &storage_owned
+                }
+                None => return None,
+            }
+        } else {
+            array_name
+        };
+        let assoc_marked = if pre_attrs.nameref {
+            is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, storage_name)
+        } else {
+            pre_attrs.assoc
+        };
+        if !assoc_marked {
+            return None;
+        }
+        if self.shell_state.env_vars.array_cells_dirty()
+            && !self.shell_state.env_vars.cell_is_fresh(storage_name)
+        {
+            return None;
+        }
+        if !matches!(
+            self.shell_state
+                .variables
+                .get(storage_name)
+                .map(|variable| &variable.value),
+            Some(crate::shell::ShellValue::AssociativeArray(_))
+        ) {
+            return None;
+        }
+        Some(
+            self.shell_state
+                .variables
+                .associative_element(storage_name, key)
+                .map(str::to_string),
+        )
+    }
+
     fn array_element_parameter_value_uncached(&self, expression: &str) -> Option<String> {
         let (array_name, key) = parse_array_subscript(expression)?;
 

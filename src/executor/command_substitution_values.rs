@@ -1,3 +1,4 @@
+use super::command_registry::{comsub_front_slot, ComsubFrontSlot};
 use super::*;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
@@ -763,10 +764,14 @@ impl Executor {
     ) -> Option<String> {
         words.first()?;
         let stdio = self.command_substitution_words_and_stdio(words)?;
-        if matches!(
-            stdio.expanded_words.first().map(String::as_str),
-            Some("tty") | Some("/bin/tty") | Some("/usr/bin/tty")
-        ) {
+        // The front face's claim keys are the registry's COMSUB_FRONT
+        // projection (rubash#2036 S4), slash forms included.
+        if stdio
+            .expanded_words
+            .first()
+            .and_then(|word| comsub_front_slot(word))
+            == Some(ComsubFrontSlot::Tty)
+        {
             let silent = stdio
                 .expanded_words
                 .iter()
@@ -806,7 +811,7 @@ impl Executor {
         // &self path records no hash-table entry (`$(tty)` has the same
         // introspection face).
         #[cfg(windows)]
-        if matches!(first_word, "tput" | "/bin/tput" | "/usr/bin/tput") {
+        if comsub_front_slot(first_word) == Some(ComsubFrontSlot::Tput) {
             if let Some(outcome) = self.admitted_tput_outcome_for_words(&stdio.expanded_words) {
                 let (output, status) = match outcome {
                     crate::executor::tput_emulation::TputOutcome::Bytes(bytes) => {
@@ -846,10 +851,20 @@ impl Executor {
         };
         let (dev_args, dev_ops) =
             self.materialize_dev_fd_operands(&stdio.expanded_words[1..], dev_stdin, dev_stdout);
+        // rubash#1905: synthetic /proc operands become spawn-time
+        // snapshot files for a child without its own /proc layer; the
+        // record lives until the substitution's output is collected
+        // (function scope end).
+        let (proc_args, _proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
+            &dev_args,
+            Some(&stdio.expanded_words[0]),
+            Some(program.as_path()),
+            &self.shell_state.env_vars,
+        );
         let (mut process, _) = external_command_for_named_program(
             &program,
             Some(&stdio.expanded_words[0]),
-            &dev_args,
+            &proc_args,
             &self.shell_state.env_vars,
             self.bash_argv0_env_supplied(&[]),
         );
@@ -907,8 +922,22 @@ impl Executor {
         if let Some(redirect) = &stdio.stderr_redirect {
             let file = open_command_substitution_redirect(redirect).ok()?;
             process.stderr(Stdio::from(file));
+        } else if self.command_substitution_stderr_is_process_stderr() {
+            // GNU subst.c:7143 command_substitute: the forked child shares
+            // the parent's fd 2 — only fd 1 is replaced by the capture
+            // pipe, fd 2 is never captured (subst.c:7149). Inherit it live:
+            // piping it into wait_with_output's buffer dropped the bytes
+            // wholesale, so a spawned child's diagnostics inside $( )
+            // vanished while its status survived (rubash#2086).
+            process.stderr(Stdio::inherit());
         } else {
-            process.stderr(Stdio::piped());
+            // fd 2 is rebound (a file, a stdout snapshot), closed, or
+            // captured by an enclosing pipeline stage in this context: a
+            // bare spawn has no handle for that binding. Decline to the
+            // full-execution path, whose stdio planner realizes fd 2 from
+            // the fd table (the same fall-through every other
+            // inexpressible shape in this route takes).
+            return None;
         }
         // rubash#438: /dev/fd/N operand words stay literal on Unix; pin the
         // substitution pipe read ends at their numbers in the child.
@@ -953,6 +982,21 @@ impl Executor {
                 .trim_capture_terminator()
                 .to_string(),
         )
+    }
+
+    /// True when this executor's fd 2 is the ambient process stderr: the
+    /// seeded default endpoint, not closed, and not shadowed by an
+    /// executor-level stderr capture (a pipeline-stage body installs one,
+    /// and its buffered routing — not a live handle — owns fd 2 there).
+    /// Only then does `Stdio::inherit()` name exactly the object GNU's
+    /// substitution fork leaves on the child's fd 2 (subst.c:7143).
+    fn command_substitution_stderr_is_process_stderr(&self) -> bool {
+        !self.fd_table.is_closed(2)
+            && self.stderr_capture.is_none()
+            && matches!(
+                self.fd_table.output_endpoint(2),
+                Some(FdWriteEndpoint::Stderr)
+            )
     }
 
     fn command_substitution_words_and_stdio(
@@ -1086,10 +1130,8 @@ impl Executor {
         // is a special form that does not resolve (out of range); None
         // when it is not a special prefix at all, so the caller falls
         // through to the `~user` lookup.
-        match crate::expand::tilde::tilde::special_tilde_expansion(
-            word,
-            &self.shell_state.env_vars,
-        ) {
+        match crate::expand::tilde::tilde::special_tilde_expansion(word, &self.shell_state.env_vars)
+        {
             Some(Some(value)) => Some(value),
             Some(None) => Some(word.to_string()),
             None => None,

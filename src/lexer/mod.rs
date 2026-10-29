@@ -557,6 +557,42 @@ pub(crate) struct GroupScanFeeder {
     /// residual checkpoints use (perf8): every non-append mutation of
     /// `logical_line` drops it.
     param_open_cache: Option<bool>,
+    /// rubash#1955: resumable state of the per-pass `set -o posix` flip
+    /// scan (see `line_posix_mode_change`). The scan's answer over an
+    /// append-only token list is a running fold: a tail-resumed pass only
+    /// has to scan the appended delta (plus re-probe a `set` word whose
+    /// argument list was cut off by the previous pass's end). Before this,
+    /// every appended line re-scanned the whole accumulated token list —
+    /// Θ(tokens) per physical line, Θ(tokens²) per group (defs-wrap-8000
+    /// `-n`: 160M token visits). GNU anchor: parse.y:3557 read_token
+    /// streams the input once; no per-line whole-list rescan exists there.
+    posix_scan: LinePosixScan,
+    /// rubash#1955: heredoc-presence watermark over the same append-only
+    /// token list. `heredoc_prefix_present` is the `windows(2)` answer
+    /// over the first `heredoc_scan_upto` tokens; a tail-resumed pass only
+    /// re-checks the straddling pair and the delta pairs. The join
+    /// decision needs presence only — the delimiter structs themselves
+    /// are still computed by a full `heredoc_delimiters` call, once, on
+    /// the commit path (their operator contexts read the final source
+    /// text, so caching them across passes could go stale).
+    heredoc_scan_upto: usize,
+    heredoc_prefix_present: bool,
+    /// rubash#1955: byte column of the last bare `{` Keyword token the
+    /// summary fold has seen in the CURRENT token list, maintained by
+    /// `fold_pass_tokens` (delta-only on tail-resumed passes, rebuilt on
+    /// any pass that refolds from the line-start snapshot — the same
+    /// passes that rewrite the list). When the join branch stores the
+    /// boundary checkpoint, this value is copied into
+    /// `innermost_brace_column`: it is exactly the `rposition` answer the
+    /// resume gate used to recompute over the whole checkpoint token
+    /// list on every `}`-bearing appended line.
+    fold_brace_column: Option<usize>,
+    /// The `fold_brace_column` snapshot belonging to the token list held
+    /// by the CURRENT `boundary` checkpoint; read by the resume gate.
+    /// Only written where `boundary` is stored, and only read when a
+    /// boundary checkpoint was actually taken, so it can never describe
+    /// a different list than the checkpoint's.
+    innermost_brace_column: Option<usize>,
     /// The parameter-expansion scan's checkpoint over `comsub_chars`
     /// (perf15, rubash#292 plan-B shape): `param_residuals_advance` follows
     /// the same streaming model as the quotes/compound checkpoints — per
@@ -682,6 +718,11 @@ impl GroupScanFeeder {
             brace_cache: BraceScanCache::default(),
             brace_join_active: false,
             param_open_cache: None,
+            posix_scan: LinePosixScan::new(),
+            heredoc_scan_upto: 0,
+            heredoc_prefix_present: false,
+            fold_brace_column: None,
+            innermost_brace_column: None,
             param_checkpoint: Some(ParamScanCheckpoint::initial()),
             boundary: None,
             opener: None,
@@ -862,6 +903,11 @@ impl GroupScanFeeder {
         if resumed {
             for token in &tokens[self.open_folded.min(tokens.len())..] {
                 self.fold_token(token);
+                // rubash#1955: keep the last-bare-`{` mirror current over
+                // the delta; the prefix part was folded by earlier passes.
+                if token.kind == TokenKind::Keyword && token.value == "{" {
+                    self.fold_brace_column = Some(token.column);
+                }
             }
         } else {
             // Restore (a COPY of) the open line's start snapshot: the same
@@ -871,11 +917,42 @@ impl GroupScanFeeder {
             self.keyword_stack = snapshot.0;
             self.last_significant = snapshot.1;
             self.stray_close = snapshot.2;
+            // This pass rewrote the token list from the fold point, so the
+            // last-bare-`{` mirror is rebuilt by the refold below.
+            self.fold_brace_column = None;
             for token in tokens {
                 self.fold_token(token);
+                if token.kind == TokenKind::Keyword && token.value == "{" {
+                    self.fold_brace_column = Some(token.column);
+                }
             }
         }
         self.open_folded = tokens.len();
+    }
+
+    /// rubash#1955: heredoc presence over the pass's token list, answered
+    /// incrementally. Presence is exactly "`windows(2)` holds a pair whose
+    /// first token is `TokenKind::HereDoc`" — a pure function of adjacent
+    /// token kinds, so over an append-only list the prefix answer survives
+    /// and only the pair straddling the watermark plus the delta pairs
+    /// are new. A pass that rewrote the list (not tail-resumed) or a
+    /// watermark that no longer fits resets to a full scan — the same
+    /// cost the old per-pass `heredoc_delimiters` call paid, now paid
+    /// only on list-rewriting passes.
+    fn heredoc_present_scan(&mut self, tokens: &[Token], tail_resumed: bool) -> bool {
+        fn pair_present(pair: &[Token]) -> bool {
+            pair[0].kind == TokenKind::HereDoc
+        }
+        if !tail_resumed || self.heredoc_scan_upto == 0 || self.heredoc_scan_upto > tokens.len() {
+            self.heredoc_prefix_present = tokens.windows(2).any(pair_present);
+        } else if tokens[self.heredoc_scan_upto - 1..]
+            .windows(2)
+            .any(pair_present)
+        {
+            self.heredoc_prefix_present = true;
+        }
+        self.heredoc_scan_upto = tokens.len();
+        self.heredoc_prefix_present
     }
 
     /// Feed one physical line (its raw text without the '\n'). The caller
@@ -1263,6 +1340,9 @@ impl GroupScanFeeder {
                         self.param_open_cache = None;
                         self.boundary = None;
                         self.opener = None;
+                        self.posix_scan.reset();
+                        self.heredoc_scan_upto = 0;
+                        self.heredoc_prefix_present = false;
                         self.rebuild_comsub_mirror();
                         self.group_clean = false;
                         comsub_state_changed = true;
@@ -1327,6 +1407,9 @@ impl GroupScanFeeder {
             self.param_open_cache = None;
             self.boundary = None;
             self.opener = None;
+            self.posix_scan.reset();
+            self.heredoc_scan_upto = 0;
+            self.heredoc_prefix_present = false;
             self.continued_line = true;
             self.brace_join_active = false;
             self.group_clean = false;
@@ -1406,6 +1489,9 @@ impl GroupScanFeeder {
             self.param_open_cache = None;
             self.boundary = None;
             self.opener = None;
+            self.posix_scan.reset();
+            self.heredoc_scan_upto = 0;
+            self.heredoc_prefix_present = false;
             self.group_clean = false;
             self.rebuild_comsub_mirror();
         }
@@ -1453,12 +1539,17 @@ impl GroupScanFeeder {
         let resume_allowed = if !line.contains('}') {
             true
         } else {
-            let opener_column = boundary_taken.as_ref().and_then(|(_, tokens, _)| {
-                tokens
-                    .iter()
-                    .rposition(|token| token.kind == TokenKind::Keyword && token.value == "{")
-                    .map(|index| tokens[index].column)
-            });
+            // rubash#1955: the innermost bare `{` of the checkpoint token
+            // list is the fold-maintained mirror stored alongside the
+            // checkpoint (`innermost_brace_column`), not a fresh
+            // `rposition` over the whole list — that scan was Θ(tokens)
+            // on every `}`-bearing appended line (the dominant single
+            // cost of the defs-wrap shape: ~14s of a ~47s debug run).
+            let opener_column = if boundary_taken.is_some() {
+                self.innermost_brace_column
+            } else {
+                None
+            };
             match opener_column {
                 None => true,
                 Some(column) => {
@@ -1501,7 +1592,9 @@ impl GroupScanFeeder {
         // byte-identical to a fresh full pass in all three cases).
         let fold_chars = line_tokens.len() as u64;
         self.fold_pass_tokens(&line_tokens, tail_resumed);
-        if let Some(updated) = line_posix_mode_change(&line_tokens) {
+        if let Some(updated) =
+            line_posix_mode_change(&mut self.posix_scan, &line_tokens, tail_resumed)
+        {
             // rubash#1544: never apply the flip here. This pass may sit
             // inside a still-open complete_command (an accumulating brace
             // group re-lexes its earlier lines on every appended line;
@@ -1604,12 +1697,15 @@ impl GroupScanFeeder {
                     .min(self.logical_line.len());
             }
         }
-        // perf21: compute the delimiters ONCE — the join branch below only
-        // needs their emptiness, and the commit path reuses the same Vec
-        // (heredoc_delimiters reads only token kinds/values/raw, none of
-        // which the gap-capture loop above mutates).
-        let delimiters = heredoc_delimiters(&line_tokens, &self.logical_line, self.in_comsub);
-        let has_heredoc = !delimiters.is_empty();
+        // rubash#1955: the join branch below needs only heredoc PRESENCE,
+        // which the watermark scan answers over the appended delta alone
+        // (presence is a pure `windows(2)` predicate over token kinds).
+        // The delimiter structs are computed by the full
+        // `heredoc_delimiters` call on the commit path below — once per
+        // logical line, against the final source text their operator
+        // contexts read (perf21's compute-once, moved to the one path
+        // that consumes the Vec).
+        let has_heredoc = self.heredoc_present_scan(&line_tokens, tail_resumed);
         // Join forward only on signals the tokens themselves prove: an
         // unclosed reserved-word `{` group (see tokens_open_unclosed_brace_group)
         // or an unterminated `${...}` parameter expansion. The old text-level
@@ -1719,6 +1815,10 @@ impl GroupScanFeeder {
             if brace_group_open && !param_expansion_open {
                 if let Some(state) = pass_boundary {
                     self.boundary = Some((self.logical_line.len(), line_tokens, state));
+                    // rubash#1955: snapshot the fold's last-bare-`{`
+                    // mirror for THIS stored list; the resume gate reads
+                    // it instead of re-scanning the checkpoint tokens.
+                    self.innermost_brace_column = self.fold_brace_column;
                 }
             } else if param_expansion_open {
             }
@@ -1790,6 +1890,7 @@ impl GroupScanFeeder {
         // The lexer cannot return an error, so record the fatal condition with
         // its script-relative line and stop tokenizing. `main` converts the
         // recorded flag into the EX_BADUSAGE exit status.
+        let delimiters = heredoc_delimiters(&line_tokens, &self.logical_line, self.in_comsub);
         if delimiters.len() > 16 {
             if std::env::var_os("RUBASH_DBG_543").is_some() {
                 eprintln!(
@@ -1814,6 +1915,9 @@ impl GroupScanFeeder {
         self.param_open_cache = None;
         self.boundary = None;
         self.opener = None;
+        self.posix_scan.reset();
+        self.heredoc_scan_upto = 0;
+        self.heredoc_prefix_present = false;
         // Offsets restart for the next logical line: cache invalid. Every
         // residual checkpoint resets to the fresh-scan state (the empty
         // buffer's full scan is `Default`), so the next logical line's
@@ -1899,7 +2003,20 @@ impl GroupScanFeeder {
             // reprinted with the body inside the closing `)`. Rotate
             // `$(cat <<EOF)\nfoo\nEOF` into `$(cat <<EOF\nfoo\nEOF)` so every
             // downstream consumer sees the GNU reprint order (heredoc7.sub).
-            if let Some(rotated) = relocate_comsub_heredoc_paren(&self.logical_line) {
+            // rubash#2025: when the delimiter line never arrives and input
+            // ends inside the header-close shape, GNU still closes at the
+            // header `)` and gathers the body to EOF (parse.y:4563-4567 +
+            // make_cmd.c:627); complete the line to that reprint instead of
+            // reporting an unclosed `(`.
+            if let Some(completed) = complete_comsub_heredoc_header_close(&self.logical_line) {
+                self.logical_line = completed;
+                self.brace_cache.clear();
+                self.boundary = None;
+                self.opener = None;
+                // End of input: no further gate calls read these offsets,
+                // but keep the mirror honest anyway (rubash#292).
+                self.rebuild_comsub_mirror();
+            } else if let Some(rotated) = relocate_comsub_heredoc_paren(&self.logical_line) {
                 self.logical_line = rotated;
                 self.brace_cache.clear();
                 self.boundary = None;
@@ -2233,6 +2350,259 @@ pub fn stdin_line_ends_with_continuation(input: &str) -> bool {
 /// substitution's heredoc past the gathered body, mirroring GNU
 /// print_comsub's reprint order. Returns None when the input carries no such
 /// pattern.
+/// rubash#2025: end-of-input completion for the header-close shape the
+/// per-line gates cannot decide. `$(cat <<EOF file)` with no delimiter
+/// line anywhere after it leaves the substitution open forever — the gate
+/// scanners keep the logical line joining (that is how a TERMINATED
+/// header-close gathers its body lines, rubash#1982) and at EOF the
+/// driver reports `unexpected EOF while looking for matching ')'`.
+/// GNU's reader closes the substitution at the header `)` instead
+/// (parse.y:4513/4519 parse_comsub sets PST_EOFTOKEN and
+/// `shell_eof_token = close`), then gather_here_documents
+/// (parse.y:4563-4567) reads the pending body from the following lines —
+/// to end of input here, warning per make_cmd.c:627 — and print_comsub
+/// (parse.y:4655, print_cmd.c:164) reprints the command with that body
+/// inside the closing `)`.
+///
+/// This rebuilds that reprint against the accumulated logical line: the
+/// header command text, the gathered body lines, a synthesized delimiter
+/// line (GNU's gather consumed the body to EOF; the delimiter line gives
+/// every downstream text consumer the same body without re-modeling
+/// gather-to-EOF), the closing `)` on its own line, and the header line's
+/// tail after the `)` (an outer quote's closing `"`) moved to the very
+/// end — the consumption order GNU's reader produces. Two IFS_GLUE marks
+/// after the `$(` carry the evidence to the expansion-side warning site:
+/// one mark is the rubash#1982 header-close record (`command
+/// substitution: 1 unterminated here-document`), and the second says the
+/// gather ran to end of input (`here-document at line N delimited by
+/// end-of-file`, make_cmd.c:627) — a REAL delimiter line would be
+/// indistinguishable after the synthesis.
+///
+/// rubash#2026: the scan also recognizes a `$(` INSIDE a double-quoted
+/// word (GNU parse.y:4172-4174 parse_matched_pair dispatches
+/// `$(...)` to parse_comsub with `~P_DQUOTE` - the nested parse starts
+/// with the outer quote state cleared). The completion then reaches the
+/// quoted faces the per-line quotes gate cannot close (its atomic unit
+/// skip consumes the outer quote's closing `"`, which sits after the
+/// header `)` on line 1, so the gate keeps joining lines to EOF). For a
+/// quoted opener the header-line tail after the `)` must contain the
+/// closing quote - otherwise the word is genuinely unterminated and the
+/// quote machinery's report must stand. A TERMINATED quoted shape
+/// (delimiter line present) rebuilds without the synthesized delimiter
+/// and carries ONE mark, exactly like the unquoted rotation's record.
+///
+/// Refusal cases keep today's behavior: no header-line `)`, an open
+/// substitution introducer on the header line (perf19's refusal shape),
+/// a second `<<` candidate, single quotes still open at EOF, a quoted
+/// opener whose closing quote is missing from the header-line tail,
+/// nested substitutions opened after the candidate, or a candidate
+/// deeper than the outermost substitution. A false refusal only keeps
+/// the current unclosed-EOF report; a false completion would rewrite a
+/// line GNU errors on, so every ambiguity declines.
+fn complete_comsub_heredoc_header_close(input: &str) -> Option<String> {
+    if !input.contains("$(") || !input.contains("<<") {
+        return None;
+    }
+    let chars: Vec<char> = input.chars().collect();
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    // The `$` index plus the double-quote state at entry for each
+    // currently open construct. The candidate records the substitution
+    // that OWNS the heredoc (the rebuild splices its marks right after
+    // that opener); the saved flag is restored when the construct closes
+    // and decides the tail-quote requirement for quoted openers
+    // (parse.y:4174 `~P_DQUOTE`: the nested parse starts with the outer
+    // double-quote state cleared).
+    let mut openers: Vec<(usize, bool)> = Vec::new();
+    let mut candidate: Option<(usize, usize, usize, usize, String, bool, bool, bool)> = None;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' if !double => {
+                single = true;
+                index += 1;
+            }
+            '"' if !single => {
+                double = !double;
+                index += 1;
+            }
+            '$' if !single
+                && chars.get(index + 1) == Some(&'(')
+                && chars.get(index + 2) != Some(&'(') =>
+            {
+                // A `$(` is live inside double quotes (parse.y:4172-4174),
+                // and the nested parse owns its quote state: clear the
+                // outer double flag for the body, restore it on close.
+                depth += 1;
+                openers.push((index, double));
+                double = false;
+                index += 2;
+            }
+            '(' if depth > 0 && !double => {
+                depth += 1;
+                openers.push((usize::MAX, double));
+                index += 1;
+            }
+            ')' if depth > 0 && !double => {
+                depth = depth.saturating_sub(1);
+                if let Some((_, saved_double)) = openers.pop() {
+                    double = saved_double;
+                }
+                index += 1;
+            }
+            '<' if depth > 0
+                && !double
+                && chars.get(index + 1) == Some(&'<')
+                && chars.get(index + 2) != Some(&'<') =>
+            {
+                let facts = heredoc_scan::scan_heredoc_header_facts(&chars, index).ok()?;
+                if facts.header_close_paren.is_some() && !facts.substitution_on_header && depth == 1
+                {
+                    if candidate.is_some() {
+                        // A second header-close candidate: ambiguous shape.
+                        return None;
+                    }
+                    // The terminator must not already be present: the
+                    // terminated shapes are the rotation's (rubash#1982)
+                    // and completing them would duplicate the body.
+                    let delimiter = facts.delimiter.clone();
+                    let mut line_start = facts.body_start;
+                    let terminated = loop {
+                        if line_start >= chars.len() {
+                            break false;
+                        }
+                        let mut line_end = line_start;
+                        while line_end < chars.len() && chars[line_end] != '\n' {
+                            line_end += 1;
+                        }
+                        let line: String = chars[line_start..line_end].iter().collect();
+                        let comparable = if facts.strip_tabs {
+                            line.trim_start_matches('\t')
+                        } else {
+                            line.as_str()
+                        };
+                        if comparable == delimiter
+                            || (comparable.starts_with(delimiter.as_str())
+                                && comparable[delimiter.len()..].contains(')'))
+                        {
+                            break true;
+                        }
+                        if line_end >= chars.len() {
+                            break false;
+                        }
+                        line_start = line_end + 1;
+                    };
+                    let Some(&(opener, saved_double)) = openers.last() else {
+                        return None;
+                    };
+                    if opener == usize::MAX {
+                        // The innermost opener is a plain `(` group, not a
+                        // `$(`: the header `)` would close the group, not a
+                        // substitution this completion models.
+                        return None;
+                    }
+                    let paren = facts.header_close_paren.unwrap();
+                    if saved_double {
+                        // The word is double-quoted around the substitution:
+                        // the closing quote must sit in the header-line tail
+                        // after the `)`. Without it the word is genuinely
+                        // unterminated and the quote machinery's EOF report
+                        // is the correct outcome.
+                        let tail: String = chars[paren + 1..facts.header_end].iter().collect();
+                        if !tail.contains('"') {
+                            return None;
+                        }
+                    }
+                    candidate = Some((
+                        opener,
+                        paren,
+                        facts.header_end,
+                        depth,
+                        facts.delimiter,
+                        facts.strip_tabs,
+                        saved_double,
+                        terminated,
+                    ));
+                }
+                // Resume past the header line either way: its `)` and tail
+                // belong to the candidate's accounting, not to a second
+                // scan.
+                index = facts.body_start.max(index + 1);
+            }
+            _ => index += 1,
+        }
+    }
+    let Some((
+        opener,
+        paren,
+        header_end,
+        depth_at_candidate,
+        delimiter,
+        _strip_tabs,
+        _quoted,
+        terminated,
+    )) = candidate
+    else {
+        return None;
+    };
+    // The candidate must still be what keeps the line open: nothing may
+    // have opened (nested substitution, quote) after it, and the
+    // substitution itself must never have closed. The double flag rides
+    // the opener stack (parse.y:4174 ~P_DQUOTE), so an outer word still
+    // open at EOF would surface as `double == true` here only through a
+    // non-`$(` route the tail-quote rule already declined.
+    if depth != depth_at_candidate || single || double {
+        return None;
+    }
+    let glue = crate::executor::markers::IFS_GLUE;
+    let mut out: String = chars[..opener + 2].iter().collect();
+    out.push(glue);
+    if !terminated {
+        // The second mark records the eof gather (make_cmd.c:627); a real
+        // delimiter line keeps the single rubash#1982 header-close record.
+        out.push(glue);
+    }
+    out.extend(chars[opener + 2..paren].iter());
+    // The gathered body: every physical line after the header line ran
+    // into the gather (to end of input, or through the terminator line).
+    out.extend(chars[header_end..].iter());
+    if !terminated {
+        // The synthesized delimiter line: GNU's gather consumed the body
+        // to EOF, and the delimiter line gives every downstream text
+        // consumer that same body without re-modeling gather-to-EOF.
+        out.push('\n');
+        out.push_str(&delimiter);
+    }
+    // The closing `)` on its own line (print_comsub's reprint order).
+    out.push('\n');
+    out.push(')');
+    // The header line's tail after the `)` — an outer word's closing
+    // quote and any other literal bytes — resumes the outer word, which
+    // is where GNU's reader picks up after the gather.
+    out.extend(chars[paren + 1..header_end].iter());
+    Some(out)
+}
+
 fn relocate_comsub_heredoc_paren(input: &str) -> Option<String> {
     if !input.contains("$(") || !input.contains("<<") {
         return None;
@@ -2761,10 +3131,57 @@ fn tokenize_with_boundary(
 
 /// Detect top-level `set -o posix` / `set +o posix` commands in a tokenized
 /// logical line, returning the POSIX mode that should apply to later lines.
-fn line_posix_mode_change(tokens: &[Token]) -> Option<bool> {
-    let mut result = None;
-    let mut command_start = true;
-    let mut index = 0usize;
+/// rubash#1955: resumable state of the `set -o posix` flip scan over one
+/// accumulating logical line's token list. The scan is a left-to-right
+/// fold whose only non-local step is the argument probe after a
+/// command-start `set` word; that probe is decisive unless it runs off
+/// the end of the list (an argument list cut by the pass boundary), in
+/// which case `pending_set` parks the `set` word's index and the next
+/// pass re-probes from there before folding the appended delta. The
+/// running `result` therefore equals the from-scratch scan's answer over
+/// the tokens folded so far, on every pass.
+#[derive(Clone)]
+pub(super) struct LinePosixScan {
+    result: Option<bool>,
+    command_start: bool,
+    pending_set: Option<usize>,
+    upto: usize,
+}
+
+impl LinePosixScan {
+    fn new() -> Self {
+        LinePosixScan {
+            result: None,
+            command_start: true,
+            pending_set: None,
+            upto: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = LinePosixScan::new();
+    }
+}
+
+fn line_posix_mode_change(
+    scan: &mut LinePosixScan,
+    tokens: &[Token],
+    tail_resumed: bool,
+) -> Option<bool> {
+    if !tail_resumed || scan.upto > tokens.len() {
+        scan.reset();
+    }
+    // A parked `set` word is re-probed first: it sits at a command start,
+    // and the tokens after it up to the old watermark were all Words (the
+    // probe consumed them), so re-entering the fold at its index with
+    // `command_start` set replays the from-scratch scan exactly.
+    let mut index = match scan.pending_set {
+        Some(set_index) => {
+            scan.command_start = true;
+            set_index
+        }
+        None => scan.upto,
+    };
     while index < tokens.len() {
         let token = &tokens[index];
         let is_separator = token.line_break
@@ -2778,44 +3195,67 @@ fn line_posix_mode_change(tokens: &[Token]) -> Option<bool> {
                     | TokenKind::PipeErr
             );
         if is_separator {
-            command_start = true;
+            scan.command_start = true;
             index += 1;
             continue;
         }
-        if command_start && token.kind == TokenKind::Word && token.value == "set" {
-            if let Some(enabled) = set_command_posix_change(&tokens[index + 1..]) {
-                result = Some(enabled);
+        if scan.command_start && token.kind == TokenKind::Word && token.value == "set" {
+            match set_command_posix_probe(&tokens[index + 1..]) {
+                SetPosixProbe::Flip(enabled) => scan.result = Some(enabled),
+                SetPosixProbe::Decided => {}
+                SetPosixProbe::Undecided => {
+                    scan.pending_set = Some(index);
+                    scan.command_start = false;
+                    scan.upto = tokens.len();
+                    return scan.result;
+                }
             }
         }
-        command_start = false;
+        scan.command_start = false;
         index += 1;
     }
-    result
+    scan.pending_set = None;
+    scan.upto = tokens.len();
+    scan.result
 }
 
-fn set_command_posix_change(tokens: &[Token]) -> Option<bool> {
+/// The `set` argument probe, classified. `Decided` covers every outcome
+/// the pre-#1955 `set_command_posix_change` reached without exhausting
+/// the token slice (including "no flip"); `Undecided` is exactly the
+/// exhaustion outcomes — all-Word arguments with no verdict, or a
+/// trailing `-o`/`+o` whose option name has not been lexed yet — where
+/// appended tokens can still change the answer.
+enum SetPosixProbe {
+    Flip(bool),
+    Decided,
+    Undecided,
+}
+
+fn set_command_posix_probe(tokens: &[Token]) -> SetPosixProbe {
     let mut index = 0usize;
     while index < tokens.len() {
         let token = &tokens[index];
         if token.kind != TokenKind::Word {
-            return None;
+            return SetPosixProbe::Decided;
         }
         let value = token.value.as_str();
         if value == "--" {
-            return None;
+            return SetPosixProbe::Decided;
         }
         if value == "-o" || value == "+o" {
-            let next = tokens.get(index + 1)?;
+            let Some(next) = tokens.get(index + 1) else {
+                return SetPosixProbe::Undecided;
+            };
             if next.kind == TokenKind::Word && next.value == "posix" {
-                return Some(value == "-o");
+                return SetPosixProbe::Flip(value == "-o");
             }
-            return None;
+            return SetPosixProbe::Decided;
         }
         if value.starts_with('-') || value.starts_with('+') {
             index += 1;
             continue;
         }
-        return None;
+        return SetPosixProbe::Decided;
     }
-    None
+    SetPosixProbe::Undecided
 }
