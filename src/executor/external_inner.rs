@@ -138,7 +138,24 @@ impl Executor {
             return Ok(());
         }
 
-        let Some(program) = find_user_command(&config.command[0], &env_map) else {
+        // rubash#2046 B2: GNU env hands the composed environment to
+        // execvp, and execvp with PATH ABSENT from that environment
+        // searches its default path (glibc confstr _CS_PATH) instead of
+        // failing — `env -u PATH printenv PATH` runs /usr/bin/printenv
+        // and reports its rc 1, not env's 127. Mirror that one shape:
+        // resolve against the standard path (path::standard_path, the
+        // same confstr port `command -p` uses) whenever the composed
+        // environment carries no PATH at all. A set-but-empty PATH is
+        // a different shape and keeps the plain lookup — the ruling's
+        // scope is the unset form only.
+        let program = if crate::executor::path::path_is_unset(&env_map) {
+            let mut lookup_env = env_map.clone();
+            lookup_env.insert("PATH".to_string(), standard_path(&env_map));
+            find_user_command(&config.command[0], &lookup_env)
+        } else {
+            find_user_command(&config.command[0], &env_map)
+        };
+        let Some(program) = program else {
             let mut stderr = Vec::new();
             writeln!(
                 &mut stderr,

@@ -1,0 +1,98 @@
+//! rubash#2046 (S6 of the rubash#2036 sync line): the four cells S5
+//! registered unruled — B2 env PATH-unset resolution, B3 stty
+//! validation order, C1 `uname --help`, C2 arch diagnostic quotes —
+//! adjudicated 2026-10-29 (DECISIONS: all four align GNU/WinuxCmd)
+//! and fixed in S6. Each pin names its cell; expectations are the
+//! GNU measurements (bash 5.3.20 + coreutils 9.4, dual-run anchored
+//! in the S5 corpus, whose four registered cells flipped to hard
+//! `gnu` expectations in the same batch).
+
+use std::process::Command;
+
+fn rubash() -> std::path::PathBuf {
+    let mut path = std::env::current_exe().expect("current exe");
+    path.pop();
+    path.pop();
+    path.push("rubash");
+    if cfg!(windows) {
+        path.set_extension("exe");
+    }
+    path
+}
+
+struct Output {
+    stdout: String,
+    stderr: String,
+}
+
+fn run(script: &str, dir: &std::path::Path) -> Output {
+    run_with_path(script, dir, "/usr/bin:/bin")
+}
+
+fn run_with_path(script: &str, dir: &std::path::Path, path: &str) -> Output {
+    let output = Command::new(rubash())
+        .arg("-c")
+        .arg(script)
+        .current_dir(dir)
+        .env("PATH", path)
+        .output()
+        .expect("spawn rubash");
+    Output {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+fn scratch(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("rubash-2046-s6-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    dir
+}
+
+// ---------------------------------------------------------------- B2
+
+#[test]
+fn issue2046_b2_env_unset_path_resolves_via_execvp_default() {
+    let dir = scratch("b2");
+    // The corpus shape: PATH stripped from the CHILD's environment —
+    // execvp's default path still finds printenv, which then reports
+    // PATH absent from its own environment (rc 1, no output). The
+    // pre-fix engine answered env's own 127 here.
+    let out = run("env -u PATH printenv PATH; echo rc=$?", &dir);
+    assert_eq!(out.stdout, "rc=1\n");
+    assert_eq!(out.stderr, "");
+    // Same absence reached through -i: the composed env is honoured
+    // (FOO visible) while resolution still succeeds.
+    let out = run("env -i FOO=bar printenv FOO; echo rc=$?", &dir);
+    assert_eq!(out.stdout, "bar\nrc=0\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn issue2046_b2_env_unset_path_missing_command_stays_127() {
+    let dir = scratch("b2miss");
+    // The fallback is a search, not an invention: a name the default
+    // path does not hold still fails with env's 127 face (the message
+    // text is the engine's WinuxCmd-aligned form, unchanged by B2).
+    let out = run("env -u PATH s6_no_such_cmd_xyz; echo rc=$?", &dir);
+    assert_eq!(out.stdout, "rc=127\n");
+    assert!(
+        out.stderr.contains("s6_no_such_cmd_xyz"),
+        "stderr: {:?}",
+        out.stderr
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn issue2046_b2_env_set_but_empty_path_is_out_of_scope() {
+    let dir = scratch("b2empty");
+    // Ruling scope: ONLY the unset form falls back. A set-but-empty
+    // PATH keeps the plain (failing) lookup — GNU agrees (rc 127 in
+    // an empty directory: the empty element is the cwd, which holds
+    // no printenv here).
+    let out = run("env PATH= printenv PATH; echo rc=$?", &dir);
+    assert_eq!(out.stdout, "rc=127\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}

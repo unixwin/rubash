@@ -51,18 +51,14 @@
    "id": "env-u-path",
    "name": "env",
    "face": "builtin",
-   "status": "registered",
-   "ref": "#2046 B2 (unruled; registered only, no behavior change)",
+   "status": "gnu",
+   "ref": "#2046 B2 (ruled align GNU/WinuxCmd, DECISIONS 2026-10-29; fixed S6: PATH absent from the composed env resolves through the execvp default path)",
    "path": "system",
    "script": "env -u PATH printenv PATH; echo rc=$?",
    "expect": {
     "rc": 0,
-    "stdout": "rc=127\n",
-    "stderr": "env: failed to run command 'printenv': No such file or directory\n"
-   },
-   "gnu": {
-    "rc": 0,
-    "stdout": "rc=1\n"
+    "stdout": "rc=1\n",
+    "stderr": ""
    }
   },
   {
