@@ -59,17 +59,45 @@ pub fn path_error(target: &str, err: std::io::Error) -> std::io::Error {
     } else {
         false
     };
-    if invalid_name
-        && target
-            .chars()
-            .any(|ch| matches!(ch, '*' | '?' | '[' | '<' | '>'))
-    {
+    if invalid_name && windows_reserved_name_char(target) {
         return std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("{target}: No such file or directory"),
         );
     }
     std::io::Error::new(err.kind(), format!("{target}: {}", message(&err)))
+}
+
+/// Characters that Windows refuses in ANY file name but a Unix filesystem
+/// accepts as literal name bytes (rubash#2027): an operand carrying one can
+/// never exist as a literal file, so a failed open is GNU's ENOENT
+/// (`cat: '<(echo hi)': No such file or directory`), never the Win32
+/// invalid-name invalid-argument text. `*?` are the glob characters the
+/// original mapping covered; `<` and `>` are reserved in every Windows name
+/// position and ordinary bytes in Unix names, so the same ENOENT inference
+/// extends to them. `:` and `|` are deliberately left out: `:` participates
+/// in valid Windows alternate data streams and drive letters, so a failed
+/// open on a `:`-bearing name is not provably a missing file.
+fn windows_reserved_name_char(target: &str) -> bool {
+    target
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | '<' | '>'))
+}
+
+/// The strerror text only (no `"<target>: "` payload) for a failed
+/// operation on `target`, with the same Windows invalid-name to ENOENT
+/// inference [`path_error`] applies. Consumers that render the target
+/// themselves (GNU cat quotes the operand via quotef, coreutils cat.c
+/// `error (0, errno, "%s", quotef (name))`) need the text without
+/// rebinding the target out of the formatted payload (rubash#2027).
+pub fn path_strerror(target: &str, err: &std::io::Error) -> String {
+    if cfg!(windows)
+        && (err.raw_os_error() == Some(123) || err.kind() == std::io::ErrorKind::InvalidInput)
+        && windows_reserved_name_char(target)
+    {
+        return "No such file or directory".to_string();
+    }
+    message(err)
 }
 
 /// Same mapping for a raw OS error code (Win32 on Windows, errno elsewhere).

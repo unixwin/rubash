@@ -360,6 +360,19 @@ pub(in crate::executor) fn is_reserved_word(word: &str) -> bool {
     )
 }
 
+/// The POSIX special-builtin set, execution side. GNU's table is
+/// name-based: `special_builtins[]` (builtins/mkbuiltins.c:148-154)
+/// lists 16 names — `source` included, as the synonym spelling of
+/// `.` — and the SPECIAL flag is applied by name wherever the name
+/// appears (mkbuiltins.c:819-820). This predicate is the executor's
+/// one classification point for the set (function shadowing,
+/// definition rejection, tempenv fatality, assignment persistence);
+/// it must stay equal to the registry's `SPECIAL_BUILTINS`
+/// (command_registry.rs), which the registry consistency tests pin.
+/// rubash#2036 KD-2: `source` was missing here until S3 — the
+/// introspection faces already reported it as special (S2), and
+/// variable_state carried a `|| command == "source"` workaround for
+/// the gap (removed with this alignment).
 pub(in crate::executor) fn is_posix_special_builtin(name: &str) -> bool {
     matches!(
         name,
@@ -374,6 +387,7 @@ pub(in crate::executor) fn is_posix_special_builtin(name: &str) -> bool {
             | "return"
             | "set"
             | "shift"
+            | "source"
             | "times"
             | "trap"
             | "unset"

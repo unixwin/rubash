@@ -36,6 +36,7 @@ pub mod shell;
 pub(crate) mod stack_growth;
 pub mod token_str;
 pub mod usage;
+pub(crate) mod winux_fifo;
 
 // The DAP frontend entry points (1.5.0 debugger design section
 // 13; PLAN row 10): the one part of the debugger the binaries and

@@ -63,6 +63,19 @@ jobs:
       - name: Run marker leak golden tests
         run: cargo nextest run --test marker_leak_golden --test issue824_marker_decode_boundary_regressions --profile ci
 
+      # rubash#2036 S5: the three-way sync corpus for the 34
+      # builtin/WinuxCmd conflict names (tests/difftest/cases-2036).
+      # Expectations are recorded GNU bash 5.3.20 / coreutils 9.4
+      # measurements, so the gate needs no live GNU oracle on the
+      # runner; the test is #[cfg(unix)] and this ubuntu lane is its
+      # execution home (the Windows three-way run is the win-diff
+      # battery, pkg10 H cell).
+      - name: Run 2036 sync corpus tests
+        run: >-
+          cargo nextest run --test issue2036_s5_sync_corpus
+          --test issue2043_sync_a_class_regressions
+          --test issue2046_sync_b_class_regressions --profile ci
+
       - name: Run compatibility CLI tests
         continue-on-error: true
         run: cargo nextest run --test cli_tests --profile ci

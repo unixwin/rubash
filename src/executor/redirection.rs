@@ -2001,8 +2001,10 @@ impl Executor {
             // do_redirections performs ONE open per redirection.
             // Mirror the #1820 probe carve-out (probe_output_redirect):
             // a FIFO target is validated by access only, so the flush
-            // open is the single pairing open.
-            #[cfg(unix)]
+            // open is the single pairing open. rubash#1903: the same
+            // carve-out covers WinuxCmd markers on Windows, with the
+            // marker probe standing in for access(2).
+            #[cfg(any(unix, windows))]
             let fifo_validation: Option<Result<(), std::io::Error>> = {
                 let path =
                     self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
@@ -2013,10 +2015,23 @@ impl Executor {
                     }
                 })
             };
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             let fifo_validation: Option<Result<(), std::io::Error>> = None;
             let open_result: Result<(), std::io::Error> = match fifo_validation {
                 Some(result) => result,
+                None if crate::special_paths::is_net_redirect_target(&target) => {
+                    // rubash#1967: net twin of the #1868 FIFO
+                    // validation above — this walk's create would
+                    // CONNECT and drop the File (only the Path is
+                    // kept in the state), and the flush's open
+                    // connects again: two connections where GNU's
+                    // do_redirections opens once. Validate by
+                    // resolution; the flush open is the single
+                    // connect, and a refusal surfaces there with
+                    // the same diagnostic.
+                    self.validate_net_redirect_target(&target)
+                        .map_err(|e| crate::posix_errors::path_error(&target, e))
+                }
                 None if redirect.append => {
                     // GNU redir.c redirection_error (redir.c:149-176) carries the
                     // failed open's target word (`$FIX/b: No such file or
@@ -2432,6 +2447,15 @@ impl OutputFdState {
             // pairing open lives here, at the flush site; a non-empty
             // stream reaches it through the Path arm below.
             if let Some(OutputTarget::Path(path)) = self.fd_target(fd).cloned() {
+                // rubash#1967: net twin of the FIFO pairing below —
+                // GNU's open happens even when nothing is written
+                // (`: > /dev/tcp/...` is exactly this shape through
+                // the no-output pass; an empty buffered stream owes
+                // the peer its one connection the same way).
+                if crate::special_paths::is_net_redirect_target(&path) {
+                    let _pairing = executor.open_net_redirect(&path)?;
+                    return Ok(());
+                }
                 let resolved = executor
                     .session_path(shell_path_to_windows(&path, &executor.shell_state.env_vars));
                 if crate::executor::shell_options::redirect_path_is_fifo(&resolved) {

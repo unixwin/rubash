@@ -155,10 +155,20 @@ impl Executor {
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
         );
+        // rubash#1905: synthetic /proc operands become spawn-time
+        // snapshot files for a child without its own /proc layer; the
+        // record lives until spawn_external_process has waited the
+        // child out (function scope end).
+        let (proc_args, _proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
+            &dev_args,
+            Some(&config.command[0]),
+            Some(program.as_path()),
+            &env_map,
+        );
         let (mut process, used_shell) = external_command_for_named_program(
             &program,
             Some(&config.command[0]),
-            &dev_args,
+            &proc_args,
             &env_map,
             env_map
                 .get("BASH_ARGV0")
@@ -832,10 +842,20 @@ impl Executor {
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
         );
+        // rubash#1905: synthetic /proc operands become spawn-time
+        // snapshot files for a child without its own /proc layer; the
+        // record lives until spawn_external_process has waited the
+        // child out (function scope end).
+        let (proc_args, _proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
+            &dev_args,
+            Some(&cmd.words[0]),
+            Some(program.as_path()),
+            &self.shell_state.env_vars,
+        );
         let (mut process, used_shell) = external_command_for_named_program(
             &program,
             Some(&cmd.words[0]),
-            &dev_args,
+            &proc_args,
             &self.shell_state.env_vars,
             self.bash_argv0_env_supplied(&cmd.assignments),
         );
@@ -977,16 +997,40 @@ impl Executor {
             // each command and pass named pipes/FIFOs to `diff`. Upstream
             // shopt1.sub uses `diff <("$t1") <("$t2")` where the files are
             // executable helper scripts that differ only by a shebang.
-            let left =
-                shell_path_to_windows(&self.expand_word(&cmd.words[1]), &self.shell_state.env_vars);
-            let right =
-                shell_path_to_windows(&self.expand_word(&cmd.words[2]), &self.shell_state.env_vars);
-            if let (Ok(left_source), Ok(right_source)) =
-                (fs::read_to_string(left), fs::read_to_string(right))
-            {
-                if strip_shebang(&left_source) == strip_shebang(&right_source) {
-                    self.exit_code = 0;
-                    return Ok(true);
+            //
+            // rubash#2043 A4: the in-process equality answer may only
+            // stand in for the real diff on that documented shape —
+            // both operands produced by a process substitution of THIS
+            // command (a parser-recorded, unquoted `<(...)` span on
+            // each operand word). For plain files the shortcut
+            // silently reported a shebang-only difference as equal
+            // where GNU diff reports it (rc 1 with the `1c1` block);
+            // those fall through to the real diff like every other
+            // operand pair.
+            let both_operands_are_procsub = [1usize, 2].iter().all(|&index| {
+                cmd.word_metadata.get(index).is_some_and(|metadata| {
+                    metadata
+                        .process_substitutions
+                        .iter()
+                        .any(|substitution| !substitution.output)
+                })
+            });
+            if both_operands_are_procsub {
+                let left = shell_path_to_windows(
+                    &self.expand_word(&cmd.words[1]),
+                    &self.shell_state.env_vars,
+                );
+                let right = shell_path_to_windows(
+                    &self.expand_word(&cmd.words[2]),
+                    &self.shell_state.env_vars,
+                );
+                if let (Ok(left_source), Ok(right_source)) =
+                    (fs::read_to_string(left), fs::read_to_string(right))
+                {
+                    if strip_shebang(&left_source) == strip_shebang(&right_source) {
+                        self.exit_code = 0;
+                        return Ok(true);
+                    }
                 }
             }
         }
@@ -1284,7 +1328,7 @@ impl Executor {
         // the parent's only post-spawn duty was the wait.
         if matches!(
             self.external_stdio_outcome,
-            Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(_))
+            Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(..))
         ) || self.external_needs_fd_copy_capture(cmd)
         {
             return false;
@@ -1744,6 +1788,7 @@ impl Executor {
                     let foreground_pid = child.id();
                     if let super::external_redirects::ExternalStdioOutcome::CapturePipe(
                         mut reader,
+                        capture_generation,
                     ) = outcome
                     {
                         use std::io::Read;
@@ -1761,9 +1806,21 @@ impl Executor {
                             );
                         }
                         self.run_sigchld_trap_for_reaped_child()?;
-                        // Route the merged stream into the active capture
-                        // exactly like the legacy single-stream collection.
-                        self.write_default_stdout(&merged)?;
+                        // Route the merged stream into the capture the
+                        // plan materialized the pipe for — addressed by
+                        // its recorded generation, NOT through fd 1's
+                        // current endpoint: a function-call wrap may have
+                        // rebound fd 1 since the plan (rubash#2031:
+                        // `$(f 2>&1 >/dev/null)`, f's external leaf wrote
+                        // its stderr into the capture pipe, and resolving
+                        // the drain through fd 1 landed the bytes in the
+                        // /dev/null target file instead of the
+                        // substitution's capture).
+                        super::shell_options::write_stdout_capture_at_generation(
+                            &merged,
+                            capture_generation,
+                        )
+                        .map_err(ExecuteError::IoError)?;
                         self.exit_code = crate::executor::wait_status::process_exit_status(&status);
                     } else {
                         let status = self.wait_external_child(&mut child)?;

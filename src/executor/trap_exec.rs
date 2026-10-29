@@ -1159,6 +1159,31 @@ impl Executor {
         if self.debug_trap_running || self.host_internal_depth.get() > 0 {
             return Ok(None);
         }
+        // niubash#681 (design 4.2/9.1): the consult below decides
+        // about THIS seam, so its location facts are snapshotted at
+        // funnel arrival — before the user's trap action runs. The
+        // action executes in full ahead of the consult (the design's
+        // order), and an action that calls a function leaves the
+        // ambient line stamp at that function's definition line on
+        // exit (execute_function's deliberate restamp for the RETURN
+        // trap, function_calls.rs). A consult that re-read the
+        // ambient stamp after the action would adjudicate this
+        // seam's breakpoints against the trap function's definition
+        // line: line breakpoints silently never match, or replay at
+        // the stale line wearing this seam's command text. GNU
+        // establishes the seam's line in the caller before
+        // run_debug_trap (execute_cmd.c) and runs the action inside
+        // a saved/restored parser state (trap.c _run_trap_internal),
+        // so the post-action line state is the seam's by
+        // construction; the snapshot is the same guarantee here.
+        // Taken only while a session is armed (the gate load the
+        // funnel already pays), so the debugger-off path is
+        // unchanged.
+        let seam_facts = if crate::debugger::SESSION_ACTIVE.is_armed() {
+            Some(self.debugger_location())
+        } else {
+            None
+        };
         // WP-3 (design 4.4; WP-1 gap G-02; 150-c REPORT section 5
         // note 1): the session gate is consulted BEFORE the
         // trap-action lookup below, so an attached session is asked
@@ -1187,7 +1212,7 @@ impl Executor {
                 // consult with the run still alive in the caller,
                 // and a stuck flag would silence every later seam
                 // of this executor.
-                let consult_result = self.debugger_consult(seam, command_text);
+                let consult_result = self.debugger_consult(seam, command_text, seam_facts);
                 self.debug_trap_running = false;
                 consult_result?;
                 return Ok(None);
@@ -1268,7 +1293,7 @@ impl Executor {
             return Ok(Some(trap_status));
         }
         if crate::debugger::SESSION_ACTIVE.is_armed() {
-            self.debugger_consult(seam, command_text)?;
+            self.debugger_consult(seam, command_text, seam_facts)?;
         }
         Ok(None)
     }
@@ -2723,7 +2748,8 @@ impl Executor {
                 let child_stdout = Stdio::from(file.try_clone()?);
                 let child_stderr = Stdio::from(file.try_clone()?);
                 let mut child_diag = file.try_clone()?;
-                let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+                let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                    cmd,
                     &cmd.words[1..],
                     crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                     crate::executor::dev_fd_operands::DevOperandStdout::Path(
@@ -2755,7 +2781,8 @@ impl Executor {
             ) {
                 return result;
             }
-            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                cmd,
                 &cmd.words[1..],
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::Path(shell_path_to_windows(
@@ -2793,7 +2820,8 @@ impl Executor {
             ) {
                 return result;
             }
-            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                cmd,
                 &cmd.words[1..],
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::Path(shell_path_to_windows(
@@ -2829,7 +2857,8 @@ impl Executor {
                 } else {
                     dup.strip_suffix('-').unwrap_or(dup)
                 };
-                let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+                let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                    cmd,
                     &cmd.words[1..],
                     crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                     crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
@@ -2884,7 +2913,8 @@ impl Executor {
             ) {
                 return result;
             }
-            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                cmd,
                 &cmd.words[1..],
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
@@ -2942,7 +2972,8 @@ impl Executor {
             ) {
                 return result;
             }
-            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                cmd,
                 &cmd.words[1..],
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
@@ -3026,7 +3057,8 @@ impl Executor {
         let fd1_lands_in_capture = self.fd_table.write_endpoint(1) == Some(FdWriteEndpoint::Stdout)
             && (self.stdout_capture.is_some()
                 || crate::executor::shell_options::stdout_capture_active());
-        let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+        let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+            cmd,
             &cmd.words[1..],
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
@@ -3241,6 +3273,15 @@ impl Executor {
         // __RUBASH_SCRIPT_NAME at all (init.rs), the same stamp the
         // output-substitution spawn carries.
         child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
+        // rubash#2032: process_substitute's producer is a forked child
+        // (subst.c:6362), so it inherits the parent's positional
+        // parameters (POSITIONAL_PARAMS_TRANSPORT). Before this stamp
+        // the body saw $# = 0 and `"$@"` collapsed to one empty word —
+        // the bats zero-test-execution regression.
+        child.env(
+            super::compound_exec::POSITIONAL_PARAMS_TRANSPORT,
+            self.positional_params_transport_value(),
+        );
         if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             child.env("__RUBASH_SCRIPT_NAME", script_name);
         }
@@ -6097,6 +6138,7 @@ impl Executor {
         &mut self,
         seam: crate::debugger::SeamKind,
         command_text: &str,
+        seam_facts: Option<(Option<crate::debugger::SourceLocation>, usize)>,
     ) -> Result<(), ExecuteError> {
         // WP-8 (design 5.2): a function-entry seam proves the
         // entered function is defined. The note is resolution
@@ -6146,7 +6188,7 @@ impl Executor {
         // reporting the last command that had *begun*.)
         let saved_trap_command = self.shell_state.debug_trap_command.borrow().clone();
         *self.shell_state.debug_trap_command.borrow_mut() = Some(command_text.to_string());
-        let result = self.debugger_consult_at_seam(seam, command_text);
+        let result = self.debugger_consult_at_seam(seam, command_text, seam_facts);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
         result
     }
@@ -6157,10 +6199,16 @@ impl Executor {
         &mut self,
         seam: crate::debugger::SeamKind,
         command_text: &str,
+        seam_facts: Option<(Option<crate::debugger::SourceLocation>, usize)>,
     ) -> Result<(), ExecuteError> {
         use crate::debugger::{HitOutcome, SeamKind, StopInfo, StopReason};
 
-        let (location, depth) = self.debugger_location();
+        // niubash#681: the seam's location/depth as captured at
+        // funnel arrival, before the user's DEBUG trap action ran
+        // (see run_debug_trap). The fallback is defensive only —
+        // the funnel always passes a snapshot while a session is
+        // armed, which is the only state in which a consult runs.
+        let (location, depth) = seam_facts.unwrap_or_else(|| self.debugger_location());
         let function_name = if seam == SeamKind::FunctionEntry {
             self.shell_state.function_name_stack.first().cloned()
         } else {

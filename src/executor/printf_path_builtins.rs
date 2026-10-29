@@ -595,7 +595,7 @@ fn open_cd_redirect_file(
     }
 }
 
-fn simple_path_tool_operands(args: &[String]) -> Option<Vec<&str>> {
+pub(in crate::executor) fn simple_path_tool_operands(args: &[String]) -> Option<Vec<&str>> {
     let mut operands = Vec::new();
     let mut parse_options = true;
     for arg in args {
@@ -611,7 +611,7 @@ fn simple_path_tool_operands(args: &[String]) -> Option<Vec<&str>> {
     Some(operands)
 }
 
-fn basename_value(path: &str) -> String {
+pub(in crate::executor) fn basename_value(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     // niubash#709: an empty operand is the empty basename in GNU (`basename ''`
     // prints a blank line), but an all-slash operand stays `/` here because
@@ -692,7 +692,7 @@ fn trim_trailing_slashes(value: &str) -> String {
     }
 }
 
-fn strip_basename_suffix(name: &str, suffix: &str) -> String {
+pub(in crate::executor) fn strip_basename_suffix(name: &str, suffix: &str) -> String {
     if suffix.len() < name.len() && name.ends_with(suffix) {
         name[..name.len() - suffix.len()].to_string()
     } else {

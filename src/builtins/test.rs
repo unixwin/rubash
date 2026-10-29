@@ -722,6 +722,18 @@ fn fd_pipe_test(
 }
 
 fn test_path(operand: &str, env_vars: &crate::shell::var_table::VarTable) -> std::path::PathBuf {
+    // rubash#2071: GNU hands the operand string to the syscall verbatim —
+    // test.c:549-550 `sh_stat (arg, &stat_buf)` for -a/-e, test.c:552-559
+    // `sh_eaccess (arg, R_OK|W_OK|X_OK)` for -r/-w/-x, lstat likewise for
+    // -h/-L — so an empty operand fails ENOENT and every path unary is
+    // false. The $PWD anchoring below would instead join "" onto the cwd
+    // and stat the cwd itself (exists, directory, readable/writable/
+    // executable, owned, setgid…), silently answering true. Keep the
+    // empty operand empty so every downstream stat/access fails exactly
+    // like the syscall does.
+    if operand.is_empty() {
+        return std::path::PathBuf::new();
+    }
     let path = crate::executor::path::shell_path_to_windows_for_lookup(operand, env_vars);
     if path.is_absolute() {
         return path;

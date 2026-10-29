@@ -1241,7 +1241,10 @@ impl Executor {
         // merged with the shell's env_vars, `__RUBASH_*` keys crossing only
         // through the spawn-inherited whitelist, and the parent's caught
         // traps cancelled for the child (subst.c:6421).
-        let mut env_map: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        let mut env_map: std::collections::BTreeMap<String, String> =
+            crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
                 env_map.insert(key.clone(), value.clone());
@@ -1251,6 +1254,13 @@ impl Executor {
             !(key.starts_with("__RUBASH_TRAP") && key != crate::builtins::trap::TRAP_ORIG_IGNORES)
         });
         env_map.insert("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string());
+        // rubash#2032: process_substitute's consumer is a forked child
+        // (subst.c:6362), so it inherits the parent's positional
+        // parameters (POSITIONAL_PARAMS_TRANSPORT).
+        env_map.insert(
+            super::compound_exec::POSITIONAL_PARAMS_TRANSPORT.to_string(),
+            self.positional_params_transport_value(),
+        );
         // subst.c:6609 subshell_level++ — the procsub child runs one level
         // deeper than the parent for $BASH_SUBSHELL/$BASHPID.
         env_map.insert(

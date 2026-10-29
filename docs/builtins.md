@@ -21,9 +21,12 @@ rubash 对一个命令词按优先级做三层处理：
    直接在进程内执行，不创建子进程。
 2. **Fast-path builtin（隐藏）**：**不在**白名单内，仅在参数形态简单时进程内
    快速执行；复杂参数回退到外部命令（由 winuxcmd 提供）。这是 Windows 下
-   减少进程创建开销的优化。introspection（`type`、`command -v`、`enable`）
-   将其报告为外部命令——与 GNU Bash 的报告结果一致（bash 中这些本来就是
-   外部命令）。
+   减少进程创建开销的优化。introspection 口径（#2036 S2 裁定）：它们不是
+   builtin，`compgen -b` / `enable` 的名单不含它们（与 GNU 的 builtin 表
+   一致）；但 describe 面（`type`、`command -v`）必须如实披露进程内
+   接管——接管生效时 `type X` 报告 `X is a shell emulation of <path>`、
+   `type -t X` 报告 `emulation`；接管因名字不可解析而 stand-down 时，
+   如实回落文件 / 未找到答案。
 3. **外部命令**：沿 PATH 查找，由 winuxcmd 提供。
 
 ## 二、真 builtin 清单（62 项）
@@ -113,7 +116,10 @@ wait
 ## 三、Fast-Path（隐藏 builtin）清单
 
 以下命令在参数形态简单时进程内执行，否则回退外部 winuxcmd 命令。
-**有意不进 `is_shell_builtin_name` 白名单**，以保持 introspection 与 bash 一致。
+**有意不进 `is_shell_builtin_name` 白名单**：它们不是 builtin，白名单外
+的身份保证 builtin 表类内省面（`compgen -b`、`enable`）与 GNU 一致；
+describe 面自 #2036 S2 起如实披露接管（`type` 报 emulation 形态），
+不再假装是外部文件。
 
 <!-- fastpath-list
 sleep
@@ -121,6 +127,7 @@ dirname
 basename
 uname
 arch
+stty
 -->
 
 | 命令 | fast-path 实现位置 | 回退行为 | 备注 |
@@ -130,6 +137,7 @@ arch
 | `basename` | `executor/printf_path_builtins.rs` | `execute_external`（winuxcmd `basename`） | 同上 |
 | `uname` | `builtins/uname.rs`（身份人设字段取自 `executor/identity.rs`） | 无（内置完整选项解析） | rubash#154：身份不外包给 PATH |
 | `arch` | `builtins/uname.rs`（`uname -m` 语义） | 无 | 同上 |
+| `stty` | `builtins/stty.rs`（`execute_console_mode_tool`） | `execute_external`（stand-down 时） | 控制台模式工具，与 uname/arch 同族（#154） |
 
 `env` 是唯一的混合形态：它在白名单内（属第二节真 builtin，`type env` 报告为
 builtin），但实现是进程内执行 coreutils 语义、**没有外部回退路径**。它不进
@@ -182,10 +190,15 @@ tr
 
 除下述 13 个重叠命令外，还有一层**只在本进程内模拟、默认不回退外部命令**
 的文件命令：`cp` `rm` `rmdir` `mkdir` `touch` `chmod` `cat` `sed`（简单参数）
-`mkfifo` `tty`。它们由 `executor/external_file_builtins.rs` 实现，
+`mkfifo` `tty` `tput`（仅 Windows）。它们由 `executor/external_file_builtins.rs` 实现，
 `external_file_builtins_enabled` 默认开启（init.rs），仅测试代码会关闭。
 
 关键事实：
+
+- **introspection 披露（#2036 S2）**：该层启用且名字可解析时，`type X`
+  报告 `X is a shell emulation of <path>`、`type -t X` 报告 `emulation`、
+  `command -v X` 报告裸名；该层被宿主关闭或名字不可解析（stand-down）
+  时回落文件 / 未找到答案。第三节 fast-path 同口径。
 
 - **裸跑 rubash.exe（83 套件 harness 即如此）时这层模拟生效**，上面表里的
   重叠判定不适用；产品 niubash（niubash-runtime/shell.rs:253）会关闭该层，

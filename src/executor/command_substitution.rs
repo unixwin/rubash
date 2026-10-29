@@ -1,3 +1,4 @@
+use super::command_registry::{comsub_word_slot, ComsubWordSlot};
 use super::*;
 use crate::executor::markers::DATA_DOLLAR;
 
@@ -819,11 +820,21 @@ impl Executor {
         // be provably equivalent, and it is not when tracing or when the
         // inherited DEBUG trap fires) and the body falls to the real
         // parser/executor below (rubash#254, rubash#825).
-        if source == "false" && !self.xtrace_enabled() && !self.err_trap_inherited_into_comsub() {
+        // The exact-body shortcuts key on the registry's COMSUB_WORD
+        // projection (rubash#2036 S4): the slot is Some(False) exactly
+        // for the body "false", and True/Colon exactly for "true"/":".
+        if comsub_word_slot(source) == Some(ComsubWordSlot::False)
+            && !self.xtrace_enabled()
+            && !self.err_trap_inherited_into_comsub()
+        {
             self.last_command_substitution_status.set(Some(1));
             return String::new();
         }
-        if matches!(source, "true" | ":") && !self.xtrace_enabled() {
+        if matches!(
+            comsub_word_slot(source),
+            Some(ComsubWordSlot::True | ComsubWordSlot::Colon)
+        ) && !self.xtrace_enabled()
+        {
             self.last_command_substitution_status.set(Some(0));
             return String::new();
         }
@@ -884,7 +895,15 @@ impl Executor {
             return output;
         }
 
-        if words.first().map(String::as_str) == Some("echo") {
+        // The first-word chain below keys on the registry's
+        // COMSUB_WORD projection (rubash#2036 S4). Each arm keeps its
+        // historical condition tail and fall-through exactly: an arm
+        // whose inner conditions fail still declines to the shared
+        // tail (the describe call, the external face, full
+        // execution), never to a sibling arm.
+        let word_slot = words.first().and_then(|word| comsub_word_slot(word));
+
+        if word_slot == Some(ComsubWordSlot::Echo) {
             let expanded_args = self.brace_expanded_substitution_args(&words, &word_parts);
             let output = echo_command_substitution_output(&expanded_args);
             // The body's command is echo and echo cannot fail here: pin the
@@ -896,7 +915,7 @@ impl Executor {
             return output;
         }
 
-        if words.first().map(String::as_str) == Some("printf") {
+        if word_slot == Some(ComsubWordSlot::Printf) {
             let expanded_args: Vec<String> = words[1..]
                 .iter()
                 .enumerate()
@@ -951,7 +970,7 @@ impl Executor {
         // The file-operand fast path must not claim a bare `cat` (or flag/
         // `-` operands): those read fd 0, which lives in FUNCTION_STDIN and
         // shares the caller's cursor — external_cat owns that semantics.
-        if words.first().map(String::as_str) == Some("cat")
+        if word_slot == Some(ComsubWordSlot::Cat)
             && !self.emulated_external_stands_down("cat")
             && words[1..].iter().all(|word| !word.starts_with('-'))
             && words.len() > 1
@@ -1009,10 +1028,18 @@ impl Executor {
                     Err(error) => {
                         status = 1;
                         // rubash#1949: report the read's real strerror,
-                        // unquoted — GNU cat names the actual errno
-                        // (`Is a directory`, `Not a directory`, ELOOP),
-                        // never a blanket ENOENT.
-                        eprintln!("cat: {}: {}", path, crate::posix_errors::message(&error));
+                        // never a blanket ENOENT — GNU cat names the actual
+                        // errno (`Is a directory`, `Not a directory`, ELOOP).
+                        // rubash#2027: GNU cat renders the operand through
+                        // quotef (coreutils cat.c `error (0, errno, "%s",
+                        // quotef (name))`), so an operand holding shell
+                        // special characters prints quoted:
+                        // `cat: '<(echo hi)': No such file or directory`.
+                        eprintln!(
+                            "cat: {}: {}",
+                            gnu_cat_quoted_operand(&path),
+                            crate::posix_errors::path_strerror(&path, &error)
+                        );
                     }
                 }
             }
@@ -1020,31 +1047,55 @@ impl Executor {
             return output.trim_capture_terminator().to_string();
         }
 
-        if words.first().map(String::as_str) == Some("basename") {
-            let Some(path) = words.get(1).map(|word| self.expand_word(word)) else {
-                self.last_command_substitution_status.set(Some(1));
-                return String::new();
-            };
-            let trimmed = path.trim_end_matches(['/', '\\']);
-            let name = trimmed
-                .rsplit(['/', '\\'])
-                .next()
-                .filter(|name| !name.is_empty())
-                .unwrap_or(trimmed);
-            let suffix = words.get(2).map(|word| self.expand_word(word));
-            let output = suffix
-                .as_deref()
-                .and_then(|suffix| name.strip_suffix(suffix))
-                .unwrap_or(name);
-            self.last_command_substitution_status.set(Some(0));
-            return output.to_string();
+        if word_slot == Some(ComsubWordSlot::Basename)
+            && !self.emulated_external_stands_down("basename")
+        {
+            // rubash#2043 A2/A3: this arm used to be a second, divergent
+            // basename implementation — it silently dropped operands
+            // past the second, treated option words as the path, kept a
+            // suffix the simple face strips (and stripped one it keeps),
+            // and never produced a diagnostic. The arm now shares the
+            // simple face's exact machinery (rubash#2036 consolidation):
+            // expand the argv, admit only what
+            // simple_path_tool_operands admits with 1..=2 operands, and
+            // compute with basename_value / strip_basename_suffix.
+            // Every other shape — extra operands, option words, no
+            // operand — declines to full execution below, where the
+            // simple face and then the real basename answer with GNU's
+            // result and diagnostics (subst.c:7143
+            // command_substitute: the arm is an accelerator for exactly
+            // the shapes it can answer byte-identically, nothing more).
+            //
+            // rubash#2046 B1 (S3-adjudicated, DECISIONS 2026-10-29):
+            // the arm's gate above consults the same stand-down
+            // predicate as the sibling cat arm — the projection's
+            // Unchecked cell for this face is now FailClosed. When
+            // PATH holds no basename the arm declines and full
+            // execution answers 127 like GNU (and like this
+            // evaluator's dirname shape, which has no arm at all).
+            let expanded: Vec<String> = words[1..]
+                .iter()
+                .map(|word| self.expand_word(word))
+                .collect();
+            if let Some(operands) =
+                super::printf_path_builtins::simple_path_tool_operands(&expanded)
+            {
+                if !operands.is_empty() && operands.len() <= 2 {
+                    let mut value = super::printf_path_builtins::basename_value(operands[0]);
+                    if let Some(suffix) = operands.get(1) {
+                        value = super::printf_path_builtins::strip_basename_suffix(&value, suffix);
+                    }
+                    self.last_command_substitution_status.set(Some(0));
+                    return value;
+                }
+            }
         }
 
         if let Some(output) = self.command_describe_substitution_output(&words) {
             return output;
         }
 
-        if words.first().map(String::as_str) == Some("umask") {
+        if word_slot == Some(ComsubWordSlot::UMask) {
             // Run the real builtin like the ulimit branch below (rubash#1251:
             // the old canned lookup ignored the arguments entirely, so
             // `$(umask -S)` printed the octal mask and `$(umask 077)` set
@@ -1079,7 +1130,7 @@ impl Executor {
                 .to_string();
         }
 
-        if words.first().map(String::as_str) == Some("ulimit") {
+        if word_slot == Some(ComsubWordSlot::ULimit) {
             // Run the real builtin engine (getrlimit/setrlimit on unix, the
             // emulated table on Windows) instead of a canned lookup, so
             // `$(ulimit -n)` cannot drift from `ulimit -n` (rubash#261).
@@ -1105,7 +1156,7 @@ impl Executor {
                 .to_string();
         }
 
-        if words.first().map(String::as_str) == Some("pwd") {
+        if word_slot == Some(ComsubWordSlot::Pwd) {
             if words.get(1).map(String::as_str) == Some("-P") {
                 // rubash#537: the raw session cwd is a Windows path; the
                 // builtin renders get_working_directory in the one
@@ -1124,7 +1175,7 @@ impl Executor {
                 .unwrap_or_default();
         }
 
-        if words.first().map(String::as_str) == Some("type")
+        if word_slot == Some(ComsubWordSlot::Type)
             && words.get(1).map(String::as_str) == Some("-t")
             && words.len() >= 3
         {
@@ -1140,8 +1191,7 @@ impl Executor {
             }
         }
 
-        if words.first().map(String::as_str) == Some("kill")
-            && words.get(1).map(String::as_str) == Some("-l")
+        if word_slot == Some(ComsubWordSlot::Kill) && words.get(1).map(String::as_str) == Some("-l")
         {
             if let Some(word) = words.get(2) {
                 // The spec may reference variables set by a running trap
@@ -1158,7 +1208,7 @@ impl Executor {
             }
         }
 
-        if words.first().map(String::as_str) == Some("mktemp") {
+        if word_slot == Some(ComsubWordSlot::Mktemp) {
             if let Some(path) = self.mktemp_command_substitution(&words) {
                 return path;
             }
@@ -1823,7 +1873,9 @@ impl Executor {
             // through the bare-$NAME std::env::var fallback in
             // embedded_parameters.rs).
             process_env_snapshot: crate::executor::local_helpers::with_process_state_lock(|| {
-                std::env::vars().collect()
+                crate::executor::env_helpers::process_env_pairs()
+                    .into_iter()
+                    .collect()
             }),
             // G-03: a fork copy starts a fresh journal. (When the body runs
             // under a parent's execute_ast the journal stack attributes its
@@ -2614,6 +2666,40 @@ fn restore_old_style_backtick_markers(value: &str) -> String {
 
 fn readfile_path_is_quoted(path: &str) -> bool {
     path.chars().any(|ch| matches!(ch, '\'' | '"' | '\\'))
+}
+
+/// GNU cat's quotef rendering of an operand in its open/read diagnostics
+/// (rubash#2027; coreutils gnulib quotearg shell-escape style, measured
+/// against coreutils 9.4: `/tmp`, `./missing`, `a+b`, `a,b`, `a@b`, `a%b`,
+/// `a~b`, `a#b`, `a{b` print bare, while `a:b`, `a=b`, `a^b`, `a[b`, `a b`,
+/// `a"b`, `x*y`, `<(echo hi)` print single-quoted). An operand is printed
+/// verbatim only when every character is in that shell-safe set; anything
+/// else wraps the WHOLE operand in `'...'`, with an embedded `'` broken as
+/// `'` + `\'` + `'` the way shell single-quote escaping does.
+pub(in crate::executor) fn gnu_cat_quoted_operand(path: &str) -> String {
+    let safe = |ch: char| {
+        ch.is_alphanumeric()
+            || matches!(
+                ch,
+                '_' | '.' | '/' | '-' | '+' | ',' | '@' | '%' | '~' | '#' | '{' | '}'
+            )
+    };
+    if path.chars().all(safe) {
+        return path.to_string();
+    }
+    let mut quoted = String::with_capacity(path.len() + 2);
+    quoted.push('\'');
+    for ch in path.chars() {
+        if ch == '\'' {
+            // `'` cannot appear inside a single-quoted shell string; the
+            // escape spelling quotearg emits is `'\''`.
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn command_substitution_result_status(result: Result<(), ExecuteError>, exit_code: i32) -> i32 {

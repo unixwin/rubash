@@ -73,6 +73,7 @@ mod declare_local;
 mod dev_fd_operands;
 mod dynamic_arrays;
 mod exec_profile;
+pub(in crate::executor) mod proc_operands;
 pub(in crate::executor) use dynamic_arrays::dense_view_element;
 pub(in crate::executor) use dynamic_arrays::env_derived_dynamic_parameter_value;
 pub(crate) mod embedded_mutations;
@@ -184,9 +185,14 @@ mod alias_helpers;
 pub(crate) mod assignment_helpers;
 mod ast_exec;
 mod builtin_names;
+#[allow(dead_code)]
+// rubash#2036: consumers landed through S4 (introspection, dispatch,
+// pipeline and comsub projections); a few registration-only fields
+// are read by the module's consistency pins rather than hot paths.
+pub(crate) mod command_registry;
 mod command_subst_helpers;
 mod command_text;
-mod env_helpers;
+pub(crate) mod env_helpers;
 mod execution_misc;
 mod function_env;
 pub(crate) mod local_helpers;

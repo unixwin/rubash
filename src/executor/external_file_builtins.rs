@@ -332,6 +332,7 @@ impl Executor {
         let mut no_more_flags = false;
         let mut parents = false;
         let mut failed = false;
+        let mut operands = 0usize;
         // coreutils diagnostics are the emulated command's own stderr:
         // they go through the command's redirections like any external
         // command's output (rubash#1372: `mkdir ... >f 2>&1` must create
@@ -392,6 +393,7 @@ impl Executor {
             // parent must fail ENOENT without -p, not silently create
             // the whole chain (on the Android/Termux host it surfaced as
             // a bogus EROFS instead).
+            operands += 1;
             let path =
                 self.session_path(shell_path_to_windows(&expanded, &self.shell_state.env_vars));
             let result = if parents {
@@ -408,6 +410,16 @@ impl Executor {
                 )?;
                 failed = true;
             }
+        }
+        if operands == 0 {
+            // GNU coreutils 9.4 mkdir.c: an invocation whose words are
+            // all options (or a bare `--`) has no operand — it reports
+            // `mkdir: missing operand` and exits 1. The loop above
+            // silently succeeded with rc 0 on that shape (rubash#2043
+            // A1: a fake success on an error input).
+            writeln!(stderr, "mkdir: missing operand")?;
+            writeln!(stderr, "Try 'mkdir --help' for more information.")?;
+            failed = true;
         }
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         self.exit_code = i32::from(failed);
@@ -2135,11 +2147,15 @@ impl Executor {
                     match fs::read(&link.native) {
                         Ok(bytes) => output.extend(bytes),
                         Err(error) => {
+                            // rubash#2027: the operand renders through GNU
+                            // cat's quotef and the reason keeps the real
+                            // errno mapping (including the Windows
+                            // reserved-name to ENOENT inference).
                             writeln!(
                                 &mut diagnostics,
                                 "cat: {}: {}",
-                                target,
-                                crate::posix_errors::message(&error)
+                                super::command_substitution::gnu_cat_quoted_operand(&target),
+                                crate::posix_errors::path_strerror(&target, &error)
                             )?;
                             status = 1;
                         }
@@ -2160,6 +2176,40 @@ impl Executor {
                     shell_path_to_windows(&target, &self.shell_state.env_vars),
                     &self.shell_state.env_vars,
                 ));
+                // rubash#1903: a WinuxCmd fifo marker operand is the
+                // read side of the named-pipe rendezvous, not a file
+                // holding the marker bytes — WinuxCmd's own cat
+                // bridges its operand the same way (file_io), and the
+                // issue's repro (`echo hi > f & cat f`) reads through
+                // whichever cat the ecosystem resolves, so the
+                // emulated reader must meet the writer here. Buffered
+                // like this handler's other operand serves: the read
+                // runs to the writer's EOF, which is the fifo's own
+                // close semantics.
+                #[cfg(windows)]
+                if crate::winux_fifo::path_is_winux_fifo(&win) {
+                    let read = crate::winux_fifo::open_winux_fifo_read(&win, &|| {
+                        crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+                    })
+                    .and_then(|mut file| {
+                        use std::io::Read;
+                        let mut bytes = Vec::new();
+                        file.read_to_end(&mut bytes).map(|_| bytes)
+                    });
+                    match read {
+                        Ok(bytes) => output.extend(bytes),
+                        Err(error) => {
+                            writeln!(
+                                &mut diagnostics,
+                                "cat: {}: {}",
+                                target,
+                                crate::posix_errors::message(&error)
+                            )?;
+                            status = 1;
+                        }
+                    }
+                    continue;
+                }
                 // `<(cmd)` carrier path: the word names a draining stream —
                 // serve the shared remainder (subst.c:7143).
                 let read = match self.procsub_stream_take(&win) {
@@ -2174,12 +2224,21 @@ impl Executor {
                         // strerror and no shell diagnostic prefix. The
                         // discarded error flattened EACCES/EISDIR to a
                         // blanket ENOENT text behind the script prefix
-                        // (rubash#1309).
+                        // (rubash#1309). rubash#2027: the operand itself
+                        // renders through GNU cat's quotef (coreutils
+                        // `error (0, errno, "%s", quotef (name))`), so
+                        // `cat '<(echo hi)'` reports
+                        // `cat: '<(echo hi)': No such file or directory`,
+                        // and the reason keeps the real-errno mapping —
+                        // on Windows a name bearing the reserved `<`/`>`
+                        // bytes can never exist, so the invalid-name
+                        // rejection reads ENOENT exactly like the Unix
+                        // lookup failure it stands in for.
                         writeln!(
                             &mut diagnostics,
                             "cat: {}: {}",
-                            target,
-                            crate::posix_errors::message(&error)
+                            super::command_substitution::gnu_cat_quoted_operand(&target),
+                            crate::posix_errors::path_strerror(&target, &error)
                         )?;
                         status = 1;
                     }
@@ -2473,14 +2532,21 @@ impl Executor {
         // platform has a real fifo object, so the emulation must not
         // answer at all — decline and let the resolved PATH binary
         // create the fifo (dispatch reaches this handler only when the
-        // name resolved, rubash#1545). The unconditional
-        // `Operation not supported` refusal below is the Windows-only
-        // answer: Windows has no POSIX fifo object, and creating a
-        // regular file instead would silently change semantics (a
-        // fifo's blocking open/read behavior would become an instant
-        // regular-file EOF). GNU coreutils mkfifo reports per-operand
-        // failures and exits 1 — match that honestly:
-        // `mkfifo: cannot create fifo 'NAME': Operation not supported`.
+        // name resolved, rubash#1545).
+        //
+        // rubash#1903 supersedes the Windows half of the #1725
+        // refusal. That refusal's rationale was that creating a
+        // regular file instead of a fifo "would silently change
+        // semantics (a fifo's blocking open/read behavior would
+        // become an instant regular-file EOF)". The premise is gone:
+        // the shell now recognizes the WinuxCmd fifo marker and
+        // bridges redirect opens of it to the named-pipe rendezvous
+        // (crate::winux_fifo), so creating the marker in WinuxCmd's
+        // on-disk format completes the semantics instead of faking
+        // them — `mkfifo f; echo hi > f & cat f` works end to end,
+        // and WinuxCmd tools bridge the same marker from their side.
+        // GNU coreutils mkfifo reports per-operand failures and
+        // exits 1 — the creation loop below keeps that shape.
         #[cfg(not(windows))]
         {
             let _ = cmd;
@@ -2502,13 +2568,15 @@ impl Executor {
             // line, and an invocation with no operand at all must
             // not exit 0 in silence.
             let mut mode_pending: Option<bool> = None; // Some(true): --mode form
+            let mut mode: Option<String> = None;
             let mut no_more_flags = false;
             let mut failed = false;
-            let mut operands = 0usize;
+            let mut operands: Vec<&str> = Vec::new();
             let mut stderr: Vec<u8> = Vec::new();
             'words: for word in &cmd.words[1..] {
                 let expanded = word.as_str();
                 if mode_pending.is_some() {
+                    mode = Some(expanded.to_string());
                     mode_pending = None;
                     continue;
                 }
@@ -2528,8 +2596,11 @@ impl Executor {
                                 failed = true;
                                 break 'words;
                             }
-                            if entry.name == "mode" && attached.is_none() {
-                                mode_pending = Some(true);
+                            if entry.name == "mode" {
+                                match attached {
+                                    Some(value) => mode = Some(value.to_string()),
+                                    None => mode_pending = Some(true),
+                                }
                             }
                         }
                         LongResolution::Unknown => {
@@ -2558,6 +2629,8 @@ impl Executor {
                             'm' => {
                                 if position + 1 == cluster.len() {
                                     mode_pending = Some(false);
+                                } else {
+                                    mode = Some(cluster[position + 1..].iter().collect());
                                 }
                                 break;
                             }
@@ -2572,12 +2645,7 @@ impl Executor {
                     }
                     continue;
                 }
-                operands += 1;
-                writeln!(
-                    stderr,
-                    "mkfifo: cannot create fifo '{expanded}': Operation not supported"
-                )?;
-                failed = true;
+                operands.push(expanded);
             }
             if !failed {
                 if let Some(long_form) = mode_pending {
@@ -2587,10 +2655,47 @@ impl Executor {
                         diag_short_option_requires_argument(&mut stderr, "mkfifo", 'm');
                     }
                     failed = true;
-                } else if operands == 0 {
+                } else if operands.is_empty() {
                     let _ = writeln!(stderr, "mkfifo: missing operand");
                     diag_try_line(&mut stderr, "mkfifo");
                     failed = true;
+                } else if let Some(mode) = &mode {
+                    if mode.is_empty() || !mode.chars().all(|ch| ('0'..='7').contains(&ch)) {
+                        let _ = writeln!(stderr, "mkfifo: invalid mode '{mode}'");
+                        failed = true;
+                    }
+                }
+            }
+            if !failed {
+                // WinuxCmd's readonly rule (mkfifo.cpp): an octal
+                // mode without any write bit — no digit from 02367
+                // anywhere — maps to the DOS readonly attribute.
+                let readonly = mode.as_deref().is_some_and(|mode| {
+                    !mode.is_empty()
+                        && mode.chars().all(|ch| ('0'..='7').contains(&ch))
+                        && !mode.contains(['0', '2', '3', '6', '7'])
+                });
+                for expanded in &operands {
+                    let path = self
+                        .session_path(shell_path_to_windows(expanded, &self.shell_state.env_vars));
+                    // GNU coreutils reports per-operand failures and
+                    // continues with the rest, exiting 1.
+                    if std::fs::metadata(&path).is_ok() {
+                        let _ = writeln!(
+                            stderr,
+                            "mkfifo: cannot create fifo '{expanded}': File exists"
+                        );
+                        failed = true;
+                        continue;
+                    }
+                    if let Err(error) = crate::winux_fifo::create_winux_fifo(&path, readonly) {
+                        let _ = writeln!(
+                            stderr,
+                            "mkfifo: cannot create fifo '{expanded}': {}",
+                            crate::posix_errors::message(&error)
+                        );
+                        failed = true;
+                    }
                 }
             }
             self.write_buffered_builtin_output(cmd, &[], &stderr)?;
