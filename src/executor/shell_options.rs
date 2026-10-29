@@ -1846,11 +1846,26 @@ impl Executor {
     /// the delimiter, `cat` sees only the remainder. FUNCTION_STDIN keeps a
     /// FUNCTION_STDIN_OFFSET cursor for shell reads; feeding a child process
     /// must hand over only the unread tail.
+    ///
+    /// rubash#2111: PRESENCE of the mirror is the binding, not non-emptiness.
+    /// Every staging site inserts the pair only to bind a stage's / call's
+    /// fd 0 (and the live-handle faces — streaming tail, live stage 0 —
+    /// REMOVE it, rubash#761/#1873), so a present-but-empty mirror is a
+    /// bound input at EOF, never an unbound fd 0. GNU execute_cmd.c
+    /// execute_pipeline + do_piping (execute_cmd.c:6373) replaces every
+    /// element's fd 0 with the inter-stage pipe; an element whose producer
+    /// wrote nothing reads EOF from that pipe, not the shell's own stdin.
+    /// Judging by emptiness let empty-payload stages fall through to the
+    /// inherited process handle (the INHERIT_PROCESS_STDIN arms, the
+    /// comsub / function-call / exec-image stdin ladders): `true | command
+    /// cat` with the shell's stdin on a file printed the file, and on a
+    /// terminal it blocked. This is the FUNCTION_STDIN twin of rubash#2103,
+    /// which applied the same presence ruling to fd-table slot 0; the one
+    /// consumer that had already patched around the emptiness judge
+    /// (read_inherited_process_stdin_to_string, rubash#436) states this
+    /// invariant verbatim.
     pub(in crate::executor) fn function_stdin_remaining(&self) -> Option<String> {
         let input = self.shell_state.env_vars.get(FUNCTION_STDIN)?;
-        if input.is_empty() {
-            return None;
-        }
         let offset = self
             .shell_state
             .env_vars
