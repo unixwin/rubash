@@ -722,7 +722,10 @@ fn fd_alias_fact_test(
     if op == "-h" || op == "-L" {
         return Some(true);
     }
-    let class = bits.as_bytes()[0] as char;
+    // `bits` is an engine-minted ASCII access mark (device-class letter
+    // plus rwx flag chars), so byte 0 is always ASCII (< 0x80) and can
+    // never be a UTF-8 continuation byte.
+    let class = char::from(bits.as_bytes()[0]);
     let granted = |flag: char| bits.chars().skip(1).any(|bit| bit == flag);
     Some(match class {
         // fifo prw-r--r--; the probe-verified live-pipe matrix
