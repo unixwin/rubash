@@ -235,16 +235,11 @@
    "id": "stty-badopt",
    "name": "stty",
    "face": "hidden-fastpath",
-   "status": "registered",
-   "ref": "#2046 B3 (unruled; registered only, no behavior change)",
+   "status": "gnu",
+   "ref": "#2046 B3 (ruled align GNU/WinuxCmd, DECISIONS 2026-10-29; fixed S6: full operand validation before any device contact)",
    "path": "system",
    "script": "stty -Z; echo rc=$?",
    "expect": {
-    "rc": 0,
-    "stdout": "rc=1\n",
-    "stderr": "stty: 'standard input': Inappropriate ioctl for device\n"
-   },
-   "gnu": {
     "rc": 0,
     "stdout": "rc=1\n",
     "stderr": "stty: invalid argument '-Z'\nTry 'stty --help' for more information.\n"

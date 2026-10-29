@@ -96,3 +96,41 @@ fn issue2046_b2_env_set_but_empty_path_is_out_of_scope() {
     assert_eq!(out.stdout, "rc=127\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------- B3
+
+#[test]
+fn issue2046_b3_stty_validates_all_operands_before_touching_the_device() {
+    let dir = scratch("b3");
+    // The corpus shape: stdin is not a terminal (piped), yet the bad
+    // operand is what gets reported — validation precedes the device
+    // probe, exactly like GNU (the pre-fix engine answered the ioctl
+    // diagnostic here).
+    let out = run("stty -Z; echo rc=$?", &dir);
+    assert_eq!(out.stdout, "rc=1\n");
+    assert_eq!(
+        out.stderr,
+        "stty: invalid argument '-Z'\nTry 'stty --help' for more information.\n"
+    );
+    // First invalid operand in argv order wins, whichever side of a
+    // valid operand it sits on.
+    let out = run("stty size -Z; echo rc=$?", &dir);
+    assert_eq!(
+        out.stderr,
+        "stty: invalid argument '-Z'\nTry 'stty --help' for more information.\n"
+    );
+    let out = run("stty -Y -Z; echo rc=$?", &dir);
+    assert_eq!(
+        out.stderr,
+        "stty: invalid argument '-Y'\nTry 'stty --help' for more information.\n"
+    );
+    // An all-valid list still reaches the device probe: on this
+    // non-terminal stdin the answer is the ioctl diagnostic.
+    let out = run("stty size; echo rc=$?", &dir);
+    assert_eq!(out.stdout, "rc=1\n");
+    assert_eq!(
+        out.stderr,
+        "stty: 'standard input': Inappropriate ioctl for device\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
