@@ -569,6 +569,19 @@ impl Executor {
                     shell_path_to_windows(&target, &self.shell_state.env_vars),
                     &self.shell_state.env_vars,
                 ));
+                // rubash#1903: a WinuxCmd fifo marker bound on a
+                // numbered fd takes the rendezvous read open, not a
+                // plain open of the marker file (same family as the
+                // fd-0 bind in compound_fd0_stream_file).
+                #[cfg(windows)]
+                if crate::winux_fifo::path_is_winux_fifo(&path) {
+                    let file = crate::winux_fifo::open_winux_fifo_read(&path, &|| {
+                        crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+                    })
+                    .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                    self.set_fd_input_file(fd, FileFd::from_file(file, path), true);
+                    continue;
+                }
                 let file = FileFd::open_read(path)
                     .map_err(|error| crate::posix_errors::path_error(&target, error))?;
                 self.set_fd_input_file(fd, file, true);
@@ -1352,6 +1365,23 @@ impl Executor {
             super::path::shell_path_to_windows(&target, &self.shell_state.env_vars),
             &self.shell_state.env_vars,
         ));
+        // rubash#1903: a WinuxCmd fifo marker is a regular file on disk,
+        // so the metadata class below admits it and FileFd::open_read
+        // would bind a plain handle on the marker bytes — the body's
+        // reads would consume the marker while the writer waits for a
+        // rendezvous server that never exists (the #2014 CI hang's
+        // compound face). The fd-0 bind performs GNU's single open
+        // (redir.c do_redirection_internal) — for a marker that open
+        // is the read side of the named-pipe rendezvous, and the slot
+        // binds the live pipe handle.
+        #[cfg(windows)]
+        if crate::winux_fifo::path_is_winux_fifo(&path) {
+            let file = crate::winux_fifo::open_winux_fifo_read(&path, &|| {
+                crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+            })
+            .ok()?;
+            return Some(FileFd::from_file(file, path));
+        }
         if !std::fs::metadata(&path)
             .map(|meta| Self::compound_fd0_stream_source(&meta))
             .unwrap_or(false)

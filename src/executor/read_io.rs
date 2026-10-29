@@ -663,6 +663,41 @@ impl Executor {
                     .write(true)
                     .open(&path);
             }
+            // rubash#1903: a WinuxCmd fifo marker is a regular file on
+            // disk, so the live-handle branch below would bind the
+            // marker file itself and the slurp further down would read
+            // its bytes. Bind the rendezvous read handle transiently
+            // instead — the same record-wise live read, over the pipe.
+            #[cfg(windows)]
+            if crate::winux_fifo::path_is_winux_fifo(&path) {
+                let Ok(server) = crate::winux_fifo::open_winux_fifo_read(&path, &|| {
+                    crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+                }) else {
+                    return None;
+                };
+                let file = FileFd::from_file(server, path.clone());
+                let saved = self.fd_table.entries.get(&0).cloned();
+                self.fd_table
+                    .open_input(0, FdReadEndpoint::File(file), false);
+                let line = self.read_virtual_fd_stdin(
+                    0,
+                    silent,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                    escape_aware,
+                    raw,
+                );
+                match saved {
+                    Some(entry) => {
+                        self.fd_table.entries.insert(0, entry);
+                    }
+                    None => {
+                        self.fd_table.entries.remove(&0);
+                    }
+                }
+                return line;
+            }
             // GNU redir.c opens the target as the command's fd 0; for
             // non-regular inputs (/dev/tty → CON, NUL, a fifo) the read must
             // come byte-wise off the live handle — a slurp-to-EOF would

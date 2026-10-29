@@ -419,6 +419,19 @@ impl Executor {
         if let Some(bytes) = crate::special_paths::synthetic_proc_content(&target) {
             return Some(bytes_to_shell_text(&bytes));
         }
+        // rubash#1903: a WinuxCmd fifo marker slurped through the plain
+        // read below would yield the 7 marker bytes and never create
+        // the rendezvous the writer is waiting for. The staging
+        // slurp's one open of a marker is the read side of the
+        // named-pipe rendezvous (same rule as the text channel in
+        // stdin_string_for_command).
+        #[cfg(windows)]
+        if let Some(result) =
+            crate::winux_fifo::slurp_marker_bytes(&path, &self.shell_state.env_vars)
+        {
+            let buf = result.ok()?;
+            return Some(bytes_to_shell_text(&buf));
+        }
         fs::read_to_string(path).ok()
     }
 }

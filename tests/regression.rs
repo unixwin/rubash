@@ -5669,3 +5669,336 @@ mod issue_1951 {
         assert_eq!(stdout, "1/1000/2000/2000\n", "stderr:\n{stderr}");
     }
 }
+
+/// rubash#1903: a WinuxCmd `mkfifo` marker was not recognized by shell
+/// redirections — `echo hi > f` truncated the marker as a plain file
+/// and `cat f` read the marker bytes, so the two halves of the
+/// ecosystem never rendezvoused. GNU anchor: a fifo redirect target is
+/// opened exactly once (redir.c do_redirection_internal) and the open
+/// blocks until the peer side opens (fifo open semantics).
+///
+/// The pins cover the shell half of the WinuxCmd protocol
+/// (crate::winux_fifo): marker creation by the emulated `mkfifo`, the
+/// redirect round trip in the issue's exact shape, both blocking-open
+/// directions across two shell processes (the cross-process shape is
+/// what pairs with a WinuxCmd tool on the other side), the append and
+/// redirect-fed read forms, and a marker created OUTSIDE the shell
+/// (the WinuxCmd on-disk format written by hand) being honored.
+#[cfg(windows)]
+mod issue_1903 {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Per-invocation bound for every rubash child this module spawns.
+    /// The shapes below complete in well under a second when the
+    /// rendezvous pairs; 20s is pure failure headroom.
+    const BOUND: Duration = Duration::from_secs(20);
+
+    struct BoundedOutcome {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        code: Option<i32>,
+        timed_out: bool,
+        pid: u32,
+    }
+
+    /// This module carries its own runner instead of run_rubash_in /
+    /// wait_bounded for one mechanical reason: wait_bounded reads the
+    /// child's pipes only AFTER the child exits, with an unbounded
+    /// read_to_end — a background job process that outlives the shell
+    /// (a fifo writer parked in its pairing open is exactly that)
+    /// inherits the write end and the read never returns, so the
+    /// nominal 30s bound never fires and one wedged shape eats the
+    /// whole CI job (the #2014 hang: the goldens job burned its full
+    /// 25-minute timeout inside this module). Here both pipes drain
+    /// on threads from spawn, the wait polls try_wait against a hard
+    /// deadline, and a timeout kills the child and reports its pid
+    /// plus whatever it managed to print — a hang becomes a fast,
+    /// diagnosed test failure. The environment discipline is
+    /// run_rubash_in's airtight one, unchanged.
+    fn spawn_drained(
+        dir: &Path,
+        script_name: &str,
+        script: &str,
+    ) -> (Child, Arc<Mutex<Vec<u8>>>, Arc<Mutex<Vec<u8>>>) {
+        let path = dir.join(script_name);
+        std::fs::write(&path, script).expect("write probe script");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+        cmd.arg(path.to_str().expect("utf8 scratch path"))
+            .current_dir(dir)
+            .env_clear()
+            .env("PATH", minimal_path())
+            .env("HOME", dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for name in [
+            "SystemRoot",
+            "SystemDrive",
+            "WINDIR",
+            "COMSPEC",
+            "PATHEXT",
+            "OS",
+            "TEMP",
+            "TMP",
+        ] {
+            if let Ok(value) = std::env::var(name) {
+                cmd.env(name, value);
+            }
+        }
+        let mut child = cmd.spawn().expect("spawn rubash");
+        let stdout_buf = Arc::new(Mutex::new(Vec::new()));
+        let stderr_buf = Arc::new(Mutex::new(Vec::new()));
+        fn drain<R: std::io::Read + Send + 'static>(mut pipe: R, sink: Arc<Mutex<Vec<u8>>>) {
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => sink.lock().unwrap().extend_from_slice(&chunk[..n]),
+                    }
+                }
+            });
+        }
+        drain(
+            child.stdout.take().expect("piped stdout"),
+            stdout_buf.clone(),
+        );
+        drain(
+            child.stderr.take().expect("piped stderr"),
+            stderr_buf.clone(),
+        );
+        (child, stdout_buf, stderr_buf)
+    }
+
+    fn wait_drained(
+        child: &mut Child,
+        stdout_buf: &Arc<Mutex<Vec<u8>>>,
+        stderr_buf: &Arc<Mutex<Vec<u8>>>,
+        limit: Duration,
+    ) -> BoundedOutcome {
+        let pid = child.id();
+        let start = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return BoundedOutcome {
+                        stdout: stdout_buf.lock().unwrap().clone(),
+                        stderr: stderr_buf.lock().unwrap().clone(),
+                        code: status.code(),
+                        timed_out: false,
+                        pid,
+                    };
+                }
+                Ok(None) if start.elapsed() > limit => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return BoundedOutcome {
+                        stdout: stdout_buf.lock().unwrap().clone(),
+                        stderr: stderr_buf.lock().unwrap().clone(),
+                        code: None,
+                        timed_out: true,
+                        pid,
+                    };
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return BoundedOutcome {
+                        stdout: stdout_buf.lock().unwrap().clone(),
+                        stderr: stderr_buf.lock().unwrap().clone(),
+                        code: None,
+                        timed_out: false,
+                        pid,
+                    };
+                }
+            }
+        }
+    }
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let (mut child, stdout_buf, stderr_buf) = spawn_drained(dir, "case.sh", script);
+        let out = wait_drained(&mut child, &stdout_buf, &stderr_buf, BOUND);
+        assert!(
+            !out.timed_out,
+            "rubash pid {} still running after {BOUND:?} — subprocess state: \
+             partial stdout:\n{}\npartial stderr:\n{}",
+            out.pid,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// Spawn a shell that is expected to BLOCK (its fifo open has no
+    /// peer yet), drained from birth like every child in this module.
+    fn spawn_blocked(
+        dir: &Path,
+        script: &str,
+    ) -> (Child, Arc<Mutex<Vec<u8>>>, Arc<Mutex<Vec<u8>>>) {
+        spawn_drained(dir, "blocked.sh", script)
+    }
+
+    fn assert_still_blocked(child: &mut Child, what: &str) {
+        std::thread::sleep(Duration::from_millis(2000));
+        assert!(
+            matches!(child.try_wait(), Ok(None)),
+            "{what}: completed without a peer — the fifo open did not block"
+        );
+    }
+
+    fn marker_bytes_and_attrs(path: &Path) -> (Vec<u8>, u32) {
+        use std::os::windows::fs::MetadataExt;
+        let bytes = std::fs::read(path).expect("read marker");
+        let attrs = std::fs::metadata(path)
+            .expect("marker metadata")
+            .file_attributes();
+        (bytes, attrs)
+    }
+
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x0000_0004;
+    const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+
+    #[test]
+    fn issue1903_mkfifo_creates_winux_marker() {
+        let dir = case_scratch("1903-create");
+        let (stdout, stderr, code) = run(&dir, "mkfifo f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "");
+        let (bytes, attrs) = marker_bytes_and_attrs(&dir.join("f"));
+        assert_eq!(bytes, b"!<fifo>", "marker content");
+        assert_ne!(
+            attrs & FILE_ATTRIBUTE_SYSTEM,
+            0,
+            "marker must carry FILE_ATTRIBUTE_SYSTEM (attrs {attrs:#x})"
+        );
+
+        // Existing target: GNU reports per-operand and exits 1.
+        let (_, stderr, code) = run(&dir, "mkfifo f\n");
+        assert_eq!(code, Some(1));
+        assert!(
+            stderr.contains("mkfifo: cannot create fifo 'f': File exists"),
+            "stderr:\n{stderr}"
+        );
+
+        // No operand: GNU's missing-operand failure (the pre-#1903
+        // handler silently exited 0).
+        let (_, stderr, code) = run(&dir, "mkfifo\n");
+        assert_eq!(code, Some(1));
+        assert!(
+            stderr.contains("mkfifo: missing operand"),
+            "stderr:\n{stderr}"
+        );
+
+        // A mode without any write bit maps to the readonly attribute
+        // (WinuxCmd's rule).
+        let (_, stderr, code) = run(&dir, "mkfifo -m 444 g\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        let (_, attrs) = marker_bytes_and_attrs(&dir.join("g"));
+        assert_ne!(
+            attrs & FILE_ATTRIBUTE_READONLY,
+            0,
+            "-m 444 must set FILE_ATTRIBUTE_READONLY (attrs {attrs:#x})"
+        );
+    }
+
+    #[test]
+    fn issue1903_redirect_round_trip_background_writer() {
+        // The issue's exact shape, several rounds: the rendezvous is a
+        // pairing race by nature, so one pass proves little (the
+        // #1820 pins set this precedent).
+        for round in 0..3 {
+            let dir = case_scratch(&format!("1903-roundtrip-{round}"));
+            let (stdout, stderr, code) = run(&dir, "mkfifo f\necho hi > f &\ncat f\n");
+            assert_eq!(code, Some(0), "round {round} stderr:\n{stderr}");
+            assert_eq!(stdout, "hi\n", "round {round} stderr:\n{stderr}");
+            // The write went through the pipe, not into the marker:
+            // the marker file still holds exactly the marker bytes.
+            let (bytes, _) = marker_bytes_and_attrs(&dir.join("f"));
+            assert_eq!(bytes, b"!<fifo>", "round {round}: marker was written into");
+        }
+    }
+
+    #[test]
+    fn issue1903_read_open_blocks_until_writer_arrives() {
+        let dir = case_scratch("1903-block-read");
+        let (_, stderr, code) = run(&dir, "mkfifo f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        let (mut reader, out_buf, err_buf) = spawn_blocked(&dir, "cat f\n");
+        assert_still_blocked(&mut reader, "cat f with no writer");
+        let (stdout, stderr, code) = run(&dir, "echo hi > f\n");
+        assert_eq!(code, Some(0), "writer stderr:\n{stderr}");
+        assert_eq!(stdout, "");
+        let out = wait_drained(&mut reader, &out_buf, &err_buf, BOUND);
+        assert!(
+            !out.timed_out,
+            "reader pid {} never completed after the writer arrived; partial stderr:\n{}",
+            out.pid,
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert_eq!(out.code, Some(0));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+    }
+
+    #[test]
+    fn issue1903_write_open_blocks_until_reader_arrives() {
+        let dir = case_scratch("1903-block-write");
+        let (_, stderr, code) = run(&dir, "mkfifo f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        let (mut writer, out_buf, err_buf) = spawn_blocked(&dir, "echo hi > f\n");
+        assert_still_blocked(&mut writer, "echo hi > f with no reader");
+        let (stdout, stderr, code) = run(&dir, "cat f\n");
+        assert_eq!(code, Some(0), "reader stderr:\n{stderr}");
+        assert_eq!(stdout, "hi\n");
+        let out = wait_drained(&mut writer, &out_buf, &err_buf, BOUND);
+        assert!(
+            !out.timed_out,
+            "writer pid {} never completed after the reader arrived; partial stderr:\n{}",
+            out.pid,
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert_eq!(out.code, Some(0));
+    }
+
+    #[test]
+    fn issue1903_append_and_redirect_fed_read_forms() {
+        let dir = case_scratch("1903-forms");
+        // Append form: `>>` is the same write-side rendezvous.
+        let (stdout, stderr, code) = run(&dir, "mkfifo f\necho via-append >> f &\ncat < f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "via-append\n");
+        // Builtin read fed by an input redirect, writer in background.
+        let (stdout, stderr, code) = run(
+            &dir,
+            "mkfifo g\necho line1 > g &\nread x < g\necho \"got=[$x]\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "got=[line1]\n");
+    }
+
+    #[test]
+    fn issue1903_foreign_winux_marker_is_honored() {
+        // A marker in WinuxCmd's on-disk format created OUTSIDE the
+        // shell (here: by hand — content + SYSTEM attribute, the two
+        // things detection keys on) must rendezvous exactly like one
+        // the shell's own mkfifo made. This is the issue's literal
+        // repro: the marker came from the other half of the ecosystem.
+        let dir = case_scratch("1903-foreign");
+        let marker = dir.join("f");
+        std::fs::write(&marker, b"!<fifo>").expect("write foreign marker");
+        let status = Command::new("attrib")
+            .arg("+S")
+            .arg(&marker)
+            .status()
+            .expect("attrib +S");
+        assert!(status.success(), "attrib +S failed");
+        let (stdout, stderr, code) = run(&dir, "echo hi > f &\ncat f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "hi\n");
+    }
+}

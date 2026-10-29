@@ -2001,8 +2001,10 @@ impl Executor {
             // do_redirections performs ONE open per redirection.
             // Mirror the #1820 probe carve-out (probe_output_redirect):
             // a FIFO target is validated by access only, so the flush
-            // open is the single pairing open.
-            #[cfg(unix)]
+            // open is the single pairing open. rubash#1903: the same
+            // carve-out covers WinuxCmd markers on Windows, with the
+            // marker probe standing in for access(2).
+            #[cfg(any(unix, windows))]
             let fifo_validation: Option<Result<(), std::io::Error>> = {
                 let path =
                     self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
@@ -2013,7 +2015,7 @@ impl Executor {
                     }
                 })
             };
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             let fifo_validation: Option<Result<(), std::io::Error>> = None;
             let open_result: Result<(), std::io::Error> = match fifo_validation {
                 Some(result) => result,
