@@ -450,6 +450,20 @@ impl Executor {
         }
         env_vars.remove("__RUBASH_CURRENT_FUNCTION");
         env_vars.remove("__RUBASH_IN_SOURCE");
+        // rubash#2135: the function-stdin staging pair is execution
+        // state, not import state. Every legitimate write happens
+        // in-process long after import (the function-call stdin scope
+        // in command_input_scope.rs / ast_exec.rs, the source builtin's
+        // explicit-path staging) and every read consults this live
+        // table, so an ambient copy can only be a plant: pre-fix, a
+        // parent exporting __RUBASH_FUNCTION_STDIN=<file> made the
+        // child's first function-call `read` — and external commands in
+        // the staged scope — consume the named file instead of the
+        // process's real stdin. Strip both keys (and their process-env
+        // mirrors, so respawn builders seeded from the process env
+        // cannot re-import them downstream).
+        env_vars.remove(super::types::FUNCTION_STDIN);
+        env_vars.remove(super::types::FUNCTION_STDIN_OFFSET);
         // rubash#2136: a respawn provenance claim is honored only when
         // the spawner stamp agrees with this process's actual parent
         // (respawn_provenance_validated). An unvalidated claim is
@@ -505,6 +519,8 @@ impl Executor {
         env_vars.remove(crate::executor::path::COMPATIBLE_SHELL_PATH_ENV);
         mirror_env_remove("__RUBASH_CURRENT_FUNCTION");
         mirror_env_remove("__RUBASH_IN_SOURCE");
+        mirror_env_remove(super::types::FUNCTION_STDIN);
+        mirror_env_remove(super::types::FUNCTION_STDIN_OFFSET);
         mirror_env_remove(RESPAWN_SPAWNER_PID_KEY);
         mirror_env_remove("__RUBASH_COPROC_CHILD");
         if !internal_respawn {
