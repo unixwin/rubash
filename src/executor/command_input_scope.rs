@@ -1499,6 +1499,31 @@ impl Executor {
         if crate::special_paths::is_synthetic_link_path(&target) {
             return None;
         }
+        // An empty expanded target is a literal name no file can match:
+        // GNU redir_open (redir.c:916) opens it and fails ENOENT — the
+        // outcome the simple-command face already reports (`echo hi < ""`
+        // → `: No such file or directory`). The session-path conversion
+        // below would instead resolve "" to the session directory, the
+        // probe open would succeed, and the compound would silently fall
+        // back to the ambient stdin — the failure the rubash#2024 nounset
+        // pin guards (`done < "$NOPE"` with NOPE unbound expands to "").
+        // Here-strings and heredocs carry their payload AS the target,
+        // so only the path-open kinds (Input / ReadWrite) take this arm.
+        if target.is_empty()
+            && matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+            )
+        {
+            return Some(format!(
+                "{}{}",
+                self.error_prefix(),
+                crate::posix_errors::path_error(
+                    &target,
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory",),
+                )
+            ));
+        }
         // niubash#177: same operand resolution as open_input_redirect —
         // a virtual-root input operand may exist only under its `.exe`
         // spelling on disk.
