@@ -226,6 +226,13 @@ pub(in crate::executor) enum OutputTarget {
     /// target is its own class and the write faces produce the
     /// failure themselves.
     FullDevice,
+    /// rubash#2042: a 0644-class synthetic /proc content target —
+    /// GNU's open succeeds (procfs 0644) and every write fails
+    /// EINVAL (`<name>: write error: Invalid argument`, same
+    /// sh_chkwrite channel). Same Windows-handle ceiling as
+    /// FullDevice: the target is its own class and the write faces
+    /// produce the failure.
+    ProcContentWrite,
     CoprocStdin(u32),
     Path(String),
     /// GNU dup2 semantics: a write endpoint carried by fd_table refers to
@@ -1537,6 +1544,11 @@ impl Executor {
                     // exec-bound fd fails exactly like the direct
                     // redirect face.
                     FdWriteEndpoint::FullDevice => OutputTarget::FullDevice,
+                    // rubash#2042: a 0644-class synthetic /proc
+                    // binding seeds the ProcContentWrite target, so
+                    // `echo x >&3` on an exec-bound fd fails EINVAL
+                    // exactly like the direct redirect face.
+                    FdWriteEndpoint::ProcContentWrite => OutputTarget::ProcContentWrite,
                     FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                         OutputTarget::Path(path.to_string_lossy().into_owned())
                     }
@@ -2077,7 +2089,16 @@ impl Executor {
                 state.redirect_failed = true;
                 return Ok(());
             }
-            state.fds.insert(fd, OutputTarget::Path(target));
+            if crate::special_paths::synthetic_proc_write_allowed(&target) == Some(true) {
+                // rubash#2042: a 0644-class synthetic /proc content
+                // target's writes fail EINVAL through the symbolic
+                // target (GNU procfs: the 0644 open succeeds, the
+                // write fails) — never a Path flush open into the
+                // absorbed sink, which would silently succeed.
+                state.fds.insert(fd, OutputTarget::ProcContentWrite);
+            } else {
+                state.fds.insert(fd, OutputTarget::Path(target));
+            }
         }
         state.saw_output_redirect = true;
         Ok(())
@@ -2264,16 +2285,24 @@ impl Executor {
                 }
             }
             OutputTarget::Null => {}
-            OutputTarget::FullDevice => {
+            OutputTarget::FullDevice | OutputTarget::ProcContentWrite => {
                 // rubash#1898: GNU builtins/common.c:320-334
                 // sh_chkwrite — the write to /dev/full fails ENOSPC
                 // and the builtin reports it in its own name, exactly
                 // the Closed arm's protocol with the device's
-                // strerror.
+                // strerror. rubash#2042: the 0644-class synthetic
+                // /proc content binds ride the same channel with the
+                // entry's own write strerror (procfs content files
+                // without a write handler answer EINVAL; measured on
+                // real procfs, bash 5.3.20).
+                let write_error_reason = match target {
+                    OutputTarget::FullDevice => "No space left on device",
+                    _ => "Invalid argument",
+                };
                 if !output.is_empty() && !(fd == 1 && builtin_output_write_is_unchecked(cmd)) {
                     let command = cmd.words.first().map(String::as_str).unwrap_or("command");
                     diag.push_str(&format!(
-                        "{}{command}: write error: No space left on device\n",
+                        "{}{command}: write error: {write_error_reason}\n",
                         self.diagnostic_prefix()
                     ));
                     self.exit_code = 1;
@@ -2544,7 +2573,7 @@ impl OutputFdState {
                 Ok(())
             }
             OutputTarget::Null | OutputTarget::Closed => Ok(()),
-            OutputTarget::FullDevice => {
+            reason @ (OutputTarget::FullDevice | OutputTarget::ProcContentWrite) => {
                 // rubash#1898: a write routed here fails ENOSPC; the
                 // caller's sh_chkwrite handling (#1496 arm in
                 // write_state_output_or_diagnostic) renders it in the
@@ -2552,10 +2581,15 @@ impl OutputFdState {
                 // the payload so the rendering is exact on every
                 // platform (no OS raw code means the same text on
                 // Windows, whose error table has no ENOSPC entry).
-                Err(
-                    std::io::Error::new(std::io::ErrorKind::Other, "No space left on device")
-                        .into(),
-                )
+                // rubash#2042: the 0644-class synthetic /proc content
+                // binds ride the same channel with the entry's own
+                // write strerror (procfs content without a write
+                // handler answers EINVAL).
+                let reason_text = match reason {
+                    OutputTarget::FullDevice => "No space left on device",
+                    _ => "Invalid argument",
+                };
+                Err(std::io::Error::new(std::io::ErrorKind::Other, reason_text).into())
             }
             OutputTarget::CoprocStdin(fd) => {
                 if let Some(pipe) = executor.coproc_write_file(fd) {

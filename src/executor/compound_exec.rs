@@ -4500,6 +4500,10 @@ impl Executor {
             // stderr writes are absorbed (the ENOSPC profile cannot
             // cross the spawn boundary; the in-shell faces carry it).
             Some(FdWriteEndpoint::FullDevice) => CoprocStderrPlan::Direct(Stdio::null()),
+            // rubash#2042: fd 2 bound to a 0644-class synthetic /proc
+            // content entry — same boundary: the EINVAL write profile
+            // cannot cross into the child's handle; writes absorb.
+            Some(FdWriteEndpoint::ProcContentWrite) => CoprocStderrPlan::Direct(Stdio::null()),
         }
     }
 
@@ -4832,6 +4836,10 @@ impl Executor {
             ),
             // rubash#1898: mirrors the plan's /dev/full arm.
             Some(FdWriteEndpoint::FullDevice) => CoprocFdSpec::Null,
+            // rubash#2042: mirrors the plan's synthetic-/proc arm —
+            // the child's stderr writes absorb (Null), exactly like
+            // the /dev/full binding's ENOSPC ceiling.
+            Some(FdWriteEndpoint::ProcContentWrite) => CoprocFdSpec::Null,
         })
     }
 

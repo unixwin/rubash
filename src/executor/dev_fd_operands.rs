@@ -526,6 +526,12 @@ impl Executor {
             // contract minus the ENOSPC the child would see from
             // the real device; the in-shell faces carry that shape).
             FdWriteEndpoint::FullDevice => dev_operand_temp(&[], m),
+            // rubash#2042: an operand naming a 0644-class synthetic
+            // /proc binding — same absorbed-temp treatment; the
+            // EINVAL write profile the child would see from the real
+            // procfs entry cannot cross the boundary (the in-shell
+            // faces carry that shape).
+            FdWriteEndpoint::ProcContentWrite => dev_operand_temp(&[], m),
         }
     }
 
@@ -806,7 +812,10 @@ impl Executor {
             | FdWriteEndpoint::ProcessSubstitution { .. }
             // rubash#1898: a /dev/full write endpoint holds no
             // readable bytes.
-            | FdWriteEndpoint::FullDevice => None,
+            | FdWriteEndpoint::FullDevice
+            // rubash#2042: neither does a 0644-class synthetic /proc
+            // write binding (the entry's bytes ride the read side).
+            | FdWriteEndpoint::ProcContentWrite => None,
         }
     }
 

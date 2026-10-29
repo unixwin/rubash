@@ -506,6 +506,9 @@ fn eval_unary(
     if let Some(result) = fd_pipe_test(op, operand, env_vars) {
         return Ok(result);
     }
+    if let Some(result) = fd_file_test(op, operand, env_vars) {
+        return Ok(result);
+    }
     if let Some(result) = proc_unary_test(op, operand) {
         return Ok(result);
     }
@@ -719,6 +722,35 @@ fn fd_pipe_test(
         "-f" | "-d" | "-x" | "-s" | "-S" | "-b" | "-c" | "-u" | "-g" | "-k" | "-N" => false,
         _ => return None,
     })
+}
+
+/// rubash#2042: the file-backed sibling of [`fd_pipe_test`]. A
+/// file-backed descriptor (`exec 4</dev/null`, `exec 6>>f`) is a live
+/// fd magic link too, and GNU answers `test -r` TRUE for it
+/// regardless of the fd's open mode: sh_eaccess (test.c:553 ->
+/// lib/sh/eaccess.c:194) on real procfs answers yes for `lr-x`
+/// read-only, `l-wx` write-only append, and `lr-x` /dev/null links
+/// alike (bash 5.3.20, uid 1 — the class question is the link's
+/// liveness, not the open mode). Only -r is answered here: the rest
+/// of the unary matrix for file links falls through to the faces it
+/// always used, and the pipe class stays on fd_pipe_test's matrix.
+fn fd_file_test(
+    op: &str,
+    operand: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> Option<bool> {
+    let fd: u32 = crate::special_paths::fd_alias_target(operand)?;
+    if env_vars
+        .get(&format!("{}{fd}", crate::executor::types::FD_FILE_PREFIX))
+        .map(String::as_str)
+        != Some("1")
+    {
+        return None;
+    }
+    match op {
+        "-r" => Some(true),
+        _ => None,
+    }
 }
 
 fn test_path(operand: &str, env_vars: &crate::shell::var_table::VarTable) -> std::path::PathBuf {
