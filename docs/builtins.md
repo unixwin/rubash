@@ -191,7 +191,8 @@ tr
 除下述 13 个重叠命令外，还有一层**只在本进程内模拟、默认不回退外部命令**
 的文件命令：`cp` `rm` `rmdir` `mkdir` `touch` `chmod` `cat` `sed`（简单参数）
 `mkfifo` `tty` `tput`（仅 Windows）。它们由 `executor/external_file_builtins.rs` 实现，
-`external_file_builtins_enabled` 默认开启（init.rs），仅测试代码会关闭。
+`external_file_builtins_enabled` 默认开启（init.rs），宿主经
+`Executor::set_external_file_builtins_enabled` 调节；全仓实际调用面只有测试会关闭。
 
 关键事实：
 
@@ -200,9 +201,16 @@ tr
   `command -v X` 报告裸名；该层被宿主关闭或名字不可解析（stand-down）
   时回落文件 / 未找到答案。第三节 fast-path 同口径。
 
-- **裸跑 rubash.exe（83 套件 harness 即如此）时这层模拟生效**，上面表里的
-  重叠判定不适用；产品 niubash（niubash-runtime/shell.rs:253）会关闭该层，
-  让 winuxcmd 的同名命令接管。两侧因此行为可能不同。
+- **宿主契约（#2045 收口，2026-10-29 按代码复核）**：裸跑 rubash.exe
+  （83 套件 harness 即如此）与产品 niubash **都保持该层开启**——旧版此节
+  称「产品 niubash 会关闭该层」与代码不符，已按代码对齐。niubash 的现行
+  态是刻意留开：niubash-runtime/src/shell.rs 的 "P1 spawn takeover"
+  注释在案——曾在此关闭时，POSIX PATH（=/usr/bin:/bin）下脚本套件的
+  spawn 被宿主 command-not-found 处理器吞成 127，故裁定不关。开关两态
+  的行为账：开启 = 名字可解析时由进程内模拟作答（让路规则见注册表
+  stand_down 两轴）；关闭 = 简单命令面与管线 stage 臂（#2066 起同门）
+  全部落真实 spawn，comsub 面不由此门管辖。差分覆盖：S5 三方语料钉
+  默认开态，关态由 issue2066 / issue2036_s4 两组钉钉住。
 - 模拟实现必须对齐 GNU coreutils 的 stdout/rc（ledger 只计 stdout），错误
   措辞按子进程 stderr 形式输出（无 shell 前缀、走缓冲 stderr 通道，
   `2>/dev/null` 可捕获）。2026-09-10 已按 GNU 差分探针根治：cp `/dev/null`
