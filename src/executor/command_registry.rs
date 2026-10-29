@@ -20,8 +20,14 @@
 //! project their name lists from this table, and the describe path
 //! reads the per-row `introspection` projection — including the S2
 //! disclosure ruling for claimed names (`Introspection::Emulated`).
-//! Dispatch tables still do not read the registry; they project in
-//! S3 (the four dispatch tables) and S4 (pipeline and comsub faces).
+//! S3 projects the four simple-command dispatch tables (audit
+//! M3–M6) onto the registry: the typed slot tables at the bottom of
+//! this module are each entry's claim set, pinned against the rows
+//! by the consistency tests, and the four dispatch functions match
+//! on slots with their historical bodies and arm order (including
+//! the late table's function-guard position) unchanged. The
+//! pipeline and comsub faces still do not read the registry; they
+//! project in S4.
 //! The consistency tests at the bottom of this file pin the table
 //! against the live code (the name predicates, the projected lists,
 //! and literal scans of the scattered claim sites), so a claim added
@@ -472,7 +478,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
     builtin("set", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias")], FunctionShadow::PosixSpecialBlock),
     builtin("shift", &[ImplRef::new(Entry::SimpLate, "command_dispatch_late"), ImplRef::new(Entry::CmdPrimary, "command_no_alias")], FunctionShadow::PosixSpecialBlock),
     builtin("shopt", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias")], FunctionShadow::Allow),
-    builtin("source", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias"), ImplRef::new(Entry::PipelineStage, "pipeline_exec stage restricted-shell refusal guard")], FunctionShadow::Allow),
+    builtin("source", &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary"), ImplRef::new(Entry::CmdPrimary, "command_no_alias"), ImplRef::new(Entry::PipelineStage, "pipeline_exec stage restricted-shell refusal guard")], FunctionShadow::PosixSpecialBlock),
     builtin("suspend", &[ImplRef::new(Entry::SimpLate, "command_dispatch_late"), ImplRef::new(Entry::CmdLate, "command_no_alias_late")], FunctionShadow::Allow),
     builtin("test", &[ImplRef::new(Entry::SimpLate, "command_dispatch_late"), ImplRef::new(Entry::CmdLate, "command_no_alias_late")], FunctionShadow::Allow),
     builtin("times", &[ImplRef::new(Entry::SimpLate, "command_dispatch_late"), ImplRef::new(Entry::CmdLate, "command_no_alias_late")], FunctionShadow::PosixSpecialBlock),
@@ -963,17 +969,19 @@ pub(crate) fn registry_row(name: &str) -> Option<&'static CommandRow> {
 /// table before functions).
 ///
 /// The executor's execution-side predicate
-/// (`support_names::is_posix_special_builtin`) still lacks `source`;
-/// the introspection faces project from THIS set (KD-2, report side
-/// closed in S2), and the consistency tests below pin the remaining
-/// predicate difference at exactly `{"source"}` for S3.
+/// (`support_names::is_posix_special_builtin`) names the same 16 —
+/// KD-2 closed on the execution side in S3 (the predicate gained
+/// `source`; the registry row's function-shadow rule and the
+/// consistency pins below moved with it).
 pub(crate) const SPECIAL_BUILTINS: &[&str] = &[
     ".", ":", "break", "continue", "eval", "exec", "exit", "export", "readonly", "return", "set",
     "shift", "source", "times", "trap", "unset",
 ];
 
 /// Whether `name` is a POSIX special builtin (registry projection;
-/// report faces only in S2 — dispatch keeps its own predicate).
+/// the introspection faces read this set, the execution side reads
+/// `support_names::is_posix_special_builtin` — the same 16 names
+/// since S3, pinned equal by the consistency tests).
 pub(crate) fn is_special_builtin(name: &str) -> bool {
     SPECIAL_BUILTINS.contains(&name)
 }
@@ -1004,6 +1012,385 @@ pub(crate) fn introspection_keyword_names() -> Vec<&'static str> {
         .filter(|row| row.class == ClaimClass::Keyword)
         .map(|row| row.name)
         .collect()
+}
+
+// ------------------------------------------------------------ S3: dispatch
+//
+// The four dispatch tables (audit M3–M6) project from the registry
+// in S3: each table below is the entry's claim set in typed form —
+// one (name, slot) pair per claimed name, sorted by name for binary
+// search — and the four executor dispatch functions match on the
+// slot instead of on string literals, carrying their historical
+// per-name bodies verbatim. The consistency tests pin each table
+// against the registry rows' claims for its entry, both directions,
+// so the tables and the rows cannot drift apart.
+//
+// Performance contract (audit §5 C1/C2): the tables are `const`
+// slices of plain data, lookups are one binary search over at most
+// 43 short strings (the same shape as `builtin_names`'
+// binary_search) — no runtime registration, no hash maps, no locks,
+// no syscalls, and the stand-down judgment is untouched.
+//
+// Two names are deliberately NOT in any table:
+// * `sudo` — not a registry claim at all: it is the embedding
+//   host's elevation capability (issue #759 item 4), gated on a
+//   registered handler. The primary and `command` dispatch
+//   functions keep their historical cfg(windows) pre-check for it
+//   ahead of the table lookup.
+// * Conversely, one table entry has no registry row: `((` in
+//   LATE_DISPATCH. The word is a parser-produced pseudo-word (an
+//   arithmetic command node), never a claimable command name — it
+//   has no BUILTIN_NAMES entry and no keyword row — but the late
+//   table is where its execution arm lives. The consistency tests
+//   carry it as the tables' single listed exception.
+
+/// A primary-dispatch arm (command_dispatch_primary.rs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrimarySlot {
+    Alias,
+    Break,
+    Builtin,
+    Cd,
+    Colon,
+    Command,
+    Continue,
+    Declare,
+    Dirs,
+    Echo,
+    Enable,
+    Env,
+    Eval,
+    Exec,
+    Exit,
+    Export,
+    False,
+    Getopts,
+    Hash,
+    Help,
+    Kill,
+    Local,
+    Logout,
+    Popd,
+    Printf,
+    Pushd,
+    Pwd,
+    Readonly,
+    Return,
+    Set,
+    Shopt,
+    Sleep,
+    Source,
+    True,
+    Unalias,
+}
+
+/// The SimpPrimary claim set, sorted by name.
+pub(crate) const PRIMARY_DISPATCH: &[(&str, PrimarySlot)] = &[
+    (".", PrimarySlot::Source),
+    (":", PrimarySlot::Colon),
+    ("alias", PrimarySlot::Alias),
+    ("break", PrimarySlot::Break),
+    ("builtin", PrimarySlot::Builtin),
+    ("cd", PrimarySlot::Cd),
+    ("command", PrimarySlot::Command),
+    ("continue", PrimarySlot::Continue),
+    ("declare", PrimarySlot::Declare),
+    ("dirs", PrimarySlot::Dirs),
+    ("echo", PrimarySlot::Echo),
+    ("enable", PrimarySlot::Enable),
+    ("env", PrimarySlot::Env),
+    ("eval", PrimarySlot::Eval),
+    ("exec", PrimarySlot::Exec),
+    ("exit", PrimarySlot::Exit),
+    ("export", PrimarySlot::Export),
+    ("false", PrimarySlot::False),
+    ("getopts", PrimarySlot::Getopts),
+    ("hash", PrimarySlot::Hash),
+    ("help", PrimarySlot::Help),
+    ("kill", PrimarySlot::Kill),
+    ("local", PrimarySlot::Local),
+    ("logout", PrimarySlot::Logout),
+    ("popd", PrimarySlot::Popd),
+    ("printf", PrimarySlot::Printf),
+    ("pushd", PrimarySlot::Pushd),
+    ("pwd", PrimarySlot::Pwd),
+    ("readonly", PrimarySlot::Readonly),
+    ("return", PrimarySlot::Return),
+    ("set", PrimarySlot::Set),
+    ("shopt", PrimarySlot::Shopt),
+    ("sleep", PrimarySlot::Sleep),
+    ("source", PrimarySlot::Source),
+    ("true", PrimarySlot::True),
+    ("typeset", PrimarySlot::Declare),
+    ("unalias", PrimarySlot::Unalias),
+];
+
+/// A late-dispatch arm (command_dispatch_late.rs). The arm ORDER
+/// inside `execute_late_builtin_command` is semantic (the function
+/// guard sits between the ordinary slots and the hidden ones,
+/// rubash#154); this table only names the slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LateSlot {
+    Arch,
+    Arithmetic,
+    Basename,
+    Bg,
+    Bind,
+    Caller,
+    Compgen,
+    Complete,
+    Compopt,
+    Conditional,
+    Dirname,
+    Disown,
+    Fc,
+    Fg,
+    History,
+    Jobs,
+    Let,
+    Mapfile,
+    Read,
+    Shift,
+    Stty,
+    Suspend,
+    Test,
+    TestBracket,
+    Time,
+    Times,
+    Trap,
+    Type,
+    Ulimit,
+    Umask,
+    Uname,
+    Unset,
+    Wait,
+}
+
+impl LateSlot {
+    /// The hidden fast-path slots (the registry's HiddenFastpath
+    /// rows): in the late table they sit AFTER the function guard,
+    /// so a shell function with one of these names wins over the
+    /// engine claim (rubash#154). The consistency tests pin this
+    /// set against the HiddenFastpath rows.
+    pub(crate) fn is_hidden(self) -> bool {
+        matches!(self, LateSlot::Uname | LateSlot::Arch | LateSlot::Stty)
+    }
+}
+
+/// The SimpLate claim set, sorted by name.
+pub(crate) const LATE_DISPATCH: &[(&str, LateSlot)] = &[
+    ("((", LateSlot::Arithmetic),
+    ("[", LateSlot::TestBracket),
+    ("[[", LateSlot::Conditional),
+    ("arch", LateSlot::Arch),
+    ("basename", LateSlot::Basename),
+    ("bg", LateSlot::Bg),
+    ("bind", LateSlot::Bind),
+    ("caller", LateSlot::Caller),
+    ("compgen", LateSlot::Compgen),
+    ("complete", LateSlot::Complete),
+    ("compopt", LateSlot::Compopt),
+    ("dirname", LateSlot::Dirname),
+    ("disown", LateSlot::Disown),
+    ("fc", LateSlot::Fc),
+    ("fg", LateSlot::Fg),
+    ("history", LateSlot::History),
+    ("jobs", LateSlot::Jobs),
+    ("let", LateSlot::Let),
+    ("mapfile", LateSlot::Mapfile),
+    ("read", LateSlot::Read),
+    ("readarray", LateSlot::Mapfile),
+    ("shift", LateSlot::Shift),
+    ("stty", LateSlot::Stty),
+    ("suspend", LateSlot::Suspend),
+    ("test", LateSlot::Test),
+    ("time", LateSlot::Time),
+    ("times", LateSlot::Times),
+    ("trap", LateSlot::Trap),
+    ("type", LateSlot::Type),
+    ("ulimit", LateSlot::Ulimit),
+    ("umask", LateSlot::Umask),
+    ("uname", LateSlot::Uname),
+    ("unset", LateSlot::Unset),
+    ("wait", LateSlot::Wait),
+];
+
+/// A `command`-prefix primary-dispatch arm (command_no_alias.rs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CmdPrimarySlot {
+    Alias,
+    Break,
+    Builtin,
+    Cd,
+    Colon,
+    Command,
+    Continue,
+    Declare,
+    Dirs,
+    Echo,
+    Enable,
+    Eval,
+    Exec,
+    Exit,
+    Export,
+    False,
+    Getopts,
+    Hash,
+    Help,
+    Kill,
+    Let,
+    Local,
+    Logout,
+    Mapfile,
+    Popd,
+    Printf,
+    Pushd,
+    Pwd,
+    Read,
+    Readonly,
+    Return,
+    Set,
+    Shift,
+    Shopt,
+    Source,
+    True,
+    Ulimit,
+    Umask,
+    Unalias,
+    Unset,
+}
+
+/// The CmdPrimary claim set, sorted by name.
+pub(crate) const CMD_PRIMARY_DISPATCH: &[(&str, CmdPrimarySlot)] = &[
+    (".", CmdPrimarySlot::Source),
+    (":", CmdPrimarySlot::Colon),
+    ("alias", CmdPrimarySlot::Alias),
+    ("break", CmdPrimarySlot::Break),
+    ("builtin", CmdPrimarySlot::Builtin),
+    ("cd", CmdPrimarySlot::Cd),
+    ("command", CmdPrimarySlot::Command),
+    ("continue", CmdPrimarySlot::Continue),
+    ("declare", CmdPrimarySlot::Declare),
+    ("dirs", CmdPrimarySlot::Dirs),
+    ("echo", CmdPrimarySlot::Echo),
+    ("enable", CmdPrimarySlot::Enable),
+    ("eval", CmdPrimarySlot::Eval),
+    ("exec", CmdPrimarySlot::Exec),
+    ("exit", CmdPrimarySlot::Exit),
+    ("export", CmdPrimarySlot::Export),
+    ("false", CmdPrimarySlot::False),
+    ("getopts", CmdPrimarySlot::Getopts),
+    ("hash", CmdPrimarySlot::Hash),
+    ("help", CmdPrimarySlot::Help),
+    ("kill", CmdPrimarySlot::Kill),
+    ("let", CmdPrimarySlot::Let),
+    ("local", CmdPrimarySlot::Local),
+    ("logout", CmdPrimarySlot::Logout),
+    ("mapfile", CmdPrimarySlot::Mapfile),
+    ("popd", CmdPrimarySlot::Popd),
+    ("printf", CmdPrimarySlot::Printf),
+    ("pushd", CmdPrimarySlot::Pushd),
+    ("pwd", CmdPrimarySlot::Pwd),
+    ("read", CmdPrimarySlot::Read),
+    ("readarray", CmdPrimarySlot::Mapfile),
+    ("readonly", CmdPrimarySlot::Readonly),
+    ("return", CmdPrimarySlot::Return),
+    ("set", CmdPrimarySlot::Set),
+    ("shift", CmdPrimarySlot::Shift),
+    ("shopt", CmdPrimarySlot::Shopt),
+    ("source", CmdPrimarySlot::Source),
+    ("true", CmdPrimarySlot::True),
+    ("typeset", CmdPrimarySlot::Declare),
+    ("ulimit", CmdPrimarySlot::Ulimit),
+    ("umask", CmdPrimarySlot::Umask),
+    ("unalias", CmdPrimarySlot::Unalias),
+    ("unset", CmdPrimarySlot::Unset),
+];
+
+/// A `command`-prefix late-dispatch arm (command_no_alias_late.rs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CmdLateSlot {
+    Arch,
+    Basename,
+    Bg,
+    Bind,
+    Caller,
+    Compgen,
+    Complete,
+    Compopt,
+    Dirname,
+    Disown,
+    Fc,
+    Fg,
+    History,
+    Jobs,
+    Stty,
+    Suspend,
+    Test,
+    TestBracket,
+    Times,
+    Trap,
+    Type,
+    Uname,
+    Wait,
+}
+
+/// The CmdLate claim set, sorted by name.
+pub(crate) const CMD_LATE_DISPATCH: &[(&str, CmdLateSlot)] = &[
+    ("[", CmdLateSlot::TestBracket),
+    ("arch", CmdLateSlot::Arch),
+    ("basename", CmdLateSlot::Basename),
+    ("bg", CmdLateSlot::Bg),
+    ("bind", CmdLateSlot::Bind),
+    ("caller", CmdLateSlot::Caller),
+    ("compgen", CmdLateSlot::Compgen),
+    ("complete", CmdLateSlot::Complete),
+    ("compopt", CmdLateSlot::Compopt),
+    ("dirname", CmdLateSlot::Dirname),
+    ("disown", CmdLateSlot::Disown),
+    ("fc", CmdLateSlot::Fc),
+    ("fg", CmdLateSlot::Fg),
+    ("history", CmdLateSlot::History),
+    ("jobs", CmdLateSlot::Jobs),
+    ("stty", CmdLateSlot::Stty),
+    ("suspend", CmdLateSlot::Suspend),
+    ("test", CmdLateSlot::Test),
+    ("times", CmdLateSlot::Times),
+    ("trap", CmdLateSlot::Trap),
+    ("type", CmdLateSlot::Type),
+    ("uname", CmdLateSlot::Uname),
+    ("wait", CmdLateSlot::Wait),
+];
+
+fn dispatch_slot<S: Copy>(table: &'static [(&'static str, S)], word: &str) -> Option<S> {
+    table
+        .binary_search_by(|(name, _)| (*name).cmp(word))
+        .ok()
+        .map(|index| table[index].1)
+}
+
+/// The primary-table slot for `word`, if the primary dispatch
+/// claims it (registry SimpPrimary projection).
+pub(crate) fn primary_dispatch_slot(word: &str) -> Option<PrimarySlot> {
+    dispatch_slot(PRIMARY_DISPATCH, word)
+}
+
+/// The late-table slot for `word`, if the late dispatch claims it
+/// (registry SimpLate projection).
+pub(crate) fn late_dispatch_slot(word: &str) -> Option<LateSlot> {
+    dispatch_slot(LATE_DISPATCH, word)
+}
+
+/// The `command`-prefix primary-table slot for `word` (registry
+/// CmdPrimary projection).
+pub(crate) fn cmd_primary_dispatch_slot(word: &str) -> Option<CmdPrimarySlot> {
+    dispatch_slot(CMD_PRIMARY_DISPATCH, word)
+}
+
+/// The `command`-prefix late-table slot for `word` (registry
+/// CmdLate projection).
+pub(crate) fn cmd_late_dispatch_slot(word: &str) -> Option<CmdLateSlot> {
+    dispatch_slot(CMD_LATE_DISPATCH, word)
 }
 
 #[cfg(test)]
@@ -1331,10 +1718,11 @@ mod registry_consistency {
 
         // KD-2: the registry's special-builtin set is GNU's 16-name
         // table (mkbuiltins.c:148-154; `enable -s` measurement on GNU
-        // bash 5.3.20), including `source`. The execution-side
-        // predicate still lacks `source` — that remainder is S3's,
-        // pinned here at exactly {"source"} so S3's alignment diffs
-        // against it explicitly.
+        // bash 5.3.20), including `source`. S1–S2 pinned the
+        // execution-side difference at exactly {"source"}; S3 closed
+        // it (the predicate gained `source` and this row set moved
+        // with it), so the symmetric difference is now empty and the
+        // two sets must stay equal.
         assert_eq!(SPECIAL_BUILTINS.len(), 16);
         let special = set(SPECIAL_BUILTINS);
         let builtins = class_rows(ClaimClass::Builtin);
@@ -1348,7 +1736,8 @@ mod registry_consistency {
             .symmetric_difference(&predicate_rows)
             .cloned()
             .collect();
-        assert_eq!(diff, set(&["source"]));
+        assert_eq!(diff, BTreeSet::new());
+        assert_eq!(predicate_rows, special);
     }
 
     #[test]
@@ -1483,7 +1872,11 @@ mod registry_consistency {
             .map(|r| r.name.to_string())
             .collect();
         assert_eq!(positives, rows);
-        assert_eq!(positives.len(), 15);
+        // GNU's 16-name table (mkbuiltins.c:148-154); `source` joined
+        // in S3 (KD-2) — before that this pin read 15 with the
+        // difference carried explicitly.
+        assert_eq!(positives.len(), 16);
+        assert_eq!(positives, set(SPECIAL_BUILTINS));
     }
 
     #[test]
@@ -1570,6 +1963,72 @@ mod registry_consistency {
 
     #[test]
     fn dispatch_tables_match_registry() {
+        // S3: the four dispatch tables are data now (the slot tables
+        // above), so the equality is proven on the data itself
+        // instead of on source scans: each table's name set equals
+        // the registry rows' claim set for its entry, both
+        // directions, and each table is sorted and duplicate-free
+        // (the binary-search lookups depend on it). The one listed
+        // exception is the late table's `((`: a parser-produced
+        // pseudo-word with no registry row (see the S3 section
+        // header). `sudo` appears in NO table: it is the host
+        // elevation pre-check, not a claim (also see the header).
+        fn table_names<S: Copy>(table: &[(&str, S)]) -> BTreeSet<String> {
+            let names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
+            let mut sorted = names.clone();
+            sorted.sort_unstable();
+            assert_eq!(names, sorted, "dispatch table not sorted");
+            let set: BTreeSet<String> = names.iter().map(|s| s.to_string()).collect();
+            assert_eq!(set.len(), names.len(), "dispatch table has duplicates");
+            set
+        }
+        for (names, entry, exceptions) in [
+            (table_names(PRIMARY_DISPATCH), Entry::SimpPrimary, set(&[])),
+            (table_names(LATE_DISPATCH), Entry::SimpLate, set(&["(("])),
+            (
+                table_names(CMD_PRIMARY_DISPATCH),
+                Entry::CmdPrimary,
+                set(&[]),
+            ),
+            (table_names(CMD_LATE_DISPATCH), Entry::CmdLate, set(&[])),
+        ] {
+            let registered: BTreeSet<String> =
+                names.intersection(&registry_names()).cloned().collect();
+            assert_eq!(registered, claims(entry), "dispatch drift at {entry:?}");
+            let unregistered: BTreeSet<String> =
+                names.difference(&registry_names()).cloned().collect();
+            assert_eq!(unregistered, exceptions, "unlisted exception at {entry:?}");
+            assert!(!names.contains("sudo"), "sudo is a pre-check, not a claim");
+        }
+        // The late table's hidden slots (the arms behind the
+        // function guard) are exactly the HiddenFastpath rows.
+        let hidden: BTreeSet<String> = LATE_DISPATCH
+            .iter()
+            .filter(|(_, slot)| slot.is_hidden())
+            .map(|(name, _)| name.to_string())
+            .collect();
+        assert_eq!(hidden, class_rows(ClaimClass::HiddenFastpath));
+        // The lookup functions agree with the tables (the dispatch
+        // functions call these, not the tables directly).
+        for (name, _) in PRIMARY_DISPATCH {
+            assert!(primary_dispatch_slot(name).is_some(), "{name}");
+        }
+        for (name, _) in LATE_DISPATCH {
+            assert!(late_dispatch_slot(name).is_some(), "{name}");
+        }
+        for (name, _) in CMD_PRIMARY_DISPATCH {
+            assert!(cmd_primary_dispatch_slot(name).is_some(), "{name}");
+        }
+        for (name, _) in CMD_LATE_DISPATCH {
+            assert!(cmd_late_dispatch_slot(name).is_some(), "{name}");
+        }
+        assert!(primary_dispatch_slot("rubash-no-such-name").is_none());
+        // Shadow-arm guard (the S1/S2 direction of this pin): the
+        // four dispatch source files may not (re)introduce a claim
+        // for a name their entry does not project. Bodies still
+        // reference their own names in calls (`is_disabled("echo")`,
+        // the stand-down checks), which is why this direction is a
+        // subset check, not the equality the data pin above proves.
         for (src, entry) in [
             (SRC_DISPATCH_PRIMARY, Entry::SimpPrimary),
             (SRC_DISPATCH_LATE, Entry::SimpLate),
@@ -1577,7 +2036,12 @@ mod registry_consistency {
             (SRC_NO_ALIAS_LATE, Entry::CmdLate),
         ] {
             let scanned = only_registered(claim_literals(src));
-            assert_eq!(scanned, claims(entry), "dispatch drift at {entry:?}");
+            let claimed = claims(entry);
+            assert!(
+                scanned.is_subset(&claimed),
+                "shadow claim at {entry:?}: {:?}",
+                scanned.difference(&claimed).collect::<Vec<_>>()
+            );
         }
     }
 
