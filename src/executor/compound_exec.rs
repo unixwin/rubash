@@ -2996,7 +2996,8 @@ impl Executor {
         let saved_state = self.shell_state.clone_for_child_save();
         // rubash#1551: the fork bracket also covers the process-global
         // hash-table mirror (see executor::path::hashed_cache_fork_guard).
-        let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        let _hashed_fork =
+            crate::executor::path::hashed_cache_fork_guard(&self.shell_state.env_vars);
         // The fd table is executor state, not ShellState: a forked child's
         // descriptor table is a copy (execute_in_subshell after make_child),
         // so `( exec 3<&- )` cannot close the parent's fd 3. Rc-shared

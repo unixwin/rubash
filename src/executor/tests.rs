@@ -447,19 +447,23 @@ mod unit_tests {
         };
         use std::collections::HashMap;
 
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
         let env = HashMap::<String, String>::new();
 
         // A miss should be cached as None by find_user_command when hashall
         // is on (the default).  Verify by inserting a None directly and
         // checking that find_user_command returns it without re-scanning.
-        set_command_lookup_cache("definitely_not_a_real_command_xyz_test", None);
+        set_command_lookup_cache(
+            "definitely_not_a_real_command_xyz_test",
+            None,
+            &HashMap::new(),
+        );
         let result = find_user_command("definitely_not_a_real_command_xyz_test", &env);
         assert!(
             result.is_none(),
             "cached negative lookup should return None without re-scanning"
         );
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
     }
 
     /// Issue #71: clear_command_lookup_cache must forget all entries including
@@ -469,20 +473,25 @@ mod unit_tests {
         use crate::executor::path::{
             clear_command_lookup_cache, remove_command_lookup_cache, set_command_lookup_cache,
         };
+        use std::collections::HashMap;
         use std::path::PathBuf;
 
-        clear_command_lookup_cache();
-        set_command_lookup_cache("cached_miss_name", None);
-        set_command_lookup_cache("cached_hit_name", Some(PathBuf::from("/bin/echo")));
+        clear_command_lookup_cache(&HashMap::new());
+        set_command_lookup_cache("cached_miss_name", None, &HashMap::new());
+        set_command_lookup_cache(
+            "cached_hit_name",
+            Some(PathBuf::from("/bin/echo")),
+            &HashMap::new(),
+        );
 
         // Remove both via clear
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
 
         // After clear, re-inserting should work from scratch (no stale entries
         // interfere).  This verifies the clear was complete.
-        set_command_lookup_cache("cached_miss_name", None);
-        remove_command_lookup_cache("cached_miss_name");
-        clear_command_lookup_cache();
+        set_command_lookup_cache("cached_miss_name", None, &HashMap::new());
+        remove_command_lookup_cache("cached_miss_name", &HashMap::new());
+        clear_command_lookup_cache(&HashMap::new());
     }
 
     /// Issue #71: remove_command_lookup_cache must remove individual negative
@@ -492,17 +501,18 @@ mod unit_tests {
         use crate::executor::path::{
             clear_command_lookup_cache, remove_command_lookup_cache, set_command_lookup_cache,
         };
+        use std::collections::HashMap;
 
-        clear_command_lookup_cache();
-        set_command_lookup_cache("hash_d_negative_test_cmd", None);
+        clear_command_lookup_cache(&HashMap::new());
+        set_command_lookup_cache("hash_d_negative_test_cmd", None, &HashMap::new());
 
         // remove_command_lookup_cache should not panic and should remove the
         // entry.  After removal, the cache no longer has the entry.
-        remove_command_lookup_cache("hash_d_negative_test_cmd");
+        remove_command_lookup_cache("hash_d_negative_test_cmd", &HashMap::new());
 
         // Re-inserting after removal should work (entry was actually removed).
-        set_command_lookup_cache("hash_d_negative_test_cmd", None);
-        clear_command_lookup_cache();
+        set_command_lookup_cache("hash_d_negative_test_cmd", None, &HashMap::new());
+        clear_command_lookup_cache(&HashMap::new());
     }
 
     /// Issue #71: PATH change must invalidate the negative cache via the
@@ -515,10 +525,10 @@ mod unit_tests {
         };
         use std::collections::HashMap;
 
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
 
         // Insert a negative entry with the default (empty) environment.
-        set_command_lookup_cache("path_invalidation_test_cmd", None);
+        set_command_lookup_cache("path_invalidation_test_cmd", None, &HashMap::new());
 
         // A lookup with the same environment should return the cached None.
         let env_same = HashMap::<String, String>::new();
@@ -543,7 +553,7 @@ mod unit_tests {
             "changed PATH should re-scan and still return None for missing command"
         );
 
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
     }
 
     // niubash shell-quirks Q16: an enclosing compound redirect (for loop /

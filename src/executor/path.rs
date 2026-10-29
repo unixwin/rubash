@@ -18,7 +18,7 @@ use crate::executor::markers::DATA_DOLLAR;
 
 pub(crate) const COMPATIBLE_SHELL_PATH_ENV: &str = "__RUBASH_COMPATIBLE_SHELL_PATH";
 
-/// Process-wide command-resolution cache.
+/// Process-wide command-resolution cache, sliced per session (rubash#2078).
 ///
 /// GNU bash remembers executed commands in its hash table (findcmd.c +
 /// builtins/hash.def) so a repeated name never pays a full PATH scan twice.
@@ -29,6 +29,18 @@ pub(crate) const COMPATIBLE_SHELL_PATH_ENV: &str = "__RUBASH_COMPATIBLE_SHELL_PA
 /// <name>` child process), so hits, misses, per-directory listings backing
 /// a merged PATH scan, and dispatcher probe outcomes are all cached
 /// (rubash#159).
+///
+/// The store holds one slice per session scope (SESSION_SCOPE_KEY, stamped
+/// by Executor::new) instead of a single fingerprint slot: an embedding host
+/// legitimately holds several Sessions in one process (API design §5.1,
+/// contract Q5), and a single slot made them serve each other's results —
+/// the `hashed` mirror deliberately survives fingerprint resets
+/// (rubash#1137), so one session's `hash -p` entry resolved another
+/// session's command, and one session's `hash -r`/PATH bind dropped
+/// another's remembered locations. Slices keyed by the session scope give
+/// every Session the isolated single-fingerprint cache rubash#159 designed;
+/// maps without the scope token (hand-built test maps, composed child env
+/// lookups) share the "" fallback slice with exactly the old behavior.
 struct CommandLookupCache {
     fingerprint: String,
     results: HashMap<String, Option<PathBuf>>,
@@ -74,6 +86,18 @@ struct CommandLookupCache {
 }
 
 impl CommandLookupCache {
+    fn empty() -> Self {
+        CommandLookupCache {
+            fingerprint: String::new(),
+            results: HashMap::new(),
+            hashed: HashMap::new(),
+            listings: HashMap::new(),
+            probes: HashMap::new(),
+            path_dirs: None,
+            path_extensions: None,
+        }
+    }
+
     /// Drop everything keyed on the previous fingerprint. GNU's
     /// equivalent single flush point is phash_flush()
     /// (builtins/hash.def:150, `hash -r`); the fingerprint mismatch path
@@ -90,34 +114,75 @@ impl CommandLookupCache {
     }
 }
 
-static COMMAND_LOOKUP_CACHE: OnceLock<Mutex<CommandLookupCache>> = OnceLock::new();
+/// Session-scope transport key (rubash#2078): Executor::new stamps a fresh
+/// unique token under this name into the session's env_vars, and the
+/// command-lookup cache slices on it. In-memory only — `__RUBASH_*` names
+/// are excluded from the initial export set (env_helpers
+/// is_initial_export_candidate) and from the spawn env (the
+/// compound_exec/external_setup `rubash_spawn_inherited_state` filter), so
+/// the token never crosses a process boundary; each process slices its own
+/// static map. An env that already carries the token keeps it (a lineage
+/// re-entering Executor::new on a cloned env stays on the parent's slice —
+/// the same fork-sharing shape the hashed_cache_fork_guard brackets
+/// assume).
+pub(crate) const SESSION_SCOPE_KEY: &str = "__RUBASH_SESSION_SCOPE";
 
-fn command_lookup_cache() -> &'static Mutex<CommandLookupCache> {
-    COMMAND_LOOKUP_CACHE.get_or_init(|| {
-        Mutex::new(CommandLookupCache {
-            fingerprint: String::new(),
-            results: HashMap::new(),
-            hashed: HashMap::new(),
-            listings: HashMap::new(),
-            probes: HashMap::new(),
-            path_dirs: None,
-            path_extensions: None,
-        })
-    })
+/// The cache slice name for one env map: the session scope token when the
+/// map belongs to a session, else the shared fallback slice (hand-built
+/// maps keep the pre-#2078 single-store behavior).
+fn session_scope(env_vars: &HashMap<String, String>) -> String {
+    env_vars.get(SESSION_SCOPE_KEY).cloned().unwrap_or_default()
 }
 
-/// Forget only the hash-table mirror entries (the `hashed` map).
+/// Live slice cap. Sessions are heavyweight objects and embedding hosts
+/// hold a handful; a host churning through more distinct scopes than this
+/// (per-request sessions) pays one cache-cold cycle per batch of 16, never
+/// a correctness change — every slice is a pure cache (fingerprint-guarded
+/// PATH-scan evidence plus the session's own hash-table mirror).
+const CACHE_SLICE_CAP: usize = 16;
+
+static COMMAND_LOOKUP_CACHES: OnceLock<Mutex<HashMap<String, CommandLookupCache>>> =
+    OnceLock::new();
+
+fn command_lookup_caches() -> std::sync::MutexGuard<'static, HashMap<String, CommandLookupCache>> {
+    COMMAND_LOOKUP_CACHES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Lock one session's slice, creating it (and evicting stale scopes at the
+/// cap) as needed. The guard returned by command_lookup_caches must be held
+/// for the slice borrow's whole lifetime, so every cache operation is one
+/// lock scope — the shape find_user_command's pre/post-walk blocks already
+/// use (the walk itself runs with the lock dropped, as before).
+fn session_lookup_cache<'a>(
+    caches: &'a mut HashMap<String, CommandLookupCache>,
+    scope: &str,
+) -> &'a mut CommandLookupCache {
+    if !caches.contains_key(scope) {
+        if caches.len() >= CACHE_SLICE_CAP {
+            caches.clear();
+        }
+        caches.insert(scope.to_string(), CommandLookupCache::empty());
+    }
+    caches.get_mut(scope).expect("slice just inserted")
+}
+
+/// Forget only the hash-table mirror entries (the `hashed` map) of the
+/// session that owns `env_vars`.
 ///
 /// GNU sv_path (variables.c:5919, fired by every PATH bind/unbind) is
 /// hashcmd.c:57 phash_flush: the remembered locations die, while PATH
 /// scanning itself is untouched. The scan stores here stay in place —
 /// they are fingerprint-guarded, so results computed under the old PATH
-/// are dropped by the next lookup's reset anyway (rubash#1551).
-pub(crate) fn flush_command_lookup_cache_hashed() {
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.hashed.clear();
+/// are dropped by the next lookup's reset anyway (rubash#1551). The flush
+/// is slice-scoped (rubash#2078): a sibling session's PATH bind must not
+/// drop this session's remembered locations.
+pub(crate) fn flush_command_lookup_cache_hashed(env_vars: &HashMap<String, String>) {
+    let scope = session_scope(env_vars);
+    let mut caches = command_lookup_caches();
+    session_lookup_cache(&mut caches, &scope).hashed.clear();
 }
 
 /// RAII bracket for an in-process fork boundary (pipeline element,
@@ -134,66 +199,75 @@ pub(crate) fn flush_command_lookup_cache_hashed() {
 /// child's `hash -p` would leak into them (rubash#1551). The owning
 /// state's `__RUBASH_HASH_TABLE` env entry is already cloned/restored
 /// by the boundary's own state snapshot; this guard covers the mirror.
-/// Same guard shape as builtins::kill::sigpipe_block_guard.
+/// Same guard shape as builtins::kill::sigpipe_block_guard. The bracket
+/// snapshots and restores only its own session's slice (rubash#2078) —
+/// a sibling session running on another thread during the boundary
+/// must not be rolled back by this drop.
 pub(crate) struct HashedCacheForkGuard {
+    scope: String,
     saved: HashMap<String, Option<PathBuf>>,
 }
 
-pub(crate) fn hashed_cache_fork_guard() -> HashedCacheForkGuard {
-    let cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    HashedCacheForkGuard {
-        saved: cache.hashed.clone(),
-    }
+pub(crate) fn hashed_cache_fork_guard(env_vars: &HashMap<String, String>) -> HashedCacheForkGuard {
+    let scope = session_scope(env_vars);
+    let saved = {
+        let mut caches = command_lookup_caches();
+        session_lookup_cache(&mut caches, &scope).hashed.clone()
+    };
+    HashedCacheForkGuard { scope, saved }
 }
 
 impl Drop for HashedCacheForkGuard {
     fn drop(&mut self) {
-        let mut cache = command_lookup_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.hashed = std::mem::take(&mut self.saved);
+        let mut caches = command_lookup_caches();
+        session_lookup_cache(&mut caches, &self.scope).hashed = std::mem::take(&mut self.saved);
     }
 }
 
-/// Forget all remembered command locations (`hash -r`, tests).
-pub(crate) fn clear_command_lookup_cache() {
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+/// Forget all remembered command locations (`hash -r`, tests) in the
+/// session that owns `env_vars`.
+pub(crate) fn clear_command_lookup_cache(env_vars: &HashMap<String, String>) {
+    let scope = session_scope(env_vars);
+    let mut caches = command_lookup_caches();
+    let cache = session_lookup_cache(&mut caches, &scope);
     // `hash -r` (phash_flush) forgets hashed_filenames too — unlike a
     // fingerprint reset, this clear drops the hash-table mirror as well.
     cache.hashed.clear();
     cache.reset(String::new());
 }
 
-/// Forget one remembered command location.
+/// Forget one remembered command location in the session that owns
+/// `env_vars`.
 ///
 /// GNU `hash -d NAME` (builtins/hash.def) calls `phash_remove(w)` to drop a
 /// single entry from the hash table. Rubash keeps the user-visible hash table
 /// in `__RUBASH_HASH_TABLE` and the in-memory lookup cache here; both must be
 /// invalidated together or the next `find_user_command(name)` returns the
 /// stale cached path.
-pub(crate) fn remove_command_lookup_cache(name: &str) {
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+pub(crate) fn remove_command_lookup_cache(name: &str, env_vars: &HashMap<String, String>) {
+    let scope = session_scope(env_vars);
+    let mut caches = command_lookup_caches();
+    let cache = session_lookup_cache(&mut caches, &scope);
     cache.results.remove(name);
     cache.hashed.remove(name);
 }
 
-/// Insert or override one remembered command location.
+/// Insert or override one remembered command location in the session that
+/// owns `env_vars`.
 ///
 /// GNU `hash -p PATH NAME` (builtins/hash.def) calls `phash_insert(w,
 /// pathname)` so the next lookup of `name` returns `pathname` without a PATH
 /// scan. `hash NAME` rehash also lands here after a fresh PATH search. The
 /// internal cache must mirror the user-visible table or `find_user_command`
 /// keeps returning the old result.
-pub(crate) fn set_command_lookup_cache(name: &str, path: Option<PathBuf>) {
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+pub(crate) fn set_command_lookup_cache(
+    name: &str,
+    path: Option<PathBuf>,
+    env_vars: &HashMap<String, String>,
+) {
+    let scope = session_scope(env_vars);
+    let mut caches = command_lookup_caches();
+    let cache = session_lookup_cache(&mut caches, &scope);
     if cache.hashed.len() >= 4096 {
         cache.hashed.clear();
     }
@@ -411,11 +485,11 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
     if !crate::builtins::set::shell_option_enabled(env_vars, "hashall")
         || env_vars.get("__RUBASH_TEMP_PATH").map(String::as_str) == Some("1")
     {
+        let scope = session_scope(env_vars);
         let fingerprint = command_lookup_fingerprint(env_vars);
         {
-            let mut cache = command_lookup_cache()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut caches = command_lookup_caches();
+            let cache = session_lookup_cache(&mut caches, &scope);
             if cache.fingerprint != fingerprint {
                 cache.reset(fingerprint.clone());
             } else if cache.results.get(name) == Some(&None) {
@@ -426,7 +500,7 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
                 // The probe grid re-stats every candidate spelling under
                 // every PATH dir; a hit means the file appeared
                 // mid-session, so drop the memo and take the real walk.
-                if memoized_miss_still_absent(&mut cache, name, env_vars, &fingerprint) {
+                if memoized_miss_still_absent(cache, name, env_vars, &fingerprint) {
                     return None;
                 }
                 cache.results.remove(name);
@@ -434,9 +508,8 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         }
         let result = find_user_command_uncached(name, env_vars, &fingerprint);
         if result.is_none() && !has_path_separator(name) {
-            let mut cache = command_lookup_cache()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut caches = command_lookup_caches();
+            let cache = session_lookup_cache(&mut caches, &scope);
             if cache.fingerprint == fingerprint {
                 if cache.results.len() >= 4096 {
                     cache.results.clear();
@@ -447,11 +520,11 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         return result;
     }
 
+    let scope = session_scope(env_vars);
     let fingerprint = command_lookup_fingerprint(env_vars);
     {
-        let mut cache = command_lookup_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut caches = command_lookup_caches();
+        let cache = session_lookup_cache(&mut caches, &scope);
         if cache.fingerprint != fingerprint {
             cache.reset(fingerprint.clone());
         }
@@ -496,9 +569,8 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
 
     let result = find_user_command_uncached(name, env_vars, &fingerprint);
 
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut caches = command_lookup_caches();
+    let cache = session_lookup_cache(&mut caches, &scope);
     if cache.fingerprint != fingerprint {
         cache.reset(fingerprint);
     }
@@ -731,10 +803,10 @@ fn find_in_path_via_listings(
     env_vars: &HashMap<String, String>,
     fingerprint: &str,
 ) -> Option<PathBuf> {
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (dirs, extensions) = path_scan_scaffold(&mut cache, env_vars, fingerprint);
+    let scope = session_scope(env_vars);
+    let mut caches = command_lookup_caches();
+    let cache = session_lookup_cache(&mut caches, &scope);
+    let (dirs, extensions) = path_scan_scaffold(cache, env_vars, fingerprint);
     // Candidate spellings are per-NAME, not per-directory (GNU passes the
     // same NAME through the whole walk); derive them once so a miss costs
     // one contains() per PATH entry per PATHEXT candidate and no
@@ -742,7 +814,7 @@ fn find_in_path_via_listings(
     let candidates = listed_candidates(name, &extensions);
     for attempt in 0..2 {
         for dir in dirs.iter() {
-            let listing = cached_dir_listing(&mut cache, dir);
+            let listing = cached_dir_listing(cache, dir);
             for candidate in &candidates {
                 // rubash#799 relaxed by rubash#1283: within one directory a
                 // byte-equal listing hit (arm above) wins; this fold arm
@@ -791,7 +863,7 @@ fn find_in_path_via_listings(
         // unhashed lookup, so the negative answer always comes from the
         // filesystem, never from a cache. Hits return from the listing
         // scan above and never pay the probe grid.
-        if attempt == 0 && confirm_listing_miss(&mut cache, &dirs, &candidates).moved {
+        if attempt == 0 && confirm_listing_miss(cache, &dirs, &candidates).moved {
             continue;
         }
         break;
@@ -2433,11 +2505,11 @@ fn winuxcmd_has_command_cached(
     name: &str,
     env_vars: &HashMap<String, String>,
 ) -> bool {
+    let scope = session_scope(env_vars);
     let fingerprint = command_lookup_fingerprint(env_vars);
     {
-        let mut cache = command_lookup_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut caches = command_lookup_caches();
+        let cache = session_lookup_cache(&mut caches, &scope);
         if cache.fingerprint != fingerprint {
             cache.reset(fingerprint.clone());
         } else if let Some(cached) = cache.probes.get(name) {
@@ -2445,9 +2517,8 @@ fn winuxcmd_has_command_cached(
         }
     }
     let probed = winuxcmd_has_command(dispatcher, name, env_vars);
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut caches = command_lookup_caches();
+    let cache = session_lookup_cache(&mut caches, &scope);
     if cache.fingerprint != fingerprint {
         cache.reset(fingerprint);
     }
@@ -6898,7 +6969,7 @@ mod tests {
         );
 
         // `hash -r` drops everything; the fresh listing sees the files.
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
         assert_eq!(
             find_user_command("late_tool", &env_vars),
             Some(dir.join("late_tool.exe"))
@@ -6906,7 +6977,7 @@ mod tests {
 
         // A PATH change still resets the scan scaffold (fingerprint
         // mismatch), and the newly created file is visible either way.
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
         assert_eq!(find_user_command("late_tool4", &env_vars), None);
         fs::write(dir.join("late_tool4.exe"), b"").unwrap();
         assert_eq!(
@@ -7023,25 +7094,33 @@ mod tests {
         env_vars.insert("PATH".to_string(), dir.to_string_lossy().to_string());
         env_vars.insert("__RUBASH_SETOPT_hashall".to_string(), "0".to_string());
 
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
         assert_eq!(find_user_command("gate_tool", &env_vars), None);
         // The miss is memoized (rubash#159)...
         assert_eq!(
-            command_lookup_cache()
-                .lock()
-                .unwrap()
-                .results
-                .get("gate_tool"),
-            Some(&None)
+            {
+                let mut caches = command_lookup_caches();
+                session_lookup_cache(&mut caches, "")
+                    .results
+                    .get("gate_tool")
+                    .cloned()
+            },
+            Some(None)
         );
         // ...and a still-absent repeat stays absent WITHOUT growing the
         // listings: the bounded probe grid (stat walk) ran, not the full
         // directory re-scan (rubash#159 miss-cost contract).
-        let listings_before = command_lookup_cache().lock().unwrap().listings.len();
+        let listings_before = {
+            let mut caches = command_lookup_caches();
+            session_lookup_cache(&mut caches, "").listings.len()
+        };
         assert_eq!(find_user_command("gate_tool", &env_vars), None);
         assert_eq!(find_user_command("gate_tool", &env_vars), None);
         assert_eq!(
-            command_lookup_cache().lock().unwrap().listings.len(),
+            {
+                let mut caches = command_lookup_caches();
+                session_lookup_cache(&mut caches, "").listings.len()
+            },
             listings_before
         );
 
@@ -7053,16 +7132,18 @@ mod tests {
             Some(dir.join("gate_tool.exe"))
         );
         assert_eq!(
-            command_lookup_cache()
-                .lock()
-                .unwrap()
-                .results
-                .get("gate_tool"),
+            {
+                let mut caches = command_lookup_caches();
+                session_lookup_cache(&mut caches, "")
+                    .results
+                    .get("gate_tool")
+                    .cloned()
+            },
             None
         );
 
         let _ = fs::remove_dir_all(dir);
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
     }
 
     // unixwin/niubash#659: std::fs::canonicalize on Windows returns
