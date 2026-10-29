@@ -7,8 +7,11 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
+use std::sync::{Mutex, OnceLock};
 
-use crate::executor::path::{is_executable_file, shell_directory_entries, shell_path_entries};
+use crate::executor::path::{
+    command_lookup_fingerprint, is_executable_file, shell_directory_entries, shell_path_entries,
+};
 
 use crate::builtins::alias::Alias;
 
@@ -1787,10 +1790,46 @@ fn command_completion_candidates(
     candidates
 }
 
+/// rubash#1994: the PATH completion walk, memoized under the
+/// command-lookup fingerprint (the same key the executor's command
+/// lookup cache uses: PATH, PWD, PATHEXT and every env key the path
+/// translation consults). A `compgen -c` / compspec evaluation used to
+/// re-walk every PATH directory and stat every entry on EVERY call —
+/// on a fat PATH (~2900 executables) that was ~95ms per call in-shell
+/// (Linux same-machine), so 200 evaluations paid the walk 200 times.
+/// The cached list is the RAW walk (duplicates across directories
+/// preserved, rubash#1089); callers merge/sort/dedup as before.
+/// Accepted staleness, identical to the niubash host-side cache this
+/// mirrors: filesystem-only changes under an unchanged fingerprint
+/// are observed when a fingerprint input changes (a PATH bind, a cd),
+/// not before.
+struct PathCandidatesCache {
+    fingerprint: String,
+    candidates: Vec<String>,
+}
+
+static PATH_CANDIDATES_CACHE: OnceLock<Mutex<PathCandidatesCache>> = OnceLock::new();
+
+fn path_candidates_cache() -> &'static Mutex<PathCandidatesCache> {
+    PATH_CANDIDATES_CACHE.get_or_init(|| {
+        Mutex::new(PathCandidatesCache {
+            fingerprint: String::new(),
+            candidates: Vec::new(),
+        })
+    })
+}
+
 fn path_command_completion_candidates(env_vars: &HashMap<String, String>) -> Vec<String> {
     let Some(path_value) = env_vars.get("PATH") else {
         return Vec::new();
     };
+
+    let fingerprint = command_lookup_fingerprint(env_vars);
+    if let Ok(cache) = path_candidates_cache().lock() {
+        if cache.fingerprint == fingerprint {
+            return cache.candidates.clone();
+        }
+    }
 
     let mut candidates = Vec::new();
     for dir in shell_path_entries(path_value) {
@@ -1808,6 +1847,10 @@ fn path_command_completion_candidates(env_vars: &HashMap<String, String>) -> Vec
                 candidates.push(entry.name);
             }
         }
+    }
+    if let Ok(mut cache) = path_candidates_cache().lock() {
+        cache.fingerprint = fingerprint;
+        cache.candidates = candidates.clone();
     }
     candidates
 }

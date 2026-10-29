@@ -230,7 +230,7 @@ fn anchor_at_session_cwd(candidate: PathBuf, env_vars: &HashMap<String, String>)
     candidate
 }
 
-fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
+pub(crate) fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
     const ENV_KEYS: &[&str] = &[
         "PATH",
         // G-02: cached lookup results are anchored at the session cwd
@@ -1566,7 +1566,12 @@ pub fn external_command_for_named_program(
         let lower = name.replace('\\', "/").to_ascii_lowercase();
         let is_sh =
             lower == "sh" || lower == "bash" || lower.ends_with("/sh") || lower.ends_with("/bash");
-        if !cfg!(unix) && is_sh && native_args.len() == 2 && native_args[0] == "-c" && !bash_argv0_supplied {
+        if !cfg!(unix)
+            && is_sh
+            && native_args.len() == 2
+            && native_args[0] == "-c"
+            && !bash_argv0_supplied
+        {
             command.arg(name);
         }
     }
@@ -5456,7 +5461,10 @@ mod tests {
             &home_root.join("winuxcmd-other").join("x.exe"),
             &env
         ));
-        assert!(!posix_aware_child(Path::new(r"D:\elsewhere\node.exe"), &env));
+        assert!(!posix_aware_child(
+            Path::new(r"D:\elsewhere\node.exe"),
+            &env
+        ));
 
         // Route 3: the per-tree winuxcmd.exe marker probe — a WinuxCmd
         // installation reached through PATH without any env configuration.
@@ -5471,10 +5479,7 @@ mod tests {
             &usr_bin.join("printf.exe"),
             &HashMap::new()
         ));
-        assert!(!posix_aware_child(
-            &usr_bin.join("fd.exe"),
-            &HashMap::new()
-        ));
+        assert!(!posix_aware_child(&usr_bin.join("fd.exe"), &HashMap::new()));
 
         // Flat (legacy) installation layout: marker directly in the root.
         let flat = std::env::temp_dir().join("rubash-optb-wcmd-flat");
@@ -5520,7 +5525,10 @@ mod tests {
         let ls = usr_bin.join("ls.exe");
 
         // Applet keeps the shell-tree spelling verbatim.
-        assert_eq!(child_argv(&ls, &["/tmp"], &env_vars), vec!["/tmp".to_string()]);
+        assert_eq!(
+            child_argv(&ls, &["/tmp"], &env_vars),
+            vec!["/tmp".to_string()]
+        );
 
         // Third-party gets a native path for the same operand.
         let rg_tmp = child_argv(&rg, &["/tmp"], &env_vars);
