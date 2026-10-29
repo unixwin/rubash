@@ -208,6 +208,32 @@ pub(crate) fn open_winux_fifo_write(
     imp::open_winux_fifo_write(path, interrupted)
 }
 
+/// Slurp a marker target's whole stream for a builtin text consumer
+/// (the `read`/`mapfile` self-slurp faces and the FUNCTION_STDIN
+/// staging channel): Some(bytes) read through the rendezvous when
+/// `path` is a WinuxCmd fifo marker, None when it is not a marker —
+/// the caller's plain-file read proceeds unchanged. A failed
+/// rendezvous surfaces as Some(Err) so the caller keeps its existing
+/// read-failure shape. Plain-reading the marker file instead would
+/// hand the consumer the 7 marker bytes and leave the writer waiting
+/// for a server that never exists.
+#[cfg(windows)]
+pub(crate) fn slurp_marker_bytes(
+    path: &Path,
+    env_vars: &HashMap<String, String>,
+) -> Option<io::Result<Vec<u8>>> {
+    if !path_is_winux_fifo(path) {
+        return None;
+    }
+    let mut file = match open_winux_fifo_read(path, &|| fifo_wait_interrupted(env_vars)) {
+        Ok(file) => file,
+        Err(error) => return Some(Err(error)),
+    };
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    Some(file.read_to_end(&mut buf).map(|_| buf))
+}
+
 #[cfg(windows)]
 mod imp {
     #![allow(non_snake_case)]

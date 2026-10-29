@@ -426,14 +426,10 @@ impl Executor {
         // named-pipe rendezvous (same rule as the text channel in
         // stdin_string_for_command).
         #[cfg(windows)]
-        if crate::winux_fifo::path_is_winux_fifo(&path) {
-            use std::io::Read as _;
-            let mut file = crate::winux_fifo::open_winux_fifo_read(&path, &|| {
-                crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
-            })
-            .ok()?;
-            let mut buf = Vec::new();
-            file.read_to_end(&mut buf).ok()?;
+        if let Some(result) =
+            crate::winux_fifo::slurp_marker_bytes(&path, &self.shell_state.env_vars)
+        {
+            let buf = result.ok()?;
             return Some(bytes_to_shell_text(&buf));
         }
         fs::read_to_string(path).ok()
