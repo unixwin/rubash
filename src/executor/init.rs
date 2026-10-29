@@ -113,6 +113,31 @@ impl Executor {
             );
         }
 
+        // rubash#2078: name this executor's command-lookup cache slice. The
+        // process-global cache in executor::path is a map keyed on this
+        // token instead of a single fingerprint slot, so two Sessions in one
+        // process (the embed API's supported shape, contract Q5) with
+        // different PATH or hash states stop serving each other's parse
+        // results. Fresh stamp per constructor entry; an env that already
+        // carries the token keeps it — a lineage re-entering this
+        // constructor on a cloned env (the fork-copy shape
+        // command_substitution_executor uses) stays on the parent's slice,
+        // which is exactly the sharing the hashed_cache_fork_guard brackets
+        // assume. In-memory only: `__RUBASH_*` names are excluded from the
+        // initial export set (env_helpers is_initial_export_candidate) and
+        // from the spawn env (the rubash_spawn_inherited_state filter), so
+        // the token never crosses a process boundary and each process
+        // slices its own static map.
+        if !env_vars.contains_key(crate::executor::path::SESSION_SCOPE_KEY) {
+            static NEXT_SESSION_SCOPE: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let scope = NEXT_SESSION_SCOPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            env_vars.insert(
+                crate::executor::path::SESSION_SCOPE_KEY.to_string(),
+                format!("s{scope}"),
+            );
+        }
+
         // rubash#588: record the imported (normalized) PATH once at the
         // startup boundary. GNU command search walks the PATH variable
         // verbatim — search_for_command feeds value_cell(path) straight to

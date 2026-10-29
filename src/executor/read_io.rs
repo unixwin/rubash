@@ -1320,7 +1320,8 @@ impl Executor {
         // rubash#1551: the body is a forked child (subst.c:6362
         // process_substitute) running in place here — bracket the
         // process-global hash-table mirror for its duration.
-        let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        let _hashed_fork =
+            crate::executor::path::hashed_cache_fork_guard(&self.shell_state.env_vars);
         subshell.stdout_capture = Some(Vec::new());
         // Direct-stdout builtins inside the substitution consult the
         // thread-local capture, which belongs to an enclosing pipeline

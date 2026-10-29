@@ -647,7 +647,8 @@ impl Executor {
         // rubash#1551: the fork bracket also covers the process-global
         // hash-table mirror — the child's `hash -p` writes and PATH-bind
         // flushes must not reach the parent's remembered locations.
-        let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        let _hashed_fork =
+            crate::executor::path::hashed_cache_fork_guard(&self.shell_state.env_vars);
         // rubash#403: subshell_depth is NOT bumped here. GNU increments
         // subshell_level exactly once per substitution — in the CHILD
         // (execute_in_subshell; variables.c get_bash_subshell reads the
