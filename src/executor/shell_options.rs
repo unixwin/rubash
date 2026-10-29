@@ -825,6 +825,202 @@ impl Executor {
         }
     }
 
+    /// rubash#1902: GNU's `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and
+    /// `/dev/fd/N` faces answer the fd FACT, never a name constant —
+    /// sh_eaccess routes path_is_devfd operands (eaccess.c:63-77) through
+    /// sh_stataccess (eaccess.c:116), whose sh_stat (eaccess.c:80) stats
+    /// the currently bound descriptor and checks the mode bits of what it
+    /// found: fd 0 bound to a writable file makes `test -w /dev/stdin`
+    /// true, a 444 file makes it false. The builtin only receives
+    /// env_vars, so mirror the fd table right before test/[[ runs —
+    /// same channel as the terminal and pipe marks:
+    /// - a File-bound fd carries its target path in __RUBASH_FD_TARGET_<fd>
+    ///   and every file predicate answers from the referent (the procfs
+    ///   symlink semantics);
+    /// - every other open fd carries its device class and mode bits in
+    ///   __RUBASH_FD_ACCESS_<fd>;
+    /// - an entry the shell closed carries an empty value (the
+    ///   /proc/self/fd/N ENOENT face). An fd with no entry at all was
+    ///   never opened, where the marks are simply not consulted.
+    /// Rewritten fresh each call, like the other marks.
+    pub(in crate::executor) fn sync_fd_alias_facts(&mut self, cmd: Option<&CommandNode>) {
+        self.shell_state.env_vars.retain(|key, _| {
+            !key.starts_with(FD_TARGET_PREFIX) && !key.starts_with(FD_ACCESS_PREFIX)
+        });
+        for (fd, entry) in &self.fd_table.entries {
+            if entry.closed {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_ACCESS_PREFIX}{fd}"), String::new());
+                continue;
+            }
+            // Streaming pipeline tail (rubash#761): the consumer pipe is
+            // the stage's descriptor 0 — GNU dup2's it on (execute_cmd.c),
+            // and its fifo mode carries owner r+w. The fd table still
+            // holds whatever `exec` bound earlier, so it must not answer
+            // here; a stage command with its own `< file` re-dup2's first
+            // (redir.c) and the table entry IS the truth again.
+            if *fd == 0
+                && self.pipeline_stdin_stream.is_some()
+                && cmd
+                    .and_then(|command| command.redirect_in.as_ref())
+                    .is_none()
+            {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_ACCESS_PREFIX}{fd}"), "prw".to_string());
+                continue;
+            }
+            // The read endpoint wins when both ends are bound: GNU stats
+            // one inode (a `<>` pair shares it), and the read side is the
+            // one the stdio spellings name first.
+            let mut class = 'f';
+            let mut can_r = false;
+            let mut can_w = false;
+            let can_x;
+            let mut target: Option<String> = None;
+            // A DOS device binding (NUL for /dev/null, CONIN$ for a
+            // console stdin) has no stat-able path — the bind may store
+            // the device name cwd-joined (a `< /dev/null` File endpoint
+            // records `<cwd>\NUL`), so judge the FILE NAME and emit the
+            // device class instead of a target the evaluator cannot
+            // resolve (metadata() fails on it while open() succeeds
+            // through the kernel's NUL magic — the two faces disagreed,
+            // which is exactly what the marks must not do).
+            let dos_device_class = |path: &std::path::Path| -> Option<char> {
+                let name = path.file_name()?;
+                if !crate::fd::is_dos_device_path(std::path::Path::new(name)) {
+                    return None;
+                }
+                let upper = name.to_string_lossy().to_ascii_uppercase();
+                if matches!(upper.as_str(), "CON" | "CONIN$" | "CONOUT$") {
+                    Some('c')
+                } else {
+                    Some('n')
+                }
+            };
+            match &entry.read {
+                Some(FdReadEndpoint::File(file)) => {
+                    if let Some(device) = dos_device_class(&file.path) {
+                        class = device;
+                        can_r = true;
+                        can_w = true;
+                    } else if !file.path.as_os_str().is_empty() {
+                        target = Some(file.path.to_string_lossy().into_owned());
+                    } else if crate::fd::is_pipe_handle(file.handle) {
+                        class = 'p';
+                        can_r = true;
+                        can_w = true;
+                    } else {
+                        class = 'f';
+                        can_r = true;
+                    }
+                }
+                // The inherited stdin is a console or the parent's pipe
+                // end (an invocation `< file` binds File above); both
+                // inodes carry owner r+w bits.
+                Some(FdReadEndpoint::InheritedProcessStdin) => {
+                    class = if self.stdin_source_is_terminal() {
+                        'c'
+                    } else {
+                        'p'
+                    };
+                    can_r = true;
+                    can_w = true;
+                }
+                // TextInput pipes (text feeds, process substitution,
+                // coproc stdout): fifo prw-r--r--.
+                Some(
+                    FdReadEndpoint::Text(_)
+                    | FdReadEndpoint::ProcessSubstitution(_)
+                    | FdReadEndpoint::CoprocStdout { .. },
+                ) => {
+                    class = 'p';
+                    can_r = true;
+                    can_w = true;
+                }
+                // The synthetic /proc/self/cwd bind (rubash#1937): GNU
+                // opened the directory O_RDONLY — mode 755.
+                Some(FdReadEndpoint::Directory) => {
+                    class = 'd';
+                    can_r = true;
+                    can_w = true;
+                }
+                None => {}
+            }
+            match &entry.write {
+                Some(FdWriteEndpoint::File(file)) => {
+                    if target.is_none() {
+                        if let Some(device) = dos_device_class(&file.path) {
+                            class = device;
+                            can_r = true;
+                            can_w = true;
+                        } else if !file.path.as_os_str().is_empty() {
+                            target = Some(file.path.to_string_lossy().into_owned());
+                        } else if crate::fd::is_pipe_handle(file.handle) {
+                            class = 'p';
+                            can_w = true;
+                        } else {
+                            can_w = true;
+                        }
+                    }
+                }
+                Some(FdWriteEndpoint::Stdout) => {
+                    if self.stdout_sink_is_terminal() {
+                        class = 'c';
+                    } else if class == 'f' {
+                        class = 'p';
+                    }
+                    can_w = true;
+                }
+                Some(FdWriteEndpoint::Stderr) => {
+                    if crate::fd::is_console_handle(crate::fd::process_std_handle(2)) {
+                        class = 'c';
+                    } else if class == 'f' {
+                        class = 'p';
+                    }
+                    can_w = true;
+                }
+                Some(
+                    FdWriteEndpoint::CoprocStdin { .. }
+                    | FdWriteEndpoint::ProcessSubstitution { .. },
+                ) => {
+                    class = 'p';
+                    can_w = true;
+                }
+                // rubash#1898: the bind is symbolic but the underlying
+                // inode is the null device, crw-rw-rw-.
+                Some(FdWriteEndpoint::FullDevice) => {
+                    class = 'n';
+                    can_r = true;
+                    can_w = true;
+                }
+                None => {}
+            }
+            if let Some(target) = target {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_TARGET_PREFIX}{fd}"), target);
+                continue;
+            }
+            can_x = class == 'd';
+            let mut value = String::new();
+            value.push(class);
+            if can_r {
+                value.push('r');
+            }
+            if can_w {
+                value.push('w');
+            }
+            if can_x {
+                value.push('x');
+            }
+            self.shell_state
+                .env_vars
+                .insert(format!("{FD_ACCESS_PREFIX}{fd}"), value);
+        }
+    }
+
     /// isatty() verdict for an expanded redirect target: `&N` and the
     /// /dev/fd/N aliases consult fd N's bound endpoint; a path is probed
     /// read-only (no create/truncate side effect) and judged by

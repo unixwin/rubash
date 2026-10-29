@@ -42,7 +42,7 @@ impl Executor {
         }
         let mut overrides: Vec<(usize, String)> = Vec::new();
         let mut has_t = false;
-        let mut has_fd_path = false;
+        let mut has_fd_alias = false;
         let mut index = 0;
         // rubash#1202: the -v subscript rewrite's evalerror diagnostic is
         // a diagnostic OF THIS BUILTIN (GNU test.c via execute_cmd.c
@@ -55,8 +55,19 @@ impl Executor {
             if current == "-t" {
                 has_t = true;
             }
-            if current.starts_with("/dev/fd/") || current.starts_with("/proc/self/fd/") {
-                has_fd_path = true;
+            // rubash#1902: the /dev/std* spellings are fd aliases too;
+            // /proc/<pid>/fd/N needs the registry's own-pid judgment. The
+            // /dev/fd and /proc/self/fd prefixes the pipe marks gated on
+            // are the same alias set the registry classifies.
+            if current.starts_with("/dev/fd/")
+                || current.starts_with("/proc/self/fd/")
+                || current.starts_with("/dev/std")
+            {
+                has_fd_alias = true;
+            } else if current.starts_with("/proc/")
+                && crate::special_paths::fd_alias_target(current).is_some()
+            {
+                has_fd_alias = true;
             }
             // Operands are skipped after a `-v` (GNU test.c unary_operator
             // consumes the next word), so the operator test never sees a
@@ -127,11 +138,14 @@ impl Executor {
             self.sync_fd_terminal_marks(Some(cmd));
         }
         // Same fused-scan economy for the pipe marks (__RUBASH_FD_PIPE_<fd>,
-        // consumed by the /dev/fd/N operand arm in builtins/test.rs):
-        // refresh only when an argument actually spells an fd path
-        // (rubash#1467).
-        if has_fd_path {
+        // consumed by the /dev/fd/N operand arm in builtins/test.rs) and the
+        // fd-alias facts (__RUBASH_FD_TARGET_<fd> / __RUBASH_FD_ACCESS_<fd>,
+        // rubash#1902 — the stdio spellings and /proc/<pid>/fd/N join the
+        // operand set): refresh only when an argument actually spells an
+        // fd alias.
+        if has_fd_alias {
             self.sync_fd_pipe_marks();
+            self.sync_fd_alias_facts(Some(cmd));
         }
         // GNU execute_cmd.c: test's diagnostics go to the shell's CURRENTLY
         // BOUND fd 2 (redir.c) — an enclosing `exec 2>/dev/null` contains

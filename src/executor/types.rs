@@ -46,6 +46,16 @@ pub const FD_OUTPUT_PROCESS_SUBSTITUTION_PREFIX: &str = "__RUBASH_FD_OUTPUT_PROC
 pub const FD_CLOSED_PREFIX: &str = "__RUBASH_FD_CLOSED_";
 pub const FD_TERMINAL_PREFIX: &str = "__RUBASH_FD_TERMINAL_";
 pub const FD_PIPE_PREFIX: &str = "__RUBASH_FD_PIPE_";
+/// rubash#1902: the fd-alias facts the test/[[ evaluator consumes. A
+/// File-bound fd carries its target path in __RUBASH_FD_TARGET_<fd>
+/// (every file predicate answers from the referent, the procfs-symlink
+/// semantics); every other open fd carries its device class plus mode
+/// bits in __RUBASH_FD_ACCESS_<fd> (class char first: `p` fifo, `c`
+/// console, `d` directory, `n` null-style char device, `f` generic file;
+/// then the granted r/w/x letters). An empty value is the closed-entry
+/// tombstone: /proc/self/fd/N is gone and every predicate fails.
+pub const FD_TARGET_PREFIX: &str = "__RUBASH_FD_TARGET_";
+pub const FD_ACCESS_PREFIX: &str = "__RUBASH_FD_ACCESS_";
 pub const FD_STDOUT_TARGET: &str = "__RUBASH_FD_STDOUT";
 pub const FD_STDERR_TARGET: &str = "__RUBASH_FD_STDERR";
 pub const FD_COPROC_STDIN_TARGET_PREFIX: &str = "__RUBASH_COPROC_STDIN:";

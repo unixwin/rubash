@@ -941,6 +941,14 @@ impl Executor {
         }
         let value = self.expand_conditional_word(operand);
         self.xtrace_conditional_term(op, &value, None);
+        // rubash#1902: an fd-alias operand answers the bound fd's facts
+        // (sh_stataccess stats the current binding, eaccess.c:116), so the
+        // marks must be fresh for THIS evaluation — same contract as the
+        // [ ] path's fused scan.
+        if crate::special_paths::fd_alias_target(&value).is_some() {
+            self.sync_fd_pipe_marks();
+            self.sync_fd_alias_facts(None);
+        }
         let args = vec![op.to_string(), value];
         crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
     }
