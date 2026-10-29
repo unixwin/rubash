@@ -464,7 +464,15 @@ impl ShellInvocation {
             // `__RUBASH_` env filter).
             executor.set_env(crate::script_driver::READ_STDIN_MARKER, "1");
         }
-        executor.set_positional_params(self.positional_params.clone());
+        // rubash#2032: an internal respawn's birth seed carries the
+        // fork-inherited positional window (Executor::new consumed
+        // POSITIONAL_PARAMS_TRANSPORT); the respawn argv is just
+        // `-c source`, so this invocation's empty parameter list must
+        // not clear the seed. An invocation that DOES carry parameters
+        // wins verbatim, as before.
+        if !self.positional_params.is_empty() || executor.positional_params().is_empty() {
+            executor.set_positional_params(self.positional_params.clone());
+        }
         Ok(())
     }
 

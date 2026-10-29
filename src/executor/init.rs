@@ -293,6 +293,27 @@ impl Executor {
         env_vars.remove("__RUBASH_BG_BASHPID_BASE");
         mirror_env_remove("__RUBASH_BG_BASHPID_BASE");
 
+        // rubash#2032: every fork-shaped respawn (async/subshell wrapper,
+        // coproc, both process-substitution forms) stamps the parent's
+        // live positional window under POSITIONAL_PARAMS_TRANSPORT — a
+        // GNU fork carries dollar_vars verbatim (variables.c; the fork
+        // sites are execute_cmd.c:1576 execute_in_subshell and
+        // subst.c:6362 process_substitute), but a respawned `rubash -c`
+        // child re-imports only its process environment, so without the
+        // stamp the body saw $# = 0. Consume the stamp only for internal
+        // respawns; strip it either way so it never surfaces as a shell
+        // variable. The seed lands in the ShellState literal below, and
+        // ShellInvocation::apply_to_executor_before_startup keeps it
+        // when the invocation carries no parameters of its own (the
+        // respawn argv is just `-c source`).
+        let respawn_positional_params: Vec<String> =
+            match env_vars.get(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT) {
+                Some(value) if internal_respawn => array_values(value),
+                _ => Vec::new(),
+            };
+        env_vars.remove(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT);
+        mirror_env_remove(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT);
+
         // Forked-child fd table restore: a `rubash -c` background/subshell
         // child inherits the parent's fd>=3 File endpoints through the
         // PROC_THREAD_ATTRIBUTE_HANDLE_LIST whitelist; the inherited handle
@@ -378,7 +399,11 @@ impl Executor {
                 function_definition_redirects: HashMap::new(),
                 function_def_infos: imported_function_def_infos,
                 function_definition_locations: HashMap::new(),
-                positional_params: Vec::new(),
+                // rubash#2032: a fork-shaped respawn's transported
+                // positional window (consumed above); ordinary shells
+                // start empty and get their parameters from the
+                // invocation (ShellInvocation::apply_to_executor_before_startup).
+                positional_params: respawn_positional_params,
                 positional_offset: 0,
                 // GNU: PIPESTATUS starts unset (empty); it materializes on
                 // the first pipeline/simple-command execution (rubash#1364).

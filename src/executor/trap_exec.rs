@@ -3078,6 +3078,15 @@ impl Executor {
         // __RUBASH_SCRIPT_NAME at all (init.rs), the same stamp the
         // output-substitution spawn carries.
         child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
+        // rubash#2032: process_substitute's producer is a forked child
+        // (subst.c:6362), so it inherits the parent's positional
+        // parameters (POSITIONAL_PARAMS_TRANSPORT). Before this stamp
+        // the body saw $# = 0 and `"$@"` collapsed to one empty word —
+        // the bats zero-test-execution regression.
+        child.env(
+            super::compound_exec::POSITIONAL_PARAMS_TRANSPORT,
+            self.positional_params_transport_value(),
+        );
         if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             child.env("__RUBASH_SCRIPT_NAME", script_name);
         }

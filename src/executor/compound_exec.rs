@@ -57,6 +57,27 @@ pub(in crate::executor) fn rubash_spawn_inherited_state(key: &str) -> bool {
     key.starts_with("__RUBASH_SETOPT_") || KEYS.contains(&key)
 }
 
+/// Transport key for the fork-inherited positional parameters. GNU fork
+/// children inherit the parent's dollar_vars verbatim (variables.c), but
+/// a respawned `rubash -c` child re-imports only its process
+/// environment, so every fork-shaped spawn (async/subshell wrapper,
+/// coproc, both process-substitution forms) stamps the live positional
+/// window under this key and `Executor::new` consumes and strips it for
+/// internal respawns (init.rs). Without the stamp the child's body saw
+/// `$#` = 0 — bats-exec-suite read `"$@"` inside `< <(...)` as one empty
+/// word and ran zero tests (rubash#2032). The value rides the indexed
+/// array storage codec (`format_indexed_array_values`/`array_values`),
+/// the same round-trip the array-variable transport uses.
+pub(in crate::executor) const POSITIONAL_PARAMS_TRANSPORT: &str = "__RUBASH_POSITIONAL_PARAMS";
+
+impl Executor {
+    /// The live positional window (`shift`-visible `$1..$#`) rendered
+    /// for a fork-shaped respawn; see POSITIONAL_PARAMS_TRANSPORT.
+    pub(in crate::executor) fn positional_params_transport_value(&self) -> String {
+        format_indexed_array_values(self.shell_state.positional_window().to_vec())
+    }
+}
+
 /// GNU jobs.c:2455/2460 pipeline_pgrp at fork time, recorded as j->pgrp
 /// (jobs.c:649) and substituted by `jobs -x` (builtins/jobs.def
 /// execute_list_with_replacements `itos (j->pgrp)`, rubash#1096): with job
@@ -838,6 +859,14 @@ impl Executor {
             }
         }
         env_map.insert("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string());
+        // rubash#2032: GNU's forked async/subshell child inherits the
+        // parent's positional parameters (execute_cmd.c:1576
+        // execute_in_subshell runs a whole-copy fork); stamp the live
+        // window for the child's init to seed (POSITIONAL_PARAMS_TRANSPORT).
+        env_map.insert(
+            POSITIONAL_PARAMS_TRANSPORT.to_string(),
+            self.positional_params_transport_value(),
+        );
         // rubash#1074: the wrapper child is one subshell level deeper than
         // this shell (execute_in_subshell's subshell_level++); carry the
         // target depth so the child's BASH_SUBSHELL starts at parent + 1.
@@ -4015,6 +4044,14 @@ impl Executor {
                 let line_offset = line.parse::<usize>().unwrap_or(1).saturating_sub(1);
                 child.env("__RUBASH_LINE_OFFSET", line_offset.to_string());
             }
+            // rubash#2032: the coproc child is a GNU fork (execute_cmd.c
+            // coproc_getfd -> make_child), so it inherits the parent's
+            // positional parameters like every other fork-shaped respawn
+            // (POSITIONAL_PARAMS_TRANSPORT).
+            child.env(
+                POSITIONAL_PARAMS_TRANSPORT,
+                self.positional_params_transport_value(),
+            );
             // Coprocess children own a shell-created stdin pipe. Keep builtin
             // readers attached to it and let TERM use native termination when a
             // blocked read cannot consume the shell signal mailbox.
