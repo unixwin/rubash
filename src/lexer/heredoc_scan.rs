@@ -93,17 +93,34 @@ pub(super) fn skip_heredoc_top_level(chars: &[char], start: usize) -> Option<(us
     Some((index, terminator_found))
 }
 
-/// Shared body of the heredoc skips. `comsub_context` enables the two
-/// PST_EOFTOKEN-gated behaviors (see [`skip_heredoc_top_level`]); the
-/// fourth component reports the empty-delimiter early return and the
-/// fifth an open substitution introducer on the header line, so the
-/// top-level variant can refuse to decide those shapes.
-#[allow(clippy::type_complexity)]
-fn skip_heredoc_in_chars_core(
+/// The heredoc header facts, shared by the comsub body skip and the EOF
+/// completion (rubash#2025): the dequoted delimiter word, the `<<-`
+/// tab-strip flag, the header line's end (the `\n` index or `chars.len()`),
+/// the index just past it, and — when an unquoted `)` sits on the header
+/// line — that index. The `)` is the PST_EOFTOKEN closer
+/// (parse.y:4513/4519 parse_comsub): it closes the enclosing `$(...)` on
+/// the header line whether or not the delimiter line has arrived.
+/// `substitution_on_header` reports an open `$(`/`${`/backtick introducer
+/// after the delimiter word (see [`skip_heredoc_top_level`]): there the
+/// header newline is inside that substitution and the header facts do not
+/// decide anything.
+pub(super) struct HeredocHeaderFacts {
+    pub(super) delimiter: String,
+    pub(super) strip_tabs: bool,
+    pub(super) header_close_paren: Option<usize>,
+    pub(super) header_end: usize,
+    pub(super) body_start: usize,
+    pub(super) substitution_on_header: bool,
+}
+
+/// Err carries the resume index for the empty-delimiter early return
+/// (`<< ""`, `<<` at the buffer tail): the body loop never runs and the
+/// caller resumes right after the (empty) delimiter word, exactly as the
+/// pre-factoring scan did.
+pub(super) fn scan_heredoc_header_facts(
     chars: &[char],
     start: usize,
-    comsub_context: bool,
-) -> (usize, Option<(usize, usize)>, bool, bool, bool) {
+) -> Result<HeredocHeaderFacts, usize> {
     let mut index = start + 2;
     let strip_tabs = if chars.get(index) == Some(&'-') {
         index += 1;
@@ -154,7 +171,7 @@ fn skip_heredoc_in_chars_core(
         delimiter = delimiter.trim_start_matches('\t').to_string();
     }
     if delimiter.is_empty() {
-        return (index, None, false, true, false);
+        return Err(index);
     }
     let mut header_close_paren = None;
     // perf19: an open substitution introducer on the header line (`$(`,
@@ -185,9 +202,46 @@ fn skip_heredoc_in_chars_core(
         index += 1;
     }
     let header_end = index;
-    if chars.get(index) == Some(&'\n') {
-        index += 1;
-    }
+    let body_start = if chars.get(index) == Some(&'\n') {
+        index + 1
+    } else {
+        index
+    };
+    Ok(HeredocHeaderFacts {
+        delimiter,
+        strip_tabs,
+        header_close_paren,
+        header_end,
+        body_start,
+        substitution_on_header,
+    })
+}
+
+/// Shared body of the heredoc skips. `comsub_context` enables the two
+/// PST_EOFTOKEN-gated behaviors (see [`skip_heredoc_top_level`]); the
+/// fourth component reports the empty-delimiter early return and the
+/// fifth an open substitution introducer on the header line, so the
+/// top-level variant can refuse to decide those shapes.
+#[allow(clippy::type_complexity)]
+fn skip_heredoc_in_chars_core(
+    chars: &[char],
+    start: usize,
+    comsub_context: bool,
+) -> (usize, Option<(usize, usize)>, bool, bool, bool) {
+    let facts = match scan_heredoc_header_facts(chars, start) {
+        Ok(facts) => facts,
+        // The empty-delimiter early return: the body loop never runs.
+        Err(resume) => return (resume, None, false, true, false),
+    };
+    let HeredocHeaderFacts {
+        delimiter,
+        strip_tabs,
+        header_close_paren,
+        header_end,
+        body_start,
+        substitution_on_header,
+    } = facts;
+    let mut index = body_start;
 
     let mut found_delimiter = false;
     while index < chars.len() {

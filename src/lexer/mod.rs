@@ -2003,7 +2003,20 @@ impl GroupScanFeeder {
             // reprinted with the body inside the closing `)`. Rotate
             // `$(cat <<EOF)\nfoo\nEOF` into `$(cat <<EOF\nfoo\nEOF)` so every
             // downstream consumer sees the GNU reprint order (heredoc7.sub).
-            if let Some(rotated) = relocate_comsub_heredoc_paren(&self.logical_line) {
+            // rubash#2025: when the delimiter line never arrives and input
+            // ends inside the header-close shape, GNU still closes at the
+            // header `)` and gathers the body to EOF (parse.y:4563-4567 +
+            // make_cmd.c:627); complete the line to that reprint instead of
+            // reporting an unclosed `(`.
+            if let Some(completed) = complete_comsub_heredoc_header_close(&self.logical_line) {
+                self.logical_line = completed;
+                self.brace_cache.clear();
+                self.boundary = None;
+                self.opener = None;
+                // End of input: no further gate calls read these offsets,
+                // but keep the mirror honest anyway (rubash#292).
+                self.rebuild_comsub_mirror();
+            } else if let Some(rotated) = relocate_comsub_heredoc_paren(&self.logical_line) {
                 self.logical_line = rotated;
                 self.brace_cache.clear();
                 self.boundary = None;
@@ -2337,6 +2350,206 @@ pub fn stdin_line_ends_with_continuation(input: &str) -> bool {
 /// substitution's heredoc past the gathered body, mirroring GNU
 /// print_comsub's reprint order. Returns None when the input carries no such
 /// pattern.
+/// rubash#2025: end-of-input completion for the header-close shape the
+/// per-line gates cannot decide. `$(cat <<EOF file)` with no delimiter
+/// line anywhere after it leaves the substitution open forever — the gate
+/// scanners keep the logical line joining (that is how a TERMINATED
+/// header-close gathers its body lines, rubash#1982) and at EOF the
+/// driver reports `unexpected EOF while looking for matching ')'`.
+/// GNU's reader closes the substitution at the header `)` instead
+/// (parse.y:4513/4519 parse_comsub sets PST_EOFTOKEN and
+/// `shell_eof_token = close`), then gather_here_documents
+/// (parse.y:4563-4567) reads the pending body from the following lines —
+/// to end of input here, warning per make_cmd.c:627 — and print_comsub
+/// (parse.y:4655, print_cmd.c:164) reprints the command with that body
+/// inside the closing `)`.
+///
+/// This rebuilds that reprint against the accumulated logical line: the
+/// header command text, the gathered body lines, a synthesized delimiter
+/// line (GNU's gather consumed the body to EOF; the delimiter line gives
+/// every downstream text consumer the same body without re-modeling
+/// gather-to-EOF), the closing `)` on its own line, and the header line's
+/// tail after the `)` (an outer quote's closing `"`) moved to the very
+/// end — the consumption order GNU's reader produces. Two IFS_GLUE marks
+/// after the `$(` carry the evidence to the expansion-side warning site:
+/// one mark is the rubash#1982 header-close record (`command
+/// substitution: 1 unterminated here-document`), and the second says the
+/// gather ran to end of input (`here-document at line N delimited by
+/// end-of-file`, make_cmd.c:627) — a REAL delimiter line would be
+/// indistinguishable after the synthesis.
+///
+/// Refusal cases keep today's behavior: no header-line `)`, a delimiter
+/// line already present (the terminated shapes the rotation owns), an
+/// open substitution introducer on the header line (perf19's refusal
+/// shape), a second `<<` candidate, quotes that are still open at EOF
+/// (a `[`-less unclosed quote is the quote machinery's report), nested
+/// substitutions opened after the candidate, or a candidate deeper than
+/// the outermost substitution. A false refusal only keeps the current
+/// unclosed-EOF report; a false completion would rewrite a line GNU
+/// errors on, so every ambiguity declines.
+fn complete_comsub_heredoc_header_close(input: &str) -> Option<String> {
+    if !input.contains("$(") || !input.contains("<<") {
+        return None;
+    }
+    let chars: Vec<char> = input.chars().collect();
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    // The `$` index of each currently open `$(`, so the candidate records
+    // the substitution that OWNS the heredoc (the rebuild splices its
+    // marks right after that opener).
+    let mut openers: Vec<usize> = Vec::new();
+    let mut candidate: Option<(usize, usize, usize, usize, String, bool)> = None;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' if !double => {
+                single = true;
+                index += 1;
+            }
+            '"' if !single => {
+                double = !double;
+                index += 1;
+            }
+            '$' if !double
+                && chars.get(index + 1) == Some(&'(')
+                && chars.get(index + 2) != Some(&'(') =>
+            {
+                depth += 1;
+                openers.push(index);
+                index += 2;
+            }
+            '(' if depth > 0 && !double => {
+                depth += 1;
+                openers.push(usize::MAX);
+                index += 1;
+            }
+            ')' if depth > 0 && !double => {
+                depth = depth.saturating_sub(1);
+                openers.pop();
+                index += 1;
+            }
+            '<' if depth > 0
+                && !double
+                && chars.get(index + 1) == Some(&'<')
+                && chars.get(index + 2) != Some(&'<') =>
+            {
+                let facts = heredoc_scan::scan_heredoc_header_facts(&chars, index).ok()?;
+                if facts.header_close_paren.is_some() && !facts.substitution_on_header && depth == 1
+                {
+                    if candidate.is_some() {
+                        // A second header-close candidate: ambiguous shape.
+                        return None;
+                    }
+                    // The terminator must not already be present: the
+                    // terminated shapes are the rotation's (rubash#1982)
+                    // and completing them would duplicate the body.
+                    let delimiter = facts.delimiter.clone();
+                    let mut line_start = facts.body_start;
+                    let terminated = loop {
+                        if line_start >= chars.len() {
+                            break false;
+                        }
+                        let mut line_end = line_start;
+                        while line_end < chars.len() && chars[line_end] != '\n' {
+                            line_end += 1;
+                        }
+                        let line: String = chars[line_start..line_end].iter().collect();
+                        let comparable = if facts.strip_tabs {
+                            line.trim_start_matches('\t')
+                        } else {
+                            line.as_str()
+                        };
+                        if comparable == delimiter
+                            || (comparable.starts_with(delimiter.as_str())
+                                && comparable[delimiter.len()..].contains(')'))
+                        {
+                            break true;
+                        }
+                        if line_end >= chars.len() {
+                            break false;
+                        }
+                        line_start = line_end + 1;
+                    };
+                    if terminated {
+                        return None;
+                    }
+                    let Some(&opener) = openers.last() else {
+                        return None;
+                    };
+                    if opener == usize::MAX {
+                        // The innermost opener is a plain `(` group, not a
+                        // `$(`: the header `)` would close the group, not a
+                        // substitution this completion models.
+                        return None;
+                    }
+                    candidate = Some((
+                        opener,
+                        facts.header_close_paren.unwrap(),
+                        facts.header_end,
+                        depth,
+                        facts.delimiter,
+                        facts.strip_tabs,
+                    ));
+                }
+                // Resume past the header line either way: its `)` and tail
+                // belong to the candidate's accounting, not to a second
+                // scan.
+                index = facts.body_start.max(index + 1);
+            }
+            _ => index += 1,
+        }
+    }
+    let Some((opener, paren, header_end, depth_at_candidate, delimiter, _strip_tabs)) = candidate
+    else {
+        return None;
+    };
+    // The candidate must still be what keeps the line open: nothing may
+    // have opened (nested substitution, quote) after it, and the
+    // substitution itself must never have closed.
+    if depth != depth_at_candidate || single || double {
+        return None;
+    }
+    let glue = crate::executor::markers::IFS_GLUE;
+    let mut out: String = chars[..opener + 2].iter().collect();
+    out.push(glue);
+    out.push(glue);
+    out.extend(chars[opener + 2..paren].iter());
+    // The gathered body: every physical line after the header line ran
+    // into the gather (to end of input).
+    out.extend(chars[header_end..].iter());
+    // The synthesized delimiter line, then the closing `)` on its own
+    // line (print_comsub's reprint order).
+    out.push('\n');
+    out.push_str(&delimiter);
+    out.push('\n');
+    out.push(')');
+    // The header line's tail after the `)` — an outer word's closing
+    // quote and any other literal bytes — resumes the outer word, which
+    // is where GNU's reader picks up after the gather.
+    out.extend(chars[paren + 1..header_end].iter());
+    Some(out)
+}
+
 fn relocate_comsub_heredoc_paren(input: &str) -> Option<String> {
     if !input.contains("$(") || !input.contains("<<") {
         return None;
