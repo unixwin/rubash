@@ -55,7 +55,15 @@ impl Executor {
             if current == "-t" {
                 has_t = true;
             }
-            if current.starts_with("/dev/fd/") || current.starts_with("/proc/self/fd/") {
+            // rubash#2042: the admission question is the REGISTRY's —
+            // every spelling fd_alias_target serves (`/dev/fd/N`,
+            // `/proc/self/fd/N`, the numeric-pid `/proc/<pid>/fd/N`
+            // of rubash#1974, `/dev/std*`). The prefix list here
+            // predated #1974's numeric-pid spelling, so a test/[ whose
+            // only fd operand was `/proc/$$/fd/N` skipped the mark
+            // refresh and read whatever a PREVIOUS test had left in
+            // the env (deterministically stale at the first dispatch).
+            if crate::special_paths::fd_alias_target(current).is_some() {
                 has_fd_path = true;
             }
             // Operands are skipped after a `-v` (GNU test.c unary_operator
