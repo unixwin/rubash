@@ -168,7 +168,18 @@ fn secondary_assignment_targets(inner: &str) -> Vec<String> {
 /// name — the target whose later assignment can leak into earlier
 /// fragments of the same word (rubash#1169).
 fn parameter_assignment_target(inner: &str) -> Option<String> {
+    // rubash#1960: the `:=` split only names the target when its left
+    // side is target-shaped; for `${v=x:=y}` the split's left side is
+    // the composite `v=x`, the body's first operator is the bare `=`,
+    // and the target is `v` — fall through to the `=` split instead of
+    // giving up (GNU dispatches on the FIRST operator character,
+    // subst.c:9886-9917).
+    let is_target_shaped = |name: &str| {
+        let base = name.split('[').next().unwrap_or(name);
+        is_shell_name(base)
+    };
     let (name, _word) = super::expand_braced_ops::split_once_outside_subscript_str(inner, ":=")
+        .filter(|(name, _)| is_target_shaped(name))
         .or_else(|| super::expand_braced_ops::split_once_outside_subscript(inner, '='))?;
     let base = name.split('[').next().unwrap_or(name);
     if is_shell_name(base) {
@@ -1608,17 +1619,21 @@ impl Executor {
         // `${x[i=0$(...)]}` expands element i=0 -- it does not assign
         // through `x[i` and does not expand the subscript text as the
         // operator word, which would run the embedded $(...) twice).
+        // rubash#1960: the `:=` split is only adjudicated when its
+        // left-hand side is an assignment target. A non-target left
+        // side does NOT claim the fragment: when a bare `=` precedes
+        // the `:=` (`${v=x:=y}`), GNU's first-operator dispatch
+        // (subst.c:9886-9917) makes `=` the body's operator with word
+        // `x:=y`, so the `=` arm below must still run — the old code
+        // returned here and the bind was silently dropped. When the
+        // `:=` sits inside another operator's word (`${a:-x:=1}`),
+        // the `=` arm's own target-form gate rejects its split the
+        // same way, so the rubash#1953 phantom-expansion guard holds
+        // for both arms.
         if let Some((name, value)) =
             super::expand_braced_ops::split_once_outside_subscript_str(inner, ":=")
+                .filter(|(name, _)| parameter_assignment_target_form(name))
         {
-            // rubash#1953: the split names an assignment only when its
-            // left-hand side is an assignment target; otherwise the
-            // `:=` sits inside another operator's word and the split's
-            // "value" is that word's text, which must not be expanded
-            // here (see parameter_assignment_target_form).
-            if !parameter_assignment_target_form(name) {
-                return;
-            }
             if self
                 .parameter_operator_value(name)
                 .is_some_and(|value| !value.is_empty())
