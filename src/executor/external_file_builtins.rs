@@ -835,7 +835,7 @@ fn touch_utimensat(
         match value.duration_since(SystemTime::UNIX_EPOCH) {
             Ok(elapsed) => libc::timespec {
                 tv_sec: elapsed.as_secs() as libc::time_t,
-                tv_nsec: libc::c_long::from(elapsed.subsec_nanos()),
+                tv_nsec: elapsed.subsec_nanos() as libc::c_long,
             },
             Err(before) => {
                 let elapsed = before.duration();
@@ -847,7 +847,7 @@ fn touch_utimensat(
                 } else {
                     libc::timespec {
                         tv_sec: -(elapsed.as_secs() as libc::time_t) - 1,
-                        tv_nsec: 1_000_000_000 - libc::c_long::from(elapsed.subsec_nanos()),
+                        tv_nsec: 1_000_000_000 - elapsed.subsec_nanos() as libc::c_long,
                     }
                 }
             }
