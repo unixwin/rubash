@@ -2579,6 +2579,16 @@ impl Executor {
             self.exit_code = 1;
             return Ok(1);
         }
+        // rubash#2030: the same dup preflight the compound wrappers run —
+        // an `exec` whose `<&N` source is unbound fails EBADF (`N: Bad
+        // file descriptor`, redir.c:1179 dup2 + redir.c:149-158
+        // redirection_error), the command is not exec'd, and the shell
+        // continues at status 1 (GNU exec.def exec_builtin: a failed
+        // do_redirections returns before the execve).
+        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
+            self.abandon_compound_for_dup_bad_fd::<()>(cmd, index, &name)?;
+            return Ok(1);
+        }
         // `<&N` dups and numbered input redirects are real descriptor
         // operations on the spawn's fd table (the numbered path already
         // applies them for compounds; open_compound_numbered_input_redirects
@@ -3515,7 +3525,12 @@ impl Executor {
                         self.share_fd_output_file(1, 2, &path, false);
                         continue;
                     }
-                    if self.open_persistent_output_process_substitution(fd, &target)? {
+                    // rubash#2090: a quoted ">(...)" target is a literal
+                    // filename (subst.c:11365-11372), not a span — only a
+                    // parser-recorded span may bind a substitution here.
+                    if super::external_setup::redirect_target_span_is_recorded(redirect)
+                        && self.open_persistent_output_process_substitution(fd, &target)?
+                    {
                         continue;
                     }
                     let append = matches!(
@@ -3622,6 +3637,17 @@ impl Executor {
                     if let Some(source) = target
                         .strip_prefix("<(")
                         .and_then(|target| target.strip_suffix(')'))
+                        // rubash#2090: value-text shape alone does not
+                        // admit the span — GNU expand_word_internal
+                        // (subst.c:11365-11372) refuses a `<(` whose `<`
+                        // was quoted (Q_DOUBLE_QUOTES), so only a
+                        // parser-recorded (unquoted) span is live; a
+                        // quoted target falls through to the literal
+                        // open below. Same recorded-span admission as
+                        // every other materialization arm (rubash#1931).
+                        .filter(|_| {
+                            super::external_setup::redirect_target_span_is_recorded(redirect)
+                        })
                     {
                         // rubash#1021: GNU process_substitute (subst.c)
                         // forks the body and binds the pipe read end
@@ -4918,6 +4944,12 @@ impl Executor {
                 if let Some(source) = target
                     .strip_prefix("<(")
                     .and_then(|target| target.strip_suffix(')'))
+                    // rubash#2090: only a parser-recorded (unquoted) span
+                    // is a live process substitution — GNU
+                    // expand_word_internal (subst.c:11365-11372) refuses
+                    // a quoted `<(`; the quoted form is a literal filename
+                    // whose open the plain path below owns.
+                    .filter(|_| super::external_setup::redirect_target_span_is_recorded(redirect))
                 {
                     // rubash#1952: stream first, exactly like the plain
                     // exec arm — GNU process_substitute (subst.c:6362)
@@ -5054,6 +5086,10 @@ impl Executor {
                 if let Some(source) = target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    // rubash#2090: recorded-span admission, as in the
+                    // Input arm above — a quoted ">(...)" target is a
+                    // literal filename (subst.c:11365-11372).
+                    .filter(|_| super::external_setup::redirect_target_span_is_recorded(redirect))
                 {
                     if self.open_persistent_output_process_substitution(fd, &target)? {
                         if !self.set_dynamic_fd_variable(name, fd) {

@@ -61,6 +61,7 @@ fn run_cli(program: &str, commands: &str) -> (i32, String) {
         rubash::DebugCliPreset {
             program: Some(program.to_string()),
             args: Vec::new(),
+            startup_file: None,
         },
         Box::new(BufReader::new(Cursor::new(commands.as_bytes().to_vec()))),
         Box::new(out.clone()),

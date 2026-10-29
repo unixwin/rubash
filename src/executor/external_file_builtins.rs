@@ -332,6 +332,7 @@ impl Executor {
         let mut no_more_flags = false;
         let mut parents = false;
         let mut failed = false;
+        let mut operands = 0usize;
         // coreutils diagnostics are the emulated command's own stderr:
         // they go through the command's redirections like any external
         // command's output (rubash#1372: `mkdir ... >f 2>&1` must create
@@ -392,6 +393,7 @@ impl Executor {
             // parent must fail ENOENT without -p, not silently create
             // the whole chain (on the Android/Termux host it surfaced as
             // a bogus EROFS instead).
+            operands += 1;
             let path =
                 self.session_path(shell_path_to_windows(&expanded, &self.shell_state.env_vars));
             let result = if parents {
@@ -408,6 +410,16 @@ impl Executor {
                 )?;
                 failed = true;
             }
+        }
+        if operands == 0 {
+            // GNU coreutils 9.4 mkdir.c: an invocation whose words are
+            // all options (or a bare `--`) has no operand — it reports
+            // `mkdir: missing operand` and exits 1. The loop above
+            // silently succeeded with rc 0 on that shape (rubash#2043
+            // A1: a fake success on an error input).
+            writeln!(stderr, "mkdir: missing operand")?;
+            writeln!(stderr, "Try 'mkdir --help' for more information.")?;
+            failed = true;
         }
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         self.exit_code = i32::from(failed);
@@ -2135,11 +2147,15 @@ impl Executor {
                     match fs::read(&link.native) {
                         Ok(bytes) => output.extend(bytes),
                         Err(error) => {
+                            // rubash#2027: the operand renders through GNU
+                            // cat's quotef and the reason keeps the real
+                            // errno mapping (including the Windows
+                            // reserved-name to ENOENT inference).
                             writeln!(
                                 &mut diagnostics,
                                 "cat: {}: {}",
-                                target,
-                                crate::posix_errors::message(&error)
+                                super::command_substitution::gnu_cat_quoted_operand(&target),
+                                crate::posix_errors::path_strerror(&target, &error)
                             )?;
                             status = 1;
                         }
@@ -2208,12 +2224,21 @@ impl Executor {
                         // strerror and no shell diagnostic prefix. The
                         // discarded error flattened EACCES/EISDIR to a
                         // blanket ENOENT text behind the script prefix
-                        // (rubash#1309).
+                        // (rubash#1309). rubash#2027: the operand itself
+                        // renders through GNU cat's quotef (coreutils
+                        // `error (0, errno, "%s", quotef (name))`), so
+                        // `cat '<(echo hi)'` reports
+                        // `cat: '<(echo hi)': No such file or directory`,
+                        // and the reason keeps the real-errno mapping —
+                        // on Windows a name bearing the reserved `<`/`>`
+                        // bytes can never exist, so the invalid-name
+                        // rejection reads ENOENT exactly like the Unix
+                        // lookup failure it stands in for.
                         writeln!(
                             &mut diagnostics,
                             "cat: {}: {}",
-                            target,
-                            crate::posix_errors::message(&error)
+                            super::command_substitution::gnu_cat_quoted_operand(&target),
+                            crate::posix_errors::path_strerror(&target, &error)
                         )?;
                         status = 1;
                     }
@@ -2475,6 +2500,17 @@ impl Executor {
     }
 
     fn external_sed(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
+        // rubash#1903 residual census (S6, 2026-10-29): this arm can
+        // never read a file operand — sed_script_args declines any
+        // invocation carrying one — so there is no emulated-reader
+        // face that could mistake a WinuxCmd fifo marker for a plain
+        // file; operand shapes fall through to the spawned sed,
+        // whose own side bridges the rendezvous. The pipeline sed
+        // arm shares the same admission, and the only grep arm
+        // (pipeline_exec::inline_grep_args) declines file operands
+        // identically. cat, the one emulated reader that does take
+        // operands, is bridged above (path_is_winux_fifo).
+        //
         // cmd.words are the already-expanded argv (the simple-command
         // executor expanded each word once, execute_cmd.c
         // execute_disk_command -> expand_words). Re-running expand_word here

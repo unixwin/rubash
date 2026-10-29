@@ -1,5 +1,11 @@
 use super::*;
 
+#[cfg(windows)]
+use super::command_registry::{comsub_front_slot, ComsubFrontSlot};
+use super::command_registry::{
+    pipeline_precheck_claims, pipeline_stage_slot, pipeline_standin_claims, timed_consumer_slot,
+    timed_followup_claims, timed_producer_slot, PipelineSlot, TimedConsumerSlot, TimedProducerSlot,
+};
 #[cfg(any(windows, unix))]
 use crate::executor::fd_table::FdEntry;
 
@@ -95,7 +101,9 @@ fn timed_followup_keeps_stream(command: &CommandNode, name: &str) -> bool {
     if command.words.is_empty() {
         return true;
     }
-    matches!(name, "echo" | "printf" | "true" | ":" | "false" | "sleep")
+    // The claim set is the registry's TimedFollowup projection
+    // (rubash#2036 S4).
+    timed_followup_claims(name)
 }
 
 #[cfg(windows)]
@@ -1278,6 +1286,7 @@ impl Executor {
                 .map(|prefix| &prefix.command)
                 .unwrap_or(command);
             let mut stage0_stdin_base = None;
+            let mut stage0_alias_fold = None;
             let mut stage0_stdin_inherit = false;
             let mut stage0_stdin_live = false;
             if stage_index == 0 {
@@ -1303,7 +1312,7 @@ impl Executor {
                         None => true,
                     };
                 } else {
-                    let (stage_input, base) = self.initial_pipeline_input(stage);
+                    let (stage_input, base, alias_fold) = self.initial_pipeline_input(stage);
                     // GNU execute_pipeline forks the child with the shell's own
                     // fd 0 — with no fd-0 binding on the stage and fd 0 being the
                     // inherited process stdin, the child reads that handle
@@ -1322,6 +1331,7 @@ impl Executor {
                         };
                     input = stage_input;
                     stage0_stdin_base = base;
+                    stage0_alias_fold = alias_fold;
                 }
             }
             self.set_current_command(stage);
@@ -1523,6 +1533,22 @@ impl Executor {
                 self.shell_state.env_vars.insert(
                     FUNCTION_STDIN_OFFSET.to_string(),
                     (base + consumed).to_string(),
+                );
+            }
+            if let Some((alias_fd, alias_base, alias_pipe_like)) = stage0_alias_fold {
+                // rubash#2029: same fold for a stage-0 fd-alias source
+                // (#2003's materialized endpoint) — GNU's element dup2
+                // (redir.c:1193) advances the shared open-file offset, so
+                // `head -1 <&3 | …; cat <&3` continues after line 1 instead
+                // of replaying the payload. `input` still holds the stage-0
+                // payload here (the `input = next_input` rebind follows).
+                let consumed = self.pipeline_stdin_consumed.take().unwrap_or(0);
+                self.fold_stage0_alias_consumption(
+                    alias_fd,
+                    alias_base,
+                    consumed,
+                    alias_pipe_like,
+                    &input,
                 );
             }
             input = next_input;
@@ -1748,9 +1774,11 @@ impl Executor {
             return None;
         }
         let name = self.expand_word(command.words.first()?);
-        match name.as_str() {
-            "true" | ":" => Some(()),
-            "sleep" => {
+        // The producer claim set is the registry's TimedProducer
+        // projection (rubash#2036 S4).
+        match timed_producer_slot(&name) {
+            Some(TimedProducerSlot::TrueColon) => Some(()),
+            Some(TimedProducerSlot::Sleep) => {
                 // When sleep does not resolve (PATH unset, rubash#1126;
                 // or a set PATH without it, rubash#1545), decline the
                 // timing model so the real pipeline reports the failure.
@@ -1764,7 +1792,7 @@ impl Executor {
                 *at += duration;
                 Some(())
             }
-            "echo" => {
+            Some(TimedProducerSlot::Echo) => {
                 let mut args: Vec<String> = command.words[1..]
                     .iter()
                     .enumerate()
@@ -1788,7 +1816,7 @@ impl Executor {
                 chunks.push((*at, output));
                 Some(())
             }
-            _ => None,
+            None => None,
         }
     }
 
@@ -1836,14 +1864,17 @@ impl Executor {
         let mut last_status = 0;
         for command in body {
             let name = self.expand_word(command.words.first()?);
-            match name.as_str() {
-                "sleep" if !saw_read => {
+            // The consumer claim set is the registry's TimedConsumer
+            // projection (rubash#2036 S4); the guards and the
+            // fall-through into the followup arm are unchanged.
+            match timed_consumer_slot(&name) {
+                Some(TimedConsumerSlot::Sleep) if !saw_read => {
                     at += command
                         .words
                         .get(1)
                         .and_then(|word| self.expand_word(word).parse::<f64>().ok())?;
                 }
-                "read" if !saw_read => {
+                Some(TimedConsumerSlot::Read) if !saw_read => {
                     let (timeout, char_limit, name) = self.timed_read_options(command)?;
                     read_name = name;
                     let (value, status) = timed_read_value(input, at, timeout, char_limit);
@@ -2397,9 +2428,13 @@ impl Executor {
         // driver — a producer whose fd 0 is the shell's live fd 0 gets
         // no payload (computing one would drain a file endpoint).
         let stage0_stdin_live = self.pipeline_stage0_stdin_live(commands[0]);
-        let (stage0_input, stage0_stdin_base) = if stage0_stdin_live {
+        // rubash#2029: this path's stage 0 is a compound shell-side writer
+        // whose funnel binds its fd 0 to the materialized alias endpoint
+        // (#2003), so its consumption moves the shared cursor directly and
+        // needs no driver-side fold.
+        let (stage0_input, stage0_stdin_base, _alias_fold) = if stage0_stdin_live {
             self.apply_comsub_stdin_writeback();
-            (String::new(), None)
+            (String::new(), None, None)
         } else {
             self.initial_pipeline_input(commands[0])
         };
@@ -2716,7 +2751,9 @@ impl Executor {
                 // path and let the sequential stage executor report it.
                 // (The stand-in's legitimate case is a HASH-resolved
                 // name find_user_command's PATH walk cannot see.)
-                (matches!(expanded_name.as_str(), "yes" | "head" | "wc")
+                // The stand-in set is the registry's PipelineStandIn
+                // projection (rubash#2036 S4).
+                (pipeline_standin_claims(&expanded_name)
                     && !self.emulated_external_stands_down(&expanded_name))
                 .then(|| internal_pipeline_program(&expanded_name))
             })?;
@@ -2852,7 +2889,11 @@ impl Executor {
         // Stage 0's fd-0 payload is computed once and reused for the
         // post-spawn stdin write below; a `/dev/stdin` operand on the first
         // member materializes the same bytes.
-        let (stage0_input, stage0_stdin_base) = self.initial_pipeline_input(commands[0]);
+        // rubash#2029: the concurrent members' fd-0 sources never carry an
+        // fd-alias redirect (concurrent_external_stage_spec declines
+        // redirect_in), so the alias fold target cannot exist here.
+        let (stage0_input, stage0_stdin_base, _alias_fold) =
+            self.initial_pipeline_input(commands[0]);
         // GNU forks the child with the shell's own fd 0 — when the stage
         // carries no fd-0 binding (no `<`, `<<<`, `<<`, heredoc-0) and fd 0
         // is the inherited process stdin, the child must inherit the real
@@ -3207,7 +3248,11 @@ impl Executor {
         // element with the shell's own descriptors). A staged FUNCTION_STDIN
         // payload would need the writer-thread dance; such shapes keep the
         // sequential path.
-        let (stage0_input, _stage0_stdin_base) = self.initial_pipeline_input(commands[0]);
+        // rubash#2029: prefix members never carry an fd-alias redirect
+        // (concurrent_external_stage_spec declines redirect_in), so the
+        // alias fold target cannot exist here.
+        let (stage0_input, _stage0_stdin_base, _alias_fold) =
+            self.initial_pipeline_input(commands[0]);
         if !stage0_input.is_empty() {
             return Ok(None);
         }
@@ -3668,7 +3713,11 @@ impl Executor {
             return Ok(None);
         }
 
-        let (stage0_input, stage0_stdin_base) = self.initial_pipeline_input(commands[0]);
+        // rubash#2029: the streaming prefix members never carry an fd-alias
+        // redirect (concurrent_external_stage_spec declines redirect_in),
+        // so the alias fold target cannot exist here.
+        let (stage0_input, stage0_stdin_base, _alias_fold) =
+            self.initial_pipeline_input(commands[0]);
         // Same contract as the Windows path: with no fd-0 binding the
         // first child inherits the shell's real stdin handle.
         let stage0_inherits = stage0_input.is_empty()
@@ -4740,15 +4789,19 @@ impl Executor {
         // external programs (head, cat, sed, grep, wc, tr) must stand
         // down in both cases and let the external stage report the
         // failure. Builtin arms are unaffected.
-        if matches!(name, "head" | "cat" | "sed" | "grep" | "wc" | "tr" | "tput")
-            && self.emulated_external_stands_down(name)
-        {
+        // The pre-check set is the registry's PIPELINE_PRECHECK
+        // projection (rubash#2036 S4): the non-builtin stage claims.
+        if pipeline_precheck_claims(name) && self.emulated_external_stands_down(name) {
             return self.execute_external_pipeline_stage(command, input, stdin_inherit);
         }
-        match name {
-            "true" | ":" => Ok(Some((String::new(), String::new(), 0))),
-            "false" => Ok(Some((String::new(), String::new(), 1))),
-            "echo" => {
+        // The stage arms are the registry's PIPELINE_STAGE projection
+        // (rubash#2036 S4); the restricted-guard claims (`.`, cd,
+        // command, exec, source) never reach this match — they were
+        // judged by restricted_command_error above.
+        match pipeline_stage_slot(name) {
+            Some(PipelineSlot::TrueColon) => Ok(Some((String::new(), String::new(), 0))),
+            Some(PipelineSlot::False) => Ok(Some((String::new(), String::new(), 1))),
+            Some(PipelineSlot::Echo) => {
                 // rubash#1488: same variable-table locale guard as the
                 // plain execute_echo path — a pipeline stage's \u/\U
                 // gate must see the shell's LC_ALL, not the process env.
@@ -4766,7 +4819,7 @@ impl Executor {
                     0,
                 )))
             }
-            "printf" => {
+            Some(PipelineSlot::Printf) => {
                 let args: Vec<String> = self.expand_pipeline_stage_arg_words(command, 1);
                 let mut env_vars = self.shell_state.env_vars.clone();
                 let mut output = Vec::new();
@@ -4783,7 +4836,7 @@ impl Executor {
                     status,
                 )))
             }
-            "trap" => {
+            Some(PipelineSlot::Trap) => {
                 // A `trap ACTION EXIT` install as a pipeline element runs in
                 // the forked subshell in GNU and fires at the element's exit
                 // (execute_cmd.c:1761-1763; rubash#1104: `trap 'echo X' EXIT
@@ -4827,7 +4880,7 @@ impl Executor {
                     status,
                 )))
             }
-            "head" => {
+            Some(PipelineSlot::Head) => {
                 let args = command.words[1..]
                     .iter()
                     .map(|word| self.expand_word(word))
@@ -4841,9 +4894,23 @@ impl Executor {
                 let Some(spec) = parse_head_line_count(&args) else {
                     return self.execute_external_pipeline_stage(command, input, stdin_inherit);
                 };
-                Ok(Some((spec.apply(input), String::new(), 0)))
+                let output = spec.apply(input);
+                // rubash#2029: the arm consumed exactly the prefix it printed,
+                // through the stage's payload COPY. Report the amount so the
+                // driver folds it into the shared cursor — the FUNCTION_STDIN
+                // base for an ambient-buffer source, or the materialized
+                // stage-0 fd-alias endpoint (#2003) for a `<&N` source. GNU
+                // forks the element with the shell's own descriptors and the
+                // element's `<&N` is a dup2 sharing the open-file offset
+                // (execute_cmd.c:2620 execute_pipeline; redir.c:1138
+                // do_redirection_internal case r_duplicating_input -> dup2 at
+                // :1193), so head's reads advance the position a later
+                // `cat <&3` continues from — this report is the missing
+                // consumption-amount channel for the inline arm.
+                self.pipeline_stdin_consumed.set(Some(spec.consumed(input)));
+                Ok(Some((output, String::new(), 0)))
             }
-            "cat" => {
+            Some(PipelineSlot::Cat) => {
                 // rubash#2066: this arm IS the in-process layer, so the
                 // host flag gates it exactly like the simple-command face
                 // (handle_external_file_builtins returns not-handled when
@@ -5050,7 +5117,7 @@ impl Executor {
                 };
                 Ok(Some((output, String::new(), 0)))
             }
-            "sed" => {
+            Some(PipelineSlot::Sed) => {
                 // rubash#2066: same host-flag gate as the cat arm above —
                 // with the in-process layer off, the stage runs the real
                 // PATH program (and reports 127 when there is none),
@@ -5076,12 +5143,17 @@ impl Executor {
                     return self.execute_external_pipeline_stage(command, input, stdin_inherit);
                 }
                 if let Some(output) = apply_simple_sed_args(input, &args) {
+                    // rubash#2029: the arm transformed the whole payload
+                    // copy — report the full consumption so the driver
+                    // folds the shared cursor (a stream reader's sed
+                    // consumes its whole input).
+                    self.pipeline_stdin_consumed.set(Some(input.len()));
                     Ok(Some((output, String::new(), 0)))
                 } else {
                     self.execute_external_pipeline_stage(command, input, stdin_inherit)
                 }
             }
-            "grep" => {
+            Some(PipelineSlot::Grep) => {
                 // The inline fast path handles the flag forms GNU pipelines use
                 // most (grep [-cinvq] [--] PATTERN with stdin input only).
                 // Anything else -- regex engine flags, file operands, unknown
@@ -5133,9 +5205,13 @@ impl Executor {
                 if spec.count_mode {
                     output = format!("{selected}\n");
                 }
+                // rubash#2029: the arm scanned the whole payload copy —
+                // report the full consumption so the driver folds the
+                // shared cursor (a stream reader's grep reads to EOF).
+                self.pipeline_stdin_consumed.set(Some(input.len()));
                 Ok(Some((output, String::new(), i32::from(selected == 0))))
             }
-            "wc" => {
+            Some(PipelineSlot::Wc) => {
                 let args: Vec<String> = command.words[1..]
                     .iter()
                     .map(|word| self.expand_word(word))
@@ -5180,6 +5256,9 @@ impl Executor {
                             );
                         }
                     };
+                    // rubash#2029: full consumer — report the consumption so
+                    // the driver folds the shared cursor to EOF.
+                    self.pipeline_stdin_consumed.set(Some(input.len()));
                     return Ok(Some((format!("{value}\n"), String::new(), 0)));
                 }
                 // Default (no operands) matches GNU wc: lines, words, bytes.
@@ -5189,6 +5268,8 @@ impl Executor {
                     let bytes =
                         crate::executor::substitution_metadata::shell_text_to_raw_bytes(input)
                             .len();
+                    // rubash#2029: full consumer — same fold report.
+                    self.pipeline_stdin_consumed.set(Some(input.len()));
                     return Ok(Some((
                         format!("{lines:>7} {words:>7} {bytes:>7}\n"),
                         String::new(),
@@ -5197,7 +5278,7 @@ impl Executor {
                 }
                 self.execute_external_pipeline_stage(command, input, stdin_inherit)
             }
-            "tr" => {
+            Some(PipelineSlot::Tr) => {
                 let args = command.words[1..]
                     .iter()
                     .map(|word| self.expand_word(word))
@@ -5210,11 +5291,15 @@ impl Executor {
                 if args.iter().any(|arg| arg.starts_with('-')) {
                     self.execute_external_pipeline_stage(command, input, stdin_inherit)
                 } else if args.len() == 2 && matches!(args[0].as_str(), "\\n" | "\n") {
+                    // rubash#2029: full consumer — fold report (see wc).
+                    self.pipeline_stdin_consumed.set(Some(input.len()));
                     Ok(Some((input.replace('\n', &args[1]), String::new(), 0)))
                 } else if args.len() == 2
                     && inline_expand_tr_set(&args[0]).is_some()
                     && inline_expand_tr_set(&args[1]).is_some()
                 {
+                    // rubash#2029: full consumer — fold report (see wc).
+                    self.pipeline_stdin_consumed.set(Some(input.len()));
                     Ok(Some((
                         translate_tr(input, &args[0], &args[1]),
                         String::new(),
@@ -5236,7 +5321,7 @@ impl Executor {
             // the byte-exact whitelist; anything else falls through to the
             // real binary exactly as before.
             #[cfg(windows)]
-            "tput" => {
+            Some(PipelineSlot::Tput) => {
                 // rubash#2066: same host-flag gate as the cat/sed arms —
                 // the simple-command tput face sits behind the flag in
                 // handle_external_file_builtins, so the stage arm must
@@ -5266,6 +5351,10 @@ impl Executor {
                     self.execute_external_pipeline_stage(command, input, stdin_inherit)
                 }
             }
+            // Unclaimed names — and, off Windows, the Tput slot (its
+            // arm is cfg(windows): the whitelist exists to dodge the
+            // Windows spawn floor) — take the historical fallback:
+            // function stage, builtin stage, external stage.
             _ => {
                 if let Some(output) =
                     self.execute_function_pipeline_stage(command, input, live_stdin)?
@@ -5502,8 +5591,19 @@ impl Executor {
     /// runs (pipeline_stdin_consumed reports subshell/child reads). Returns
     /// the input plus the FUNCTION_STDIN base offset when the buffer was the
     /// source (None for heredoc/redirect/virtual-fd/process-stdin sources,
-    /// whose cursors live elsewhere).
-    fn initial_pipeline_input(&mut self, command: &CommandNode) -> (String, Option<usize>) {
+    /// whose cursors live elsewhere). rubash#2029: when the source was a
+    /// stage-0 fd alias (#2003's materialization), it also returns
+    /// `(fd, fold_base, pipe_like)` — the materialized endpoint and the RAW
+    /// byte offset the stage's measured consumption adds onto (0 for a
+    /// replaced handle-backed endpoint, the restored cursor for a buffered
+    /// one), plus whether the pre-materialization source was pipe-like: a
+    /// regular-file (coproc pipe read end aside) dup keeps GNU head's
+    /// seek-back-to-printed-boundary consumption, a Text/ProcessSubstitution
+    /// source models an unseekable stream whose first block read drains it.
+    fn initial_pipeline_input(
+        &mut self,
+        command: &CommandNode,
+    ) -> (String, Option<usize>, Option<(u32, usize, bool)>) {
         self.apply_comsub_stdin_writeback();
         let base = self
             .shell_state
@@ -5543,17 +5643,48 @@ impl Executor {
             .map(|(_, offset)| offset);
         let resolved = self.stdin_string_for_command_mut(command);
         self.restore_spec_variables(saved_input_env);
+        let mut alias_fold = None;
         if let (Some(fd), Some(payload)) = (alias_source, &resolved) {
+            // The pre-materialization kind decides the fold semantics: a
+            // seekable regular-file source keeps head's lseek-back
+            // consumption (coreutils head.c seeks a regular input back to
+            // the last printed byte); every other source — a buffered Text
+            // carrier, a procsub stream (both the Text carrier and the
+            // `<(...)`-path pipe-reader FileFd that `exec 3< <(...)` binds,
+            // spawn_input_process_substitution_child), a coproc read end —
+            // models an unseekable pipe whose first block read drains it.
+            let pipe_like = match self.fd_table.read_endpoint(fd) {
+                Some(FdReadEndpoint::File(file)) => {
+                    // Pipe-like only when this FileFd is an input-procsub
+                    // pipe reader (spawn_input_process_substitution_child
+                    // stamps the `<(…)` carrier as its path). String-prefix
+                    // check, NOT Path::starts_with — that one compares
+                    // whole components and never matches the carrier
+                    // spelling. A plain file stays seekable (prefix fold).
+                    file.path.to_string_lossy().starts_with("<(")
+                }
+                Some(_) => true,
+                None => false,
+            };
             self.materialize_stage0_alias_source(fd, payload, alias_buffered_offset);
+            // rubash#2029: the fold base is the endpoint cursor AFTER the
+            // materialization — 0 for a handle-backed source replaced by an
+            // in-memory endpoint, the restored pre-resolution offset for a
+            // buffered source (whose payload is data[base..]). Raw bytes:
+            // the fd-table TextInput cursor indexes the raw data.
+            alias_fold = self
+                .fd_table
+                .input_snapshot_bytes(fd)
+                .map(|(_, offset)| (fd, offset, pipe_like));
         }
         let input = resolved.unwrap_or_default();
         if from_function_stdin {
             self.shell_state
                 .env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), base.to_string());
-            (input, Some(base))
+            (input, Some(base), alias_fold)
         } else {
-            (input, None)
+            (input, None, alias_fold)
         }
     }
 
@@ -5660,6 +5791,62 @@ impl Executor {
                     .open_input(fd, FdReadEndpoint::bytes(bytes), dynamic);
             }
             _ => {}
+        }
+    }
+
+    /// rubash#2029: fold a stage's measured payload consumption back into
+    /// the materialized stage-0 fd-alias endpoint. GNU execute_pipeline
+    /// (execute_cmd.c:2620) forks every element with the shell's own
+    /// descriptors and the element applies `<&N` inside the fork as a dup2
+    /// (redir.c:1138 do_redirection_internal case r_duplicating_input ->
+    /// dup2 at :1193), so the element's reads advance the SHARED
+    /// open-file offset a later `cat <&3` continues from. Rubash
+    /// materialized the alias as a buffered endpoint (#2003) and the stage
+    /// consumed the payload COPY, so the measured amount must be folded
+    /// back here. `base` is the raw endpoint cursor measured when the
+    /// payload was snapshotted; `consumed` is the stage report in
+    /// transport units (pipeline_stdin_consumed's convention) and is
+    /// converted through the payload prefix it names. For a pipe-like
+    /// source (`pipe_like`, an unseekable stream behind the alias), the
+    /// report models the consumer's block read instead: a reading stage
+    /// drained the materialized stream (GNU head's first read(2) takes
+    /// everything a procsub-sized pipe holds; coreutils head.c copy_fd),
+    /// a non-reading one (`head -n 0`) left it untouched. The fold never
+    /// rewinds: a descriptor-channel consumer in the same stage (the
+    /// inline cat arm's endpoint drain) already advanced the shared
+    /// cursor, and the position after the stage is the FURTHEST any
+    /// consumer reached — the same open-file-description semantics the
+    /// GNU dup models.
+    fn fold_stage0_alias_consumption(
+        &mut self,
+        fd: u32,
+        base: usize,
+        consumed: usize,
+        pipe_like: bool,
+        payload: &str,
+    ) {
+        let Some((data, current)) = self.fd_table.input_snapshot_bytes(fd) else {
+            return;
+        };
+        let consumed = if pipe_like && consumed > 0 {
+            payload.len()
+        } else {
+            consumed
+        };
+        // Slice the payload at the consumed transport boundary (char
+        // boundary) and convert to raw bytes: the endpoint cursor indexes
+        // the raw data, the report counts transport chars.
+        let boundary = payload
+            .char_indices()
+            .nth(consumed)
+            .map(|(index, _)| index)
+            .unwrap_or(payload.len());
+        let consumed_raw =
+            crate::executor::substitution_metadata::shell_text_to_raw_bytes(&payload[..boundary])
+                .len();
+        let target = base.saturating_add(consumed_raw).min(data.len());
+        if target > current {
+            self.fd_table.set_input_offset(fd, target);
         }
     }
 }
@@ -5781,6 +5968,26 @@ impl HeadLineCount {
             HeadLineCount::AllButLast(count) => {
                 let lines = input.split_inclusive('\n').collect::<Vec<_>>();
                 lines[..lines.len().saturating_sub(count)].concat()
+            }
+        }
+    }
+
+    /// rubash#2029: the transport length of the prefix this selection
+    /// consumes — GNU head reads exactly up to the end of the last line it
+    /// prints (coreutils head.c copy_fd reads blocks but head_file seeks a
+    /// regular file back to that boundary), so `head -1 <&3` leaves the
+    /// shared open-file offset after line 1 and a later `cat <&3` continues
+    /// there. Same unit as the stage input (`str` length), i.e.
+    /// `pipeline_stdin_consumed`'s transport convention.
+    pub(in crate::executor) fn consumed(&self, input: &str) -> usize {
+        match *self {
+            HeadLineCount::First(count) => {
+                input.split_inclusive('\n').take(count).map(str::len).sum()
+            }
+            HeadLineCount::AllButLast(count) => {
+                let lines = input.split_inclusive('\n').count();
+                let keep = lines.saturating_sub(count);
+                input.split_inclusive('\n').take(keep).map(str::len).sum()
             }
         }
     }
@@ -6287,10 +6494,15 @@ struct InlineGrepSpec {
 /// costs concurrency, never correctness.
 #[cfg(windows)]
 fn tput_inline_stage(command: &CommandNode) -> bool {
-    matches!(
-        command.words.first().map(String::as_str),
-        Some("tput") | Some("/bin/tput") | Some("/usr/bin/tput")
-    )
+    // The form set is the tput row's registered name family, read
+    // through the registry's COMSUB_FRONT table (rubash#2036 S4):
+    // its tput entries are exactly the bare name plus the row's
+    // Emulated slash forms, pinned against the row by the registry
+    // consistency tests.
+    command
+        .words
+        .first()
+        .is_some_and(|word| comsub_front_slot(word) == Some(ComsubFrontSlot::Tput))
 }
 
 /// Non-Windows stub so `cfg!(windows) && tput_inline_stage(command)` at the

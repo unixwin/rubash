@@ -138,7 +138,24 @@ impl Executor {
             return Ok(());
         }
 
-        let Some(program) = find_user_command(&config.command[0], &env_map) else {
+        // rubash#2046 B2: GNU env hands the composed environment to
+        // execvp, and execvp with PATH ABSENT from that environment
+        // searches its default path (glibc confstr _CS_PATH) instead of
+        // failing — `env -u PATH printenv PATH` runs /usr/bin/printenv
+        // and reports its rc 1, not env's 127. Mirror that one shape:
+        // resolve against the standard path (path::standard_path, the
+        // same confstr port `command -p` uses) whenever the composed
+        // environment carries no PATH at all. A set-but-empty PATH is
+        // a different shape and keeps the plain lookup — the ruling's
+        // scope is the unset form only.
+        let program = if crate::executor::path::path_is_unset(&env_map) {
+            let mut lookup_env = env_map.clone();
+            lookup_env.insert("PATH".to_string(), standard_path(&env_map));
+            find_user_command(&config.command[0], &lookup_env)
+        } else {
+            find_user_command(&config.command[0], &env_map)
+        };
+        let Some(program) = program else {
             let mut stderr = Vec::new();
             writeln!(
                 &mut stderr,
@@ -997,16 +1014,40 @@ impl Executor {
             // each command and pass named pipes/FIFOs to `diff`. Upstream
             // shopt1.sub uses `diff <("$t1") <("$t2")` where the files are
             // executable helper scripts that differ only by a shebang.
-            let left =
-                shell_path_to_windows(&self.expand_word(&cmd.words[1]), &self.shell_state.env_vars);
-            let right =
-                shell_path_to_windows(&self.expand_word(&cmd.words[2]), &self.shell_state.env_vars);
-            if let (Ok(left_source), Ok(right_source)) =
-                (fs::read_to_string(left), fs::read_to_string(right))
-            {
-                if strip_shebang(&left_source) == strip_shebang(&right_source) {
-                    self.exit_code = 0;
-                    return Ok(true);
+            //
+            // rubash#2043 A4: the in-process equality answer may only
+            // stand in for the real diff on that documented shape —
+            // both operands produced by a process substitution of THIS
+            // command (a parser-recorded, unquoted `<(...)` span on
+            // each operand word). For plain files the shortcut
+            // silently reported a shebang-only difference as equal
+            // where GNU diff reports it (rc 1 with the `1c1` block);
+            // those fall through to the real diff like every other
+            // operand pair.
+            let both_operands_are_procsub = [1usize, 2].iter().all(|&index| {
+                cmd.word_metadata.get(index).is_some_and(|metadata| {
+                    metadata
+                        .process_substitutions
+                        .iter()
+                        .any(|substitution| !substitution.output)
+                })
+            });
+            if both_operands_are_procsub {
+                let left = shell_path_to_windows(
+                    &self.expand_word(&cmd.words[1]),
+                    &self.shell_state.env_vars,
+                );
+                let right = shell_path_to_windows(
+                    &self.expand_word(&cmd.words[2]),
+                    &self.shell_state.env_vars,
+                );
+                if let (Ok(left_source), Ok(right_source)) =
+                    (fs::read_to_string(left), fs::read_to_string(right))
+                {
+                    if strip_shebang(&left_source) == strip_shebang(&right_source) {
+                        self.exit_code = 0;
+                        return Ok(true);
+                    }
                 }
             }
         }

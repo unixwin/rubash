@@ -132,9 +132,17 @@ fn head_abs() -> String {
 // ------------------------------------------------------------ §4 shape 1
 
 /// Shape 1 (audit §4): plain call, script fake first on PATH.
-/// cat yields to the script fake; stty and sleep are answered by the
-/// engine even though a resolvable body exists (existence gate, not
-/// yield-to-real). WART (stty/sleep): S3/S4 stand-down adjudication.
+/// stty and sleep are answered by the engine even though a resolvable
+/// body exists (existence gate, not yield-to-real). The cat leg of
+/// this shape is a PIPELINE form (`cat f1.txt | head -1`): its yield
+/// to the fake is the pipeline planner's, not the simple face's —
+/// attribution corrected by the S4 four-quadrant re-measurement
+/// (03ae580d): the simple face replaces BOTH fake shapes
+/// (shape-blind, see shape 1'), the pipeline face yields to BOTH
+/// via the concurrent direct-spawn planner. The audit's original
+/// "simple face yields to a script fake" reading compared this
+/// pipeline leg against a simple-form leg and is superseded.
+/// WART (stty/sleep): S3/S4 stand-down adjudication.
 #[test]
 fn issue2036_shape1_plain_script_fake() {
     let rig = rig("s1");
@@ -156,11 +164,14 @@ fn issue2036_shape1_plain_script_fake() {
 }
 
 /// Shape 1' (audit §4/B5): same shape with an ELF fake (a copy of
-/// /bin/true), SIMPLE form. Now cat is ALSO answered by the engine
-/// (prints the file; the ELF fake prints nothing) — the external
-/// layer distinguishes script vs ELF candidates. (The pipeline form
-/// of this shape answers the other way; see the W5 wart pin.)
-/// WART: S3/S4 adjudication.
+/// /bin/true), SIMPLE form. cat is answered by the engine (prints
+/// the file; the ELF fake prints nothing). Attribution corrected
+/// (S4 four-quadrant re-measurement, 03ae580d): the simple face is
+/// SHAPE-BLIND — it replaces script fakes exactly as it replaces
+/// ELF fakes; no layer distinguishes script vs ELF candidates. The
+/// audit's contrary reading rested on shape 1's cat leg, which is
+/// a pipeline form (see shape 1). The pipeline face yields to both
+/// shapes (see the B5 pin below). WART: S3/S4 adjudication.
 #[test]
 fn issue2036_shape1_elf_fake_cat_is_replaced() {
     let rig = rig("s1e");
@@ -391,7 +402,11 @@ fn issue2036_shape13_enable_faces() {
     // and dispatch falls through to the PATH body (the fakebin script
     // here). Before the disable, the bare name runs the in-process
     // env (its output is the environment, never the fake's marker).
-    write_fake(&rig.root.join("fakebin"), "env", "#!/bin/sh\necho FAKE-env\n");
+    write_fake(
+        &rig.root.join("fakebin"),
+        "env",
+        "#!/bin/sh\necho FAKE-env\n",
+    );
     let out = run(
         &rig.root,
         &rig.fake_path,
@@ -485,7 +500,11 @@ fn issue2036_introspection_emulated_names_report_file() {
     // reported — the not-found answer returns (the claim is an
     // existence gate, exactly as dispatch behaves).
     let empty = scratch("introempty");
-    let out = run(&dir, empty.to_str().unwrap(), "echo t=\"$(type -t stty)\"; type stty 2>/dev/null; echo rc=$?");
+    let out = run(
+        &dir,
+        empty.to_str().unwrap(),
+        "echo t=\"$(type -t stty)\"; type stty 2>/dev/null; echo rc=$?",
+    );
     assert!(out.stdout.contains("t=\n"), "{}", out.stdout);
     assert!(out.stdout.contains("rc=1"), "{}", out.stdout);
 }
@@ -623,22 +642,29 @@ fn issue2036_hash_record_after_emulated_runs() {
 
 // ------------------------------------------------------- stand-down warts
 
-/// Audit B1 (§3.3): the comsub basename arm does NOT consult the
-/// stand-down predicate — with PATH=/nonexistent it still answers,
-/// while the simple-command form of the same name stands down to 127,
-/// and the comsub dirname shape (no arm) also fails. WART: S4 must
-/// adjudicate this cell explicitly; pinned as-is until then.
+/// Audit B1 (§3.3), S3-adjudicated FailClosed and FIXED in S5
+/// (rubash#2046): the comsub basename arm now consults the same
+/// stand-down predicate as the cat arm. With PATH=/nonexistent the
+/// substitution fails closed — empty value, status 127 — exactly
+/// like the simple-command form of the same name and like the comsub
+/// dirname shape (no arm). This pin replaces the wart pin that held
+/// the pre-fix answer (`comsub_basename=c`) until adjudication.
 #[test]
-fn issue2036_wart_comsub_basename_ignores_stand_down() {
+fn issue2036_comsub_basename_stands_down() {
     let dir = scratch("w1");
     let out = run(
         &dir,
         "/nonexistent",
-        "echo comsub_basename=$(basename /a/b/c); \
+        "comsub_basename=$(basename /a/b/c); \
+         echo \"val=[$comsub_basename] rc=$?\"; \
          basename /a/b/c 2>&1; echo simp_rc=$?; \
          echo comsub_dirname=$(dirname /a/b/c 2>&1); echo done",
     );
-    assert!(out.stdout.contains("comsub_basename=c"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("val=[] rc=127"),
+        "comsub basename must fail closed (empty value, status 127): {}",
+        out.stdout
+    );
     assert!(out.stdout.contains("simp_rc=127"), "{}", out.stdout);
     assert!(
         !out.stdout.contains("comsub_dirname=/a/b"),
@@ -663,7 +689,12 @@ fn issue2036_comsub_cat_stands_down() {
 
 /// Audit B5 (§3.3): pipeline stage with an ELF fake — the pipeline
 /// yields to the fake (wc counts the fake's empty output), the exact
-/// opposite of the simple-command form in shape 1'. WART: S4.
+/// opposite of the simple-command form in shape 1'. Attribution
+/// (S4): the yield belongs to the pipeline face's concurrent
+/// direct-spawn planner, and it is shape-blind — script fakes yield
+/// there too; the simple face replaces both shapes. S3 §3.2-a RULED
+/// this cell KEEP (both faces keep their current values), so the
+/// pin now guards the ruled shape rather than an open wart.
 #[test]
 fn issue2036_wart_pipeline_cat_yields_to_elf_fake() {
     let rig = rig("w5");

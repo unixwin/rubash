@@ -40,6 +40,12 @@ fn shell_bin() -> PathBuf {
 
 #[cfg(any(unix, windows))]
 struct Output {
+    // The outer `rubash -c` process status, kept for probe debugging.
+    // It is the exit status of the whole script (its last command),
+    // not of the applet under test, so no row asserts it directly:
+    // applet exit codes are pinned through the in-script `rc=$?`
+    // echoes captured in `stdout`.
+    #[allow(dead_code)]
     status: i32,
     stdout: String,
     stderr: String,
@@ -426,4 +432,3 @@ fn issue1943_chmod_capital_x_reads_the_original_mode() {
     let out = run_in_dir(&dir, "touch f; chmod 644 f; chmod u+x,g+X f; stat -c %a f");
     assert_eq!(out.stdout, "744\n");
 }
-

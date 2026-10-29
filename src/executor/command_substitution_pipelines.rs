@@ -1,3 +1,6 @@
+use super::command_registry::{
+    comsub_heredoc_slot, comsub_timed_slot, ComsubHeredocSlot, ComsubTimedSlot,
+};
 use super::*;
 
 #[cfg(windows)]
@@ -14,6 +17,51 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 /// `cat <<\)` has `)` as the delimiter (backslash-quoted), so the `)` is
 /// NOT the command-substitution closer.  `cat <<EOF)` has `EOF` as the
 /// delimiter and `)` as the closer.
+/// The delimiter word of the source's first `<<` header line, dequoted the
+/// way the heredoc machinery compares body lines (rubash#2025): quote bytes
+/// are syntax and drop out, a backslash contributes its escaped byte. Used
+/// by the eof-gather warning arm, which must name the delimiter GNU's
+/// `here-document ... (wanted `X')` report carries (make_cmd.c:627).
+fn heredoc_header_delimiter_word(header: &str) -> Option<String> {
+    let ll_pos = header.find("<<")?;
+    let after = &header[ll_pos + 2..];
+    let after = after.strip_prefix('-').unwrap_or(after);
+    let after = after.trim_start();
+    let bytes = after.as_bytes();
+    let mut delimiter: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'\\' && i + 1 < bytes.len() {
+            delimiter.push(bytes[i + 1]);
+            i += 2;
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            let quote = byte;
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                delimiter.push(bytes[i]);
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        if byte.is_ascii_whitespace() || matches!(byte, b';' | b'|' | b'&' | b')' | b'<' | b'>') {
+            break;
+        }
+        delimiter.push(byte);
+        i += 1;
+    }
+    if delimiter.is_empty() {
+        None
+    } else {
+        String::from_utf8(delimiter).ok()
+    }
+}
+
 fn heredoc_header_closes_command_substitution(source: &str) -> bool {
     let Some(header) = source.lines().next() else {
         return false;
@@ -183,7 +231,13 @@ fn heredoc_comsub_produce(
     let mut output = if first.pipe.is_none() && ast.commands.len() > 1 {
         let mut output = String::new();
         for command in &ast.commands {
-            if command.words.first().map(String::as_str) != Some("cat")
+            // The producer's claim keys are the registry's
+            // ComsubHeredoc projection (rubash#2036 S4).
+            if command
+                .words
+                .first()
+                .and_then(|word| comsub_heredoc_slot(word))
+                != Some(ComsubHeredocSlot::Cat)
                 || command.pipe.is_some()
                 // rubash#320: redirect-carrying cats are not
                 // shortcut-eligible (see command_has_file_redirect).
@@ -199,7 +253,10 @@ fn heredoc_comsub_produce(
         if first.pipe.is_some() {
             let next = piped_next?;
             match next.words.as_slice() {
-                [cmd, option] if cmd == "sort" && option == "-u" => {
+                [cmd, option]
+                    if comsub_heredoc_slot(cmd) == Some(ComsubHeredocSlot::Sort)
+                        && option == "-u" =>
+                {
                     let mut lines = output.lines().map(str::to_string).collect::<Vec<_>>();
                     lines.sort();
                     lines.dedup();
@@ -343,6 +400,18 @@ impl Executor {
         let first_line_end = source.find('\n').unwrap_or(source.len());
         let header_close_marked =
             source[..first_line_end].contains(crate::executor::markers::IFS_GLUE);
+        // rubash#2025: a SECOND mark on the first line records that the
+        // gather ran to end of input (complete_comsub_heredoc_header_close
+        // synthesizes the delimiter line it consumed to EOF), so the
+        // delimited-by-end-of-file warning must fire from this plan too —
+        // GNU emits it at parse time (make_cmd.c:627 via
+        // parse.y:4563-4567 gather_here_documents), entry-independently
+        // like the header-close warning above.
+        let eof_gather_marked = header_close_marked
+            && source[..first_line_end]
+                .matches(crate::executor::markers::IFS_GLUE)
+                .count()
+                >= 2;
         let closed_by_paren = source[first_line_end..].contains(crate::executor::markers::IFS_GLUE);
         let source = source.replace(crate::executor::markers::IFS_GLUE, "");
         let source = self.comsub_body_alias_splice_extracted(&source);
@@ -377,6 +446,43 @@ impl Executor {
                 self.error_prefix_for_line(start_line)
             );
         }
+        if eof_gather_marked {
+            // GNU make_cmd.c:627 make_here_document, driven by
+            // parse.y:4563-4567 parse_comsub's gather_here_documents: the
+            // pending heredoc hit end of input before its delimiter line,
+            // so the reader warns per heredoc — at the line the gather
+            // ended (the command's start line plus the body lines it
+            // consumed) — and still runs the command with the gathered
+            // body. The synthesized delimiter in the source gives every
+            // downstream consumer that body; this arm owns only the
+            // warning.
+            let header = source.lines().next().unwrap_or("");
+            let wanted = heredoc_header_delimiter_word(header).unwrap_or_default();
+            let start_line = self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_CMD_START_LINE")
+                .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE"))
+                .and_then(|line| line.parse::<usize>().ok())
+                .unwrap_or(1);
+            let strip_tabs = header.contains("<<-");
+            let body_line_count = source
+                .lines()
+                .skip(1)
+                .take_while(|line| {
+                    let comparable = if strip_tabs {
+                        line.trim_start_matches('\t')
+                    } else {
+                        *line
+                    };
+                    comparable != wanted
+                })
+                .count();
+            eprintln!(
+                "{}warning: here-document at line {start_line} delimited by end-of-file (wanted `{wanted}')",
+                self.error_prefix_for_line(start_line + body_line_count)
+            );
+        }
         // The cat/heredoc-optimized comsub paths re-derive the here-document
         // warning lines, which GNU reports from the outer script's physical
         // parse (parse_comsub yyparse + gather_here_documents), so seed the
@@ -407,7 +513,11 @@ impl Executor {
         } else {
             (first, ast.commands.get(1))
         };
-        if first.words.first().map(String::as_str) != Some("cat")
+        if first
+            .words
+            .first()
+            .and_then(|word| comsub_heredoc_slot(word))
+            != Some(ComsubHeredocSlot::Cat)
             || self.emulated_external_stands_down("cat")
         {
             // When cat does not resolve (PATH unset, rubash#1126; or a
@@ -472,7 +582,12 @@ impl Executor {
         // decline too. Declining only costs the shortcut — the real
         // executor produces GNU's output for every declined shape.
         let cat_operands_admissible = |command: &CommandNode| {
-            if command.words.first().map(String::as_str) != Some("cat") {
+            if command
+                .words
+                .first()
+                .and_then(|word| comsub_heredoc_slot(word))
+                != Some(ComsubHeredocSlot::Cat)
+            {
                 return true;
             }
             let operands = &command.words[1..];
@@ -678,16 +793,19 @@ impl Executor {
     }
 
     fn timed_command_substitution_inner(&self, words: &[String]) -> Option<String> {
-        match words.first().map(String::as_str) {
-            None | Some(":") | Some("true") => {
+        // The claim keys are the registry's ComsubTimed projection
+        // (rubash#2036 S4), slash forms included; arm bodies and
+        // their order are unchanged.
+        match words.first().map(|word| comsub_timed_slot(word)) {
+            None | Some(Some(ComsubTimedSlot::TrueColon)) => {
                 self.last_command_substitution_status.set(Some(0));
                 Some(String::new())
             }
-            Some("false") => {
+            Some(Some(ComsubTimedSlot::False)) => {
                 self.last_command_substitution_status.set(Some(1));
                 Some(String::new())
             }
-            Some("echo") => {
+            Some(Some(ComsubTimedSlot::Echo)) => {
                 let args = words[1..]
                     .iter()
                     .map(|word| self.expand_word(word))
@@ -695,7 +813,7 @@ impl Executor {
                 self.last_command_substitution_status.set(Some(0));
                 Some(echo_command_substitution_output(&args))
             }
-            Some("printf") => {
+            Some(Some(ComsubTimedSlot::Printf)) => {
                 let expanded_args = words[1..]
                     .iter()
                     .flat_map(|word| self.expand_command_substitution_arg_values(word))
@@ -717,7 +835,10 @@ impl Executor {
                         .to_string(),
                 )
             }
-            Some("tty") | Some("/bin/tty") | Some("/usr/bin/tty") => {
+            Some(Some(ComsubTimedSlot::Tty)) => {
+                // Only the BARE form consults the stand-down
+                // predicate; the slash forms never did (the Tty
+                // slot covers all three registered forms).
                 if words.first().map(String::as_str) == Some("tty")
                     && self.emulated_external_stands_down("tty")
                 {
@@ -734,7 +855,7 @@ impl Executor {
                     "not a tty".to_string()
                 })
             }
-            Some("cat") => {
+            Some(Some(ComsubTimedSlot::Cat)) => {
                 // When cat does not resolve (PATH unset, rubash#1126; or
                 // a set PATH without it, rubash#1545), decline.
                 if self.emulated_external_stands_down("cat") {
