@@ -50,7 +50,12 @@ fn resolve_net_service_port(port_text: &str, udp: bool) -> Option<u16> {
         let (Some(name), Some(port_proto)) = (fields.next(), fields.next()) else {
             continue;
         };
-        if name != port_text {
+        // GNU's service resolution is getservbyname (via getaddrinfo),
+        // which matches the entry's alias column as well as its
+        // primary name (rubash#1896: `www` resolves http's port,
+        // `mail` smtp's). The remaining fields after port/proto are
+        // the aliases.
+        if name != port_text && !fields.any(|alias| alias == port_text) {
             continue;
         }
         let Some((port, service_proto)) = port_proto.split_once('/') else {
@@ -204,16 +209,13 @@ impl Executor {
         }
     }
 
-    /// Parse and connect a net redirect target, returning the
-    /// endpoint in its native socket form. The File form
-    /// (open_net_redirect_raw) adopts the SOCKET as a raw handle for
-    /// the fd machinery, but std File reads on an adopted overlapped
-    /// socket fail on Windows (ERROR_INVALID_PARAMETER), so byte
-    /// consumers read through this socket form, whose reads go
-    /// through WSARecv/recv. The diagnostic pre-lines (service-name
-    /// failure, refused connect; rubash#1237) are emitted here so
-    /// both forms report identically.
-    pub(in crate::executor) fn connect_net_stream(&self, target: &str) -> io::Result<NetStream> {
+    /// Parse and resolve a net redirect target WITHOUT connecting:
+    /// the first-slash split, the service resolution and the host
+    /// resolution GNU's getaddrinfo performs inside netopen, with
+    /// the diagnostic pre-lines those failures carry (service name,
+    /// unresolvable host; rubash#1237/#1894). Returns the protocol
+    /// flag and the resolved address set.
+    fn resolve_net_target(&self, target: &str) -> io::Result<(bool, Vec<std::net::SocketAddr>)> {
         let (udp, rest) = if let Some(rest) = target.strip_prefix("/dev/tcp/") {
             (false, rest)
         } else if let Some(rest) = target.strip_prefix("/dev/udp/") {
@@ -225,7 +227,12 @@ impl Executor {
             ));
         };
         let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "Invalid argument");
-        let (host, port_text) = rest.rsplit_once('/').ok_or_else(invalid)?;
+        // GNU netopen (lib/sh/netopen.c netopen()) splits at the
+        // FIRST slash (strchr): the host is the segment before it and
+        // the service is the whole remainder, slashes included —
+        // `/dev/tcp/a/b/80` resolves host `a` with service `b/80`,
+        // which then fails as an unknown service (rubash#1895).
+        let (host, port_text) = rest.split_once('/').ok_or_else(invalid)?;
         let port: u16 = match resolve_net_service_port(port_text, udp) {
             Some(port) => port,
             None => {
@@ -242,20 +249,82 @@ impl Executor {
                 return Err(invalid());
             }
         };
-        if host.is_empty() {
+        // GNU _netopen6 (lib/sh/netopen.c) resolves host and service
+        // through getaddrinfo and treats its result set as
+        // authoritative. A host that does not resolve is reported by
+        // internal_error BEFORE the redirection_error line the caller
+        // adds — `{host}: Name or service not known` (glibc's
+        // gai_strerror text for EAI_NONAME) — and netopen then fails
+        // with EINVAL, so the caller's line reads
+        // `{target}: Invalid argument` (rubash#1894). The empty host
+        // takes the same path (getaddrinfo("") is EAI_NONAME).
+        let addrs: Vec<std::net::SocketAddr> = if host.is_empty() {
+            Vec::new()
+        } else {
+            use std::net::ToSocketAddrs as _;
+            match (host, port).to_socket_addrs() {
+                Ok(iter) => iter.collect(),
+                Err(_) => Vec::new(),
+            }
+        };
+        if addrs.is_empty() {
+            eprintln!("{}{host}: Name or service not known", self.error_prefix());
             return Err(invalid());
         }
+        Ok((udp, addrs))
+    }
+
+    /// Validation-only form for the setup/probe walks. GNU opens a
+    /// net redirect exactly once — at the bind (redir.c
+    /// do_redirections) — but this port's in-process funnels run
+    /// probe walks ahead of the bind to surface the open's errors
+    /// early. For a filesystem target a probe open is unobservable;
+    /// for a net target it is a real connection that eats the peer's
+    /// greeting and leaves the bind's own connection reset
+    /// (rubash#1950/#1967). A probe therefore resolves the target —
+    /// surfacing every failure that can be known without connecting,
+    /// with the same pre-lines — and leaves the connect itself to
+    /// the bind's one open; a refused connection surfaces there with
+    /// the same diagnostic the probe's open would have produced.
+    pub(in crate::executor) fn validate_net_redirect_target(
+        &self,
+        target: &str,
+    ) -> io::Result<()> {
+        self.resolve_net_target(target).map(|_| ())
+    }
+
+    /// Parse and connect a net redirect target, returning the
+    /// endpoint in its native socket form. The File form
+    /// (open_net_redirect_raw) adopts the SOCKET as a raw handle for
+    /// the fd machinery, but std File reads on an adopted overlapped
+    /// socket fail on Windows (ERROR_INVALID_PARAMETER), so byte
+    /// consumers read through this socket form, whose reads go
+    /// through WSARecv/recv. The diagnostic pre-lines (service-name
+    /// failure, refused connect; rubash#1237) are emitted here so
+    /// both forms report identically.
+    pub(in crate::executor) fn connect_net_stream(&self, target: &str) -> io::Result<NetStream> {
+        let (udp, addrs) = self.resolve_net_target(target)?;
         if udp {
-            let bind_addr = if host.contains(':') {
+            // The bind family follows the RESOLVED address, not the
+            // host spelling (rubash#1897): _netopen6 sockets and
+            // connects the getaddrinfo result itself, so a v6-only
+            // host name spelled without ':' still binds [::]:0 —
+            // binding 0.0.0.0 for it made the connect target's family
+            // unreachable.
+            let bind_addr = if addrs[0].is_ipv6() {
                 "[::]:0"
             } else {
                 "0.0.0.0:0"
             };
             let socket = std::net::UdpSocket::bind(bind_addr)?;
-            socket.connect((host, port))?;
+            socket.connect(addrs[0])?;
             Ok(NetStream::Udp(socket))
         } else {
-            let stream = std::net::TcpStream::connect((host, port)).map_err(|error| {
+            // Connect over the resolved set (TcpStream tries each
+            // address in order, like _netopen6's res loop) so the
+            // connect below can only fail at connect time, never at
+            // resolution time.
+            let stream = std::net::TcpStream::connect(addrs.as_slice()).map_err(|error| {
                 // GNU netopen reports a refused connect through sys_error
                 // with the script name only (no line segment) BEFORE the
                 // redirection_error line the caller adds:
@@ -441,6 +510,24 @@ impl Executor {
     }
 
     fn open_input_redirect_impl(&self, target: &str, consume: bool) -> io::Result<File> {
+        // rubash#1950: a probe (consume == false) must not open a net
+        // target either — the classified ladder would CONNECT, a real
+        // connection the probe drops unread: it eats the peer's
+        // greeting, and the bind phase's one real open (GNU's only
+        // open, redir.c do_redirections) is left talking to a reset
+        // stream. Validate by resolution instead — the #1820 FIFO
+        // carve-out's rule: the probe asks every question the open
+        // can answer without performing it, the bind performs the
+        // open. Every probe caller drops the returned File unread,
+        // so the /dev/null stand-in is inert.
+        if !consume && crate::special_paths::is_net_redirect_target(target) {
+            self.validate_net_redirect_target(target)
+                .map_err(|e| crate::posix_errors::path_error(target, e))?;
+            return File::open(shell_path_to_windows(
+                "/dev/null",
+                &self.shell_state.env_vars,
+            ));
+        }
         if let Some(opened) = self.open_classified_input(target) {
             return opened;
         }
@@ -930,6 +1017,19 @@ impl Executor {
         target: &str,
         clobber: bool,
     ) -> io::Result<File> {
+        // rubash#1967: on a net target the prepare phase's connect is
+        // the same phantom as the FIFO's prepare open below — dropped
+        // unused while the bind phase connects again. Validate by
+        // resolution; the bind performs GNU's single open. Every
+        // caller drops the returned File, so the stand-in is inert.
+        if crate::special_paths::is_net_redirect_target(target) {
+            self.validate_net_redirect_target(target)
+                .map_err(|e| crate::posix_errors::path_error(target, e))?;
+            return File::open(shell_path_to_windows(
+                "/dev/null",
+                &self.shell_state.env_vars,
+            ));
+        }
         // rubash#1820: on a FIFO the prepare phase's create is a
         // semantic no-op (O_TRUNC/O_CREAT do nothing to a fifo) whose
         // blocking open consumes the rendezvous pairing the bind phase
@@ -2650,6 +2750,17 @@ pub(in crate::executor) fn probe_output_redirect(
     target: &str,
     clobber: bool,
 ) -> std::io::Result<()> {
+    // rubash#1967: a net target's probe must not connect — the probe
+    // connection is dropped unwritten while the bind's own open
+    // connects again, so the peer sees two connections where GNU's
+    // do_redirections (redir.c do_redirection_internal) opens one.
+    // Validate by resolution; the one real open performs the
+    // connect and surfaces a refusal with the same diagnostic.
+    if crate::special_paths::is_net_redirect_target(target) {
+        return executor
+            .validate_net_redirect_target(target)
+            .map_err(|e| crate::posix_errors::path_error(target, e));
+    }
     #[cfg(unix)]
     {
         let path = executor.session_path(shell_path_to_windows(
@@ -2676,6 +2787,12 @@ pub(in crate::executor) fn probe_output_redirect_append(
     executor: &Executor,
     target: &str,
 ) -> std::io::Result<()> {
+    // rubash#1967: net arm of the same carve-out as probe_output_redirect.
+    if crate::special_paths::is_net_redirect_target(target) {
+        return executor
+            .validate_net_redirect_target(target)
+            .map_err(|e| crate::posix_errors::path_error(target, e));
+    }
     #[cfg(unix)]
     {
         let path = executor.session_path(shell_path_to_windows(
