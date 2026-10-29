@@ -62,13 +62,16 @@
 //! its 127. The policy value `Yield` (real body wins when resolvable)
 //! is used by **no** row; since S4 it is used by exactly one face —
 //! the pipeline cat face, whose net policy is set by the concurrent
-//! direct-spawn planner ahead of the arm (see the cat row). The
-//! non-standard cells are flagged on their rows and, since S4, in
-//! the per-face StandDown records: the pipeline sed arm's inverted
-//! recheck (row level), the comsub basename arm's unchecked cell
-//! (audit B1), the timed-consumer sleep model's unchecked cell
-//! (KD-4), and the mktemp word arm's shape-only admission (S3
-//! §3.1/§5.4).
+//! direct-spawn planner ahead of the arm (see the cat row).
+//! `ScriptYield` (real body wins when the resolution is a script)
+//! is used by exactly two rows — the identity tools `uname`/`arch`,
+//! adjudicated by rubash#2104 and consumed through
+//! `Executor::registered_stand_down`. The non-standard cells are
+//! flagged on their rows and, since S4, in the per-face StandDown
+//! records: the pipeline sed arm's inverted recheck (row level),
+//! the comsub basename arm's unchecked cell (audit B1), the
+//! timed-consumer sleep model's unchecked cell (KD-4), and the
+//! mktemp word arm's shape-only admission (S3 §3.1/§5.4).
 
 /// Which family claims the name (audit §6.2 `class`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +221,16 @@ pub(crate) enum ResolvablePolicy {
     /// consistency tests pin the row-level absence and the exact
     /// per-face set so either can only change deliberately.
     Yield,
+    /// The real body wins when the resolution is a script (a `#!`
+    /// file); a native-image resolution is still replaced. Ruled for
+    /// the identity tools by rubash#2104: GNU has no `uname`/`arch`
+    /// builtin, so a PATH-placed script (nvm's mock `uname` is the
+    /// field case) is the user's program and must run, while the
+    /// synced native body the persona stands in for keeps the
+    /// in-process answer (the #154 identity design and the #130
+    /// spawn-cost rationale are untouched). The consistency tests
+    /// pin the row set carrying this value.
+    ScriptYield,
     /// The pipeline sed arm: answers only when the name is
     /// hash-resolved but the PATH walk misses (an inverted recheck
     /// layered on the fail-closed pre-check).
@@ -586,12 +599,19 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
     keyword("]]", &[]),
     keyword("coproc", &[]),
     // -- hidden fast-path: identity / console tools (#154) --
+    // rubash#2104 adjudication: the identity rows' resolvable axis is
+    // ScriptYield — a PATH resolution landing on a script runs that
+    // script (GNU has no uname/arch builtin; nvm's mock `uname` is
+    // the field case), a native-image resolution keeps the persona
+    // answer, and the unresolvable axis stays FailClosed (#1545).
+    // The dispatch arms consult this row through
+    // Executor::registered_stand_down, never a per-name check.
     CommandRow {
         name: "uname",
         class: ClaimClass::HiddenFastpath,
         impls: &[ImplRef::new(Entry::SimpLate, "command_dispatch_late -> printf_path_builtins::execute_identity_tool (builtins/uname.rs)"), ImplRef::new(Entry::CmdLate, "command_no_alias_late -> printf_path_builtins::execute_identity_tool")],
         admission: Admission::Full,
-        stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
+        stand_down: StandDown::new(ResolvablePolicy::ScriptYield, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
         introspection: Introspection::Emulated,
@@ -606,7 +626,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         class: ClaimClass::HiddenFastpath,
         impls: &[ImplRef::new(Entry::SimpLate, "command_dispatch_late -> printf_path_builtins::execute_identity_tool (builtins/uname.rs)"), ImplRef::new(Entry::CmdLate, "command_no_alias_late -> printf_path_builtins::execute_identity_tool")],
         admission: Admission::Full,
-        stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
+        stand_down: StandDown::new(ResolvablePolicy::ScriptYield, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
         introspection: Introspection::Emulated,
@@ -2001,6 +2021,20 @@ mod registry_consistency {
                 .iter()
                 .all(|r| r.stand_down.resolvable != ResolvablePolicy::Yield),
             "a row started yielding — update this pin with the adjudication reference"
+        );
+        // ScriptYield at row level is exactly the identity pair,
+        // adjudicated by rubash#2104 (a script resolution runs; a
+        // native-image resolution keeps the persona answer). Any
+        // further row taking the value needs its own adjudication.
+        let script_yield_rows: Vec<&str> = COMMAND_REGISTRY
+            .iter()
+            .filter(|r| r.stand_down.resolvable == ResolvablePolicy::ScriptYield)
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(
+            script_yield_rows,
+            vec!["uname", "arch"],
+            "ScriptYield rows are exactly the #2104 identity pair"
         );
         // Same discipline for Unchecked: the row-level set stays
         // empty; the unchecked cells (comsub basename B1,

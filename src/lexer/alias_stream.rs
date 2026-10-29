@@ -249,10 +249,10 @@ pub(crate) fn expand_aliases_in_source(
     let mut expect_in_cmd = Tok::Start; // expecting_in_command
     let mut cond = 0usize; // inside [[ ]]
     let mut open_brace = 0usize; // open_brace_count for `}` recognition
-                                 // Heredoc state: `<<`/<<- record their delimiter word; after the next
-                                 // newline the body lines are raw data — GNU reads them with
-                                 // here_document_to_fd, outside the token stream, so no alias expansion
-                                 // ever applies inside a heredoc body.
+    // Heredoc state: `<<`/<<- record their delimiter word; after the next
+    // newline the body lines are raw data — GNU reads them with
+    // here_document_to_fd, outside the token stream, so no alias expansion
+    // ever applies inside a heredoc body.
     let mut expect_heredoc: Option<bool> = None; // strip_tabs for <<-
     let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
     // >0 while scanning the element words of a compound array assignment
@@ -889,15 +889,44 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>, posix: boo
     let mut pos = 0usize;
     let mut in_double = false;
     let mut changed = false;
+    // Whether the next character begins a new token (shell_getc position,
+    // parse.y:3631): `#' only starts a comment at token start — after the
+    // input start, a blank, a newline, or an operator. A `#' reached there
+    // is ALWAYS a comment for GNU's reader (read_token_word consumes word
+    // characters — including `#' — without returning to shell_getc, so a
+    // mid-word `#' like `a#b' never comments); the walker must skip its
+    // text without quote-tracking, or an apostrophe inside a comment
+    // ("modernish's") opens a phantom string that swallows the rest of the
+    // input and hides real `$(' units from expansion.
+    let mut at_word_start = true;
     while pos < chars.len() {
         match chars[pos] {
-            '\\' => pos = (pos + 2).min(chars.len()),
-            '\'' if !in_double => pos = skip_single_quote(&chars, pos),
+            ' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>' => {
+                pos += 1;
+                at_word_start = true;
+            }
+            '#' if at_word_start => {
+                while pos < chars.len() && chars[pos] != '\n' {
+                    pos += 1;
+                }
+            }
+            '\\' => {
+                pos = (pos + 2).min(chars.len());
+                at_word_start = false;
+            }
+            '\'' if !in_double => {
+                pos = skip_single_quote(&chars, pos);
+                at_word_start = false;
+            }
             '"' => {
                 in_double = !in_double;
                 pos += 1;
+                at_word_start = false;
             }
-            '`' if !in_double => pos = skip_backtick(&chars, pos),
+            '`' if !in_double => {
+                pos = skip_backtick(&chars, pos);
+                at_word_start = false;
+            }
             '$' if chars.get(pos + 1) == Some(&'(') => {
                 pos = splice_substitution_body(
                     &mut chars,
@@ -907,6 +936,7 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>, posix: boo
                     &mut changed,
                     |chars, open| crate::lexer::skip_parenthesized_unit_corrected(chars, open),
                 );
+                at_word_start = false;
             }
             // Bash 5.3 funsub (parser.h:85, the live `#else' arm of
             // FUNSUB_CHAR, parse.y:5506): `${ ' followed by blank, newline
@@ -928,8 +958,12 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>, posix: boo
                     &mut changed,
                     skip_funsub_body,
                 );
+                at_word_start = false;
             }
-            _ => pos += 1,
+            _ => {
+                pos += 1;
+                at_word_start = false;
+            }
         }
     }
     if changed {
@@ -1387,6 +1421,11 @@ struct ComsubAliasScanner<'a> {
     /// value inside the truncated body contributing its closer), so
     /// the caller owes it the batch check (see AliasStreamScanner).
     park_comsub: bool,
+    /// Shell_getc token-boundary state for `#' comment recognition
+    /// (parse.y:3631): true after the input start, a blank, a newline, or
+    /// an operator; false inside a word. Kept in lockstep with the batch
+    /// walker in expand_comsub_alias_bodies.
+    at_word_start: bool,
 }
 
 impl<'a> ComsubAliasScanner<'a> {
@@ -1405,6 +1444,7 @@ impl<'a> ComsubAliasScanner<'a> {
             park_rescan: false,
             retry_at: 0,
             park_comsub: false,
+            at_word_start: true,
         }
     }
 
@@ -1448,34 +1488,66 @@ impl<'a> ComsubAliasScanner<'a> {
                 }
             }
             match self.chars[pos] {
+                ' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>' => {
+                    self.pos = pos + 1;
+                    self.at_word_start = true;
+                }
+                // parse.y:3631 shell_getc: `#' at a token start discards to
+                // EOL outside every quote state; the same rule as the batch
+                // walker (expand_comsub_alias_bodies). Without this, an
+                // apostrophe in a comment ("modernish's") opens a phantom
+                // string that parks the phase across whole spans of input.
+                '#' if self.at_word_start => {
+                    if !final_pass && !self.chars[pos..].contains(&'\n') {
+                        self.parked = true;
+                        break;
+                    }
+                    while self.pos < self.chars.len() && self.chars[self.pos] != '\n' {
+                        self.pos += 1;
+                    }
+                }
                 '\\' => {
                     if pos + 1 >= self.chars.len() && !final_pass {
                         self.parked = true;
                         break;
                     }
                     self.pos = (pos + 2).min(self.chars.len());
+                    self.at_word_start = false;
                 }
                 '\'' if !self.in_double => match single_quote_end(&self.chars, pos) {
-                    Some(end) => self.pos = end,
+                    Some(end) => {
+                        self.pos = end;
+                        self.at_word_start = false;
+                    }
                     None if !final_pass => {
                         self.parked = true;
                         rescan_park = true;
                         break;
                     }
-                    None => self.pos = self.chars.len(),
+                    None => {
+                        self.pos = self.chars.len();
+                        self.at_word_start = false;
+                    }
                 },
                 '"' => {
                     self.in_double = !self.in_double;
                     self.pos = pos + 1;
+                    self.at_word_start = false;
                 }
                 '`' if !self.in_double => match backtick_end(&self.chars, pos) {
-                    Some(end) => self.pos = end,
+                    Some(end) => {
+                        self.pos = end;
+                        self.at_word_start = false;
+                    }
                     None if !final_pass => {
                         self.parked = true;
                         rescan_park = true;
                         break;
                     }
-                    None => self.pos = self.chars.len(),
+                    None => {
+                        self.pos = self.chars.len();
+                        self.at_word_start = false;
+                    }
                 },
                 '$' if self.chars.get(pos + 1) == Some(&'(') => {
                     // Park BEFORE any mutation while the unit's extent
@@ -1502,6 +1574,7 @@ impl<'a> ComsubAliasScanner<'a> {
                         &mut changed,
                         extent_paren_tracked,
                     );
+                    self.at_word_start = false;
                     if !final_pass && COMSUB_EXTENT_MISS.with(|flag| flag.get()) {
                         self.poisoned = true;
                         self.parked = true;
@@ -1530,13 +1603,17 @@ impl<'a> ComsubAliasScanner<'a> {
                         &mut changed,
                         extent_funsub_tracked,
                     );
+                    self.at_word_start = false;
                     if !final_pass && COMSUB_EXTENT_MISS.with(|flag| flag.get()) {
                         self.poisoned = true;
                         self.parked = true;
                         break;
                     }
                 }
-                _ => self.pos = pos + 1,
+                _ => {
+                    self.pos = pos + 1;
+                    self.at_word_start = false;
+                }
             }
             self.commit = self.pos;
         }

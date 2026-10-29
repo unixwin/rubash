@@ -37,6 +37,14 @@ impl Executor {
         self.shell_state
             .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        // The staged mirror IS the stage's fd 0 (same invariant as
+        // execute_pipeline_stage): GNU runs the lastpipe element in the
+        // current shell with the pipe dup2'd onto fd 0
+        // (execute_cmd.c:2758), so a PERSISTENT fd-0 binding (`exec
+        // 0<target`, an enclosing `done < file` stream bind) must not
+        // shadow the staged payload. Clear the slot for the element and
+        // restore it below — the parent keeps its descriptor.
+        let saved_stage_fd0 = self.fd_table.entries.remove(&0);
 
         let saved_stdout_capture = self.stdout_capture.take();
         let saved_stderr_capture = self.stderr_capture.take();
@@ -81,6 +89,18 @@ impl Executor {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
         self.pipeline_stdin_consumed.set(Some(consumed));
+        // Restore the ambient fd-0 binding the element replaced (GNU's
+        // in-shell dup2 is undone after the element — the shell keeps its
+        // own descriptor, redir.c RX_ACTIVE persistence for `exec
+        // 0<target`).
+        match saved_stage_fd0 {
+            Some(entry) => {
+                self.fd_table.entries.insert(0, entry);
+            }
+            None => {
+                self.fd_table.entries.remove(&0);
+            }
+        }
         restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
         restore_optional_env_var(
             &mut self.shell_state.env_vars,
@@ -182,6 +202,23 @@ impl Executor {
         if streaming_stdin || live_stdin {
             subshell.shell_state.env_vars.remove(FUNCTION_STDIN);
             subshell.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
+        }
+        // rubash#2106: when the mirror stays armed it IS the element's
+        // fd 0 (the inter-stage pipe, execute_cmd.c:2620 execute_pipeline).
+        // The clone also inherited the enclosing context's fd-0 entry,
+        // and a File endpoint there outranks the mirror in the fd-0 read
+        // ladder (read_io.rs: a File binding is a real open file
+        // description whose EOF is final — the niubash#276 rule, written
+        // for a compound's OWN binding). Inside a stage that precedence
+        // serves the ambient binding instead of the pipe:
+        // `{ awk | while read …; } < file > /dev/null` iterated over the
+        // group's file in the loop element and never saw the pipe
+        // payload. Drop the inherited entry; the element's own fd-0
+        // redirections still bind inside the subshell afterwards (the
+        // #2003 alias arm below; execute_command's redirect application)
+        // — GNU's pipe-first, then-the-element's-redirections order.
+        if !streaming_stdin && !live_stdin {
+            subshell.fd_table.entries.remove(&0);
         }
         // rubash#2003: when the element's own fd-0 winner is an fd alias
         // (`<&N`, `< /dev/fd/N`), GNU binds the element's fd 0 to that
@@ -355,6 +392,19 @@ impl Executor {
             return Ok(Some((String::new(), String::new(), 0)));
         };
         let expanded_name = self.expand_word(name);
+        // GNU execute_cmd.c:4657-4663 (execute_simple_command — reached
+        // for every pipeline element through execute_pipeline): in posix
+        // mode a special builtin is found BEFORE functions, so
+        // find_function is never consulted for one. The sequential
+        // driver's early classification declines function-named posix
+        // special elements, but this stage is also the driver's
+        // fall-through route for unclaimed names, so the preclusion is
+        // stated here, at the function route itself — the same decline
+        // execute_function_command_invocation performs for the
+        // top-level call (rubash#2081).
+        if self.posix_mode_enabled() && is_posix_special_builtin(&expanded_name) {
+            return Ok(None);
+        }
         let Some(function_name) = self
             .function_name_for_command_word(&expanded_name)
             // Bash posix-mode notes (item 19): POSIX mode never executes a
@@ -504,6 +554,11 @@ impl Executor {
                 .shell_state
                 .env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+            // rubash#2106: the armed mirror IS the element's fd 0 — drop
+            // the inherited fd-0 entry so an ambient File binding cannot
+            // outrank the pipe payload in the body's read ladder (see
+            // execute_compound_pipeline_stage for the full rationale).
+            subshell.fd_table.entries.remove(&0);
         }
 
         // rubash#1605: same final-member rule as the compound stage
@@ -765,23 +820,86 @@ impl Executor {
         // which is exactly GNU's ordering.
         call.redirect_err = None;
         call.redirect_err_append = None;
+        // rubash#2106: the fd-1 half of the same double application. The
+        // retain below used to strip only the fd-2 assignments, so an
+        // element's own fd-1 entries (`> own.txt`, `1>&2`) stayed in the
+        // clone's list and the subshell applied them itself — an external
+        // leaf wrote straight to the file, a builtin straight to the
+        // rebound fd 1 — after which the driver's route re-applied the
+        // same redirect from the (empty) capture and its truncating
+        // setup open erased the bytes (`printf … | command awk '…'
+        // > own.txt` produced an empty own.txt, in a redirected group or
+        // not). GNU applies an element's redirections ONCE, in the
+        // element's fork (execute_cmd.c:2620 execute_pipeline -> redir.c
+        // do_redirection_internal); in this model the driver's ordered
+        // walk IS that single application, so every output-side entry
+        // assigning fd 1 or fd 2 leaves the clone. Numbered assignments
+        // (fd >= 3) stay: no stream routes through them, and the clone's
+        // fd table is where their bindings must live. Input-side
+        // entries stay too — the driver routes only output streams, and
+        // a DuplicateInput assigning fd 1 (`1<&2`) is an fd-1 assignment
+        // the walk resolves, while one assigning fd 0 (`<&2`) is the
+        // element's stdin and stays.
         call.redirects.retain(|redirect| {
-            redirect.fd_var.is_some()
-                || !(matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::CombinedOutput
-                        | crate::parser::RedirectKind::CombinedAppend
-                ) || (matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::Output
-                        | crate::parser::RedirectKind::Append
-                        | crate::parser::RedirectKind::ClobberOutput
-                        | crate::parser::RedirectKind::DuplicateOutput
-                        | crate::parser::RedirectKind::DuplicateInput
-                ) && redirect.fd == Some(2)))
+            if redirect.fd_var.is_some() {
+                return true;
+            }
+            let strips = match redirect.kind {
+                crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend => true,
+                crate::parser::RedirectKind::Output
+                | crate::parser::RedirectKind::Append
+                | crate::parser::RedirectKind::ClobberOutput
+                | crate::parser::RedirectKind::DuplicateOutput => {
+                    matches!(redirect.fd, None | Some(1) | Some(2))
+                }
+                crate::parser::RedirectKind::DuplicateInput => {
+                    matches!(redirect.fd, Some(1) | Some(2))
+                }
+                _ => false,
+            };
+            !strips
         });
 
         let mut subshell = self.command_substitution_executor();
+        // GNU execute_cmd.c:6373 do_piping: EVERY element is forked with
+        // its fd 1 bound to the pipeline — the pipe for a non-rightmost
+        // element, the pipeline's own stdout for the rightmost — never to
+        // whatever fd 1 the enclosing context happened to bind. The stage
+        // clone inherits the context's fd-1 entry verbatim, so an
+        // enclosing compound's output binding (a group's/function call's
+        // `>file`, realized in the fd table by
+        // open_compound_output_redirects) survived into the stage: an
+        // external or emulated leaf resolved its stdout to that File
+        // handle and the stage materialized empty while the bytes went
+        // to the compound's target (rubash#2106: `{ awk | while read …; }
+        // <<EOF > /dev/null` iterated zero times). The function and
+        // compound stage executors rebind the clone's fd 1 for their
+        // non-final elements; this executor missed the rebind entirely.
+        // It is unconditional here (final stage included) because the
+        // sequential driver materializes EVERY builtin stage's output
+        // and applies the stage's own — and the pipeline's — output
+        // redirects to the captured stream itself: a final element
+        // keeping the ambient binding lost its output the same way when
+        // it carried its own redirect (`… | awk '…' > own.txt` inside a
+        // redirected group) or when the pipeline node carried the file
+        // redirect (the driver's end-of-pipeline route then rewrote the
+        // target from the empty capture). Rebind fd 1 to the default
+        // Stdout endpoint — it resolves to the active stage capture in
+        // write_fd_endpoint and in the external stdio plan — exactly the
+        // rebind the command-substitution child performs
+        // (command_substitution.rs, subst.c:7320). fd 2 stays inherited:
+        // a pipeline never pipes an element's stderr (execute_cmd.c:2620
+        // execute_pipeline).
+        subshell.fd_table.entries.insert(
+            1,
+            crate::executor::fd_table::FdEntry {
+                read: None,
+                write: Some(FdWriteEndpoint::Stdout),
+                closed: false,
+                dynamic: false,
+            },
+        );
         // A pipeline member runs in a subshell: caught signal traps reset to
         // the inherited disposition (execute_cmd.c subshell trap reset), so
         // only traps the member itself installs run at its exit.
@@ -804,6 +922,13 @@ impl Executor {
                 .shell_state
                 .env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+            // rubash#2106: the armed mirror IS the element's fd 0 — drop
+            // the inherited fd-0 entry so an ambient File binding cannot
+            // outrank the pipe payload in the command's stdin resolution
+            // (an emulated reader with an empty payload otherwise falls
+            // through to the ambient descriptor and reads the shell's own
+            // stdin; see execute_compound_pipeline_stage).
+            subshell.fd_table.entries.remove(&0);
         }
 
         subshell.stderr_capture = Some(Vec::new());

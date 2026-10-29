@@ -55,10 +55,13 @@ impl Executor {
             if current == "-t" {
                 has_t = true;
             }
-            // rubash#1902: the /dev/std* spellings are fd aliases too;
-            // /proc/<pid>/fd/N needs the registry's own-pid judgment. The
-            // /dev/fd and /proc/self/fd prefixes the pipe marks gated on
-            // are the same alias set the registry classifies.
+            // rubash#1902 + #2042 (union at the takeover merge): the
+            // /dev/std* spellings are fd aliases too; /proc/<pid>/fd/N
+            // needs the registry's own-pid judgment, which the second
+            // branch takes from fd_alias_target — the same registry
+            // question #2042 asks (its numeric-pid spelling included),
+            // so no fd-alias operand can slip past the mark refresh
+            // and read a previous test's stale marks.
             if current.starts_with("/dev/fd/")
                 || current.starts_with("/proc/self/fd/")
                 || current.starts_with("/dev/std")
@@ -444,14 +447,17 @@ impl Executor {
             // builtin. The `command`-builtin path (command_no_alias_late)
             // bypasses functions by definition and dispatches directly.
             Some(LateSlot::Uname) => {
-                if self.emulated_external_stands_down("uname") {
+                // The stand-down decision is the registry row's
+                // two-axis policy (ScriptYield/FailClosed, #2104),
+                // not a per-name check.
+                if self.registered_stand_down("uname") {
                     return self.execute_external(cmd);
                 }
                 self.exit_code = self.execute_identity_tool(cmd, "uname");
                 Ok(())
             }
             Some(LateSlot::Arch) => {
-                if self.emulated_external_stands_down("arch") {
+                if self.registered_stand_down("arch") {
                     return self.execute_external(cmd);
                 }
                 self.exit_code = self.execute_identity_tool(cmd, "arch");

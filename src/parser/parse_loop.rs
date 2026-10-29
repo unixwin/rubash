@@ -1587,10 +1587,33 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             return Some(tokens.len());
         }
 
-        state.current_cmd.insert_assignment(
-            "__RUBASH_PARSE_ERROR__".to_string(),
-            "unexpected token `do'".to_string(),
-        );
+        // GNU parse.y:867-877 (`WHILE compound_list DO compound_list
+        // DONE` / UNTIL twin): the condition list runs until `do` at a
+        // command position, so the syntax-error token is the first token
+        // that cannot continue it — a closer owned by another frame, or
+        // the `done` that arrived where `do` was expected (rubash#2087:
+        // `while true\ndone` blames `done`, never the missing `do`;
+        // `while true; fi; done` blames `fi`). A stream whose only
+        // `done`s sit inside nested constructs never left the condition
+        // — that is the EOF shape, not a near-token error.
+        let offender = loop_head_offender(tokens, i, opener);
+        let command = match offender {
+            Some(bad_index) => mismatched_closer_node(
+                tokens,
+                bad_index,
+                state.diagnostic_text.as_deref(),
+                state.source_line_offset,
+            ),
+            None => unclosed_keyword_eof_node(tokens, i, opener),
+        };
+        state.current_cmd = command;
+        state
+            .ast
+            .commands
+            .push(std::mem::take(&mut state.current_cmd));
+        if offender.is_none() {
+            return Some(tokens.len());
+        }
         let mut next_i = i + 1;
         while tokens.get(next_i).is_some() {
             let is_done = is_keyword(tokens, next_i, "done");
@@ -1599,10 +1622,6 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                 break;
             }
         }
-        state
-            .ast
-            .commands
-            .push(std::mem::take(&mut state.current_cmd));
         return Some(next_i);
     }
 
@@ -2675,6 +2694,42 @@ pub(super) fn first_mismatched_closer(region: &[Token], opener: &'static str) ->
         }
     }
     None
+}
+
+/// The syntax-error token of a failed `while`/`until` head (rubash#2087):
+/// the first token that cannot continue the condition compound_list —
+/// either a closer owned by another frame (first_mismatched_closer,
+/// seeded with the loop frame) or the first `done` at compound depth
+/// zero, which arrived where the grammar requires `do` (the walk mirrors
+/// find_loop_do's boundary-stack scan, so `done`s closing nested
+/// constructs in the condition are skipped). None ⇒ every `done` in the
+/// stream is nested and the input truly ended inside the condition.
+fn loop_head_offender(
+    tokens: &[Token],
+    opener_index: usize,
+    opener: &'static str,
+) -> Option<usize> {
+    let mismatched = first_mismatched_closer(&tokens[opener_index + 1..], opener)
+        .map(|rel| opener_index + 1 + rel);
+    let mut stack = Vec::new();
+    let mut depth_zero_done = None;
+    let mut index = opener_index + 1;
+    while index < tokens.len() {
+        if stack.is_empty()
+            && command_boundary_keyword_allowed(tokens, index)
+            && is_keyword(tokens, index, "done")
+        {
+            depth_zero_done = Some(index);
+            break;
+        }
+        update_compound_boundary_stack(tokens, index, &mut stack);
+        index += 1;
+    }
+    match (mismatched, depth_zero_done) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, done) => done,
+    }
 }
 
 /// GNU parse.y if-compound grammar over a *failed* `if` parse: tracks the

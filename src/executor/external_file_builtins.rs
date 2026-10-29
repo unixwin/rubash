@@ -737,10 +737,20 @@ impl Executor {
                 }
                 times
             };
-            let stamped = File::options()
-                .write(true)
-                .open(&target)
-                .and_then(|file| file.set_times(make_times()));
+            // GNU touch stamps an EXISTING operand through
+            // utimensat (touch.c do_touch) — it never opens the
+            // operand, so directories (EISDIR on a write open,
+            // rubash#2105: nvm's `touch -t ... "$lock"` aging a lock
+            // directory), fifos (any open blocks), and read-only
+            // files all take the stamp. stamp_existing_operand is
+            // that shape; a missing operand keeps the create flow
+            // below, classified by its NotFound error.
+            let stamped = stamp_existing_operand(
+                &target,
+                stamp_accessed.then_some(stamp_atime),
+                stamp_modified.then_some(stamp_mtime),
+                &make_times,
+            );
             let outcome = match stamped {
                 Ok(()) => Ok(()),
                 // -c on a missing operand: GNU touch skips it silently
@@ -766,6 +776,91 @@ impl Executor {
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         self.exit_code = if failed { 1 } else { 0 };
         Ok(true)
+    }
+}
+
+/// Stamp an existing `touch` operand (rubash#2105). Existence is
+/// classified by stat (following symlinks, as GNU's utimensat with
+/// flags 0 does): a missing operand returns the NotFound error the
+/// caller's create / -c flow keys on. On unix the stamp is the
+/// utimensat syscall itself — no open, so directories, fifos, and
+/// read-only files stamp exactly as under GNU. On other platforms
+/// the stamp goes through a handle: write-open first, then the
+/// read-open shape `cp_apply_preserved` falls back to (a directory
+/// takes SetFileTime on a read/backup-semantics handle, the same
+/// outcome WinuxCmd's touch reaches via FILE_WRITE_ATTRIBUTES).
+fn stamp_existing_operand(
+    target: &std::path::Path,
+    atime: Option<SystemTime>,
+    mtime: Option<SystemTime>,
+    make_times: &dyn Fn() -> std::fs::FileTimes,
+) -> std::io::Result<()> {
+    // Each platform arm consumes only one stamp representation.
+    #[cfg(unix)]
+    let _ = make_times;
+    #[cfg(not(unix))]
+    let _ = (atime, mtime);
+    std::fs::metadata(target)?;
+    #[cfg(unix)]
+    {
+        touch_utimensat(target, atime, mtime)
+    }
+    #[cfg(not(unix))]
+    {
+        File::options()
+            .write(true)
+            .open(target)
+            .and_then(|file| file.set_times(make_times()))
+            .or_else(|_| File::open(target).and_then(|file| file.set_times(make_times())))
+    }
+}
+
+/// utimensat(AT_FDCWD, path, times, 0) with UTIME_OMIT for the
+/// side `-a`/`-m` did not select. SystemTime values before the
+/// epoch convert to the matching negative timespec.
+#[cfg(unix)]
+fn touch_utimensat(
+    target: &std::path::Path,
+    atime: Option<SystemTime>,
+    mtime: Option<SystemTime>,
+) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    fn to_timespec(value: Option<SystemTime>) -> libc::timespec {
+        let Some(value) = value else {
+            return libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_OMIT as libc::c_long,
+            };
+        };
+        match value.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(elapsed) => libc::timespec {
+                tv_sec: elapsed.as_secs() as libc::time_t,
+                tv_nsec: elapsed.subsec_nanos() as libc::c_long,
+            },
+            Err(before) => {
+                let elapsed = before.duration();
+                if elapsed.subsec_nanos() == 0 {
+                    libc::timespec {
+                        tv_sec: -(elapsed.as_secs() as libc::time_t),
+                        tv_nsec: 0,
+                    }
+                } else {
+                    libc::timespec {
+                        tv_sec: -(elapsed.as_secs() as libc::time_t) - 1,
+                        tv_nsec: 1_000_000_000 - elapsed.subsec_nanos() as libc::c_long,
+                    }
+                }
+            }
+        }
+    }
+    let times = [to_timespec(atime), to_timespec(mtime)];
+    let c_path = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
 
@@ -1972,8 +2067,8 @@ impl Executor {
                     self.exit_code = 0;
                     return Ok(true);
                 }
-                let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-                file.write_all(&output)?;
+                let file = self.create_redirect_output(&target, redirect.clobber)?;
+                crate::fd::write_file_all(&file, &output)?;
                 self.exit_code = 0;
                 return Ok(true);
             }
@@ -2083,14 +2178,13 @@ impl Executor {
                         && diagnostics.is_empty()
                     {
                         if let Some(file) = self.dev_fd_operand_live_file(cmd, fd) {
-                            use std::io::Write;
                             if procsub_sink.is_none() && !procsub_streamed {
                                 procsub_sink = self.open_cat_output_sink(cmd)?;
                             }
                             if !output.is_empty() {
                                 match procsub_sink.as_mut() {
                                     Some(sink_file) => {
-                                        sink_file.write_all(&filter(&output))?;
+                                        crate::fd::write_file_all(sink_file, &filter(&output))?;
                                     }
                                     None => {
                                         self.write_cat_output(cmd, &filter(&output))?;
@@ -2251,9 +2345,8 @@ impl Executor {
                     // through the sink; append the (normally empty)
                     // remainder there — write_cat_output would
                     // re-create and truncate the target.
-                    use std::io::Write;
                     match procsub_sink.as_mut() {
-                        Some(sink_file) => sink_file.write_all(&output)?,
+                        Some(sink_file) => crate::fd::write_file_all(sink_file, &output)?,
                         None => self.write_cat_output(cmd, &output)?,
                     }
                 } else {
@@ -2419,7 +2512,7 @@ impl Executor {
     /// GNU cat.c's byte-copy loop. Identity options only (formatting needs
     /// whole-stream state).
     fn stream_cat_stdin_operand(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        use std::io::{Read, Write};
+        use std::io::Read;
         // The output target is opened ONCE for the whole copy: `write_cat_output`
         // recreates (truncates) it per call, so a per-8 KiB-chunk caller kept
         // only the last chunk (niubash#198).
@@ -2432,7 +2525,7 @@ impl Executor {
                 break;
             }
             match sink.as_mut() {
-                Some(file) => file.write_all(&buffer[..count])?,
+                Some(file) => crate::fd::write_file_all(file, &buffer[..count])?,
                 None => self.write_cat_output(cmd, &buffer[..count])?,
             }
         }
@@ -2450,14 +2543,13 @@ impl Executor {
         file: &FileFd,
         sink: &mut Option<File>,
     ) -> Result<(), ExecuteError> {
-        use std::io::Write;
         loop {
             let chunk = crate::fd::read_some(file.handle, 8192).map_err(ExecuteError::IoError)?;
             if chunk.is_empty() {
                 break;
             }
             match sink.as_mut() {
-                Some(sink_file) => sink_file.write_all(&chunk)?,
+                Some(sink_file) => crate::fd::write_file_all(sink_file, &chunk)?,
                 None => self.write_cat_output(cmd, &chunk)?,
             }
         }
@@ -2491,7 +2583,7 @@ impl Executor {
                 break;
             }
             match sink.as_mut() {
-                Some(file) => file.write_all(&buffer[..count])?,
+                Some(file) => crate::fd::write_file_all(file, &buffer[..count])?,
                 None => self.write_cat_output(cmd, &buffer[..count])?,
             }
         }

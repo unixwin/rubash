@@ -677,14 +677,17 @@ impl Executor {
         }
 
         if self.handle_external_shortcuts(cmd)? {
+            self.note_emulated_foreground_wait();
             return Ok(());
         }
 
         if self.handle_host_external_command(cmd)? {
+            self.note_emulated_foreground_wait();
             return Ok(());
         }
 
         if self.handle_external_file_builtins(cmd)? {
+            self.note_emulated_foreground_wait();
             return Ok(());
         }
 
@@ -1773,6 +1776,43 @@ impl Executor {
                 for dup in parent_side_dups {
                     crate::fd::close_handle(dup);
                 }
+                // rubash#2094: when the stdio plan left a capture pipe to
+                // collect, start draining it NOW — before the stdin feed
+                // below and before the child wait. The feed is a
+                // synchronous write_all of the whole payload; once the
+                // payload and the child's output each exceed the pipe
+                // buffer, the child stops reading (its output pipe is
+                // full), the feed blocks mid-payload, and a drain that
+                // only starts after the feed never runs — a three-way
+                // deadlock (`out=$(dl | command sed …)` with ~128 KiB in
+                // flight; measured hang threshold between 135,000 and
+                // 140,000 bytes of payload). GNU forks, so its drain is
+                // concurrent by construction: subst.c:7143
+                // command_substitute dups the capture pipe into the
+                // child, and the parent reads it (subst.c:7437
+                // read_comsub) BEFORE waiting (subst.c:7441 wait_for).
+                // This is the same discipline niubash#158 applied to the
+                // concurrent pipeline members (drain the last member
+                // before waiting on the producers). A non-capture outcome
+                // is put back untouched for the handling below.
+                let capture_drain = match self.external_stdio_outcome.take() {
+                    Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(
+                        reader,
+                        capture_generation,
+                    )) => Some((
+                        std::thread::spawn(move || {
+                            use std::io::Read;
+                            let mut reader = reader;
+                            let mut merged = Vec::new();
+                            reader.read_to_end(&mut merged).map(|_| merged)
+                        }),
+                        capture_generation,
+                    )),
+                    other => {
+                        self.external_stdio_outcome = other;
+                        None
+                    }
+                };
                 // Only materialize the virtual stdin text when the child
                 // actually owns a pipe — `<&N` on a real file handle uses
                 // Stdio::from(dup) (no child.stdin to take), and draining
@@ -1795,7 +1835,41 @@ impl Executor {
                     }
                 }
 
-                if let Some(outcome) = self.external_stdio_outcome.take() {
+                if let Some((drain, capture_generation)) = capture_drain {
+                    // rubash#2094: the capture drain has been running on
+                    // its thread since before the stdin feed; the child
+                    // wait, the signal-death note, the SIGCHLD trap and
+                    // the generation-addressed routing keep exactly the
+                    // order the serial drain produced (drain -> wait ->
+                    // note -> trap -> route is observationally wait ->
+                    // note -> trap -> route once the drain overlaps the
+                    // feed). EOF follows the child's exit — the parent's
+                    // own write-end copies dropped with the Command — so
+                    // the join only collects the drained bytes.
+                    let foreground_pid = child.id();
+                    let status = self.wait_external_child(&mut child)?;
+                    if let Some(signal) = crate::executor::wait_status::exit_status_signal(&status)
+                    {
+                        self.note_child_signal_death(
+                            foreground_pid,
+                            signal,
+                            self.signal_notice_command_text(cmd),
+                            true,
+                        );
+                    }
+                    self.run_sigchld_trap_for_reaped_child()?;
+                    let merged = drain.join().map_err(|_| {
+                        ExecuteError::IoError(std::io::Error::other(
+                            "stdout capture drain thread panicked",
+                        ))
+                    })??;
+                    super::shell_options::write_stdout_capture_at_generation(
+                        &merged,
+                        capture_generation,
+                    )
+                    .map_err(ExecuteError::IoError)?;
+                    self.exit_code = crate::executor::wait_status::process_exit_status(&status);
+                } else if let Some(outcome) = self.external_stdio_outcome.take() {
                     // niubash#144: the stdio plan already gave the child real
                     // handles; only the shared capture pipe needs collecting.
                     // Drain it to EOF first — the merged bytes stream in true
@@ -1808,6 +1882,11 @@ impl Executor {
                         capture_generation,
                     ) = outcome
                     {
+                        // Fallback for an outcome re-armed after the
+                        // drain start above (no producer does so today —
+                        // CapturePipe outcomes are claimed by capture_drain
+                        // before the feed). Kept so this branch stays
+                        // total over the outcome enum.
                         use std::io::Read;
                         let mut merged = Vec::new();
                         reader.read_to_end(&mut merged)?;

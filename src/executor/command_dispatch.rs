@@ -418,6 +418,29 @@ impl Executor {
         // channel reads it too. (RC audit phase-1 finding ④ / errors10:
         // before this, failures already wired into the channel — the
         // `set' family — died inside conditions where GNU continues.)
+        //
+        // rubash#2082: GNU's single do_redirections verdict reaches
+        // rubash through two channels. The apply layer's failures
+        // surface as IoError and are converted in execute_command's
+        // arm; the reject gate's RedirectRejection::Command — the
+        // dup / input-open / ambiguous class, redir.c:255-260's first
+        // failing entry — is adjudicated here instead: for a special
+        // builtin in a posixly_correct non-interactive shell it is the
+        // same EX_REDIRFAIL conversion (execute_cmd.c:4865-4875), an
+        // exit at EXECUTION_FAILURE that precedes the outcome chain
+        // because GNU's jump is not gated on ignore_return. The gate
+        // already rendered the diagnostic and set status 1; the
+        // FatalNounset rejection keeps its own adjudication above and
+        // is not this class.
+        if redirect_rejected
+            && matches!(
+                redirect_rejection,
+                Some(super::redirection::RedirectRejection::Command)
+            )
+            && self.posix_special_redirect_failure_exits(cmd)
+        {
+            return Err(ExecuteError::ExitCode(1));
+        }
         let outcome = if result.is_ok()
             && self.special_builtin_failed.get()
             && self.command_builtin_depth == 0

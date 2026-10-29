@@ -57,8 +57,8 @@ impl Executor {
             if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
                 return result;
             }
-            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-            file.write_all(output)?;
+            let file = self.create_redirect_output(&target, redirect.clobber)?;
+            crate::fd::write_file_all(&file, output)?;
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
             if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
@@ -67,8 +67,8 @@ impl Executor {
             // Classified append open (rubash#1964): the raw mapped
             // open this replaces could not reach /dev/tcp targets
             // (their mapped name is not a file).
-            let mut file = self.open_append_target(&target)?;
-            file.write_all(output)?;
+            let file = self.open_append_target(&target)?;
+            crate::fd::write_file_all(&file, output)?;
         } else {
             self.write_default_stdout(output)?;
         }

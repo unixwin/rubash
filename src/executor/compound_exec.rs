@@ -3460,6 +3460,15 @@ impl Executor {
             self.shell_state.loop_depth += 1;
             let result = self.execute_ast_inner(body);
             self.shell_state.loop_depth -= 1;
+            // GNU execute_cmd.c:3838 REAP() (execute_while_or_until):
+            // dead jobs — and, via cleanup_dead_jobs -> coproc_reap,
+            // dead coprocs (rubash#2053) — are silently reaped after
+            // every while/until body in a non-interactive or
+            // non-job-control shell. The alias-reparse path had this
+            // call (alias_loops.rs); the AST path missed it, so a
+            // coproc that died during a while loop kept its variables
+            // for the whole loop.
+            self.reap_dead_jobs_after_loop_body();
             self.run_pending_signal_traps()?;
             match result {
                 Ok(()) => {
@@ -4500,6 +4509,10 @@ impl Executor {
             // stderr writes are absorbed (the ENOSPC profile cannot
             // cross the spawn boundary; the in-shell faces carry it).
             Some(FdWriteEndpoint::FullDevice) => CoprocStderrPlan::Direct(Stdio::null()),
+            // rubash#2042: fd 2 bound to a 0644-class synthetic /proc
+            // content entry — same boundary: the EINVAL write profile
+            // cannot cross into the child's handle; writes absorb.
+            Some(FdWriteEndpoint::ProcContentWrite) => CoprocStderrPlan::Direct(Stdio::null()),
         }
     }
 
@@ -4832,6 +4845,10 @@ impl Executor {
             ),
             // rubash#1898: mirrors the plan's /dev/full arm.
             Some(FdWriteEndpoint::FullDevice) => CoprocFdSpec::Null,
+            // rubash#2042: mirrors the plan's synthetic-/proc arm —
+            // the child's stderr writes absorb (Null), exactly like
+            // the /dev/full binding's ENOSPC ceiling.
+            Some(FdWriteEndpoint::ProcContentWrite) => CoprocFdSpec::Null,
         })
     }
 
