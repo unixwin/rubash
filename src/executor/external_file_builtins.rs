@@ -2500,6 +2500,17 @@ impl Executor {
     }
 
     fn external_sed(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
+        // rubash#1903 residual census (S6, 2026-10-29): this arm can
+        // never read a file operand — sed_script_args declines any
+        // invocation carrying one — so there is no emulated-reader
+        // face that could mistake a WinuxCmd fifo marker for a plain
+        // file; operand shapes fall through to the spawned sed,
+        // whose own side bridges the rendezvous. The pipeline sed
+        // arm shares the same admission, and the only grep arm
+        // (pipeline_exec::inline_grep_args) declines file operands
+        // identically. cat, the one emulated reader that does take
+        // operands, is bridged above (path_is_winux_fifo).
+        //
         // cmd.words are the already-expanded argv (the simple-command
         // executor expanded each word once, execute_cmd.c
         // execute_disk_command -> expand_words). Re-running expand_word here

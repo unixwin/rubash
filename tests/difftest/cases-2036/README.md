@@ -40,9 +40,11 @@ transcribe expectations from the engine's current output for
 - `status`: `gnu` — `expect` is the GNU measurement and the engine
   must match it. `registered` — `expect` pins the engine's current
   measured behavior for a divergence that is adjudicated-keep (a ruled
-  stand_down Replace cell) or not yet ruled (#2046 B2/B3/C1/C2); the
-  GNU measurement is recorded in the case's `gnu` field. A registered
-  case may only change with the ruling that owns it.
+  stand_down Replace cell); the GNU measurement is recorded in the
+  case's `gnu` field. A registered case may only change with the
+  ruling that owns it. (The four #2046 cells registered in S5 —
+  env-u-path, stty-badopt, uname-help, arch-extra — were ruled
+  align-GNU on 2026-10-29 and flipped to `gnu` in S6.)
 - Host-tool rule: for shapes the engine *declines* to the real body
   (e.g. `cat --version`, no-operand `chmod`/`rmdir`), the output text
   belongs to the host toolset, which is not part of the engine's

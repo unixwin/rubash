@@ -10,9 +10,11 @@
 //!   be indistinguishable from GNU on that shape.
 //! - `status: "registered"` cases pin the engine's CURRENT measured
 //!   behavior where a divergence is adjudicated-keep (a ruled
-//!   stand_down Replace cell) or not yet ruled (#2046 B2/B3/C1/C2);
-//!   the GNU measurement is stored in the case's `gnu` field so the
-//!   future ruling starts from data, not archaeology.
+//!   stand_down Replace cell); the GNU measurement is stored in the
+//!   case's `gnu` field so a future ruling starts from data, not
+//!   archaeology. (The four #2046 cells S5 registered unruled were
+//!   adjudicated align-GNU on 2026-10-29 and flipped to hard `gnu`
+//!   expectations in S6.)
 //!
 //! The Windows three-way run of this same case set (engine x applet x
 //! GNU on a real Windows host) is the audit's win-diff battery

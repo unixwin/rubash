@@ -137,7 +137,7 @@ stty
 | `basename` | `executor/printf_path_builtins.rs` | `execute_external`（winuxcmd `basename`） | 同上 |
 | `uname` | `builtins/uname.rs`（身份人设字段取自 `executor/identity.rs`） | 无（内置完整选项解析） | rubash#154：身份不外包给 PATH |
 | `arch` | `builtins/uname.rs`（`uname -m` 语义） | 无 | 同上 |
-| `stty` | `builtins/stty.rs`（`execute_console_mode_tool`） | `execute_external`（stand-down 时） | 控制台模式工具，与 uname/arch 同族（#154） |
+| `stty` | `builtins/stty.rs`（`execute_console_mode_tool`） | `execute_external`（stand-down 时） | 控制台模式工具，与 uname/arch 同族（#154）；stand_down=Replace 为已裁保持——用户 2026-10-29 确认 stty 暂用内建、不翻 Yield，评估格就此关闭，有实测问题再重评 |
 
 `env` 是唯一的混合形态：它在白名单内（属第二节真 builtin，`type env` 报告为
 builtin），但实现是进程内执行 coreutils 语义、**没有外部回退路径**。它不进
@@ -242,6 +242,30 @@ winuxcmd（176 个外部命令）与 rubash 内置/保留字重叠的命令共 1
 `/usr/bin/env` 等显式形式仍走 winuxcmd 外部版本。2026-09-08 已对重叠命令的
 行为（选项、转义、格式化、信号、jobspec、TIMEFORMAT）完成逐项比对，结论：
 对齐。详细判定见工作区审计报告。
+
+### 4.3 斜杠形逃逸契约（echo/printf/pwd 的 RedirectToBuiltin 组）
+
+审计 §3.2-e 遗留格，S6 实测 + 裁定（2026-10-29，Linux 同机、GNU bash
+5.3.20 + coreutils 9.4 对照，探针账见 S6 报告）：
+
+- **认领面只有六个精确拼写**：`/bin/echo`、`/usr/bin/echo`、`/bin/printf`、
+  `/usr/bin/printf`、`/bin/pwd`、`/usr/bin/pwd`。任何其他斜杠拼写（相对
+  路径、其他目录、伪造路径）一律按字面 exec 该文件，与 GNU 无分歧
+  （探针：自备脚本 `/tmp/.../echo` 双边都真跑）。
+- **被认领的拼写无条件以内建语义作答**（不查字面文件是否存在）。在字面
+  文件真实存在的宿主上，与该文件的可观察分歧为：① `--help`/`--version`
+  答复（内建的报错/字面输出 vs 文件的整页帮助/版本横幅）；② `/bin/echo`
+  跟随 shell 的 echo 选项（`shopt -s xpg_echo` 时解释转义，文件版不认
+  shell 选项）；③ `/bin/pwd` 无选项时答逻辑路径，文件版 pwd 对 `$PWD`
+  的采纳更严（符号链尾形答物理路径）。
+- **保留理由（裁定保持）**：Windows 宿主上这些拼写没有字面文件，改道层
+  是 `/bin/echo` 形脚本能跑起来的前提（与 find_user_command 对
+  `/bin/X` 的 basename 命名空间处理同层）。「文件存在则文件赢」的存在性
+  门会改动 Windows 侧解析语义、无法从 Linux 侧验证，作立案草稿交主会话
+  裁定，不在本批动。
+- **门控不对称（如实登记）**：printf/pwd 两形走 external_file_builtins
+  宿主旗（关则落真实 spawn）；echo 形走 external_inner 捷径面，不受该旗
+  管辖。
 
 **命令替换内的 builtin 遮蔽（防回归不变量）**：`$(builtin …)` 的外部命令
 解析在 PATH 查找**之前**先按名字判 `is_shell_builtin_name`，并尊重
