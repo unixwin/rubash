@@ -843,6 +843,13 @@ fn touch_utimensat(
     mtime: Option<SystemTime>,
 ) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
+    // `libc::time_t` is deprecated on musl/ohos targets and the niubash
+    // cross-target checks compile this crate with `-D warnings`
+    // (rubash#2146). The casts below target the `tv_sec` field's own
+    // type, so allowing the alias locally changes no conversion on any
+    // target; see the twins in printf/zone.rs and
+    // `local_utc_offset_seconds` below.
+    #[allow(deprecated)]
     fn to_timespec(value: Option<SystemTime>) -> libc::timespec {
         let Some(value) = value else {
             return libc::timespec {
