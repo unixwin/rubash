@@ -2032,9 +2032,16 @@ impl Executor {
                 }
             }
             OutputTarget::Path(path) => {
-                let mut file = open_redirect_append(
-                    &self.session_path(shell_path_to_windows(path, &self.shell_state.env_vars)),
-                )?;
+                // rubash#1967: net targets flush through netopen (the
+                // one open for the redirect; see the write_to_fd Path
+                // arm) — the filesystem append-open cannot connect.
+                let mut file = if crate::special_paths::is_net_redirect_target(path) {
+                    self.open_net_redirect(path)?
+                } else {
+                    open_redirect_append(
+                        &self.session_path(shell_path_to_windows(path, &self.shell_state.env_vars)),
+                    )?
+                };
                 // GNU builtins/common.c:320-334 sh_chkwrite: a builtin's
                 // failed flush is reported by the BUILTIN as
                 // `<name>: write error: <strerror>` (builtin_error via
@@ -2177,6 +2184,15 @@ impl OutputFdState {
             // pairing open lives here, at the flush site; a non-empty
             // stream reaches it through the Path arm below.
             if let Some(OutputTarget::Path(path)) = self.fd_target(fd).cloned() {
+                // rubash#1967: net twin of the FIFO pairing below —
+                // GNU's open happens even when nothing is written
+                // (`: > /dev/tcp/...` is exactly this shape through
+                // the no-output pass; an empty buffered stream owes
+                // the peer its one connection the same way).
+                if crate::special_paths::is_net_redirect_target(&path) {
+                    let _pairing = executor.open_net_redirect(&path)?;
+                    return Ok(());
+                }
                 let resolved = executor
                     .session_path(shell_path_to_windows(&path, &executor.shell_state.env_vars));
                 if crate::executor::shell_options::redirect_path_is_fifo(&resolved) {
@@ -2278,15 +2294,26 @@ impl OutputFdState {
                 Ok(())
             }
             OutputTarget::Path(path) => {
-                // G-02: the recorded target is the raw redirect word —
-                // anchor it at the session cwd, never the process cwd
-                // (this append-open is where buffered builtin output
-                // actually lands; the setup open in
-                // open_command_output_target only creates/truncates).
-                let mut file = open_redirect_append(
-                    &executor
-                        .session_path(shell_path_to_windows(&path, &executor.shell_state.env_vars)),
-                )?;
+                // rubash#1967: a net target's flush open is the ONE
+                // open (the setup/ordered walks validate by
+                // resolution) and must go through netopen — the
+                // target's mapped pseudo-path is not a file, and the
+                // filesystem append-open fails ENOENT without ever
+                // connecting.
+                let mut file = if crate::special_paths::is_net_redirect_target(path) {
+                    executor.open_net_redirect(path)?
+                } else {
+                    // G-02: the recorded target is the raw redirect
+                    // word — anchor it at the session cwd, never the
+                    // process cwd (this append-open is where buffered
+                    // builtin output actually lands; the setup open in
+                    // open_command_output_target only creates/
+                    // truncates).
+                    open_redirect_append(&executor.session_path(shell_path_to_windows(
+                        &path,
+                        &executor.shell_state.env_vars,
+                    )))?
+                };
                 file.write_all(output)?;
                 Ok(())
             }
