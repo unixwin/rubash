@@ -209,13 +209,19 @@ impl Executor {
             return Err(invalid());
         }
         if udp {
-            let bind_addr = if host.contains(':') {
+            // The bind family follows the RESOLVED address, not the
+            // host spelling (rubash#1897): _netopen6 sockets and
+            // connects the getaddrinfo result itself, so a v6-only
+            // host name spelled without ':' still binds [::]:0 —
+            // binding 0.0.0.0 for it made the connect target's family
+            // unreachable.
+            let bind_addr = if addrs[0].is_ipv6() {
                 "[::]:0"
             } else {
                 "0.0.0.0:0"
             };
             let socket = std::net::UdpSocket::bind(bind_addr)?;
-            socket.connect((host, port))?;
+            socket.connect(addrs[0])?;
             Ok(NetStream::Udp(socket))
         } else {
             // Connect over the resolved set (TcpStream tries each

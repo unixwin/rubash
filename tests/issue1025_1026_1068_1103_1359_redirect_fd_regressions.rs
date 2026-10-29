@@ -198,6 +198,43 @@ fn issue_1359_autofd_write_redirect_keeps_stdout_intact_and_ordered() {
 }
 
 #[test]
+fn issue_1897_udp_bind_family_follows_the_resolved_address() {
+    use std::net::ToSocketAddrs as _;
+    use std::time::Duration;
+    // Environment gate (per the issue's own seed): a v6-only host
+    // name and an IPv6 loopback must both exist here, otherwise this
+    // face cannot be exercised and the pin stands down instead of
+    // passing on v4 evidence. `ip6-localhost` is the v6-only name in
+    // the stock hosts file.
+    let v6_only = ("ip6-localhost", 0u16)
+        .to_socket_addrs()
+        .map_or(false, |iter| {
+            let addrs: Vec<_> = iter.collect();
+            !addrs.is_empty() && addrs.iter().all(|addr| addr.is_ipv6())
+        });
+    let listener = std::net::UdpSocket::bind("[::1]:0");
+    let (Ok(listener), true) = (listener, v6_only) else {
+        return;
+    };
+    let port = listener.local_addr().expect("local addr").port();
+    listener
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    // GNU _netopen6 binds/connects the getaddrinfo result itself, so
+    // the datagram leaves from ::1 even though the host spelling
+    // contains no ':' (oracle-verified against GNU bash 5.3.20).
+    let (stdout, stderr, code) = run_c(&format!(
+        "echo hello > /dev/udp/ip6-localhost/{port}; echo rc=$?"
+    ));
+    assert_eq!(stdout, "rc=0\n", "stderr: {stderr}");
+    assert_eq!(code, Some(0));
+    let mut buf = [0u8; 64];
+    let (n, from) = listener.recv_from(&mut buf).expect("datagram arrives");
+    assert_eq!(&buf[..n], b"hello\n");
+    assert!(from.is_ipv6(), "datagram source: {from}");
+}
+
+#[test]
 fn issue_1894_unresolvable_host_reports_name_line_then_invalid_argument() {
     // GNU _netopen6 (lib/sh/netopen.c:205) reports a getaddrinfo
     // failure through internal_error BEFORE the redirection_error
