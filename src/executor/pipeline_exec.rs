@@ -501,7 +501,32 @@ pub(in crate::executor) fn wait_pipeline_stage_output(
     #[cfg(unix)]
     {
         let _ = executor;
-        child.wait_with_output().map_err(ExecuteError::IoError)
+        // `wait_with_output` consumes the child, but this signature only
+        // borrows it, so spell out that call's own recipe instead: take
+        // both pipes, drain them on reader threads, wait, then join. The
+        // observable behavior is unchanged — the plain blocking
+        // drain-and-wait, with no mailbox polling on this face.
+        let stdout_drain = child
+            .stdout
+            .take()
+            .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
+        let stderr_drain = child
+            .stderr
+            .take()
+            .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
+        let status = match child.wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = join_pipe_drain(stdout_drain);
+                let _ = join_pipe_drain(stderr_drain);
+                return Err(ExecuteError::IoError(error));
+            }
+        };
+        Ok(std::process::Output {
+            status,
+            stdout: join_pipe_drain(stdout_drain)?,
+            stderr: join_pipe_drain(stderr_drain)?,
+        })
     }
 }
 
@@ -515,7 +540,7 @@ pub(in crate::executor) fn wait_pipeline_stage_output(
 pub(in crate::executor) fn wait_pipeline_stage_merged_output(
     executor: &mut Executor,
     child: &mut std::process::Child,
-    reader: impl std::io::Read + Send + 'static,
+    mut reader: impl std::io::Read + Send + 'static,
 ) -> Result<(std::process::ExitStatus, Vec<u8>), ExecuteError> {
     #[cfg(not(unix))]
     {
@@ -532,7 +557,6 @@ pub(in crate::executor) fn wait_pipeline_stage_merged_output(
     #[cfg(unix)]
     {
         let _ = executor;
-        use std::io::Read;
         let mut merged = Vec::new();
         reader
             .read_to_end(&mut merged)
