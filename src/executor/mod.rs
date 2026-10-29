@@ -1449,6 +1449,19 @@ pub struct Executor {
     /// execute_time_ast_command entry; taken by the time branch after
     /// its inner dispatch completes, so a stale mark is never consumed.
     pub(crate) posix_special_status_converted: Cell<bool>,
+    /// rubash#2125: set by execute_exec when the `{var}` fd_var apply
+    /// (apply_dynamic_fd_var_redirects) fails for an operand-bearing
+    /// `exec`. GNU reaches that failure inside do_redirections, BEFORE
+    /// exec_builtin's search/execve (exec.def:151+), so it is an
+    /// ordinary redirection failure — status 1, shell continues —
+    /// never exec.def's failed_exec exit, which covers only the
+    /// search/execve failure. execute_exec_command consumes the mark
+    /// to complete the command at status 1 WITHOUT routing through
+    /// finish_exec_replacement. In POSIX mode the same failure takes
+    /// the EX_REDIRFAIL jump instead (execute_cmd.c:4865-4875) and the
+    /// mark is never set. One-shot: set and consumed within a single
+    /// execute_exec_command call.
+    pub(crate) exec_do_redirections_failed: Cell<bool>,
     /// Depth of enclosing execute_time_ast_command inner dispatches.
     /// While > 0, the dispatch-level errexit conversion sites convert
     /// WITHOUT firing the ERR trap: the timed command completes through

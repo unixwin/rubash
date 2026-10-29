@@ -464,6 +464,20 @@ impl Executor {
         if cmd.words.first().map(String::as_str) != Some("exec")
             && self.apply_dynamic_fd_var_redirects(&cmd, true)?
         {
+            // rubash#2125: the applier rendered the diagnostic and set
+            // status 1, but the failure never becomes an IoError at the
+            // #2082 conversion arm below — apply_dynamic_fd_var_redirects
+            // swallows it into its bool. GNU reaches the same failure
+            // through redir_varassign inside do_redirections, whose
+            // EX_REDIRFAIL return (execute_cmd.c:5613) takes the
+            // execute_cmd.c:4865-4875 jump for a special builtin in a
+            // posixly_correct non-interactive shell: convert here, at
+            // the applier's call site, under the #2082 gate. The jump
+            // is an Err, so tested contexts do not contain it and the
+            // ERR trap never runs — exactly the plain-redirect channel.
+            if self.posix_special_redirect_failure_exits(&cmd) {
+                return Err(ExecuteError::ExitCode(1));
+            }
             return Ok(());
         }
 
