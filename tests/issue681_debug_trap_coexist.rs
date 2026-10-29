@@ -165,7 +165,7 @@ fn string_builtin_debug_trap_still_keeps_breakpoints() {
     let (status, transcript) = run_cli(&program, "break 3\ncontinue\ncontinue\n");
     assert_eq!(status, 0, "{transcript}");
     assert!(
-        transcript.contains("Stopped (breakpoint 1) at <PROG>:3: echo one"),
+        transcript.contains("Stopped (breakpoint 1) at <PROG>:3: echo two"),
         "the line-3 breakpoint must stop at its own seam:\n{transcript}"
     );
     std::fs::remove_dir_all(&dir).ok();
