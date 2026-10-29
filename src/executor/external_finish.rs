@@ -675,8 +675,10 @@ impl Executor {
             None
         };
         let saved_process_env: Option<HashMap<String, String>> = if fresh_shell {
-            let saved: HashMap<String, String> = env::vars().collect();
-            for (name, _) in env::vars() {
+            let saved: HashMap<String, String> = crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect();
+            for (name, _) in crate::executor::env_helpers::process_env_pairs() {
                 env::remove_var(&name);
             }
             for (name, value) in self.shell_state.env_vars.values_map() {
@@ -736,7 +738,7 @@ impl Executor {
         }
 
         if let Some(saved) = saved_process_env {
-            for (name, _) in env::vars() {
+            for (name, _) in crate::executor::env_helpers::process_env_pairs() {
                 env::remove_var(&name);
             }
             for (name, value) in saved {

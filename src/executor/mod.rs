@@ -189,7 +189,7 @@ mod builtin_names;
 mod command_registry;
 mod command_subst_helpers;
 mod command_text;
-mod env_helpers;
+pub(crate) mod env_helpers;
 mod execution_misc;
 mod function_env;
 pub(crate) mod local_helpers;

@@ -1823,7 +1823,9 @@ impl Executor {
             // through the bare-$NAME std::env::var fallback in
             // embedded_parameters.rs).
             process_env_snapshot: crate::executor::local_helpers::with_process_state_lock(|| {
-                std::env::vars().collect()
+                crate::executor::env_helpers::process_env_pairs()
+                    .into_iter()
+                    .collect()
             }),
             // G-03: a fork copy starts a fresh journal. (When the body runs
             // under a parent's execute_ast the journal stack attributes its

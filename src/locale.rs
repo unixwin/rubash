@@ -910,7 +910,10 @@ pub fn init_locale() {
     #[cfg(unix)]
     {
         let _ = attempt_setlocale(libc::LC_ALL, "");
-        let env: std::collections::HashMap<String, String> = std::env::vars().collect();
+        let env: std::collections::HashMap<String, String> =
+            crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect();
         if let Some(warning) = locale_assignment_warning("LC_ALL", &env) {
             let shell_name = std::env::args()
                 .next()
