@@ -4,7 +4,7 @@
 // - findcmd.c
 // - findcmd.h
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 #[cfg(windows)]
@@ -41,25 +41,15 @@ pub(crate) const COMPATIBLE_SHELL_PATH_ENV: &str = "__RUBASH_COMPATIBLE_SHELL_PA
 /// every Session the isolated single-fingerprint cache rubash#159 designed;
 /// maps without the scope token (hand-built test maps, composed child env
 /// lookups) share the "" fallback slice with exactly the old behavior.
+///
+/// A slice holds ONLY the pure resolution cache below (fingerprint-guarded
+/// PATH-scan evidence). The hash-table mirror is NOT part of the slice:
+/// it is user-visible state, not a cache, so it lives in its own map on
+/// CommandLookupStores where the slice cap can never evict it
+/// (rubash#2078 review).
 struct CommandLookupCache {
     fingerprint: String,
     results: HashMap<String, Option<PathBuf>>,
-    /// Entries mirrored from the user-visible hash table (`hash -p`,
-    /// BASH_CMDS assignment — set_command_lookup_cache). GNU keeps these
-    /// in hashed_filenames (findcmd.c phash_search). The fingerprint
-    /// reset that invalidates PATH-scan results must not discard them
-    /// (rubash#1137: a `hash -p` entry inserted before the first PATH
-    /// scan vanished when the scan initialized the fingerprint, and the
-    /// registered command never executed) — but a PATH *bind* must:
-    /// variables.c:5819 registers sv_path for PATH and sv_path
-    /// (variables.c:5919) is exactly hashcmd.c:57 phash_flush, so every
-    /// PATH assignment empties the whole table (rubash#1551). That
-    /// flush is an explicit bind-time action in the owning shell state
-    /// (builtins::hash::flush_command_hash_table clears the state's
-    /// table and calls flush_command_lookup_cache_hashed below); it
-    /// cannot ride the fingerprint reset because interleaved executor
-    /// states share this process-global cache.
-    hashed: HashMap<String, Option<PathBuf>>,
     /// File-name listing per physical PATH directory. Replaces the PATH x
     /// PATHEXT per-candidate stat grid with one read_dir per directory
     /// (rubash#159); exact-case set + ASCII-lowercase fold map since #799.
@@ -90,7 +80,6 @@ impl CommandLookupCache {
         CommandLookupCache {
             fingerprint: String::new(),
             results: HashMap::new(),
-            hashed: HashMap::new(),
             listings: HashMap::new(),
             probes: HashMap::new(),
             path_dirs: None,
@@ -134,39 +123,129 @@ fn session_scope(env_vars: &HashMap<String, String>) -> String {
     env_vars.get(SESSION_SCOPE_KEY).cloned().unwrap_or_default()
 }
 
-/// Live slice cap. Sessions are heavyweight objects and embedding hosts
-/// hold a handful; a host churning through more distinct scopes than this
-/// (per-request sessions) pays one cache-cold cycle per batch of 16, never
-/// a correctness change — every slice is a pure cache (fingerprint-guarded
-/// PATH-scan evidence plus the session's own hash-table mirror).
+/// Live RESOLUTION-slice cap. Sessions are heavyweight objects and
+/// embedding hosts hold a handful; a host churning through more distinct
+/// scopes than this (per-request sessions) pays a cache-cold cycle for
+/// the evicted slice only, never a correctness change — a slice is a
+/// pure cache (fingerprint-guarded PATH-scan evidence), so losing one
+/// costs a re-walk. The hash-table mirrors below are NOT slices and are
+/// never evicted (rubash#2078 review): they are user-visible state.
 const CACHE_SLICE_CAP: usize = 16;
 
-static COMMAND_LOOKUP_CACHES: OnceLock<Mutex<HashMap<String, CommandLookupCache>>> =
-    OnceLock::new();
+/// The process-global lookup stores: one capped set of pure resolution
+/// slices plus the uncapped per-scope hash-table mirrors, behind one
+/// mutex so a lookup that needs both stays a single lock scope (the
+/// shape find_user_command's pre/post-walk blocks already use — the walk
+/// itself runs with the lock dropped, as before).
+struct CommandLookupStores {
+    /// Pure per-scope resolution caches, capped at CACHE_SLICE_CAP with
+    /// single-slice LRU eviction.
+    slices: HashMap<String, CommandLookupCache>,
+    /// Recency order over `slices`, least-recently-used first.
+    recency: VecDeque<String>,
+    /// Entries mirrored from each session's user-visible hash table
+    /// (`hash -p`, BASH_CMDS assignment — set_command_lookup_cache),
+    /// keyed by session scope. GNU keeps these in hashed_filenames
+    /// (findcmd.c phash_search). The fingerprint reset that invalidates
+    /// PATH-scan results must not discard them (rubash#1137: a `hash -p`
+    /// entry inserted before the first PATH scan vanished when the scan
+    /// initialized the fingerprint, and the registered command never
+    /// executed) — but a PATH *bind* must: variables.c:5819 registers
+    /// sv_path for PATH and sv_path (variables.c:5919) is exactly
+    /// hashcmd.c:57 phash_flush, so every PATH assignment empties the
+    /// whole table (rubash#1551). That flush is an explicit bind-time
+    /// action in the owning shell state
+    /// (builtins::hash::flush_command_hash_table clears the state's
+    /// table and calls flush_command_lookup_cache_hashed below); it
+    /// cannot ride the fingerprint reset because interleaved executor
+    /// states share this process-global store.
+    ///
+    /// The mirrors are exempt from the slice cap and from eviction:
+    /// GNU keeps a shell's hash table for the shell's whole lifetime —
+    /// entries die only by that shell's own PATH assignment / `hash -r`
+    /// (both slice-scoped here) — so a store-level eviction must never
+    /// drop a live session's remembered locations. The map is bounded by
+    /// the scopes the host has created and each scope's own hash usage
+    /// (the per-scope self-cap in set_command_lookup_cache); only the
+    /// resolution slices' memory is bounded by CACHE_SLICE_CAP.
+    hashed: HashMap<String, HashMap<String, Option<PathBuf>>>,
+}
 
-fn command_lookup_caches() -> std::sync::MutexGuard<'static, HashMap<String, CommandLookupCache>> {
-    COMMAND_LOOKUP_CACHES
-        .get_or_init(|| Mutex::new(HashMap::new()))
+impl CommandLookupStores {
+    fn new() -> Self {
+        CommandLookupStores {
+            slices: HashMap::new(),
+            recency: VecDeque::new(),
+            hashed: HashMap::new(),
+        }
+    }
+
+    /// Mark `scope` most-recently-used, creating its resolution slice
+    /// first if needed. Creation at the cap evicts the single
+    /// least-recently-used OTHER slice — never a global clear, and the
+    /// hash-table mirrors are not touched: eviction cold-cycles one
+    /// sibling's PATH-scan evidence, nothing user-visible.
+    fn touch_slice(&mut self, scope: &str) {
+        if self.slices.contains_key(scope) {
+            if let Some(pos) = self.recency.iter().position(|s| s == scope) {
+                self.recency.remove(pos);
+            }
+            self.recency.push_back(scope.to_string());
+            return;
+        }
+        if self.slices.len() >= CACHE_SLICE_CAP {
+            if let Some(victim) = self.recency.pop_front() {
+                self.slices.remove(&victim);
+            }
+        }
+        self.slices
+            .insert(scope.to_string(), CommandLookupCache::empty());
+        self.recency.push_back(scope.to_string());
+    }
+}
+
+static COMMAND_LOOKUP_STORES: OnceLock<Mutex<CommandLookupStores>> = OnceLock::new();
+
+fn command_lookup_stores() -> std::sync::MutexGuard<'static, CommandLookupStores> {
+    COMMAND_LOOKUP_STORES
+        .get_or_init(|| Mutex::new(CommandLookupStores::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Lock one session's slice, creating it (and evicting stale scopes at the
-/// cap) as needed. The guard returned by command_lookup_caches must be held
-/// for the slice borrow's whole lifetime, so every cache operation is one
-/// lock scope — the shape find_user_command's pre/post-walk blocks already
-/// use (the walk itself runs with the lock dropped, as before).
-fn session_lookup_cache<'a>(
-    caches: &'a mut HashMap<String, CommandLookupCache>,
+/// Lock one session's resolution slice, creating it (with LRU eviction
+/// at the cap) as needed.
+fn session_lookup_slice<'a>(
+    stores: &'a mut CommandLookupStores,
     scope: &str,
 ) -> &'a mut CommandLookupCache {
-    if !caches.contains_key(scope) {
-        if caches.len() >= CACHE_SLICE_CAP {
-            caches.clear();
-        }
-        caches.insert(scope.to_string(), CommandLookupCache::empty());
-    }
-    caches.get_mut(scope).expect("slice just inserted")
+    stores.touch_slice(scope);
+    stores.slices.get_mut(scope).expect("slice just inserted")
+}
+
+/// Lock one session's hash-table mirror. Mirrors are state, not cache:
+/// this never creates a resolution slice and never evicts anything.
+fn session_hashed_mirror<'a>(
+    stores: &'a mut CommandLookupStores,
+    scope: &str,
+) -> &'a mut HashMap<String, Option<PathBuf>> {
+    stores.hashed.entry(scope.to_string()).or_default()
+}
+
+/// Lock one session's resolution slice AND its hash-table mirror in the
+/// same lock scope (find_user_command consults the mirror first, then
+/// the slice's scan evidence).
+fn session_slice_and_mirror<'a>(
+    stores: &'a mut CommandLookupStores,
+    scope: &str,
+) -> (
+    &'a mut CommandLookupCache,
+    &'a mut HashMap<String, Option<PathBuf>>,
+) {
+    stores.touch_slice(scope);
+    let slice = stores.slices.get_mut(scope).expect("slice just inserted");
+    let mirror = stores.hashed.entry(scope.to_string()).or_default();
+    (slice, mirror)
 }
 
 /// Forget only the hash-table mirror entries (the `hashed` map) of the
@@ -181,8 +260,8 @@ fn session_lookup_cache<'a>(
 /// drop this session's remembered locations.
 pub(crate) fn flush_command_lookup_cache_hashed(env_vars: &HashMap<String, String>) {
     let scope = session_scope(env_vars);
-    let mut caches = command_lookup_caches();
-    session_lookup_cache(&mut caches, &scope).hashed.clear();
+    let mut stores = command_lookup_stores();
+    session_hashed_mirror(&mut stores, &scope).clear();
 }
 
 /// RAII bracket for an in-process fork boundary (pipeline element,
@@ -211,16 +290,16 @@ pub(crate) struct HashedCacheForkGuard {
 pub(crate) fn hashed_cache_fork_guard(env_vars: &HashMap<String, String>) -> HashedCacheForkGuard {
     let scope = session_scope(env_vars);
     let saved = {
-        let mut caches = command_lookup_caches();
-        session_lookup_cache(&mut caches, &scope).hashed.clone()
+        let mut stores = command_lookup_stores();
+        session_hashed_mirror(&mut stores, &scope).clone()
     };
     HashedCacheForkGuard { scope, saved }
 }
 
 impl Drop for HashedCacheForkGuard {
     fn drop(&mut self) {
-        let mut caches = command_lookup_caches();
-        session_lookup_cache(&mut caches, &self.scope).hashed = std::mem::take(&mut self.saved);
+        let mut stores = command_lookup_stores();
+        *session_hashed_mirror(&mut stores, &self.scope) = std::mem::take(&mut self.saved);
     }
 }
 
@@ -228,11 +307,11 @@ impl Drop for HashedCacheForkGuard {
 /// session that owns `env_vars`.
 pub(crate) fn clear_command_lookup_cache(env_vars: &HashMap<String, String>) {
     let scope = session_scope(env_vars);
-    let mut caches = command_lookup_caches();
-    let cache = session_lookup_cache(&mut caches, &scope);
+    let mut stores = command_lookup_stores();
+    let (cache, mirror) = session_slice_and_mirror(&mut stores, &scope);
     // `hash -r` (phash_flush) forgets hashed_filenames too — unlike a
     // fingerprint reset, this clear drops the hash-table mirror as well.
-    cache.hashed.clear();
+    mirror.clear();
     cache.reset(String::new());
 }
 
@@ -246,10 +325,10 @@ pub(crate) fn clear_command_lookup_cache(env_vars: &HashMap<String, String>) {
 /// stale cached path.
 pub(crate) fn remove_command_lookup_cache(name: &str, env_vars: &HashMap<String, String>) {
     let scope = session_scope(env_vars);
-    let mut caches = command_lookup_caches();
-    let cache = session_lookup_cache(&mut caches, &scope);
+    let mut stores = command_lookup_stores();
+    let (cache, mirror) = session_slice_and_mirror(&mut stores, &scope);
     cache.results.remove(name);
-    cache.hashed.remove(name);
+    mirror.remove(name);
 }
 
 /// Insert or override one remembered command location in the session that
@@ -266,10 +345,10 @@ pub(crate) fn set_command_lookup_cache(
     env_vars: &HashMap<String, String>,
 ) {
     let scope = session_scope(env_vars);
-    let mut caches = command_lookup_caches();
-    let cache = session_lookup_cache(&mut caches, &scope);
-    if cache.hashed.len() >= 4096 {
-        cache.hashed.clear();
+    let mut stores = command_lookup_stores();
+    let mirror = session_hashed_mirror(&mut stores, &scope);
+    if mirror.len() >= 4096 {
+        mirror.clear();
     }
     // This setter is the hash table's write path (`hash -p`, BASH_CMDS),
     // so the entry belongs ONLY in the hash-table mirror, whose entries
@@ -279,7 +358,7 @@ pub(crate) fn set_command_lookup_cache(
     // outlived phash_flush (a PATH bind clears the mirror) whenever the
     // fingerprint later coincided, resurrecting a flushed entry
     // (rubash#1551).
-    cache.hashed.insert(name.to_string(), path);
+    mirror.insert(name.to_string(), path);
 }
 
 /// Environment values that can change a lookup result. The cache resets
@@ -488,8 +567,8 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         let scope = session_scope(env_vars);
         let fingerprint = command_lookup_fingerprint(env_vars);
         {
-            let mut caches = command_lookup_caches();
-            let cache = session_lookup_cache(&mut caches, &scope);
+            let mut stores = command_lookup_stores();
+            let cache = session_lookup_slice(&mut stores, &scope);
             if cache.fingerprint != fingerprint {
                 cache.reset(fingerprint.clone());
             } else if cache.results.get(name) == Some(&None) {
@@ -508,8 +587,8 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         }
         let result = find_user_command_uncached(name, env_vars, &fingerprint);
         if result.is_none() && !has_path_separator(name) {
-            let mut caches = command_lookup_caches();
-            let cache = session_lookup_cache(&mut caches, &scope);
+            let mut stores = command_lookup_stores();
+            let cache = session_lookup_slice(&mut stores, &scope);
             if cache.fingerprint == fingerprint {
                 if cache.results.len() >= 4096 {
                     cache.results.clear();
@@ -523,8 +602,8 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
     let scope = session_scope(env_vars);
     let fingerprint = command_lookup_fingerprint(env_vars);
     {
-        let mut caches = command_lookup_caches();
-        let cache = session_lookup_cache(&mut caches, &scope);
+        let mut stores = command_lookup_stores();
+        let (cache, mirror) = session_slice_and_mirror(&mut stores, &scope);
         if cache.fingerprint != fingerprint {
             cache.reset(fingerprint.clone());
         }
@@ -533,10 +612,10 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         // hash table survives PATH changes — consult the mirrored
         // hash-table entries first, even right after a fingerprint reset
         // (rubash#1137).
-        if let Some(result) = cache.hashed.get(name).cloned() {
+        if let Some(result) = mirror.get(name).cloned() {
             if let Some(path) = &result {
                 if crate::builtins::shopt::checkhash_enabled() && !cached_path_still_valid(path) {
-                    cache.hashed.remove(name);
+                    mirror.remove(name);
                     cache.results.remove(name);
                 } else {
                     return Some(path.clone());
@@ -569,8 +648,8 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
 
     let result = find_user_command_uncached(name, env_vars, &fingerprint);
 
-    let mut caches = command_lookup_caches();
-    let cache = session_lookup_cache(&mut caches, &scope);
+    let mut stores = command_lookup_stores();
+    let cache = session_lookup_slice(&mut stores, &scope);
     if cache.fingerprint != fingerprint {
         cache.reset(fingerprint);
     }
@@ -804,8 +883,8 @@ fn find_in_path_via_listings(
     fingerprint: &str,
 ) -> Option<PathBuf> {
     let scope = session_scope(env_vars);
-    let mut caches = command_lookup_caches();
-    let cache = session_lookup_cache(&mut caches, &scope);
+    let mut stores = command_lookup_stores();
+    let cache = session_lookup_slice(&mut stores, &scope);
     let (dirs, extensions) = path_scan_scaffold(cache, env_vars, fingerprint);
     // Candidate spellings are per-NAME, not per-directory (GNU passes the
     // same NAME through the whole walk); derive them once so a miss costs
@@ -2508,8 +2587,8 @@ fn winuxcmd_has_command_cached(
     let scope = session_scope(env_vars);
     let fingerprint = command_lookup_fingerprint(env_vars);
     {
-        let mut caches = command_lookup_caches();
-        let cache = session_lookup_cache(&mut caches, &scope);
+        let mut stores = command_lookup_stores();
+        let cache = session_lookup_slice(&mut stores, &scope);
         if cache.fingerprint != fingerprint {
             cache.reset(fingerprint.clone());
         } else if let Some(cached) = cache.probes.get(name) {
@@ -2517,8 +2596,8 @@ fn winuxcmd_has_command_cached(
         }
     }
     let probed = winuxcmd_has_command(dispatcher, name, env_vars);
-    let mut caches = command_lookup_caches();
-    let cache = session_lookup_cache(&mut caches, &scope);
+    let mut stores = command_lookup_stores();
+    let cache = session_lookup_slice(&mut stores, &scope);
     if cache.fingerprint != fingerprint {
         cache.reset(fingerprint);
     }
@@ -7099,8 +7178,8 @@ mod tests {
         // The miss is memoized (rubash#159)...
         assert_eq!(
             {
-                let mut caches = command_lookup_caches();
-                session_lookup_cache(&mut caches, "")
+                let mut stores = command_lookup_stores();
+                session_lookup_slice(&mut stores, "")
                     .results
                     .get("gate_tool")
                     .cloned()
@@ -7111,15 +7190,15 @@ mod tests {
         // listings: the bounded probe grid (stat walk) ran, not the full
         // directory re-scan (rubash#159 miss-cost contract).
         let listings_before = {
-            let mut caches = command_lookup_caches();
-            session_lookup_cache(&mut caches, "").listings.len()
+            let mut stores = command_lookup_stores();
+            session_lookup_slice(&mut stores, "").listings.len()
         };
         assert_eq!(find_user_command("gate_tool", &env_vars), None);
         assert_eq!(find_user_command("gate_tool", &env_vars), None);
         assert_eq!(
             {
-                let mut caches = command_lookup_caches();
-                session_lookup_cache(&mut caches, "").listings.len()
+                let mut stores = command_lookup_stores();
+                session_lookup_slice(&mut stores, "").listings.len()
             },
             listings_before
         );
@@ -7133,8 +7212,8 @@ mod tests {
         );
         assert_eq!(
             {
-                let mut caches = command_lookup_caches();
-                session_lookup_cache(&mut caches, "")
+                let mut stores = command_lookup_stores();
+                session_lookup_slice(&mut stores, "")
                     .results
                     .get("gate_tool")
                     .cloned()

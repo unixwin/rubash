@@ -20,6 +20,11 @@
 //! the exact shape that cross-contaminated — and need no SERIAL lock or
 //! `hash -r` purges: other tests' sessions now own their own slices.
 //!
+//! The pure resolution slices are LRU-capped (16 scopes); the hash-table
+//! mirror is NOT a slice and is exempt from eviction — it is user-visible
+//! state, and GNU keeps a shell's hash table for the shell's lifetime.
+//! Pin 5 guards that split.
+//!
 //! Pins 1 and 2 observe command EXECUTION, not `command -v`: the describe
 //! face consults the session's own `__RUBASH_HASH_TABLE` first (which no
 //! sibling can touch), so only the executor's `find_user_command` route —
@@ -266,6 +271,82 @@ fn issue2078_single_session_hash_r_still_forgets() {
         "after hash -r the name is off PATH and unresolved"
     );
     assert_eq!(count_lines(&count), ["P"]);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Pin 5 — churning scopes past the resolution-slice cap must not disturb
+/// a LIVE session's hash table. The slices are capped pure caches (LRU),
+/// but the mirror is state: when the cap still cleared the whole store,
+/// the 17th scope's creation wiped every live session's mirror with it,
+/// and a pinned command died with 127 — pin 2's failure shape re-entering
+/// through the cap instead of a sibling's `hash -r`. GNU's guarantee is
+/// that a shell's hash table lives as long as the shell (entries die only
+/// by that shell's own PATH assignment / `hash -r`).
+#[test]
+fn issue2078_slice_cap_rollover_keeps_live_sessions_hash_pin() {
+    let root = temp_dir("cap");
+    let count = root.join("count.txt");
+    let dir_a = root.join("a");
+    fs::create_dir_all(&dir_a).expect("dir a");
+    // The pinned tool lives OUTSIDE A's PATH: only the hash table can
+    // resolve it, so losing the mirror entry is observable as a 127.
+    let pinned = make_tool(&root, "P", &count);
+
+    let mut a = session(&dir_a.to_string_lossy());
+    let script = format!(
+        "hash -p \"{}\" {TOOL}",
+        pinned.to_string_lossy().replace('\\', "/")
+    );
+    let outcome = a.run(&script, &opts()).expect("run");
+    assert_eq!(outcome.status, 0);
+
+    assert_eq!(run_tool(&mut a), 0);
+    assert_eq!(count_lines(&count), ["P"], "A's pin resolves and runs");
+
+    // A's `hash` listing shows the pin before the churn.
+    let hash_before = root.join("hash-before.txt");
+    let script = format!(
+        "hash > \"{}\"",
+        hash_before.to_string_lossy().replace('\\', "/")
+    );
+    let outcome = a.run(&script, &opts()).expect("run");
+    assert_eq!(outcome.status, 0);
+    let before = fs::read_to_string(&hash_before).unwrap_or_default();
+    assert!(
+        before.contains(TOOL),
+        "hash listing must show the pin: {before}"
+    );
+
+    // Churn: 20 further sessions, each resolving the tool through its own
+    // PATH — every one creates (and keeps touching) its own resolution
+    // slice, rolling the 16-slice cap over repeatedly.
+    let dir_b = root.join("b");
+    make_tool(&dir_b, "B", &count);
+    for _ in 0..20 {
+        let mut churn = session(&dir_b.join("bin").to_string_lossy());
+        assert_eq!(run_tool(&mut churn), 0, "churn session runs its own tool");
+    }
+
+    // A's listing is byte-identical after the rollover (no A lookup has
+    // run since, so even the hit counts must not have moved)...
+    let hash_after = root.join("hash-after.txt");
+    let script = format!(
+        "hash > \"{}\"",
+        hash_after.to_string_lossy().replace('\\', "/")
+    );
+    let outcome = a.run(&script, &opts()).expect("run");
+    assert_eq!(outcome.status, 0);
+    let after = fs::read_to_string(&hash_after).unwrap_or_default();
+    assert_eq!(after, before, "A's hash listing must survive the rollover");
+
+    // ...and the pin still resolves: the mirror entry itself survived.
+    assert_eq!(
+        run_tool(&mut a),
+        0,
+        "cap rollover must not drop A's hash -p pin"
+    );
+    assert_eq!(count_lines(&count).last(), Some(&"P".to_string()));
 
     let _ = fs::remove_dir_all(root);
 }
