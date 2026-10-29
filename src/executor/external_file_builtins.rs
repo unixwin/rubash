@@ -737,10 +737,20 @@ impl Executor {
                 }
                 times
             };
-            let stamped = File::options()
-                .write(true)
-                .open(&target)
-                .and_then(|file| file.set_times(make_times()));
+            // GNU touch stamps an EXISTING operand through
+            // utimensat (touch.c do_touch) — it never opens the
+            // operand, so directories (EISDIR on a write open,
+            // rubash#2105: nvm's `touch -t ... "$lock"` aging a lock
+            // directory), fifos (any open blocks), and read-only
+            // files all take the stamp. stamp_existing_operand is
+            // that shape; a missing operand keeps the create flow
+            // below, classified by its NotFound error.
+            let stamped = stamp_existing_operand(
+                &target,
+                stamp_accessed.then_some(stamp_atime),
+                stamp_modified.then_some(stamp_mtime),
+                &make_times,
+            );
             let outcome = match stamped {
                 Ok(()) => Ok(()),
                 // -c on a missing operand: GNU touch skips it silently
@@ -766,6 +776,91 @@ impl Executor {
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         self.exit_code = if failed { 1 } else { 0 };
         Ok(true)
+    }
+}
+
+/// Stamp an existing `touch` operand (rubash#2105). Existence is
+/// classified by stat (following symlinks, as GNU's utimensat with
+/// flags 0 does): a missing operand returns the NotFound error the
+/// caller's create / -c flow keys on. On unix the stamp is the
+/// utimensat syscall itself — no open, so directories, fifos, and
+/// read-only files stamp exactly as under GNU. On other platforms
+/// the stamp goes through a handle: write-open first, then the
+/// read-open shape `cp_apply_preserved` falls back to (a directory
+/// takes SetFileTime on a read/backup-semantics handle, the same
+/// outcome WinuxCmd's touch reaches via FILE_WRITE_ATTRIBUTES).
+fn stamp_existing_operand(
+    target: &std::path::Path,
+    atime: Option<SystemTime>,
+    mtime: Option<SystemTime>,
+    make_times: &dyn Fn() -> std::fs::FileTimes,
+) -> std::io::Result<()> {
+    // Each platform arm consumes only one stamp representation.
+    #[cfg(unix)]
+    let _ = make_times;
+    #[cfg(not(unix))]
+    let _ = (atime, mtime);
+    std::fs::metadata(target)?;
+    #[cfg(unix)]
+    {
+        touch_utimensat(target, atime, mtime)
+    }
+    #[cfg(not(unix))]
+    {
+        File::options()
+            .write(true)
+            .open(target)
+            .and_then(|file| file.set_times(make_times()))
+            .or_else(|_| File::open(target).and_then(|file| file.set_times(make_times())))
+    }
+}
+
+/// utimensat(AT_FDCWD, path, times, 0) with UTIME_OMIT for the
+/// side `-a`/`-m` did not select. SystemTime values before the
+/// epoch convert to the matching negative timespec.
+#[cfg(unix)]
+fn touch_utimensat(
+    target: &std::path::Path,
+    atime: Option<SystemTime>,
+    mtime: Option<SystemTime>,
+) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    fn to_timespec(value: Option<SystemTime>) -> libc::timespec {
+        let Some(value) = value else {
+            return libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_OMIT as libc::c_long,
+            };
+        };
+        match value.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(elapsed) => libc::timespec {
+                tv_sec: elapsed.as_secs() as libc::time_t,
+                tv_nsec: libc::c_long::from(elapsed.subsec_nanos()),
+            },
+            Err(before) => {
+                let elapsed = before.duration();
+                if elapsed.subsec_nanos() == 0 {
+                    libc::timespec {
+                        tv_sec: -(elapsed.as_secs() as libc::time_t),
+                        tv_nsec: 0,
+                    }
+                } else {
+                    libc::timespec {
+                        tv_sec: -(elapsed.as_secs() as libc::time_t) - 1,
+                        tv_nsec: 1_000_000_000 - libc::c_long::from(elapsed.subsec_nanos()),
+                    }
+                }
+            }
+        }
+    }
+    let times = [to_timespec(atime), to_timespec(mtime)];
+    let c_path = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
 
