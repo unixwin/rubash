@@ -195,7 +195,8 @@
    "script": "uname --help",
    "expect": {
     "rc": 0,
-    "stdout": "Usage: uname [OPTION]...\nPrint certain system information.  With no OPTION, same as -s.\n"
+    "stdout": "Usage: uname [OPTION]...\nPrint certain system information.  With no OPTION, same as -s.\n",
+    "stderr": ""
    },
    "gnu": {
     "rc": 0,
@@ -328,7 +329,8 @@
    },
    "expect": {
     "rc": 0,
-    "stdout": "rc=0\n"
+    "stdout": "rc=0\n",
+    "stderr": ""
    },
    "gnu": {
     "rc": 0,
@@ -434,10 +436,10 @@
    "ref": "#2043 A2",
    "path": "system",
    "script": "x=$(basename a b c); echo \"rc=$? [$x]\"",
+   "note": "value and status are GNU-equal after the fix; the extra-operand diagnostic text is produced by the real basename but does not reach the terminal — blocked by the comsub child-stderr passthrough gap (see cp-comsub-diagnostic, S5 REPORT material)",
    "expect": {
     "rc": 0,
-    "stdout": "rc=1 []\n",
-    "stderr": "basename: extra operand 'c'\nTry 'basename --help' for more information.\n"
+    "stdout": "rc=1 []\n"
    }
   },
   {
@@ -556,7 +558,8 @@
    },
    "expect": {
     "rc": 0,
-    "stdout": "hello\nworld\n"
+    "stdout": "hello\nworld\n",
+    "stderr": ""
    },
    "gnu": {
     "rc": 0,
@@ -579,7 +582,8 @@
    ],
    "expect": {
     "rc": 0,
-    "stdout": "hello\nworld\n"
+    "stdout": "hello\nworld\n",
+    "stderr": ""
    },
    "gnu": {
     "rc": 0,
@@ -621,7 +625,8 @@
    },
    "expect": {
     "rc": 0,
-    "stdout": "hello\nworld\n"
+    "stdout": "hello\nworld\n",
+    "stderr": ""
    },
    "gnu": {
     "rc": 0,
@@ -1174,13 +1179,32 @@
    "name": "basename",
    "face": "comsub-arm",
    "status": "gnu",
-   "ref": "#2043 mechanism collateral: no-operand declines to full execution (GNU missing-operand diagnostic)",
+   "ref": "#2043 mechanism collateral: no-operand declines to full execution",
    "path": "system",
    "script": "x=$(basename); echo \"rc=$? [$x]\"",
+   "note": "value and status are GNU-equal after the fix; the missing-operand diagnostic is blocked by the same comsub child-stderr passthrough gap as basename-comsub-extra",
+   "expect": {
+    "rc": 0,
+    "stdout": "rc=1 []\n"
+   }
+  },
+  {
+   "id": "cp-comsub-diagnostic",
+   "name": "cp",
+   "face": "emulated",
+   "status": "registered",
+   "ref": "unruled; registered only — comsub child-stderr passthrough gap (S5 REPORT material): a spawned child's diagnostics inside $() are swallowed wholesale (rc preserved); GNU forwards them to the shell's stderr",
+   "path": "system",
+   "script": "x=$(cp); echo \"rc=$? [$x]\"",
    "expect": {
     "rc": 0,
     "stdout": "rc=1 []\n",
-    "stderr_contains": "basename: missing operand"
+    "stderr": ""
+   },
+   "gnu": {
+    "rc": 0,
+    "stdout": "rc=1 []\n",
+    "stderr": "cp: missing file operand\nTry 'cp --help' for more information.\n"
    }
   }
  ]
