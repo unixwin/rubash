@@ -28,6 +28,47 @@ fn drop_undecodable_environment_entries() {
     }
 }
 
+/// rubash#2129: this process's OWN invocation shape, recorded by the
+/// argv[0]/argv handling in this file as it runs — never imported from
+/// the environment. GNU decides startup behavior from the invocation
+/// itself: shell.c:540-549 makes a shell interactive only for
+/// `forced_interactive` (the `-i` flag) or the no-operand tty pair, and
+/// shell.c:497-503 sets LOGIN_SHELL only from `-l`/`--login` (with the
+/// argv[0] `-` mark at shell.c set_shell_name). The
+/// `__RUBASH_INTERACTIVE` / `__RUBASH_LOGIN_SHELL` env carriers are
+/// session state written by the shell that owns the session; an
+/// interactive parent exports them to every child, so a plain `-c`
+/// child that merely INHERITED them must not adopt the parent's
+/// startup behavior — with an rc/profile line that respawns the shell
+/// (fzf's `__fzf_orig_completion < <(complete -p ...)`), each
+/// generation re-sourced the startup files and respawned again,
+/// recursing without bound. The startup-shape decision therefore
+/// reads these statics, and the env carriers keep serving only the
+/// in-session faces (option state, `$-`, the exit echo) they already
+/// serve.
+static OWN_INTERACTIVE_SHELL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static OWN_LOGIN_SHELL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn own_interactive_shell() -> bool {
+    OWN_INTERACTIVE_SHELL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn own_login_shell() -> bool {
+    OWN_LOGIN_SHELL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// rubash#2133: run_startup_files' run-once guard as a process-local
+/// static. It used to be the `__RUBASH_STARTUP_FILES_DONE` env carrier,
+/// which Executor::set_env mirrors into the process env — so every
+/// child inherited "startup files already ran" from its parent, and a
+/// genuine nested login shell (`rubash -lc 'rubash -lc true'`) skipped
+/// its own profile chain entirely. As a static the guard still runs
+/// the chain at most once per process, but it can never cross a spawn
+/// boundary: DONE never enters any child's environment.
+static STARTUP_FILES_DONE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn main() {
     drop_undecodable_environment_entries();
 
@@ -71,6 +112,32 @@ fn run_main() -> i32 {
     let invoked_as = env::var("NIU_INVOKED_AS").ok().filter(|v| !v.is_empty());
     if invoked_as.is_some() {
         env::remove_var("NIU_INVOKED_AS");
+    }
+    // rubash#2129/#2133: the intra-process startup-carrier family is
+    // THIS process's private startup bookkeeping, never an inheritable
+    // setting: __RUBASH_STARTUP_FILES_DONE (run_startup_files' run-once
+    // guard — a process-local static since #2133, stripped here so a
+    // stale inherited copy cannot re-enter through any other reader),
+    // __RUBASH_SOURCED_RC (the rc file THIS process's startup chain
+    // already sourced), and the --noprofile/--norc suppressors
+    // __RUBASH_NO_PROFILE/__RUBASH_NO_RC. Executor::set_env mirrors
+    // __RUBASH_* markers into the process env, so every child of a
+    // shell that ran its startup inherits copies describing the
+    // PARENT's startup, not this invocation: an inherited DONE made a
+    // genuine nested `rubash -lc 'rubash -lc true'` skip its own
+    // profile chain, and an inherited __RUBASH_NO_PROFILE defeated an
+    // explicit `-l` on this process's own argv. Strip the family
+    // consume-on-read — the same rule as NIU_INVOKED_AS above — before
+    // Executor::new imports the process environment; after this point
+    // only this process's own argv (--noprofile/--norc arms in
+    // run_args/parse_long_options) may arm the suppressors again.
+    for carrier in [
+        "__RUBASH_STARTUP_FILES_DONE",
+        "__RUBASH_SOURCED_RC",
+        "__RUBASH_NO_PROFILE",
+        "__RUBASH_NO_RC",
+    ] {
+        env::remove_var(carrier);
     }
     let mut args: Vec<String> = env::args().collect();
     // niubash#362: a respawned async `&` child too large for the
@@ -251,6 +318,7 @@ fn apply_invocation_shell_mode(executor: &mut Executor, argv0: Option<&str>) {
     // GNU shell.c set_shell_name: an argv[0] whose first character is '-'
     // (after the basename) marks a login shell, independent of --login/-l.
     if name.starts_with('-') {
+        OWN_LOGIN_SHELL.store(true, std::sync::atomic::Ordering::Relaxed);
         executor.mark_login_shell();
     }
     // GNU shell.c shell_is_restricted/maybe_make_restricted
@@ -556,6 +624,7 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                 }
             }
             (false, "-i") => {
+                OWN_INTERACTIVE_SHELL.store(true, std::sync::atomic::Ordering::Relaxed);
                 executor.set_env("__RUBASH_INTERACTIVE", "1");
                 index += 1;
             }
@@ -586,6 +655,7 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                 // GNU shell.c:497-503: --login/-l flips LOGIN_SHELL; a login
                 // shell accepts the logout builtin and runs ~/.bash_logout
                 // at exit.
+                OWN_LOGIN_SHELL.store(true, std::sync::atomic::Ordering::Relaxed);
                 executor.mark_login_shell();
                 index += 1;
             }
@@ -1002,6 +1072,7 @@ fn parse_long_options(
                 return (index, Some(0));
             }
             "login" => {
+                OWN_LOGIN_SHELL.store(true, std::sync::atomic::Ordering::Relaxed);
                 executor.mark_login_shell();
             }
             "posix" => {
@@ -1216,7 +1287,11 @@ fn run_command_string_with_init(
     // interactive parent). Re-running the interactive defaults here
     // clobbered the verbatim-inherited option state (a parent's
     // `set +H` came back on inside every background child).
-    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1")
+    // rubash#2129: the same reasoning covers a NON-respawned `-c`
+    // child that inherited the marker — init_interactive is an
+    // own-invocation step (shell.c:540-549), so the gate reads the
+    // process's own shape, not the env carrier.
+    if own_interactive_shell()
         && !rubash::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed)
     {
         apply_init_interactive_defaults(executor);
@@ -1254,7 +1329,10 @@ fn run_command_string_with_init(
     // GNU runs the history-file protocol only in the top-level
     // interactive shell (bashhist.c load_history / exit_shell's
     // maybe_save_shell_history on the reader shell).
-    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1")
+    // rubash#2129: gated on the OWN invocation shape for the same
+    // reason as the defaults above — an inherited marker alone does
+    // not make this `-c` process interactive.
+    if own_interactive_shell()
         && !rubash::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed)
     {
         prepare_interactive_history(executor);
@@ -1502,11 +1580,15 @@ fn run_no_script_with_init(
     // the same interactivity `-i` forces. stderr not a terminal (e.g.
     // `rubash 2>log` on a console) keeps the shell NON-interactive — GNU
     // then reads the tty stdin as a plain script with no prompts.
-    if executor.get_env("__RUBASH_INTERACTIVE").is_none()
-        && io::stdin().is_terminal()
-        && io::stderr().is_terminal()
-    {
-        executor.set_env("__RUBASH_INTERACTIVE", "1");
+    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        // rubash#2129: the tty pair is this process's OWN interactive
+        // shape (shell.c:540-549) — record it even when the env carrier
+        // already rode in, so a genuine nested interactive shell still
+        // sources its startup files.
+        OWN_INTERACTIVE_SHELL.store(true, std::sync::atomic::Ordering::Relaxed);
+        if executor.get_env("__RUBASH_INTERACTIVE").is_none() {
+            executor.set_env("__RUBASH_INTERACTIVE", "1");
+        }
     }
     apply_interactive_alias_default(executor, alias_expansion_override);
     executor.inherit_process_stdin();
@@ -1567,11 +1649,15 @@ fn run_stdin_script_with_init(
     // `(arg_index == argc) || read_from_stdin`; `-s` sets read_from_stdin,
     // so tty stdin + tty stderr make `bash -s` interactive too. Without
     // `-i` and with a piped stdin the shell stays non-interactive.
-    if executor.get_env("__RUBASH_INTERACTIVE").is_none()
-        && io::stdin().is_terminal()
-        && io::stderr().is_terminal()
-    {
-        executor.set_env("__RUBASH_INTERACTIVE", "1");
+    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        // rubash#2129: the tty pair is this process's OWN interactive
+        // shape (shell.c:540-549) — record it even when the env carrier
+        // already rode in, so a genuine nested interactive shell still
+        // sources its startup files.
+        OWN_INTERACTIVE_SHELL.store(true, std::sync::atomic::Ordering::Relaxed);
+        if executor.get_env("__RUBASH_INTERACTIVE").is_none() {
+            executor.set_env("__RUBASH_INTERACTIVE", "1");
+        }
     }
     apply_interactive_alias_default(executor, alias_expansion_override);
     executor.inherit_process_stdin();
@@ -1749,19 +1835,56 @@ fn run_init_file(executor: &mut Executor, init_file: &str) -> i32 {
 /// was cfg-gated out on Windows). `--noprofile` / `--norc` inhibit their
 /// respective branches.
 ///
+/// rubash#2129: WHICH branch runs is decided by this process's own
+/// invocation shape (the OWN_* statics: own argv `-i`/`-l`, the argv[0]
+/// `-` mark, the no-operand tty pair) — never by the inherited
+/// `__RUBASH_INTERACTIVE` / `__RUBASH_LOGIN_SHELL` env carriers — and a
+/// respawned internal child (RESPAWNED_CHILD) runs no branch at all,
+/// $BASH_ENV included.
+///
 /// Returns Some(exit_status) when a startup file executed `exit`
 /// (rubash#297: nothing after a startup-file exit runs) — the caller must
 /// return finish_shell immediately.
 fn run_startup_files(executor: &mut Executor, rc_override: Option<&str>) -> Option<i32> {
-    // Run once per process: the four *_with_init drivers are alternatives,
-    // but a respawned child re-entering a driver must not re-source.
-    if executor.get_env("__RUBASH_STARTUP_FILES_DONE").is_some() {
+    // rubash#2129: a respawned internal child (process substitution,
+    // coproc, async wrapper — every engine spawn site that re-execs
+    // this shell stamps `__RUBASH_SHELL_PID` or `__RUBASH_COPROC_CHILD`,
+    // which Executor::new folds into RESPAWNED_CHILD) is GNU's forked
+    // subshell (execute_cmd.c:1576 execute_in_subshell): it inherits
+    // the parent's POST-startup state through the respawn transport
+    // and never runs the startup chain — not the profile/rc branches
+    // and not $BASH_ENV. The #2072 fix gated the interactive defaults
+    // and the history faces on this same door; the startup files were
+    // the ungated face.
+    if rubash::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
     }
-    executor.set_env("__RUBASH_STARTUP_FILES_DONE", "1");
-    diagnose_bash_env_directory(executor);
-    let login = executor.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
-    let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
+    // Run once per process: the four *_with_init drivers are
+    // alternatives, but a driver re-entry must not re-source. The
+    // guard is the process-local STARTUP_FILES_DONE static
+    // (rubash#2133), not an env carrier — as a carrier it was exported
+    // to children and suppressed a genuine nested shell's own startup
+    // chain (see run_main's consume-on-read strip).
+    if STARTUP_FILES_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    // rubash#2129: the branch shape is this process's OWN invocation
+    // shape (shell.c:540-549, shell.c:497-503), never the inherited
+    // env carriers — see the OWN_* statics. A `-c` child of an
+    // interactive session therefore takes the plain non-interactive
+    // branch (no profile, no rc; $BASH_ENV only), exactly like GNU.
+    let login = own_login_shell();
+    let interactive = own_interactive_shell();
+    if !login {
+        // The exit door reads the same carrier (the logout-file face
+        // in finish_shell): a login mark this process did not earn
+        // from its own argv[0]/argv must not make it run
+        // ~/.bash_logout either — and dropping the carrier here also
+        // stops it riding into this process's children. A genuine
+        // login shell (own mark) keeps the carrier untouched.
+        executor.remove_env("__RUBASH_LOGIN_SHELL");
+    }
+    diagnose_bash_env_directory(executor, interactive);
     let no_profile = executor.get_env("__RUBASH_NO_PROFILE").as_deref() == Some("1");
     let no_rc = executor.get_env("__RUBASH_NO_RC").as_deref() == Some("1");
     let home = executor.get_env("HOME").unwrap_or_default();
@@ -1846,9 +1969,11 @@ fn login_profile_branch(
 /// on stderr, then continues (execution is unaffected). The standalone
 /// rubash binary silently ignored the failure (rubash#1146). Report
 /// the directory case here, once per process (guarded by the caller's
-/// startup-files-done marker).
-fn diagnose_bash_env_directory(executor: &mut Executor) {
-    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+/// run-once startup guard).
+fn diagnose_bash_env_directory(executor: &mut Executor, interactive: bool) {
+    // rubash#2129: `interactive` is the caller's OWN invocation shape,
+    // not the inherited env carrier (see run_startup_files).
+    if interactive {
         return;
     }
     let Some(bash_env) = executor
