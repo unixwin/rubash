@@ -17,6 +17,137 @@ struct OutputProcessSubstitution {
     /// fork (subst.c:6362) inherits the parent's line_number at fork
     /// time (rubash#1184 f4).
     line: Option<usize>,
+    /// rubash#2195: the consumer's spawn-time fd plan (see
+    /// ProcsubSpawnPlan). The empty default inherits everything — the
+    /// pre-#2195 behavior, and the correct one for word-form
+    /// substitutions: GNU forks those during word expansion in the
+    /// parent shell, before any of the command's redirects apply.
+    spawn_plan: ProcsubSpawnPlan,
+}
+
+/// rubash#2195: where one of a `>(...)` consumer's inherited fds
+/// points when the consumer is spawned. GNU process_substitute
+/// (subst.c:6362) forks the consumer while do_redirections
+/// (redir.c:237) walks the owning command's redirect list in order —
+/// each entry's word is expanded (redirection_expand, redir.c:298)
+/// at its own turn — so the consumer inherits the fd table as the
+/// entries BEFORE its own left it, not the shell's ambient table.
+/// Rubash's deferred spawn (the consumer runs at command finish from
+/// a temp carrier) captures that prefix state at materialization
+/// time, before the command's redirects are applied and undone.
+#[derive(Debug, Clone)]
+enum ProcsubSpawnFd {
+    /// Untouched by the prefix: inherit the shell's ambient state
+    /// (stdio inherit for fds 1-2; nothing crosses for fds >= 3,
+    /// matching the consumer spawn's existing transport).
+    Inherit,
+    /// A file a prefix redirect opened. The read/write slots hold the
+    /// SAME open file descriptions the prefix walk opened (shared
+    /// Rc), mirroring the description sharing of GNU's fork: a dup
+    /// later in the prefix clones this whole value, so `> f 2>&1`
+    /// leaves both consumer fds on one description.
+    File {
+        read: Option<Rc<FileFd>>,
+        write: Option<Rc<FileFd>>,
+    },
+    /// A file a prefix redirect opened in TRUNCATE mode. GNU's
+    /// consumer shares the open file description with the command
+    /// child, so its writes continue at the description's offset —
+    /// after the command's own writes. Rubash's deferred spawn
+    /// cannot share that description (the command opens its own
+    /// at application), so the spawn seeks this disposition's dup
+    /// to end-of-file first: the closest faithful offset once the
+    /// command has run. Append-mode captures use File (O_APPEND
+    /// makes the offset moot).
+    TruncatedFile(Rc<FileFd>),
+    /// A prefix redirect bound this fd to an EARLIER output process
+    /// substitution's carrier: the consumer's writes append to that
+    /// carrier file (the deferred stand-in for GNU's pipe write end).
+    CarrierWrite(PathBuf),
+    /// A prefix redirect bound this fd to an input substitution's
+    /// temp carrier: opened read-only at spawn.
+    CarrierRead(PathBuf),
+    /// A prefix redirect closed this fd.
+    Closed,
+}
+
+/// The prefix fd state for one output process substitution: a sparse
+/// fd -> disposition map; fds absent from the map inherit.
+#[derive(Debug, Clone, Default)]
+struct ProcsubSpawnPlan {
+    fds: Vec<(u32, ProcsubSpawnFd)>,
+}
+
+impl ProcsubSpawnPlan {
+    fn get(&self, fd: u32) -> Option<&ProcsubSpawnFd> {
+        self.fds
+            .iter()
+            .find(|(candidate, _)| *candidate == fd)
+            .map(|(_, disposition)| disposition)
+    }
+}
+
+/// How a prefix redirect's file open went, for the spawn-plan
+/// walk (rubash#2195): Captured carries the opened description;
+/// Declined means the target's shape is not capturable (the entry
+/// is skipped and the walk continues); Failed means the open was
+/// attempted and errored — GNU's do_redirections aborts at that
+/// entry, so the walk stops there too.
+enum ProcsubPlanCapture {
+    Captured(Rc<FileFd>),
+    Declined,
+    Failed,
+}
+
+/// The open mode a prefix redirect uses, for plan capture.
+#[derive(Clone, Copy)]
+enum ProcsubPlanMode {
+    Read,
+    WriteTruncate,
+    WriteAppend,
+    ReadWrite,
+}
+
+/// rubash#2195: if `field` is the parser's fabricated mirror of a
+/// dup (redirect_assign.rs assign_redirect_err_target turns
+/// `2>&1` with fd 1 bound to a substitution into a `2>> <target>`
+/// field that has NO entry in the ordered redirect list), return
+/// the carrier the dup's source fd materialized for the same
+/// target text. The mirror is a spelling of the dup, not a second
+/// substitution, so it aliases the source's carrier instead of
+/// materializing a phantom consumer on an orphan one. Returns
+/// None for a genuine redirect (a matching list entry exists) and
+/// for mirrors whose source never materialized — those follow
+/// the normal materialization path, today's behavior.
+fn procsub_dup_mirror_carrier(
+    list: &[Redirect],
+    materialized: &[(u32, String, PathBuf)],
+    field: &Redirect,
+) -> Option<PathBuf> {
+    let field_fd = field.fd.unwrap_or(2);
+    // A genuine entry for this field exists in the list.
+    if list.iter().any(|entry| {
+        entry
+            .fd
+            .unwrap_or(if entry.is_input_side() { 0 } else { 1 })
+            == field_fd
+            && entry.target == field.target
+            && matches!(entry.kind, crate::parser::RedirectKind::Append)
+    }) {
+        return None;
+    }
+    // The list holds the dup itself, aimed at a source fd that
+    // materialized the same target text.
+    let source_fd = list.iter().find_map(|entry| {
+        (matches!(entry.kind, crate::parser::RedirectKind::DuplicateOutput)
+            && entry.fd.unwrap_or(field_fd) == field_fd)
+            .then(|| redirect_target_fd(&entry.target))
+            .flatten()
+    })?;
+    materialized
+        .iter()
+        .find(|(fd, target, _)| *fd == source_fd && target == &field.target)
+        .map(|(_, _, carrier)| carrier.clone())
 }
 
 fn exec_keeps_output_process_substitution(words: &[String], redirect: &Redirect) -> bool {
@@ -667,6 +798,44 @@ impl Executor {
                 )?;
             }
         }
+        // rubash#2195/#2196: redirect-derived substitutions are
+        // tracked by their position in the ORDERED redirect list —
+        // the sequence do_redirections (redir.c:237) walks in order,
+        // expanding each entry's word at its own turn
+        // (redirection_expand, redir.c:298), so a `>(...)` at
+        // position p is forked (process_substitute, subst.c:6362)
+        // with the fd state entries [0..p) leave behind. The
+        // dedicated fields below are mirrors of individual entries;
+        // materializing from them alone both duplicated a
+        // substitution (the parser's `2>&1` mirror — see the
+        // redirect_err_append arm) and never saw list-only entries
+        // (numbered and {var} fds, #2196). Every materialization
+        // records its list position; a list pass after the field
+        // arms covers each entry no field served, and spawn plans
+        // are computed from these positions at the end.
+        let original_redirects = rewritten.redirects.clone();
+        // (outputs index, list position, carrier path)
+        let mut materialized_positions: Vec<(usize, usize, PathBuf)> = Vec::new();
+        // (effective fd, original target text, carrier path)
+        let mut materialized_by_fd_target: Vec<(u32, String, PathBuf)> = Vec::new();
+        // (list position, carrier path) for the input substitution
+        // the redirect_in arm materializes in collected form.
+        let mut input_carrier_positions: Vec<(usize, PathBuf)> = Vec::new();
+        let find_redirect_position = |fd: Option<u32>,
+                                      input_side: bool,
+                                      target: &str,
+                                      kinds: &[crate::parser::RedirectKind]|
+         -> Option<usize> {
+            let want_fd = fd.unwrap_or(if input_side { 0 } else { 1 });
+            original_redirects.iter().rposition(|entry| {
+                entry
+                    .fd
+                    .unwrap_or(if entry.is_input_side() { 0 } else { 1 })
+                    == want_fd
+                    && entry.target == target
+                    && kinds.contains(&entry.kind)
+            })
+        };
         if let Some(redirect) = &mut rewritten.redirect_in {
             if let Some(source) = redirect
                 .target
@@ -698,7 +867,18 @@ impl Executor {
                     self.procsub_stream_set_timing(&path, body_timing);
                     let old_target = redirect.target.clone();
                     redirect.target = shell_display_path(&path.to_string_lossy());
-                    redirect_target_rewrites.push((old_target, redirect.target.clone()));
+                    redirect_target_rewrites.push((old_target.clone(), redirect.target.clone()));
+                    // rubash#2195: record the carrier's list
+                    // position so a later consumer's spawn plan can
+                    // bind a dup of this fd to the carrier.
+                    if let Some(position) = find_redirect_position(
+                        redirect.fd,
+                        true,
+                        &old_target,
+                        &[crate::parser::RedirectKind::Input],
+                    ) {
+                        input_carrier_positions.push((position, path.clone()));
+                    }
                     files.inputs.push(path);
                 }
             }
@@ -732,6 +912,10 @@ impl Executor {
             rewritten.redirect_out.as_deref(),
             rewritten.redirect_err_append.as_deref(),
         ) {
+            let combined_target = rewritten
+                .redirect_out
+                .as_ref()
+                .map(|redirect| redirect.target.clone());
             let path = self.empty_process_substitution_temp()?;
             let display_path = shell_display_path(&path.to_string_lossy());
             if let Some(redirect) = &mut rewritten.redirect_out {
@@ -748,12 +932,32 @@ impl Executor {
                 path,
                 source,
                 line: cmd_line,
+                spawn_plan: ProcsubSpawnPlan::default(),
             });
+            if let Some(position) = combined_target.as_deref().and_then(|target| {
+                find_redirect_position(
+                    None,
+                    false,
+                    target,
+                    &[crate::parser::RedirectKind::CombinedOutput],
+                )
+            }) {
+                let carrier = files.outputs.last().unwrap().path.clone();
+                materialized_positions.push((files.outputs.len() - 1, position, carrier.clone()));
+                if let Some(target) = &combined_target {
+                    materialized_by_fd_target.push((1, target.clone(), carrier.clone()));
+                    materialized_by_fd_target.push((2, target.clone(), carrier));
+                }
+            }
         }
         if let Some(source) = shared_combined_output_process_substitution(
             rewritten.append.as_deref(),
             rewritten.redirect_err_append.as_deref(),
         ) {
+            let combined_target = rewritten
+                .append
+                .as_ref()
+                .map(|redirect| redirect.target.clone());
             let path = self.empty_process_substitution_temp()?;
             let display_path = shell_display_path(&path.to_string_lossy());
             if let Some(redirect) = &mut rewritten.append {
@@ -770,7 +974,23 @@ impl Executor {
                 path,
                 source,
                 line: cmd_line,
+                spawn_plan: ProcsubSpawnPlan::default(),
             });
+            if let Some(position) = combined_target.as_deref().and_then(|target| {
+                find_redirect_position(
+                    None,
+                    false,
+                    target,
+                    &[crate::parser::RedirectKind::CombinedAppend],
+                )
+            }) {
+                let carrier = files.outputs.last().unwrap().path.clone();
+                materialized_positions.push((files.outputs.len() - 1, position, carrier.clone()));
+                if let Some(target) = &combined_target {
+                    materialized_by_fd_target.push((1, target.clone(), carrier.clone()));
+                    materialized_by_fd_target.push((2, target.clone(), carrier));
+                }
+            }
         }
         if let Some(redirect) = &mut rewritten.redirect_out {
             if !exec_keeps_output_process_substitution(&exec_words, redirect) {
@@ -785,12 +1005,34 @@ impl Executor {
                     let path = self.empty_process_substitution_temp()?;
                     let old_target = redirect.target.clone();
                     redirect.target = shell_display_path(&path.to_string_lossy());
-                    redirect_target_rewrites.push((old_target, redirect.target.clone()));
+                    redirect_target_rewrites.push((old_target.clone(), redirect.target.clone()));
                     files.outputs.push(OutputProcessSubstitution {
                         path,
                         source,
                         line: cmd_line,
+                        spawn_plan: ProcsubSpawnPlan::default(),
                     });
+                    if let Some(position) = find_redirect_position(
+                        redirect.fd,
+                        false,
+                        &old_target,
+                        &[
+                            crate::parser::RedirectKind::Output,
+                            crate::parser::RedirectKind::ClobberOutput,
+                        ],
+                    ) {
+                        let carrier = files.outputs.last().unwrap().path.clone();
+                        materialized_positions.push((
+                            files.outputs.len() - 1,
+                            position,
+                            carrier.clone(),
+                        ));
+                        materialized_by_fd_target.push((
+                            redirect.fd.unwrap_or(1),
+                            old_target.clone(),
+                            carrier,
+                        ));
+                    }
                 }
             }
         }
@@ -807,12 +1049,31 @@ impl Executor {
                     let path = self.empty_process_substitution_temp()?;
                     let old_target = redirect.target.clone();
                     redirect.target = shell_display_path(&path.to_string_lossy());
-                    redirect_target_rewrites.push((old_target, redirect.target.clone()));
+                    redirect_target_rewrites.push((old_target.clone(), redirect.target.clone()));
                     files.outputs.push(OutputProcessSubstitution {
                         path,
                         source,
                         line: cmd_line,
+                        spawn_plan: ProcsubSpawnPlan::default(),
                     });
+                    if let Some(position) = find_redirect_position(
+                        redirect.fd,
+                        false,
+                        &old_target,
+                        &[crate::parser::RedirectKind::Append],
+                    ) {
+                        let carrier = files.outputs.last().unwrap().path.clone();
+                        materialized_positions.push((
+                            files.outputs.len() - 1,
+                            position,
+                            carrier.clone(),
+                        ));
+                        materialized_by_fd_target.push((
+                            redirect.fd.unwrap_or(1),
+                            old_target.clone(),
+                            carrier,
+                        ));
+                    }
                 }
             }
         }
@@ -829,18 +1090,69 @@ impl Executor {
                     let path = self.empty_process_substitution_temp()?;
                     let old_target = redirect.target.clone();
                     redirect.target = shell_display_path(&path.to_string_lossy());
-                    redirect_target_rewrites.push((old_target, redirect.target.clone()));
+                    redirect_target_rewrites.push((old_target.clone(), redirect.target.clone()));
                     files.outputs.push(OutputProcessSubstitution {
                         path,
                         source,
                         line: cmd_line,
+                        spawn_plan: ProcsubSpawnPlan::default(),
                     });
+                    if let Some(position) = find_redirect_position(
+                        redirect.fd,
+                        false,
+                        &old_target,
+                        &[
+                            crate::parser::RedirectKind::Output,
+                            crate::parser::RedirectKind::ClobberOutput,
+                        ],
+                    ) {
+                        let carrier = files.outputs.last().unwrap().path.clone();
+                        materialized_positions.push((
+                            files.outputs.len() - 1,
+                            position,
+                            carrier.clone(),
+                        ));
+                        materialized_by_fd_target.push((
+                            redirect.fd.unwrap_or(2),
+                            old_target.clone(),
+                            carrier,
+                        ));
+                    }
                 }
             }
         }
         if let Some(redirect) = &mut rewritten.redirect_err_append {
             if !exec_keeps_output_process_substitution(&exec_words, redirect) {
-                if let Some(source) = redirect
+                // rubash#2195: the parser mirrors `2>&1` (fd 1 bound to
+                // a substitution) into this field as a fabricated
+                // `2>> <fd1's target>` — a spelling of the DUP, not a
+                // second substitution (redirect_assign.rs
+                // assign_redirect_err_target; the ordered list keeps
+                // the faithful DuplicateOutput entry and has no fd-2
+                // append entry for the target). Materializing the
+                // mirror spawned a phantom second consumer on an
+                // orphan carrier — the shell printed its empty read
+                // as a spurious extra line, and when the phantom's
+                // body redirected into the real consumer's output
+                // file, its open truncated the payload. Alias the
+                // mirror to the source fd's carrier instead: the
+                // list's own `2>&1` entry then dups fd 2 onto the one
+                // carrier at application time, which is exactly
+                // GNU's single-pipe state.
+                let dup_mirror_carrier = if redirect.target.starts_with(">(") {
+                    procsub_dup_mirror_carrier(
+                        &original_redirects,
+                        &materialized_by_fd_target,
+                        redirect,
+                    )
+                } else {
+                    None
+                };
+                if let Some(carrier) = dup_mirror_carrier {
+                    let old_target = redirect.target.clone();
+                    redirect.target = shell_display_path(&carrier.to_string_lossy());
+                    redirect_target_rewrites.push((old_target, redirect.target.clone()));
+                } else if let Some(source) = redirect
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
@@ -851,13 +1163,44 @@ impl Executor {
                     let path = self.empty_process_substitution_temp()?;
                     let old_target = redirect.target.clone();
                     redirect.target = shell_display_path(&path.to_string_lossy());
-                    redirect_target_rewrites.push((old_target, redirect.target.clone()));
+                    redirect_target_rewrites.push((old_target.clone(), redirect.target.clone()));
                     files.outputs.push(OutputProcessSubstitution {
                         path,
                         source,
                         line: cmd_line,
+                        spawn_plan: ProcsubSpawnPlan::default(),
                     });
+                    if let Some(position) = find_redirect_position(
+                        redirect.fd,
+                        false,
+                        &old_target,
+                        &[crate::parser::RedirectKind::Append],
+                    ) {
+                        let carrier = files.outputs.last().unwrap().path.clone();
+                        materialized_positions.push((
+                            files.outputs.len() - 1,
+                            position,
+                            carrier.clone(),
+                        ));
+                        materialized_by_fd_target.push((
+                            redirect.fd.unwrap_or(2),
+                            old_target.clone(),
+                            carrier,
+                        ));
+                    }
                 }
+            }
+        }
+        // rubash#2195: rewrite the field-served list entries
+        // positionally — their field mirrors were rewritten above,
+        // and the generic string-match sync below would cross-wire
+        // identical target texts on different entries (two
+        // `>(...)` entries with the same body text) to the first
+        // carrier, merging two consumers into one.
+        for (_, position, carrier) in &materialized_positions {
+            let entry = &mut rewritten.redirects[*position];
+            if entry.target.starts_with(">(") {
+                entry.target = shell_display_path(&carrier.to_string_lossy());
             }
         }
         for redirect in &mut rewritten.redirects {
@@ -878,7 +1221,385 @@ impl Executor {
             metadata.process_substitutions.clear();
         }
         sync_ordered_redirect_targets(&mut rewritten);
+        // rubash#2195: with every carrier in place, compute each
+        // redirect-derived consumer's spawn plan from the ORIGINAL
+        // ordered list (field and list targets are rewritten by
+        // now, so the walk reads the captured copy).
+        let carrier_by_position: std::collections::HashMap<usize, PathBuf> = materialized_positions
+            .iter()
+            .map(|(_, position, carrier)| (*position, carrier.clone()))
+            .collect();
+        let input_carrier_by_position: std::collections::HashMap<usize, PathBuf> =
+            input_carrier_positions.into_iter().collect();
+        for (output_index, position, _) in &materialized_positions {
+            let plan = self.procsub_spawn_plan(
+                &original_redirects,
+                *position,
+                &carrier_by_position,
+                &input_carrier_by_position,
+            );
+            files.outputs[*output_index].spawn_plan = plan;
+        }
         Ok((rewritten, files))
+    }
+
+    /// rubash#2195: compute a redirect-derived `>(...)` consumer's
+    /// spawn plan from the redirect entries preceding its own in
+    /// the ordered list — the fd state do_redirections
+    /// (redir.c:237) has established when process_substitute
+    /// (subst.c:6362) forks the consumer at its entry's turn. File
+    /// opens here mirror the opens GNU's command child performs
+    /// before the fork (same descriptions, shared via Rc, so a dup
+    /// later in the prefix clones the same description — `> f 2>&1`
+    /// leaves both consumer fds on one description). An entry whose
+    /// state cannot be captured faithfully is left Inherit (the
+    /// pre-#2195 ambient behavior); an entry whose open fails stops
+    /// the walk, matching do_redirections aborting at that entry.
+    /// The plan never touches fd 0: GNU's process_substitute
+    /// overrides the consumer's fd 0 with the substitution pipe.
+    fn procsub_spawn_plan(
+        &mut self,
+        list: &[Redirect],
+        position: usize,
+        carrier_by_position: &std::collections::HashMap<usize, PathBuf>,
+        input_carrier_by_position: &std::collections::HashMap<usize, PathBuf>,
+    ) -> ProcsubSpawnPlan {
+        fn set(plan: &mut ProcsubSpawnPlan, fd: u32, disposition: ProcsubSpawnFd) {
+            if let Some(slot) = plan.fds.iter_mut().find(|(candidate, _)| *candidate == fd) {
+                slot.1 = disposition;
+            } else {
+                plan.fds.push((fd, disposition));
+            }
+        }
+        let mut plan = ProcsubSpawnPlan::default();
+        for (index, redirect) in list.iter().enumerate().take(position) {
+            if redirect.fd_var.is_some() {
+                continue;
+            }
+            match redirect.kind {
+                crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend => {
+                    if let Some(carrier) = carrier_by_position.get(&index) {
+                        set(&mut plan, 1, ProcsubSpawnFd::CarrierWrite(carrier.clone()));
+                        set(&mut plan, 2, ProcsubSpawnFd::CarrierWrite(carrier.clone()));
+                    } else {
+                        let mode =
+                            if matches!(redirect.kind, crate::parser::RedirectKind::CombinedAppend)
+                            {
+                                ProcsubPlanMode::WriteAppend
+                            } else {
+                                ProcsubPlanMode::WriteTruncate
+                            };
+                        match self.procsub_plan_capture(redirect, mode) {
+                            ProcsubPlanCapture::Captured(file) => {
+                                let first = match mode {
+                                    ProcsubPlanMode::WriteTruncate => {
+                                        ProcsubSpawnFd::TruncatedFile(file.clone())
+                                    }
+                                    _ => ProcsubSpawnFd::File {
+                                        read: None,
+                                        write: Some(file.clone()),
+                                    },
+                                };
+                                let second = match mode {
+                                    ProcsubPlanMode::WriteTruncate => {
+                                        ProcsubSpawnFd::TruncatedFile(file)
+                                    }
+                                    _ => ProcsubSpawnFd::File {
+                                        read: None,
+                                        write: Some(file),
+                                    },
+                                };
+                                set(&mut plan, 1, first);
+                                set(&mut plan, 2, second);
+                            }
+                            ProcsubPlanCapture::Declined => {}
+                            ProcsubPlanCapture::Failed => break,
+                        }
+                    }
+                }
+                crate::parser::RedirectKind::Output
+                | crate::parser::RedirectKind::ClobberOutput
+                | crate::parser::RedirectKind::Append => {
+                    let fd = redirect.fd.unwrap_or(1);
+                    if fd == 0 {
+                        continue;
+                    }
+                    if let Some(carrier) = carrier_by_position.get(&index) {
+                        set(&mut plan, fd, ProcsubSpawnFd::CarrierWrite(carrier.clone()));
+                    } else {
+                        let mode = if matches!(redirect.kind, crate::parser::RedirectKind::Append) {
+                            ProcsubPlanMode::WriteAppend
+                        } else {
+                            ProcsubPlanMode::WriteTruncate
+                        };
+                        match self.procsub_plan_capture(redirect, mode) {
+                            ProcsubPlanCapture::Captured(file) => {
+                                let disposition = match mode {
+                                    ProcsubPlanMode::WriteTruncate => {
+                                        ProcsubSpawnFd::TruncatedFile(file)
+                                    }
+                                    _ => ProcsubSpawnFd::File {
+                                        read: None,
+                                        write: Some(file),
+                                    },
+                                };
+                                set(&mut plan, fd, disposition);
+                            }
+                            ProcsubPlanCapture::Declined => {}
+                            ProcsubPlanCapture::Failed => break,
+                        }
+                    }
+                }
+                crate::parser::RedirectKind::Input => {
+                    let fd = redirect.fd.unwrap_or(0);
+                    if fd == 0 {
+                        continue;
+                    }
+                    if let Some(carrier) = input_carrier_by_position.get(&index) {
+                        set(&mut plan, fd, ProcsubSpawnFd::CarrierRead(carrier.clone()));
+                    } else {
+                        match self.procsub_plan_capture(redirect, ProcsubPlanMode::Read) {
+                            ProcsubPlanCapture::Captured(file) => {
+                                set(
+                                    &mut plan,
+                                    fd,
+                                    ProcsubSpawnFd::File {
+                                        read: Some(file),
+                                        write: None,
+                                    },
+                                );
+                            }
+                            ProcsubPlanCapture::Declined => {}
+                            ProcsubPlanCapture::Failed => break,
+                        }
+                    }
+                }
+                crate::parser::RedirectKind::ReadWrite => {
+                    let fd = redirect.fd.unwrap_or(0);
+                    if fd == 0 {
+                        continue;
+                    }
+                    match self.procsub_plan_capture(redirect, ProcsubPlanMode::ReadWrite) {
+                        ProcsubPlanCapture::Captured(file) => {
+                            set(
+                                &mut plan,
+                                fd,
+                                ProcsubSpawnFd::File {
+                                    read: Some(file.clone()),
+                                    write: Some(file),
+                                },
+                            );
+                        }
+                        ProcsubPlanCapture::Declined => {}
+                        ProcsubPlanCapture::Failed => break,
+                    }
+                }
+                crate::parser::RedirectKind::DuplicateOutput
+                | crate::parser::RedirectKind::DuplicateInput => {
+                    let fd = redirect
+                        .fd
+                        .unwrap_or(if redirect.is_input_side() { 0 } else { 1 });
+                    if fd == 0 {
+                        continue;
+                    }
+                    if is_closed_redirect_target(&redirect.target) {
+                        set(&mut plan, fd, ProcsubSpawnFd::Closed);
+                    } else if redirect_target_is_dup_spelling(&redirect.target) {
+                        if let Some((source_fd, move_fd)) =
+                            redirect_target_fd_and_move(&redirect.target)
+                        {
+                            if source_fd != 0 && source_fd != fd {
+                                let disposition = plan
+                                    .get(source_fd)
+                                    .cloned()
+                                    .unwrap_or_else(|| self.ambient_procsub_spawn_fd(source_fd));
+                                set(&mut plan, fd, disposition);
+                                if move_fd {
+                                    set(&mut plan, source_fd, ProcsubSpawnFd::Closed);
+                                }
+                            }
+                        }
+                    }
+                }
+                crate::parser::RedirectKind::CloseOutput
+                | crate::parser::RedirectKind::CloseInput => {
+                    let fd = redirect
+                        .fd
+                        .unwrap_or(if redirect.is_input_side() { 0 } else { 1 });
+                    if fd != 0 {
+                        set(&mut plan, fd, ProcsubSpawnFd::Closed);
+                    }
+                }
+                _ => {}
+            }
+        }
+        plan
+    }
+
+    /// rubash#2195: try to open the file a prefix redirect names,
+    /// for a spawn plan (see procsub_spawn_plan). Only
+    /// expansion-free plain targets are captured — the stored
+    /// target text is used as-is, so any character whose meaning
+    /// expansion, globbing, tilde, or alias resolution would
+    /// change declines, as do net targets (a connect is a side
+    /// effect beyond an open) and fifos (whose open can block —
+    /// the validation-open machinery carves them out for the same
+    /// reason). No expansion is performed here on purpose: the
+    /// command's own application expands each target at its turn,
+    /// and expanding twice would double any side effect the
+    /// target carries.
+    fn procsub_plan_capture(
+        &mut self,
+        redirect: &Redirect,
+        mode: ProcsubPlanMode,
+    ) -> ProcsubPlanCapture {
+        let target = redirect.target.as_str();
+        if target.is_empty()
+            || target.chars().any(|c| {
+                matches!(
+                    c,
+                    '$' | '`'
+                        | '\''
+                        | '"'
+                        | '\\'
+                        | '*'
+                        | '?'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '~'
+                        | '#'
+                        | ' '
+                        | '\t'
+                        | '<'
+                        | '>'
+                        | '&'
+                        | '|'
+                        | ';'
+                        | '('
+                        | ')'
+                )
+            })
+            || crate::special_paths::is_net_redirect_target(target)
+            || target.starts_with("/dev/fd/")
+            || target.starts_with("/proc/self/fd/")
+        {
+            return ProcsubPlanCapture::Declined;
+        }
+        let session_target =
+            self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars));
+        if super::shell_options::redirect_path_is_fifo(&session_target) {
+            return ProcsubPlanCapture::Declined;
+        }
+        match mode {
+            ProcsubPlanMode::Read => match FileFd::open_read(session_target) {
+                Ok(file) => ProcsubPlanCapture::Captured(file),
+                Err(_) => ProcsubPlanCapture::Failed,
+            },
+            ProcsubPlanMode::WriteAppend => match open_redirect_append(&session_target) {
+                Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
+                    handle: crate::fd::into_handle(file),
+                    path: session_target,
+                })),
+                Err(_) => ProcsubPlanCapture::Failed,
+            },
+            ProcsubPlanMode::WriteTruncate => {
+                match self.create_redirect_output(target, redirect.clobber) {
+                    Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
+                        handle: crate::fd::into_handle(file),
+                        path: session_target,
+                    })),
+                    Err(_) => ProcsubPlanCapture::Failed,
+                }
+            }
+            ProcsubPlanMode::ReadWrite => {
+                match std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&session_target)
+                {
+                    Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
+                        handle: crate::fd::into_handle(file),
+                        path: session_target,
+                    })),
+                    Err(_) => ProcsubPlanCapture::Failed,
+                }
+            }
+        }
+    }
+
+    /// The plan value for an fd the prefix never bound, resolved
+    /// from the shell's CURRENT fd table (rubash#2195): a dup in
+    /// the prefix aimed at an ambient fd clones its endpoint the
+    /// way GNU's fork would inherit it. Non-file endpoints (pipes,
+    /// coproc streams, text inputs) cannot cross the consumer
+    /// spawn's transport and stay Inherit.
+    fn ambient_procsub_spawn_fd(&self, fd: u32) -> ProcsubSpawnFd {
+        let read = match self.fd_table.read_endpoint(fd) {
+            Some(FdReadEndpoint::File(file)) => Some(file),
+            _ => None,
+        };
+        let write = match self.fd_table.write_endpoint(fd) {
+            Some(FdWriteEndpoint::File(file)) => Some(file),
+            Some(FdWriteEndpoint::ProcessSubstitution { path, .. }) => {
+                return ProcsubSpawnFd::CarrierWrite(path);
+            }
+            _ => None,
+        };
+        if read.is_none() && write.is_none() {
+            ProcsubSpawnFd::Inherit
+        } else {
+            ProcsubSpawnFd::File { read, write }
+        }
+    }
+
+    /// Resolve one stdio slot (fd 1 or 2) of a `>(...)` consumer
+    /// spawn from its plan (rubash#2195). File dispositions dup the
+    /// plan's handle inheritable (the coproc_stderr_plan
+    /// precedent); carriers open at spawn (append for a write
+    /// binding, read for an input carrier); Closed maps to the
+    /// null device — the same approximation the coproc stderr
+    /// plan uses for a closed fd 2. Any resolution failure falls
+    /// back to inherit rather than failing the spawn.
+    fn procsub_plan_stdio(&self, disposition: Option<&ProcsubSpawnFd>) -> Stdio {
+        match disposition {
+            None | Some(ProcsubSpawnFd::Inherit) => Stdio::inherit(),
+            Some(ProcsubSpawnFd::File { read, write }) => {
+                let file = write.as_ref().or(read.as_ref());
+                match file
+                    .and_then(|file| crate::fd::duplicate_handle_inheritable(file.handle).ok())
+                {
+                    Some(handle) => Stdio::from(crate::fd::handle_to_file(handle)),
+                    None => Stdio::inherit(),
+                }
+            }
+            Some(ProcsubSpawnFd::TruncatedFile(file)) => {
+                match crate::fd::duplicate_handle_inheritable(file.handle).ok() {
+                    Some(handle) => {
+                        let mut file = crate::fd::handle_to_file(handle);
+                        // See the variant: continue where the
+                        // command's writes ended.
+                        use std::io::Seek as _;
+                        let _ = file.seek(std::io::SeekFrom::End(0));
+                        Stdio::from(file)
+                    }
+                    None => Stdio::inherit(),
+                }
+            }
+            Some(ProcsubSpawnFd::CarrierWrite(path)) => {
+                match std::fs::OpenOptions::new().append(true).open(path) {
+                    Ok(file) => Stdio::from(file),
+                    Err(_) => Stdio::inherit(),
+                }
+            }
+            Some(ProcsubSpawnFd::CarrierRead(path)) => match std::fs::File::open(path) {
+                Ok(file) => Stdio::from(file),
+                Err(_) => Stdio::inherit(),
+            },
+            Some(ProcsubSpawnFd::Closed) => Stdio::null(),
+        }
     }
 
     fn materialize_standalone_process_substitution_word(
@@ -918,6 +1639,7 @@ impl Executor {
                 path,
                 source,
                 line: line,
+                spawn_plan: ProcsubSpawnPlan::default(),
             });
         }
         Ok(())
@@ -937,6 +1659,7 @@ impl Executor {
                     path: path.clone(),
                     source: substitution.source,
                     line,
+                    spawn_plan: ProcsubSpawnPlan::default(),
                 });
                 let display_path = self.process_substitution_output_fd_word(&path);
                 *word = word.replacen(&substitution.target, &display_path, 1);
@@ -1254,6 +1977,7 @@ impl Executor {
                 path,
                 source,
                 line,
+                spawn_plan: ProcsubSpawnPlan::default(),
             })?;
         }
         Ok(())
@@ -1418,7 +2142,12 @@ impl Executor {
         // stall the parent's next command (rubash#1220), and the child's own
         // `exit`/traps/variables stay child-local by construction (subst.c
         // 6421 restore_original_signals, :6628 exit).
-        self.spawn_output_process_substitution_child(&output.source, input, output.line)
+        self.spawn_output_process_substitution_child(
+            &output.source,
+            input,
+            output.line,
+            &output.spawn_plan,
+        )
     }
 
     /// Spawn the `>(body)` consumer detached, the stand-in for GNU's
@@ -1436,6 +2165,7 @@ impl Executor {
         body: &str,
         input: Vec<u8>,
         line: Option<usize>,
+        spawn_plan: &ProcsubSpawnPlan,
     ) -> Result<(), ExecuteError> {
         let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
             .map(std::path::PathBuf::from)
@@ -1542,16 +2272,112 @@ impl Executor {
                 spawn_args[1] = String::new();
             }
         }
+        // rubash#2195: fds >= 3 in the consumer's spawn plan ride
+        // the __RUBASH_FD_* env channel — the same transport the
+        // background respawn uses (compound_exec.rs): each endpoint
+        // is duplicated to a fresh inheritable handle and the child
+        // learns the fd -> handle binding from the env keys its
+        // init restores into its fd table (init.rs); the
+        // parent-side dups are closed once the spawn lands. A
+        // Closed plan fd needs no key: the child inherits nothing
+        // at >= 3 except through this channel.
+        let mut parent_side_dups: Vec<crate::fd::HANDLE> = Vec::new();
+        for (fd, disposition) in &spawn_plan.fds {
+            if *fd < 3 {
+                continue;
+            }
+            match disposition {
+                ProcsubSpawnFd::File { read, write } => {
+                    if let Some(file) = read {
+                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                            env_map.insert(format!("__RUBASH_FD_HANDLE_{fd}"), format!("{dup:#x}"));
+                            env_map.insert(
+                                format!("__RUBASH_FD_PATH_{fd}"),
+                                file.path.to_string_lossy().into_owned(),
+                            );
+                            parent_side_dups.push(dup);
+                        }
+                    }
+                    if let Some(file) = write {
+                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                            env_map
+                                .insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}"));
+                            env_map.insert(
+                                format!("__RUBASH_FD_WPATH_{fd}"),
+                                file.path.to_string_lossy().into_owned(),
+                            );
+                            parent_side_dups.push(dup);
+                        }
+                    }
+                }
+                ProcsubSpawnFd::TruncatedFile(file) => {
+                    if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                        // Seek the dup (the shared description) to
+                        // end-of-file before it crosses: see the
+                        // variant's offset note.
+                        let mut seeked = crate::fd::handle_to_file(dup);
+                        use std::io::Seek as _;
+                        let _ = seeked.seek(std::io::SeekFrom::End(0));
+                        let dup = crate::fd::into_handle(seeked);
+                        env_map.insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}"));
+                        env_map.insert(
+                            format!("__RUBASH_FD_WPATH_{fd}"),
+                            file.path.to_string_lossy().into_owned(),
+                        );
+                        parent_side_dups.push(dup);
+                    }
+                }
+                ProcsubSpawnFd::CarrierWrite(path) => {
+                    if let Ok(file) = std::fs::OpenOptions::new().append(true).open(path) {
+                        let handle = crate::fd::into_handle(file);
+                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(handle) {
+                            env_map
+                                .insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}"));
+                            env_map.insert(
+                                format!("__RUBASH_FD_WPATH_{fd}"),
+                                path.to_string_lossy().into_owned(),
+                            );
+                            parent_side_dups.push(dup);
+                        }
+                        crate::fd::close_handle(handle);
+                    }
+                }
+                ProcsubSpawnFd::CarrierRead(path) => {
+                    if let Ok(file) = std::fs::File::open(path) {
+                        let handle = crate::fd::into_handle(file);
+                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(handle) {
+                            env_map.insert(format!("__RUBASH_FD_HANDLE_{fd}"), format!("{dup:#x}"));
+                            env_map.insert(
+                                format!("__RUBASH_FD_PATH_{fd}"),
+                                path.to_string_lossy().into_owned(),
+                            );
+                            parent_side_dups.push(dup);
+                        }
+                        crate::fd::close_handle(handle);
+                    }
+                }
+                ProcsubSpawnFd::Inherit | ProcsubSpawnFd::Closed => {}
+            }
+        }
         let mut process = std::process::Command::new(&exe);
         process
             .args(&spawn_args)
             .envs(&env_map)
+            // rubash#2195: fds 1-2 follow the spawn plan (the
+            // prefix state at the substitution's own redirect);
+            // fd 0 stays the payload pipe — GNU's
+            // process_substitute overrides it with the pipe read
+            // end (subst.c:6362).
             .stdin(Stdio::piped())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+            .stdout(self.procsub_plan_stdio(spawn_plan.get(1)))
+            .stderr(self.procsub_plan_stdio(spawn_plan.get(2)));
         process.current_dir(&self.shell_state.cwd);
         suppress_orphan_console(&mut process);
-        let mut child = process.spawn()?;
+        let spawn_result = process.spawn();
+        for dup in parent_side_dups {
+            crate::fd::close_handle(dup);
+        }
+        let mut child = spawn_result?;
         let pid = child.id();
         adopt_orphan_console(pid);
         if let Some(mut stdin) = child.stdin.take() {
