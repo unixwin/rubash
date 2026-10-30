@@ -1844,6 +1844,7 @@ impl Executor {
             read_interrupted_signal: None,
             read_sigint_guard_armed: false,
             read_eof_no_delimiter: false,
+            read_process_stdin_eof: false,
             // rubash#1141: the fork copy reads the SAME staged input
             // stream as its parent (FUNCTION_STDIN crosses in the cloned
             // shell state), so its production timing crosses too — the

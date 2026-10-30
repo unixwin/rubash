@@ -1583,6 +1583,19 @@ pub struct Executor {
     /// partial record is still assigned; only the status becomes 1. Merged
     /// with the fd-table copy by `take_read_eof_no_delimiter`.
     pub(crate) read_eof_no_delimiter: bool,
+    /// niubash#684: the armed inherited-stdin transport read fd 0 itself
+    /// and hit a genuine EOF (zero-length read) with no record to serve.
+    /// GNU builtin_read reads exactly ONE descriptor
+    /// (builtins/read.def:294) and a zread EOF ends the builtin
+    /// (read.def:767 `eof = 1`; :949 `retval = eof ? EXECUTION_FAILURE`)
+    /// — EOF is a verdict, not a "try the next transport" signal. The
+    /// read builtin's None cascade consults this flag so an EOF on the
+    /// process stdin is never re-asked of a second blocking reader
+    /// (which swallowed the EOF and consumed the NEXT input line as the
+    /// record). Reset beside read_eof_no_delimiter at every acquisition;
+    /// set only by read_inherited_process_stdin's EOF-with-nothing
+    /// return, never by a timeout/interrupt break.
+    pub(crate) read_process_stdin_eof: bool,
     /// rubash#1141: production timing of the input currently staged on
     /// FUNCTION_STDIN (a pipeline stage's captured producer output), so
     /// `read`/`select` can judge an armed deadline against the stream's

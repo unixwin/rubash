@@ -213,6 +213,9 @@ impl Executor {
         // when they exhaust their input before finding it.
         self.read_eof_no_delimiter = false;
         self.fd_table.read_eof_no_delimiter = false;
+        // niubash#684: same reset discipline for the process-stdin EOF
+        // verdict — it describes THIS acquisition only.
+        self.read_process_stdin_eof = false;
         // read.def check_read_timeout runs at the top of every read-loop
         // iteration — including before the first byte — so a deadline that
         // already expired during setup reports timeout even on buffered
@@ -1039,6 +1042,18 @@ impl Executor {
             return None;
         }
 
+        // niubash#684: the fd-0 probe above already routed an
+        // InheritedProcessStdin endpoint through the inherited reader
+        // (read_virtual_fd_stdin), and it delivered the descriptor's
+        // EOF verdict. The mirror → inherited chain below would ask the
+        // SAME descriptor a second time — re-blocking and consuming the
+        // next input line as a record — where GNU reads one descriptor
+        // once (read.def:294) and ends the builtin at its EOF
+        // (read.def:767, :949).
+        if self.read_process_stdin_eof {
+            return None;
+        }
+
         self.read_function_stdin(delimiter, char_limit, exact_char_limit, escape_aware, raw)
             .or_else(|| {
                 self.read_inherited_process_stdin(
@@ -1082,6 +1097,14 @@ impl Executor {
             raw,
         ) {
             return Some(line);
+        }
+        // niubash#684: the inherited transport already delivered fd 0's
+        // EOF verdict — the raw fallback reader would only re-block on
+        // the same descriptor and swallow the next input line as a
+        // record GNU never assigns (read.def:767/:949 end the builtin
+        // at the first EOF).
+        if self.read_process_stdin_eof {
+            return None;
         }
         match read_stdin_until(
             self.read_deadline,
@@ -1809,6 +1832,16 @@ impl Executor {
         // break with eof=1); conflating the two made the empty line fail the
         // builtin and swallow the following record (niubash#275).
         if output.is_empty() && !delimiter_found {
+            // niubash#684: a genuine EOF (the raw read returned empty)
+            // with nothing served is the builtin's verdict, recorded so
+            // the caller's fallback cascade does not re-block on a
+            // second transport — GNU reads ONE descriptor and zread's
+            // EOF ends the builtin (read.def:767, :949). Timeout and
+            // interrupt breaks reach here with `eof` clear and leave
+            // the flag untouched; those verdicts have their own arms.
+            if eof {
+                self.read_process_stdin_eof = true;
+            }
             return None;
         }
         // read.def:949 eof: the handle closed before the delimiter.
