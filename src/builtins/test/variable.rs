@@ -1,5 +1,4 @@
 use crate::executor::markers::STORAGE_WORD_PREFIX;
-use std::env;
 
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
@@ -72,6 +71,17 @@ fn is_valid_variable_name(name: &str) -> bool {
     chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
+/// Set-ness for `test -v` / `[[ -v ]]`, over the shell variable table
+/// ONLY. GNU test.c:650-677 (unary `-v`) is `find_variable(arg)`; an
+/// environment entry the shell never imported is unset even while the
+/// raw process environment still carries it — GNU's importer
+/// (variables.c:368 initialize_shell_variables) binds such entries into
+/// the separate `invalid_env` table (variables.c:126, :3307
+/// bind_invalid_envvar) that find_variable never consults. The process
+/// environment is therefore never a fallback here (rubash#2073): this
+/// engine's ingest drops undecodable entries the same way (rubash#2064),
+/// so consulting `env::var_os` reported entries the shell does not hold,
+/// including entries a host adds after the session was built.
 pub(crate) fn variable_is_set(operand: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
     if let Some(verdict) = dash_v_nameref_verdict(operand, env_vars) {
         return verdict;
@@ -113,7 +123,7 @@ pub(crate) fn variable_is_set(operand: &str, env_vars: &crate::shell::var_table:
                 .map(|value| !array_entries(value).is_empty())
                 .unwrap_or(false);
         }
-        return env_vars.contains_key(name) || env::var_os(name).is_some();
+        return env_vars.contains_key(name);
     }
 
     // GNU test.c:650-668: a `[`-shaped operand that fails
@@ -130,7 +140,7 @@ pub(crate) fn variable_is_set(operand: &str, env_vars: &crate::shell::var_table:
             operand, false, false, env_vars,
         );
     if !valid_arrayref {
-        return env_vars.contains_key(operand) || env::var_os(operand).is_some();
+        return env_vars.contains_key(operand);
     }
 
     if let Some((name, subscript)) = parse_array_subscript(operand) {
@@ -174,9 +184,7 @@ pub(crate) fn variable_is_set(operand: &str, env_vars: &crate::shell::var_table:
             .unwrap_or(false);
     }
 
-    env_vars.contains_key(operand)
-        || env::var_os(operand).is_some()
-        || dynamic_parameter_is_set(operand, env_vars)
+    env_vars.contains_key(operand) || dynamic_parameter_is_set(operand, env_vars)
 }
 
 // GNU builtins/set.def:928: `unset -v` unbinds a dynamic variable like an
