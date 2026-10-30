@@ -483,6 +483,23 @@ impl Executor {
                 .env_vars
                 .insert(FD0_MIRROR_FACT.to_string(), fact);
         }
+        // rubash#2170: the staged mirror IS fd 0's binding for the
+        // scope — GNU do_redirection_internal (redir.c:767-955)
+        // installs the command's own redirection on fd 0, superseding
+        // whatever the enclosing scope bound there. Every descriptor
+        // branch of this bind replaces the fd-table entry; the mirror
+        // branch left it in place, so a persistent File binding
+        // (`exec 0<file`) kept governing the body's readers — the
+        // builtin read's fd-table arm, the external-child stdin
+        // wiring and the fd-alias fact sync all answered from the
+        // superseded file while the staged channel claimed the
+        // mirror's source. Displace the entry for the scope's
+        // duration: the guard snapshotted it above and restores it
+        // verbatim at scope end, and with the slot empty every
+        // consumer sees the state the mirror's design always assumed
+        // (the #2131 fact pass already treats an absent slot as
+        // mirror-governed).
+        self.fd_table.entries.remove(&0);
         Ok(Some(CommandFd0InputGuard {
             saved_fd0_entry,
             saved_function_stdin,
