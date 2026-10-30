@@ -34,7 +34,32 @@ impl Executor {
             && !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "physical")
         {
             if let Some(pwd) = self.shell_state.env_vars.get("PWD") {
-                if pwd.starts_with('/') {
+                // GNU builtins/common.c get_working_directory: `pwd`
+                // prints the_current_working_directory — the shell's
+                // VALIDATED logical cwd — never the raw $PWD variable.
+                // A user assignment to $PWD desynchronizes the variable
+                // and bash keeps printing the validated value
+                // (rubash#2143). Echo the variable only when it IS the
+                // validated value (logical_pwd_if_current, the same
+                // same-directory judgment the full path below uses);
+                // otherwise fall through to the full path, which
+                // prints the physical session cwd. On Windows the
+                // bridge state (the __RUBASH_PHYSICAL_PWD marker set by
+                // cd's logical bridge branch) has no physical directory
+                // to validate against, so its '/'-spelled $PWD stays
+                // echoable exactly as before.
+                if pwd.starts_with('/')
+                    && (crate::builtins::pwd::logical_pwd_if_current(
+                        &self.shell_state.cwd,
+                        &self.shell_state.env_vars,
+                    )
+                    .is_some()
+                        || (cfg!(windows)
+                            && self
+                                .shell_state
+                                .env_vars
+                                .contains_key("__RUBASH_PHYSICAL_PWD")))
+                {
                     writeln!(stdout, "{pwd}")?;
                     return Ok(0);
                 }
