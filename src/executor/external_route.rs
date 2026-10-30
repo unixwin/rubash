@@ -372,13 +372,14 @@ mod tests {
         (executor, record)
     }
 
-    /// The battery's externals (`dd`, `printenv`) must resolve to
-    /// the platform's own tools on every CI runner: an inherited
-    /// PATH can carry another platform's binaries ahead of them
-    /// (the macOS runner's did — resolution landed on a foreign
-    /// binary and every spawn twin failed with "cannot execute
-    /// binary file" while the route arm, which never execs,
-    /// passed). Pin the system tool path in both arms alike.
+    /// The battery's externals (`dd`, `printenv`) must resolve
+    /// deterministically to the platform's own tools on every
+    /// runner: pin the system tool path in both arms alike. (The
+    /// execution battery is Linux-gated — on the macOS runner the
+    /// engine's binary classification refuses the bare Mach-O
+    /// spawn from a lib test ("cannot execute binary file"), a
+    /// platform gap outside this seam; the annotation test,
+    /// which never execs, stays unix-wide.)
     fn pin_tool_path(executor: &mut Executor) {
         assert_eq!(run(executor, "export PATH=/usr/bin:/bin"), 0);
     }
@@ -452,7 +453,7 @@ mod tests {
         assert_eq!(outcomes[0], outcomes[1], "route/spawn divergence in {tag}");
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn stdin_and_redirect_shapes_are_byte_equivalent() {
         // Heredoc body through the route's temp-file realization.
@@ -529,7 +530,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn capture_and_env_shapes_are_byte_equivalent() {
         // Command-substitution capture past the pipe buffer: the
@@ -592,7 +593,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn cwd_reaches_the_provider_and_the_child_environment() {
         let dir = scratch("cwd");
@@ -613,7 +614,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn status_and_cancellation_plumbing() {
         // A provider-reported status becomes $? verbatim.
@@ -634,7 +635,7 @@ mod tests {
         assert_eq!(run(&mut executor, "dd < /dev/null"), 130);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn pipeline_stages_are_not_consulted_in_v1() {
         let dir = scratch("pipe");
@@ -649,7 +650,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn declining_provider_is_byte_identical_to_no_provider() {
         assert_equivalent(
