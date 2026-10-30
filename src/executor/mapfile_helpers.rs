@@ -284,6 +284,22 @@ impl Executor {
         if is_closed_redirect_target(&target) {
             return None;
         }
+        // rubash#2235: an fd-alias target (/dev/fd/N, /proc/self/fd/N)
+        // names the fd table's endpoint at N (the rubash#1963 alias
+        // layer) — above all a list-level input procsub the
+        // materializer rewrote to exactly this spelling. Drain the
+        // endpoint through the alias service (mapfile reads to EOF
+        // by design); reading the spelling as a filesystem path
+        // would read the process's unrelated real fd N.
+        if let Some(alias_fd) = dev_stdio_redirect_fd(&target) {
+            if self.fd_table.read_endpoint(alias_fd).is_some() {
+                let mut file = self.open_fd_read_endpoint(alias_fd, &target).ok()?;
+                let mut input = String::new();
+                use std::io::Read as _;
+                file.read_to_string(&mut input).ok()?;
+                return Some(input);
+            }
+        }
         // niubash#177: same operand resolution as open_input_redirect —
         // a virtual-root input operand may exist only under its `.exe`
         // spelling on disk.
