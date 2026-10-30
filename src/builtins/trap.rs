@@ -816,6 +816,40 @@ fn add_orig_ignored_signal(env_vars: &mut VarTable, signal: &str) {
     store_orig_ignored_signals(env_vars, signals);
 }
 
+/// Canonicalize the transported entry-ignore set (TRAP_ORIG_IGNORES) to
+/// the trap table's number-derived keys, in place. GNU keeps the entry
+/// dispositions as original_signals[] indexed by signal NUMBER
+/// (trap.c:136-150) and decode_signal (trap.c:236) resolves every
+/// operand spelling to that number; names are a display spelling only.
+/// The transport's own writer emits this table's canonical names, but a
+/// foreign parent may spell an entry any way the signal can be written:
+/// a bare number — the ONLY spelling for a bionic hole, whose table has
+/// no name to give (rubash#1124/#2193) — or a short name (`USR1` for
+/// `SIGUSR1`). Consumption keyed on the raw spelling dropped those
+/// entries onto a phantom key no lookup ever uses: the rebuild below
+/// inserted `__RUBASH_TRAP_38` / `__RUBASH_TRAP_USR1` while every reader
+/// (canonical_trap_order, normalized operands, is_hard_ignored) keys by
+/// the canonical slot key. Map each entry through normalize_signal —
+/// numeric payloads land on their slot, name payloads resolve through
+/// SIGNALS to the same slot — and store the result back, so the rebuild,
+/// the hard-ignore checks, and the child-boundary re-export all read one
+/// canonical set (store_orig_ignored_signals sorts/dedups, so dual
+/// spellings of one signal collapse). Entries naming no signal in this
+/// platform's table, and the EXIT/DEBUG/ERR/RETURN pseudo-signals (never
+/// transportable dispositions — the writer excludes them), are dropped:
+/// they key no trap here.
+fn canonicalize_orig_ignored_signals(env_vars: &mut VarTable) {
+    if !env_vars.contains_key(TRAP_ORIG_IGNORES) {
+        return;
+    }
+    let canonical: Vec<String> = orig_ignored_signals(env_vars)
+        .into_iter()
+        .filter_map(|entry| normalize_signal(&entry))
+        .filter(|key| !matches!(key.as_str(), "EXIT" | "DEBUG" | "ERR" | "RETURN"))
+        .collect();
+    store_orig_ignored_signals(env_vars, canonical);
+}
+
 /// Seed the traps a shell inherits from its environment at startup. WSL's
 /// init leaves SIGRTMIN ignored for every child process, so the GNU 5.3.0
 /// contract baseline lists "trap -- '' SIGRTMIN" in every shell; model that
@@ -824,6 +858,11 @@ fn add_orig_ignored_signal(env_vars: &mut VarTable, signal: &str) {
 /// child) become hard-ignored for this shell, matching trap.c's
 /// original_signals == SIG_IGN startup handling.
 pub(crate) fn seed_startup_traps(env_vars: &mut VarTable) {
+    // rubash#2193: the transported set is consumed here, at startup —
+    // key it by signal number before the fold and the rebuild read it,
+    // so a bare-number or short-name payload reconstructs the same
+    // entry-ignore a full-name payload does.
+    canonicalize_orig_ignored_signals(env_vars);
     // rubash#1124: fold this process's ENTRY dispositions into the
     // transported set before the rebuild below. GNU trap.c
     // initialize_traps snapshots original_signals[] at startup: a
@@ -1254,6 +1293,77 @@ mod tests {
         assert_eq!(display_signal_name("SIGUSR1", false), "SIGUSR1");
         assert_eq!(display_signal_name("EXIT", true), "EXIT");
         assert_eq!(display_signal_name("ERR", false), "ERR");
+    }
+
+    /// rubash#2193: startup consumption keys the transported entry-ignore
+    /// set by signal number. A short-name payload and its full-name
+    /// spelling collapse onto the one canonical key; entries naming no
+    /// signal in this table and the pseudo-signals are dropped.
+    #[test]
+    fn orig_ignored_transport_canonicalizes_by_number() {
+        let mut env_vars = VarTable::default();
+        env_vars.insert(
+            TRAP_ORIG_IGNORES.to_string(),
+            "USR1:SIGUSR1:BOGUS:EXIT:0".to_string(),
+        );
+        super::canonicalize_orig_ignored_signals(&mut env_vars);
+        assert_eq!(
+            super::orig_ignored_signals(&env_vars),
+            vec!["SIGUSR1".to_string()]
+        );
+    }
+
+    /// rubash#2193 on the Linux-numbering tables (glibc and the Windows
+    /// wire format): signal 38's slot is named, so a bare-number payload
+    /// and the full-name spelling are the same entry.
+    #[cfg(any(target_os = "linux", not(unix)))]
+    #[test]
+    fn orig_ignored_transport_number_keys_to_named_slot() {
+        let mut env_vars = VarTable::default();
+        env_vars.insert(TRAP_ORIG_IGNORES.to_string(), "38".to_string());
+        super::canonicalize_orig_ignored_signals(&mut env_vars);
+        assert_eq!(
+            super::orig_ignored_signals(&env_vars),
+            vec!["SIGRTMIN+4".to_string()]
+        );
+
+        let mut env_vars = VarTable::default();
+        env_vars.insert(TRAP_ORIG_IGNORES.to_string(), "38:SIGRTMIN+4".to_string());
+        super::canonicalize_orig_ignored_signals(&mut env_vars);
+        assert_eq!(
+            super::orig_ignored_signals(&env_vars),
+            vec!["SIGRTMIN+4".to_string()]
+        );
+    }
+
+    /// rubash#2193 on bionic: signal 38 is a hole (32..40 nameless), so
+    /// the bare number IS the canonical key and survives unchanged.
+    #[cfg(target_os = "android")]
+    #[test]
+    fn orig_ignored_transport_number_keys_to_hole_slot() {
+        let mut env_vars = VarTable::default();
+        env_vars.insert(TRAP_ORIG_IGNORES.to_string(), "38".to_string());
+        super::canonicalize_orig_ignored_signals(&mut env_vars);
+        assert_eq!(
+            super::orig_ignored_signals(&env_vars),
+            vec!["38".to_string()]
+        );
+    }
+
+    /// rubash#2193: after seeding, a short-name transport payload has
+    /// rebuilt the canonical trap-table entry and is hard-ignored under
+    /// its canonical key (set/reset become silent no-ops).
+    #[test]
+    fn seed_startup_traps_rebuilds_short_name_transport() {
+        let mut env_vars = VarTable::default();
+        env_vars.insert(TRAP_ORIG_IGNORES.to_string(), "USR1".to_string());
+        super::seed_startup_traps(&mut env_vars);
+        assert_eq!(
+            env_vars.get(&super::trap_key("SIGUSR1")),
+            Some(&String::new())
+        );
+        assert!(super::trap_list(&env_vars).contains("SIGUSR1"));
+        assert!(super::is_hard_ignored(&env_vars, "SIGUSR1"));
     }
 
     /// The trap table and the kill builtin's table must name the same signal
