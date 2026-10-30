@@ -55,6 +55,22 @@ impl Executor {
         cmd: &CommandNode,
         kind: LoopControlKind,
     ) -> Result<(), ExecuteError> {
+        // GNU builtins/common.h:29-36 CHECK_HELPOPT (break.def /
+        // continue.def run it first): the RAW first word `--help`
+        // prints the long help to stdout and the builtin RETURNS
+        // EX_USAGE (258 > EX_SHERRBASE) — before check_loop_level, so
+        // there is no "only meaningful" diagnostic outside a loop, and
+        // without setting `breaking`/`continuing`, so a loop body runs
+        // on after it. Mirrors execute_return's --help face
+        // (rubash#2128, the #1229 family's residual face).
+        if cmd.words.get(1).map(String::as_str) == Some("--help") {
+            let mut stdout = Vec::new();
+            crate::builtins::help::print_builtin_help(kind.name(), &mut stdout)?;
+            self.write_buffered_builtin_output(cmd, &stdout, &[])?;
+            self.exit_code = 2;
+            self.special_builtin_failed.set(true);
+            return Ok(());
+        }
         let mut stderr = Vec::new();
         // GNU loop_level as seen by this executor: loops executing HERE
         // (loop_depth) plus the depth a fork boundary carried in
