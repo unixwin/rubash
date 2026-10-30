@@ -1245,11 +1245,44 @@ impl Executor {
 
     fn command_substitution_cd_pwd_output_impl(&self, source: &str) -> Option<String> {
         let (left, right) = command_substitution_cd_pwd_shape(source)?;
-        let target = if let Some(word) = split_shell_words(left.trim()).get(1) {
+        // rubash#2219: operand presence is a WORD question, not a text
+        // question — the split (split_shell_words_with_quote_info) now
+        // reports a quoted empty word, and the cases separate on what
+        // expansion does to the word:
+        //   * the raw word is already empty (`cd ""`, `cd ''`): the word
+        //     exists but names nothing — GNU's cd refuses it as a null
+        //     directory (builtins/cd.def:333). Decided here, before any
+        //     expansion runs: decline to the real cd/pwd pair, which
+        //     owns that verdict.
+        //   * the word expands to nothing (`cd "$e"`, `cd $e`): quoted,
+        //     that is again the null-directory refusal; unquoted, the
+        //     word is removed entirely and the body is the operand-less
+        //     $HOME move (cd.def:316). The two verdicts are the real
+        //     builtin's to give — decline, as the set-but-empty HOME
+        //     arm below already declines rather than drift.
+        //   * an UNQUOTED word expands to text containing blanks: the
+        //     real parse field-splits it (subst.c
+        //     expand_word_list_internal), which can make the body a
+        //     multi-operand cd — a shape this single-target model
+        //     cannot express. Decline. (A quoted word never splits, so
+        //     its blanks stay fast-path territory.)
+        let target = if let Some((word, quoted)) = split_shell_words_with_quote_info(left.trim())
+            .into_iter()
+            .nth(1)
+        {
+            if word.is_empty() {
+                return None;
+            }
             // GNU subst.c expands the cd target with expand_string (parameter,
             // tilde) but not pathname expansion: `cd` takes a single directory,
             // so a glob pattern would be a literal path, not a match list.
-            self.expand_word(word)
+            let expanded = self.expand_word(&word);
+            if expanded.is_empty()
+                || (!quoted && expanded.chars().any(|ch| ch == ' ' || ch == '\t'))
+            {
+                return None;
+            }
+            expanded
         } else {
             // GNU builtins/cd.def:316-322: the operand-less cd refuses only
             // a MISSING HOME (`dirname == 0`); a set-but-EMPTY value flows
