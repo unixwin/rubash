@@ -58,7 +58,31 @@ fn ensure_bash_shim_fixture() {
     fs::create_dir_all(&bin).unwrap();
     fs::create_dir_all(root.join("tmp")).unwrap();
     fs::copy(env!("CARGO_BIN_EXE_rubash"), root.join("winuxsh.exe")).unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_bash"), bin.join("bash.exe")).unwrap();
+    // The `bash` face is the feature-gated shim bin (Cargo.toml:
+    // required-features = ["windows-shim"], and the default feature
+    // set is empty), so lanes that do not opt into the shim never
+    // build it and CARGO_BIN_EXE_bash names a path that does not
+    // exist — copying it panicked here on the Linux cli lane
+    // (rubash#2190). Fall back to the engine binary itself: the
+    // fixture only needs a working bash at the face path, and lanes
+    // that do build the shim keep using the real one.
+    let bash_face = Path::new(env!("CARGO_BIN_EXE_bash"));
+    let bash_source: &Path = if bash_face.exists() {
+        bash_face
+    } else {
+        Path::new(env!("CARGO_BIN_EXE_rubash"))
+    };
+    fs::copy(bash_source, bin.join("bash.exe")).unwrap();
+    // The generated launcher's nested-shell entry points exec the
+    // shell path baked in at bashdb's configure time (the fixture
+    // build's /usr/local/bin/bash; see the environment note on
+    // bashdb_shell_nested_bash_uses_compatible_shim). Mirror that
+    // layout inside the fixture root so the nested exec has a
+    // resolvable target under the root the tests install.
+    let local_bin = root.join("usr").join("local").join("bin");
+    fs::create_dir_all(&local_bin).unwrap();
+    fs::copy(bash_source, local_bin.join("bash.exe")).unwrap();
+    fs::copy(bash_source, local_bin.join("bash")).unwrap();
 }
 
 #[test]
@@ -942,19 +966,51 @@ fn bash_compat_debugger_options_run_init_file_before_script() {
     fs::write(&init, "INIT_VALUE=ready\n").unwrap();
     fs::write(&script, "printf 'value=%s\\n' \"$INIT_VALUE\"\n").unwrap();
 
-    let output = crate::rubash_command()
+    // Whether a bashdb starter exists is an environment property, not
+    // the behavior under test. The --debugger starter search
+    // (src/main.rs start_debugger, mirroring GNU shell.c:1547) is
+    // $BASHDB_START_FILE, then /usr/local/share and /usr/share. The CI
+    // cli lane installs bashdb under target/bashdb-install, a
+    // developer machine may carry a system prefix, and a bare
+    // checkout has neither — the old unconditional empty-stderr
+    // assertion only held on starter-equipped machines (rubash#2190).
+    // Point the documented BASHDB_START_FILE seam at the lane fixture
+    // when present so the real starter runs there. With no starter
+    // anywhere, GNU's outcome is the diagnostic pair (shell.c:
+    // 1556-1561; oracle-verified byte shape apart from the program
+    // leader and the baked prefix) while the init file and the script
+    // still run — assert exactly that pair.
+    let fixture_starter = Path::new("target/bashdb-install/share/bashdb/bashdb-main.inc");
+    let mut command = crate::rubash_command();
+    command
         .arg("--init-file")
         .arg(&init)
         .arg("--debugger")
-        .arg(&script)
-        .output()
-        .expect("run rubash debugger options");
+        .arg(&script);
+    let starter_found = if std::env::var_os("BASHDB_START_FILE").is_some_and(|v| !v.is_empty()) {
+        true
+    } else if fixture_starter.exists() {
+        command.env("BASHDB_START_FILE", fixture_starter);
+        true
+    } else {
+        Path::new("/usr/local/share/bashdb/bashdb-main.inc").exists()
+            || Path::new("/usr/share/bashdb/bashdb-main.inc").exists()
+    };
+    let output = command.output().expect("run rubash debugger options");
 
     let _ = fs::remove_file(&init);
     let _ = fs::remove_file(&script);
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "value=ready\n");
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    if starter_found {
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    } else {
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "rubash: /usr/local/share/bashdb/bashdb-main.inc: No such file or directory\n\
+             rubash: warning: cannot start debugger; debugging mode disabled\n"
+        );
+    }
 }
 
 #[test]
