@@ -875,6 +875,26 @@ impl Executor {
     ///   never opened, where the marks are simply not consulted.
     /// Rewritten fresh each call, like the other marks.
     pub(in crate::executor) fn sync_fd_alias_facts(&mut self, cmd: Option<&CommandNode>) {
+        let redirects = cmd.map(|command| command.redirects.as_slice());
+        self.sync_fd_alias_facts_scoped(cmd, redirects);
+    }
+
+    /// The sync above, with the evaluating command's redirection list
+    /// supplied separately from the command node: `[[ ]]` binds only
+    /// its fds 1/2 and evaluates through no CommandNode, so its caller
+    /// stashes the list on the executor (rubash#2131). The list drives
+    /// the own-redirect overlay at the end: a command's own
+    /// redirections are applied by GNU before its builtin runs
+    /// (execute_cmd.c + redir.c do_redirections precede the builtin
+    /// call), but rubash's builtin paths stage their payloads without
+    /// binding fd-table entries, so without the overlay the sync
+    /// answers every self-redirected descriptor from the binding the
+    /// command superseded.
+    pub(in crate::executor) fn sync_fd_alias_facts_scoped(
+        &mut self,
+        cmd: Option<&CommandNode>,
+        redirects: Option<&[crate::parser::Redirect]>,
+    ) {
         self.shell_state.env_vars.retain(|key, _| {
             !key.starts_with(FD_TARGET_PREFIX) && !key.starts_with(FD_ACCESS_PREFIX)
         });
@@ -1089,6 +1109,19 @@ impl Executor {
                 .env_vars
                 .insert(format!("{FD_ACCESS_PREFIX}{fd}"), value);
         }
+        // rubash#2131: two binding shapes install no fd-table row for
+        // the loop above to classify. A staged FUNCTION_STDIN mirror
+        // (a compound's text-channel rebind) recorded its source's
+        // fact in FD0_MIRROR_FACT beside the mirror; state it over
+        // the ambient entry it superseded. And the evaluating
+        // command's own redirections — applied by GNU before the
+        // builtin runs, staged as payloads here without binding —
+        // state each redirected descriptor's fact from its winning
+        // redirect, over everything above.
+        self.apply_fd0_mirror_fact();
+        if let Some(redirects) = redirects {
+            self.apply_own_redirect_facts(redirects);
+        }
         // rubash#1902 (stage face): a pipeline stage whose fd 0 is the
         // staged FUNCTION_STDIN mirror has NO fd-table row — the stage
         // funnels clear the slot so the mirror governs the stage's
@@ -1135,6 +1168,322 @@ impl Executor {
             self.shell_state
                 .env_vars
                 .insert(format!("{FD_ACCESS_PREFIX}0"), "prw".to_string());
+        }
+    }
+
+    /// Write one descriptor's fd-alias fact in the sync's mark
+    /// vocabulary, superseding whatever mark the descriptor carried:
+    /// a target mark and an access mark never coexist (the entries
+    /// loop's own shape), and `Closed` is the empty-access tombstone.
+    /// `DupOf` copies the source descriptor's marks as they stand at
+    /// this point in the sync — GNU's dup2 hands over the source's
+    /// open file description (redir.c r_duplicating_input/output) —
+    /// and an unmarked source answers as closed.
+    fn apply_fd_fact_mark(&mut self, fd: u32, mark: &FdFactMark) {
+        self.shell_state
+            .env_vars
+            .remove(&format!("{FD_TARGET_PREFIX}{fd}"));
+        self.shell_state
+            .env_vars
+            .remove(&format!("{FD_ACCESS_PREFIX}{fd}"));
+        match mark {
+            FdFactMark::Target(target) => {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_TARGET_PREFIX}{fd}"), target.clone());
+            }
+            FdFactMark::Access(access) => {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_ACCESS_PREFIX}{fd}"), access.clone());
+            }
+            FdFactMark::Closed => {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_ACCESS_PREFIX}{fd}"), String::new());
+            }
+            FdFactMark::DupOf(source) => {
+                if *source == fd {
+                    return;
+                }
+                let source_target = self
+                    .shell_state
+                    .env_vars
+                    .get(&format!("{FD_TARGET_PREFIX}{source}"))
+                    .cloned();
+                let source_access = self
+                    .shell_state
+                    .env_vars
+                    .get(&format!("{FD_ACCESS_PREFIX}{source}"))
+                    .cloned();
+                match (source_target, source_access) {
+                    (Some(target), _) => {
+                        self.shell_state
+                            .env_vars
+                            .insert(format!("{FD_TARGET_PREFIX}{fd}"), target);
+                    }
+                    (None, Some(access)) => {
+                        self.shell_state
+                            .env_vars
+                            .insert(format!("{FD_ACCESS_PREFIX}{fd}"), access);
+                    }
+                    (None, None) => {
+                        self.shell_state
+                            .env_vars
+                            .insert(format!("{FD_ACCESS_PREFIX}{fd}"), String::new());
+                    }
+                }
+            }
+            FdFactMark::Unchanged => {}
+        }
+    }
+
+    /// The fd-alias fact one redirect will have installed once GNU's
+    /// do_redirections applies it (redir.c:767-955
+    /// do_redirection_internal), judged from the redirect itself with
+    /// the same target constructions the bind paths use, so a stated
+    /// fact can never disagree with the binding it describes
+    /// (rubash#2131). Returns the (descriptor, fact) pairs the
+    /// redirect speaks for — two for the `&>` family, whose single
+    /// open file description lands on both stdio descriptors
+    /// (redir.c:832-838 r_err_and_out).
+    fn fd_fact_mark_for_redirect(
+        &self,
+        redirect: &crate::parser::Redirect,
+    ) -> Vec<(u32, FdFactMark)> {
+        use crate::parser::RedirectKind;
+        let input_side = redirect.is_input_side();
+        let fd = redirect.fd.unwrap_or(if input_side { 0 } else { 1 });
+        let target = self.expand_redirect_target(redirect);
+        let closed = is_closed_redirect_target(&target);
+        let mark = match redirect.kind {
+            RedirectKind::Unknown => return Vec::new(),
+            RedirectKind::CloseInput | RedirectKind::CloseOutput => FdFactMark::Closed,
+            RedirectKind::HereDoc | RedirectKind::HereString => {
+                // GNU feeds both from a pipe (or a temp file with the
+                // pipe's predicates); the binds state `prw` for them.
+                FdFactMark::Access("prw".to_string())
+            }
+            RedirectKind::DuplicateInput => {
+                if closed {
+                    FdFactMark::Closed
+                } else if let Some((source, _)) =
+                    super::execution_misc::redirect_target_fd_and_move(&target)
+                {
+                    FdFactMark::DupOf(source)
+                } else if let Some(source) = dev_stdio_redirect_fd(&target) {
+                    FdFactMark::DupOf(source)
+                } else {
+                    FdFactMark::Unchanged
+                }
+            }
+            RedirectKind::DuplicateOutput => {
+                if closed {
+                    FdFactMark::Closed
+                } else if let Some((source, _)) =
+                    super::execution_misc::redirect_target_fd_and_move(&target)
+                {
+                    FdFactMark::DupOf(source)
+                } else if let Some(source) = dev_stdio_redirect_fd(&target) {
+                    FdFactMark::DupOf(source)
+                } else if target.starts_with('&') {
+                    FdFactMark::Unchanged
+                } else {
+                    // `>&word` over a file word is r_err_and_out: the
+                    // target is opened, not duplicated.
+                    self.fd_fact_mark_for_file_target(&target, false)
+                }
+            }
+            RedirectKind::Input | RedirectKind::ReadWrite => {
+                if closed {
+                    FdFactMark::Closed
+                } else if let Some(source) = dev_stdio_redirect_fd(&target) {
+                    FdFactMark::DupOf(source)
+                } else {
+                    self.fd_fact_mark_for_file_target(&target, true)
+                }
+            }
+            RedirectKind::Output
+            | RedirectKind::Append
+            | RedirectKind::ClobberOutput
+            | RedirectKind::CombinedOutput
+            | RedirectKind::CombinedAppend => {
+                if closed {
+                    FdFactMark::Closed
+                } else if let Some(source) = dev_stdio_redirect_fd(&target) {
+                    FdFactMark::DupOf(source)
+                } else {
+                    self.fd_fact_mark_for_file_target(&target, false)
+                }
+            }
+        };
+        if matches!(
+            redirect.kind,
+            RedirectKind::CombinedOutput | RedirectKind::CombinedAppend
+        ) && redirect.fd.is_none()
+        {
+            return vec![(1, mark.clone()), (2, mark)];
+        }
+        if redirect.kind == RedirectKind::DuplicateOutput
+            && redirect.fd.is_none()
+            && matches!(mark, FdFactMark::Target(_) | FdFactMark::Access(_))
+        {
+            // `>&file` with the redirector defaulted: fd 1 takes the
+            // open, then fd 2 duplicates it (2>&1 follows the open).
+            return vec![(1, mark), (2, FdFactMark::DupOf(1))];
+        }
+        vec![(fd, mark)]
+    }
+
+    /// The fact for a redirect target that names something to OPEN
+    /// (never a dup word — the caller resolved those): the device and
+    /// synthetic classes the binds themselves special-case, answered
+    /// in the same marks, and otherwise the referent path — exactly
+    /// what a FileFd bind stores as its endpoint path, which the
+    /// evaluator stats (the procfs-symlink semantics).
+    fn fd_fact_mark_for_file_target(&self, target: &str, input: bool) -> FdFactMark {
+        if is_null_device(target)
+            || crate::special_paths::is_zero_device(target)
+            || crate::special_paths::is_full_device(target)
+        {
+            // /dev/null classifies as a char device (crw-rw-rw-) on
+            // every platform; the binds answer zero/full with the
+            // same 'n' inode (the DOS-device judgment, the symbolic
+            // FullDevice endpoint, rubash#1898).
+            return FdFactMark::Access("nrw".to_string());
+        }
+        if crate::special_paths::is_net_redirect_target(target) {
+            // A connected socket has no class letter in the mark
+            // vocabulary; leave the binding's own statement (the
+            // #2124 bind's endpoint classification) standing.
+            return FdFactMark::Unchanged;
+        }
+        if input && target.starts_with("<(") {
+            return FdFactMark::Access("prw".to_string());
+        }
+        if !input && target.starts_with(">(") {
+            return FdFactMark::Access("pw".to_string());
+        }
+        if crate::special_paths::synthetic_proc_content(target).is_some()
+            || crate::special_paths::is_synthetic_link_path(target)
+        {
+            // The evaluator answers the spelling from the registry's
+            // own facts — the same truth the classified bind serves.
+            return FdFactMark::Target(target.to_string());
+        }
+        let native = if input {
+            self.session_path(super::path::windows_operand_file_path(
+                shell_path_to_windows(target, &self.shell_state.env_vars),
+                &self.shell_state.env_vars,
+            ))
+        } else {
+            self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars))
+        };
+        FdFactMark::Target(native.to_string_lossy().into_owned())
+    }
+
+    /// rubash#2131: state each descriptor the evaluating command
+    /// redirected from its winning redirect. GNU applies a command's
+    /// redirections left to right before the builtin runs, the LAST
+    /// redirect naming a descriptor being its binding for the
+    /// command's duration; the marks are applied in list order so a
+    /// dup copies the fact of the source's own winning redirect, not
+    /// its superseded binding.
+    fn apply_own_redirect_facts(&mut self, redirects: &[crate::parser::Redirect]) {
+        let mut yields: Vec<(u32, FdFactMark)> = Vec::new();
+        let mut last_yield: std::collections::HashMap<u32, usize> =
+            std::collections::HashMap::new();
+        for redirect in redirects {
+            if redirect.fd_var.is_some() {
+                // A {var} redirect binds whichever descriptor the
+                // variable names at runtime; it speaks for no fixed
+                // descriptor here.
+                continue;
+            }
+            for (fd, mark) in self.fd_fact_mark_for_redirect(redirect) {
+                last_yield.insert(fd, yields.len());
+                yields.push((fd, mark));
+            }
+        }
+        for (index, (fd, mark)) in yields.iter().enumerate() {
+            if last_yield.get(fd) == Some(&index) {
+                self.apply_fd_fact_mark(*fd, mark);
+            }
+        }
+    }
+
+    /// rubash#2131: while a staged FUNCTION_STDIN mirror governs
+    /// fd 0, the mirror's source — not the ambient binding it
+    /// superseded — is fd 0's fact; the staging site recorded that
+    /// fact in FD0_MIRROR_FACT and its guard restores the key with
+    /// the mirror, so the key's presence is the scope signal. Two
+    /// bindings outrank it: a pipeline stage's own pipe
+    /// (FD0_STAGE_PIPE — the stage funnel owns fd 0 then, and the
+    /// post-pass below states its mark) and an entry that genuinely
+    /// replaced the mirror's channel — the mirror only ever
+    /// supersedes the ambient inherited entry or an absent slot, so
+    /// any other entry at fd 0 means the mirror is shadowed and the
+    /// entry's fact stands.
+    fn apply_fd0_mirror_fact(&mut self) {
+        let Some(fact) = self.shell_state.env_vars.get(FD0_MIRROR_FACT).cloned() else {
+            return;
+        };
+        if !self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
+            || self
+                .shell_state
+                .env_vars
+                .get(FD0_STAGE_PIPE)
+                .map(String::as_str)
+                == Some("1")
+        {
+            return;
+        }
+        if let Some(entry) = self.fd_table.entries.get(&0) {
+            let mirror_supersedes =
+                !entry.closed && matches!(entry.read, Some(FdReadEndpoint::InheritedProcessStdin));
+            if !mirror_supersedes {
+                return;
+            }
+        }
+        if let Some(source) = fact.strip_prefix("D:") {
+            if source == "0" {
+                // A `<&0` mirror serves fd 0's own channel; the
+                // entry's fact already states it.
+                return;
+            }
+            if let Ok(source_fd) = source.parse::<u32>() {
+                self.apply_fd_fact_mark(0, &FdFactMark::DupOf(source_fd));
+                return;
+            }
+        }
+        if let Some(target) = fact.strip_prefix("T:") {
+            self.apply_fd_fact_mark(0, &FdFactMark::Target(target.to_string()));
+        } else if let Some(access) = fact.strip_prefix("A:") {
+            self.apply_fd_fact_mark(0, &FdFactMark::Access(access.to_string()));
+        }
+    }
+
+    /// rubash#2131: the FD0_MIRROR_FACT value for a binding about to
+    /// be staged as FUNCTION_STDIN text (bind_command_fd0_input's
+    /// mirror branch, the flat-subshell region feed): the staged
+    /// source's own fd-0 fact, judged by the same classifier the
+    /// own-redirect overlay uses. None when the staged text is the
+    /// ENCLOSING channel's remainder — the node carries no fd-0
+    /// winner of its own — so the enclosing binding keeps its fact.
+    pub(in crate::executor) fn fd0_mirror_fact_value(&self, cmd: &CommandNode) -> Option<String> {
+        match fd0_stdin_redirect_winner_redirect(cmd) {
+            Some(redirect) => self
+                .fd_fact_mark_for_redirect(redirect)
+                .into_iter()
+                .find(|(fd, _)| *fd == 0)
+                .and_then(|(_, mark)| encode_fd_fact_mark(&mark)),
+            None => {
+                if cmd.heredoc.is_some() || cmd.here_string.is_some() {
+                    Some("A:prw".to_string())
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -2660,6 +3009,35 @@ impl Executor {
     }
 }
 
+/// rubash#2131: one descriptor's fd-alias fact as the sync states
+/// it — the same three shapes the entries loop writes (a referent
+/// target, a device-class access mark, the closed tombstone), plus
+/// the two judgments a not-yet-bound redirect can require: copy
+/// another descriptor's fact (a dup — GNU's dup2 hands over the
+/// source's open file description) and leave the standing fact alone
+/// (shapes the mark vocabulary cannot express, e.g. a net socket).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::executor) enum FdFactMark {
+    Target(String),
+    Access(String),
+    Closed,
+    DupOf(u32),
+    Unchanged,
+}
+
+/// The FD0_MIRROR_FACT encoding of a fact (`T:` target, `A:` access
+/// mark — empty after the colon is the closed tombstone, `D:` dup
+/// source); None for `Unchanged`, which records no key.
+pub(in crate::executor) fn encode_fd_fact_mark(mark: &FdFactMark) -> Option<String> {
+    match mark {
+        FdFactMark::Target(target) => Some(format!("T:{target}")),
+        FdFactMark::Access(access) => Some(format!("A:{access}")),
+        FdFactMark::Closed => Some("A:".to_string()),
+        FdFactMark::DupOf(source) => Some(format!("D:{source}")),
+        FdFactMark::Unchanged => None,
+    }
+}
+
 /// The fd-0 input redirect that wins under GNU left-to-right application
 /// (redir.c do_redirections): the last cmd.redirects entry targeting fd 0
 /// whose kind supplies stdin (`<`, `<&`, `<>`, `<&-`, `<<`, `<<<`).
@@ -2683,6 +3061,28 @@ pub(in crate::executor) fn fd0_stdin_redirect_winner(
                 )
         })
         .map(|redirect| redirect.kind.clone())
+}
+
+/// rubash#2131: the winning fd-0 input redirect itself (the redirect
+/// `fd0_stdin_redirect_winner` selects), for callers that need its
+/// target, not just its kind. A `{var}` redirect binds no fixed
+/// descriptor and never wins here.
+pub(in crate::executor) fn fd0_stdin_redirect_winner_redirect(
+    cmd: &CommandNode,
+) -> Option<&crate::parser::Redirect> {
+    cmd.redirects.iter().rev().find(|redirect| {
+        redirect.fd_var.is_none()
+            && redirect.fd.unwrap_or(0) == 0
+            && matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Input
+                    | crate::parser::RedirectKind::DuplicateInput
+                    | crate::parser::RedirectKind::ReadWrite
+                    | crate::parser::RedirectKind::CloseInput
+                    | crate::parser::RedirectKind::HereDoc
+                    | crate::parser::RedirectKind::HereString
+            )
+    })
 }
 
 /// rubash#1902: whether an fd-0 binding that stages the FUNCTION_STDIN

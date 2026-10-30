@@ -710,6 +710,15 @@ pub struct Executor {
     /// carrier (the same finish the simple-command path gives output
     /// process substitutions).
     conditional_output_procsubs: Vec<(std::path::PathBuf, String, Option<usize>)>,
+    /// rubash#2131: the redirection list of the `[[ ]]` command
+    /// currently evaluating, stashed by
+    /// execute_conditional_command_with_redirects for the fd-alias
+    /// sync's own-redirect overlay: `[[ ]]` binds only its fds 1/2
+    /// (bind_conditional_stdio_redirects), so its fd-0 binding never
+    /// reaches the fd table, and the evaluator runs through no
+    /// CommandNode the sync could read the list from. Saved and
+    /// restored around the evaluation like the fd 1/2 entries.
+    current_conditional_redirects: Option<Vec<crate::parser::Redirect>>,
     pending_scalar_assignment: bool,
     suppress_errexit: usize,
     /// rubash#1563: depth of GNU's CMD_IGNORE_RETURN clearing frame for

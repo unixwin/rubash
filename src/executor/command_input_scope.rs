@@ -30,6 +30,11 @@ pub(in crate::executor) struct CommandFd0InputGuard {
     /// mirror supersedes the inter-stage pipe), every other branch
     /// leaves it, and restore puts the entry value back verbatim.
     saved_stage_pipe_fact: Option<String>,
+    /// rubash#2131: the FD0_MIRROR_FACT in force when the bind began;
+    /// the mirror branch below may replace it with the staged source's
+    /// own fact, every other branch leaves it, and restore puts the
+    /// entry value back verbatim.
+    saved_mirror_fact: Option<String>,
     /// rubash#1141: when fd 0 was bound to a process-substitution
     /// stream's endpoint, the stream's registered path — restore writes
     /// the endpoint's consumed offset back into the stream.
@@ -199,6 +204,9 @@ impl Executor {
         // can touch it; the guard restores it verbatim (the mirror
         // branch is the one branch that may clear it, below).
         let saved_stage_pipe_fact = self.shell_state.env_vars.get(FD0_STAGE_PIPE).cloned();
+        // rubash#2131: same snapshot discipline for the mirror fact;
+        // the mirror branch is the one branch that may replace it.
+        let saved_mirror_fact = self.shell_state.env_vars.get(FD0_MIRROR_FACT).cloned();
         // rubash#1141: compound commands (brace group, select, loops)
         // dispatch BEFORE the simple-command materialization gate, so
         // their `< <(...)` redirect_in can still carry the raw
@@ -269,6 +277,7 @@ impl Executor {
                             // writes the same value back.
                             saved_timed_stdin: self.timed_stdin.clone(),
                             saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                            saved_mirror_fact: saved_mirror_fact.clone(),
                             procsub_stream_path: None,
                         }));
                     }
@@ -301,6 +310,7 @@ impl Executor {
                             // writes the same value back.
                             saved_timed_stdin: self.timed_stdin.clone(),
                             saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                            saved_mirror_fact: saved_mirror_fact.clone(),
                             procsub_stream_path: None,
                         }));
                     }
@@ -349,6 +359,7 @@ impl Executor {
                         saved_function_stdin_offset,
                         saved_timed_stdin: self.timed_stdin.clone(),
                         saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                        saved_mirror_fact: saved_mirror_fact.clone(),
                         procsub_stream_path: Some(path),
                     }));
                 }
@@ -396,6 +407,7 @@ impl Executor {
                         // fact it found — same shape as the compound-stream
                         // branch below.
                         saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                        saved_mirror_fact: saved_mirror_fact.clone(),
                         procsub_stream_path: None,
                     }));
                 }
@@ -422,6 +434,7 @@ impl Executor {
                 // timing stays valid; restore writes the same value back.
                 saved_timed_stdin: self.timed_stdin.clone(),
                 saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                saved_mirror_fact: saved_mirror_fact.clone(),
                 procsub_stream_path: None,
             }));
         }
@@ -458,12 +471,25 @@ impl Executor {
         if !super::shell_options::fd0_mirror_binding_keeps_pipe_fact(cmd) {
             self.shell_state.env_vars.remove(FD0_STAGE_PIPE);
         }
+        // rubash#2131: the mirror installs no fd-table entry, so the
+        // staged source's own fd-0 fact travels beside it in
+        // FD0_MIRROR_FACT for the fd-alias sync (the evaluator's
+        // /dev/stdin predicates must answer from the rebound source,
+        // not the ambient binding). A node with no fd-0 winner of its
+        // own staged the enclosing channel's remainder — the key is
+        // left as the enclosing scope set it.
+        if let Some(fact) = self.fd0_mirror_fact_value(cmd) {
+            self.shell_state
+                .env_vars
+                .insert(FD0_MIRROR_FACT.to_string(), fact);
+        }
         Ok(Some(CommandFd0InputGuard {
             saved_fd0_entry,
             saved_function_stdin,
             saved_function_stdin_offset,
             saved_timed_stdin,
             saved_stage_pipe_fact,
+            saved_mirror_fact,
             procsub_stream_path: None,
         }))
     }
@@ -489,6 +515,11 @@ impl Executor {
             &mut self.shell_state.env_vars,
             FD0_STAGE_PIPE,
             guard.saved_stage_pipe_fact,
+        );
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FD0_MIRROR_FACT,
+            guard.saved_mirror_fact,
         );
         restore_optional_env_var(
             &mut self.shell_state.env_vars,

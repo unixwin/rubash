@@ -1031,6 +1031,20 @@ impl Executor {
                             if !super::shell_options::fd0_mirror_binding_keeps_pipe_fact(c) {
                                 self.shell_state.env_vars.remove(FD0_STAGE_PIPE);
                             }
+                            // rubash#2131: the fed text is a staged
+                            // mirror with no fd-table entry — record
+                            // its source's fd-0 fact beside it, the
+                            // same statement bind_command_fd0_input's
+                            // mirror branch makes (reverted by the
+                            // wholesale boundary restore like the rest
+                            // of the fed state). A node with no fd-0
+                            // winner staged the enclosing channel's
+                            // remainder and leaves the key alone.
+                            if let Some(fact) = self.fd0_mirror_fact_value(c) {
+                                self.shell_state
+                                    .env_vars
+                                    .insert(FD0_MIRROR_FACT.to_string(), fact);
+                            }
                         }
                         break;
                     }

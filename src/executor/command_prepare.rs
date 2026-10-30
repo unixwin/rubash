@@ -328,12 +328,24 @@ impl Executor {
         // reach `2>f`.
         let saved_stdout = self.fd_table.entries.get(&1).cloned();
         let saved_stderr = self.fd_table.entries.get(&2).cloned();
+        // rubash#2131: stash the command's redirection list for the
+        // fd-alias sync's own-redirect overlay — `[[ ]]` binds only
+        // fds 1/2, so without the list the sync answers its fd-0
+        // predicates from the superseded ambient binding. Restored
+        // below once the evaluation is done, on every exit path.
+        let saved_conditional_redirects = std::mem::replace(
+            &mut self.current_conditional_redirects,
+            Some(cmd.redirects.clone()),
+        );
         // rubash#545 (cells 2+3): the `[[ ]]` command owns any input-procsub
         // fds realized for its operands and any `>(...)` bodies queued
         // during evaluation — close/run them at the command's end, the same
         // lifetime execute_materialized_command gives simple commands.
         let procsub_fd_base = self.command_scoped_procsub_input_fds.len();
-        self.bind_conditional_stdio_redirects(cmd)?;
+        if let Err(error) = self.bind_conditional_stdio_redirects(cmd) {
+            self.current_conditional_redirects = saved_conditional_redirects;
+            return Err(error);
+        }
         self.exit_code = self.execute_conditional_command(conditional_command);
         // rubash#1130: a [[ ]] operand hit a FATAL word-expansion error
         // (nounset unbound) — the diagnostic and exit_code are already
@@ -342,6 +354,9 @@ impl Executor {
         let conditional_fatal = self.conditional_expansion_fatal.replace(false);
         let conditional_fatal_status = self.conditional_fatal_status.replace(None);
         let conditional_error = self.conditional_expansion_error_status.take();
+        // rubash#2131: the evaluation is done; drop the stashed list
+        // before the unwind paths below run anything else.
+        self.current_conditional_redirects = saved_conditional_redirects;
         if conditional_fatal {
             // rubash#1201: execute_conditional_command just overwrote
             // exit_code with the predicate's own status (e.g. -z of the
