@@ -1715,6 +1715,9 @@ impl Executor {
             None
         };
         let manual_echo = onechar.is_some() && !silent;
+        // niubash#684: canonical-console VEOF translation state for the
+        // byte loop below (see read_helpers::stdin_veof_armed).
+        let veof_armed = super::read_helpers::stdin_veof_armed(stdin_handle, onechar.is_some());
         let mut output = String::new();
         let mut decoder = StdinCharDecoder::new();
         let mut units = 0usize;
@@ -1766,6 +1769,20 @@ impl Executor {
                 if buf.is_empty() {
                     eof = true;
                     break;
+                }
+                // niubash#684: canonical-console VEOF — see
+                // read_helpers::stdin_veof_armed. At an empty record the
+                // 0x04 marker IS the EOF (and the verdict recording
+                // below treats it exactly like the zero-length read);
+                // mid-record it flushes the buffered prefix — already
+                // delivered byte-wise — so it is dropped and the record
+                // continues.
+                if veof_armed && buf[0] == 0x04 {
+                    if output.is_empty() {
+                        eof = true;
+                        break;
+                    }
+                    continue;
                 }
                 decoder.queue_byte(buf[0]);
             }

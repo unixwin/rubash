@@ -743,6 +743,19 @@ pub fn is_console_handle(h: HANDLE) -> bool {
     (unsafe { GetConsoleMode(h, &mut mode) }) != 0
 }
 
+/// True when the console input handle is in line-input (cooked) mode.
+/// A cooked Windows console has no VEOF of its own: conhost assembles a
+/// line and hands its bytes — Ctrl-D included — to ReadFile as data,
+/// where a Unix canonical line discipline would have turned the same
+/// keystroke into an EOF/flush. The read transports consult this to
+/// translate a received 0x04 byte back into those semantics
+/// (niubash#684). ENABLE_LINE_INPUT is defined with the one-char guard
+/// constants below.
+pub fn console_line_input_mode(h: HANDLE) -> bool {
+    let mut mode: DWORD = 0;
+    (unsafe { GetConsoleMode(h, &mut mode) }) != 0 && (mode & ENABLE_LINE_INPUT) != 0
+}
+
 /// FILE_TYPE_CHAR check for `test -c` (GNU test.c filetest → S_ISCHR):
 /// both the console and NUL qualify as character devices.
 pub fn is_char_device_handle(h: HANDLE) -> bool {

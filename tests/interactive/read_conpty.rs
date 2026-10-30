@@ -125,6 +125,16 @@ fn conpty_deadline_contract_faces() {
     run_conpty_legs(&["t-partial-assign", "t-no-input"]);
 }
 
+/// niubash#684: Ctrl-D at a plain canonical console `read` is the EOF
+/// (rc 1, empty assignment, shell survives) and mid-line Ctrl-D is the
+/// VEOF flush (record continues, marker is not data). These legs are
+/// the ConPTY half of the #684 pair; the POSIX-pty half lives in
+/// read_pty.rs.
+#[test]
+fn conpty_ctrld_read_eof_niubash684() {
+    run_conpty_legs(&["ctrld-read-eof", "ctrld-midline-flush"]);
+}
+
 /// The whole suite in one pass — same legs, one ConPTY session per leg, the
 /// shape the ticket acceptance calls for (`--test-threads=1` comes from the
 /// repo's .cargo/config.toml). Each leg bounds its own wall clock with an
@@ -142,5 +152,7 @@ fn conpty_read_faces_full_pass() {
         "plain-queued-cooked",
         "t-partial-assign",
         "t-no-input",
+        "ctrld-read-eof",
+        "ctrld-midline-flush",
     ]);
 }
