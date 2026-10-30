@@ -1341,9 +1341,23 @@ fn time_prefix_from_command(command: &mut CommandNode) -> Option<TimePipelinePre
     if command.word_kinds.len() == old_word_len {
         command.word_kinds = command.word_kinds[index..].to_vec();
     }
-    if command.word_metadata.len() == old_word_len {
-        command.word_metadata = command.word_metadata[index..].to_vec();
-    }
+    // rubash#2237: word_metadata entries address words by
+    // WordMetadata::word_index and the vector is sparse (a
+    // process-substitution word carries no entry), so drop the folded
+    // prefix's entries and shift the survivors' keys — slicing by
+    // count covers only the dense case and left stale keys on the
+    // inner command, so `time [ -r <( ) ]` materialized nothing.
+    command.word_metadata = command
+        .word_metadata
+        .iter()
+        .filter_map(|metadata| {
+            metadata.word_index.checked_sub(index).map(|shifted| {
+                let mut metadata = metadata.clone();
+                metadata.word_index = shifted;
+                metadata
+            })
+        })
+        .collect();
     reclassify_leading_assignment_words(command);
     Some(TimePipelinePrefix {
         keyword,

@@ -6771,9 +6771,22 @@ fn time_pipeline_prefix(command: &CommandNode) -> Option<TimePipelinePrefix> {
     if command.word_kinds.len() == command.words.len() {
         stripped.word_kinds = command.word_kinds[index..].to_vec();
     }
-    if command.word_metadata.len() == command.words.len() {
-        stripped.word_metadata = command.word_metadata[index..].to_vec();
-    }
+    // rubash#2237: same keyed shift as the non-pipeline time strip —
+    // word_metadata entries address words by WordMetadata::word_index
+    // and the vector is sparse (a process-substitution word carries no
+    // entry), so drop the consumed prefix's entries and shift the
+    // survivors' keys instead of slicing only the dense case.
+    stripped.word_metadata = command
+        .word_metadata
+        .iter()
+        .filter_map(|metadata| {
+            metadata.word_index.checked_sub(index).map(|shifted| {
+                let mut metadata = metadata.clone();
+                metadata.word_index = shifted;
+                metadata
+            })
+        })
+        .collect();
     // rubash#1661: same displaced classification as the parser fold —
     // restore the stage's leading assignment words (see
     // parser::reclassify_leading_assignment_words).
