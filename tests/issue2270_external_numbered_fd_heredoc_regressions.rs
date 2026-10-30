@@ -20,6 +20,18 @@
 //! Expectations byte-verified against GNU bash 5.3.20 via
 //! probes/probe-2270.sh (oracle run in the cluster workdir).
 //!
+//! OBSERVER NOTE: the observing child is a real spawned process —
+//! the rubash binary itself re-invoked — never a `./reader.sh`
+//! script: rubash runs ENOEXEC scripts in-process, where
+//! spawn-delivered fd bindings do not appear. The original pins
+//! observed through `./reader3.sh` / `./reader4.sh` / `./reader0.sh`
+//! and read 2 passed / 8 failed on a tree whose product face was
+//! verified correct with foreign ELF observers (the script child
+//! reported `3: Bad file descriptor` and printed `fd3-closed` even
+//! for the plain `3<file` control). The harness repair changed the
+//! observer mechanism only; every redirect shape, expected body,
+//! and exit-code expectation is unchanged.
+//!
 //! NOTE: the `<<-` pin additionally depends on the lexer strip-tabs
 //! fix for numbered fds (PR #2269, rubash#2265); on a tree without
 //! it the tabbed terminator never matches and that one pin stays
@@ -29,34 +41,17 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-const READER3: &str = "while IFS= read -r line <&3; do\n  printf 'fd3|%s\\n' \"$line\"\ndone\nif : <&3; then echo 'fd3-open'; else echo 'fd3-closed'; fi\nexit 7\n";
-const READER4: &str = "while IFS= read -r line <&4; do\n  printf 'fd4|%s\\n' \"$line\"\ndone\nif : <&4; then echo 'fd4-open'; else echo 'fd4-closed'; fi\n";
-const READER0: &str =
-    "while IFS= read -r line; do\n  printf 'fd0|%s\\n' \"$line\"\ndone\necho 'fd0-done'\n";
+const RUBASH: &str = env!("CARGO_BIN_EXE_rubash");
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rubash-issue2270-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create scratch dir");
-    for (name, body) in [
-        ("reader3.sh", READER3),
-        ("reader4.sh", READER4),
-        ("reader0.sh", READER0),
-    ] {
-        let path = dir.join(name);
-        fs::write(&path, body).expect("write reader script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-                .expect("chmod reader script");
-        }
-    }
     dir
 }
 
 fn rubash_in(dir: &std::path::Path, script: &str) -> (String, String, Option<i32>) {
-    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+    let output = Command::new(RUBASH)
         .arg("-c")
         .arg(script)
         .current_dir(dir)
@@ -69,13 +64,38 @@ fn rubash_in(dir: &std::path::Path, script: &str) -> (String, String, Option<i32
     )
 }
 
+/// The observing child for a numbered fd: a nested rubash (a real
+/// spawn) whose read loop echoes each line the delivered descriptor
+/// carries, then reports whether the descriptor is still open at
+/// EOF, then exits with `exit_code` when one is given — the exact
+/// observations the old `./readerN.sh` scripts made, through a
+/// process boundary the spawn delivery actually crosses.
+fn reader_child(fd: u32, exit_code: Option<i32>) -> String {
+    let mut inner = format!(
+        "while IFS= read -r line <&{fd}; do printf \"fd{fd}|%s\\n\" \"$line\"; done; \
+         if : <&{fd}; then echo fd{fd}-open; else echo fd{fd}-closed; fi"
+    );
+    if let Some(code) = exit_code {
+        inner.push_str(&format!("; exit {code}"));
+    }
+    format!("\"{RUBASH}\" -c '{inner}'")
+}
+
+/// The observing child for the fd 0 control: a nested rubash whose
+/// read loop echoes each stdin line, then prints the done marker.
+fn reader0_child() -> String {
+    let inner = "while IFS= read -r line; do printf \"fd0|%s\\n\" \"$line\"; done; echo fd0-done";
+    format!("\"{RUBASH}\" -c '{inner}'")
+}
+
 #[test]
 fn issue2270_fd3_heredoc_body_reaches_external_child() {
     let dir = scratch("fd3");
-    let (stdout, stderr, code) = rubash_in(
-        &dir,
-        "who=world\n./reader3.sh 3<<EOF\nhello $who\nsecond line\nEOF\n",
+    let script = format!(
+        "who=world\n{} 3<<EOF\nhello $who\nsecond line\nEOF\n",
+        reader_child(3, Some(7))
     );
+    let (stdout, stderr, code) = rubash_in(&dir, &script);
     assert_eq!(
         stdout, "fd3|hello world\nfd3|second line\nfd3-open\n",
         "stderr: {stderr}"
@@ -86,10 +106,11 @@ fn issue2270_fd3_heredoc_body_reaches_external_child() {
 #[test]
 fn issue2270_fd3_dash_heredoc_strips_tabs() {
     let dir = scratch("fd3dash");
-    let (stdout, stderr, code) = rubash_in(
-        &dir,
-        "./reader3.sh 3<<-EOF\n\ttabbed one\n\t\ttabbed two\n\tEOF\n",
+    let script = format!(
+        "{} 3<<-EOF\n\ttabbed one\n\t\ttabbed two\n\tEOF\n",
+        reader_child(3, Some(7))
     );
+    let (stdout, stderr, code) = rubash_in(&dir, &script);
     assert_eq!(
         stdout, "fd3|tabbed one\nfd3|tabbed two\nfd3-open\n",
         "stderr: {stderr}"
@@ -100,7 +121,8 @@ fn issue2270_fd3_dash_heredoc_strips_tabs() {
 #[test]
 fn issue2270_fd4_heredoc_body_reaches_external_child() {
     let dir = scratch("fd4");
-    let (stdout, stderr, code) = rubash_in(&dir, "./reader4.sh 4<<EOF\nfour body\nEOF\n");
+    let script = format!("{} 4<<EOF\nfour body\nEOF\n", reader_child(4, None));
+    let (stdout, stderr, code) = rubash_in(&dir, &script);
     assert_eq!(stdout, "fd4|four body\nfd4-open\n", "stderr: {stderr}");
     assert_eq!(code, Some(0), "stderr: {stderr}");
 }
@@ -111,7 +133,8 @@ fn issue2270_child_exit_code_after_reading_body_to_eof() {
     // status must be the child's own 7 (not a redirect-error 1/2),
     // and the fd must still be open (at EOF) after the last read.
     let dir = scratch("exitcode");
-    let (stdout, stderr, code) = rubash_in(&dir, "./reader3.sh 3<<EOF\nonly line\nEOF\n");
+    let script = format!("{} 3<<EOF\nonly line\nEOF\n", reader_child(3, Some(7)));
+    let (stdout, stderr, code) = rubash_in(&dir, &script);
     assert_eq!(stdout, "fd3|only line\nfd3-open\n", "stderr: {stderr}");
     assert_eq!(code, Some(7), "stderr: {stderr}");
 }
@@ -119,7 +142,8 @@ fn issue2270_child_exit_code_after_reading_body_to_eof() {
 #[test]
 fn issue2270_fd3_here_string_body_reaches_external_child() {
     let dir = scratch("herestring");
-    let (stdout, stderr, code) = rubash_in(&dir, "./reader3.sh 3<<<\"string body\"\n");
+    let script = format!("{} 3<<<\"string body\"\n", reader_child(3, Some(7)));
+    let (stdout, stderr, code) = rubash_in(&dir, &script);
     assert_eq!(stdout, "fd3|string body\nfd3-open\n", "stderr: {stderr}");
     assert_eq!(code, Some(7), "stderr: {stderr}");
 }
@@ -129,10 +153,11 @@ fn issue2270_fd3_last_heredoc_wins() {
     // GNU do_redirections walks the list in order (redir.c:237);
     // the second heredoc's binding is the one the child reads.
     let dir = scratch("lastwins");
-    let (stdout, stderr, code) = rubash_in(
-        &dir,
-        "./reader3.sh 3<<ONE 3<<TWO\nfirst body\nONE\nsecond body\nTWO\n",
+    let script = format!(
+        "{} 3<<ONE 3<<TWO\nfirst body\nONE\nsecond body\nTWO\n",
+        reader_child(3, Some(7))
     );
+    let (stdout, stderr, code) = rubash_in(&dir, &script);
     assert_eq!(stdout, "fd3|second body\nfd3-open\n", "stderr: {stderr}");
     assert_eq!(code, Some(7), "stderr: {stderr}");
 }
@@ -140,8 +165,11 @@ fn issue2270_fd3_last_heredoc_wins() {
 #[test]
 fn issue2270_fd3_quoted_delimiter_body_is_literal() {
     let dir = scratch("quoted");
-    let (stdout, stderr, code) =
-        rubash_in(&dir, "who=world\n./reader3.sh 3<<'EOF'\nhello $who\nEOF\n");
+    let script = format!(
+        "who=world\n{} 3<<'EOF'\nhello $who\nEOF\n",
+        reader_child(3, Some(7))
+    );
+    let (stdout, stderr, code) = rubash_in(&dir, &script);
     assert_eq!(stdout, "fd3|hello $who\nfd3-open\n", "stderr: {stderr}");
     assert_eq!(code, Some(7), "stderr: {stderr}");
 }
@@ -151,7 +179,8 @@ fn issue2270_no_delimiter_file_created() {
     // The pre-fix shape "opened" the delimiter as an output file in
     // the cwd; GNU creates nothing.
     let dir = scratch("nostray");
-    let (_stdout, _stderr, _code) = rubash_in(&dir, "./reader3.sh 3<<EOF\nbody\nEOF\n");
+    let script = format!("{} 3<<EOF\nbody\nEOF\n", reader_child(3, Some(7)));
+    let (_stdout, _stderr, _code) = rubash_in(&dir, &script);
     assert!(
         !dir.join("EOF").exists(),
         "delimiter word must not become a file in the cwd"
@@ -161,7 +190,8 @@ fn issue2270_no_delimiter_file_created() {
 #[test]
 fn issue2270_fd0_heredoc_control_still_works() {
     let dir = scratch("fd0");
-    let (stdout, stderr, code) = rubash_in(&dir, "./reader0.sh <<EOF\nstdin body\nEOF\n");
+    let script = format!("{} <<EOF\nstdin body\nEOF\n", reader0_child());
+    let (stdout, stderr, code) = rubash_in(&dir, &script);
     assert_eq!(stdout, "fd0|stdin body\nfd0-done\n", "stderr: {stderr}");
     assert_eq!(code, Some(0), "stderr: {stderr}");
 }
@@ -170,7 +200,8 @@ fn issue2270_fd0_heredoc_control_still_works() {
 fn issue2270_fd3_plain_file_redirect_control() {
     let dir = scratch("file");
     fs::write(dir.join("input.txt"), "file body\n").expect("write input");
-    let (stdout, stderr, code) = rubash_in(&dir, "./reader3.sh 3<input.txt\n");
+    let script = format!("{} 3<input.txt\n", reader_child(3, Some(7)));
+    let (stdout, stderr, code) = rubash_in(&dir, &script);
     assert_eq!(stdout, "fd3|file body\nfd3-open\n", "stderr: {stderr}");
     assert_eq!(code, Some(7), "stderr: {stderr}");
 }
