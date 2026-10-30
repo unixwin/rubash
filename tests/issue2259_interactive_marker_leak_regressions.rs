@@ -51,7 +51,12 @@ fn run_rubash(args: &[&str], stamps: &[(&str, &str)]) -> (Option<i32>, String, S
 }
 
 fn run_script(script: &str, stamps: &[(&str, &str)]) -> (Option<i32>, String, String) {
-    let dir = std::env::temp_dir().join(format!("rubash-issue2259-{}", std::process::id()));
+    // Unique scratch dir per call: the pid alone is shared by every test
+    // in this binary, and the script tests run in parallel threads —
+    // keyed only by pid they remove/rewrite each other's probe.sh.
+    static CALL_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("rubash-issue2259-{}-{seq}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create issue2259 scratch dir");
     let script_path = dir.join("probe.sh");
