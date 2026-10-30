@@ -608,21 +608,39 @@ fn close_runs_exit_trap_and_persistent_procsub_delivery() {
 
 #[test]
 fn open_fds_reflect_the_session_fd_table() {
+    use std::collections::BTreeSet;
+
     let mut session = Session::builder().build().expect("session builds");
-    // A fresh session holds exactly the standard trio.
-    assert_eq!(session.executor().open_fds(), vec![0, 1, 2]);
+    // The live set always holds the standard trio. It can also hold
+    // descriptors the host process itself inherited open, which the
+    // executor adopts into the table (rubash#1557) — /dev/fd shows
+    // those too, so the exact fresh set is environment-dependent
+    // and the pin works in deltas from the session's own baseline.
+    let baseline: BTreeSet<u32> = session.executor().open_fds().into_iter().collect();
+    assert!(
+        baseline.is_superset(&BTreeSet::from([0, 1, 2])),
+        "standard trio present: {baseline:?}"
+    );
     // `exec 3>` is a persistent redirection: the fd joins the table
     // (and therefore the /dev/fd namespace completion enumerates).
     let outcome = session
         .run("exec 3>/dev/null", &opts())
         .expect("exec run succeeds");
     assert_eq!(outcome.status, 0);
-    assert_eq!(session.executor().open_fds(), vec![0, 1, 2, 3]);
+    let with3: BTreeSet<u32> = session.executor().open_fds().into_iter().collect();
+    assert_eq!(
+        with3,
+        baseline.union(&BTreeSet::from([3])).copied().collect()
+    );
     // Closing it removes it again — the dynamic tier tracks the
     // table, not a name list.
     let outcome = session
         .run("exec 3>&-", &opts())
         .expect("close run succeeds");
     assert_eq!(outcome.status, 0);
-    assert_eq!(session.executor().open_fds(), vec![0, 1, 2]);
+    let closed: BTreeSet<u32> = session.executor().open_fds().into_iter().collect();
+    assert_eq!(
+        closed,
+        baseline.difference(&BTreeSet::from([3])).copied().collect()
+    );
 }

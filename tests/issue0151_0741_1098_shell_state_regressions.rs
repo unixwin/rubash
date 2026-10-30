@@ -4,7 +4,9 @@
 //!   (GNU script value: `hmB`; after `set +m`: `hB`). On the invocation
 //!   side, `-m` is an option (not a script operand): without a tty GNU
 //!   warns on stderr and runs the `-c` string with $- = `hBc` (no `m`);
-//!   `-i -c` includes the `H` letter (GNU: `hiBHc`).
+//!   `-i -c` includes the `H` letter (GNU: `hiBHc`, or `himBHc` when
+//!   the runner grants the shell a controlling terminal and job
+//!   control comes up — the `m` letter follows the environment).
 //! * rust#741 — a script that kills itself with a fatal signal must die
 //!   by that signal (a waiting parent observes signal death, not a
 //!   synthetic exit code), and its post-kill commands never run.
@@ -112,9 +114,16 @@ fn issue151_interactive_dash_c_includes_h_letter() {
     let s = Scratch::new("i151c");
     let (out, _err, rc) = s.run_args(&["-i", "-c", "echo \"flags=$-\""]);
     assert_eq!(rc, 0);
+    // The guarded shape is the `H` letter. GNU 5.3.20 measured two
+    // environment-dependent values: `hiBHc` when the shell cannot
+    // claim a terminal (piped/null stdio), and `himBHc` when the
+    // runner grants a controlling terminal (session leader + ctty),
+    // where job control legitimately turns `m` on. Accept exactly
+    // those two; any other letter drift still fails (rubash#2175).
+    let flags = out.trim().strip_prefix("flags=").unwrap_or("");
     assert!(
-        out.contains("flags=hiBHc"),
-        "expected $- to contain H (GNU: hiBHc), got stdout: {out}"
+        flags == "hiBHc" || flags == "himBHc",
+        "expected $- to be hiBHc (or himBHc with job control), got stdout: {out}"
     );
 }
 

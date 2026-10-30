@@ -739,9 +739,9 @@ impl Executor {
             // its bytes. Bind the rendezvous read handle transiently
             // instead — the same record-wise live read, over the pipe.
             #[cfg(windows)]
-            if crate::winux_fifo::path_is_winux_fifo(&path) {
-                let Ok(server) = crate::winux_fifo::open_winux_fifo_read(&path, &|| {
-                    crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+            if crate::winuxcmd_fifo::path_is_winuxcmd_fifo(&path) {
+                let Ok(server) = crate::winuxcmd_fifo::open_winuxcmd_fifo_read(&path, &|| {
+                    crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
                 }) else {
                     return None;
                 };

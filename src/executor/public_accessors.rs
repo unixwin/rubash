@@ -660,15 +660,10 @@ impl Executor {
     /// directory itself contains the real `bin`, `usr/bin`, `etc`, and `tmp`
     /// directories used by the shell.
     pub fn set_shell_root(&mut self, root: impl AsRef<std::path::Path>) {
-        let value = root.as_ref().to_string_lossy().into_owned();
-        self.shell_state
-            .env_vars
-            .insert("__RUBASH_SHELL_ROOT".to_string(), value.clone());
-        // deprecated: niu bridge, remove after niu stops reading
-        self.shell_state
-            .env_vars
-            .insert("WINUXSH_ROOT".to_string(), value);
-        self.mark_exported("WINUXSH_ROOT");
+        self.shell_state.env_vars.insert(
+            "__RUBASH_SHELL_ROOT".to_string(),
+            root.as_ref().to_string_lossy().into_owned(),
+        );
     }
 
     /// Configure the native WinuxCmd dispatcher used for shell commands that
@@ -750,6 +745,31 @@ impl Executor {
             + 'static,
     {
         self.host_external_command_handler = Some(HostExternalCommandHandler(Box::new(handler)));
+    }
+
+    /// Register the external-command route provider (niubash#567
+    /// P3; see `external_route` for the seam contract): after name
+    /// resolution, a simple command about to be spawned is offered
+    /// to the provider with its final argv, complete environment,
+    /// session cwd, live stdio handles, and a cancellation peek;
+    /// the provider executes it in-process or declines it back to
+    /// the spawn. Replaces any previous registration. Sessions
+    /// normally install it at build time through
+    /// `SessionBuilder::external_route_provider`.
+    pub fn set_external_route_provider(
+        &mut self,
+        provider: Box<dyn super::external_route::ExternalRouteProvider>,
+    ) {
+        self.external_route_provider = Some(std::rc::Rc::new(std::cell::RefCell::new(
+            super::external_route::ExternalRouteProviderSlot(provider),
+        )));
+    }
+
+    /// Remove the route provider registration, if any: dispatch
+    /// returns to spawn-only, byte-identical to an engine that
+    /// never had one.
+    pub fn clear_external_route_provider(&mut self) {
+        self.external_route_provider = None;
     }
 
     #[cfg(windows)]

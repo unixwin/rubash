@@ -13,8 +13,9 @@
 //! endpoint becomes a temp file whose bytes flush into the endpoint after
 //! the child exits.
 
+use std::collections::HashMap;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -299,17 +300,163 @@ fn drain_reader_to_temp(
     dev_operand_temp(&bytes, m)
 }
 
+/// How a procsub read end delivered to an external child as an argv word
+/// reaches that child (rubash#2225 gate on the #1959 rendezvous).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ProcsubOperandDelivery {
+    /// The #1903 fifo-marker rendezvous: the word names an on-disk
+    /// `!<fifo>` marker and the child bridges it to the live pipe.
+    /// Streaming — but only a consumer whose own runtime bridges
+    /// markers ever sees the producer's bytes through it.
+    FifoMarker,
+    /// The parent drains the producer into a temp file before spawn
+    /// (the pre-#2156 general shape). Byte-correct for every consumer;
+    /// the consumer starts only after the producer exits.
+    DrainToTemp,
+}
+
+/// rubash#2225: choose the delivery for a procsub argv operand from the
+/// CONSUMER's class. #2156 sent every argv-word procsub through the
+/// fifo-marker rendezvous; a consumer that is not marker-aware (Windows'
+/// own findstr.exe is the niu#720/#723 shape) opens the marker path with
+/// a plain CreateFile and reads the 7 marker bytes instead of the
+/// producer's stream — GNU subst.c:6362 process_substitute names a live
+/// pipe whose bytes ANY consumer opening the name must receive, so
+/// streaming may never change the bytes a non-aware consumer reads.
+///
+/// The aware class is a property of the resolved program binary, not a
+/// tool-name list: `path::winuxcmd_fifo_marker_aware` (the program IS
+/// the WinuxCmd runtime — the dispatcher or an applet hardlink of it).
+/// The judgment eats the RESOLVED program path (a bare name reaches
+/// this point already PATH-resolved by the spawn sites), never the
+/// argv[0] spelling. Every miss — no program offered, an unresolvable
+/// or unknown consumer, a non-WinuxCmd binary — falls to DrainToTemp:
+/// the failure direction costs the #1959 streaming win for that shape,
+/// never bytes.
+fn procsub_operand_delivery(
+    consumer_program: Option<&Path>,
+    env_vars: &HashMap<String, String>,
+) -> ProcsubOperandDelivery {
+    #[cfg(windows)]
+    {
+        if let Some(program) = consumer_program {
+            if super::path::winuxcmd_fifo_marker_aware(program, env_vars) {
+                return ProcsubOperandDelivery::FifoMarker;
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = consumer_program;
+        let _ = env_vars;
+    }
+    ProcsubOperandDelivery::DrainToTemp
+}
+
+/// rubash#1959: the Windows rendezvous for a procsub read end delivered
+/// as an argv word to an external child (`head -1 <(body)`, `$(cat
+/// <(body))`, and the pipeline word form alike — every spawn site funnels
+/// through `dev_fd_table_operand`). The anonymous pipe's read end has no
+/// openable path and the child cannot inherit numbered handles into argv
+/// names, so the face used to drain the producer to EOF into a temp file
+/// before spawn — the consumer started only after the producer exited.
+/// GNU's contract (subst.c:6362 process_substitute) is a live pipe under
+/// the operand name: the child reads while the producer still runs.
+///
+/// The endpoint is the #1903 WinuxCmd FIFO marker rendezvous (the same
+/// design piece the issue names): the argv word carries a path to an
+/// on-disk `!<fifo>` marker whose reader opens bridge to a deterministic
+/// named pipe. The external child's own runtime (WinuxCmd
+/// file_io.cppm open_binary_file → open_fifo_read_handle) creates the
+/// INBOUND server for the marker and blocks in ConnectNamedPipe; the
+/// pump thread below is the WRITER client (`open_winuxcmd_fifo_write`,
+/// GNU's blocking O_WRONLY fifo open), copying the procsub read end
+/// into the pipe byte-wise. A consumer that is not marker-aware reads
+/// the 7 marker bytes — the same degradation every WinuxCmd fifo shows
+/// a non-protocol consumer. rubash#2225: for procsub argv words that
+/// degradation is NOT acceptable (GNU's contract is the producer's
+/// bytes for any consumer), so this rendezvous is only reached when
+/// `procsub_operand_delivery` has classified the consumer as
+/// marker-aware; every other consumer takes the drain in
+/// `dev_fd_table_operand` and never sees a marker path.
+///
+/// Ownership and lifetime: the pump owns a DuplicateHandle reference of
+/// the read end, so fd-table cleanup after the child exits (consume's
+/// seek-to-end, the command-scoped close of the procsub fd, FileFd drop)
+/// cannot race its reads. Closing the writer client is the child's EOF;
+/// a consumer gone early (GNU's SIGPIPE shape, `head -1`) fails the
+/// pump's writes and tears the pump down, which breaks the producer's
+/// pipe the same way. If no marker-aware reader ever opens the path, the
+/// pump parks in the write open and the producer parks on its full pipe
+/// — the same running-producer shape GNU leaves behind for an
+/// unconsumed substitution; nothing in the parent blocks on either. The
+/// marker file itself is removed with the materialization record (after
+/// the child exits, like every operand temp).
+#[cfg(windows)]
+fn procsub_fifo_marker_operand(file: &FileFd, m: &mut DevOperandMaterialization) -> Option<String> {
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "rubash-procsub-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    if crate::winuxcmd_fifo::create_winuxcmd_fifo(&path, false).is_err() {
+        return None;
+    }
+    let source = match crate::fd::duplicate_handle(file.handle) {
+        Ok(source) => source,
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+    };
+    let pump_path = path.clone();
+    std::thread::spawn(move || {
+        // Blocks until the child's reader creates the endpoint (and on
+        // ERROR_PIPE_BUSY waits its slice) — no parent-side thread is
+        // involved in that wait, so a consumer that never arrives costs
+        // only this parked thread, never a shell stall.
+        match crate::winuxcmd_fifo::open_winuxcmd_fifo_write(&pump_path, &|| false) {
+            Ok(sink) => {
+                use std::os::windows::io::IntoRawHandle;
+                let sink = sink.into_raw_handle() as crate::fd::HANDLE;
+                loop {
+                    match crate::fd::read_some(source, 65536) {
+                        Ok(chunk) if chunk.is_empty() => break,
+                        Ok(chunk) => {
+                            if crate::fd::write_all(sink, &chunk).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                crate::fd::close_handle(sink);
+            }
+            Err(_) => {}
+        }
+        crate::fd::close_handle(source);
+    });
+    m.temps.push(path.clone());
+    Some(path.to_string_lossy().into_owned())
+}
+
 impl Executor {
     /// Rewrite `/dev/std*`-family operand words in `args` to concrete paths.
     /// `stdin`/`stdout` describe how the caller wires the child's fd 0/1
     /// when the fd table does not own them (pipeline stages, capture
-    /// pipes). The returned record must be finished after the child exits
+    /// pipes). `consumer_program` is the spawn site's RESOLVED program
+    /// path (None when the site cannot offer one — internal pipeline
+    /// stages, an unresolvable exec target): rubash#2225's gate chooses
+    /// each procsub argv operand's delivery from the consumer's class.
+    /// The returned record must be finished after the child exits
     /// via `finish_dev_fd_operands`.
     pub(in crate::executor) fn materialize_dev_fd_operands(
         &self,
         args: &[String],
         mut stdin: DevOperandStdin<'_>,
         stdout: DevOperandStdout,
+        consumer_program: Option<&Path>,
     ) -> (Vec<String>, DevOperandMaterialization) {
         let mut m = DevOperandMaterialization::default();
         if !cfg!(windows) {
@@ -429,7 +576,9 @@ impl Executor {
                         }
                         DevOperandStdin::Path(path) => Some(path.to_string_lossy().into_owned()),
                         DevOperandStdin::Reader(reader) => drain_reader_to_temp(*reader, &mut m),
-                        DevOperandStdin::FdTable => self.dev_fd_table_operand(fd, &mut m),
+                        DevOperandStdin::FdTable => {
+                            self.dev_fd_table_operand(fd, &mut m, consumer_program)
+                        }
                     },
                     1 => match &stdout {
                         DevOperandStdout::Path(path) => Some(path.to_string_lossy().into_owned()),
@@ -447,9 +596,11 @@ impl Executor {
                                 .push((PathBuf::from(&temp), DevOperandFlush::Capture));
                             temp
                         }),
-                        DevOperandStdout::FdTable => self.dev_fd_table_operand(fd, &mut m),
+                        DevOperandStdout::FdTable => {
+                            self.dev_fd_table_operand(fd, &mut m, consumer_program)
+                        }
                     },
-                    _ => self.dev_fd_table_operand(fd, &mut m),
+                    _ => self.dev_fd_table_operand(fd, &mut m, consumer_program),
                 };
                 match path {
                     Some(path) => format!("{prefix}{path}"),
@@ -463,7 +614,14 @@ impl Executor {
     /// Resolve a `/dev/fd/N` operand through the fd table: read endpoints
     /// hand the child the fd's remaining input, write endpoints a real
     /// path or a temp file flushed into the endpoint after exit.
-    fn dev_fd_table_operand(&self, fd: u32, m: &mut DevOperandMaterialization) -> Option<String> {
+    /// `consumer_program` only steers the procsub argv-word delivery
+    /// (rubash#2225's gate, see `procsub_operand_delivery`).
+    fn dev_fd_table_operand(
+        &self,
+        fd: u32,
+        m: &mut DevOperandMaterialization,
+        consumer_program: Option<&Path>,
+    ) -> Option<String> {
         let entry = self.fd_table.entries.get(&fd).filter(|e| !e.closed)?;
         if let Some(read) = &entry.read {
             return match read {
@@ -477,16 +635,57 @@ impl Executor {
                     dev_operand_temp(&bytes, m)
                 }
                 FdReadEndpoint::File(file) => {
-                    m.consume_fds.push(fd);
                     // A pipe-backed endpoint (a process substitution's
                     // read end, rubash#1952) carries only a display
-                    // name, not a filesystem path — drain its handle
-                    // into a temp the child can open, like the
-                    // buffered endpoints above. Real file endpoints
+                    // name, not a filesystem path. Real file endpoints
                     // keep handing over their path.
                     if file.path.to_string_lossy().starts_with("<(") {
+                        // rubash#1959: deliver the live stream through
+                        // the #1903 fifo-marker rendezvous — the child
+                        // opens the marker path and its own runtime
+                        // bridges to the live pipe, instead of the
+                        // parent draining the producer to a temp file
+                        // before spawn (GNU subst.c:6362
+                        // process_substitute hands the child the pipe
+                        // read end itself). Fall back to the drain
+                        // when the rendezvous cannot be set up.
+                        //
+                        // rubash#2225: the rendezvous is sound only for
+                        // a consumer known to bridge markers. A
+                        // non-aware consumer opens the marker path
+                        // plainly and reads the 7 marker bytes in place
+                        // of the producer's stream (niu#720/#723:
+                        // findstr.exe printing `!<fifo>`), so the
+                        // marker delivery is gated on the consumer's
+                        // class — every other consumer takes the drain
+                        // below, exactly the pre-#2156 shape.
+                        #[cfg(windows)]
+                        {
+                            if procsub_operand_delivery(
+                                consumer_program,
+                                &self.shell_state.env_vars,
+                            ) == ProcsubOperandDelivery::FifoMarker
+                            {
+                                if let Some(path) = procsub_fifo_marker_operand(file, m) {
+                                    // No consume record: the pump thread owns
+                                    // the stream now, and the word fd is
+                                    // command-scoped (removed at this very
+                                    // command's end). A finish-time seek would
+                                    // be dead semantics AND would serialize
+                                    // against the pump's parked ReadFile on
+                                    // the same pipe object — synchronous
+                                    // handles allow one operation at a time,
+                                    // so the shell would block until the
+                                    // producer's next write (observed: the
+                                    // whole producer lifetime).
+                                    return Some(path);
+                                }
+                            }
+                        }
+                        m.consume_fds.push(fd);
                         drain_handle_to_temp(file.handle, m)
                     } else {
+                        m.consume_fds.push(fd);
                         Some(file.path.to_string_lossy().into_owned())
                     }
                 }
@@ -857,7 +1056,9 @@ impl Executor {
 
 #[cfg(test)]
 mod tests {
-    use super::dev_operand_fd;
+    use super::{dev_operand_fd, procsub_operand_delivery, ProcsubOperandDelivery};
+    use std::collections::HashMap;
+    use std::path::Path;
 
     /// Redundancy audit R3/D1: the spelling judgment is the registry's;
     /// this face's own `str::parse` tail-parse used to accept the `+N`
@@ -887,5 +1088,44 @@ mod tests {
         let own_plus = format!("/proc/{}/fd/+3", std::process::id());
         assert_eq!(dev_operand_fd(&own_plus), None);
         assert_eq!(dev_operand_fd("/proc/4294967294/fd/3"), None);
+    }
+
+    /// rubash#2225: the delivery gate's safe direction holds on every
+    /// platform — no consumer offered, and consumers outside the
+    /// WinuxCmd runtime class, always take the byte-correct drain; the
+    /// marker rendezvous is a Windows-only face whose aware route (the
+    /// dispatcher name) exists only there. The applet-identity route is
+    /// pinned where the file-identity APIs live
+    /// (path::tests::issue2225_fifo_marker_aware_classification).
+    #[test]
+    fn issue2225_procsub_operand_delivery_falls_to_drain() {
+        let env = HashMap::new();
+        assert_eq!(
+            procsub_operand_delivery(None, &env),
+            ProcsubOperandDelivery::DrainToTemp
+        );
+        // The niu#720/#723 consumer class: a System32 tool.
+        let findstr = if cfg!(windows) {
+            Path::new(r"C:\Windows\System32\findstr.exe")
+        } else {
+            Path::new("/usr/bin/findstr")
+        };
+        assert_eq!(
+            procsub_operand_delivery(Some(findstr), &env),
+            ProcsubOperandDelivery::DrainToTemp
+        );
+        assert_eq!(
+            procsub_operand_delivery(Some(Path::new("/usr/bin/cat")), &env),
+            ProcsubOperandDelivery::DrainToTemp
+        );
+        // The dispatcher name is the one route decidable from the path
+        // alone — and only on Windows, where the face exists.
+        let dispatcher = Path::new(r"C:\tools\winuxcmd\usr\bin\winuxcmd.exe");
+        let expected = if cfg!(windows) {
+            ProcsubOperandDelivery::FifoMarker
+        } else {
+            ProcsubOperandDelivery::DrainToTemp
+        };
+        assert_eq!(procsub_operand_delivery(Some(dispatcher), &env), expected);
     }
 }

@@ -15,6 +15,16 @@ pub(in crate::executor) fn split_shell_words_with_quote_info(source: &str) -> Ve
     let mut current = String::new();
     let mut quote = None;
     let mut word_quoted = false;
+    // rubash#2219: a word EXISTS once any segment of it has been seen —
+    // a quote pair, an ANSI-C quote, or any pushed character — even when
+    // the accumulated text is empty. GNU's lexer produces a word for
+    // `""` / `''` / `$''` (parse.y read_token_word: the quoted empty
+    // string is a complete word token), and consumers deciding operand
+    // presence from this split (the `$(cd X && pwd)` fast path) must see
+    // that word: dropping it turned `$(cd "" && pwd)` into the
+    // operand-less $HOME move. Push decisions key on this flag, not on
+    // `!current.is_empty()`.
+    let mut word_started = false;
     let mut backtick = false;
     let mut chars = source.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -126,6 +136,8 @@ pub(in crate::executor) fn split_shell_words_with_quote_info(source: &str) -> Ve
                 // Mark the word as quoted: ANSI-C quotes suppress field
                 // splitting and tilde expansion like other quotes.
                 word_quoted = true;
+                // $'' decodes to the empty string but is still a word.
+                word_started = true;
                 current.push_str(&decoded);
             }
             ('<', None) if chars.peek().copied() == Some('(') => {
@@ -144,19 +156,21 @@ pub(in crate::executor) fn split_shell_words_with_quote_info(source: &str) -> Ve
             ('\'' | '"', None) => {
                 quote = Some(ch);
                 word_quoted = true;
+                word_started = true;
             }
             (q, Some(active)) if q == active => quote = None,
             (ch, Some('\'')) => push_single_quoted_shell_word_char(&mut current, ch),
             (' ' | '\t', None) => {
-                if !current.is_empty() {
+                if word_started || !current.is_empty() {
                     words.push((std::mem::take(&mut current), word_quoted));
                     word_quoted = false;
+                    word_started = false;
                 }
             }
             _ => current.push(ch),
         }
     }
-    if !current.is_empty() {
+    if word_started || !current.is_empty() {
         words.push((current, word_quoted));
     }
     words

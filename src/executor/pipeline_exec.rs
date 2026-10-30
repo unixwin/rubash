@@ -3163,24 +3163,28 @@ impl Executor {
             } else {
                 crate::executor::dev_fd_operands::DevOperandStdout::FdTable
             };
-            let (dev_args, dev_ops) = self.materialize_dev_fd_operands(args, dev_stdin, dev_stdout);
-            stage_dev_ops.push(dev_ops);
-            // rubash#1905: synthetic /proc operands become spawn-time
-            // snapshot files for a child without its own /proc layer;
-            // each stage's record rides beside its dev_ops and is
-            // dropped where those are finished. Internal stages are
+            // The stage's resolved program feeds both operand passes'
+            // child-class policies (rubash#2225's dev-fd gate and
+            // rubash#1905's /proc policy alike). Internal stages are
             // the engine itself re-entered — they keep the literal
             // spelling (their faces serve /proc), so no program is
-            // offered to the policy for them.
-            let proc_program = if internal_pipeline_program_name(program).is_some() {
+            // offered to either policy for them.
+            let stage_program = if internal_pipeline_program_name(program).is_some() {
                 None
             } else {
                 Some(program.as_path())
             };
+            let (dev_args, dev_ops) =
+                self.materialize_dev_fd_operands(args, dev_stdin, dev_stdout, stage_program);
+            stage_dev_ops.push(dev_ops);
+            // rubash#1905: synthetic /proc operands become spawn-time
+            // snapshot files for a child without its own /proc layer;
+            // each stage's record rides beside its dev_ops and is
+            // dropped where those are finished.
             let (proc_args, proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
                 &dev_args,
                 Some(expanded_name),
-                proc_program,
+                stage_program,
                 &self.shell_state.env_vars,
             );
             stage_proc_ops.push(proc_ops);
@@ -4478,13 +4482,67 @@ impl Executor {
             );
             match materialized {
                 Ok((materialized, process_substitutions)) => {
-                    let inner = self.execute_pipeline_stage_inner(
+                    // rubash#2184: materialization rewrites a redirect-
+                    // position `>(...)` target into an empty carrier
+                    // path, but the stage runners capture the stage's
+                    // streams as strings and leave placement to the
+                    // driver loop's routing walk — which re-resolves
+                    // the ORIGINAL node's redirects, so the payload
+                    // lands in a literal file named after the raw
+                    // `>(...)` text while the consumer (spawned by
+                    // finish below) reads the still-empty carrier.
+                    // GNU connects the element's redirected fd straight
+                    // to the substitution pipe (subst.c process_
+                    // substitute; execute_cmd.c execute_pipeline runs
+                    // each element with its own redirects applied), so
+                    // when a redirect target was rewritten into a
+                    // carrier, route the captured streams here, through
+                    // the MATERIALIZED node's redirect state, before
+                    // finish spawns the consumer, and mark the stage
+                    // pre-wired so the driver skips its own walk.
+                    let redirect_carrier =
+                        stage_redirect_rewritten_to_carrier(command, &materialized);
+                    let mut inner = self.execute_pipeline_stage_inner(
                         &materialized,
                         input,
                         stdin_inherit,
                         streaming_stdin,
                         live_stdin,
                     );
+                    // A stage whose runner already placed its streams
+                    // itself — a function stage applying redirects to
+                    // its fd table, an external stage on the shared-
+                    // file arm — claims so via pipeline_stage_fds_pre_
+                    // wired; its carrier already holds the payload and
+                    // the captured strings are empty, so routing them
+                    // would only truncate the carrier back to empty.
+                    // Compound stages place their streams inside their
+                    // stage subshell the same way and are likewise out
+                    // of the routing population — the driver loop's
+                    // routing walk skips exactly this same set.
+                    if redirect_carrier
+                        && !self.pipeline_stage_fds_pre_wired.get()
+                        && !command_is_compound_pipeline_stage(command)
+                    {
+                        inner = match inner {
+                            Ok(Some((mut output, mut stderr, mut status))) => {
+                                match self.route_pipeline_stage_streams(
+                                    &materialized,
+                                    &mut output,
+                                    &mut stderr,
+                                    &mut status,
+                                ) {
+                                    Ok(true) => {
+                                        self.pipeline_stage_fds_pre_wired.set(true);
+                                        Ok(Some((output, stderr, status)))
+                                    }
+                                    Ok(false) => Ok(Some((output, stderr, status))),
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            other => other,
+                        };
+                    }
                     match self.finish_process_substitutions(process_substitutions) {
                         Err(error) => Err(error),
                         Ok(()) => inner,
@@ -6587,6 +6645,51 @@ fn command_has_pipeline_process_substitution(command: &CommandNode) -> bool {
         .into_iter()
         .flatten()
         .any(|redirect| redirect.target.starts_with("<(") || redirect.target.starts_with(">("))
+}
+
+/// rubash#2184: did process-substitution materialization rewrite any
+/// of the stage's redirect targets from `>(...)` form into a carrier
+/// path? Compares the original node against its materialized clone:
+/// materialization rewrites redirect targets in place (the typed
+/// output-redirect fields and the ordered redirect list), while
+/// input-side `<(...)` rewrites and word-position substitutions never
+/// produce an output carrier and stay out of this check.
+fn stage_redirect_rewritten_to_carrier(command: &CommandNode, materialized: &CommandNode) -> bool {
+    fn rewritten(
+        original: Option<&crate::parser::Redirect>,
+        materialized: Option<&crate::parser::Redirect>,
+    ) -> bool {
+        match (original, materialized) {
+            (Some(original), Some(materialized)) => {
+                original.target.starts_with(">(") && original.target != materialized.target
+            }
+            _ => false,
+        }
+    }
+    if rewritten(
+        command.redirect_out.as_deref(),
+        materialized.redirect_out.as_deref(),
+    ) || rewritten(command.append.as_deref(), materialized.append.as_deref())
+        || rewritten(
+            command.redirect_err.as_deref(),
+            materialized.redirect_err.as_deref(),
+        )
+        || rewritten(
+            command.redirect_err_append.as_deref(),
+            materialized.redirect_err_append.as_deref(),
+        )
+    {
+        return true;
+    }
+    command
+        .redirects
+        .iter()
+        .zip(materialized.redirects.iter())
+        .any(|(original, materialized)| {
+            original.is_output_side()
+                && original.target.starts_with(">(")
+                && original.target != materialized.target
+        })
 }
 
 struct TimePipelinePrefix {

@@ -86,7 +86,14 @@ fn run_golden_fixture(name: &str, timeout_secs: u64, corpus: &[&str]) {
         Duration::from_secs(timeout_secs),
     );
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(!out.timed_out, "{name}: TIMED OUT after {timeout_secs}s");
+    assert!(
+        !out.timed_out,
+        "{name}: TIMED OUT after {timeout_secs}s (rubash pid {}); \
+         partial stdout:\n{}\npartial stderr:\n{}",
+        out.pid,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     let expected_out = std::fs::read(root.join(GOLDEN_DIR).join(format!("{name}.gnu.out")))
         .unwrap_or_else(|e| panic!("{name}: missing golden stdout: {e}"));
     let expected_err = std::fs::read(root.join(GOLDEN_DIR).join(format!("{name}.gnu.err")))
@@ -401,52 +408,104 @@ struct RunOutcome {
     stderr: Vec<u8>,
     code: Option<i32>,
     timed_out: bool,
+    /// Pid of the direct child (rubash#2056): carried so a timeout
+    /// failure can name the wedged process, not just the bound.
+    pid: u32,
 }
 
-fn wait_bounded(child: &mut Child, limit: Duration) -> RunOutcome {
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    let _ = pipe.read_to_end(&mut stdout);
+/// One child pipe being drained on its own thread (rubash#2056): the
+/// buffer accumulates for the whole wait, and `done` flips once the
+/// pipe reaches EOF (every write end closed) or errors. A child
+/// spawned without a pipe (Stdio::null) is born done and empty.
+struct PipeDrain {
+    buffer: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn start_drain<R: Read + Send + 'static>(pipe: Option<R>) -> PipeDrain {
+    let drain = PipeDrain {
+        buffer: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(pipe.is_none())),
+    };
+    if let Some(mut pipe) = pipe {
+        let buffer = drain.buffer.clone();
+        let done = drain.done.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buffer.lock().unwrap().extend_from_slice(&chunk[..n]),
                 }
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_end(&mut stderr);
-                }
-                return RunOutcome {
-                    stdout,
-                    stderr,
-                    code: status.code(),
-                    timed_out: false,
-                };
             }
-            Ok(None) => {
-                if start.elapsed() > limit {
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    drain
+}
+
+/// Bounded wait for a spawned child, hardened by rubash#2056.
+///
+/// The pre-hardening shape waited for exit first and drained the
+/// pipes afterwards with an unbounded `read_to_end`: if a descendant
+/// that outlived the child kept a write end open (a background fifo
+/// writer is exactly that), EOF never arrived, the nominal bound
+/// never fired, and one wedged shape ate a whole 25-minute CI job
+/// with zero diagnostics (the #1903 hang; the issue1903 module grew
+/// a private drained runner to work around it, now deleted in favor
+/// of this helper). The same shape also deadlocked any child that
+/// filled a pipe buffer before exiting, and its timeout path
+/// returned empty captures.
+///
+/// Now both pipes drain on threads from entry, the wait polls
+/// `try_wait`, and ONE deadline covers both the child's exit and
+/// the pipes reaching EOF. A timeout kills the child and returns
+/// the partial captures with the pid, so the failure the caller
+/// raises carries its evidence. The timeout stays a returned
+/// outcome rather than a panic here: at least one caller
+/// (nvm_load_timed_run_script) consumes `timed_out` as a value —
+/// the panic-with-diagnostics half of the shape lives at the
+/// assertion layer, as it did in the issue1903 runner trio.
+fn wait_bounded(child: &mut Child, limit: Duration) -> RunOutcome {
+    let pid = child.id();
+    let stdout = start_drain(child.stdout.take());
+    let stderr = start_drain(child.stderr.take());
+    let snapshot = |timed_out: bool, code: Option<i32>| RunOutcome {
+        stdout: stdout.buffer.lock().unwrap().clone(),
+        stderr: stderr.buffer.lock().unwrap().clone(),
+        code,
+        timed_out,
+        pid,
+    };
+    let start = Instant::now();
+    let mut exit_code: Option<Option<i32>> = None;
+    loop {
+        if exit_code.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => exit_code = Some(status.code()),
+                Ok(None) => {}
+                Err(_) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return RunOutcome {
-                        stdout: Vec::new(),
-                        stderr: Vec::new(),
-                        code: None,
-                        timed_out: true,
-                    };
+                    return snapshot(false, None);
                 }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return RunOutcome {
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                    code: None,
-                    timed_out: false,
-                };
             }
         }
+        if let Some(code) = exit_code {
+            let drained = stdout.done.load(std::sync::atomic::Ordering::SeqCst)
+                && stderr.done.load(std::sync::atomic::Ordering::SeqCst);
+            if drained {
+                return snapshot(false, code);
+            }
+        }
+        if start.elapsed() > limit {
+            if exit_code.is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return snapshot(true, exit_code.flatten());
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -564,6 +623,127 @@ fn run_rubash_piped_stdin_in(dir: &Path, args: &[&str], limit: Duration) -> RunO
     let outcome = wait_bounded(&mut child, limit);
     drop(child.stdin.take());
     outcome
+}
+
+/// Fake child for the issue2056 wait_bounded pins: the rubash binary
+/// itself running a `-c` script, pipes on both streams. What the
+/// script does (hang, orphan its pipe, flood its pipe) is the pin's
+/// variable; the spawn shape is constant.
+fn spawn_issue2056_fake_child(script: &str) -> Child {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    cmd.args(["-c", script])
+        .env_clear()
+        .env("PATH", minimal_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.spawn().expect("spawn issue2056 fake child")
+}
+
+/// rubash#2056: a child that prints markers and then never exits
+/// (external sleep as the foreground command) must be killed at the
+/// bound, and the timeout outcome must carry whatever it printed
+/// before wedging — the pre-hardening helper returned EMPTY captures
+/// on its timeout path, so a hang surfaced with zero evidence.
+#[test]
+fn issue2056_wait_bounded_kills_never_exiting_child_with_partial_output() {
+    let mut child = spawn_issue2056_fake_child(
+        "echo issue2056-out-marker\necho issue2056-err-marker >&2\nsleep 120\n",
+    );
+    let pid = child.id();
+    let started = Instant::now();
+    let out = wait_bounded(&mut child, Duration::from_secs(3));
+    let elapsed = started.elapsed();
+    assert!(
+        out.timed_out,
+        "never-exiting child must report timed_out; got code {:?}",
+        out.code
+    );
+    assert_eq!(out.pid, pid, "outcome must carry the child's pid");
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the 3s bound did not fire promptly: {elapsed:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("issue2056-out-marker"),
+        "partial stdout lost on timeout: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("issue2056-err-marker"),
+        "partial stderr lost on timeout: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        matches!(child.try_wait(), Ok(Some(_))),
+        "timed-out child was not killed and reaped"
+    );
+}
+
+/// rubash#2056, the #1903 shape: the child EXITS promptly with code 0
+/// but leaves a background orphan holding the stdout write end, so
+/// pipe EOF never arrives. The pre-hardening helper read the pipes
+/// only after exit with an unbounded read_to_end — this shape hung
+/// it forever (it ate a full 25-minute goldens job). The hardened
+/// helper must count the still-open pipe against the same bound and
+/// return the partial capture with the child's real exit code.
+#[test]
+fn issue2056_wait_bounded_bounds_post_exit_pipe_drain() {
+    let mut child =
+        spawn_issue2056_fake_child("echo issue2056-orphan-marker\nsleep 120 &\nexit 0\n");
+    let started = Instant::now();
+    let out = wait_bounded(&mut child, Duration::from_secs(3));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the 3s bound did not fire promptly: {elapsed:?}"
+    );
+    assert!(
+        out.timed_out,
+        "pipe held open by an orphan past the bound must report timed_out; got code {:?}",
+        out.code
+    );
+    assert_eq!(out.code, Some(0), "the child itself exited 0");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("issue2056-orphan-marker"),
+        "partial stdout lost: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// rubash#2056: a child that floods stdout past the pipe buffer
+/// (~176 KB here) can only finish if the pipes drain WHILE it runs.
+/// The pre-hardening helper never read before exit, so this shape
+/// deadlocked into a timeout with empty captures; the hardened
+/// helper must deliver the full payload, byte for byte.
+#[test]
+fn issue2056_wait_bounded_drains_pipes_while_waiting() {
+    let mut child = spawn_issue2056_fake_child(
+        "i=0\nwhile (( i < 4000 )); do echo \"issue2056-line-$i-abcdefghijklmnopqrstuvwxyz\"; (( i += 1 )); done\n",
+    );
+    let out = wait_bounded(&mut child, Duration::from_secs(30));
+    assert!(
+        !out.timed_out,
+        "pipe-flooding child timed out — pipes were not drained while waiting"
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected: String = (0..4000)
+        .map(|i| format!("issue2056-line-{i}-abcdefghijklmnopqrstuvwxyz\n"))
+        .collect();
+    assert_eq!(
+        out.stdout.len(),
+        expected.len(),
+        "drained payload is truncated"
+    );
+    assert!(
+        out.stdout == expected.as_bytes(),
+        "drained payload differs from what the child wrote"
+    );
 }
 
 fn assert_bytes_eq(actual: &[u8], expected: &[u8], label: &str, name: &str) {
@@ -920,8 +1100,12 @@ fn run_suite_snapshot(suite: &str) {
     });
     assert!(
         !out.timed_out,
-        "{suite}: suite run timed out ({}s)",
-        started.elapsed().as_secs()
+        "{suite}: suite run timed out ({}s, rubash pid {}); \
+         partial stdout:\n{}\npartial stderr:\n{}",
+        started.elapsed().as_secs(),
+        out.pid,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
     assert_bytes_eq(&normalized, &expected, "snapshot stdout", suite);
 }
@@ -4848,17 +5032,21 @@ mod issue_1952 {
     /// Pipeline form: `head -1` completes the pipeline from line 1
     /// alone, before the producer's flag exists.
     ///
-    /// Ignored pending rubash#1959: on Windows, a process
-    /// substitution delivered as an argv word to a spawned external
-    /// child (`head` here) is drained to a temp file before spawn —
-    /// the parent reads the pipe to EOF first, so this form does not
-    /// stream there yet (root-cause chain: rubash#1959 and
-    /// fix-1952 REPORT §7). The in-process consumer forms above do
-    /// stream on Windows. The GNU assertion below is kept verbatim;
-    /// remove this ignore once #1959's rendezvous endpoint (named
-    /// pipe delivery to external children) lands.
+    /// The rubash#1959 drain (the parent read the producer to EOF into a
+    /// temp file before spawn) is fixed — the word face now streams
+    /// through the #1903 fifo-marker rendezvous, pinned Windows-green in
+    /// tests/issue1959_procsub_argv_streaming.rs. This literal pin still
+    /// cannot run on Windows for two tool-side reasons, neither a rubash
+    /// gap: the suite's airtight PATH resolves an MSYS head that does
+    /// not speak the marker rendezvous at all, and WinuxCmd#1442 tracks
+    /// the head line-mode fifo-operand gap for the toolchain that does.
+    /// It runs again on non-Windows (the unix face pins the read end at
+    /// the operand's fd, unchanged since #1952).
     #[test]
-    #[ignore = "rubash#1959: Windows drains procsub argv words to external children to a temp file before spawn (no streaming); remove when the #1959 rendezvous endpoint lands"]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows tool-side: suite PATH head is not marker-aware and WinuxCmd#1442 (head line-mode on fifo operand); the #1959 rendezvous itself is pinned in tests/issue1959_procsub_argv_streaming.rs"
+    )]
     fn issue1952_pipeline_head_streams_first_line() {
         let dir = case_scratch("1952-pipe");
         let (stdout, stderr, status) = run(
@@ -5013,6 +5201,191 @@ mod issue_1952 {
         );
         assert_eq!(status, Some(0), "stderr:\n{stderr}");
         assert_eq!(stdout, "probe-r3\ncatrc:1\n", "stderr:\n{stderr}");
+    }
+}
+
+/// rubash#2225: #2156 (for #1959) routed EVERY procsub argv word
+/// through the #1903 fifo-marker rendezvous, so a consumer that is not
+/// marker-aware opened the marker path plainly and read the 7
+/// `!<fifo>` bytes instead of the producer's stream (niu#720/#723:
+/// System32 findstr.exe printing `!<fifo>`). GNU subst.c:6362
+/// process_substitute names a live pipe whose bytes ANY consumer
+/// opening the name must receive, so the marker delivery is now gated
+/// on the consumer's class (path::winuxcmd_fifo_marker_aware: the
+/// resolved program IS the WinuxCmd runtime — the dispatcher or an
+/// applet hardlink of it); every other consumer takes the pre-#2156
+/// drain-to-temp. Windows-only face — the marker delivery does not
+/// exist elsewhere.
+///
+/// The plain-read pins use absolute System32 consumers with builtin
+/// producers, so they run inside this suite's airtight harness. The
+/// word-shape pins observe the chosen route through the GNU suite's
+/// own argv echo (helpers-win recho.exe prints `argv[N] = <arg>`
+/// verbatim): a fake payload tree is built in the scratch dir from
+/// recho copies (only file identity matters, so copies are the whole
+/// fixture) and the script points WINUXCMD_HOME / PATH at it.
+#[cfg(windows)]
+mod issue_2225 {
+    use super::*;
+
+    fn run(dir: &Path, code: &str) -> (String, String, Option<i32>) {
+        let out = run_rubash_in(dir, &["-c", code], Duration::from_secs(30));
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    fn win_slash(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
+    /// The niu#720/#723 shape with a deterministic producer: findstr
+    /// is a plain CreateFile reader and never bridges markers, so it
+    /// must receive the producer's bytes (drained), never the
+    /// marker's.
+    #[test]
+    fn issue2225_findstr_plain_read_gets_producer_bytes() {
+        let dir = case_scratch("2225-findstr");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "C:/Windows/System32/findstr.exe . <(printf 'issue2225-producer-bytes\\n')\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert!(
+            stdout.contains("issue2225-producer-bytes"),
+            "findstr must print the producer's line, got stdout:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("!<fifo>"),
+            "findstr must never see marker bytes, got stdout:\n{stdout}"
+        );
+    }
+
+    /// cmd.exe's `type` is the characterization cluster's plain
+    /// reader: same contract, direct and inside a command
+    /// substitution (the comsub spawn site threads the consumer the
+    /// same way).
+    #[test]
+    fn issue2225_cmd_type_plain_read_gets_producer_bytes() {
+        let dir = case_scratch("2225-cmdtype");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "C:/Windows/System32/cmd.exe /c type <(printf 'issue2225-plain-bytes\\n')\n\
+             x=$(C:/Windows/System32/cmd.exe /c type <(printf 'issue2225-comsub-bytes\\n'))\n\
+             echo \"got:[$x]\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert!(
+            stdout.contains("issue2225-plain-bytes"),
+            "type must print the producer's bytes, got stdout:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("got:[issue2225-comsub-bytes]"),
+            "comsub delivery must carry the producer's bytes, got stdout:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("!<fifo>"),
+            "no marker bytes may leak to a plain reader, got stdout:\n{stdout}"
+        );
+    }
+
+    /// Build a fake WinuxCmd payload tree in `dir`: recho.exe copied
+    /// in as the tree's winuxcmd.exe marker, plus showop.exe as either
+    /// a hardlink of the marker (the runtime binary itself —
+    /// marker-aware) or a second copy (a distinct file — not the
+    /// runtime). Returns (payload root, bin dir) in forward-slash
+    /// spelling for the script.
+    fn fake_payload(dir: &Path, link_consumer: bool) -> (String, String) {
+        let bin = dir.join("payload").join("usr").join("bin");
+        std::fs::create_dir_all(&bin).expect("create payload bin");
+        let recho = Path::new(HELPERS_WIN).join("recho.exe");
+        let dispatcher = bin.join("winuxcmd.exe");
+        std::fs::copy(&recho, &dispatcher).expect("copy dispatcher marker");
+        let consumer = bin.join("showop.exe");
+        if link_consumer {
+            std::fs::hard_link(&dispatcher, &consumer).expect("link consumer");
+        } else {
+            std::fs::copy(&recho, &consumer).expect("copy consumer");
+        }
+        (win_slash(&dir.join("payload")), win_slash(&bin))
+    }
+
+    fn echoed_operand(dir: &Path, script: &str) -> String {
+        let (stdout, stderr, status) = run(dir, script);
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        stdout
+    }
+
+    /// A consumer that IS the WinuxCmd runtime binary (an applet
+    /// hardlink of the tree's dispatcher) keeps the #1959 streaming
+    /// route: its operand word is the fifo-marker path. (The route's
+    /// streaming behavior itself stays pinned in
+    /// tests/issue1959_procsub_argv_streaming.rs.)
+    #[test]
+    fn issue2225_aware_applet_consumer_gets_marker_operand() {
+        let dir = case_scratch("2225-applet");
+        let (payload, bin) = fake_payload(&dir, true);
+        let script = format!(
+            "export WINUXCMD_HOME='{payload}'; PATH='{bin};C:/Windows/System32'; \
+             showop <(printf 'x\\n')\n"
+        );
+        let stdout = echoed_operand(&dir, &script);
+        assert!(
+            stdout.contains("rubash-procsub-"),
+            "applet consumer must receive the marker operand, got:\n{stdout}"
+        );
+    }
+
+    /// A consumer outside any WinuxCmd tree is not marker-aware: its
+    /// operand word is the drained temp file (the pre-#2156 shape).
+    #[test]
+    fn issue2225_plain_consumer_gets_drained_temp_operand() {
+        let dir = case_scratch("2225-plain");
+        let plain = dir.join("plainbin");
+        std::fs::create_dir_all(&plain).expect("create plain bin");
+        std::fs::copy(
+            Path::new(HELPERS_WIN).join("recho.exe"),
+            plain.join("showop.exe"),
+        )
+        .expect("copy consumer");
+        let script = format!(
+            "PATH='{};C:/Windows/System32'; showop <(printf 'x\\n')\n",
+            win_slash(&plain)
+        );
+        let stdout = echoed_operand(&dir, &script);
+        assert!(
+            stdout.contains("rubash-devfd-"),
+            "plain consumer must receive the drained temp operand, got:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("rubash-procsub-"),
+            "plain consumer must never receive a marker operand, got:\n{stdout}"
+        );
+    }
+
+    /// A plain COPY of an applet sitting inside the tree is a distinct
+    /// file, not the runtime binary: tree membership alone is not
+    /// awareness (the niubash#346 D6 class), so it takes the drain
+    /// too.
+    #[test]
+    fn issue2225_tree_member_copy_is_not_marker_aware() {
+        let dir = case_scratch("2225-copy");
+        let (payload, bin) = fake_payload(&dir, false);
+        let script = format!(
+            "export WINUXCMD_HOME='{payload}'; PATH='{bin};C:/Windows/System32'; \
+             showop <(printf 'x\\n')\n"
+        );
+        let stdout = echoed_operand(&dir, &script);
+        assert!(
+            stdout.contains("rubash-devfd-"),
+            "copied tree member must receive the drained temp operand, got:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("rubash-procsub-"),
+            "copied tree member must never receive a marker operand, got:\n{stdout}"
+        );
     }
 }
 
@@ -5685,7 +6058,7 @@ mod issue_1951 {
 /// blocks until the peer side opens (fifo open semantics).
 ///
 /// The pins cover the shell half of the WinuxCmd protocol
-/// (crate::winux_fifo): marker creation by the emulated `mkfifo`, the
+/// (crate::winuxcmd_fifo): marker creation by the emulated `mkfifo`, the
 /// redirect round trip in the issue's exact shape, both blocking-open
 /// directions across two shell processes (the cross-process shape is
 /// what pairs with a WinuxCmd tool on the other side), the append and
@@ -5694,40 +6067,30 @@ mod issue_1951 {
 #[cfg(windows)]
 mod issue_1903 {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
     /// Per-invocation bound for every rubash child this module spawns.
     /// The shapes below complete in well under a second when the
     /// rendezvous pairs; 20s is pure failure headroom.
     const BOUND: Duration = Duration::from_secs(20);
 
-    struct BoundedOutcome {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        code: Option<i32>,
-        timed_out: bool,
-        pid: u32,
-    }
-
-    /// This module carries its own runner instead of run_rubash_in /
-    /// wait_bounded for one mechanical reason: wait_bounded reads the
-    /// child's pipes only AFTER the child exits, with an unbounded
-    /// read_to_end — a background job process that outlives the shell
-    /// (a fifo writer parked in its pairing open is exactly that)
-    /// inherits the write end and the read never returns, so the
-    /// nominal 30s bound never fires and one wedged shape eats the
-    /// whole CI job (the #2014 hang: the goldens job burned its full
-    /// 25-minute timeout inside this module). Here both pipes drain
-    /// on threads from spawn, the wait polls try_wait against a hard
-    /// deadline, and a timeout kills the child and reports its pid
-    /// plus whatever it managed to print — a hang becomes a fast,
-    /// diagnosed test failure. The environment discipline is
-    /// run_rubash_in's airtight one, unchanged.
-    fn spawn_drained(
-        dir: &Path,
-        script_name: &str,
-        script: &str,
-    ) -> (Child, Arc<Mutex<Vec<u8>>>, Arc<Mutex<Vec<u8>>>) {
+    /// Spawn one rubash child for a script this module writes into
+    /// the scratch dir; `run` and the blocked shapes then wait on it
+    /// through the SHARED wait_bounded. This module originally
+    /// carried a private runner (spawn_drained / wait_drained)
+    /// because wait_bounded read the child's pipes only after exit,
+    /// with an unbounded read_to_end — a background job process that
+    /// outlives the shell (a fifo writer parked in its pairing open
+    /// is exactly that) inherits the write end and the read never
+    /// returned, so the nominal bound never fired and one wedged
+    /// shape ate the whole CI job (the #2014 hang: the goldens job
+    /// burned its full 25-minute timeout inside this module).
+    /// rubash#2056 promoted the drained shape into wait_bounded
+    /// itself (pipes drained on threads while waiting, try_wait
+    /// poll, one deadline over exit + pipe EOF, partial captures on
+    /// timeout), so the private runner is deleted and this module
+    /// converges onto the shared helper. The environment discipline
+    /// is run_rubash_in's airtight one, unchanged.
+    fn spawn_script(dir: &Path, script_name: &str, script: &str) -> Child {
         let path = dir.join(script_name);
         std::fs::write(&path, script).expect("write probe script");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
@@ -5753,80 +6116,12 @@ mod issue_1903 {
                 cmd.env(name, value);
             }
         }
-        let mut child = cmd.spawn().expect("spawn rubash");
-        let stdout_buf = Arc::new(Mutex::new(Vec::new()));
-        let stderr_buf = Arc::new(Mutex::new(Vec::new()));
-        fn drain<R: std::io::Read + Send + 'static>(mut pipe: R, sink: Arc<Mutex<Vec<u8>>>) {
-            std::thread::spawn(move || {
-                let mut chunk = [0u8; 8192];
-                loop {
-                    match pipe.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => sink.lock().unwrap().extend_from_slice(&chunk[..n]),
-                    }
-                }
-            });
-        }
-        drain(
-            child.stdout.take().expect("piped stdout"),
-            stdout_buf.clone(),
-        );
-        drain(
-            child.stderr.take().expect("piped stderr"),
-            stderr_buf.clone(),
-        );
-        (child, stdout_buf, stderr_buf)
-    }
-
-    fn wait_drained(
-        child: &mut Child,
-        stdout_buf: &Arc<Mutex<Vec<u8>>>,
-        stderr_buf: &Arc<Mutex<Vec<u8>>>,
-        limit: Duration,
-    ) -> BoundedOutcome {
-        let pid = child.id();
-        let start = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    return BoundedOutcome {
-                        stdout: stdout_buf.lock().unwrap().clone(),
-                        stderr: stderr_buf.lock().unwrap().clone(),
-                        code: status.code(),
-                        timed_out: false,
-                        pid,
-                    };
-                }
-                Ok(None) if start.elapsed() > limit => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return BoundedOutcome {
-                        stdout: stdout_buf.lock().unwrap().clone(),
-                        stderr: stderr_buf.lock().unwrap().clone(),
-                        code: None,
-                        timed_out: true,
-                        pid,
-                    };
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return BoundedOutcome {
-                        stdout: stdout_buf.lock().unwrap().clone(),
-                        stderr: stderr_buf.lock().unwrap().clone(),
-                        code: None,
-                        timed_out: false,
-                        pid,
-                    };
-                }
-            }
-        }
+        cmd.spawn().expect("spawn rubash")
     }
 
     fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
-        let (mut child, stdout_buf, stderr_buf) = spawn_drained(dir, "case.sh", script);
-        let out = wait_drained(&mut child, &stdout_buf, &stderr_buf, BOUND);
+        let mut child = spawn_script(dir, "case.sh", script);
+        let out = wait_bounded(&mut child, BOUND);
         assert!(
             !out.timed_out,
             "rubash pid {} still running after {BOUND:?} — subprocess state: \
@@ -5843,12 +6138,12 @@ mod issue_1903 {
     }
 
     /// Spawn a shell that is expected to BLOCK (its fifo open has no
-    /// peer yet), drained from birth like every child in this module.
-    fn spawn_blocked(
-        dir: &Path,
-        script: &str,
-    ) -> (Child, Arc<Mutex<Vec<u8>>>, Arc<Mutex<Vec<u8>>>) {
-        spawn_drained(dir, "blocked.sh", script)
+    /// peer yet). The shared wait_bounded starts draining when it is
+    /// called on the child rather than at spawn; a child parked in
+    /// its pairing open has printed nothing, so nothing is lost by
+    /// the later drain start.
+    fn spawn_blocked(dir: &Path, script: &str) -> Child {
+        spawn_script(dir, "blocked.sh", script)
     }
 
     fn assert_still_blocked(child: &mut Child, what: &str) {
@@ -5872,7 +6167,7 @@ mod issue_1903 {
     const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
 
     #[test]
-    fn issue1903_mkfifo_creates_winux_marker() {
+    fn issue1903_mkfifo_creates_winuxcmd_marker() {
         let dir = case_scratch("1903-create");
         let (stdout, stderr, code) = run(&dir, "mkfifo f\n");
         assert_eq!(code, Some(0), "stderr:\n{stderr}");
@@ -5936,12 +6231,12 @@ mod issue_1903 {
         let dir = case_scratch("1903-block-read");
         let (_, stderr, code) = run(&dir, "mkfifo f\n");
         assert_eq!(code, Some(0), "stderr:\n{stderr}");
-        let (mut reader, out_buf, err_buf) = spawn_blocked(&dir, "cat f\n");
+        let mut reader = spawn_blocked(&dir, "cat f\n");
         assert_still_blocked(&mut reader, "cat f with no writer");
         let (stdout, stderr, code) = run(&dir, "echo hi > f\n");
         assert_eq!(code, Some(0), "writer stderr:\n{stderr}");
         assert_eq!(stdout, "");
-        let out = wait_drained(&mut reader, &out_buf, &err_buf, BOUND);
+        let out = wait_bounded(&mut reader, BOUND);
         assert!(
             !out.timed_out,
             "reader pid {} never completed after the writer arrived; partial stderr:\n{}",
@@ -5957,12 +6252,12 @@ mod issue_1903 {
         let dir = case_scratch("1903-block-write");
         let (_, stderr, code) = run(&dir, "mkfifo f\n");
         assert_eq!(code, Some(0), "stderr:\n{stderr}");
-        let (mut writer, out_buf, err_buf) = spawn_blocked(&dir, "echo hi > f\n");
+        let mut writer = spawn_blocked(&dir, "echo hi > f\n");
         assert_still_blocked(&mut writer, "echo hi > f with no reader");
         let (stdout, stderr, code) = run(&dir, "cat f\n");
         assert_eq!(code, Some(0), "reader stderr:\n{stderr}");
         assert_eq!(stdout, "hi\n");
-        let out = wait_drained(&mut writer, &out_buf, &err_buf, BOUND);
+        let out = wait_bounded(&mut writer, BOUND);
         assert!(
             !out.timed_out,
             "writer pid {} never completed after the reader arrived; partial stderr:\n{}",
@@ -5989,7 +6284,7 @@ mod issue_1903 {
     }
 
     #[test]
-    fn issue1903_foreign_winux_marker_is_honored() {
+    fn issue1903_foreign_winuxcmd_marker_is_honored() {
         // A marker in WinuxCmd's on-disk format created OUTSIDE the
         // shell (here: by hand — content + SYSTEM attribute, the two
         // things detection keys on) must rendezvous exactly like one

@@ -614,6 +614,7 @@ impl Executor {
         Self::initialize_fresh_shell_env_vars(
             &mut env_vars,
             &std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            internal_respawn,
         );
 
         // rubash#2136: the stamped pid is adopted as `$$` only for a
@@ -678,6 +679,59 @@ impl Executor {
             };
         env_vars.remove(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT);
         mirror_env_remove(super::compound_exec::POSITIONAL_PARAMS_TRANSPORT);
+
+        // rubash#2058: the fork-context stamp (see
+        // Executor::fork_context_transport_entries) — the parent's
+        // effective call-stack views, its PIPESTATUS cell, and the
+        // BASH_ARGV bottom-frame state. A GNU fork copies all of it
+        // verbatim (variables.c); the respawn child re-imports only
+        // its environment, so the stamp is consumed here for internal
+        // respawns and stripped either way, exactly like
+        // POSITIONAL_PARAMS_TRANSPORT above. The frames land in
+        // ShellState::inherited_fork_frames (the dynamic views read
+        // the child's own frames above them), the bottom frame seeds
+        // bash_arg_bottom when the parent's arrays had materialized,
+        // and the PIPESTATUS cell seeds the literal's pipestatus
+        // fields.
+        let mut respawn_inherited_frames: Option<crate::shell::state::InheritedForkFrames> = None;
+        let mut respawn_argv_bottom: Option<Vec<String>> = None;
+        let mut respawn_pipestatus: Option<(
+            crate::shell::state::PipestatusShape,
+            Vec<(i64, i32)>,
+        )> = None;
+        if internal_respawn && env_vars.contains_key(super::compound_exec::FORK_FUNCNAME_TRANSPORT)
+        {
+            let stamped_list = |key: &str| -> Vec<String> {
+                env_vars
+                    .get(key)
+                    .map(|value| array_values(value))
+                    .unwrap_or_default()
+            };
+            respawn_inherited_frames = Some(crate::shell::state::InheritedForkFrames {
+                function_names: stamped_list(super::compound_exec::FORK_FUNCNAME_TRANSPORT),
+                sources: stamped_list(super::compound_exec::FORK_SOURCE_TRANSPORT),
+                linenos: stamped_list(super::compound_exec::FORK_LINENO_TRANSPORT),
+                argv_frames: stamped_list(super::compound_exec::FORK_ARGV_TRANSPORT),
+                argc_frames: stamped_list(super::compound_exec::FORK_ARGC_TRANSPORT),
+                in_function: env_vars
+                    .contains_key(super::compound_exec::FORK_IN_FUNCTION_TRANSPORT),
+                has_main_frame: env_vars
+                    .contains_key(super::compound_exec::FORK_MAIN_FRAME_TRANSPORT),
+            });
+            // Key presence is the materialization bit (see the
+            // FORK_ARGV_BOTTOM_TRANSPORT doc): present-but-empty is a
+            // materialized empty frame, absent is unmaterialized.
+            if let Some(value) = env_vars.get(super::compound_exec::FORK_ARGV_BOTTOM_TRANSPORT) {
+                respawn_argv_bottom = Some(array_values(value));
+            }
+            if let Some(value) = env_vars.get(super::compound_exec::FORK_PIPESTATUS_TRANSPORT) {
+                respawn_pipestatus = crate::shell::state::decode_pipestatus_state(value);
+            }
+        }
+        for key in super::compound_exec::FORK_TRANSPORT_KEYS {
+            env_vars.remove(key);
+            mirror_env_remove(key);
+        }
 
         // Forked-child fd table restore: a `rubash -c` background/subshell
         // child inherits the parent's fd>=3 File endpoints through the
@@ -771,14 +825,26 @@ impl Executor {
                 positional_offset: 0,
                 // GNU: PIPESTATUS starts unset (empty); it materializes on
                 // the first pipeline/simple-command execution (rubash#1364).
-                pipestatus: Vec::new(),
-                pipestatus_shape: crate::shell::state::PipestatusShape::Absent,
+                // A fork-shaped respawn instead inherits the parent's
+                // fork-time cell verbatim (rubash#2058).
+                pipestatus: respawn_pipestatus
+                    .as_ref()
+                    .map(|(_, vector)| vector.clone())
+                    .unwrap_or_default(),
+                pipestatus_shape: respawn_pipestatus
+                    .as_ref()
+                    .map(|(shape, _)| *shape)
+                    .unwrap_or(crate::shell::state::PipestatusShape::Absent),
                 function_name_stack: Vec::new(),
                 bash_argc_stack: Vec::new(),
                 bash_argv_stack: Vec::new(),
-                bash_arg_bottom: std::cell::RefCell::new(None),
+                // rubash#2058: a materialized bottom frame crosses the
+                // respawn verbatim; None keeps the arrays unmaterialized
+                // exactly as the parent's fork left them.
+                bash_arg_bottom: std::cell::RefCell::new(respawn_argv_bottom),
                 bash_lineno_stack: Vec::new(),
                 bash_source_stack: Vec::new(),
+                inherited_fork_frames: respawn_inherited_frames,
                 local_var_scopes: Vec::new(),
                 local_attr_scopes: Vec::new(),
                 local_typed_scopes: Vec::new(),
@@ -992,6 +1058,8 @@ impl Executor {
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,
+            external_route_provider: None,
+            external_stdio_slots: None,
             #[cfg(windows)]
             elevation_handler: None,
             external_file_builtins_enabled: true,
@@ -1056,6 +1124,10 @@ impl Executor {
     pub(in crate::executor) fn initialize_fresh_shell_env_vars(
         env_vars: &mut crate::shell::var_table::VarTable,
         cwd: &std::path::Path,
+        // rubash#2058: true for a validated internal respawn — a fork
+        // is not a new shell, so SHLVL keeps the parent's value
+        // instead of taking the startup increment.
+        keep_shlvl: bool,
     ) {
         env_vars.remove("BASH_ARGV0");
         env_vars.remove("BASH_EXECUTION_STRING");
@@ -1169,7 +1241,10 @@ impl Executor {
             // `$OLDPWD` would still expand to the rejected value.
             mirror_env_remove("OLDPWD");
         }
-        initialize_shell_level(env_vars);
+        // rubash#2058: see the keep_shlvl parameter.
+        if !keep_shlvl {
+            initialize_shell_level(env_vars);
+        }
         mark_initial_exported_vars(env_vars);
         mark_env_name(env_vars, EXPORTED_VARS, "OLDPWD");
         // Undo the export mark for the SHELL/PATH fallbacks fabricated

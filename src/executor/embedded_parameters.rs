@@ -2,6 +2,26 @@ use super::*;
 use crate::executor::embedded_mutations::mark_expansion_whitespace;
 use crate::executor::markers::DATA_DOLLAR;
 
+/// rubash#2216 expansion-result protection for the plain walk (the
+/// `expand_word` entry): a result's backslashes ride as
+/// ASSIGN_EXPANSION_BACKSLASH — the same registry carrier the #218
+/// assignment-RHS port uses — so `expand_word`'s trailing unescape
+/// pass cannot read them as source escape syntax. Mirrors the mut
+/// walker's protect_rhs_value (embedded_mutations.rs, rubash#2210);
+/// GNU's invariant is subst.c:4773 quote_string (CTLESC-prefix every
+/// character of a merged result) with subst.c:4807 dequote_string
+/// stripping only the protection bytes.
+fn protect_result_backslashes(value: &str, protect: bool) -> std::borrow::Cow<'_, str> {
+    if protect && value.contains('\\') {
+        std::borrow::Cow::Owned(value.replace(
+            '\\',
+            crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
+        ))
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
+}
+
 /// Expansion-result protection for the preserve-quotes compound walker.
 /// GNU subst.c:11862 `add_quoted_string:` -> `quote_string`
 /// (subst.c:4773) CTLESC-protects every parameter/command-substitution
@@ -72,6 +92,35 @@ impl Executor {
         self.expand_embedded_parameters_with_context(word, false)
     }
 
+    /// rubash#2216: the `expand_word` entry — the same walk as
+    /// `expand_embedded_parameters`, but with expansion-result
+    /// protection on: parameter-expansion results are backslash-carried
+    /// (ASSIGN_EXPANSION_BACKSLASH) at their splice sites and data
+    /// backslashes the walk itself emits ride as the same carrier,
+    /// because `expand_word` finishes with a `$(`-gated trailing
+    /// unescape pass over the ASSEMBLED string that cannot tell those
+    /// bytes from deferred source escape pairs (the non-mut sibling of
+    /// the #2210 mut-walker fix). GNU never re-scans assembled data:
+    /// subst.c:4773 quote_string CTLESC-protects every expansion result
+    /// merged into a word (subst.c:11862 add_quoted_string), and
+    /// subst.c:4807 dequote_string strips only CTLESC bytes.
+    /// `expand_word` restores the carrier right after its pass; this is
+    /// the only entry that sets the flag, so every other consumer of
+    /// this walker observes byte-identical behavior.
+    pub(in crate::executor) fn expand_embedded_parameters_protecting_results(
+        &self,
+        word: &str,
+    ) -> String {
+        let depth = EXPAND_DEPTH.with(|d| d.get());
+        if depth >= MAX_EXPAND_DEPTH {
+            return word.to_string();
+        }
+        EXPAND_DEPTH.with(|d| d.set(depth + 1));
+        let result = self.expand_embedded_parameters_inner(word, false, false, false, false, true);
+        EXPAND_DEPTH.with(|d| d.set(depth));
+        result
+    }
+
     // Compound array assignment RHS (`a=( ... )`): the same preserve-quotes
     // contract as expand_compound_assignment_parameters_mut — GNU
     // arrayfunc.c:581 parse_string_to_word_list tokenizes the raw body
@@ -88,7 +137,7 @@ impl Executor {
             return word.to_string();
         }
         EXPAND_DEPTH.with(|d| d.set(depth + 1));
-        let result = self.expand_embedded_parameters_inner(word, false, false, true, false);
+        let result = self.expand_embedded_parameters_inner(word, false, false, true, false, false);
         EXPAND_DEPTH.with(|d| d.set(depth));
         result
     }
@@ -148,7 +197,7 @@ impl Executor {
         // prior command's status. Snapshot and restore the overlay too so
         // the prompt pass is transparent to both read paths.
         let word_comsub_exit_before = self.word_expansion_comsub_exit.replace(None);
-        let result = self.expand_embedded_parameters_inner(word, false, false, false, true);
+        let result = self.expand_embedded_parameters_inner(word, false, false, false, true, false);
         self.last_command_substitution_status
             .set(comsub_status_before);
         self.word_expansion_comsub_exit.set(word_comsub_exit_before);
@@ -202,7 +251,7 @@ impl Executor {
         }
         EXPAND_DEPTH.with(|d| d.set(depth + 1));
         let result =
-            self.expand_embedded_parameters_inner(word, heredoc, protect_ifs, false, false);
+            self.expand_embedded_parameters_inner(word, heredoc, protect_ifs, false, false, false);
         EXPAND_DEPTH.with(|d| d.set(depth));
         result
     }
@@ -214,6 +263,7 @@ impl Executor {
         protect_ifs: bool,
         preserve_quotes: bool,
         double_quoted: bool,
+        protect_results: bool,
     ) -> String {
         // TODO(subst.c/subst.h): This is a narrow parameter-expansion subset.
         // GNU Bash handles quoting state, operators like ${name:-word},
@@ -408,7 +458,16 @@ impl Executor {
                     if protect_ifs && matches!(quoted_ch, ' ' | '\t' | '\n') {
                         output.push(crate::executor::markers::IFS_GLUE);
                     }
-                    output.push(quoted_ch);
+                    // rubash#2216: single-quoted content is data (GNU
+                    // read_token_word hands it to add_quoted_string
+                    // CTLESC-protected); in the protecting walk its
+                    // backslashes ride as the carrier like any other
+                    // data backslash.
+                    if protect_results && quoted_ch == '\\' {
+                        output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
+                    } else {
+                        output.push(quoted_ch);
+                    }
                 }
                 continue;
             }
@@ -484,7 +543,18 @@ impl Executor {
             }
 
             if ch != '$' {
-                output.push(ch);
+                // rubash#2216: a backslash that reaches this fall-through
+                // was not consumed as an escape by the arms above — it is
+                // data (a double-quoted span's literal `\X` for X outside
+                // the CBSDQUOTE set, a trailing backslash, quoted-span
+                // residue). In the protecting walk it rides as the
+                // carrier so `expand_word`'s trailing pass cannot eat
+                // it; `expand_word` restores it after that pass.
+                if protect_results && ch == '\\' {
+                    output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
+                } else {
+                    output.push(ch);
+                }
                 continue;
             }
 
@@ -507,7 +577,7 @@ impl Executor {
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
-                        output.push_str(&value);
+                        output.push_str(&protect_result_backslashes(&value, protect_results));
                     }
                 }
                 Some('*') => {
@@ -516,7 +586,7 @@ impl Executor {
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
-                        output.push_str(&value);
+                        output.push_str(&protect_result_backslashes(&value, protect_results));
                     }
                 }
                 Some('#') => {
@@ -611,7 +681,8 @@ impl Executor {
                             if preserve_quotes {
                                 push_preserved_expansion_output(&mut output, &value, in_double);
                             } else {
-                                output.push_str(&value);
+                                output
+                                    .push_str(&protect_result_backslashes(&value, protect_results));
                             }
                             continue;
                         }
@@ -762,7 +833,7 @@ impl Executor {
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
-                        output.push_str(&value);
+                        output.push_str(&protect_result_backslashes(&value, protect_results));
                     }
                 }
                 Some('(') => {
@@ -1029,7 +1100,7 @@ impl Executor {
                         if preserve_quotes {
                             push_preserved_expansion_output(&mut output, value, in_double);
                         } else {
-                            output.push_str(value);
+                            output.push_str(&protect_result_backslashes(value, protect_results));
                         }
                     }
                 }
@@ -1052,7 +1123,7 @@ impl Executor {
                         } else if preserve_quotes {
                             push_preserved_expansion_output(&mut output, &value, in_double);
                         } else {
-                            output.push_str(&value);
+                            output.push_str(&protect_result_backslashes(&value, protect_results));
                         }
                     }
                 }
@@ -1065,9 +1136,25 @@ impl Executor {
             }
         }
 
-        output
-            .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
-            .replace(crate::lexer::PARAM_NAME_END_MARKER, "")
+        // rubash#2216: DATA_BACKSLASH bytes in the output are data
+        // backslashes (lexer-carried span data). Every other walk
+        // restores them to `\` here; the protecting walk must NOT —
+        // `expand_word`'s trailing unescape pass runs after this
+        // function returns and would eat them — so they leave as the
+        // protection carrier and `expand_word` restores them after
+        // its pass.
+        if protect_results {
+            output
+                .replace(
+                    crate::executor::markers::DATA_BACKSLASH,
+                    crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
+                )
+                .replace(crate::lexer::PARAM_NAME_END_MARKER, "")
+        } else {
+            output
+                .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
+                .replace(crate::lexer::PARAM_NAME_END_MARKER, "")
+        }
     }
 
     pub(in crate::executor) fn expand_embedded_parameters_preserving_escaped_single_quotes(

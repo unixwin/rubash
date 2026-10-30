@@ -609,9 +609,9 @@ impl Executor {
         // marker is itself inert because the rendezvous lives in the
         // pipe, not the marker.
         #[cfg(windows)]
-        if consume && crate::winux_fifo::path_is_winux_fifo(&win_path) {
-            return crate::winux_fifo::open_winux_fifo_read(&win_path, &|| {
-                crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+        if consume && crate::winuxcmd_fifo::path_is_winuxcmd_fifo(&win_path) {
+            return crate::winuxcmd_fifo::open_winuxcmd_fifo_read(&win_path, &|| {
+                crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
             })
             .map_err(|e| crate::posix_errors::path_error(target, e));
         }
@@ -1800,7 +1800,7 @@ impl Executor {
                 });
         }
         #[cfg(windows)]
-        if crate::winux_fifo::path_is_winux_fifo(&path) {
+        if crate::winuxcmd_fifo::path_is_winuxcmd_fifo(&path) {
             // rubash#1903: a WinuxCmd fifo marker is not a file to
             // create/truncate — the open is the write side of the
             // named-pipe rendezvous. The noclobber refusal above has
@@ -1808,8 +1808,8 @@ impl Executor {
             // target, fifos included); reaching here means the open is
             // wanted, and it blocks until a reader arrives, like GNU's
             // O_WRONLY fifo open (redir.c redir_open).
-            return crate::winux_fifo::open_winux_fifo_write(&path, &|| {
-                crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+            return crate::winuxcmd_fifo::open_winuxcmd_fifo_write(&path, &|| {
+                crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
             })
             .map_err(|e| crate::posix_errors::path_error(&target, e));
         }
@@ -3051,7 +3051,7 @@ impl Executor {
                     &self.shell_state.env_vars,
                 ));
                 if let Some(result) =
-                    crate::winux_fifo::slurp_marker_bytes(&win_path, &self.shell_state.env_vars)
+                    crate::winuxcmd_fifo::slurp_marker_bytes(&win_path, &self.shell_state.env_vars)
                 {
                     let buf = result.ok()?;
                     return String::from_utf8(buf).ok();
@@ -3741,7 +3741,7 @@ pub(in crate::executor) fn redirect_path_is_fifo(path: &std::path::Path) -> bool
     }
     #[cfg(windows)]
     {
-        return crate::winux_fifo::path_is_winux_fifo(path);
+        return crate::winuxcmd_fifo::path_is_winuxcmd_fifo(path);
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -3796,7 +3796,7 @@ pub(in crate::executor) fn redirect_fifo_access_error(
     path: &std::path::Path,
     write: bool,
 ) -> Option<std::io::Error> {
-    crate::winux_fifo::marker_access_error(path, write)
+    crate::winuxcmd_fifo::marker_access_error(path, write)
 }
 
 /// The setup walk's output probe (create/truncate side effect plus
