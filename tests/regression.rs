@@ -566,6 +566,124 @@ fn run_rubash_piped_stdin_in(dir: &Path, args: &[&str], limit: Duration) -> RunO
     outcome
 }
 
+/// Fake child for the issue2056 wait_bounded pins: the rubash binary
+/// itself running a `-c` script, pipes on both streams. What the
+/// script does (hang, orphan its pipe, flood its pipe) is the pin's
+/// variable; the spawn shape is constant.
+fn spawn_issue2056_fake_child(script: &str) -> Child {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    cmd.args(["-c", script])
+        .env_clear()
+        .env("PATH", minimal_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.spawn().expect("spawn issue2056 fake child")
+}
+
+/// rubash#2056: a child that prints markers and then never exits
+/// (external sleep as the foreground command) must be killed at the
+/// bound, and the timeout outcome must carry whatever it printed
+/// before wedging — the pre-hardening helper returned EMPTY captures
+/// on its timeout path, so a hang surfaced with zero evidence.
+#[test]
+fn issue2056_wait_bounded_kills_never_exiting_child_with_partial_output() {
+    let mut child = spawn_issue2056_fake_child(
+        "echo issue2056-out-marker\necho issue2056-err-marker >&2\nsleep 120\n",
+    );
+    let started = Instant::now();
+    let out = wait_bounded(&mut child, Duration::from_secs(3));
+    let elapsed = started.elapsed();
+    assert!(
+        out.timed_out,
+        "never-exiting child must report timed_out; got code {:?}",
+        out.code
+    );
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the 3s bound did not fire promptly: {elapsed:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("issue2056-out-marker"),
+        "partial stdout lost on timeout: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("issue2056-err-marker"),
+        "partial stderr lost on timeout: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        matches!(child.try_wait(), Ok(Some(_))),
+        "timed-out child was not killed and reaped"
+    );
+}
+
+/// rubash#2056, the #1903 shape: the child EXITS promptly with code 0
+/// but leaves a background orphan holding the stdout write end, so
+/// pipe EOF never arrives. The pre-hardening helper read the pipes
+/// only after exit with an unbounded read_to_end — this shape hung
+/// it forever (it ate a full 25-minute goldens job). The hardened
+/// helper must count the still-open pipe against the same bound and
+/// return the partial capture with the child's real exit code.
+#[test]
+fn issue2056_wait_bounded_bounds_post_exit_pipe_drain() {
+    let mut child = spawn_issue2056_fake_child("echo issue2056-orphan-marker\nsleep 120 &\nexit 0\n");
+    let started = Instant::now();
+    let out = wait_bounded(&mut child, Duration::from_secs(3));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the 3s bound did not fire promptly: {elapsed:?}"
+    );
+    assert!(
+        out.timed_out,
+        "pipe held open by an orphan past the bound must report timed_out; got code {:?}",
+        out.code
+    );
+    assert_eq!(out.code, Some(0), "the child itself exited 0");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("issue2056-orphan-marker"),
+        "partial stdout lost: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// rubash#2056: a child that floods stdout past the pipe buffer
+/// (~176 KB here) can only finish if the pipes drain WHILE it runs.
+/// The pre-hardening helper never read before exit, so this shape
+/// deadlocked into a timeout with empty captures; the hardened
+/// helper must deliver the full payload, byte for byte.
+#[test]
+fn issue2056_wait_bounded_drains_pipes_while_waiting() {
+    let mut child = spawn_issue2056_fake_child(
+        "i=0\nwhile (( i < 4000 )); do echo \"issue2056-line-$i-abcdefghijklmnopqrstuvwxyz\"; (( i += 1 )); done\n",
+    );
+    let out = wait_bounded(&mut child, Duration::from_secs(30));
+    assert!(
+        !out.timed_out,
+        "pipe-flooding child timed out — pipes were not drained while waiting"
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected: String = (0..4000)
+        .map(|i| format!("issue2056-line-{i}-abcdefghijklmnopqrstuvwxyz\n"))
+        .collect();
+    assert_eq!(
+        out.stdout.len(),
+        expected.len(),
+        "drained payload is truncated"
+    );
+    assert!(
+        out.stdout == expected.as_bytes(),
+        "drained payload differs from what the child wrote"
+    );
+}
+
 fn assert_bytes_eq(actual: &[u8], expected: &[u8], label: &str, name: &str) {
     if actual == expected {
         return;
