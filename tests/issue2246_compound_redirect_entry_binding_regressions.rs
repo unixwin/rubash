@@ -288,12 +288,15 @@ fn herestring_on_redirected_while() {
 }
 
 /// A procsub output target on the compound still materializes (the
-/// one mutation that keeps the cmd clone) and receives the body.
+/// one mutation that keeps the cmd clone) and receives the body. The
+/// target is spelled as a redirect TO a process substitution
+/// (`> >(...)`): a bare `fi >(...)` is not a redirection at all — GNU
+/// rejects it as a syntax error (verified against GNU bash 5.3.20).
 #[test]
 fn procsub_target_on_if() {
     let dir = scratch_dir("procsub");
     let (stdout, stderr, code) = rubash_in(
-        "if :; then echo hi; fi >(cat > cap.txt)\necho \"cap=[$(cat cap.txt)]\"",
+        "if :; then echo hi; fi > >(cat > cap.txt)\necho \"cap=[$(cat cap.txt)]\"",
         &dir,
     );
     let _ = std::fs::remove_dir_all(&dir);
