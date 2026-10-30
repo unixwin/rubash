@@ -451,10 +451,9 @@ const CREATE_NEW: DWORD = 1;
 const OPEN_ALWAYS: DWORD = 4;
 const FILE_END: DWORD = 2;
 
-/// The flag that lets CreateFileW open a DIRECTORY handle
-/// (backup/restore semantics); the identity probes in
-/// src/executor/path.rs already open directories with it.
-const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x0200_0000;
+// FILE_FLAG_BACKUP_SEMANTICS (defined with the other file-flag
+// constants above) is what lets CreateFileW open a DIRECTORY
+// handle (backup/restore semantics).
 
 fn create_file(
     path: &std::path::Path,
