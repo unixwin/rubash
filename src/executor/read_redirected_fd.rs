@@ -99,6 +99,45 @@ impl Executor {
         if is_closed_redirect_target(&target) {
             return None;
         }
+        // rubash#2235: an fd-alias target (/dev/fd/N, /proc/self/fd/N)
+        // names the fd table's endpoint at N (the rubash#1963 alias
+        // layer) — above all a list-level input procsub the
+        // materializer rewrote to exactly this spelling. Serve the
+        // record from that endpoint through a scratch fd, mirroring
+        // the streamed `<(` arm above; the path slurp below would
+        // read the process's unrelated real fd N (or fail on it).
+        if let Some(alias_fd) = dev_stdio_redirect_fd(&target) {
+            if let Some(endpoint) = self.fd_table.read_endpoint(alias_fd) {
+                if let Some(scratch) = self.allocate_dynamic_fd() {
+                    self.fd_table.open_input(scratch, endpoint, true);
+                    let line = self.fd_table.read_text(
+                        scratch,
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                        escape_aware,
+                        raw,
+                    );
+                    self.fd_table.entries.remove(&scratch);
+                    return Some(match line {
+                        Some(line) => trim_read_input(
+                            line,
+                            delimiter,
+                            char_limit,
+                            exact_char_limit,
+                            escape_aware,
+                            raw,
+                        ),
+                        None => {
+                            if !self.fd_table.read_timed_out {
+                                self.read_eof_no_delimiter = true;
+                            }
+                            String::new()
+                        }
+                    });
+                }
+            }
+        }
         // niubash#177: same operand resolution as open_input_redirect — a
         // virtual-root input operand may exist only under its `.exe`
         // spelling on disk.
