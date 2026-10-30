@@ -849,8 +849,12 @@ impl Executor {
             }
             None => crate::executor::dev_fd_operands::DevOperandStdout::Capture,
         };
-        let (dev_args, dev_ops) =
-            self.materialize_dev_fd_operands(&stdio.expanded_words[1..], dev_stdin, dev_stdout);
+        let (dev_args, dev_ops) = self.materialize_dev_fd_operands(
+            &stdio.expanded_words[1..],
+            dev_stdin,
+            dev_stdout,
+            Some(program.as_path()),
+        );
         // rubash#1905: synthetic /proc operands become spawn-time
         // snapshot files for a child without its own /proc layer; the
         // record lives until the substitution's output is collected

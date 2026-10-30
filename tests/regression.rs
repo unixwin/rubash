@@ -5204,6 +5204,191 @@ mod issue_1952 {
     }
 }
 
+/// rubash#2225: #2156 (for #1959) routed EVERY procsub argv word
+/// through the #1903 fifo-marker rendezvous, so a consumer that is not
+/// marker-aware opened the marker path plainly and read the 7
+/// `!<fifo>` bytes instead of the producer's stream (niu#720/#723:
+/// System32 findstr.exe printing `!<fifo>`). GNU subst.c:6362
+/// process_substitute names a live pipe whose bytes ANY consumer
+/// opening the name must receive, so the marker delivery is now gated
+/// on the consumer's class (path::winuxcmd_fifo_marker_aware: the
+/// resolved program IS the WinuxCmd runtime — the dispatcher or an
+/// applet hardlink of it); every other consumer takes the pre-#2156
+/// drain-to-temp. Windows-only face — the marker delivery does not
+/// exist elsewhere.
+///
+/// The plain-read pins use absolute System32 consumers with builtin
+/// producers, so they run inside this suite's airtight harness. The
+/// word-shape pins observe the chosen route through the GNU suite's
+/// own argv echo (helpers-win recho.exe prints `argv[N] = <arg>`
+/// verbatim): a fake payload tree is built in the scratch dir from
+/// recho copies (only file identity matters, so copies are the whole
+/// fixture) and the script points WINUXCMD_HOME / PATH at it.
+#[cfg(windows)]
+mod issue_2225 {
+    use super::*;
+
+    fn run(dir: &Path, code: &str) -> (String, String, Option<i32>) {
+        let out = run_rubash_in(dir, &["-c", code], Duration::from_secs(30));
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    fn win_slash(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
+    /// The niu#720/#723 shape with a deterministic producer: findstr
+    /// is a plain CreateFile reader and never bridges markers, so it
+    /// must receive the producer's bytes (drained), never the
+    /// marker's.
+    #[test]
+    fn issue2225_findstr_plain_read_gets_producer_bytes() {
+        let dir = case_scratch("2225-findstr");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "C:/Windows/System32/findstr.exe . <(printf 'issue2225-producer-bytes\\n')\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert!(
+            stdout.contains("issue2225-producer-bytes"),
+            "findstr must print the producer's line, got stdout:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("!<fifo>"),
+            "findstr must never see marker bytes, got stdout:\n{stdout}"
+        );
+    }
+
+    /// cmd.exe's `type` is the characterization cluster's plain
+    /// reader: same contract, direct and inside a command
+    /// substitution (the comsub spawn site threads the consumer the
+    /// same way).
+    #[test]
+    fn issue2225_cmd_type_plain_read_gets_producer_bytes() {
+        let dir = case_scratch("2225-cmdtype");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "C:/Windows/System32/cmd.exe /c type <(printf 'issue2225-plain-bytes\\n')\n\
+             x=$(C:/Windows/System32/cmd.exe /c type <(printf 'issue2225-comsub-bytes\\n'))\n\
+             echo \"got:[$x]\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert!(
+            stdout.contains("issue2225-plain-bytes"),
+            "type must print the producer's bytes, got stdout:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("got:[issue2225-comsub-bytes]"),
+            "comsub delivery must carry the producer's bytes, got stdout:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("!<fifo>"),
+            "no marker bytes may leak to a plain reader, got stdout:\n{stdout}"
+        );
+    }
+
+    /// Build a fake WinuxCmd payload tree in `dir`: recho.exe copied
+    /// in as the tree's winuxcmd.exe marker, plus showop.exe as either
+    /// a hardlink of the marker (the runtime binary itself —
+    /// marker-aware) or a second copy (a distinct file — not the
+    /// runtime). Returns (payload root, bin dir) in forward-slash
+    /// spelling for the script.
+    fn fake_payload(dir: &Path, link_consumer: bool) -> (String, String) {
+        let bin = dir.join("payload").join("usr").join("bin");
+        std::fs::create_dir_all(&bin).expect("create payload bin");
+        let recho = Path::new(HELPERS_WIN).join("recho.exe");
+        let dispatcher = bin.join("winuxcmd.exe");
+        std::fs::copy(&recho, &dispatcher).expect("copy dispatcher marker");
+        let consumer = bin.join("showop.exe");
+        if link_consumer {
+            std::fs::hard_link(&dispatcher, &consumer).expect("link consumer");
+        } else {
+            std::fs::copy(&recho, &consumer).expect("copy consumer");
+        }
+        (win_slash(&dir.join("payload")), win_slash(&bin))
+    }
+
+    fn echoed_operand(dir: &Path, script: &str) -> String {
+        let (stdout, stderr, status) = run(dir, script);
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        stdout
+    }
+
+    /// A consumer that IS the WinuxCmd runtime binary (an applet
+    /// hardlink of the tree's dispatcher) keeps the #1959 streaming
+    /// route: its operand word is the fifo-marker path. (The route's
+    /// streaming behavior itself stays pinned in
+    /// tests/issue1959_procsub_argv_streaming.rs.)
+    #[test]
+    fn issue2225_aware_applet_consumer_gets_marker_operand() {
+        let dir = case_scratch("2225-applet");
+        let (payload, bin) = fake_payload(&dir, true);
+        let script = format!(
+            "export WINUXCMD_HOME='{payload}'; PATH='{bin};C:/Windows/System32'; \
+             showop <(printf 'x\\n')\n"
+        );
+        let stdout = echoed_operand(&dir, &script);
+        assert!(
+            stdout.contains("rubash-procsub-"),
+            "applet consumer must receive the marker operand, got:\n{stdout}"
+        );
+    }
+
+    /// A consumer outside any WinuxCmd tree is not marker-aware: its
+    /// operand word is the drained temp file (the pre-#2156 shape).
+    #[test]
+    fn issue2225_plain_consumer_gets_drained_temp_operand() {
+        let dir = case_scratch("2225-plain");
+        let plain = dir.join("plainbin");
+        std::fs::create_dir_all(&plain).expect("create plain bin");
+        std::fs::copy(
+            Path::new(HELPERS_WIN).join("recho.exe"),
+            plain.join("showop.exe"),
+        )
+        .expect("copy consumer");
+        let script = format!(
+            "PATH='{};C:/Windows/System32'; showop <(printf 'x\\n')\n",
+            win_slash(&plain)
+        );
+        let stdout = echoed_operand(&dir, &script);
+        assert!(
+            stdout.contains("rubash-devfd-"),
+            "plain consumer must receive the drained temp operand, got:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("rubash-procsub-"),
+            "plain consumer must never receive a marker operand, got:\n{stdout}"
+        );
+    }
+
+    /// A plain COPY of an applet sitting inside the tree is a distinct
+    /// file, not the runtime binary: tree membership alone is not
+    /// awareness (the niubash#346 D6 class), so it takes the drain
+    /// too.
+    #[test]
+    fn issue2225_tree_member_copy_is_not_marker_aware() {
+        let dir = case_scratch("2225-copy");
+        let (payload, bin) = fake_payload(&dir, false);
+        let script = format!(
+            "export WINUXCMD_HOME='{payload}'; PATH='{bin};C:/Windows/System32'; \
+             showop <(printf 'x\\n')\n"
+        );
+        let stdout = echoed_operand(&dir, &script);
+        assert!(
+            stdout.contains("rubash-devfd-"),
+            "copied tree member must receive the drained temp operand, got:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("rubash-procsub-"),
+            "copied tree member must never receive a marker operand, got:\n{stdout}"
+        );
+    }
+}
+
 /// rubash#2003: a pipeline element 0 whose own fd-0 redirect aliases
 /// another descriptor (`<&N`, `0<&N`, `< /dev/fd/N`) lost its entire
 /// input. GNU forks every element with the shell's own descriptors
