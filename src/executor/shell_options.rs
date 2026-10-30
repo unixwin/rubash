@@ -2989,7 +2989,22 @@ impl Executor {
             if crate::special_paths::is_net_redirect_target(&target) {
                 return None;
             }
-            let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+            // rubash#2240: anchor at the session cwd with the same
+            // ladder as open_input_redirect — the text channel's
+            // create (for a `<>` word) and slurp open below are real
+            // opens of the operand, and the bare mapped path resolved
+            // them against the STARTUP directory after any cd (a
+            // function call's `<>` staged the startup tree's file,
+            // and the create planted a stray there). The empty word
+            // stays un-joined (the #2211 empty-operand rule).
+            let path = if target.is_empty() {
+                shell_path_to_windows(&target, &self.shell_state.env_vars)
+            } else {
+                self.session_path(crate::executor::path::windows_operand_file_path(
+                    shell_path_to_windows(&target, &self.shell_state.env_vars),
+                    &self.shell_state.env_vars,
+                ))
+            };
             if redirect.append {
                 let _ = OpenOptions::new()
                     .create(true)
