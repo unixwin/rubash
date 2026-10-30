@@ -2655,6 +2655,46 @@ impl Executor {
                     None => true,
                 }
         };
+        // rubash#2244: start draining the last member's stdout/stderr NOW —
+        // before the in-process producer runs, not after it returns. This
+        // path's producer is the shell itself (the all-external path's
+        // members are processes, so a drain started after their spawns
+        // still races nothing in-process): the producer streams into
+        // pipe[0], the last member copies pipe[0] into its captured stdout
+        // pipe, and with nobody reading that pipe the chain wedges once
+        // pipe[0] plus the capture pipe are both full (2 x 64 KiB on
+        // Linux — `{ ...; } | cat` hung hard past 131072 bytes of output,
+        // the consumer blocked in pipe write, the producer blocked in
+        // write_pipeline_stream). This is the niubash#158 discipline the
+        // #2094 fix applied to the external spawn path: GNU forks every
+        // element (execute_cmd.c:2620 execute_pipeline), so the rightmost
+        // element's output is drained concurrently by construction and a
+        // forked producer's written bytes are never recalled. The drain
+        // target is therefore decided here from the ambient context alone
+        // (final_member_stdout_streams_to_host reads only the member's
+        // redirects and the pipeline's fd/capture state, all settled
+        // before the producer runs): when the producer later errors, any
+        // bytes already streamed to the host stay emitted — the fork
+        // model's observable — while everything not yet emitted keeps the
+        // discard contract exactly (the buffered producer_out write below
+        // stays gated on producer_error, the collected stderr is still
+        // only written on a clean producer, and the Err still propagates).
+        let last_index = consumer_count - 1;
+        let stdout_target = if self.final_member_stdout_streams_to_host(
+            consumers.last().expect("pipeline has at least two stages"),
+        ) {
+            PipelineDrainTarget::StreamHostStdout
+        } else {
+            PipelineDrainTarget::Collect
+        };
+        let last_stdout = processes[last_index]
+            .stdout
+            .take()
+            .map(|reader| spawn_pipe_drain(reader, stdout_target));
+        let last_stderr = processes[last_index]
+            .stderr
+            .take()
+            .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
         let saved_pipeline_stream = self.pipeline_stdout_stream;
         self.pipeline_stdout_stream = stream_handle;
         let producer_result = self.execute_pipeline_stage(
@@ -2691,32 +2731,12 @@ impl Executor {
         // the first consumer.
         drop(producer_writer.take());
 
-        // Reap the consumers exactly like the all-external path: drain the
-        // last member's stdout/stderr first (niubash#158), then wait each
-        // member against its immediate downstream so the Windows broken-pipe
-        // window only arms after that downstream exited.
+        // Reap the consumers exactly like the all-external path (the last
+        // member's drains have been running since before the producer —
+        // rubash#2244 above): wait each member against its immediate
+        // downstream so the Windows broken-pipe window only arms after
+        // that downstream exited.
         let mut results: Vec<(String, String, i32)> = vec![Default::default(); consumer_count];
-        let last_index = consumer_count - 1;
-        // When the producer exited cleanly the last consumer's payload goes
-        // only to write_pipeline_output below, so it may stream live — unless
-        // a producer error makes that write (and the payload) get discarded.
-        let stream_stdout = producer_error.is_none()
-            && self.final_member_stdout_streams_to_host(
-                consumers.last().expect("pipeline has at least two stages"),
-            );
-        let stdout_target = if stream_stdout {
-            PipelineDrainTarget::StreamHostStdout
-        } else {
-            PipelineDrainTarget::Collect
-        };
-        let last_stdout = processes[last_index]
-            .stdout
-            .take()
-            .map(|reader| spawn_pipe_drain(reader, stdout_target));
-        let last_stderr = processes[last_index]
-            .stderr
-            .take()
-            .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
         for index in 0..last_index {
             let (head, tail) = processes.split_at_mut(index + 1);
             let member = head.last_mut().expect("member index inside pipeline");

@@ -255,6 +255,10 @@ mod tests {
         /// Claim nothing at execution time (annotation may still
         /// claim): every call declines.
         DeclineAll,
+        /// Record every claimed consult, then decline: the
+        /// consult itself is the event under test (a declining
+        /// provider's footprint on the prepared spawn).
+        DeclineRecorded,
     }
 
     #[derive(Default)]
@@ -302,6 +306,15 @@ mod tests {
 
     impl ExternalRouteProvider for MockRoute {
         fn execute_route(&mut self, request: &ExternalRouteRequest) -> ExternalRouteOutcome {
+            if self.behavior == Behavior::DeclineRecorded {
+                if self.claims.iter().any(|name| name == request.name) {
+                    self.record
+                        .borrow_mut()
+                        .calls
+                        .push(request.name.to_string());
+                }
+                return ExternalRouteOutcome::Declined;
+            }
             if self.behavior == Behavior::DeclineAll
                 || !self.claims.iter().any(|name| name == request.name)
             {
@@ -343,7 +356,7 @@ mod tests {
                 }
                 Behavior::Fixed(status) => ExternalRouteOutcome::Completed(status),
                 Behavior::CancelNow => ExternalRouteOutcome::Cancelled,
-                Behavior::DeclineAll => ExternalRouteOutcome::Declined,
+                Behavior::DeclineAll | Behavior::DeclineRecorded => ExternalRouteOutcome::Declined,
             }
         }
 
@@ -660,6 +673,67 @@ mod tests {
             "dd < in.txt > out.txt\ndd <<'EOF' >> out.txt\nmore\nEOF\n",
             &["out.txt"],
         );
+    }
+
+    /// niubash#729: a registered provider that declines every
+    /// call (niubash's FFI provider while its master switch is
+    /// off — niubash registers it unconditionally) must leave a
+    /// capture-bound external reached through the `command`
+    /// re-dispatch byte-identical to the no-provider spawn. The
+    /// pipeline stages below are the reported shape: a non-final
+    /// `command <external>` stage runs in-process under the stage
+    /// capture, its re-dispatched external's spawn plan binds
+    /// fd 1 to that capture, and the route consult used to spend
+    /// the plan's capture outcome record on decline — dropping
+    /// the capture pipe's reader and disarming the prepared
+    /// spawn's drain, so the stage produced no output at all
+    /// (`command perl ... | wc -c` printed 0). The file-redirect
+    /// shapes in the test above never exposed it: no capture
+    /// record exists for them to spend.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn issue729_declining_provider_keeps_command_stage_output() {
+        let scripts = [
+            ("first", "command dd < in.txt | dd > out.txt"),
+            ("middle", "dd < in.txt | command dd | dd > out.txt"),
+            ("stdpath", "command -p dd < in.txt | dd > out.txt"),
+        ];
+        for (tag, script) in scripts {
+            let mut outcomes = Vec::new();
+            for routed in [false, true] {
+                let dir = scratch(&format!(
+                    "issue729-{tag}-{}",
+                    if routed { "route" } else { "spawn" }
+                ));
+                std::fs::write(dir.join("in.txt"), "alpha\nbeta\n").expect("input");
+                let (mut executor, record) = if routed {
+                    routed_executor(&["dd"], Behavior::DeclineRecorded)
+                } else {
+                    (
+                        baseline_executor(),
+                        Rc::new(RefCell::new(Record::default())),
+                    )
+                };
+                assert_eq!(run(&mut executor, &format!("cd {}", dir.display())), 0);
+                let status = run(&mut executor, script);
+                if routed {
+                    assert!(
+                        !record.borrow().calls.is_empty(),
+                        "issue729-{tag}: the route was never consulted"
+                    );
+                }
+                outcomes.push((status, read(&dir, "out.txt")));
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            assert_eq!(
+                outcomes[0], outcomes[1],
+                "issue729-{tag}: route/spawn divergence"
+            );
+            assert_eq!(
+                outcomes[0].1, "alpha\nbeta\n",
+                "issue729-{tag}: command stage output lost"
+            );
+        }
     }
 
     #[cfg(unix)]

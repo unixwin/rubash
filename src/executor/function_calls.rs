@@ -402,6 +402,10 @@ impl Executor {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
         let mut fd0_bindings: Vec<FunctionCallStdinBinding> = Vec::new();
+        // rubash#2239: the inherited fd-0 entry displaced below while
+        // this call's staged FUNCTION_STDIN text serves the body;
+        // restored on the exit path next to the fd0_bindings restore.
+        let mut displaced_fd0_entry: Option<Option<crate::executor::fd_table::FdEntry>> = None;
         let (call_stdin, stdin_carved_from_parent) =
             if let Some(definition_redirects) = &definition_redirects {
                 match self.function_call_stdin(definition_redirects)? {
@@ -446,6 +450,23 @@ impl Executor {
             while let Some(binding) = fd0_bindings.pop() {
                 self.restore_function_call_fd0(binding);
             }
+            // rubash#2239: the same supersession must hold against the
+            // INHERITED fd-0 entry. GNU installs the call's heredoc on
+            // fd 0 itself for the body's duration (execute_cmd.c:854
+            // do_redirections, RX_UNDOABLE, undone on return), so no
+            // frame binding survives underneath it. Rubash stages the
+            // body as FUNCTION_STDIN text instead and leaves the entry
+            // in place — and every consumer that consults the fd table
+            // before the mirror (the external spawn wiring's File arm,
+            // the stdin pull's source predicate) then reads the frame's
+            // binding, classically a `</dev/null` on an enclosing
+            // test_eval_-style frame, and the payload is lost. The
+            // null-device exemption in function_call_stdin only holds
+            // for consumers that fall through to the mirror; displace
+            // the entry for the body's duration so they all see the
+            // staged text. (The compound-command twin of this move is
+            // bind_command_fd0_input, rubash#2170.)
+            displaced_fd0_entry = Some(self.fd_table.entries.remove(&0));
         }
         // Set inside the entry block when this call actually pushes
         // BASH_ARGC/BASH_ARGV frames (extdebug only — see below), so the
@@ -855,6 +876,18 @@ impl Executor {
         // undone when the function returns.
         while let Some(binding) = fd0_bindings.pop() {
             self.restore_function_call_fd0(binding);
+        }
+        // rubash#2239: reinstate the fd-0 entry the staged body
+        // displaced on entry (see the displacement above).
+        if let Some(entry) = displaced_fd0_entry.take() {
+            match entry {
+                Some(entry) => {
+                    self.fd_table.entries.insert(0, entry);
+                }
+                None => {
+                    self.fd_table.entries.remove(&0);
+                }
+            }
         }
         // GNU execute_cmd.c uw_maybe_set_debug_trap: at function exit the
         // saved DEBUG action is restored only when the body did not set a
@@ -1343,7 +1376,14 @@ impl Executor {
                     let saved = self.fd_table.entries.get(&0).cloned();
                     self.fd_table
                         .open_input(0, FdReadEndpoint::text(input), false);
-                    return Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })));
+                    return Ok((
+                        None,
+                        false,
+                        Some(FunctionCallStdinBinding {
+                            entry: saved,
+                            env: Vec::new(),
+                        }),
+                    ));
                 }
                 return Ok((Some(input), carves_parent_stdin, None));
             }
@@ -1373,6 +1413,18 @@ impl Executor {
         if is_closed_redirect_target(&target) {
             return Ok((None, false, None));
         }
+        // rubash#2249: a `<>` call redirect is GNU's r_input_output
+        // (make_cmd.c:682-683 — the redirect's flags are O_RDWR|O_CREAT;
+        // redir.c:725 redir_open performs the open): ONE descriptor open
+        // for reading AND writing. The binds below must therefore
+        // install a write endpoint alongside the read endpoint on fd 0,
+        // or a body write like `echo x >&0` fails Bad file descriptor —
+        // only the read half was modelled. set_fd_readwrite_file is the
+        // category face every other `<>` site routes through; this path
+        // keeps its own #2240 operand ladder but mirrors that face's
+        // endpoint pair (FileFd::open_readwrite_pair — one open file
+        // description, shared offset) and its env bookkeeping.
+        let readwrite = redirect.kind == crate::parser::RedirectKind::ReadWrite;
         // GNU execute_cmd.c:5269-5278 (execute_function) applies the call's
         // redirections to real descriptors for the body's duration
         // (redir.c do_redirections, unwound on return). Endpoints with no
@@ -1387,7 +1439,14 @@ impl Executor {
             {
                 let saved = self.fd_table.entries.get(&0).cloned();
                 if self.fd_table.dup_input(0, source_fd).is_ok() {
-                    return Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })));
+                    return Ok((
+                        None,
+                        false,
+                        Some(FunctionCallStdinBinding {
+                            entry: saved,
+                            env: Vec::new(),
+                        }),
+                    ));
                 }
             }
             return Ok((None, false, None));
@@ -1402,12 +1461,24 @@ impl Executor {
         if crate::special_paths::is_net_redirect_target(&target) {
             let file = self.open_net_redirect(&target)?;
             let saved = self.fd_table.entries.get(&0).cloned();
-            self.fd_table.open_input(
-                0,
-                FdReadEndpoint::File(FileFd::from_file(file, target.clone().into())),
+            // rubash#2249: a connected socket is one descriptor in both
+            // directions (redir.c netopen), so a `<>` net call binds
+            // the same FileFd as fd 0's write endpoint too.
+            let file_fd = FileFd::from_file(file, target.clone().into());
+            self.fd_table
+                .open_input(0, FdReadEndpoint::File(file_fd.clone()), false);
+            let env = if readwrite {
+                self.fd_table
+                    .open_output(0, FdWriteEndpoint::File(file_fd), false);
+                self.save_and_apply_fd0_readwrite_env(&target)
+            } else {
+                Vec::new()
+            };
+            return Ok((
+                None,
                 false,
-            );
-            return Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })));
+                Some(FunctionCallStdinBinding { entry: saved, env }),
+            ));
         }
         // rubash#2240: resolve the operand with the same ladder every
         // other input face uses (open_input_redirect,
@@ -1442,12 +1513,39 @@ impl Executor {
             // GNU redir.c redirection_error prints the failing target
             // (`script: line N: /path: No such file or directory`), so the
             // open error travels with its target (issue #250 message shape).
+            if readwrite {
+                // rubash#2249: devices and fifos under `<>` take the
+                // read-write pair (GNU redir_open with O_RDWR: a fifo
+                // opens without waiting for a peer, /dev/tty takes the
+                // CON split inside open_readwrite_pair); a directory
+                // fails the pair open just as GNU's O_RDWR open fails.
+                let (read_file, write_file) = FileFd::open_readwrite_pair(path.clone())
+                    .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                let saved = self.fd_table.entries.get(&0).cloned();
+                self.fd_table
+                    .open_input(0, FdReadEndpoint::File(read_file), false);
+                self.fd_table
+                    .open_output(0, FdWriteEndpoint::File(write_file), false);
+                let env = self.save_and_apply_fd0_readwrite_env(&target);
+                return Ok((
+                    None,
+                    false,
+                    Some(FunctionCallStdinBinding { entry: saved, env }),
+                ));
+            }
             let file = FileFd::open_read(path.clone())
                 .map_err(|error| crate::posix_errors::path_error(&target, error))?;
             let saved = self.fd_table.entries.get(&0).cloned();
             self.fd_table
                 .open_input(0, FdReadEndpoint::File(file), false);
-            return Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })));
+            return Ok((
+                None,
+                false,
+                Some(FunctionCallStdinBinding {
+                    entry: saved,
+                    env: Vec::new(),
+                }),
+            ));
         }
         // A `<(cmd)` temp path is a draining stream, not a replayable
         // file — serve the shared remainder (subst.c:7143). Ordinary files
@@ -1462,12 +1560,65 @@ impl Executor {
                 None,
             ));
         }
+        if readwrite {
+            // rubash#2249: a regular file under `<>` binds the
+            // read-write pair on ONE open file description, so a body
+            // read and a body write share one offset exactly like
+            // GNU's single descriptor (oracle probe: read 2 bytes via
+            // head, then a write lands at offset 2, not at 0).
+            let (read_file, write_file) = FileFd::open_readwrite_pair(path)
+                .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+            let saved = self.fd_table.entries.get(&0).cloned();
+            self.fd_table
+                .open_input(0, FdReadEndpoint::File(read_file), false);
+            self.fd_table
+                .open_output(0, FdWriteEndpoint::File(write_file), false);
+            let env = self.save_and_apply_fd0_readwrite_env(&target);
+            return Ok((
+                None,
+                false,
+                Some(FunctionCallStdinBinding { entry: saved, env }),
+            ));
+        }
         let file = FileFd::open_read(path)
             .map_err(|error| crate::posix_errors::path_error(&target, error))?;
         let saved = self.fd_table.entries.get(&0).cloned();
         self.fd_table
             .open_input(0, FdReadEndpoint::File(file), false);
-        Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })))
+        Ok((
+            None,
+            false,
+            Some(FunctionCallStdinBinding {
+                entry: saved,
+                env: Vec::new(),
+            }),
+        ))
+    }
+
+    /// rubash#2249: env bookkeeping for a function call's `<>` fd-0
+    /// bind, mirroring set_fd_readwrite_file: fd 0's output-channel
+    /// keys must name the bound target for the body's duration.
+    /// Returns the displaced values so restore_function_call_fd0 can
+    /// reinstate them — the env half of the undo contract, which the
+    /// saved table entry alone does not carry.
+    fn save_and_apply_fd0_readwrite_env(&mut self, target: &str) -> Vec<(String, Option<String>)> {
+        let keys = [
+            fd_output_key(0),
+            fd_closed_key(0),
+            fd_output_process_substitution_key(0),
+        ];
+        let saved: Vec<(String, Option<String>)> = keys
+            .iter()
+            .map(|key| (key.clone(), self.shell_state.env_vars.get(key).cloned()))
+            .collect();
+        self.shell_state.env_vars.remove(&fd_closed_key(0));
+        self.shell_state
+            .env_vars
+            .remove(&fd_output_process_substitution_key(0));
+        self.shell_state
+            .env_vars
+            .insert(fd_output_key(0), target.to_string());
+        saved
     }
 
     fn restore_function_call_fd0(&mut self, binding: FunctionCallStdinBinding) {
@@ -1479,15 +1630,23 @@ impl Executor {
                 self.fd_table.entries.remove(&0);
             }
         }
+        // rubash#2249: reinstate the env keys a `<>` bind displaced
+        // (empty for plain `<` binds — nothing was touched there).
+        for (key, value) in binding.env {
+            restore_optional_env_var(&mut self.shell_state.env_vars, &key, value);
+        }
     }
 }
 
 /// A live fd-0 binding installed for a function call whose `<` target is
-/// not a slurpable file (device, fifo, fd alias). `entry` is the
+/// not a slurpable file (device, fifo, fd alias), or whose `<>` target
+/// binds a read-write endpoint pair (rubash#2249). `entry` is the
 /// displaced table entry — `None` when fd 0 was unbound — restored after
-/// the body finishes (GNU execute_cmd.c undo_redirections).
+/// the body finishes (GNU execute_cmd.c undo_redirections); `env` holds
+/// the displaced fd-0 env keys a `<>` bind overwrote (empty otherwise).
 pub(in crate::executor) struct FunctionCallStdinBinding {
     pub(in crate::executor) entry: Option<crate::executor::fd_table::FdEntry>,
+    pub(in crate::executor) env: Vec<(String, Option<String>)>,
 }
 
 fn function_redirects_affect_body(command: &CommandNode) -> bool {
