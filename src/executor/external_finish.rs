@@ -578,7 +578,24 @@ impl Executor {
             {
                 return None;
             }
-            let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+            // rubash#2249: anchor the operand with the same ladder
+            // function_call_stdin uses (rubash#2240): map the spelling,
+            // apply the virtual-root .exe resolution, then anchor a
+            // relative result at the SESSION cwd. The bare mapped path
+            // resolved against the STARTUP directory, so after a `cd`
+            // this install missed the child's file — silently served
+            // by the text fallback below when no same-named file
+            // existed at the startup directory, but binding the WRONG
+            // file as a live endpoint when a decoy did. The empty word
+            // stays un-joined (the #2211 empty-operand rule).
+            let path = if target.is_empty() {
+                shell_path_to_windows(&target, &self.shell_state.env_vars)
+            } else {
+                self.session_path(crate::executor::path::windows_operand_file_path(
+                    shell_path_to_windows(&target, &self.shell_state.env_vars),
+                    &self.shell_state.env_vars,
+                ))
+            };
             FileFd::open_read(path).ok()
         });
         if let Some(file) = file_stdin {
