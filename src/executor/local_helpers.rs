@@ -433,7 +433,45 @@ pub(crate) fn sync_shell_assignment_process_env(
     set_process_env(name, value);
 }
 
+/// rubash#2259: the invocation-classification keys. Each of these
+/// names THIS process's own invocation shape — whether it is
+/// interactive, a login shell, a `-c` string shell, or a debugger
+/// session — and nothing else. GNU keeps exactly this state in
+/// process-local globals (shell.c: `interactive_shell`, `login_shell`,
+/// `shell_exec_string`; interactivity itself is derived from the
+/// process's own argv/tty shape, shell.c:540-549, never read from the
+/// environment), so the values are re-derived by every process's own
+/// argv handling after import (main.rs / invocation.rs / session.rs)
+/// and an inherited or exported copy can only mislead: pre-fix, a
+/// parent's mirrored `__RUBASH_INTERACTIVE` rode the process env into
+/// nested shells, which then classified THEMSELVES by the parent's
+/// shape (the discard classification rubash#2236 proved live), and
+/// into every plain child's `env` output. The set is therefore
+/// enforced at all three environment boundaries from this one
+/// declaration: the mirror gate below never writes these keys to the
+/// process env, the child-environment composition never projects
+/// them, and Executor construction strips ambient copies at import
+/// (init.rs, the rubash#2137 F7 adjudication for the debugger pair).
+/// The rest of the `__RUBASH_*` family is NOT in this set on purpose:
+/// host-stamped protocol markers are a deliberate transport (the
+/// multi-session harness's mirrored-assignment visibility,
+/// ms_stopbleed class 2) and keep mirroring.
+pub(crate) const INVOCATION_STATE_ENV_KEYS: &[&str] = &[
+    "__RUBASH_INTERACTIVE",
+    "__RUBASH_INTERACTIVE_FLAG_OFF",
+    "__RUBASH_IS_C",
+    "__RUBASH_LOGIN_SHELL",
+    "__RUBASH_DEBUGGER_MODE",
+    "__RUBASH_DEBUGGER_ATTEMPTED",
+];
+
 pub(crate) fn shell_assignment_needs_process_env(name: &str) -> bool {
+    // rubash#2259: invocation-classification keys never mirror (see
+    // INVOCATION_STATE_ENV_KEYS above) — they live only in the live
+    // variable table of the process that derived them.
+    if INVOCATION_STATE_ENV_KEYS.contains(&name) {
+        return false;
+    }
     matches!(
         name,
         "HOME" | "OLDPWD" | "PATH" | "PATHEXT" | "PWD" | "TEMP" | "TMP" | "TMPDIR" | "USERPROFILE"
