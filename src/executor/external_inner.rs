@@ -1865,7 +1865,9 @@ impl Executor {
                 Some(fd) if fd >= 3 => fd,
                 _ => continue,
             };
-            let target = self.expand_redirect_target(redirect);
+            // rubash#2270: `mut` — the heredoc arm further down
+            // rewrites `target` to the materialized carrier path.
+            let mut target = self.expand_redirect_target(redirect);
             // rubash#2235: a numbered input entry whose target is an
             // fd-alias PATH spelling (/dev/fd/M, /proc/self/fd/M) —
             // above all a streamed list-level input procsub after
@@ -1909,7 +1911,7 @@ impl Executor {
             {
                 continue;
             }
-            let write = !matches!(
+            let mut write = !matches!(
                 redirect.kind,
                 crate::parser::RedirectKind::Input
                     | crate::parser::RedirectKind::DuplicateInput
@@ -1936,11 +1938,56 @@ impl Executor {
             // a streamed procsub word would name the producer pipe
             // through the alias layer with a fresh offset, and a
             // plain file would restart at offset 0).
+            // Merge-order note (#2235 × #2270): this lookup runs
+            // BEFORE the heredoc arm below on purpose. A heredoc /
+            // here-string entry still classifies as `write` at this
+            // point, so it can never claim a stash — which matches
+            // the dup replay itself (own_input_binding_before
+            // kind-skips heredocs, so a stash is never a heredoc
+            // binding). A stash under the same fd therefore belongs
+            // to an earlier plain entry, and the heredoc arm's own
+            // stamp, applied after it in list order, keeps GNU's
+            // last-wins for the slot.
             let stashed = if write {
                 None
             } else {
                 self.own_input_bindings.get(&fd).cloned()
             };
+            if matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+            ) {
+                // rubash#2270: a heredoc / here-string entry carries no
+                // filename target — `target` is the delimiter word.
+                // GNU do_redirection_internal treats r_reading_until /
+                // r_deblank_reading_until / r_reading_string like every
+                // other input binding at ANY redirector fd:
+                // here_document_to_fd (redir.c:423) places the body in
+                // a temporary file and the resulting descriptor is
+                // dup2'd onto the redirector (redir.c:1065-1072). The
+                // spawn-side mirror of that contract: materialize the
+                // canonical body text (external_fd_heredoc_input — the
+                // same ladder the /dev/fd operand and <&N faces use)
+                // into a carrier file, then let the ordinary input arm
+                // below open it and deliver it through the same env /
+                // pin channels as a file input redirect, so fd 3 and
+                // fd 0's body (apply_external_stdin_redirect) obey one
+                // installation contract. Without this arm the entry
+                // fell into the write bucket and "opened" the delimiter
+                // as an output file, leaving the child's fd unbound.
+                let Some(body) = self.external_fd_heredoc_input(cmd, fd) else {
+                    continue;
+                };
+                let Ok(carrier) = self.write_process_substitution_temp(&body) else {
+                    continue;
+                };
+                self.shell_state
+                    .procsub_adhoc_carriers
+                    .borrow_mut()
+                    .push(carrier.clone());
+                target = carrier.display().to_string();
+                write = false;
+            }
             let mut opened_file: Option<std::fs::File> = None;
             let raw = if let Some(file) = &stashed {
                 file.handle
