@@ -18,6 +18,15 @@ use std::os::fd::{FromRawFd, RawFd};
 
 pub type HANDLE = RawFd; // isize-compatible integer fd
 
+/// niubash#519: DOS device names (CON, CONIN$, NUL, COMx, …) are a
+/// Windows spelling class — no path is one off Windows. Stub mirror of
+/// `windows_impl::is_dos_device_path` so `crate::fd` consumers resolve
+/// on every target (the executor's own wrapper documents the same
+/// "always false off Windows" contract).
+pub fn is_dos_device_path(_path: &std::path::Path) -> bool {
+    false
+}
+
 pub fn close_handle(h: HANDLE) {
     // fd 0/1/2 are the process's live stdio; closing them is the caller's
     // explicit decision and happens through other paths.
@@ -56,6 +65,19 @@ pub fn is_pipe_handle(h: HANDLE) -> bool {
     }
 }
 
+/// S_ISSOCK — the handle refers to a socket. The Windows twin
+/// (windows_impl::is_socket_handle) exists for the spawn layer; the
+/// fd-fact classification (rubash#2132) needs the same judgment on
+/// unix, where an inherited socketpair end is otherwise
+/// indistinguishable from a pipe to a mode-only probe.
+pub fn is_socket_handle(h: HANDLE) -> bool {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::fstat(h, &mut st) == 0
+            && (u32::from(st.st_mode) & u32::from(libc::S_IFMT)) == u32::from(libc::S_IFSOCK)
+    }
+}
+
 /// The filesystem path an open regular-file descriptor refers to, or
 /// None for pipes/ttys/devices. GNU's `open("/proc/self/fd/N", O_RDONLY)`
 /// on a regular file performs a FRESH open at offset 0 — callers
@@ -72,6 +94,21 @@ pub fn disk_file_path(h: HANDLE) -> Option<std::path::PathBuf> {
 /// isatty(fd) — `test -t`'s terminal probe (GNU test.c).
 pub fn is_console_handle(h: HANDLE) -> bool {
     unsafe { libc::isatty(h) == 1 }
+}
+
+/// True when the tty is in canonical (line) input mode — the mode where
+/// the kernel line discipline gives the VEOF char (Ctrl-D) its EOF
+/// meaning. With ICANON off (the one-char/raw modes read.def installs
+/// for `-n`/`-d`/deadline reads) 0x04 is ordinary data. On a canonical
+/// tty the kernel never delivers the VEOF byte itself, so this only
+/// tells the read transports whether a 0x04 byte they DO receive (a
+/// Windows console has no kernel VEOF) carries EOF semantics.
+pub fn console_line_input_mode(h: HANDLE) -> bool {
+    if !is_console_handle(h) {
+        return false;
+    }
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+    unsafe { libc::tcgetattr(h, &mut termios) == 0 && (termios.c_lflag & libc::ICANON) != 0 }
 }
 
 /// S_ISCHR — `test -c` (GNU test.c filetest).

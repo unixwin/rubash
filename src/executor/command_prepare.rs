@@ -328,12 +328,24 @@ impl Executor {
         // reach `2>f`.
         let saved_stdout = self.fd_table.entries.get(&1).cloned();
         let saved_stderr = self.fd_table.entries.get(&2).cloned();
+        // rubash#2131: stash the command's redirection list for the
+        // fd-alias sync's own-redirect overlay — `[[ ]]` binds only
+        // fds 1/2, so without the list the sync answers its fd-0
+        // predicates from the superseded ambient binding. Restored
+        // below once the evaluation is done, on every exit path.
+        let saved_conditional_redirects = std::mem::replace(
+            &mut self.current_conditional_redirects,
+            Some(cmd.redirects.clone()),
+        );
         // rubash#545 (cells 2+3): the `[[ ]]` command owns any input-procsub
         // fds realized for its operands and any `>(...)` bodies queued
         // during evaluation — close/run them at the command's end, the same
         // lifetime execute_materialized_command gives simple commands.
         let procsub_fd_base = self.command_scoped_procsub_input_fds.len();
-        self.bind_conditional_stdio_redirects(cmd)?;
+        if let Err(error) = self.bind_conditional_stdio_redirects(cmd) {
+            self.current_conditional_redirects = saved_conditional_redirects;
+            return Err(error);
+        }
         self.exit_code = self.execute_conditional_command(conditional_command);
         // rubash#1130: a [[ ]] operand hit a FATAL word-expansion error
         // (nounset unbound) — the diagnostic and exit_code are already
@@ -342,6 +354,9 @@ impl Executor {
         let conditional_fatal = self.conditional_expansion_fatal.replace(false);
         let conditional_fatal_status = self.conditional_fatal_status.replace(None);
         let conditional_error = self.conditional_expansion_error_status.take();
+        // rubash#2131: the evaluation is done; drop the stashed list
+        // before the unwind paths below run anything else.
+        self.current_conditional_redirects = saved_conditional_redirects;
         if conditional_fatal {
             // rubash#1201: execute_conditional_command just overwrote
             // exit_code with the predicate's own status (e.g. -z of the
@@ -410,7 +425,11 @@ impl Executor {
         // same fatal redirect-word class as a commanded target (rubash#535;
         // GNU probe: `set -u; > $nope` exits 1, no next line). The walker
         // has reported the diagnostic and set the status.
-        if let Some(rejection) = self.reject_invalid_redirects(cmd)? {
+        let settle_superseded_net_outputs =
+            self.superseded_net_output_settlement_applies(cmd, false);
+        if let Some(rejection) =
+            self.reject_invalid_redirects(cmd, settle_superseded_net_outputs)?
+        {
             if rejection == super::redirection::RedirectRejection::FatalNounset {
                 self.finish_heredoc_expansion_error(cmd, Self::FATAL_PARAMETER_EXPANSION_STATUS)?;
             }
@@ -3657,10 +3676,13 @@ impl Executor {
         // gate's `"${X[0]}": Bad file descriptor` (issue #518). Placement
         // mirrors execute_materialized_command: before the tempenv applies,
         // because redirect words expand against the caller's bindings.
-        let redirect_rejection = match self.reject_invalid_redirects(&materialized_cmd) {
-            Ok(rejection) => rejection,
-            Err(error) => return Some(Err(error)),
-        };
+        let settle_superseded_net_outputs =
+            self.superseded_net_output_settlement_applies(&materialized_cmd, false);
+        let redirect_rejection =
+            match self.reject_invalid_redirects(&materialized_cmd, settle_superseded_net_outputs) {
+                Ok(rejection) => rejection,
+                Err(error) => return Some(Err(error)),
+            };
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
@@ -3735,6 +3757,12 @@ impl Executor {
                 self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
             return Some(Err(ExecuteError::ExpansionFailure(1)));
         }
+        // rubash#2126: every skip path above (redirect rejection,
+        // failed tempenv) returns before this point, so reaching here is
+        // the function dispatch itself — execute_cmd.c:4813 assigns
+        // this_shell_builtin = (SHELL_VAR *)NULL for a function
+        // dispatch, disarming the evalstring tracker bit.
+        self.shell_state.last_dispatch_was_eval_or_source = false;
         // GNU variables.c push_context: the function-call tempenv becomes the
         // function's variable context — recorded so a posix special builtin's
         // merged tempenv inside the function (att_propagate,

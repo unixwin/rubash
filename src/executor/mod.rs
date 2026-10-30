@@ -97,7 +97,10 @@ mod getopts_enable;
 pub mod identity;
 mod init;
 
-pub use init::RESPAWNED_CHILD;
+pub(crate) use init::spawner_stamp_value;
+pub use init::{
+    respawn_provenance_validated_from_process_env, RESPAWNED_CHILD, RESPAWN_SPAWNER_PID_KEY,
+};
 pub mod profiler;
 // rubash#331: the binary crate renders its self-produced path values
 // (BASH, argv[0]-derived $0) through the same POSIX-form display the
@@ -573,6 +576,18 @@ pub struct Executor {
     /// executors keep the restore.
     is_process_exit_executor: bool,
     background_children: HashMap<u32, crate::fd::SpawnedChild>,
+    /// rubash#2179: writer threads feeding output process-substitution
+    /// consumers (external_setup::spawn_output_process_substitution_child).
+    /// The feed is the shell's half of the substitution rendezvous: in
+    /// GNU the producer's bytes enter the live pipe during the command
+    /// itself (subst.c:6362 process_substitute forks the consumer at
+    /// materialization), so at shell exit nothing remains to deliver.
+    /// Rubash's deferred feed must therefore be COMPLETED, not
+    /// abandoned, before this executor's process lifetime ends —
+    /// drain_procsub_feeds joins these threads, and Drop plus the
+    /// image-replacement paths call it. Finished handles are pruned at
+    /// the next spawn so a long-lived shell does not accumulate them.
+    procsub_feed_handles: Vec<std::thread::JoinHandle<()>>,
     /// rubash#1952: pids spawned as streamed input process
     /// substitutions (real children in background_children), mapped
     /// to whether the boundary reap has spent its one bounded grace
@@ -707,6 +722,15 @@ pub struct Executor {
     /// carrier (the same finish the simple-command path gives output
     /// process substitutions).
     conditional_output_procsubs: Vec<(std::path::PathBuf, String, Option<usize>)>,
+    /// rubash#2131: the redirection list of the `[[ ]]` command
+    /// currently evaluating, stashed by
+    /// execute_conditional_command_with_redirects for the fd-alias
+    /// sync's own-redirect overlay: `[[ ]]` binds only its fds 1/2
+    /// (bind_conditional_stdio_redirects), so its fd-0 binding never
+    /// reaches the fd table, and the evaluator runs through no
+    /// CommandNode the sync could read the list from. Saved and
+    /// restored around the evaluation like the fd 1/2 entries.
+    current_conditional_redirects: Option<Vec<crate::parser::Redirect>>,
     pending_scalar_assignment: bool,
     suppress_errexit: usize,
     /// rubash#1563: depth of GNU's CMD_IGNORE_RETURN clearing frame for
@@ -798,6 +822,18 @@ pub struct Executor {
     /// not against the map value (rubash perf12: the map-value gate
     /// produced stale alias/declare line numbers after an ambient restore).
     line_env_os_value: std::cell::RefCell<Option<String>>,
+    /// #682 stamped-by-caller contract: the execute_ast command loop stamps
+    /// `__RUBASH_CURRENT_LINE`/`__RUBASH_CMD_START_LINE` for the node it is
+    /// about to dispatch (GNU stamps line_number once per command,
+    /// execute_cmd.c SET_LINE_NUMBER); the funnel's own re-stamp recomputes
+    /// the identical value from the same node and the same ambient line, so
+    /// when this flag is set the funnel skips its copy. Only the ast_exec
+    /// loop sets it — immediately before its funnel call, and only when no
+    /// DEBUG fire / debugger seam ran this iteration (a trap action leaves
+    /// its own lines behind, and the funnel's re-stamp is then GNU's
+    /// post-trap SET_LINE_NUMBER and must run). Consumed on entry, so a
+    /// nested execute_command always stamps normally.
+    pre_stamped_line: std::cell::Cell<bool>,
     /// The background direct-spawn eligibility gate (#809) expands the async
     /// command's words in the PARENT as a probe; GNU expands the forked
     /// child's words inside the child, so the parent never observes a
@@ -1449,6 +1485,19 @@ pub struct Executor {
     /// execute_time_ast_command entry; taken by the time branch after
     /// its inner dispatch completes, so a stale mark is never consumed.
     pub(crate) posix_special_status_converted: Cell<bool>,
+    /// rubash#2125: set by execute_exec when the `{var}` fd_var apply
+    /// (apply_dynamic_fd_var_redirects) fails for an operand-bearing
+    /// `exec`. GNU reaches that failure inside do_redirections, BEFORE
+    /// exec_builtin's search/execve (exec.def:151+), so it is an
+    /// ordinary redirection failure — status 1, shell continues —
+    /// never exec.def's failed_exec exit, which covers only the
+    /// search/execve failure. execute_exec_command consumes the mark
+    /// to complete the command at status 1 WITHOUT routing through
+    /// finish_exec_replacement. In POSIX mode the same failure takes
+    /// the EX_REDIRFAIL jump instead (execute_cmd.c:4865-4875) and the
+    /// mark is never set. One-shot: set and consumed within a single
+    /// execute_exec_command call.
+    pub(crate) exec_do_redirections_failed: Cell<bool>,
     /// Depth of enclosing execute_time_ast_command inner dispatches.
     /// While > 0, the dispatch-level errexit conversion sites convert
     /// WITHOUT firing the ERR trap: the timed command completes through
@@ -1567,6 +1616,19 @@ pub struct Executor {
     /// partial record is still assigned; only the status becomes 1. Merged
     /// with the fd-table copy by `take_read_eof_no_delimiter`.
     pub(crate) read_eof_no_delimiter: bool,
+    /// niubash#684: the armed inherited-stdin transport read fd 0 itself
+    /// and hit a genuine EOF (zero-length read) with no record to serve.
+    /// GNU builtin_read reads exactly ONE descriptor
+    /// (builtins/read.def:294) and a zread EOF ends the builtin
+    /// (read.def:767 `eof = 1`; :949 `retval = eof ? EXECUTION_FAILURE`)
+    /// — EOF is a verdict, not a "try the next transport" signal. The
+    /// read builtin's None cascade consults this flag so an EOF on the
+    /// process stdin is never re-asked of a second blocking reader
+    /// (which swallowed the EOF and consumed the NEXT input line as the
+    /// record). Reset beside read_eof_no_delimiter at every acquisition;
+    /// set only by read_inherited_process_stdin's EOF-with-nothing
+    /// return, never by a timeout/interrupt break.
+    pub(crate) read_process_stdin_eof: bool,
     /// rubash#1141: production timing of the input currently staged on
     /// FUNCTION_STDIN (a pipeline stage's captured producer output), so
     /// `read`/`select` can judge an armed deadline against the stream's
@@ -1628,6 +1690,21 @@ pub struct Executor {
     /// whose current value still equals the journal's final state.
     env_write_journal: EnvWriteJournal,
     history_provider: Option<crate::history::SharedHistoryProvider>,
+    /// The engine's dispatch-time stamp ledger for the provider list,
+    /// parallel to it (niubash#646). GNU stamps every add_history at the
+    /// add moment (readline/history.c hist_inittime); on the provider
+    /// contract the host records the accepted line before the engine sees
+    /// it, so the engine stamps when it first observes the entry — the
+    /// interactive dispatch (`pre_process_interactive_line`) and the
+    /// builtin's own provider mutations (`history -s` appends, `-d`
+    /// removals, `-c`), reconciling by position each time. `Rc<RefCell>`
+    /// so an Executor fork copy (command_substitute's clone) shares the
+    /// ledger exactly like it shares the provider itself — a subshell's
+    /// `history` listing must not fork the stamps off the parent's.
+    /// Hosts that carry their own stamps report them through
+    /// `HistoryProvider::entry_timestamps` (niubash#622) and take
+    /// precedence when the channel is aligned and non-empty.
+    provider_stamp_ledger: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
 }
 
 #[cfg(test)]

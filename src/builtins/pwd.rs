@@ -148,7 +148,10 @@ fn current_directory(
     Ok(Some(display))
 }
 
-fn logical_pwd_if_current(physical: &Path, env_vars: &HashMap<String, String>) -> Option<String> {
+pub(crate) fn logical_pwd_if_current(
+    physical: &Path,
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
     let logical = env_vars.get("PWD")?.clone();
 
     if !(logical.starts_with('/') || Path::new(&logical).is_absolute()) {

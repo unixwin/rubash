@@ -174,3 +174,68 @@ fn issue1968_echo_with_open_input_redirects_still_runs() {
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "hi\n");
 }
+
+// rubash#1968 residual coverage: the issue's follow-up names the
+// representative builtins "echo/read 等" — the buffered echo/printf
+// route landed with #2051; these pins lock the remaining representative
+// builtins on the same bad-fd/synthetic faces (GNU: do_redirections
+// precedes every command, execute_cmd.c:5606 — the suppression is not
+// echo-specific).
+
+#[test]
+fn issue1968_read_input_from_closed_fd_is_suppressed() {
+    let (stdout, stderr, _code) = run_c("read x < /dev/fd/63; echo rc=$?");
+    assert_eq!(stdout, "rc=1\n", "read must not run with a failed redirect");
+    assert!(
+        stderr.contains("/dev/fd/63: No such file or directory"),
+        "stderr must name the failed target, got: {stderr}"
+    );
+}
+
+#[test]
+fn issue1968_read_readwrite_from_closed_fd_is_suppressed() {
+    let (stdout, stderr, _code) = run_c("read x <> /dev/fd/63; echo rc=$?");
+    assert_eq!(stdout, "rc=1\n", "read must not run with a failed redirect");
+    assert!(
+        stderr.contains("/dev/fd/63: No such file or directory"),
+        "stderr must name the failed target, got: {stderr}"
+    );
+}
+
+#[test]
+fn issue1968_read_input_from_missing_file_is_suppressed() {
+    let (stdout, stderr, _code) = run_c("read x < /nonexistent-x-1968; echo rc=$?");
+    assert_eq!(stdout, "rc=1\n");
+    assert!(
+        stderr.contains("/nonexistent-x-1968: No such file or directory"),
+        "stderr must name the failed target, got: {stderr}"
+    );
+}
+
+#[test]
+fn issue1968_colon_input_from_closed_fd_is_suppressed() {
+    let (stdout, stderr, _code) = run_c(": < /dev/fd/63; echo rc=$?");
+    assert_eq!(stdout, "rc=1\n", ": must not succeed through a failed open");
+    assert!(
+        stderr.contains("/dev/fd/63: No such file or directory"),
+        "stderr must name the failed target, got: {stderr}"
+    );
+}
+
+#[test]
+fn issue1968_external_command_input_from_closed_fd_is_suppressed() {
+    let (stdout, stderr, _code) = run_c("true < /dev/fd/63; echo rc=$?");
+    assert_eq!(stdout, "rc=1\n", "the external face must not run either");
+    assert!(
+        stderr.contains("/dev/fd/63: No such file or directory"),
+        "stderr must name the failed target, got: {stderr}"
+    );
+}
+
+#[test]
+fn issue1968_read_with_open_input_redirect_still_runs() {
+    // Control: read consumes the bound input when the redirect opens.
+    let (stdout, _stderr, code) = run_c("echo hi | { read x; echo \"got=$x\"; }");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "got=hi\n");
+}

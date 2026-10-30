@@ -2737,6 +2737,32 @@ impl Executor {
                 } else {
                     0
                 }
+            } else if self.read_process_stdin_eof {
+                // niubash#684: the armed inherited-stdin transport read
+                // fd 0 itself and hit EOF with nothing to serve. GNU
+                // builtin_read reads ONE descriptor (read.def:294);
+                // zread's EOF breaks the loop with eof=1 (read.def:767)
+                // and the builtin returns EXECUTION_FAILURE
+                // (read.def:949). Falling through to read_stdin_until
+                // here asked a SECOND blocking reader on the same
+                // descriptor, which swallowed the EOF and consumed the
+                // next input line as this read's record (interactive
+                // `read` at Ctrl-D on a transient-EOF transport).
+                // Assign the empty record and fail, like the
+                // fd0-bound-away arm above.
+                let assign_status = self.assign_read_scalar_names(
+                    &scalar_names,
+                    initial_text.as_deref().unwrap_or(""),
+                    raw,
+                );
+                if assign_status != 0 {
+                    return self.finish_read_error(cmd, &stderr, assign_status);
+                }
+                if initial_text.is_none() {
+                    1
+                } else {
+                    0
+                }
             } else {
                 // rubash#1250: hold the foreground SIGINT guard across
                 // the raw fallback read as well (see read_input_for_

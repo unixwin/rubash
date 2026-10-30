@@ -647,7 +647,8 @@ impl Executor {
         // rubash#1551: the fork bracket also covers the process-global
         // hash-table mirror — the child's `hash -p` writes and PATH-bind
         // flushes must not reach the parent's remembered locations.
-        let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        let _hashed_fork =
+            crate::executor::path::hashed_cache_fork_guard(&self.shell_state.env_vars);
         // rubash#403: subshell_depth is NOT bumped here. GNU increments
         // subshell_level exactly once per substitution — in the CHILD
         // (execute_in_subshell; variables.c get_bash_subshell reads the
@@ -1724,6 +1725,7 @@ impl Executor {
             inside_compound_condition: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
             background_children: HashMap::new(),
+            procsub_feed_handles: Vec::new(),
             procsub_stream_children: HashMap::new(),
             pending_job_completions: Vec::new(),
             pending_coproc_retirements: Vec::new(),
@@ -1744,6 +1746,7 @@ impl Executor {
             tempenv_pipestatus_state: None,
             command_scoped_procsub_input_fds: Vec::new(),
             conditional_output_procsubs: Vec::new(),
+            current_conditional_redirects: None,
             pending_scalar_assignment: false,
             suppress_errexit: self.suppress_errexit,
             // rubash#1563: a fork copy inherits the parent's GNU frame
@@ -1775,6 +1778,7 @@ impl Executor {
             // units are its own text, never the parent's file.
             debug_syntax_unit_file: None,
             line_env_os_value: std::cell::RefCell::new(None),
+            pre_stamped_line: std::cell::Cell::new(false),
             expansion_probe_active: std::cell::Cell::new(false),
             return_trap_running: false,
             signal_trap_running: false,
@@ -1828,6 +1832,7 @@ impl Executor {
             exit_jump_pending: Cell::new(false),
             errexit_status_converted: Cell::new(false),
             posix_special_status_converted: Cell::new(false),
+            exec_do_redirections_failed: Cell::new(false),
             timed_dispatch_depth: Cell::new(0),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
@@ -1842,6 +1847,7 @@ impl Executor {
             read_interrupted_signal: None,
             read_sigint_guard_armed: false,
             read_eof_no_delimiter: false,
+            read_process_stdin_eof: false,
             // rubash#1141: the fork copy reads the SAME staged input
             // stream as its parent (FUNCTION_STDIN crosses in the cloned
             // shell state), so its production timing crosses too — the
@@ -1887,6 +1893,10 @@ impl Executor {
             // the parent restores them at its own Drop.)
             env_write_journal: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
             history_provider: self.history_provider.clone(),
+            // The stamp ledger rides the same Rc the provider does (see
+            // the field docs): a fork copy must not fork the stamps off
+            // the parent's list.
+            provider_stamp_ledger: self.provider_stamp_ledger.clone(),
         }
     }
 

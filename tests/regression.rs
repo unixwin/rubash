@@ -86,7 +86,14 @@ fn run_golden_fixture(name: &str, timeout_secs: u64, corpus: &[&str]) {
         Duration::from_secs(timeout_secs),
     );
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(!out.timed_out, "{name}: TIMED OUT after {timeout_secs}s");
+    assert!(
+        !out.timed_out,
+        "{name}: TIMED OUT after {timeout_secs}s (rubash pid {}); \
+         partial stdout:\n{}\npartial stderr:\n{}",
+        out.pid,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     let expected_out = std::fs::read(root.join(GOLDEN_DIR).join(format!("{name}.gnu.out")))
         .unwrap_or_else(|e| panic!("{name}: missing golden stdout: {e}"));
     let expected_err = std::fs::read(root.join(GOLDEN_DIR).join(format!("{name}.gnu.err")))
@@ -401,52 +408,104 @@ struct RunOutcome {
     stderr: Vec<u8>,
     code: Option<i32>,
     timed_out: bool,
+    /// Pid of the direct child (rubash#2056): carried so a timeout
+    /// failure can name the wedged process, not just the bound.
+    pid: u32,
 }
 
-fn wait_bounded(child: &mut Child, limit: Duration) -> RunOutcome {
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    let _ = pipe.read_to_end(&mut stdout);
+/// One child pipe being drained on its own thread (rubash#2056): the
+/// buffer accumulates for the whole wait, and `done` flips once the
+/// pipe reaches EOF (every write end closed) or errors. A child
+/// spawned without a pipe (Stdio::null) is born done and empty.
+struct PipeDrain {
+    buffer: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn start_drain<R: Read + Send + 'static>(pipe: Option<R>) -> PipeDrain {
+    let drain = PipeDrain {
+        buffer: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(pipe.is_none())),
+    };
+    if let Some(mut pipe) = pipe {
+        let buffer = drain.buffer.clone();
+        let done = drain.done.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buffer.lock().unwrap().extend_from_slice(&chunk[..n]),
                 }
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_end(&mut stderr);
-                }
-                return RunOutcome {
-                    stdout,
-                    stderr,
-                    code: status.code(),
-                    timed_out: false,
-                };
             }
-            Ok(None) => {
-                if start.elapsed() > limit {
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    drain
+}
+
+/// Bounded wait for a spawned child, hardened by rubash#2056.
+///
+/// The pre-hardening shape waited for exit first and drained the
+/// pipes afterwards with an unbounded `read_to_end`: if a descendant
+/// that outlived the child kept a write end open (a background fifo
+/// writer is exactly that), EOF never arrived, the nominal bound
+/// never fired, and one wedged shape ate a whole 25-minute CI job
+/// with zero diagnostics (the #1903 hang; the issue1903 module grew
+/// a private drained runner to work around it, now deleted in favor
+/// of this helper). The same shape also deadlocked any child that
+/// filled a pipe buffer before exiting, and its timeout path
+/// returned empty captures.
+///
+/// Now both pipes drain on threads from entry, the wait polls
+/// `try_wait`, and ONE deadline covers both the child's exit and
+/// the pipes reaching EOF. A timeout kills the child and returns
+/// the partial captures with the pid, so the failure the caller
+/// raises carries its evidence. The timeout stays a returned
+/// outcome rather than a panic here: at least one caller
+/// (nvm_load_timed_run_script) consumes `timed_out` as a value —
+/// the panic-with-diagnostics half of the shape lives at the
+/// assertion layer, as it did in the issue1903 runner trio.
+fn wait_bounded(child: &mut Child, limit: Duration) -> RunOutcome {
+    let pid = child.id();
+    let stdout = start_drain(child.stdout.take());
+    let stderr = start_drain(child.stderr.take());
+    let snapshot = |timed_out: bool, code: Option<i32>| RunOutcome {
+        stdout: stdout.buffer.lock().unwrap().clone(),
+        stderr: stderr.buffer.lock().unwrap().clone(),
+        code,
+        timed_out,
+        pid,
+    };
+    let start = Instant::now();
+    let mut exit_code: Option<Option<i32>> = None;
+    loop {
+        if exit_code.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => exit_code = Some(status.code()),
+                Ok(None) => {}
+                Err(_) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return RunOutcome {
-                        stdout: Vec::new(),
-                        stderr: Vec::new(),
-                        code: None,
-                        timed_out: true,
-                    };
+                    return snapshot(false, None);
                 }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return RunOutcome {
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                    code: None,
-                    timed_out: false,
-                };
             }
         }
+        if let Some(code) = exit_code {
+            let drained = stdout.done.load(std::sync::atomic::Ordering::SeqCst)
+                && stderr.done.load(std::sync::atomic::Ordering::SeqCst);
+            if drained {
+                return snapshot(false, code);
+            }
+        }
+        if start.elapsed() > limit {
+            if exit_code.is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return snapshot(true, exit_code.flatten());
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -564,6 +623,127 @@ fn run_rubash_piped_stdin_in(dir: &Path, args: &[&str], limit: Duration) -> RunO
     let outcome = wait_bounded(&mut child, limit);
     drop(child.stdin.take());
     outcome
+}
+
+/// Fake child for the issue2056 wait_bounded pins: the rubash binary
+/// itself running a `-c` script, pipes on both streams. What the
+/// script does (hang, orphan its pipe, flood its pipe) is the pin's
+/// variable; the spawn shape is constant.
+fn spawn_issue2056_fake_child(script: &str) -> Child {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    cmd.args(["-c", script])
+        .env_clear()
+        .env("PATH", minimal_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.spawn().expect("spawn issue2056 fake child")
+}
+
+/// rubash#2056: a child that prints markers and then never exits
+/// (external sleep as the foreground command) must be killed at the
+/// bound, and the timeout outcome must carry whatever it printed
+/// before wedging — the pre-hardening helper returned EMPTY captures
+/// on its timeout path, so a hang surfaced with zero evidence.
+#[test]
+fn issue2056_wait_bounded_kills_never_exiting_child_with_partial_output() {
+    let mut child = spawn_issue2056_fake_child(
+        "echo issue2056-out-marker\necho issue2056-err-marker >&2\nsleep 120\n",
+    );
+    let pid = child.id();
+    let started = Instant::now();
+    let out = wait_bounded(&mut child, Duration::from_secs(3));
+    let elapsed = started.elapsed();
+    assert!(
+        out.timed_out,
+        "never-exiting child must report timed_out; got code {:?}",
+        out.code
+    );
+    assert_eq!(out.pid, pid, "outcome must carry the child's pid");
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the 3s bound did not fire promptly: {elapsed:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("issue2056-out-marker"),
+        "partial stdout lost on timeout: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("issue2056-err-marker"),
+        "partial stderr lost on timeout: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        matches!(child.try_wait(), Ok(Some(_))),
+        "timed-out child was not killed and reaped"
+    );
+}
+
+/// rubash#2056, the #1903 shape: the child EXITS promptly with code 0
+/// but leaves a background orphan holding the stdout write end, so
+/// pipe EOF never arrives. The pre-hardening helper read the pipes
+/// only after exit with an unbounded read_to_end — this shape hung
+/// it forever (it ate a full 25-minute goldens job). The hardened
+/// helper must count the still-open pipe against the same bound and
+/// return the partial capture with the child's real exit code.
+#[test]
+fn issue2056_wait_bounded_bounds_post_exit_pipe_drain() {
+    let mut child =
+        spawn_issue2056_fake_child("echo issue2056-orphan-marker\nsleep 120 &\nexit 0\n");
+    let started = Instant::now();
+    let out = wait_bounded(&mut child, Duration::from_secs(3));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the 3s bound did not fire promptly: {elapsed:?}"
+    );
+    assert!(
+        out.timed_out,
+        "pipe held open by an orphan past the bound must report timed_out; got code {:?}",
+        out.code
+    );
+    assert_eq!(out.code, Some(0), "the child itself exited 0");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("issue2056-orphan-marker"),
+        "partial stdout lost: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// rubash#2056: a child that floods stdout past the pipe buffer
+/// (~176 KB here) can only finish if the pipes drain WHILE it runs.
+/// The pre-hardening helper never read before exit, so this shape
+/// deadlocked into a timeout with empty captures; the hardened
+/// helper must deliver the full payload, byte for byte.
+#[test]
+fn issue2056_wait_bounded_drains_pipes_while_waiting() {
+    let mut child = spawn_issue2056_fake_child(
+        "i=0\nwhile (( i < 4000 )); do echo \"issue2056-line-$i-abcdefghijklmnopqrstuvwxyz\"; (( i += 1 )); done\n",
+    );
+    let out = wait_bounded(&mut child, Duration::from_secs(30));
+    assert!(
+        !out.timed_out,
+        "pipe-flooding child timed out — pipes were not drained while waiting"
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected: String = (0..4000)
+        .map(|i| format!("issue2056-line-{i}-abcdefghijklmnopqrstuvwxyz\n"))
+        .collect();
+    assert_eq!(
+        out.stdout.len(),
+        expected.len(),
+        "drained payload is truncated"
+    );
+    assert!(
+        out.stdout == expected.as_bytes(),
+        "drained payload differs from what the child wrote"
+    );
 }
 
 fn assert_bytes_eq(actual: &[u8], expected: &[u8], label: &str, name: &str) {
@@ -920,8 +1100,12 @@ fn run_suite_snapshot(suite: &str) {
     });
     assert!(
         !out.timed_out,
-        "{suite}: suite run timed out ({}s)",
-        started.elapsed().as_secs()
+        "{suite}: suite run timed out ({}s, rubash pid {}); \
+         partial stdout:\n{}\npartial stderr:\n{}",
+        started.elapsed().as_secs(),
+        out.pid,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
     assert_bytes_eq(&normalized, &expected, "snapshot stdout", suite);
 }
@@ -5698,40 +5882,30 @@ mod issue_1951 {
 #[cfg(windows)]
 mod issue_1903 {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
     /// Per-invocation bound for every rubash child this module spawns.
     /// The shapes below complete in well under a second when the
     /// rendezvous pairs; 20s is pure failure headroom.
     const BOUND: Duration = Duration::from_secs(20);
 
-    struct BoundedOutcome {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        code: Option<i32>,
-        timed_out: bool,
-        pid: u32,
-    }
-
-    /// This module carries its own runner instead of run_rubash_in /
-    /// wait_bounded for one mechanical reason: wait_bounded reads the
-    /// child's pipes only AFTER the child exits, with an unbounded
-    /// read_to_end — a background job process that outlives the shell
-    /// (a fifo writer parked in its pairing open is exactly that)
-    /// inherits the write end and the read never returns, so the
-    /// nominal 30s bound never fires and one wedged shape eats the
-    /// whole CI job (the #2014 hang: the goldens job burned its full
-    /// 25-minute timeout inside this module). Here both pipes drain
-    /// on threads from spawn, the wait polls try_wait against a hard
-    /// deadline, and a timeout kills the child and reports its pid
-    /// plus whatever it managed to print — a hang becomes a fast,
-    /// diagnosed test failure. The environment discipline is
-    /// run_rubash_in's airtight one, unchanged.
-    fn spawn_drained(
-        dir: &Path,
-        script_name: &str,
-        script: &str,
-    ) -> (Child, Arc<Mutex<Vec<u8>>>, Arc<Mutex<Vec<u8>>>) {
+    /// Spawn one rubash child for a script this module writes into
+    /// the scratch dir; `run` and the blocked shapes then wait on it
+    /// through the SHARED wait_bounded. This module originally
+    /// carried a private runner (spawn_drained / wait_drained)
+    /// because wait_bounded read the child's pipes only after exit,
+    /// with an unbounded read_to_end — a background job process that
+    /// outlives the shell (a fifo writer parked in its pairing open
+    /// is exactly that) inherits the write end and the read never
+    /// returned, so the nominal bound never fired and one wedged
+    /// shape ate the whole CI job (the #2014 hang: the goldens job
+    /// burned its full 25-minute timeout inside this module).
+    /// rubash#2056 promoted the drained shape into wait_bounded
+    /// itself (pipes drained on threads while waiting, try_wait
+    /// poll, one deadline over exit + pipe EOF, partial captures on
+    /// timeout), so the private runner is deleted and this module
+    /// converges onto the shared helper. The environment discipline
+    /// is run_rubash_in's airtight one, unchanged.
+    fn spawn_script(dir: &Path, script_name: &str, script: &str) -> Child {
         let path = dir.join(script_name);
         std::fs::write(&path, script).expect("write probe script");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
@@ -5757,80 +5931,12 @@ mod issue_1903 {
                 cmd.env(name, value);
             }
         }
-        let mut child = cmd.spawn().expect("spawn rubash");
-        let stdout_buf = Arc::new(Mutex::new(Vec::new()));
-        let stderr_buf = Arc::new(Mutex::new(Vec::new()));
-        fn drain<R: std::io::Read + Send + 'static>(mut pipe: R, sink: Arc<Mutex<Vec<u8>>>) {
-            std::thread::spawn(move || {
-                let mut chunk = [0u8; 8192];
-                loop {
-                    match pipe.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => sink.lock().unwrap().extend_from_slice(&chunk[..n]),
-                    }
-                }
-            });
-        }
-        drain(
-            child.stdout.take().expect("piped stdout"),
-            stdout_buf.clone(),
-        );
-        drain(
-            child.stderr.take().expect("piped stderr"),
-            stderr_buf.clone(),
-        );
-        (child, stdout_buf, stderr_buf)
-    }
-
-    fn wait_drained(
-        child: &mut Child,
-        stdout_buf: &Arc<Mutex<Vec<u8>>>,
-        stderr_buf: &Arc<Mutex<Vec<u8>>>,
-        limit: Duration,
-    ) -> BoundedOutcome {
-        let pid = child.id();
-        let start = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    return BoundedOutcome {
-                        stdout: stdout_buf.lock().unwrap().clone(),
-                        stderr: stderr_buf.lock().unwrap().clone(),
-                        code: status.code(),
-                        timed_out: false,
-                        pid,
-                    };
-                }
-                Ok(None) if start.elapsed() > limit => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return BoundedOutcome {
-                        stdout: stdout_buf.lock().unwrap().clone(),
-                        stderr: stderr_buf.lock().unwrap().clone(),
-                        code: None,
-                        timed_out: true,
-                        pid,
-                    };
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return BoundedOutcome {
-                        stdout: stdout_buf.lock().unwrap().clone(),
-                        stderr: stderr_buf.lock().unwrap().clone(),
-                        code: None,
-                        timed_out: false,
-                        pid,
-                    };
-                }
-            }
-        }
+        cmd.spawn().expect("spawn rubash")
     }
 
     fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
-        let (mut child, stdout_buf, stderr_buf) = spawn_drained(dir, "case.sh", script);
-        let out = wait_drained(&mut child, &stdout_buf, &stderr_buf, BOUND);
+        let mut child = spawn_script(dir, "case.sh", script);
+        let out = wait_bounded(&mut child, BOUND);
         assert!(
             !out.timed_out,
             "rubash pid {} still running after {BOUND:?} — subprocess state: \
@@ -5847,12 +5953,12 @@ mod issue_1903 {
     }
 
     /// Spawn a shell that is expected to BLOCK (its fifo open has no
-    /// peer yet), drained from birth like every child in this module.
-    fn spawn_blocked(
-        dir: &Path,
-        script: &str,
-    ) -> (Child, Arc<Mutex<Vec<u8>>>, Arc<Mutex<Vec<u8>>>) {
-        spawn_drained(dir, "blocked.sh", script)
+    /// peer yet). The shared wait_bounded starts draining when it is
+    /// called on the child rather than at spawn; a child parked in
+    /// its pairing open has printed nothing, so nothing is lost by
+    /// the later drain start.
+    fn spawn_blocked(dir: &Path, script: &str) -> Child {
+        spawn_script(dir, "blocked.sh", script)
     }
 
     fn assert_still_blocked(child: &mut Child, what: &str) {
@@ -5940,12 +6046,12 @@ mod issue_1903 {
         let dir = case_scratch("1903-block-read");
         let (_, stderr, code) = run(&dir, "mkfifo f\n");
         assert_eq!(code, Some(0), "stderr:\n{stderr}");
-        let (mut reader, out_buf, err_buf) = spawn_blocked(&dir, "cat f\n");
+        let mut reader = spawn_blocked(&dir, "cat f\n");
         assert_still_blocked(&mut reader, "cat f with no writer");
         let (stdout, stderr, code) = run(&dir, "echo hi > f\n");
         assert_eq!(code, Some(0), "writer stderr:\n{stderr}");
         assert_eq!(stdout, "");
-        let out = wait_drained(&mut reader, &out_buf, &err_buf, BOUND);
+        let out = wait_bounded(&mut reader, BOUND);
         assert!(
             !out.timed_out,
             "reader pid {} never completed after the writer arrived; partial stderr:\n{}",
@@ -5961,12 +6067,12 @@ mod issue_1903 {
         let dir = case_scratch("1903-block-write");
         let (_, stderr, code) = run(&dir, "mkfifo f\n");
         assert_eq!(code, Some(0), "stderr:\n{stderr}");
-        let (mut writer, out_buf, err_buf) = spawn_blocked(&dir, "echo hi > f\n");
+        let mut writer = spawn_blocked(&dir, "echo hi > f\n");
         assert_still_blocked(&mut writer, "echo hi > f with no reader");
         let (stdout, stderr, code) = run(&dir, "cat f\n");
         assert_eq!(code, Some(0), "reader stderr:\n{stderr}");
         assert_eq!(stdout, "hi\n");
-        let out = wait_drained(&mut writer, &out_buf, &err_buf, BOUND);
+        let out = wait_bounded(&mut writer, BOUND);
         assert!(
             !out.timed_out,
             "writer pid {} never completed after the reader arrived; partial stderr:\n{}",

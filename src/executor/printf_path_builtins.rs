@@ -147,7 +147,53 @@ impl Executor {
             &mut stderr,
         )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        // GNU exit.def:147 (exit_or_logout -> bash_logout): once the
+        // exit arguments have validated — an argument error returns in
+        // GNU before bash_logout is ever reached, mirrored here by the
+        // Exit arm only — a login shell sources ~/.bash_logout before
+        // the exit unwinds, through the same latch the `logout` builtin
+        // uses (rubash#2140). GNU's other bash_logout guards map as:
+        // sourced_logout (the latch, preset on fork-copy executors so
+        // pipeline/comsub faces never source) and
+        // subshell_environment == 0 (flat subshells run in this
+        // executor at depth > 0 and skip it, exactly as the farewell
+        // echo above does).
+        if matches!(action, crate::builtins::exit::ExitAction::Exit(_))
+            && self.shell_state.subshell_depth.get() == 0
+            && self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_LOGIN_SHELL")
+                .map(String::as_str)
+                == Some("1")
+        {
+            self.source_bash_logout_once()?;
+        }
         Ok(action)
+    }
+
+    /// GNU exit.def:156-166 (bash_logout): source ~/.bash_logout at
+    /// most once per shell process. The caller establishes the login
+    /// shape; the latch (`bash_logout_sourced`, preset by the
+    /// fork-copy executor constructor) carries GNU's sourced_logout
+    /// and subshell_environment guards for the cloned faces.
+    fn source_bash_logout_once(&mut self) -> Result<(), ExecuteError> {
+        if let Some(home) = self.shell_state.env_vars.get("HOME").cloned() {
+            let logout_file = format!("{home}/.bash_logout");
+            if !self.bash_logout_sourced
+                && std::fs::metadata(shell_path_to_windows(
+                    &logout_file,
+                    &self.shell_state.env_vars,
+                ))
+                .is_ok()
+            {
+                self.bash_logout_sourced = true;
+                let mut node = CommandNode::default();
+                node.words = vec![".".to_string(), logout_file];
+                self.execute_source_command(&node)?;
+            }
+        }
+        Ok(())
     }
 
     pub(in crate::executor) fn execute_logout(
@@ -172,21 +218,7 @@ impl Executor {
 
         // GNU exit.def:147,156-166 (exit_or_logout -> bash_logout): a login
         // shell sources ~/.bash_logout once before exiting.
-        if let Some(home) = self.shell_state.env_vars.get("HOME").cloned() {
-            let logout_file = format!("{home}/.bash_logout");
-            if !self.bash_logout_sourced
-                && std::fs::metadata(shell_path_to_windows(
-                    &logout_file,
-                    &self.shell_state.env_vars,
-                ))
-                .is_ok()
-            {
-                self.bash_logout_sourced = true;
-                let mut node = CommandNode::default();
-                node.words = vec![".".to_string(), logout_file];
-                self.execute_source_command(&node)?;
-            }
-        }
+        self.source_bash_logout_once()?;
 
         // GNU exit.def:93-154 (exit_or_logout): jump_to_top_level(EXITBLTIN)
         // - the shell exits with the logout status (an optional numeric

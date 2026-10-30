@@ -1112,7 +1112,23 @@ impl FdTable {
                 match crate::fd::read_some(file.handle, 8192) {
                     Ok(buf) if buf.is_empty() => break,
                     Ok(buf) => out.extend_from_slice(&buf),
-                    Err(_) => break,
+                    Err(error) => {
+                        // rubash#2101: a hard read error on an
+                        // otherwise empty drain is a fact a caller
+                        // may own — the same first-error discipline
+                        // read_file_bytes keeps for the read builtin
+                        // (rubash#1495). A directory bound to the fd
+                        // reads EISDIR; swallowing it made a draining
+                        // consumer (the emulated cat) report success
+                        // where GNU's reader fails with its own
+                        // diagnostic. read_bytes resets the slot at
+                        // entry, so recording here cannot leak into an
+                        // unrelated later read.
+                        if out.is_empty() && self.read_error.is_none() {
+                            self.read_error = Some(crate::posix_errors::message(&error));
+                        }
+                        break;
+                    }
                 }
             }
             return Some(out);

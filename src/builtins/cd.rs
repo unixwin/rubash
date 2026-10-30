@@ -9,7 +9,7 @@ mod paths;
 use paths::{
     current_logical_pwd, filesystem_path_for_display, logical_destination,
     logical_destination_display, logical_pwd_var_display, set_shell_env, shell_display_path,
-    shell_pwd_display_path, shell_var, starts_with_dot_component,
+    shell_pwd_display_path, shell_var, starts_with_dot_component, validated_logical_pwd,
 };
 use std::env;
 use std::io::{self, Write};
@@ -139,7 +139,14 @@ where
         None => target,
     };
 
+    // OLDPWD records the RAW old $PWD variable (bindpwd, cd.def:136:
+    // get_string_value("PWD") — a forged variable lands there verbatim),
+    // but the logical destination is built from the VALIDATED logical
+    // cwd (change_to_directory's the_current_working_directory base,
+    // rubash#2143): the two reads are deliberately different values
+    // once a user assignment has desynchronized $PWD.
     let old_pwd = current_logical_pwd(env_vars, cwd);
+    let old_logical = validated_logical_pwd(env_vars, cwd);
     if let Some(logical_dir) = logical_posix_test_dir(&target, env_vars) {
         // G-02: the bridge rewrites the logical state only — the session
         // cwd field stays where it was, exactly as the process cwd used
@@ -205,27 +212,27 @@ where
     let physical = match probed {
         Ok(path) => path,
         Err(error) => {
-        // GNU builtins/cd.def:427: builtin_error("%s: %s", printable_filename(dirname), strerror(e))
-        // reports the user-given path, not the Windows-converted path.
-        // general.c printable_filename: non-printing bytes render through
-        // ansic_quote ($'5\247@3\231+\306S8\237\242\352\263' in unicode3.sub).
-        let display_path = target
-            .display
-            .as_deref()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| target.path.to_string_lossy().to_string());
-        let display_path = if crate::executor::ansic_shouldquote(&display_path) {
-            crate::executor::ansic_quote(&display_path)
-        } else {
-            display_path
-        };
-        writeln!(
-            stderr,
-            "{}cd: {}: {}",
-            diagnostic_prefix(env_vars),
-            display_path,
-            crate::posix_errors::message(&error)
-        )?;
+            // GNU builtins/cd.def:427: builtin_error("%s: %s", printable_filename(dirname), strerror(e))
+            // reports the user-given path, not the Windows-converted path.
+            // general.c printable_filename: non-printing bytes render through
+            // ansic_quote ($'5\247@3\231+\306S8\237\242\352\263' in unicode3.sub).
+            let display_path = target
+                .display
+                .as_deref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| target.path.to_string_lossy().to_string());
+            let display_path = if crate::executor::ansic_shouldquote(&display_path) {
+                crate::executor::ansic_quote(&display_path)
+            } else {
+                display_path
+            };
+            writeln!(
+                stderr,
+                "{}cd: {}: {}",
+                diagnostic_prefix(env_vars),
+                display_path,
+                crate::posix_errors::message(&error)
+            )?;
             stderr.flush()?;
             return Ok(EXECUTION_FAILURE);
         }
@@ -236,15 +243,17 @@ where
     *cwd = physical.clone();
 
     let new_pwd = match mode {
-        Mode::Logical => {
-            logical_destination(&old_pwd, target.display.as_deref().unwrap_or(&target.path))
-        }
+        Mode::Logical => logical_destination(
+            &old_logical,
+            target.display.as_deref().unwrap_or(&target.path),
+        ),
         Mode::Physical => physical,
     };
     let new_pwd_display = match mode {
-        Mode::Logical => {
-            logical_destination_display(&old_pwd, target.display.as_deref().unwrap_or(&target.path))
-        }
+        Mode::Logical => logical_destination_display(
+            &old_logical,
+            target.display.as_deref().unwrap_or(&target.path),
+        ),
         Mode::Physical => shell_display_path(&new_pwd),
     };
 
@@ -316,7 +325,7 @@ where
             stdout,
             "{}",
             shell_pwd_display_path(&logical_destination_display(
-                &old_pwd,
+                &old_logical,
                 target.display.as_deref().unwrap_or(&target.path)
             ))
         )?,
@@ -466,7 +475,11 @@ where
     }
 }
 
-fn resolve_cdpath(target: &Target, env_vars: &HashMap<String, String>, cwd: &Path) -> Option<Target> {
+fn resolve_cdpath(
+    target: &Target,
+    env_vars: &HashMap<String, String>,
+    cwd: &Path,
+) -> Option<Target> {
     if target
         .display
         .as_ref()
@@ -620,8 +633,14 @@ mod tests {
 
         let mut cwd_slot = std::path::PathBuf::from("/");
         assert_eq!(
-            execute_with_io(["/"], &mut env_vars, &mut cwd_slot, &mut stdout, &mut stderr)
-                .unwrap(),
+            execute_with_io(
+                ["/"],
+                &mut env_vars,
+                &mut cwd_slot,
+                &mut stdout,
+                &mut stderr
+            )
+            .unwrap(),
             0
         );
         assert_eq!(env_vars.get("PWD").map(String::as_str), Some("/"));

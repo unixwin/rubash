@@ -1270,6 +1270,12 @@ impl Executor {
             !(key.starts_with("__RUBASH_TRAP") && key != crate::builtins::trap::TRAP_ORIG_IGNORES)
         });
         env_map.insert("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string());
+        // rubash#2136: the provenance stamp the child's init validates
+        // against its actual parent (init.rs).
+        env_map.insert(
+            super::RESPAWN_SPAWNER_PID_KEY.to_string(),
+            super::spawner_stamp_value(),
+        );
         // rubash#2032: process_substitute's consumer is a forked child
         // (subst.c:6362), so it inherits the parent's positional
         // parameters (POSITIONAL_PARAMS_TRANSPORT).
@@ -1277,6 +1283,12 @@ impl Executor {
             super::compound_exec::POSITIONAL_PARAMS_TRANSPORT.to_string(),
             self.positional_params_transport_value(),
         );
+        // rubash#2058: the fork-context stamp (call-stack views,
+        // PIPESTATUS cell, ARGV bottom state) — same fork, same
+        // transport set (see fork_context_transport_entries).
+        for (key, value) in self.fork_context_transport_entries() {
+            env_map.insert(key, value);
+        }
         // subst.c:6609 subshell_level++ — the procsub child runs one level
         // deeper than the parent for $BASH_SUBSHELL/$BASHPID.
         env_map.insert(
@@ -1345,7 +1357,7 @@ impl Executor {
         let pid = child.id();
         adopt_orphan_console(pid);
         if let Some(mut stdin) = child.stdin.take() {
-            std::thread::spawn(move || {
+            let feed = std::thread::spawn(move || {
                 use std::io::Write as _;
                 // A child that exits early leaves a broken pipe; the
                 // feed must end as EPIPE, not kill the shell (SIGPIPE is
@@ -1354,11 +1366,42 @@ impl Executor {
                 crate::builtins::kill::block_sigpipe_on_this_thread();
                 let _ = stdin.write_all(&input);
             });
+            // rubash#2179: the feed thread is not fire-and-forget. The
+            // payload it carries is the shell's half of the
+            // substitution rendezvous, and the shell's process lifetime
+            // can end (script exit, image replacement) before an
+            // unscheduled thread ever runs — the consumer then reads
+            // EOF with the payload never sent. Keep the handle so
+            // drain_procsub_feeds can complete the transfer at the
+            // lifetime boundary; prune finished handles so a
+            // long-lived shell does not accumulate them.
+            self.procsub_feed_handles
+                .retain(|handle| !handle.is_finished());
+            self.procsub_feed_handles.push(feed);
         }
         self.background_children
             .insert(pid, crate::fd::SpawnedChild::from(child));
         self.shell_state.last_background_pid = Some(pid);
         Ok(())
+    }
+
+    /// rubash#2179: complete every outstanding output-procsub feed.
+    /// Joining a feed thread blocks until its `write_all` returns —
+    /// the payload is then in the consumer's stdin pipe (or the
+    /// consumer closed it), which is the state GNU is in at the same
+    /// boundary by construction: process_substitute (subst.c:6362)
+    /// forks the consumer at materialization and the producer's own
+    /// writes fill the pipe during the command. The consumer itself
+    /// is NOT waited for — it keeps running detached, exactly like
+    /// GNU's async child; only the shell's own transfer completes.
+    /// Called at every end of this executor's process lifetime: Drop,
+    /// and the image-replacement paths (the nofork tail exec and the
+    /// `exec` builtin), where the process image is about to be
+    /// replaced and a still-pending feed would die with it.
+    pub(in crate::executor) fn drain_procsub_feeds(&mut self) {
+        for handle in std::mem::take(&mut self.procsub_feed_handles) {
+            let _ = handle.join();
+        }
     }
 
     /// GNU subst.c:6362 process_substitute(): the substituted word is

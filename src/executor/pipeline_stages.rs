@@ -31,12 +31,19 @@ impl Executor {
             .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .cloned();
+        // rubash#1902: the element's fd 0 is the inter-stage pipe; the
+        // fd-fact sync reads the fact beside the mirror (restored with
+        // it below), like execute_pipeline_stage's installation.
+        let old_stage_pipe_fact = self.shell_state.env_vars.get(FD0_STAGE_PIPE).cloned();
         self.shell_state
             .env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
         self.shell_state
             .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        self.shell_state
+            .env_vars
+            .insert(FD0_STAGE_PIPE.to_string(), "1".to_string());
         // The staged mirror IS the stage's fd 0 (same invariant as
         // execute_pipeline_stage): GNU runs the lastpipe element in the
         // current shell with the pipe dup2'd onto fd 0
@@ -101,6 +108,11 @@ impl Executor {
                 self.fd_table.entries.remove(&0);
             }
         }
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FD0_STAGE_PIPE,
+            old_stage_pipe_fact,
+        );
         restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
         restore_optional_env_var(
             &mut self.shell_state.env_vars,
@@ -1611,10 +1623,19 @@ impl Executor {
                 // an empty pipe (GNU's next element reads nothing).
                 match target {
                     MergedSharedFile::Path(path) => {
-                        let mut file = open_redirect_append(&self.session_path(
-                            shell_path_to_windows(&path, &self.shell_state.env_vars),
-                        ))
-                        .map_err(ExecuteError::IoError)?;
+                        // rubash#2121: open through the registry-
+                        // classifying append (open_append_target), not
+                        // a raw filesystem open of the session-mapped
+                        // word — for `/dev/tcp/... 2>&1` on an external
+                        // pipeline stage the raw open turned the net
+                        // word into a bogus filesystem path (ENOENT,
+                        // zero connects, stage rc 1) where GNU connects
+                        // once and delivers the merged bytes. Plain
+                        // files take the same session-anchored mapped
+                        // append as before (rubash#1964).
+                        let mut file = self
+                            .open_append_target(&path)
+                            .map_err(ExecuteError::IoError)?;
                         file.write_all(&merged)?;
                     }
                     MergedSharedFile::Handle(handle) => {

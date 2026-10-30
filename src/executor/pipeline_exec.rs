@@ -4274,7 +4274,15 @@ impl Executor {
         let _sigpipe_block = crate::builtins::kill::sigpipe_block_guard();
         // rubash#1551: a pipeline element is a forked child (see the
         // RANDOM bracket below) — its hash-table writes stay inside it.
-        let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        let _hashed_fork =
+            crate::executor::path::hashed_cache_fork_guard(&self.shell_state.env_vars);
+        // rubash#2126: same fork argument for the evalstring tracker
+        // bit — a stage's dispatches happen in the forked element, so
+        // the parent's this_shell_builtin (builtins/common.c:70) is
+        // untouched by them; restored with the other stage state below.
+        // (execute_lastpipe_stage deliberately does NOT come through
+        // here: the lastpipe element runs in the current shell.)
+        let saved_dispatch_tracker = self.shell_state.last_dispatch_was_eval_or_source;
         // `|&` → trailing `2>&1` (parse.y:1470-1487; normalize_pipeerr_stage).
         // execute_simple_pipeline already normalized every gathered stage;
         // this idempotent pass covers the recursion entry points that bypass
@@ -4375,6 +4383,9 @@ impl Executor {
         // expose it the same way while the inline arms run so fd-alias
         // redirections like `cat < /dev/stdin` (niubash#118) resolve to the
         // stage input instead of the process's own stdin handle.
+        // rubash#1902: the fd-0 stage-pipe fact rides the same
+        // save/restore bracket (see the mirror installation below).
+        let old_stage_pipe_fact = self.shell_state.env_vars.get(FD0_STAGE_PIPE).cloned();
         let old_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
         let old_stdin_offset = self
             .shell_state
@@ -4423,6 +4434,20 @@ impl Executor {
             self.shell_state
                 .env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+            // rubash#1902: the staged mirror IS the stage's fd 0 and the
+            // fd-table slot is cleared below, so the fd-fact sync has no
+            // entry to classify — record what the mirror stands for.
+            // When the mirror carries an upstream stage's payload (or a
+            // text-production payload: heredoc / here-string / procsub,
+            // all pipes in GNU) fd 0 is the pipe; the inherit arm instead
+            // hands the element the ambient fd 0 itself, whose fact an
+            // outer stage's installation (or no installation) already
+            // states, so it is left untouched.
+            if !stdin_inherit {
+                self.shell_state
+                    .env_vars
+                    .insert(FD0_STAGE_PIPE.to_string(), "1".to_string());
+            }
             Some(self.fd_table.entries.remove(&0))
         };
         self.pipeline_stdin_consumed.set(None);
@@ -4453,13 +4478,67 @@ impl Executor {
             );
             match materialized {
                 Ok((materialized, process_substitutions)) => {
-                    let inner = self.execute_pipeline_stage_inner(
+                    // rubash#2184: materialization rewrites a redirect-
+                    // position `>(...)` target into an empty carrier
+                    // path, but the stage runners capture the stage's
+                    // streams as strings and leave placement to the
+                    // driver loop's routing walk — which re-resolves
+                    // the ORIGINAL node's redirects, so the payload
+                    // lands in a literal file named after the raw
+                    // `>(...)` text while the consumer (spawned by
+                    // finish below) reads the still-empty carrier.
+                    // GNU connects the element's redirected fd straight
+                    // to the substitution pipe (subst.c process_
+                    // substitute; execute_cmd.c execute_pipeline runs
+                    // each element with its own redirects applied), so
+                    // when a redirect target was rewritten into a
+                    // carrier, route the captured streams here, through
+                    // the MATERIALIZED node's redirect state, before
+                    // finish spawns the consumer, and mark the stage
+                    // pre-wired so the driver skips its own walk.
+                    let redirect_carrier =
+                        stage_redirect_rewritten_to_carrier(command, &materialized);
+                    let mut inner = self.execute_pipeline_stage_inner(
                         &materialized,
                         input,
                         stdin_inherit,
                         streaming_stdin,
                         live_stdin,
                     );
+                    // A stage whose runner already placed its streams
+                    // itself — a function stage applying redirects to
+                    // its fd table, an external stage on the shared-
+                    // file arm — claims so via pipeline_stage_fds_pre_
+                    // wired; its carrier already holds the payload and
+                    // the captured strings are empty, so routing them
+                    // would only truncate the carrier back to empty.
+                    // Compound stages place their streams inside their
+                    // stage subshell the same way and are likewise out
+                    // of the routing population — the driver loop's
+                    // routing walk skips exactly this same set.
+                    if redirect_carrier
+                        && !self.pipeline_stage_fds_pre_wired.get()
+                        && !command_is_compound_pipeline_stage(command)
+                    {
+                        inner = match inner {
+                            Ok(Some((mut output, mut stderr, mut status))) => {
+                                match self.route_pipeline_stage_streams(
+                                    &materialized,
+                                    &mut output,
+                                    &mut stderr,
+                                    &mut status,
+                                ) {
+                                    Ok(true) => {
+                                        self.pipeline_stage_fds_pre_wired.set(true);
+                                        Ok(Some((output, stderr, status)))
+                                    }
+                                    Ok(false) => Ok(Some((output, stderr, status))),
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            other => other,
+                        };
+                    }
                     match self.finish_process_substitutions(process_substitutions) {
                         Err(error) => Err(error),
                         Ok(()) => inner,
@@ -4506,6 +4585,11 @@ impl Executor {
                 .unwrap_or(0);
             self.pipeline_stdin_consumed.set(Some(measured));
         }
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FD0_STAGE_PIPE,
+            old_stage_pipe_fact,
+        );
         restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
         restore_optional_env_var(
             &mut self.shell_state.env_vars,
@@ -4517,6 +4601,8 @@ impl Executor {
         // restored its own mirror entries in the stage's table).
         self.restore_spec_variables(saved_stage_variables);
         self.shell_state.random_state.restore_state(&saved_random);
+        // rubash#2126: the stage's dispatches stay inside the element.
+        self.shell_state.last_dispatch_was_eval_or_source = saved_dispatch_tracker;
         // rubash#1540: harvest the DISCARD latches this stage raised
         // (they were cleared at entry), then restore the entry state so
         // nothing leaks to the parent. The arithmetic verdict delta is
@@ -4753,13 +4839,19 @@ impl Executor {
         // capture above is active, so restore it before propagating —
         // otherwise every later stdout write in the script is swallowed
         // into the orphaned buffer while stderr keeps working.
-        let stage_redirect_rejected = match self.reject_invalid_redirects(command) {
-            Ok(rejected) => rejected,
-            Err(error) => {
-                crate::executor::shell_options::restore_stdout_capture(saved_capture);
-                return Err(error);
-            }
-        };
+        // rubash#2121: a pipeline stage's stdio wiring is the
+        // deferred binding model even for disk commands, so the gate
+        // settles superseded net output entries for this funnel.
+        let settle_superseded_net_outputs =
+            self.superseded_net_output_settlement_applies(command, true);
+        let stage_redirect_rejected =
+            match self.reject_invalid_redirects(command, settle_superseded_net_outputs) {
+                Ok(rejected) => rejected,
+                Err(error) => {
+                    crate::executor::shell_options::restore_stdout_capture(saved_capture);
+                    return Err(error);
+                }
+            };
         if stage_redirect_rejected.is_some() {
             // The rejected stage already placed its diagnostic on the
             // element's fd 1 (the pipe) via the capture above — GNU's
@@ -6549,6 +6641,51 @@ fn command_has_pipeline_process_substitution(command: &CommandNode) -> bool {
         .into_iter()
         .flatten()
         .any(|redirect| redirect.target.starts_with("<(") || redirect.target.starts_with(">("))
+}
+
+/// rubash#2184: did process-substitution materialization rewrite any
+/// of the stage's redirect targets from `>(...)` form into a carrier
+/// path? Compares the original node against its materialized clone:
+/// materialization rewrites redirect targets in place (the typed
+/// output-redirect fields and the ordered redirect list), while
+/// input-side `<(...)` rewrites and word-position substitutions never
+/// produce an output carrier and stay out of this check.
+fn stage_redirect_rewritten_to_carrier(command: &CommandNode, materialized: &CommandNode) -> bool {
+    fn rewritten(
+        original: Option<&crate::parser::Redirect>,
+        materialized: Option<&crate::parser::Redirect>,
+    ) -> bool {
+        match (original, materialized) {
+            (Some(original), Some(materialized)) => {
+                original.target.starts_with(">(") && original.target != materialized.target
+            }
+            _ => false,
+        }
+    }
+    if rewritten(
+        command.redirect_out.as_deref(),
+        materialized.redirect_out.as_deref(),
+    ) || rewritten(command.append.as_deref(), materialized.append.as_deref())
+        || rewritten(
+            command.redirect_err.as_deref(),
+            materialized.redirect_err.as_deref(),
+        )
+        || rewritten(
+            command.redirect_err_append.as_deref(),
+            materialized.redirect_err_append.as_deref(),
+        )
+    {
+        return true;
+    }
+    command
+        .redirects
+        .iter()
+        .zip(materialized.redirects.iter())
+        .any(|(original, materialized)| {
+            original.is_output_side()
+                && original.target.starts_with(">(")
+                && original.target != materialized.target
+        })
 }
 
 struct TimePipelinePrefix {

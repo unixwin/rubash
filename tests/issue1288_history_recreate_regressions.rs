@@ -4,10 +4,14 @@
 //! Probe: clusters/k5/repro/r1288.sh (HISTFILE chmod 000, then -w/-a).
 //! Expectations verified against GNU bash 5.3.20 (script files).
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 
+#[cfg(unix)]
 fn tempdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rubash1288-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -15,6 +19,7 @@ fn tempdir(tag: &str) -> PathBuf {
     dir
 }
 
+#[cfg(unix)]
 const SCRIPT: &str = "\
 export HISTFILE=$PWD/hist.test; export HOME=$PWD/fakehome
 mkdir -p \"$HOME\"; rm -f \"$HISTFILE\"; touch \"$HISTFILE\"; chmod 000 \"$HISTFILE\"
@@ -27,6 +32,10 @@ ls -l \"$HISTFILE\"
 cat \"$HISTFILE\"
 ";
 
+// The face under test is POSIX mode semantics end to end (chmod 000 on
+// the HISTFILE, recreation at mode 600, the `ls -l` mode string, and the
+// mode-bit readback), so the probe only exists on unix.
+#[cfg(unix)]
 #[test]
 fn history_write_recreates_unreadable_histfile_mode_600() {
     let dir = tempdir("recreate");

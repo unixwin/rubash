@@ -78,6 +78,159 @@ impl Executor {
     }
 }
 
+/// rubash#2058: transport keys for the rest of the fork-inherited
+/// state (docs/design/respawn-transport-census.md). A GNU fork copies
+/// the parent's call-stack arrays and PIPESTATUS cell verbatim
+/// (variables.c); a respawned `rubash -c` child re-imports only its
+/// process environment, so every fork-shaped spawn (async/subshell
+/// wrapper, coproc, both process-substitution forms) stamps the
+/// parent's effective views under these keys and `Executor::new`
+/// consumes and strips them for internal respawns (init.rs). List
+/// values ride the indexed-array storage codec, the same round-trip
+/// POSITIONAL_PARAMS_TRANSPORT uses. The ARGV bottom frame gets its
+/// own key whose PRESENCE is the materialization bit: GNU's fork
+/// inherits `bash_argv_initialized` as-is, and an unmaterialized
+/// child's reads must not synthesize a bottom from the live window
+/// while the child runs in the parent's function context
+/// (variables.c:1656 get_bashargcv initializes only at
+/// variable_context == 0).
+pub(in crate::executor) const FORK_FUNCNAME_TRANSPORT: &str = "__RUBASH_FORK_FUNCNAME";
+pub(in crate::executor) const FORK_SOURCE_TRANSPORT: &str = "__RUBASH_FORK_BASH_SOURCE";
+pub(in crate::executor) const FORK_LINENO_TRANSPORT: &str = "__RUBASH_FORK_BASH_LINENO";
+pub(in crate::executor) const FORK_ARGV_TRANSPORT: &str = "__RUBASH_FORK_BASH_ARGV";
+pub(in crate::executor) const FORK_ARGC_TRANSPORT: &str = "__RUBASH_FORK_BASH_ARGC";
+pub(in crate::executor) const FORK_ARGV_BOTTOM_TRANSPORT: &str = "__RUBASH_FORK_ARGV_BOTTOM";
+pub(in crate::executor) const FORK_IN_FUNCTION_TRANSPORT: &str = "__RUBASH_FORK_IN_FUNCTION";
+pub(in crate::executor) const FORK_MAIN_FRAME_TRANSPORT: &str = "__RUBASH_FORK_MAIN_FRAME";
+pub(in crate::executor) const FORK_PIPESTATUS_TRANSPORT: &str = "__RUBASH_FORK_PIPESTATUS";
+
+/// Every FORK_* transport key, for the child's unconditional strip.
+pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 9] = [
+    FORK_FUNCNAME_TRANSPORT,
+    FORK_SOURCE_TRANSPORT,
+    FORK_LINENO_TRANSPORT,
+    FORK_ARGV_TRANSPORT,
+    FORK_ARGC_TRANSPORT,
+    FORK_ARGV_BOTTOM_TRANSPORT,
+    FORK_IN_FUNCTION_TRANSPORT,
+    FORK_MAIN_FRAME_TRANSPORT,
+    FORK_PIPESTATUS_TRANSPORT,
+];
+
+impl Executor {
+    /// rubash#2058: the fork-context stamp every fork-shaped respawn
+    /// carries, as (key, value) entries the spawn sites merge into the
+    /// child's environment next to POSITIONAL_PARAMS_TRANSPORT. The
+    /// stack lists are this shell's EFFECTIVE views (own frames above
+    /// any frames this shell itself inherited), so a nested respawn
+    /// re-stamps the full chain. The bottom frame is peeked, never
+    /// installed: forking in GNU does not materialize the parent's
+    /// arrays, so the stamp must not either.
+    pub(in crate::executor) fn fork_context_transport_entries(&self) -> Vec<(String, String)> {
+        let inherited = self.shell_state.inherited_fork_frames.as_ref();
+        let mut argv_frames = self.shell_state.bash_argv_stack.clone();
+        let mut argc_frames = self.shell_state.bash_argc_stack.clone();
+        if let Some(inherited) = inherited {
+            argv_frames.extend(inherited.argv_frames.iter().cloned());
+            argc_frames.extend(inherited.argc_frames.iter().cloned());
+        }
+        let mut entries = vec![
+            (
+                FORK_FUNCNAME_TRANSPORT.to_string(),
+                format_indexed_array_values(
+                    self.dynamic_stack_array_values("FUNCNAME")
+                        .unwrap_or_default(),
+                ),
+            ),
+            (
+                FORK_SOURCE_TRANSPORT.to_string(),
+                format_indexed_array_values(
+                    self.dynamic_stack_array_values("BASH_SOURCE")
+                        .unwrap_or_default(),
+                ),
+            ),
+            (
+                FORK_LINENO_TRANSPORT.to_string(),
+                format_indexed_array_values(self.bash_lineno_view()),
+            ),
+            (
+                FORK_ARGV_TRANSPORT.to_string(),
+                format_indexed_array_values(argv_frames),
+            ),
+            (
+                FORK_ARGC_TRANSPORT.to_string(),
+                format_indexed_array_values(argc_frames),
+            ),
+            (
+                FORK_PIPESTATUS_TRANSPORT.to_string(),
+                crate::shell::state::encode_pipestatus_state(
+                    self.shell_state.pipestatus_shape,
+                    &self.shell_state.pipestatus,
+                ),
+            ),
+        ];
+        // The installed bottom frame rides verbatim; its key is
+        // present exactly when the parent's arrays have materialized.
+        // A respawn child's own bottom was seeded into its RefCell at
+        // birth, so the plain peek covers the nested case.
+        if let Some(bottom) = self.shell_state.bash_arg_bottom.borrow().clone() {
+            entries.push((
+                FORK_ARGV_BOTTOM_TRANSPORT.to_string(),
+                format_indexed_array_values(bottom),
+            ));
+        }
+        if self.shell_state.function_depth > 0 || inherited.is_some_and(|frames| frames.in_function)
+        {
+            entries.push((FORK_IN_FUNCTION_TRANSPORT.to_string(), "1".to_string()));
+        }
+        if self.has_script_main_frame() || inherited.is_some_and(|frames| frames.has_main_frame) {
+            entries.push((FORK_MAIN_FRAME_TRANSPORT.to_string(), "1".to_string()));
+        }
+        entries
+    }
+}
+
+/// The parent-source line of the first command that will execute from
+/// `cmd`'s transported text: descend through subshell / brace-group /
+/// pipeline / list / wrapper nodes to the first leaf. The respawn
+/// line seed must name where the child's body text starts — GNU's
+/// forked child reports each body command's own line, and the
+/// serialized body collapses onto the seed line, so the seed is the
+/// first leaf's line (compound nodes' own `line` is their closing
+/// line, which mis-seeded async subshells by the body's height).
+pub(in crate::executor) fn first_leaf_command_line(cmd: &CommandNode) -> Option<usize> {
+    if let Some(subshell) = &cmd.subshell_command {
+        if let Some(first) = subshell.body.first() {
+            return first_leaf_command_line(first);
+        }
+    }
+    if let Some(group) = &cmd.brace_group {
+        if let Some(first) = group.body.first() {
+            return first_leaf_command_line(first);
+        }
+    }
+    if let Some(pipeline) = &cmd.pipeline_command {
+        if let Some(first) = pipeline.stages.first() {
+            return first_leaf_command_line(first);
+        }
+    }
+    if let Some(list) = &cmd.and_or_list {
+        if let Some(first) = list.commands.first() {
+            return first_leaf_command_line(first);
+        }
+    }
+    if let Some(background) = &cmd.background_command {
+        return first_leaf_command_line(&background.command);
+    }
+    if let Some(time) = &cmd.time_command {
+        return first_leaf_command_line(&time.command);
+    }
+    if let Some(inverted) = &cmd.inverted_command {
+        return first_leaf_command_line(&inverted.command);
+    }
+    cmd.line
+}
+
 /// GNU jobs.c:2455/2460 pipeline_pgrp at fork time, recorded as j->pgrp
 /// (jobs.c:649) and substituted by `jobs -x` (builtins/jobs.def
 /// execute_list_with_replacements `itos (j->pgrp)`, rubash#1096): with job
@@ -862,6 +1015,13 @@ impl Executor {
             }
         }
         env_map.insert("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string());
+        // rubash#2136: the provenance stamp the child's init validates
+        // against its actual parent (init.rs) — this process's own pid,
+        // which is the pid the spawned child will observe via getppid.
+        env_map.insert(
+            super::RESPAWN_SPAWNER_PID_KEY.to_string(),
+            super::spawner_stamp_value(),
+        );
         // rubash#2032: GNU's forked async/subshell child inherits the
         // parent's positional parameters (execute_cmd.c:1576
         // execute_in_subshell runs a whole-copy fork); stamp the live
@@ -870,6 +1030,12 @@ impl Executor {
             POSITIONAL_PARAMS_TRANSPORT.to_string(),
             self.positional_params_transport_value(),
         );
+        // rubash#2058: the fork-context stamp (call-stack views,
+        // PIPESTATUS cell, ARGV bottom state) — same fork, same
+        // transport set (see fork_context_transport_entries).
+        for (key, value) in self.fork_context_transport_entries() {
+            env_map.insert(key, value);
+        }
         // rubash#1074: the wrapper child is one subshell level deeper than
         // this shell (execute_in_subshell's subshell_level++); carry the
         // target depth so the child's BASH_SUBSHELL starts at parent + 1.
@@ -884,9 +1050,11 @@ impl Executor {
         // these markers (init.rs keeps them for __RUBASH_SHELL_PID carriers).
         if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             env_map.insert("__RUBASH_SCRIPT_NAME".to_string(), script_name.clone());
-            let line = background_command
-                .command
-                .line
+            // rubash#2058: the seed line is where the transported body
+            // text starts — the first leaf command's line. A compound
+            // node's own `line` is its closing line, which put the
+            // seed at the END of a multi-line `( ... ) &` body.
+            let line = first_leaf_command_line(&background_command.command)
                 .map(|line| line.to_string())
                 .or_else(|| {
                     self.shell_state
@@ -896,7 +1064,19 @@ impl Executor {
                 })
                 .unwrap_or_else(|| "1".to_string());
             env_map.insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
-            let line_offset = line.parse::<usize>().unwrap_or(1).saturating_sub(1);
+            // The child source is prelude + body text, so the body's
+            // first line sits prelude_newlines + 1 lines into it; the
+            // offset compensates exactly like the output-procsub
+            // consumer site (external_setup.rs) — without it every
+            // body line (and every BASH_LINENO call line pushed inside)
+            // drifts by the prelude's newline count, which varies
+            // with the transported function bodies (rubash#2058).
+            let prelude_newlines = self.background_function_prelude().matches('\n').count();
+            let line_offset = line
+                .parse::<usize>()
+                .unwrap_or(1)
+                .saturating_sub(1)
+                .saturating_sub(prelude_newlines);
             env_map.insert("__RUBASH_LINE_OFFSET".to_string(), line_offset.to_string());
         }
         // rubash#737: mark this as a background-job wrapper. Children it
@@ -3001,7 +3181,8 @@ impl Executor {
         let saved_state = self.shell_state.clone_for_child_save();
         // rubash#1551: the fork bracket also covers the process-global
         // hash-table mirror (see executor::path::hashed_cache_fork_guard).
-        let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        let _hashed_fork =
+            crate::executor::path::hashed_cache_fork_guard(&self.shell_state.env_vars);
         // The fd table is executor state, not ShellState: a forked child's
         // descriptor table is a copy (execute_in_subshell after make_child),
         // so `( exec 3<&- )` cannot close the parent's fd 3. Rc-shared
@@ -4059,8 +4240,16 @@ impl Executor {
             // coprocess shell, while keeping internal executor state isolated.
             if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
                 child.env("__RUBASH_SCRIPT_NAME", script);
-                let line = cmd
-                    .line
+                // rubash#2058: seed where the transported body text
+                // starts (first leaf command's line), not the coproc
+                // node's own line. Simple-command coprocs keep the
+                // node's line — the command IS the body.
+                let line = coproc_cmd
+                    .body
+                    .as_ref()
+                    .and_then(|body| body.first())
+                    .and_then(first_leaf_command_line)
+                    .or_else(|| cmd.line)
                     .map(|line| line.to_string())
                     .or_else(|| {
                         self.shell_state
@@ -4083,11 +4272,24 @@ impl Executor {
                 POSITIONAL_PARAMS_TRANSPORT,
                 self.positional_params_transport_value(),
             );
+            // rubash#2058: the fork-context stamp, like every other
+            // fork-shaped respawn (see fork_context_transport_entries).
+            for (key, value) in self.fork_context_transport_entries() {
+                child.env(key, value);
+            }
+            // rubash#2058: this site never stamped the shell-pid
+            // carrier, so the coproc child's $$ projected neither the
+            // parent shell's pid (the #1582 projection its sibling
+            // spawn sites produce) nor its own BASHPID.
+            child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
             // Coprocess children own a shell-created stdin pipe. Keep builtin
             // readers attached to it and let TERM use native termination when a
             // blocked read cannot consume the shell signal mailbox.
             child.env(INHERIT_PROCESS_STDIN, "1");
             child.env("__RUBASH_COPROC_CHILD", "1");
+            // rubash#2136: provenance stamp — the child's init validates
+            // the coproc claim against its actual parent (init.rs).
+            child.env(super::RESPAWN_SPAWNER_PID_KEY, super::spawner_stamp_value());
             // rubash#1074: the coproc body runs in a forked subshell
             // (execute_in_subshell: subshell_level++), so the child's
             // BASH_SUBSHELL starts at this shell's depth + 1.

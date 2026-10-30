@@ -7,9 +7,9 @@ mod options;
 mod unset;
 
 pub(crate) use options::{
-    SET_O_PRINT_WIDTH, SHOPT_O_PRINT_WIDTH, is_flag_only_shell_option, is_shell_option,
-    print_shell_option, print_shell_options, print_shell_options_by_state, set_shell_option,
-    shell_option_enabled, shell_option_names, shellopts_value, sync_shell_option_flag,
+    is_flag_only_shell_option, is_shell_option, print_shell_option, print_shell_options,
+    print_shell_options_by_state, set_shell_option, shell_option_enabled, shell_option_names,
+    shellopts_value, sync_shell_option_flag, SET_O_PRINT_WIDTH, SHOPT_O_PRINT_WIDTH,
 };
 pub use unset::unset;
 pub(crate) use unset::unset_with_stderr;
@@ -184,6 +184,19 @@ where
             let arg: &str = arg;
             if arg == "--" || arg == "-" {
                 break;
+            }
+            if arg == "--help" {
+                // builtins/bashgetopt.c:80-85: internal_getopt returns
+                // GETOPT_HELP for a `--help` word in option position,
+                // and set.def:684 CASE_HELPOPT prints the long help and
+                // returns EX_USAGE — from this VALIDITY scan, before
+                // the apply loop, so nothing is applied (`set -e
+                // --help` leaves errexit off). Words consumed above as
+                // a `-o` operand never reach this check, and the scan
+                // stops before `--`/positional words, mirroring
+                // internal_getopt's fresh-word order (rubash#2128).
+                crate::builtins::help::print_builtin_help("set", stdout)?;
+                return Ok(EX_USAGE);
             }
             let Some(prefix) = arg.chars().next().filter(|ch| *ch == '-' || *ch == '+') else {
                 break;

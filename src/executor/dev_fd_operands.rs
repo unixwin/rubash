@@ -425,8 +425,21 @@ impl Executor {
                 // operand's number like the buffered arms below.
                 // The descriptor is shared, not consumed: the child
                 // reads advance the same offset, as under GNU.
+                // rubash#2171: pin a DUPLICATE of the handle, never
+                // the endpoint's own — the record owns what it
+                // attaches and its Drop closes every recorded handle
+                // once the child exits, so recording the parent's
+                // live handle closed the parent's FileFd with the
+                // record (a mere `ls -l /proc/self/fd/0` inspection
+                // left the parent's fd dead; later reads failed
+                // EBADF where GNU keeps the descriptor — EISDIR for
+                // a directory binding). A dup shares the open file
+                // description, offset included, so the child's view
+                // is unchanged.
                 if let Some(FdReadEndpoint::File(file)) = &entry.read {
-                    m.unix_fd_attach.push((fd, file.handle));
+                    if let Ok(dup) = crate::fd::duplicate_handle(file.handle) {
+                        m.unix_fd_attach.push((fd, dup));
+                    }
                     continue;
                 }
                 let buffered = match &entry.read {

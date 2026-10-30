@@ -941,6 +941,18 @@ impl Executor {
         }
         let value = self.expand_conditional_word(operand);
         self.xtrace_conditional_term(op, &value, None);
+        // rubash#1902: an fd-alias operand answers the bound fd's facts
+        // (sh_stataccess stats the current binding, eaccess.c:116), so the
+        // marks must be fresh for THIS evaluation — same contract as the
+        // [ ] path's fused scan. rubash#2131: the `[[ ]]` command's own
+        // redirection list rides along (stashed on the executor by its
+        // wrapper — only fds 1/2 were bound, so fd 0's own redirect is
+        // stated by the sync's overlay, not by an entry).
+        if crate::special_paths::fd_alias_target(&value).is_some() {
+            self.sync_fd_pipe_marks();
+            let redirects = self.current_conditional_redirects.clone();
+            self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
+        }
         let args = vec![op.to_string(), value];
         crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
     }

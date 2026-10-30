@@ -1086,7 +1086,8 @@ static SELF_SIGNALS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new
 /// hook) set it with Release; the drain reads it with Acquire and clears
 /// it only after both queues are empty, so a delivery that races the clear
 /// either lands before the clear (drained next poll) or re-sets the flag.
-#[cfg(unix)]
+/// All platforms: the Windows take_pending_signals branch uses the same
+/// gate for the same in-process queue (#682 lock-free boundary fast path).
 static PENDING_ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Counts polls so the mailbox-file scan (for signals sent by OTHER
@@ -1144,9 +1145,9 @@ pub(crate) fn queue_self_signal(signal: i32) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push(signal);
+    PENDING_ANY.store(true, std::sync::atomic::Ordering::Release);
     #[cfg(unix)]
     {
-        PENDING_ANY.store(true, std::sync::atomic::Ordering::Release);
         kernel_signals::note_self_delivery(signal);
     }
 }
@@ -1373,7 +1374,19 @@ pub fn take_pending_signals(pid: u32) -> io::Result<Vec<i32>> {
     // create), so it silently swallowed real deliveries.
     #[cfg(not(unix))]
     {
-        let mut signals = take_self_signals();
+        // rubash#437's lock-free gate, Windows twin: PENDING_ANY marks a
+        // non-empty in-process queue (queue_self_signal and
+        // requeue_pending_signals raise it on every push, all platforms), so
+        // a clear flag skips the SELF_SIGNALS mutex entirely. External
+        // deliveries never enter this queue — they arrive through the file
+        // mailbox polled below — so the gate cannot hide one. The clear
+        // mirrors the unix drain (take_all_signals): re-take under the lock
+        // before the Release store.
+        let mut signals = if PENDING_ANY.load(std::sync::atomic::Ordering::Acquire) {
+            take_self_signals()
+        } else {
+            Vec::new()
+        };
         let tick = FILE_POLL_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // catch_flag shape (see mod signal_hint): the kernel event fires the
         // instant a same-version cross-process delivery lands, so the
@@ -1397,6 +1410,20 @@ pub fn take_pending_signals(pid: u32) -> io::Result<Vec<i32>> {
                 || (tick % HINT_POLL_PERIOD == 0 && signal_hint::signaled()))
         {
             signals = take_file_signals(pid)?;
+        }
+        // Clear only when the flag says a producer ran (the gate load, not a
+        // lock) and a re-take under the lock finds the queue drained — the
+        // same discipline as the unix take_all_signals clear. A delivery
+        // that raced the first take is delivered here, never dropped; a
+        // delivery that raced the file poll keeps the flag up for the next
+        // boundary.
+        if signals.is_empty() && PENDING_ANY.load(std::sync::atomic::Ordering::Acquire) {
+            let taken = take_self_signals();
+            if taken.is_empty() {
+                PENDING_ANY.store(false, std::sync::atomic::Ordering::Release);
+            } else {
+                signals = taken;
+            }
         }
         Ok(signals)
     }
@@ -1436,12 +1463,12 @@ pub fn requeue_pending_signals(signals: Vec<i32>) {
     queue.splice(..0, signals);
     // This is a SECOND producer of SELF_SIGNALS (the other is
     // queue_self_signal), so it must set the same lock-free wakeup flag:
-    // the boundary poll's fast path (take_all_signals) skips the self queue
-    // when PENDING_ANY is clear, and a requeue that did not raise it would
-    // strand the re-queued signal forever. `wait`/observe_signals_while_blocked
+    // the boundary poll's fast path (take_all_signals, and the Windows twin
+    // in take_pending_signals) skips the self queue when PENDING_ANY is
+    // clear, and a requeue that did not raise it would strand the re-queued
+    // signal forever. `wait`/observe_signals_while_blocked
     // peek a delivery, put it back here, and rely on the NEXT command
     // boundary to dispatch the trap (wait.def:174).
-    #[cfg(unix)]
     PENDING_ANY.store(true, std::sync::atomic::Ordering::Release);
 }
 
@@ -3440,13 +3467,28 @@ pub fn background_wrapper_role_armed() -> bool {
 /// [`apply_async_child_entry_ignores`]) before the trap table seeds and
 /// the kernel backend captures entry dispositions.
 ///
-/// Forgery note: a user `export` of this key only buys the spawner kernel
+/// Forgery note (rewritten by rubash#2134): an earlier reading held
+/// that a user `export` of this key "only buys the spawner kernel
 /// ignore for that process subtree — the same disposition `trap '' INT`
-/// achieves deliberately — and never arms traps or PDEATHSIG (those read
-/// the trap table / the nonce handshake, rubash#866). The spawn site
-/// overwrites a forged ambient value on every background respawn and
-/// removes it otherwise, so `set -m` (job control on) children never see
-/// it.
+/// achieves deliberately". That equivalence is false in the direction
+/// that matters: `trap '' INT` is a deliberate act INSIDE the victim
+/// shell, while this key is set by a DIFFERENT process — any script a
+/// user runs can export it and every shell that script spawns is then
+/// born ignoring SIGINT/SIGQUIT (the F3 census probe: a child launched
+/// with the key ambient survived `kill -INT $own_pid` and exited 0
+/// where the control died 130; with `-i` the same key reached the
+/// interactive face). GNU reaches this disposition only through actual
+/// parentage — jobs.c's async fork path (setup_async_signals,
+/// jobs.c:4043) sets it in the forked child itself, and dispositions
+/// are inherited across fork/exec, never asserted by data. The entry
+/// point below therefore applies the ignore only when the process's
+/// respawn provenance validates against its actual parent
+/// (rubash#2136) and the invocation is not interactive-shaped; the key
+/// is scrubbed either way. It still never arms traps or PDEATHSIG
+/// (those read the trap table / the nonce handshake, rubash#866), and
+/// the spawn site overwrites a forged ambient value on every
+/// background respawn and removes it otherwise, so `set -m` (job
+/// control on) children never see it.
 #[cfg(unix)]
 pub const ASYNC_CHILD_ENV_KEY: &str = "__RUBASH_ASYNC_CHILD";
 
@@ -3479,13 +3521,52 @@ pub(crate) fn async_child_entry() -> bool {
     ASYNC_CHILD_ENTRY.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// True when this process's own command line is interactive-shaped:
+/// an `-i`/`--interactive` flag before the command operand, or no `-c`
+/// and no script operand at all (a stdin-driven session). Genuine
+/// async respawns are always `-c` children (the command-file spill
+/// variant keeps `-c` with an empty operand), so the scan stops —
+/// not-interactive — at the first `-c`, `--`, or non-option operand.
+#[cfg(unix)]
+fn invocation_is_interactive_shaped() -> bool {
+    for arg in std::env::args_os().skip(1) {
+        let token = arg.to_string_lossy();
+        if token == "-c" || token == "--" || token == "-" || !token.starts_with('-') {
+            return false;
+        }
+        if token == "--interactive" {
+            return true;
+        }
+        if !token.starts_with("--") && token[1..].contains('i') {
+            return true;
+        }
+    }
+    // No command operand anywhere: commands come from stdin, which is
+    // the interactive session shape when attached to a terminal.
+    true
+}
+
 #[cfg(unix)]
 pub fn apply_async_child_entry_ignores() {
-    if std::env::var(ASYNC_CHILD_ENV_KEY).as_deref() != Ok("1") {
-        std::env::remove_var(ASYNC_CHILD_ENV_KEY);
+    let claimed = std::env::var(ASYNC_CHILD_ENV_KEY).as_deref() == Ok("1");
+    std::env::remove_var(ASYNC_CHILD_ENV_KEY);
+    if !claimed {
         return;
     }
-    std::env::remove_var(ASYNC_CHILD_ENV_KEY);
+    // rubash#2134: the marker is data in the environment, which any
+    // parent can write — it classifies nothing by itself. Apply the
+    // entry ignores only for a process whose async-child classification
+    // is established by its actual parentage (the rubash#2136
+    // provenance validation over the live process environment) and
+    // whose invocation is a `-c` respawn shape, never an interactive
+    // one: an interactive shell must be born with default dispositions
+    // so Ctrl+C keeps its meaning (jobs.c has no path where an
+    // interactive shell inherits an async child's ignores).
+    if !crate::executor::respawn_provenance_validated_from_process_env()
+        || invocation_is_interactive_shaped()
+    {
+        return;
+    }
     ASYNC_CHILD_ENTRY.store(true, std::sync::atomic::Ordering::Release);
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_IGN);

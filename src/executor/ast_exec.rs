@@ -816,6 +816,9 @@ impl Executor {
                 self.evalerror_exit_toomany_pending.set(false);
                 self.evalerror_line.set(None);
             }
+            // Resolved once here and reused by the `-n` gates below (the
+            // dispatch branch already needed this lookup per command).
+            let noexec = self.noexec_enabled();
             if self.evalerror_exec_depth.get() == 1 {
                 // rubash#1494: one tick of the notification-lag clock per
                 // top-level reader command; the refresh below applies
@@ -830,11 +833,16 @@ impl Executor {
                 // escapes under (GNU reads newline-terminated lists one at
                 // a time; the first command of a line fixes the read-time
                 // locale for every word the reader pulls in that list).
+                // rubash#353's record feeds `$'...'` re-derivation at
+                // EXPANSION time; `-n` never expands (and noexec is sticky),
+                // so the per-command insert is dead state there.
                 if let Some(line) = command.line {
-                    self.line_lex_locales
-                        .borrow_mut()
-                        .entry(line)
-                        .or_insert_with(crate::locale::locale_name);
+                    if !noexec {
+                        self.line_lex_locales
+                            .borrow_mut()
+                            .entry(line)
+                            .or_insert_with(crate::locale::locale_name);
+                    }
                 }
                 // GNU eval.c:181 (reader_loop/parse_and_execute): stdin_redir
                 // is cleared before each top-level command, so a redirected
@@ -856,14 +864,25 @@ impl Executor {
                 // :2450) — <name> and <name>_PID unbind unconditionally, so
                 // `cat <&${A[0]}` for a reaped coproc reports `ambiguous
                 // redirect` (rubash#1023).
-                self.refresh_background_jobs()?;
+                //
+                // `-n`: GNU eval.c parse_command runs only
+                // run_pending_traps(); notify_and_cleanup (eval.c:236-238) is
+                // interactive-reader-only and reaping lives in the
+                // execute_command wait paths, so the trap dispatch below
+                // stays and these two do not run.
+                if !noexec {
+                    self.refresh_background_jobs()?;
+                }
                 self.run_pending_signal_traps()?;
                 // GNU eval.c:355 runs notify_and_cleanup after each top-level
                 // command: children killed by a signal get their stderr
                 // notice here (rubash#229, jobs.c:4625 notify_of_job_status).
                 // At this point __RUBASH_CURRENT_LINE is still the previous
                 // command's line, matching GNU's line_number at notify time.
-                self.report_pending_signal_notices()?;
+                // (no notice point without execute_command)
+                if !noexec {
+                    self.report_pending_signal_notices()?;
+                }
             }
             let _t_chain = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_CHAIN);
             // GNU `line_number` advances only while the reader parses each
@@ -875,7 +894,7 @@ impl Executor {
                 self.ambient_line.set(command.end_line.or(command.line));
             }
             self.set_current_line(command);
-            if self.noexec_enabled() {
+            if noexec {
                 // GNU shell.c/parse.y: `-n` (noexec) skips execution but the
                 // reader still parses each command — parse-time diagnostics
                 // (heredoc EOF warnings, syntax errors, unclosed compounds)
@@ -1002,6 +1021,39 @@ impl Executor {
                             // stream's production schedule does not
                             // describe it (restored at the boundary).
                             self.timed_stdin = None;
+                            // rubash#1902: the same supersede as
+                            // bind_command_fd0_input's mirror branch —
+                            // the fed text is the region's own input
+                            // source, not an enclosing stage pipe,
+                            // unless the source is itself a pipe (the
+                            // wholesale boundary restore reverts this
+                            // with the rest of the state).
+                            if !super::shell_options::fd0_mirror_binding_keeps_pipe_fact(c) {
+                                self.shell_state.env_vars.remove(FD0_STAGE_PIPE);
+                            }
+                            // rubash#2131: the fed text is a staged
+                            // mirror with no fd-table entry — record
+                            // its source's fd-0 fact beside it, the
+                            // same statement bind_command_fd0_input's
+                            // mirror branch makes (reverted by the
+                            // wholesale boundary restore like the rest
+                            // of the fed state). A node with no fd-0
+                            // winner staged the enclosing channel's
+                            // remainder and leaves the key alone.
+                            if let Some(fact) = self.fd0_mirror_fact_value(c) {
+                                self.shell_state
+                                    .env_vars
+                                    .insert(FD0_MIRROR_FACT.to_string(), fact);
+                            }
+                            // rubash#2170: the same displacement as
+                            // bind_command_fd0_input's mirror branch —
+                            // the fed text is the region's fd-0 binding,
+                            // so a superseded fd-table entry (an
+                            // `exec 0<file` File binding) must not keep
+                            // governing the region's readers. The
+                            // region's cloned fd table is restored
+                            // wholesale at the boundary.
+                            self.fd_table.entries.remove(&0);
                         }
                         break;
                     }
@@ -1073,10 +1125,18 @@ impl Executor {
             // session's scope is the attachment itself, not the
             // functrace inheritance the trap path checks.
             let session_here = self.debugger_session_here();
+            // #682: a DEBUG fire (or debugger seam arrival) runs arbitrary
+            // action commands that leave their own line stamps behind —
+            // run_debug_trap does not restore __RUBASH_CURRENT_LINE — so the
+            // funnel's post-trap restamp is GNU's :936 SET_LINE_NUMBER after
+            // the action and must not be skipped by the stamped-by-caller
+            // contract below.
+            let mut line_stamp_dirty = false;
             if !skips_debug_trap
                 && ((debug_trap_active && self.debug_trap_in_scope()) || session_here)
                 && !self.debug_trap_running
             {
+                line_stamp_dirty = true;
                 // Bash exposes the about-to-run command's line via LINENO
                 // inside the DEBUG trap action (dbg-support2.tests).
                 self.set_current_line(command);
@@ -1974,6 +2034,15 @@ impl Executor {
             }
 
             drop(_t_chain);
+            // #682 stamped-by-caller contract: this loop's set_current_line
+            // above already stamped the node the funnel is about to dispatch
+            // (nothing between them stamped a different line unless a DEBUG
+            // fire / seam ran — tracked by line_stamp_dirty), so arm the
+            // funnel's skip. Consumed on entry, and suppressed while the
+            // funnel's trap-scope line branch would stamp a different value.
+            if !line_stamp_dirty {
+                self.pre_stamped_line.set(true);
+            }
             // rubash#1525: the absorbed-write marker belongs to one
             // command execution; a flag left by a command whose own
             // write site was skipped (a pipeline stage) must not

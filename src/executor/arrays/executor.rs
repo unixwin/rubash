@@ -34,9 +34,17 @@ impl Executor {
                 // fabricated `main` line (issue #519). Same gating as the
                 // dynamic_stack_array_values view.
                 let mut stack = self.shell_state.function_name_stack.clone();
-                if self.has_script_main_frame()
-                    && !stack.is_empty()
-                    && stack.last().map(String::as_str) != Some("main")
+                // rubash#2058: fork-inherited frames beneath this
+                // shell's own, with the main-frame rule applied to the
+                // composed stack (same composition as the
+                // dynamic_stack_array_values view).
+                let inherited = self.shell_state.inherited_fork_frames.as_ref();
+                if let Some(inherited) = inherited {
+                    stack.extend(inherited.function_names.iter().cloned());
+                }
+                let has_main = self.has_script_main_frame()
+                    || inherited.is_some_and(|frames| frames.has_main_frame);
+                if has_main && !stack.is_empty() && stack.last().map(String::as_str) != Some("main")
                 {
                     stack.push("main".to_string());
                 }
@@ -45,7 +53,34 @@ impl Executor {
             "BASH_ARGC" => return self.bash_argc_view(),
             "BASH_ARGV" => return self.bash_argv_view(),
             "BASH_LINENO" => return self.bash_lineno_view(),
-            "BASH_SOURCE" => return self.shell_state.bash_source_stack.clone(),
+            "BASH_SOURCE" => {
+                // Same gating as the dynamic_stack_array_values view:
+                // without a script main frame (`bash -c`, stdin
+                // scripts) the script-name bottom entry installed
+                // with $0 is not a BASH_SOURCE frame (shell.c:1635-
+                // 1650 pushes the synthetic bottom frames only for a
+                // script FILE), so the raw stack's bottom entry is
+                // dropped. Reading the raw stack here made the
+                // no-argument `caller` print that entry — the shell's
+                // own name/path — where GNU has no element at all and
+                // caller.def:89-105 renders a literal NULL
+                // (rubash#2142).
+                let mut stack = self.shell_state.bash_source_stack.clone();
+                // rubash#2058: same composition as the
+                // dynamic_stack_array_values view — the pop drops the
+                // $0 bottom entry, which a script parent's respawn
+                // child never has in its raw stack; the inherited view
+                // goes beneath.
+                let inherited = self.shell_state.inherited_fork_frames.as_ref();
+                let inherited_main = inherited.is_some_and(|frames| frames.has_main_frame);
+                if !self.has_script_main_frame() && !inherited_main && !stack.is_empty() {
+                    stack.pop();
+                }
+                if let Some(inherited) = inherited {
+                    stack.extend(inherited.sources.iter().cloned());
+                }
+                return stack;
+            }
             _ => {}
         }
         self.shell_state

@@ -58,14 +58,32 @@ impl Executor {
         // own source line (dbg-support2.tests).
         {
             let _t = PhaseTimer::new(&super::exec_profile::P_LINECMD);
-            if self.debug_trap_running && self.shell_state.function_depth > 0 {
-                if let Some(line) = self.debug_trap_function_line {
-                    self.set_current_line_value(line);
+            // #682 stamped-by-caller contract: the ast_exec loop stamps this
+            // node's line pair immediately before the funnel call, and the
+            // funnel's own stamp recomputes the identical value from the same
+            // node and the unchanged ambient (GNU stamps line_number ONCE per
+            // command — execute_cmd.c SET_LINE_NUMBER; rubash's reader-loop
+            // stamp is that stamp, the funnel copy is redundant). Skip only
+            // that copy: the flag is consumed on entry (nested execute_command
+            // callers always stamp), and it is not honored when the trap-scope
+            // branch below would stamp debug_trap_function_line instead — an
+            // in-action command's funnel stamp differs from the loop's plain
+            // stamp. A DEBUG fire / debugger seam between the loop stamp and
+            // the funnel suppresses the flag at the setter (ast_exec), so the
+            // post-trap restamp (GNU's :936 behavior after the action) runs.
+            let pre_stamped = self.pre_stamped_line.replace(false);
+            let trap_line_scope =
+                self.debug_trap_running && self.shell_state.function_depth > 0;
+            if !pre_stamped || trap_line_scope {
+                if trap_line_scope {
+                    if let Some(line) = self.debug_trap_function_line {
+                        self.set_current_line_value(line);
+                    } else {
+                        self.set_current_line(cmd);
+                    }
                 } else {
                     self.set_current_line(cmd);
                 }
-            } else {
-                self.set_current_line(cmd);
             }
             self.set_current_command(cmd);
         }
@@ -464,6 +482,20 @@ impl Executor {
         if cmd.words.first().map(String::as_str) != Some("exec")
             && self.apply_dynamic_fd_var_redirects(&cmd, true)?
         {
+            // rubash#2125: the applier rendered the diagnostic and set
+            // status 1, but the failure never becomes an IoError at the
+            // #2082 conversion arm below — apply_dynamic_fd_var_redirects
+            // swallows it into its bool. GNU reaches the same failure
+            // through redir_varassign inside do_redirections, whose
+            // EX_REDIRFAIL return (execute_cmd.c:5613) takes the
+            // execute_cmd.c:4865-4875 jump for a special builtin in a
+            // posixly_correct non-interactive shell: convert here, at
+            // the applier's call site, under the #2082 gate. The jump
+            // is an Err, so tested contexts do not contain it and the
+            // ERR trap never runs — exactly the plain-redirect channel.
+            if self.posix_special_redirect_failure_exits(&cmd) {
+                return Err(ExecuteError::ExitCode(1));
+            }
             return Ok(());
         }
 
@@ -598,6 +630,46 @@ impl Executor {
                 is_posix_special_builtin(word)
                     && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word)
             })
+    }
+
+    /// GNU builtins/evalstring.c:588-596 (parse_and_execute's parse-
+    /// failure else-branch): when the parser reports EX_BADSYNTAX out of
+    /// an evalstring, the shell jumps to top level with
+    /// last_command_exit_value = EX_BADUSAGE (2) iff
+    /// `interactive_shell == 0 && this_shell_builtin` is the source or
+    /// eval builtin `&& posixly_correct && executing_command_builtin
+    /// == 0`. report_syntax_error produces EX_BADSYNTAX only while
+    /// `executing_builtin && parse_and_execute_level` (parse.y:6842),
+    /// i.e. only for a string being parsed by eval/source — the tracker
+    /// bit is what decides whether the CURRENT string's owner is the
+    /// most recent dispatch (see the field's doc in shell/state.rs).
+    /// executing_command_builtin is the caller-context bit: the
+    /// `command` re-dispatch runs with it set, mirrored here by
+    /// command_builtin_depth, exactly as for the #2082 gate.
+    pub(crate) fn evalstring_syntax_error_exits(&self) -> bool {
+        self.posix_mode_enabled()
+            && self.command_builtin_depth == 0
+            && self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_INTERACTIVE")
+                .map(String::as_str)
+                != Some("1")
+            && self.shell_state.last_dispatch_was_eval_or_source
+    }
+
+    /// execute_cmd.c:4813 (`this_shell_builtin = ...`) reduced to the
+    /// #2126 tracker bit: a simple-command dispatch of `eval`, `source`
+    /// or `.` arms it, every other simple-command dispatch (builtin,
+    /// function, disk command — including an eval/source name that is
+    /// disabled and therefore resolves externally) disarms it. GNU
+    /// assigns on dispatch and never restores on completion; the note
+    /// points are the dispatch funnels (execute_prepared_command, the
+    /// function fast path's commit point, and the `command`/`builtin`
+    /// re-dispatch tables).
+    pub(in crate::executor) fn note_simple_command_dispatch(&mut self, word: &str) {
+        self.shell_state.last_dispatch_was_eval_or_source = matches!(word, "eval" | "source" | ".")
+            && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word);
     }
 
     /// GNU shell.c reader_loop under `-n`/`set -n` (noexec): the reader

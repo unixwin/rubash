@@ -962,7 +962,20 @@ impl Executor {
                     && (has_parse_error || parse_error_raised_during_eval) =>
             {
                 self.exit_code = code;
-                Ok(())
+                // rubash#2126: GNU builtins/evalstring.c:589-596 — a
+                // syntax error (EX_BADSYNTAX) out of parse_and_execute
+                // in a posixly_correct non-interactive shell whose most
+                // recent dispatch is eval/source itself is NOT contained
+                // by the eval boundary: jump_to_top_level (ERREXIT) with
+                // EX_BADUSAGE. The containment arms own every other
+                // shape (non-POSIX mode, `command eval` via the depth
+                // gate inside evalstring_syntax_error_exits, a string
+                // whose own commands already dispatched something else).
+                if self.evalstring_syntax_error_exits() {
+                    Err(ExecuteError::ExitCode(2))
+                } else {
+                    Ok(())
+                }
             }
             // Same containment when an inner boundary already absorbed the
             // error and execute_ast came back Ok with the flag set: GNU's
@@ -970,7 +983,14 @@ impl Executor {
             // EX_BADUSAGE, never the caller's reader.
             Ok(()) if parse_error_raised_during_eval && !parser_error_errexited => {
                 self.exit_code = 2;
-                Ok(())
+                // rubash#2126: same evalstring.c:589-596 conversion for
+                // the surface where the driver swallowed the abort into
+                // an Ok result (parse unit voided after a good prefix).
+                if self.evalstring_syntax_error_exits() {
+                    Err(ExecuteError::ExitCode(2))
+                } else {
+                    Ok(())
+                }
             }
             // GNU evalstring.c:372 installs a local top_level catch for the
             // string being evaluated ("prevents errors in substitution from
@@ -1557,7 +1577,11 @@ impl Executor {
         // their only judge (trapped -> run, ignored -> drop,
         // untrapped -> the 128+sig death).
         let signals = crate::builtins::kill::take_pending_signals(std::process::id())?;
-        let mut queue: Vec<(i32, bool)> = Vec::with_capacity(signals.len() + 4);
+        // #682: with_capacity(4) heap-allocated at every command boundary
+        // even when no delivery is pending (the common case); Vec::new()
+        // defers the allocation to the first push — identical growth
+        // semantics, one malloc/free per command removed from the floor.
+        let mut queue: Vec<(i32, bool)> = Vec::new();
         #[cfg(unix)]
         queue.extend(
             crate::builtins::kill::take_ancestor_signals()
@@ -1822,6 +1846,37 @@ impl Executor {
                     // Record $? before the unwind so an interactive host that
                     // only maps ExitCode(code) still reports 130 after Ctrl+C.
                     self.exit_code = 128 + signal;
+                    // niubash#698: the same classification the other two
+                    // mailbox drains make for this exact event — the
+                    // boundary dispatch's untrapped branch above
+                    // (run_pending_signal_traps) and the `wait` builtin's
+                    // drain (job_builtins wait_pending_signal_status,
+                    // rubash#1825): in an interactive session an untrapped
+                    // delivery is a DISCARD-class unwind (GNU jobs.c:3315
+                    // ADDINTERRUPT throws the interrupted wait to the
+                    // top-level reader; the session survives with
+                    // $?=128+sig), not a jump_to_top_level exit. This
+                    // mid-wait drain is the ONLY consumer on the paths
+                    // where no kernel delivery adjudicates first — the
+                    // Windows foreground/pipeline waits (#2020) and the
+                    // non-unix builtin sleep — so without the mark the
+                    // source driver read the bare ExitCode as an exit
+                    // jump and an interactive niu died at rc=130 on the
+                    // first untrapped Ctrl+C of a foreground command.
+                    // The test reads the executor's session flag (the
+                    // host-declared interactive state every sibling
+                    // classification reads), never the process env.
+                    // Non-interactive sessions set nothing and keep the
+                    // exit classification byte-identically.
+                    if self
+                        .shell_state
+                        .env_vars
+                        .get("__RUBASH_INTERACTIVE")
+                        .map(String::as_str)
+                        == Some("1")
+                    {
+                        self.signal_discard_pending = true;
+                    }
                     return Err(ExecuteError::ExitCode(128 + signal));
                 }
             }
@@ -1909,6 +1964,13 @@ impl Executor {
                     if crate::builtins::kill::last_delivery_kernel_caused(libc::SIGINT) {
                         return Ok(Some(libc::SIGINT));
                     }
+                    // The delivery is forgotten (see above), so the
+                    // discard classification observe attached to its
+                    // unwind is forgotten with it: the mark classifies
+                    // the unwind it was set for, and a swallowed
+                    // unwind must not leave it behind to misclassify a
+                    // later genuine exit in the same unit (niubash#698).
+                    self.take_signal_discard_pending();
                 }
                 other => other?,
             }
@@ -2598,6 +2660,22 @@ impl Executor {
         // covered the no-operand forms; apply the fd_var redirects here so
         // a real operand sees them (and they persist after it exits).
         if self.apply_dynamic_fd_var_redirects(cmd, false)? {
+            // rubash#2125: a `{var}` apply failure is a do_redirections
+            // failure (redir_varassign), reached BEFORE exec_builtin's
+            // search/execve — so in POSIX mode it takes the
+            // execute_cmd.c:4865-4875 EX_REDIRFAIL jump like every
+            // other special-builtin redirect failure, and outside
+            // POSIX mode the command simply completes at status 1.
+            // It must NOT flow into finish_exec_replacement as a bare
+            // status: that path is exec.def's failed_exec, which
+            // covers only the search/execve failure and would exit a
+            // non-POSIX shell (and wrongly defer to `execfail` in
+            // POSIX mode). The mark tells execute_exec_command to
+            // complete at status 1 without the replacement finish.
+            if self.posix_special_redirect_failure_exits(cmd) {
+                return Err(ExecuteError::ExitCode(1));
+            }
+            self.exec_do_redirections_failed.set(true);
             return Ok(1);
         }
 
@@ -2740,7 +2818,7 @@ impl Executor {
     /// arm's spawn-and-wait simulation.
     #[cfg(unix)]
     fn try_exec_image_replacement_with_stdio(
-        &self,
+        &mut self,
         cmd: &CommandNode,
         stdout: Option<Stdio>,
         stderr: Option<Stdio>,
@@ -2757,6 +2835,12 @@ impl Executor {
             Some(stdio) => stdio,
             None => self.exec_inherited_stdio(2).ok()?,
         };
+        // rubash#2179: a successful replacement ends this process
+        // lifetime; complete any outstanding output-procsub feeds
+        // first. (A decline inside replace_process_image leaves the
+        // shell running with the payloads already delivered — the
+        // state GNU is in at this point by construction.)
+        self.drain_procsub_feeds();
         let status = crate::builtins::exec::replace_process_image(
             &cmd.words[1..],
             &self.shell_state.env_vars,
@@ -3074,6 +3158,10 @@ impl Executor {
             // descriptor, keep the simulation rather than replacing
             // with the wrong (inherited) descriptors.
             if let Some(stdio) = stdio {
+                // rubash#2179: complete outstanding output-procsub
+                // feeds before a replacement ends this process
+                // lifetime (see try_exec_image_replacement_with_stdio).
+                self.drain_procsub_feeds();
                 if let Some(status) = crate::builtins::exec::replace_process_image(
                     &cmd.words[1..],
                     &self.shell_state.env_vars,
@@ -3314,6 +3402,18 @@ impl Executor {
         // __RUBASH_SCRIPT_NAME at all (init.rs), the same stamp the
         // output-substitution spawn carries.
         child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
+        // rubash#2136: the provenance stamp the child's init validates
+        // against its actual parent (init.rs).
+        child.env(super::RESPAWN_SPAWNER_PID_KEY, super::spawner_stamp_value());
+        // subst.c:6362 process_substitute: the producer is a forked
+        // child one subshell level deeper than its parent, like the
+        // consumer form (external_setup.rs) — this builder never
+        // stamped the depth, so the child's $BASH_SUBSHELL read 0
+        // where GNU reads parent + 1.
+        child.env(
+            "__RUBASH_SUBSHELL_DEPTH",
+            (self.shell_state.subshell_depth.get() + 1).to_string(),
+        );
         // rubash#2032: process_substitute's producer is a forked child
         // (subst.c:6362), so it inherits the parent's positional
         // parameters (POSITIONAL_PARAMS_TRANSPORT). Before this stamp
@@ -3323,6 +3423,12 @@ impl Executor {
             super::compound_exec::POSITIONAL_PARAMS_TRANSPORT,
             self.positional_params_transport_value(),
         );
+        // rubash#2058: the fork-context stamp (call-stack views,
+        // PIPESTATUS cell, ARGV bottom state) — same fork, same
+        // transport set (see fork_context_transport_entries).
+        for (key, value) in self.fork_context_transport_entries() {
+            child.env(key, value);
+        }
         if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             child.env("__RUBASH_SCRIPT_NAME", script_name);
         }
@@ -3500,6 +3606,18 @@ impl Executor {
                         )?;
                         self.write_default_stderr(&stderr)?;
                         self.exit_code = 1;
+                        // rubash#2125: this inline arm is bare `exec`'s
+                        // own do_redirections — a redir_varassign failure
+                        // here is EX_REDIRFAIL (execute_cmd.c:5613), and
+                        // `exec` is a special builtin, so a posixly_correct
+                        // non-interactive shell takes the
+                        // execute_cmd.c:4865-4875 jump at status 1 instead
+                        // of completing the command. The diagnostic above
+                        // is the redirection_error report GNU emits
+                        // before the jump (redir.c:135).
+                        if self.posix_special_redirect_failure_exits(cmd) {
+                            return Err(ExecuteError::ExitCode(1));
+                        }
                         return Ok(Some(1));
                     }
                     Err(error) => return Err(error),
@@ -5554,7 +5672,19 @@ impl Executor {
             Err(error) => Err(error),
         };
         let result = match status_result {
-            Ok(status) => self.finish_exec_replacement(cmd, status),
+            Ok(status) => {
+                // rubash#2125: the status came from a do_redirections
+                // failure inside execute_exec (the `{var}` apply) —
+                // the command never reached the search/execve stage
+                // finish_exec_replacement adjudicates, so complete at
+                // status 1 with the shell alive (see the mark's doc).
+                if self.exec_do_redirections_failed.replace(false) {
+                    self.exit_code = status;
+                    Ok(())
+                } else {
+                    self.finish_exec_replacement(cmd, status)
+                }
+            }
             Err(error) => Err(error),
         };
         self.restore_exported_functions_after_exec(saved);

@@ -27,7 +27,13 @@ impl Executor {
         // (`a=9 echo >&$(echo $a)` sees the outer a, not 9). Expanding here —
         // before apply_temporary_assignments — seeds the redirect-target memo
         // with the correct pre-binding values; the apply sites reuse them.
-        let redirect_rejection = self.reject_invalid_redirects(cmd)?;
+        // rubash#2121: classify the apply funnel so the reject gate
+        // settles superseded net output entries only where the funnel
+        // itself would lose them.
+        let settle_superseded_net_outputs =
+            self.superseded_net_output_settlement_applies(cmd, false);
+        let redirect_rejection =
+            self.reject_invalid_redirects(cmd, settle_superseded_net_outputs)?;
         let mut skip_command = redirect_rejection.is_some();
         if redirect_rejection == Some(super::redirection::RedirectRejection::FatalNounset) {
             // rubash#535: an unbound variable in a redirect word is a fatal
@@ -212,6 +218,29 @@ impl Executor {
                 Err(()) => Ok(()),
             }
         };
+        // rubash#2174: GNU flushes its stdio stdout after EVERY builtin
+        // or function executed in the current shell context
+        // (execute_cmd.c:5648 execute_builtin_or_function:
+        // fflush (stdout), done "before undoing the effects of any
+        // redirections" — hence before the process-substitution
+        // teardown below). rubash's stdio analog is the Rust std
+        // stdout handle's line buffer: builtin blocks routed to the
+        // real process stdout stay pending there when they carry no
+        // newline, while foreign writers on the shared fd (external
+        // commands, pipeline stages, procsub consumers, background
+        // children) write straight to the fd and overtake them
+        // (`printf 'A'; /usr/bin/printf 'B'` printed BAC). This funnel
+        // is the one completion point every simple command passes —
+        // builtins, functions, externals, and pipeline-stage
+        // re-dispatches alike — so flushing here keeps the buffer
+        // empty at every command boundary by construction. It is the
+        // RAW std handle flush, not an fd-table endpoint write: GNU's
+        // `printf 'A'; exec >file` leaves the pre-redirect A on the
+        // OLD stdout, which is exactly where the raw handle points.
+        // Cost: an empty-buffer no-op check when nothing is pending;
+        // after an external dispatch the buffer is empty by this same
+        // invariant, so spawn-heavy paths pay no extra syscall.
+        super::shell_options::flush_process_stdout();
         let external_ran = self.external_dispatch_ran.get();
         self.external_dispatch_ran.set(saved_external_marker);
         // rubash#1525: with a tempenv PIPESTATUS and an in-process
@@ -603,6 +632,13 @@ impl Executor {
             self.exit_code = 1;
             return Ok(());
         }
+        // rubash#2126: this funnel is where a simple command commits to
+        // dispatch (execute_cmd.c:4813's this_shell_builtin assignment
+        // point) — a restricted refusal above never dispatches, so the
+        // note belongs after it. The classification itself (eval /
+        // source / `.` arm, everything else disarms, disabled names
+        // resolve externally) lives in note_simple_command_dispatch.
+        self.note_simple_command_dispatch(word);
         if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word) {
             return self.execute_external(cmd);
         }

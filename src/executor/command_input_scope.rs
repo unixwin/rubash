@@ -25,6 +25,16 @@ pub(in crate::executor) struct CommandFd0InputGuard {
     /// shadowed (the rebound text is heredoc/herestring/loop input with
     /// no production timing of its own).
     saved_timed_stdin: Option<super::timed_input::SharedTimedInput>,
+    /// rubash#1902: the pipeline-stage fd-0 pipe fact in force when the
+    /// bind began; the mirror branch below may clear it (the rebound
+    /// mirror supersedes the inter-stage pipe), every other branch
+    /// leaves it, and restore puts the entry value back verbatim.
+    saved_stage_pipe_fact: Option<String>,
+    /// rubash#2131: the FD0_MIRROR_FACT in force when the bind began;
+    /// the mirror branch below may replace it with the staged source's
+    /// own fact, every other branch leaves it, and restore puts the
+    /// entry value back verbatim.
+    saved_mirror_fact: Option<String>,
     /// rubash#1141: when fd 0 was bound to a process-substitution
     /// stream's endpoint, the stream's registered path — restore writes
     /// the endpoint's consumed offset back into the stream.
@@ -190,6 +200,13 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Option<CommandFd0InputGuard>, ExecuteError> {
+        // rubash#1902: snapshot the stage-pipe fact before any branch
+        // can touch it; the guard restores it verbatim (the mirror
+        // branch is the one branch that may clear it, below).
+        let saved_stage_pipe_fact = self.shell_state.env_vars.get(FD0_STAGE_PIPE).cloned();
+        // rubash#2131: same snapshot discipline for the mirror fact;
+        // the mirror branch is the one branch that may replace it.
+        let saved_mirror_fact = self.shell_state.env_vars.get(FD0_MIRROR_FACT).cloned();
         // rubash#1141: compound commands (brace group, select, loops)
         // dispatch BEFORE the simple-command materialization gate, so
         // their `< <(...)` redirect_in can still carry the raw
@@ -259,6 +276,8 @@ impl Executor {
                             // branch, so its timing stays valid; restore
                             // writes the same value back.
                             saved_timed_stdin: self.timed_stdin.clone(),
+                            saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                            saved_mirror_fact: saved_mirror_fact.clone(),
                             procsub_stream_path: None,
                         }));
                     }
@@ -290,6 +309,8 @@ impl Executor {
                             // branch, so its timing stays valid; restore
                             // writes the same value back.
                             saved_timed_stdin: self.timed_stdin.clone(),
+                            saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                            saved_mirror_fact: saved_mirror_fact.clone(),
                             procsub_stream_path: None,
                         }));
                     }
@@ -337,6 +358,8 @@ impl Executor {
                         saved_function_stdin,
                         saved_function_stdin_offset,
                         saved_timed_stdin: self.timed_stdin.clone(),
+                        saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                        saved_mirror_fact: saved_mirror_fact.clone(),
                         procsub_stream_path: Some(path),
                     }));
                 }
@@ -379,6 +402,12 @@ impl Executor {
                         saved_function_stdin,
                         saved_function_stdin_offset,
                         saved_timed_stdin: self.timed_stdin.clone(),
+                        // This branch (from the #2124 merge) does not touch
+                        // FD0_STAGE_PIPE, so the guard restores exactly the
+                        // fact it found — same shape as the compound-stream
+                        // branch below.
+                        saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                        saved_mirror_fact: saved_mirror_fact.clone(),
                         procsub_stream_path: None,
                     }));
                 }
@@ -404,6 +433,8 @@ impl Executor {
                 // The text channel is untouched in this branch, so its
                 // timing stays valid; restore writes the same value back.
                 saved_timed_stdin: self.timed_stdin.clone(),
+                saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                saved_mirror_fact: saved_mirror_fact.clone(),
                 procsub_stream_path: None,
             }));
         }
@@ -427,11 +458,55 @@ impl Executor {
         // text (heredoc / here-string / loop input) — the enclosing
         // stream's production schedule does not describe it.
         let saved_timed_stdin = self.timed_stdin.take();
+        // rubash#1902: the rebound mirror supersedes whatever fd 0 the
+        // enclosing scope had — including a pipeline stage's pipe, whose
+        // fact (FD0_STAGE_PIPE) the stage entry installed. The fact
+        // survives only when this binding's own source is a pipe in GNU
+        // (heredoc / here-string / process substitution); a file or
+        // device text source clears it for the scope's duration, and
+        // the guard restores the stage's fact at scope end. GNU's
+        // ordering is do_piping first, then the command's own
+        // redirections (execute_cmd.c:2620, redir.c
+        // do_redirection_internal).
+        if !super::shell_options::fd0_mirror_binding_keeps_pipe_fact(cmd) {
+            self.shell_state.env_vars.remove(FD0_STAGE_PIPE);
+        }
+        // rubash#2131: the mirror installs no fd-table entry, so the
+        // staged source's own fd-0 fact travels beside it in
+        // FD0_MIRROR_FACT for the fd-alias sync (the evaluator's
+        // /dev/stdin predicates must answer from the rebound source,
+        // not the ambient binding). A node with no fd-0 winner of its
+        // own staged the enclosing channel's remainder — the key is
+        // left as the enclosing scope set it.
+        if let Some(fact) = self.fd0_mirror_fact_value(cmd) {
+            self.shell_state
+                .env_vars
+                .insert(FD0_MIRROR_FACT.to_string(), fact);
+        }
+        // rubash#2170: the staged mirror IS fd 0's binding for the
+        // scope — GNU do_redirection_internal (redir.c:767-955)
+        // installs the command's own redirection on fd 0, superseding
+        // whatever the enclosing scope bound there. Every descriptor
+        // branch of this bind replaces the fd-table entry; the mirror
+        // branch left it in place, so a persistent File binding
+        // (`exec 0<file`) kept governing the body's readers — the
+        // builtin read's fd-table arm, the external-child stdin
+        // wiring and the fd-alias fact sync all answered from the
+        // superseded file while the staged channel claimed the
+        // mirror's source. Displace the entry for the scope's
+        // duration: the guard snapshotted it above and restores it
+        // verbatim at scope end, and with the slot empty every
+        // consumer sees the state the mirror's design always assumed
+        // (the #2131 fact pass already treats an absent slot as
+        // mirror-governed).
+        self.fd_table.entries.remove(&0);
         Ok(Some(CommandFd0InputGuard {
             saved_fd0_entry,
             saved_function_stdin,
             saved_function_stdin_offset,
             saved_timed_stdin,
+            saved_stage_pipe_fact,
+            saved_mirror_fact,
             procsub_stream_path: None,
         }))
     }
@@ -452,6 +527,16 @@ impl Executor {
             &mut self.shell_state.env_vars,
             FUNCTION_STDIN,
             guard.saved_function_stdin,
+        );
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FD0_STAGE_PIPE,
+            guard.saved_stage_pipe_fact,
+        );
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FD0_MIRROR_FACT,
+            guard.saved_mirror_fact,
         );
         restore_optional_env_var(
             &mut self.shell_state.env_vars,
@@ -1488,8 +1573,18 @@ impl Executor {
     /// objects that yield a live kernel stream from open(2). Windows
     /// has no filesystem FIFOs or device nodes of this kind, so the
     /// class is regular files only there.
+    ///
+    /// rubash#2101: directories join the class on every platform.
+    /// GNU opens a directory for a compound's stdin exactly like a
+    /// file (redir.c redir_open) and binds the descriptor; the body
+    /// observes the read failure itself (the read builtin's EISDIR
+    /// diagnostic, an external reader's own error). Excluding them
+    /// dropped the binding to the text mirror, which swallowed the
+    /// error at bind time — `{ cat; } < dir` exited 0 silently. The
+    /// Windows open succeeds through the fd layer's directory retry
+    /// (open_file_read's FILE_FLAG_BACKUP_SEMANTICS arm).
     fn compound_fd0_stream_source(meta: &std::fs::Metadata) -> bool {
-        if meta.is_file() {
+        if meta.is_file() || meta.is_dir() {
             return true;
         }
         #[cfg(unix)]
