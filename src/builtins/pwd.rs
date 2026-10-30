@@ -35,7 +35,9 @@ where
     W: Write,
     E: Write,
 {
-    let env_vars = env::vars().collect::<HashMap<_, _>>();
+    let env_vars: HashMap<_, _> = crate::executor::env_helpers::process_env_pairs()
+        .into_iter()
+        .collect();
     // Standalone entry (no session): the process cwd is the only cwd.
     let cwd = env::current_dir().unwrap_or_default();
     execute_with_env_and_io(args, &env_vars, &cwd, stdout, stderr)
@@ -146,7 +148,10 @@ fn current_directory(
     Ok(Some(display))
 }
 
-fn logical_pwd_if_current(physical: &Path, env_vars: &HashMap<String, String>) -> Option<String> {
+pub(crate) fn logical_pwd_if_current(
+    physical: &Path,
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
     let logical = env_vars.get("PWD")?.clone();
 
     if !(logical.starts_with('/') || Path::new(&logical).is_absolute()) {
@@ -205,6 +210,32 @@ mod tests {
         assert_eq!(status, EX_USAGE);
         assert!(stdout.is_empty());
         assert!(stderr.contains("invalid option"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue659_physical_mode_strips_verbatim_cwd_prefix() {
+        // unixwin/niubash#659: the session cwd field can hold
+        // canonicalize's extended-length form (\\?\C:\...) when a probe
+        // result reaches it; `pwd -P` must still print the POSIX
+        // /<drive>/... getcwd form, never `//?/...`.
+        let native = env::temp_dir();
+        let verbatim = std::path::PathBuf::from(format!(r"\\?\{}", native.to_string_lossy()));
+        let env_vars = HashMap::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let status = execute_with_env_and_io(
+            ["-P"].iter().copied(),
+            &env_vars,
+            &verbatim,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+        assert_eq!(status, EXECUTION_SUCCESS);
+        let printed = String::from_utf8(stdout).unwrap();
+        assert!(!printed.contains('?'), "{printed}");
+        assert!(printed.starts_with('/'), "{printed}");
     }
 
     #[cfg(windows)]

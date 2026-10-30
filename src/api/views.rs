@@ -373,10 +373,22 @@ impl OptionsView<'_> {
         self.executor.view_option_enabled(name)
     }
 
-    /// Set one option by name; false when the name is unknown to
-    /// both families (no state changes then).
+    /// Set one option by name; false when the name is unknown to both
+    /// families, or when the flip itself is refused (no state changes
+    /// then). Flag-only shell options (the `restricted` of GNU
+    /// flags.c shell_flags[]) go through the same `set_shell_option`
+    /// machinery the `set -r` builtin branch uses (rubash#2040), with
+    /// GNU's one-way gate intact: change_flag refuses FLAG_OFF while
+    /// the option is on (flags.c:231-233).
     pub fn set(&mut self, name: &str, enabled: bool) -> bool {
         if self.executor.is_shell_option(name) {
+            self.executor.set_shell_option(name, enabled);
+            true
+        } else if crate::builtins::set::is_flag_only_shell_option(name) {
+            let armed = self.executor.view_option_enabled(name) == Some(true);
+            if armed && !enabled {
+                return false;
+            }
             self.executor.set_shell_option(name, enabled);
             true
         } else {
@@ -396,6 +408,21 @@ impl Executor {
     /// PLAN row 6).
     pub fn state_views(&mut self) -> StateViews<'_> {
         StateViews { executor: self }
+    }
+
+    /// The §5.3 variables view directly over this executor —
+    /// the one-hop form for owners that return the view itself
+    /// (the Session API): a view borrowed through a temporary
+    /// `StateViews` cannot outlive the call, so the constructor
+    /// lives here, beside `state_views`.
+    pub fn variables_view(&mut self) -> VariablesView<'_> {
+        VariablesView { executor: self }
+    }
+
+    /// The §5.3 options view directly over this executor (the
+    /// one-hop form of `state_views().options()`).
+    pub fn options_view(&mut self) -> OptionsView<'_> {
+        OptionsView { executor: self }
     }
 
     /// The session cwd as an owned path (convenience for hosts that

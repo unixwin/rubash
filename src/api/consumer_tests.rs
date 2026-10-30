@@ -190,24 +190,31 @@ fn act1_host_drives_session_through_state_views_only() {
     let subdir = dir.join("sub");
     std::fs::create_dir_all(&subdir).expect("subdir");
     let subdir_canon = std::fs::canonicalize(&subdir).expect("canonical subdir");
+    // The session field carries the getcwd form of the canonical path:
+    // canonicalize's extended-length `\\?\` prefix is a Rust/Win32
+    // artifact GNU's getcwd never reports (unixwin/niubash#659), so
+    // the field comparisons use the de-verbatimized form; the raw
+    // canonical value remains the filesystem-identity yardstick for
+    // the printed-pwd comparison below.
+    let subdir_field_form = crate::executor::path::strip_verbatim_prefix(&subdir_canon);
     {
         let mut views = executor.state_views();
         assert!(views.set_cwd(&subdir));
-        assert_eq!(views.cwd(), subdir_canon.as_path());
+        assert_eq!(views.cwd(), subdir_field_form.as_path());
         assert!(!views.set_cwd(PathBuf::from("/nonexistent-150-views").as_path()));
         assert_eq!(
             views.cwd(),
-            subdir_canon.as_path(),
+            subdir_field_form.as_path(),
             "a failed cd leaves the cwd"
         );
     }
     assert_eq!(run(&mut executor, "pwd > \"$OUT/pwd.txt\""), 0);
     // `pwd` prints the shell spelling of the directory (the shell
     // namespace on Windows, the logical path through symlinks on
-    // macOS); the view-set cwd is the native canonical path. The
-    // two spellings differ as strings (on Windows by the `/c/`
-    // namespace, 8.3 short names and the `\\?\` prefix; on macOS
-    // by `/private`), so compare filesystem identity instead:
+    // macOS); the view-set cwd is the native path in getcwd form.
+    // The two spellings differ as strings (on Windows by the `/c/`
+    // namespace and 8.3 short names; on macOS by `/private`), so
+    // compare filesystem identity instead:
     // canonicalize the printed spelling and require the same
     // directory the view set.
     let pwd_text = read(&dir, "pwd.txt").trim_end().to_string();

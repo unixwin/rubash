@@ -33,6 +33,12 @@
 //! Debug builds only: the verifier and the read paths it guards are
 //! `debug_assertions`/dev-profile code.
 
+// The verifier entry points (`verify_typed_cells_forced`) exist only
+// under `debug_assertions`, so this whole target is gated to match:
+// in release builds it compiles to an empty target instead of failing
+// to resolve the verifier.
+#![cfg(debug_assertions)]
+
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::process::Command;

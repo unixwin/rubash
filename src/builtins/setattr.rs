@@ -16,7 +16,7 @@ use value::diagnostic_prefix;
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
-const EX_USAGE: i32 = 2;
+pub(crate) const EX_USAGE: i32 = 2;
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";

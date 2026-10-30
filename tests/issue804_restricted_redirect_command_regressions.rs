@@ -18,7 +18,6 @@
 //! skipped `command` operands entirely.
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,30 +39,6 @@ struct Output {
     status: i32,
     stdout: String,
     stderr: String,
-}
-
-fn run_face(engine: &Path, cwd: &Path, script: &str) -> Output {
-    let mut child = Command::new(engine)
-        .arg("-c")
-        .arg(script)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn engine");
-    child
-        .stdin
-        .take()
-        .map(|mut stdin| stdin.write_all(b"").ok());
-    let output = child.wait_with_output().expect("wait");
-    Output {
-        status: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr)
-            .to_string()
-            .replace('\r', ""),
-    }
 }
 
 /// The `-r` flag face.

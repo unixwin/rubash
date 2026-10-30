@@ -15,9 +15,19 @@ it proves presence by declaration patterns, nothing more.
 
 Usage:
     python3 scripts/check-api-ledger.py [--repo PATH] [--ledger PATH]
+    python3 scripts/check-api-ledger.py [--repo PATH] [--ledger PATH]
+        --niu PATH
     python3 scripts/check-api-ledger.py --self-test
 
-Exit status: 0 when every ledger symbol is present, 1 otherwise.
+With --niu (ledger §5, completeness half), the script additionally
+scans the paired niubash tree for every `rubash::...` path it
+consumes and verifies each one is recorded in the ledger: presence
+of the recorded symbols alone does not prove the ledger is
+complete, and the v2 census missed two consumed families for a
+full release cycle before this half existed.
+
+Exit status: 0 when every ledger symbol is present (and, with
+--niu, every consumed path is recorded), 1 otherwise.
 Standard library only.
 """
 
@@ -141,7 +151,74 @@ def method_exists(src_root, segments):
     return re.search(pattern, text) is not None
 
 
-def check(repo_root, ledger_path, verbose=False):
+CONSUMED_TOKEN = re.compile(r"rubash::[A-Za-z0-9_:]+")
+USE_LIST = re.compile(r"rubash::\{([^{}]*)\}")
+
+
+def consumed_paths(niu_root):
+    """Every `rubash::...` path token niubash's Rust sources name.
+
+    Mirrors the ledger §0 counting rule: occurrences of the token
+    pattern in *.rs under crates/ and src/, unioned with the items
+    of flat `use rubash::{...}` lists (whose items the bare token
+    pattern cannot see). A nested use list degrades to its module
+    token, which the module-prefix coverage rule still covers.
+    """
+    found = set()
+    for base in (niu_root / "crates", niu_root / "src"):
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.rs")):
+            text = read_all([path])
+            for match in CONSUMED_TOKEN.finditer(text):
+                token = match.group(0).rstrip(":")
+                if token != "rubash":
+                    found.add(token)
+            for match in USE_LIST.finditer(text):
+                for item in match.group(1).split(","):
+                    item = item.split(" as ")[0].strip()
+                    if item and item != "self":
+                        found.add("rubash::" + item)
+    return found
+
+
+def check_completeness(entries, niu_root):
+    """Ledger §5.4: everything niubash consumes must be recorded.
+
+    Returns (uncovered, unconsumed_warnings, consumed_count). A
+    consumed path is covered when an entry names it exactly, or
+    when it is a module prefix of a recorded entry (a module is
+    covered by the symbols recorded under it). Recorded-but-
+    unconsumed item/variant entries only warn — the ledger
+    legitimately carries staged exits — and method entries never
+    warn: receiver-form calls are invisible to a path scan.
+    """
+    recorded = {path for _kind, path in entries}
+    consumed = consumed_paths(niu_root)
+    uncovered = sorted(
+        path
+        for path in consumed
+        if path not in recorded
+        and not any(entry.startswith(path + "::") for entry in recorded)
+    )
+
+    def is_used(entry_path):
+        return any(
+            path == entry_path
+            or path.startswith(entry_path + "::")
+            or entry_path.startswith(path + "::")
+            for path in consumed
+        )
+
+    warnings = sorted(
+        path
+        for kind, path in entries
+        if kind in ("item", "variant") and not is_used(path)
+    )
+    return uncovered, warnings, len(consumed)
+
+
+def check(repo_root, ledger_path, verbose=False, niu_root=None):
     src_root = repo_root / "src"
     entries = parse_ledger(ledger_path.read_text(encoding="utf-8"))
     if not entries:
@@ -163,12 +240,30 @@ def check(repo_root, ledger_path, verbose=False):
             print(f"  {'ok ' if ok else 'MISS'} {kind} {path}")
         if not ok:
             missing.append((kind, path, "not found in tree"))
+    consumed_count = None
+    if niu_root is not None:
+        uncovered, unconsumed, consumed_count = check_completeness(
+            entries, niu_root
+        )
+        for path in unconsumed:
+            print(
+                f"check-api-ledger: warning: recorded but not consumed: {path}"
+            )
+        for path in uncovered:
+            missing.append(
+                ("consumed", path, "consumed by niubash but not recorded")
+            )
     if missing:
         print(f"check-api-ledger: {len(missing)} ledger symbol(s) missing:")
         for kind, path, why in missing:
             print(f"  MISSING {kind} {path} ({why})")
         return 1
     print(f"check-api-ledger: all {len(entries)} ledger symbols present")
+    if consumed_count is not None:
+        print(
+            f"check-api-ledger: all {consumed_count} consumed niubash "
+            "paths are recorded"
+        )
     return 0
 
 
@@ -199,6 +294,44 @@ def self_test():
             print("self-test FAILED: bogus symbol was not reported", file=sys.stderr)
             return 1
         print("self-test: bogus symbol correctly reported missing")
+    # Completeness (§5.4): a consumed path nobody recorded must
+    # fail; once every consumed path is recorded, it must pass.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "src").mkdir()
+        (root / "src" / "lib.rs").write_text(
+            "pub struct Executor;\n", encoding="utf-8"
+        )
+        ledger = root / "ledger.md"
+        ledger.write_text(
+            "# t\n\n```api-ledger\nitem rubash::Executor\n```\n",
+            encoding="utf-8",
+        )
+        niu = root / "niu"
+        (niu / "src").mkdir(parents=True)
+        (niu / "src" / "main.rs").write_text(
+            "fn main() {\n"
+            "    let _ = rubash::Executor;\n"
+            "    let _ = rubash::executor::Executor::new;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        if check(root, ledger, niu_root=niu) != 1:
+            print(
+                "self-test FAILED: unrecorded consumed path was not reported",
+                file=sys.stderr,
+            )
+            return 1
+        (niu / "src" / "main.rs").write_text(
+            "fn main() { let _ = rubash::Executor; }\n", encoding="utf-8"
+        )
+        if check(root, ledger, niu_root=niu) != 0:
+            print(
+                "self-test FAILED: fully recorded consumption did not pass",
+                file=sys.stderr,
+            )
+            return 1
+        print("self-test: completeness check fails unrecorded, passes recorded")
         return 0
 
 
@@ -206,13 +339,20 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--ledger", type=Path, default=None)
+    parser.add_argument(
+        "--niu",
+        type=Path,
+        default=None,
+        help="niubash tree: also verify every consumed rubash:: path "
+        "is recorded in the ledger (ledger §5.4)",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
     ledger = args.ledger or (args.repo / "docs" / "api-ledger.md")
-    return check(args.repo, ledger, verbose=args.verbose)
+    return check(args.repo, ledger, verbose=args.verbose, niu_root=args.niu)
 
 
 if __name__ == "__main__":

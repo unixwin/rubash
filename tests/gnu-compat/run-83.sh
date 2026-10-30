@@ -83,7 +83,7 @@ prepare_wsl_helpers() {
 
 prepare_posix_root() {
   # rubash translates POSIX-absolute external arguments (/bin, /etc, /tmp,
-  # ...) against the configured shell root (WINUXSH_ROOT, see
+  # ...) against the configured shell root (__RUBASH_SHELL_ROOT, see
   # src/executor/path.rs external_argument_path). Upstream tests (rsh,
   # coproc, posixexp, ...) reference /bin/sh and /etc/passwd, which exist on
   # WSL but not for a bare rubash under Git Bash. Instead of patching
@@ -118,12 +118,12 @@ run_rubash() { # $1=name  $2=outfile
     # variables leaking into this session (CODEBUDDY_*, BASH_FUNC_* shims,
     # BASH_ENV, ...) make the A/B asymmetric and skew varenv et al. Keep a
     # minimal whitelist, unset everything else.
-    __allowed=" PATH HOME TMPDIR TEMP TMP SYSTEMROOT SYSTEMDRIVE WINDIR COMSPEC PATHEXT USERPROFILE APPDATA LOCALAPPDATA HOMEDRIVE HOMEPATH USERNAME COMPUTERNAME WSLENV THIS_SH WINUXSH_ROOT " && \
+    __allowed=" PATH HOME TMPDIR TEMP TMP SYSTEMROOT SYSTEMDRIVE WINDIR COMSPEC PATHEXT USERPROFILE APPDATA LOCALAPPDATA HOMEDRIVE HOMEPATH USERNAME COMPUTERNAME WSLENV THIS_SH __RUBASH_SHELL_ROOT " && \
     while IFS= read -r __v; do
       [ -n "$__v" ] || continue
       case "$__allowed" in *" $__v "*) ;; *) unset "$__v" ;; esac
     done < <(export -p | sed -n 's/^declare -x \([^= ]*\)=.*/\1/p') && \
-    export WINUXSH_ROOT="$POSIX_ROOT" && \
+    export __RUBASH_SHELL_ROOT="$POSIX_ROOT" && \
     timeout "$TIMEOUT_SECS" "$RUBASH" "./$1.tests") > "$2" 2>&1
 }
 

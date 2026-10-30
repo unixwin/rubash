@@ -12,7 +12,7 @@
 #![allow(unreachable_patterns)]
 #![allow(clashing_extern_declarations)]
 
-pub(crate) mod api;
+pub mod api;
 pub mod build_info;
 pub mod builtins;
 pub mod console_readline;
@@ -36,6 +36,7 @@ pub mod shell;
 pub(crate) mod stack_growth;
 pub mod token_str;
 pub mod usage;
+pub(crate) mod winuxcmd_fifo;
 
 // The DAP frontend entry points (1.5.0 debugger design section
 // 13; PLAN row 10): the one part of the debugger the binaries and

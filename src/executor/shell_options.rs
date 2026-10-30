@@ -29,6 +29,28 @@ fn services_db_path() -> std::path::PathBuf {
     root.join(r"System32\drivers\etc\services")
 }
 
+/// rubash#2101: open one redirect input target. A directory is a
+/// legal input in GNU (redir.c redir_open simply opens it; the child
+/// receives the descriptor and only a reading child fails, with its
+/// own diagnostic), but a plain Windows open refuses directories —
+/// retry those with FILE_FLAG_BACKUP_SEMANTICS, the flag the identity
+/// probes (src/executor/path.rs) already use to open directory
+/// handles. Unix opens directories natively.
+fn open_redirect_input_file(path: &std::path::Path) -> io::Result<File> {
+    let opened = File::open(path);
+    #[cfg(windows)]
+    {
+        if opened.is_err() && std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()) {
+            use std::os::windows::fs::OpenOptionsExt;
+            return std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(0x0200_0000)
+                .open(path);
+        }
+    }
+    opened
+}
+
 fn resolve_net_service_port(port_text: &str, udp: bool) -> Option<u16> {
     if let Ok(port) = port_text.parse::<u16>() {
         return Some(port);
@@ -50,7 +72,12 @@ fn resolve_net_service_port(port_text: &str, udp: bool) -> Option<u16> {
         let (Some(name), Some(port_proto)) = (fields.next(), fields.next()) else {
             continue;
         };
-        if name != port_text {
+        // GNU's service resolution is getservbyname (via getaddrinfo),
+        // which matches the entry's alias column as well as its
+        // primary name (rubash#1896: `www` resolves http's port,
+        // `mail` smtp's). The remaining fields after port/proto are
+        // the aliases.
+        if name != port_text && !fields.any(|alias| alias == port_text) {
             continue;
         }
         let Some((port, service_proto)) = port_proto.split_once('/') else {
@@ -102,10 +129,76 @@ impl Executor {
     /// mode 0666 (make_cmd.c:682, consumed by redir.c:702 redir_open), so
     /// probing a missing name CREATES it — the open is part of the
     /// redirection's side effects (rubash#264), not just a check.
+    ///
+    /// The probe asks the registry first (rubash#1935/#1963/#1964):
+    /// the classes with no filesystem file behind the mapped path get
+    /// their own open semantics instead of a raw open of a literal
+    /// path that cannot exist — a net target connects, a closed fd
+    /// alias fails ENOENT (the kernel open of the alias name decides,
+    /// exactly like the input ladder), a synthetic /proc entry opens
+    /// or refuses by its write class, a synthetic link opens its
+    /// resolved target. Only plain filesystem spellings (and the null
+    /// device, whose mapped open is the device) reach the raw open.
+    /// Errors are raw: callers apply posix_errors::path_error.
     pub(in crate::executor) fn probe_input_redirect_readwrite(
         &self,
         target: &str,
     ) -> io::Result<File> {
+        use crate::special_paths::SpecialPathClass;
+        match crate::special_paths::classify_special_path(target) {
+            SpecialPathClass::NetRedirect => return self.open_net_redirect_raw(target),
+            // rubash#1898: the devices — <> on /dev/zero reads zeros
+            // and discards writes; <> on /dev/full reads zeros (the
+            // probe's File is dropped by every caller; the sink
+            // stand-in carries the write side of the bind contract).
+            SpecialPathClass::ZeroDevice => return Self::zero_device_file(&target),
+            SpecialPathClass::FullDevice => return Self::synthetic_proc_write_sink(false),
+            SpecialPathClass::FdAlias(fd) => {
+                if super::redirection::dup_source_fd_open(
+                    &self.fd_table,
+                    fd,
+                    &std::collections::HashMap::new(),
+                ) {
+                    // The alias is open: GNU's open succeeds (a dup of
+                    // the descriptor). The probe's File is dropped by
+                    // every caller, so the null device stands in.
+                    return self.create_redirect_output("/dev/null", true);
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "No such file or directory",
+                ));
+            }
+            SpecialPathClass::SyntheticProc => {
+                match crate::special_paths::synthetic_proc_write_allowed(target) {
+                    Some(false) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "Permission denied",
+                        ));
+                    }
+                    Some(true) => return Self::synthetic_proc_write_sink(false),
+                    None => {}
+                }
+            }
+            SpecialPathClass::SyntheticLink => {
+                match crate::special_paths::synthetic_link_target(
+                    target,
+                    Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
+                ) {
+                    Some(link) => {
+                        return OpenOptions::new().read(true).write(true).open(&link.native);
+                    }
+                    None => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "No such file or directory",
+                        ));
+                    }
+                }
+            }
+            SpecialPathClass::NullDevice | SpecialPathClass::Filesystem => {}
+        }
         let path = self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars));
         // niubash#519: CON has no read+write handle (GENERIC_READ|
         // GENERIC_WRITE -> ERROR_INVALID_PARAMETER); the real `<>` bind
@@ -138,16 +231,13 @@ impl Executor {
         }
     }
 
-    /// Parse and connect a net redirect target, returning the
-    /// endpoint in its native socket form. The File form
-    /// (open_net_redirect_raw) adopts the SOCKET as a raw handle for
-    /// the fd machinery, but std File reads on an adopted overlapped
-    /// socket fail on Windows (ERROR_INVALID_PARAMETER), so byte
-    /// consumers read through this socket form, whose reads go
-    /// through WSARecv/recv. The diagnostic pre-lines (service-name
-    /// failure, refused connect; rubash#1237) are emitted here so
-    /// both forms report identically.
-    pub(in crate::executor) fn connect_net_stream(&self, target: &str) -> io::Result<NetStream> {
+    /// Parse and resolve a net redirect target WITHOUT connecting:
+    /// the first-slash split, the service resolution and the host
+    /// resolution GNU's getaddrinfo performs inside netopen, with
+    /// the diagnostic pre-lines those failures carry (service name,
+    /// unresolvable host; rubash#1237/#1894). Returns the protocol
+    /// flag and the resolved address set.
+    fn resolve_net_target(&self, target: &str) -> io::Result<(bool, Vec<std::net::SocketAddr>)> {
         let (udp, rest) = if let Some(rest) = target.strip_prefix("/dev/tcp/") {
             (false, rest)
         } else if let Some(rest) = target.strip_prefix("/dev/udp/") {
@@ -159,7 +249,12 @@ impl Executor {
             ));
         };
         let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "Invalid argument");
-        let (host, port_text) = rest.rsplit_once('/').ok_or_else(invalid)?;
+        // GNU netopen (lib/sh/netopen.c netopen()) splits at the
+        // FIRST slash (strchr): the host is the segment before it and
+        // the service is the whole remainder, slashes included —
+        // `/dev/tcp/a/b/80` resolves host `a` with service `b/80`,
+        // which then fails as an unknown service (rubash#1895).
+        let (host, port_text) = rest.split_once('/').ok_or_else(invalid)?;
         let port: u16 = match resolve_net_service_port(port_text, udp) {
             Some(port) => port,
             None => {
@@ -176,20 +271,79 @@ impl Executor {
                 return Err(invalid());
             }
         };
-        if host.is_empty() {
+        // GNU _netopen6 (lib/sh/netopen.c) resolves host and service
+        // through getaddrinfo and treats its result set as
+        // authoritative. A host that does not resolve is reported by
+        // internal_error BEFORE the redirection_error line the caller
+        // adds — `{host}: Name or service not known` (glibc's
+        // gai_strerror text for EAI_NONAME) — and netopen then fails
+        // with EINVAL, so the caller's line reads
+        // `{target}: Invalid argument` (rubash#1894). The empty host
+        // takes the same path (getaddrinfo("") is EAI_NONAME).
+        let addrs: Vec<std::net::SocketAddr> = if host.is_empty() {
+            Vec::new()
+        } else {
+            use std::net::ToSocketAddrs as _;
+            match (host, port).to_socket_addrs() {
+                Ok(iter) => iter.collect(),
+                Err(_) => Vec::new(),
+            }
+        };
+        if addrs.is_empty() {
+            eprintln!("{}{host}: Name or service not known", self.error_prefix());
             return Err(invalid());
         }
+        Ok((udp, addrs))
+    }
+
+    /// Validation-only form for the setup/probe walks. GNU opens a
+    /// net redirect exactly once — at the bind (redir.c
+    /// do_redirections) — but this port's in-process funnels run
+    /// probe walks ahead of the bind to surface the open's errors
+    /// early. For a filesystem target a probe open is unobservable;
+    /// for a net target it is a real connection that eats the peer's
+    /// greeting and leaves the bind's own connection reset
+    /// (rubash#1950/#1967). A probe therefore resolves the target —
+    /// surfacing every failure that can be known without connecting,
+    /// with the same pre-lines — and leaves the connect itself to
+    /// the bind's one open; a refused connection surfaces there with
+    /// the same diagnostic the probe's open would have produced.
+    pub(in crate::executor) fn validate_net_redirect_target(&self, target: &str) -> io::Result<()> {
+        self.resolve_net_target(target).map(|_| ())
+    }
+
+    /// Parse and connect a net redirect target, returning the
+    /// endpoint in its native socket form. The File form
+    /// (open_net_redirect_raw) adopts the SOCKET as a raw handle for
+    /// the fd machinery, but std File reads on an adopted overlapped
+    /// socket fail on Windows (ERROR_INVALID_PARAMETER), so byte
+    /// consumers read through this socket form, whose reads go
+    /// through WSARecv/recv. The diagnostic pre-lines (service-name
+    /// failure, refused connect; rubash#1237) are emitted here so
+    /// both forms report identically.
+    pub(in crate::executor) fn connect_net_stream(&self, target: &str) -> io::Result<NetStream> {
+        let (udp, addrs) = self.resolve_net_target(target)?;
         if udp {
-            let bind_addr = if host.contains(':') {
+            // The bind family follows the RESOLVED address, not the
+            // host spelling (rubash#1897): _netopen6 sockets and
+            // connects the getaddrinfo result itself, so a v6-only
+            // host name spelled without ':' still binds [::]:0 —
+            // binding 0.0.0.0 for it made the connect target's family
+            // unreachable.
+            let bind_addr = if addrs[0].is_ipv6() {
                 "[::]:0"
             } else {
                 "0.0.0.0:0"
             };
             let socket = std::net::UdpSocket::bind(bind_addr)?;
-            socket.connect((host, port))?;
+            socket.connect(addrs[0])?;
             Ok(NetStream::Udp(socket))
         } else {
-            let stream = std::net::TcpStream::connect((host, port)).map_err(|error| {
+            // Connect over the resolved set (TcpStream tries each
+            // address in order, like _netopen6's res loop) so the
+            // connect below can only fail at connect time, never at
+            // resolution time.
+            let stream = std::net::TcpStream::connect(addrs.as_slice()).map_err(|error| {
                 // GNU netopen reports a refused connect through sys_error
                 // with the script name only (no line segment) BEFORE the
                 // redirection_error line the caller adds:
@@ -226,6 +380,16 @@ impl Executor {
                 &self.shell_state.env_vars,
             )));
         }
+        // rubash#1898: /dev/zero reads yield an unbounded stream of
+        // NUL bytes, and /dev/full reads yield the same zeros — both
+        // serve from the pump-fed zero source (a real handle, so
+        // external children can inherit it). On Unix the construction
+        // is equivalent to opening the real device.
+        if crate::special_paths::is_zero_device(target)
+            || crate::special_paths::is_full_device(target)
+        {
+            return Some(Self::zero_device_file(&target));
+        }
         // GNU redir.c resolves /dev/std*, /dev/fd/N, /proc/self/fd/N through
         // the OS fd-alias layer — a dup of fd N, not a filesystem path.
         // Windows has no /dev, so resolve against the virtual fd table
@@ -248,6 +412,17 @@ impl Executor {
                 return Some(self.open_fd_read_endpoint(fd, target));
             }
             return None;
+        }
+        // SyntheticLink (rubash#1900): /proc/<pid>/exe and .../cwd are
+        // magic links — the open goes to the resolved target file. The
+        // session cwd (G-02; never the process-global cwd) answers for
+        // self/cwd. A directory target (cwd) fails the OS open here,
+        // which the caller reports like any unreadable redirect source.
+        if let Some(link) = crate::special_paths::synthetic_link_target(
+            target,
+            Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
+        ) {
+            return Some(open_redirect_input_file(std::path::Path::new(&link.native)));
         }
         // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): synthetic /proc files
         // serve as a pre-filled pipe converted to a File; reads hit EOF at
@@ -282,7 +457,96 @@ impl Executor {
         }
     }
 
+    /// rubash#1935: the write side of a 0644-class synthetic /proc
+    /// entry (`/proc/self/status`, `/proc/self/cmdline`). GNU's open
+    /// of the real entry succeeds and only the WRITE fails (EINVAL),
+    /// but no Windows handle reproduces a per-write EINVAL, so writes
+    /// land in a throwaway temp file. That removes the two failure
+    /// shapes this family exists for — ENOENT (no service face at
+    /// all) and a phantom enclave file created at the mapped literal
+    /// path — while keeping the observable contract: the open
+    /// succeeds, and the generated snapshot stays the only read truth
+    /// (on GNU the failed write never alters what a later read of
+    /// the entry serves either). Unique per call: two opens of the
+    /// entry are two open file descriptions. Delete-on-close where
+    /// the platform supports it.
+    pub(in crate::executor) fn synthetic_proc_write_sink(append: bool) -> io::Result<File> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SINK_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SINK_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("rubash-proc-sink-{}-{seq}", std::process::id()));
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        if append {
+            options.append(true);
+        } else {
+            options.truncate(true);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            // FILE_FLAG_DELETE_ON_CLOSE: the sink must not outlive
+            // the descriptor that owns it.
+            options.custom_flags(0x0400_0000);
+        }
+        let file = options.open(&path)?;
+        #[cfg(unix)]
+        {
+            // The descriptor stays valid after the name is unlinked.
+            let _ = std::fs::remove_file(&path);
+        }
+        Ok(file)
+    }
+
+    /// rubash#1898: a readable File that yields an unbounded stream
+    /// of NUL bytes — the /dev/zero (and /dev/full) read face. Unix
+    /// hosts have the real devices: opening the target IS GNU's
+    /// semantics, an unbounded kernel-owned zero source. Windows has
+    /// no zero device, so a pump thread feeds a pipe, following the
+    /// process-substitution streaming precedent: consumers get a
+    /// real handle (external children can inherit it), reads never
+    /// see EOF, and the pump exits on a broken pipe once the last
+    /// reader closes.
+    pub(in crate::executor) fn zero_device_file(target: &str) -> io::Result<File> {
+        #[cfg(unix)]
+        {
+            File::open(target)
+        }
+        #[cfg(windows)]
+        {
+            let _ = target;
+            use std::io::Write as _;
+            let (reader, mut writer) = std::io::pipe()?;
+            std::thread::spawn(move || {
+                const ZEROS: [u8; 8192] = [0u8; 8192];
+                while writer.write_all(&ZEROS).is_ok() {}
+            });
+            use std::os::windows::io::{FromRawHandle as _, IntoRawHandle as _};
+            let handle = reader.into_raw_handle();
+            Ok(unsafe { File::from_raw_handle(handle) })
+        }
+    }
+
     fn open_input_redirect_impl(&self, target: &str, consume: bool) -> io::Result<File> {
+        // rubash#1950: a probe (consume == false) must not open a net
+        // target either — the classified ladder would CONNECT, a real
+        // connection the probe drops unread: it eats the peer's
+        // greeting, and the bind phase's one real open (GNU's only
+        // open, redir.c do_redirections) is left talking to a reset
+        // stream. Validate by resolution instead — the #1820 FIFO
+        // carve-out's rule: the probe asks every question the open
+        // can answer without performing it, the bind performs the
+        // open. Every probe caller drops the returned File unread,
+        // so the /dev/null stand-in is inert.
+        if !consume && crate::special_paths::is_net_redirect_target(target) {
+            self.validate_net_redirect_target(target)
+                .map_err(|e| crate::posix_errors::path_error(target, e))?;
+            return File::open(shell_path_to_windows(
+                "/dev/null",
+                &self.shell_state.env_vars,
+            ));
+        }
         if let Some(opened) = self.open_classified_input(target) {
             return opened;
         }
@@ -335,7 +599,23 @@ impl Executor {
             }
             return File::open("/dev/null").map_err(|e| crate::posix_errors::path_error(target, e));
         }
-        File::open(win_path).map_err(|e| crate::posix_errors::path_error(target, e))
+        // rubash#1903: the one real open of a WinuxCmd fifo marker is
+        // the read side of the named-pipe rendezvous (it blocks until
+        // a writer connects, like GNU's O_RDONLY fifo open). Probes
+        // (consume == false) skip this arm on purpose: their fallthrough
+        // File::open below opens the marker *file*, which validates
+        // existence without consuming the pairing — the Windows twin
+        // of the #1820 probe carve-out above, except that opening the
+        // marker is itself inert because the rendezvous lives in the
+        // pipe, not the marker.
+        #[cfg(windows)]
+        if consume && crate::winuxcmd_fifo::path_is_winuxcmd_fifo(&win_path) {
+            return crate::winuxcmd_fifo::open_winuxcmd_fifo_read(&win_path, &|| {
+                crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+            })
+            .map_err(|e| crate::posix_errors::path_error(target, e));
+        }
+        open_redirect_input_file(&win_path).map_err(|e| crate::posix_errors::path_error(target, e))
     }
 
     pub(in crate::executor) fn open_fd_read_endpoint(
@@ -361,7 +641,9 @@ impl Executor {
             Some(FdReadEndpoint::CoprocStdout { fd: file_fd, .. }) => {
                 crate::fd::duplicate_handle(file_fd.handle)
                     .map(crate::fd::handle_to_file)
-                    .map_err(|e| crate::posix_errors::path_error(&file_fd.path.to_string_lossy(), e))
+                    .map_err(|e| {
+                        crate::posix_errors::path_error(&file_fd.path.to_string_lossy(), e)
+                    })
             }
             Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
                 let bytes = self
@@ -389,10 +671,32 @@ impl Executor {
             Some(FdReadEndpoint::InheritedProcessStdin) => {
                 super::inherited_stdin::duplicate_process_stdin()
             }
-            _ => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("{target}: Bad file descriptor"),
-            )),
+            _ => {
+                // rubash#1963: no read endpoint, but the descriptor
+                // may be open write-only (`exec 63>f; : < /dev/fd/63`).
+                // GNU's /dev/fd open is a fresh open of the
+                // descriptor's TARGET, judged against the target
+                // file's mode, not the descriptor's: a file binding
+                // reopens its path (its stored path is the native
+                // form it was opened from), and any other open
+                // descriptor's read-open succeeds against the null
+                // device (reads see EOF — the stdio write ends'
+                // content contract is the dev-operand face's
+                // documented decline). Only a descriptor with no
+                // endpoint at all keeps the EBADF answer.
+                match self.fd_table.write_endpoint(fd) {
+                    Some(FdWriteEndpoint::File(file)) => File::open(&file.path)
+                        .map_err(|e| crate::posix_errors::path_error(target, e)),
+                    Some(_) => File::open(shell_path_to_windows(
+                        "/dev/null",
+                        &self.shell_state.env_vars,
+                    )),
+                    None => Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("{target}: Bad file descriptor"),
+                    )),
+                }
+            }
         }
     }
 
@@ -504,6 +808,11 @@ impl Executor {
         self.shell_state
             .env_vars
             .retain(|key, _| !key.starts_with(FD_PIPE_PREFIX));
+        // rubash#2042: the file-backed marks answer the same lifecycle
+        // (rewritten fresh each call), so they retire with the pipes.
+        self.shell_state
+            .env_vars
+            .retain(|key, _| !key.starts_with(crate::executor::types::FD_FILE_PREFIX));
         for (fd, entry) in &self.fd_table.entries {
             if entry.closed {
                 continue;
@@ -539,6 +848,777 @@ impl Executor {
                 self.shell_state
                     .env_vars
                     .insert(format!("{FD_PIPE_PREFIX}{fd}"), "1".to_string());
+            }
+            // rubash#2042: a file-backed descriptor carries the file
+            // mark for the `test -r /proc/<pid>/fd/N` face. GNU's
+            // sh_eaccess (test.c:553 -> lib/sh/eaccess.c:194) answers
+            // -r TRUE for every live fd magic link regardless of the
+            // fd's open mode — the class question is liveness, not
+            // open mode (uid-1 procfs measurement recorded on
+            // FD_FILE_PREFIX). Pipes and virtual endpoints stay on the
+            // pipe mark only; a closed fd carries neither, so the
+            // operand falls through to the filesystem face and fails
+            // like the dangling magic link (ENOENT).
+            let read_file = matches!(
+                &entry.read,
+                Some(FdReadEndpoint::File(file))
+                    if !crate::fd::is_pipe_handle(file.handle)
+            );
+            let write_file = matches!(
+                &entry.write,
+                Some(FdWriteEndpoint::File(file))
+                    if !crate::fd::is_pipe_handle(file.handle)
+            );
+            if read_file || write_file {
+                self.shell_state.env_vars.insert(
+                    format!("{}{fd}", crate::executor::types::FD_FILE_PREFIX),
+                    "1".to_string(),
+                );
+            }
+        }
+    }
+
+    /// rubash#1902: GNU's `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and
+    /// `/dev/fd/N` faces answer the fd FACT, never a name constant —
+    /// sh_eaccess routes path_is_devfd operands (eaccess.c:63-77) through
+    /// sh_stataccess (eaccess.c:116), whose sh_stat (eaccess.c:80) stats
+    /// the currently bound descriptor and checks the mode bits of what it
+    /// found: fd 0 bound to a writable file makes `test -w /dev/stdin`
+    /// true, a 444 file makes it false. The builtin only receives
+    /// env_vars, so mirror the fd table right before test/[[ runs —
+    /// same channel as the terminal and pipe marks:
+    /// - a File-bound fd carries its target path in __RUBASH_FD_TARGET_<fd>
+    ///   and every file predicate answers from the referent (the procfs
+    ///   symlink semantics);
+    /// - every other open fd carries its device class and mode bits in
+    ///   __RUBASH_FD_ACCESS_<fd>;
+    /// - an entry the shell closed carries an empty value (the
+    ///   /proc/self/fd/N ENOENT face). An fd with no entry at all was
+    ///   never opened, where the marks are simply not consulted.
+    /// Rewritten fresh each call, like the other marks.
+    /// rubash#2132: the fd-alias fact of one of the process's own
+    /// stdio handles, classified by the handle itself — GNU's
+    /// sh_stataccess stats the descriptor the process actually holds
+    /// (eaccess.c:116), so an inherited /dev/null is a character
+    /// device, an inherited regular file answers from its referent,
+    /// and only a real pipe is a pipe. The judgments reuse the fd
+    /// layer's handle probes (console / pipe / socket / disk-file
+    /// path); on unix the char-device and directory faces resolve
+    /// through /proc/self/fd, and anything unclassifiable keeps the
+    /// historical pipe default (the common harness ambient).
+    fn process_stdio_fact(&self, fd: u32) -> FdFactMark {
+        let handle = crate::fd::process_std_handle(fd);
+        if crate::fd::is_console_handle(handle) {
+            return FdFactMark::Access("crw".to_string());
+        }
+        if crate::fd::is_pipe_handle(handle) {
+            return FdFactMark::Access("prw".to_string());
+        }
+        if crate::fd::is_socket_handle(handle) {
+            return FdFactMark::Access("srw".to_string());
+        }
+        if let Some(path) = crate::fd::disk_file_path(handle) {
+            return FdFactMark::Target(path.to_string_lossy().into_owned());
+        }
+        #[cfg(unix)]
+        {
+            if crate::fd::is_char_device_handle(handle) {
+                // /dev/null and kin carry the null-class inode
+                // (crw-rw-rw-); any other char device answers with
+                // the console class's mode shape.
+                if let Ok(link) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
+                    let name = link
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    if matches!(name.as_str(), "null" | "zero" | "full") {
+                        return FdFactMark::Access("nrw".to_string());
+                    }
+                }
+                return FdFactMark::Access("crw".to_string());
+            }
+            // A directory handed to the process: the referent path
+            // answers, exactly like an opened directory bind.
+            if let Ok(link) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
+                if link.is_dir() {
+                    return FdFactMark::Target(link.to_string_lossy().into_owned());
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            if crate::fd::is_char_device_handle(handle) {
+                // FILE_TYPE_CHAR beyond the console: the null-class
+                // devices (NUL and kin) — a Windows directory handle
+                // reports FILE_TYPE_DISK and took the target branch
+                // above via GetFinalPathNameByHandleW.
+                return FdFactMark::Access("nrw".to_string());
+            }
+        }
+        FdFactMark::Access("prw".to_string())
+    }
+
+    pub(in crate::executor) fn sync_fd_alias_facts(&mut self, cmd: Option<&CommandNode>) {
+        let redirects = cmd.map(|command| command.redirects.as_slice());
+        self.sync_fd_alias_facts_scoped(cmd, redirects);
+    }
+
+    /// The sync above, with the evaluating command's redirection list
+    /// supplied separately from the command node: `[[ ]]` binds only
+    /// its fds 1/2 and evaluates through no CommandNode, so its caller
+    /// stashes the list on the executor (rubash#2131). The list drives
+    /// the own-redirect overlay at the end: a command's own
+    /// redirections are applied by GNU before its builtin runs
+    /// (execute_cmd.c + redir.c do_redirections precede the builtin
+    /// call), but rubash's builtin paths stage their payloads without
+    /// binding fd-table entries, so without the overlay the sync
+    /// answers every self-redirected descriptor from the binding the
+    /// command superseded.
+    pub(in crate::executor) fn sync_fd_alias_facts_scoped(
+        &mut self,
+        cmd: Option<&CommandNode>,
+        redirects: Option<&[crate::parser::Redirect]>,
+    ) {
+        self.shell_state.env_vars.retain(|key, _| {
+            !key.starts_with(FD_TARGET_PREFIX) && !key.starts_with(FD_ACCESS_PREFIX)
+        });
+        for (fd, entry) in &self.fd_table.entries {
+            if entry.closed {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_ACCESS_PREFIX}{fd}"), String::new());
+                continue;
+            }
+            // Streaming pipeline tail (rubash#761): the consumer pipe is
+            // the stage's descriptor 0 — GNU dup2's it on (execute_cmd.c),
+            // and its fifo mode carries owner r+w. The fd table still
+            // holds whatever `exec` bound earlier, so it must not answer
+            // here; a stage command with its own `< file` re-dup2's first
+            // (redir.c) and the table entry IS the truth again.
+            if *fd == 0
+                && self.pipeline_stdin_stream.is_some()
+                && cmd
+                    .and_then(|command| command.redirect_in.as_ref())
+                    .is_none()
+            {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_ACCESS_PREFIX}{fd}"), "prw".to_string());
+                continue;
+            }
+            // The read endpoint wins when both ends are bound: GNU stats
+            // one inode (a `<>` pair shares it), and the read side is the
+            // one the stdio spellings name first.
+            let mut class = 'f';
+            let mut can_r = false;
+            let mut can_w = false;
+            let can_x;
+            let mut target: Option<String> = None;
+            // A DOS device binding (NUL for /dev/null, CONIN$ for a
+            // console stdin) has no stat-able path — the bind may store
+            // the device name cwd-joined (a `< /dev/null` File endpoint
+            // records `<cwd>\NUL`), so judge the FILE NAME and emit the
+            // device class instead of a target the evaluator cannot
+            // resolve (metadata() fails on it while open() succeeds
+            // through the kernel's NUL magic — the two faces disagreed,
+            // which is exactly what the marks must not do).
+            let dos_device_class = |path: &std::path::Path| -> Option<char> {
+                let name = path.file_name()?;
+                if !crate::fd::is_dos_device_path(std::path::Path::new(name)) {
+                    return None;
+                }
+                let upper = name.to_string_lossy().to_ascii_uppercase();
+                if matches!(upper.as_str(), "CON" | "CONIN$" | "CONOUT$") {
+                    Some('c')
+                } else {
+                    Some('n')
+                }
+            };
+            // rubash#1902: a File endpoint whose stored path is the
+            // `<(source)` carrier spelling is a process-substitution
+            // pipe reader by construction —
+            // spawn_input_process_substitution_child is the spelling's
+            // only producer and its handle is the spawned body's pipe
+            // (the same judgment initial_pipeline_input documents for
+            // its stage-0 alias fold). The spelling is transport, not
+            // a filesystem path: it must never become the fd target
+            // (the evaluator would re-enter on it as a path and every
+            // predicate would fail). The handle check is the ground
+            // truth that the endpoint really is that pipe; a real path
+            // (a named fifo included) keeps the target treatment.
+            let procsub_pipe = |path: &std::path::Path, handle: crate::fd::HANDLE| -> bool {
+                let spelling = path.to_string_lossy();
+                crate::fd::is_pipe_handle(handle)
+                    && spelling.starts_with("<(")
+                    && spelling.ends_with(')')
+            };
+            match &entry.read {
+                Some(FdReadEndpoint::File(file)) => {
+                    if let Some(device) = dos_device_class(&file.path) {
+                        class = device;
+                        can_r = true;
+                        can_w = true;
+                    } else if procsub_pipe(&file.path, file.handle) {
+                        class = 'p';
+                        can_r = true;
+                        can_w = true;
+                    } else if !file.path.as_os_str().is_empty() {
+                        target = Some(file.path.to_string_lossy().into_owned());
+                    } else if crate::fd::is_pipe_handle(file.handle) {
+                        class = 'p';
+                        can_r = true;
+                        can_w = true;
+                    } else {
+                        class = 'f';
+                        can_r = true;
+                    }
+                }
+                // rubash#2132: the inherited stdin is whatever the
+                // parent handed the process — a console, a pipe, a
+                // regular file, /dev/null, a directory, a socket —
+                // and GNU's fstat answers from THAT inode. Classify
+                // the real handle; the old console-or-pipe default
+                // called a /dev/null stdin a pipe.
+                Some(FdReadEndpoint::InheritedProcessStdin) => match self.process_stdio_fact(0) {
+                    FdFactMark::Target(path) => {
+                        target = Some(path);
+                    }
+                    FdFactMark::Access(mark) => {
+                        let (fact_class, fact_r, fact_w) = access_mark_parts(&mark);
+                        class = fact_class;
+                        can_r = fact_r;
+                        can_w = fact_w;
+                    }
+                    _ => {
+                        class = 'p';
+                        can_r = true;
+                        can_w = true;
+                    }
+                },
+                // TextInput pipes (text feeds, process substitution,
+                // coproc stdout): fifo prw-r--r--.
+                Some(
+                    FdReadEndpoint::Text(_)
+                    | FdReadEndpoint::ProcessSubstitution(_)
+                    | FdReadEndpoint::CoprocStdout { .. },
+                ) => {
+                    class = 'p';
+                    can_r = true;
+                    can_w = true;
+                }
+                // The synthetic /proc/self/cwd bind (rubash#1937): GNU
+                // opened the directory O_RDONLY — mode 755.
+                Some(FdReadEndpoint::Directory) => {
+                    class = 'd';
+                    can_r = true;
+                    can_w = true;
+                }
+                None => {}
+            }
+            match &entry.write {
+                Some(FdWriteEndpoint::File(file)) => {
+                    if target.is_none() {
+                        if let Some(device) = dos_device_class(&file.path) {
+                            class = device;
+                            can_r = true;
+                            can_w = true;
+                        } else if procsub_pipe(&file.path, file.handle) {
+                            class = 'p';
+                            can_w = true;
+                        } else if !file.path.as_os_str().is_empty() {
+                            target = Some(file.path.to_string_lossy().into_owned());
+                        } else if crate::fd::is_pipe_handle(file.handle) {
+                            class = 'p';
+                            can_w = true;
+                        } else {
+                            can_w = true;
+                        }
+                    }
+                }
+                Some(FdWriteEndpoint::Stdout) => {
+                    // rubash#2132: same coarse default as the stdin
+                    // arm — a non-terminal sink was called a pipe even
+                    // when the process's stdout is a regular file.
+                    // A live capture sink IS a pipe in GNU (the
+                    // substitution child's fd 1); anything else is the
+                    // process's own stdout handle, classified by it.
+                    if self.stdout_capture.is_some() || stdout_capture_active() {
+                        if class == 'f' {
+                            class = 'p';
+                        }
+                    } else if entry.read.is_none() {
+                        match self.process_stdio_fact(1) {
+                            FdFactMark::Target(path) => {
+                                if target.is_none() {
+                                    target = Some(path);
+                                }
+                            }
+                            FdFactMark::Access(mark) => {
+                                let (fact_class, fact_r, _) = access_mark_parts(&mark);
+                                class = fact_class;
+                                can_r = fact_r;
+                            }
+                            _ => {}
+                        }
+                    } else if self.stdout_sink_is_terminal() {
+                        class = 'c';
+                    } else if class == 'f' {
+                        class = 'p';
+                    }
+                    can_w = true;
+                }
+                Some(FdWriteEndpoint::Stderr) => {
+                    // rubash#2132: the process's stderr handle,
+                    // classified like the other ambient stdio ends
+                    // (the console probe it replaces is the helper's
+                    // first judgment already).
+                    if entry.read.is_none() {
+                        match self.process_stdio_fact(2) {
+                            FdFactMark::Target(path) => {
+                                if target.is_none() {
+                                    target = Some(path);
+                                }
+                            }
+                            FdFactMark::Access(mark) => {
+                                let (fact_class, fact_r, _) = access_mark_parts(&mark);
+                                class = fact_class;
+                                can_r = fact_r;
+                            }
+                            _ => {}
+                        }
+                    } else if crate::fd::is_console_handle(crate::fd::process_std_handle(2)) {
+                        class = 'c';
+                    } else if class == 'f' {
+                        class = 'p';
+                    }
+                    can_w = true;
+                }
+                Some(
+                    FdWriteEndpoint::CoprocStdin { .. }
+                    | FdWriteEndpoint::ProcessSubstitution { .. },
+                ) => {
+                    class = 'p';
+                    can_w = true;
+                }
+                // rubash#1898: the bind is symbolic but the underlying
+                // inode is the null device, crw-rw-rw-.
+                Some(FdWriteEndpoint::FullDevice) => {
+                    class = 'n';
+                    can_r = true;
+                    can_w = true;
+                }
+                // rubash#2042 (master face met at the #2088 takeover
+                // merge): the bind is symbolic but the underlying inode
+                // is a 0644-class synthetic /proc regular file — writes
+                // fail EINVAL, but the fd's facts are the file's: the
+                // generic-file class, readable by inode mode (the same
+                // measurement FD_FILE_PREFIX carries). A class the read
+                // side already settled (a <> pair shares one inode)
+                // stands; only the default class gains the read bit.
+                Some(FdWriteEndpoint::ProcContentWrite) => {
+                    if class == 'f' {
+                        can_r = true;
+                    }
+                    can_w = true;
+                }
+                None => {}
+            }
+            if let Some(target) = target {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_TARGET_PREFIX}{fd}"), target);
+                continue;
+            }
+            can_x = class == 'd';
+            let mut value = String::new();
+            value.push(class);
+            if can_r {
+                value.push('r');
+            }
+            if can_w {
+                value.push('w');
+            }
+            if can_x {
+                value.push('x');
+            }
+            self.shell_state
+                .env_vars
+                .insert(format!("{FD_ACCESS_PREFIX}{fd}"), value);
+        }
+        // rubash#2131: two binding shapes install no fd-table row for
+        // the loop above to classify. A staged FUNCTION_STDIN mirror
+        // (a compound's text-channel rebind) recorded its source's
+        // fact in FD0_MIRROR_FACT beside the mirror; state it over
+        // the ambient entry it superseded. And the evaluating
+        // command's own redirections — applied by GNU before the
+        // builtin runs, staged as payloads here without binding —
+        // state each redirected descriptor's fact from its winning
+        // redirect, over everything above.
+        self.apply_fd0_mirror_fact();
+        if let Some(redirects) = redirects {
+            self.apply_own_redirect_facts(redirects);
+        }
+        // rubash#1902 (stage face): a pipeline stage whose fd 0 is the
+        // staged FUNCTION_STDIN mirror has NO fd-table row — the stage
+        // funnels clear the slot so the mirror governs the stage's
+        // reads — so the loop above wrote no fd-0 mark and the
+        // evaluator would fall through to the shell's own descriptors.
+        // The stage entry recorded the binding in FD0_STAGE_PIPE
+        // (execute_pipeline_stage / execute_lastpipe_stage, beside the
+        // mirror it stands for); turn it into the fd-0 access mark
+        // here, in the same `prw` vocabulary as the
+        // pipeline_stdin_stream special case above. Two guards, both
+        // GNU's ordering (execute_cmd.c:2620 do_piping first, then the
+        // element's own do_redirections): an fd-table entry that DID
+        // speak for fd 0 (a binding installed inside the stage) wins
+        // over the pipe, and a command carrying a descriptor-class
+        // fd-0 redirect winner keeps that face's current treatment —
+        // its binding is the redirect machinery's to state. Text-class
+        // winners (heredoc / here-string) are pipes in GNU and keep
+        // the mark.
+        let fd0_marked = self
+            .shell_state
+            .env_vars
+            .contains_key(&format!("{FD_TARGET_PREFIX}0"))
+            || self
+                .shell_state
+                .env_vars
+                .contains_key(&format!("{FD_ACCESS_PREFIX}0"));
+        if !fd0_marked
+            && self
+                .shell_state
+                .env_vars
+                .get(FD0_STAGE_PIPE)
+                .map(String::as_str)
+                == Some("1")
+            && !matches!(
+                cmd.and_then(fd0_stdin_redirect_winner),
+                Some(
+                    crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::ReadWrite
+                        | crate::parser::RedirectKind::CloseInput
+                )
+            )
+        {
+            self.shell_state
+                .env_vars
+                .insert(format!("{FD_ACCESS_PREFIX}0"), "prw".to_string());
+        }
+    }
+
+    /// Write one descriptor's fd-alias fact in the sync's mark
+    /// vocabulary, superseding whatever mark the descriptor carried:
+    /// a target mark and an access mark never coexist (the entries
+    /// loop's own shape), and `Closed` is the empty-access tombstone.
+    /// `DupOf` copies the source descriptor's marks as they stand at
+    /// this point in the sync — GNU's dup2 hands over the source's
+    /// open file description (redir.c r_duplicating_input/output) —
+    /// and an unmarked source answers as closed.
+    fn apply_fd_fact_mark(&mut self, fd: u32, mark: &FdFactMark) {
+        self.shell_state
+            .env_vars
+            .remove(&format!("{FD_TARGET_PREFIX}{fd}"));
+        self.shell_state
+            .env_vars
+            .remove(&format!("{FD_ACCESS_PREFIX}{fd}"));
+        match mark {
+            FdFactMark::Target(target) => {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_TARGET_PREFIX}{fd}"), target.clone());
+            }
+            FdFactMark::Access(access) => {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_ACCESS_PREFIX}{fd}"), access.clone());
+            }
+            FdFactMark::Closed => {
+                self.shell_state
+                    .env_vars
+                    .insert(format!("{FD_ACCESS_PREFIX}{fd}"), String::new());
+            }
+            FdFactMark::DupOf(source) => {
+                if *source == fd {
+                    return;
+                }
+                let source_target = self
+                    .shell_state
+                    .env_vars
+                    .get(&format!("{FD_TARGET_PREFIX}{source}"))
+                    .cloned();
+                let source_access = self
+                    .shell_state
+                    .env_vars
+                    .get(&format!("{FD_ACCESS_PREFIX}{source}"))
+                    .cloned();
+                match (source_target, source_access) {
+                    (Some(target), _) => {
+                        self.shell_state
+                            .env_vars
+                            .insert(format!("{FD_TARGET_PREFIX}{fd}"), target);
+                    }
+                    (None, Some(access)) => {
+                        self.shell_state
+                            .env_vars
+                            .insert(format!("{FD_ACCESS_PREFIX}{fd}"), access);
+                    }
+                    (None, None) => {
+                        self.shell_state
+                            .env_vars
+                            .insert(format!("{FD_ACCESS_PREFIX}{fd}"), String::new());
+                    }
+                }
+            }
+            FdFactMark::Unchanged => {}
+        }
+    }
+
+    /// The fd-alias fact one redirect will have installed once GNU's
+    /// do_redirections applies it (redir.c:767-955
+    /// do_redirection_internal), judged from the redirect itself with
+    /// the same target constructions the bind paths use, so a stated
+    /// fact can never disagree with the binding it describes
+    /// (rubash#2131). Returns the (descriptor, fact) pairs the
+    /// redirect speaks for — two for the `&>` family, whose single
+    /// open file description lands on both stdio descriptors
+    /// (redir.c:832-838 r_err_and_out).
+    fn fd_fact_mark_for_redirect(
+        &self,
+        redirect: &crate::parser::Redirect,
+    ) -> Vec<(u32, FdFactMark)> {
+        use crate::parser::RedirectKind;
+        let input_side = redirect.is_input_side();
+        let fd = redirect.fd.unwrap_or(if input_side { 0 } else { 1 });
+        let target = self.expand_redirect_target(redirect);
+        let closed = is_closed_redirect_target(&target);
+        let mark = match redirect.kind {
+            RedirectKind::Unknown => return Vec::new(),
+            RedirectKind::CloseInput | RedirectKind::CloseOutput => FdFactMark::Closed,
+            RedirectKind::HereDoc | RedirectKind::HereString => {
+                // GNU feeds both from a pipe (or a temp file with the
+                // pipe's predicates); the binds state `prw` for them.
+                FdFactMark::Access("prw".to_string())
+            }
+            RedirectKind::DuplicateInput => {
+                if closed {
+                    FdFactMark::Closed
+                } else if let Some((source, _)) =
+                    super::execution_misc::redirect_target_fd_and_move(&target)
+                {
+                    FdFactMark::DupOf(source)
+                } else if let Some(source) = dev_stdio_redirect_fd(&target) {
+                    FdFactMark::DupOf(source)
+                } else {
+                    FdFactMark::Unchanged
+                }
+            }
+            RedirectKind::DuplicateOutput => {
+                if closed {
+                    FdFactMark::Closed
+                } else if let Some((source, _)) =
+                    super::execution_misc::redirect_target_fd_and_move(&target)
+                {
+                    FdFactMark::DupOf(source)
+                } else if let Some(source) = dev_stdio_redirect_fd(&target) {
+                    FdFactMark::DupOf(source)
+                } else if target.starts_with('&') {
+                    FdFactMark::Unchanged
+                } else {
+                    // `>&word` over a file word is r_err_and_out: the
+                    // target is opened, not duplicated.
+                    self.fd_fact_mark_for_file_target(&target, false)
+                }
+            }
+            RedirectKind::Input | RedirectKind::ReadWrite => {
+                if closed {
+                    FdFactMark::Closed
+                } else if let Some(source) = dev_stdio_redirect_fd(&target) {
+                    FdFactMark::DupOf(source)
+                } else {
+                    self.fd_fact_mark_for_file_target(&target, true)
+                }
+            }
+            RedirectKind::Output
+            | RedirectKind::Append
+            | RedirectKind::ClobberOutput
+            | RedirectKind::CombinedOutput
+            | RedirectKind::CombinedAppend => {
+                if closed {
+                    FdFactMark::Closed
+                } else if let Some(source) = dev_stdio_redirect_fd(&target) {
+                    FdFactMark::DupOf(source)
+                } else {
+                    self.fd_fact_mark_for_file_target(&target, false)
+                }
+            }
+        };
+        if matches!(
+            redirect.kind,
+            RedirectKind::CombinedOutput | RedirectKind::CombinedAppend
+        ) && redirect.fd.is_none()
+        {
+            return vec![(1, mark.clone()), (2, mark)];
+        }
+        if redirect.kind == RedirectKind::DuplicateOutput
+            && redirect.fd.is_none()
+            && matches!(mark, FdFactMark::Target(_) | FdFactMark::Access(_))
+        {
+            // `>&file` with the redirector defaulted: fd 1 takes the
+            // open, then fd 2 duplicates it (2>&1 follows the open).
+            return vec![(1, mark), (2, FdFactMark::DupOf(1))];
+        }
+        vec![(fd, mark)]
+    }
+
+    /// The fact for a redirect target that names something to OPEN
+    /// (never a dup word — the caller resolved those): the device and
+    /// synthetic classes the binds themselves special-case, answered
+    /// in the same marks, and otherwise the referent path — exactly
+    /// what a FileFd bind stores as its endpoint path, which the
+    /// evaluator stats (the procfs-symlink semantics).
+    fn fd_fact_mark_for_file_target(&self, target: &str, input: bool) -> FdFactMark {
+        if is_null_device(target)
+            || crate::special_paths::is_zero_device(target)
+            || crate::special_paths::is_full_device(target)
+        {
+            // /dev/null classifies as a char device (crw-rw-rw-) on
+            // every platform; the binds answer zero/full with the
+            // same 'n' inode (the DOS-device judgment, the symbolic
+            // FullDevice endpoint, rubash#1898).
+            return FdFactMark::Access("nrw".to_string());
+        }
+        if crate::special_paths::is_net_redirect_target(target) {
+            // A connected socket has no class letter in the mark
+            // vocabulary; leave the binding's own statement (the
+            // #2124 bind's endpoint classification) standing.
+            return FdFactMark::Unchanged;
+        }
+        if input && target.starts_with("<(") {
+            return FdFactMark::Access("prw".to_string());
+        }
+        if !input && target.starts_with(">(") {
+            return FdFactMark::Access("pw".to_string());
+        }
+        if crate::special_paths::synthetic_proc_content(target).is_some()
+            || crate::special_paths::is_synthetic_link_path(target)
+        {
+            // The evaluator answers the spelling from the registry's
+            // own facts — the same truth the classified bind serves.
+            return FdFactMark::Target(target.to_string());
+        }
+        let native = if input {
+            self.session_path(super::path::windows_operand_file_path(
+                shell_path_to_windows(target, &self.shell_state.env_vars),
+                &self.shell_state.env_vars,
+            ))
+        } else {
+            self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars))
+        };
+        FdFactMark::Target(native.to_string_lossy().into_owned())
+    }
+
+    /// rubash#2131: state each descriptor the evaluating command
+    /// redirected from its winning redirect. GNU applies a command's
+    /// redirections left to right before the builtin runs, the LAST
+    /// redirect naming a descriptor being its binding for the
+    /// command's duration; the marks are applied in list order so a
+    /// dup copies the fact of the source's own winning redirect, not
+    /// its superseded binding.
+    fn apply_own_redirect_facts(&mut self, redirects: &[crate::parser::Redirect]) {
+        let mut yields: Vec<(u32, FdFactMark)> = Vec::new();
+        let mut last_yield: std::collections::HashMap<u32, usize> =
+            std::collections::HashMap::new();
+        for redirect in redirects {
+            if redirect.fd_var.is_some() {
+                // A {var} redirect binds whichever descriptor the
+                // variable names at runtime; it speaks for no fixed
+                // descriptor here.
+                continue;
+            }
+            for (fd, mark) in self.fd_fact_mark_for_redirect(redirect) {
+                last_yield.insert(fd, yields.len());
+                yields.push((fd, mark));
+            }
+        }
+        for (index, (fd, mark)) in yields.iter().enumerate() {
+            if last_yield.get(fd) == Some(&index) {
+                self.apply_fd_fact_mark(*fd, mark);
+            }
+        }
+    }
+
+    /// rubash#2131: while a staged FUNCTION_STDIN mirror governs
+    /// fd 0, the mirror's source — not the ambient binding it
+    /// superseded — is fd 0's fact; the staging site recorded that
+    /// fact in FD0_MIRROR_FACT and its guard restores the key with
+    /// the mirror, so the key's presence is the scope signal. Two
+    /// bindings outrank it: a pipeline stage's own pipe
+    /// (FD0_STAGE_PIPE — the stage funnel owns fd 0 then, and the
+    /// post-pass below states its mark) and an entry that genuinely
+    /// replaced the mirror's channel — the mirror only ever
+    /// supersedes the ambient inherited entry or an absent slot, so
+    /// any other entry at fd 0 means the mirror is shadowed and the
+    /// entry's fact stands.
+    fn apply_fd0_mirror_fact(&mut self) {
+        let Some(fact) = self.shell_state.env_vars.get(FD0_MIRROR_FACT).cloned() else {
+            return;
+        };
+        if !self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
+            || self
+                .shell_state
+                .env_vars
+                .get(FD0_STAGE_PIPE)
+                .map(String::as_str)
+                == Some("1")
+        {
+            return;
+        }
+        if let Some(entry) = self.fd_table.entries.get(&0) {
+            let mirror_supersedes =
+                !entry.closed && matches!(entry.read, Some(FdReadEndpoint::InheritedProcessStdin));
+            if !mirror_supersedes {
+                return;
+            }
+        }
+        if let Some(source) = fact.strip_prefix("D:") {
+            if source == "0" {
+                // A `<&0` mirror serves fd 0's own channel; the
+                // entry's fact already states it.
+                return;
+            }
+            if let Ok(source_fd) = source.parse::<u32>() {
+                self.apply_fd_fact_mark(0, &FdFactMark::DupOf(source_fd));
+                return;
+            }
+        }
+        if let Some(target) = fact.strip_prefix("T:") {
+            self.apply_fd_fact_mark(0, &FdFactMark::Target(target.to_string()));
+        } else if let Some(access) = fact.strip_prefix("A:") {
+            self.apply_fd_fact_mark(0, &FdFactMark::Access(access.to_string()));
+        }
+    }
+
+    /// rubash#2131: the FD0_MIRROR_FACT value for a binding about to
+    /// be staged as FUNCTION_STDIN text (bind_command_fd0_input's
+    /// mirror branch, the flat-subshell region feed): the staged
+    /// source's own fd-0 fact, judged by the same classifier the
+    /// own-redirect overlay uses. None when the staged text is the
+    /// ENCLOSING channel's remainder — the node carries no fd-0
+    /// winner of its own — so the enclosing binding keeps its fact.
+    pub(in crate::executor) fn fd0_mirror_fact_value(&self, cmd: &CommandNode) -> Option<String> {
+        match fd0_stdin_redirect_winner_redirect(cmd) {
+            Some(redirect) => self
+                .fd_fact_mark_for_redirect(redirect)
+                .into_iter()
+                .find(|(fd, _)| *fd == 0)
+                .and_then(|(_, mark)| encode_fd_fact_mark(&mark)),
+            None => {
+                if cmd.heredoc.is_some() || cmd.here_string.is_some() {
+                    Some("A:prw".to_string())
+                } else {
+                    None
+                }
             }
         }
     }
@@ -626,6 +1706,75 @@ impl Executor {
                 &self.shell_state.env_vars,
             ));
         }
+        // rubash#1898: /dev/zero discards writes exactly like the
+        // null device; opens route to the same sink.
+        if crate::special_paths::is_zero_device(target) {
+            return OpenOptions::new().write(true).open(shell_path_to_windows(
+                "/dev/null",
+                &self.shell_state.env_vars,
+            ));
+        }
+        // rubash#1898: /dev/full ACCEPTS the open — GNU fails only
+        // the write (ENOSPC). The direct builtin faces route their
+        // flush through OutputTarget::FullDevice, which owns the
+        // write-error shape; the File returned here is the stand-in
+        // for the probe/bind/external contracts that need the open
+        // itself to succeed (their writes are absorbed — the
+        // documented residual of those faces).
+        if crate::special_paths::is_full_device(target) {
+            return Self::synthetic_proc_write_sink(false);
+        }
+        // rubash#1935: synthetic /proc content has no filesystem file
+        // behind the mapped path — without this step `> /proc/...`
+        // either failed ENOENT or created a phantom enclave file at
+        // the literal path. Ask the entry's write class instead: the
+        // 0444 class refuses the open EACCES; the 0644 class accepts
+        // it and the writes are absorbed (see
+        // synthetic_proc_write_sink).
+        if let Some(allowed) = crate::special_paths::synthetic_proc_write_allowed(target) {
+            if !allowed {
+                return Err(crate::posix_errors::path_error(
+                    target,
+                    io::Error::new(io::ErrorKind::PermissionDenied, "Permission denied"),
+                ));
+            }
+            return Self::synthetic_proc_write_sink(false);
+        }
+        // rubash#1963: an fd-alias spelling is an open of fd N's
+        // open file description (redir.c redir_open over the /dev/fd
+        // layer), never a filesystem create at the mapped literal
+        // path — the literal create made a phantom enclave file for
+        // a spelling GNU fails ENOENT when the fd is closed. Closed
+        // alias: ENOENT, pre-shaped like the synthetic arm above
+        // (this function's callers render the io message verbatim).
+        // Open alias: resolve through the endpoint like the append
+        // face (open_append_target's FdAlias arm); endpoint shapes
+        // that cannot take a handle dup fall back to the null sink —
+        // the routing walk owns exact delivery for fds 1/2 through
+        // its dup shortcut, and this function's contract is the
+        // open itself.
+        if let Some(fd) = crate::special_paths::fd_alias_target(target) {
+            if !super::redirection::dup_source_fd_open(
+                &self.fd_table,
+                fd,
+                &std::collections::HashMap::new(),
+            ) {
+                return Err(crate::posix_errors::path_error(
+                    target,
+                    io::Error::new(io::ErrorKind::NotFound, "No such file or directory"),
+                ));
+            }
+            return match self.open_output_fd_append(target) {
+                Ok(file) => Ok(file),
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                    OpenOptions::new().write(true).open(shell_path_to_windows(
+                        "/dev/null",
+                        &self.shell_state.env_vars,
+                    ))
+                }
+                Err(error) => Err(error),
+            };
+        }
         let target = self.redirect_output_path_target(target);
         let path = self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
         if !clobber
@@ -649,6 +1798,20 @@ impl Executor {
                         e
                     }
                 });
+        }
+        #[cfg(windows)]
+        if crate::winuxcmd_fifo::path_is_winuxcmd_fifo(&path) {
+            // rubash#1903: a WinuxCmd fifo marker is not a file to
+            // create/truncate — the open is the write side of the
+            // named-pipe rendezvous. The noclobber refusal above has
+            // already had its say (GNU refuses to clobber any existing
+            // target, fifos included); reaching here means the open is
+            // wanted, and it blocks until a reader arrives, like GNU's
+            // O_WRONLY fifo open (redir.c redir_open).
+            return crate::winuxcmd_fifo::open_winuxcmd_fifo_write(&path, &|| {
+                crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+            })
+            .map_err(|e| crate::posix_errors::path_error(&target, e));
         }
         if crate::executor::execution_misc::is_dos_device_path(&path) {
             // niubash#519 family: GNU redir_open's single open() succeeds
@@ -679,6 +1842,19 @@ impl Executor {
         target: &str,
         clobber: bool,
     ) -> io::Result<File> {
+        // rubash#1967: on a net target the prepare phase's connect is
+        // the same phantom as the FIFO's prepare open below — dropped
+        // unused while the bind phase connects again. Validate by
+        // resolution; the bind performs GNU's single open. Every
+        // caller drops the returned File, so the stand-in is inert.
+        if crate::special_paths::is_net_redirect_target(target) {
+            self.validate_net_redirect_target(target)
+                .map_err(|e| crate::posix_errors::path_error(target, e))?;
+            return File::open(shell_path_to_windows(
+                "/dev/null",
+                &self.shell_state.env_vars,
+            ));
+        }
         // rubash#1820: on a FIFO the prepare phase's create is a
         // semantic no-op (O_TRUNC/O_CREAT do nothing to a fifo) whose
         // blocking open consumes the rendezvous pairing the bind phase
@@ -686,8 +1862,10 @@ impl Executor {
         // Skip the physical open — the bind performs GNU's single
         // open — after the same write-access validation the create's
         // failure would have surfaced. Every caller drops the returned
-        // File, so the /dev/null stand-in is inert.
-        #[cfg(unix)]
+        // File, so the null-device stand-in is inert. rubash#1903: a
+        // WinuxCmd marker is a FIFO for this rule on Windows, with the
+        // marker probe standing in for access(2).
+        #[cfg(any(unix, windows))]
         {
             let path = self.session_path(shell_path_to_windows(
                 &self.redirect_output_path_target(target),
@@ -697,7 +1875,14 @@ impl Executor {
                 if let Some(error) = redirect_fifo_access_error(&path, true) {
                     return Err(crate::posix_errors::path_error(target, error));
                 }
-                return File::open("/dev/null");
+                #[cfg(windows)]
+                {
+                    return File::open("NUL");
+                }
+                #[cfg(not(windows))]
+                {
+                    return File::open("/dev/null");
+                }
             }
         }
         let file = self.create_redirect_output(target, clobber)?;
@@ -762,6 +1947,20 @@ impl Executor {
                     "coprocess file descriptor",
                 ));
             }
+            FdWriteEndpoint::FullDevice => {
+                // rubash#1898: an append-dup of a /dev/full binding —
+                // GNU's open succeeds and its writes fail ENOSPC; no
+                // handle reproduces that, so the append lands on the
+                // absorbed sink (a deep edge; the bound write faces
+                // themselves carry the exact ENOSPC shape).
+                return Self::synthetic_proc_write_sink(true);
+            }
+            FdWriteEndpoint::ProcContentWrite => {
+                // rubash#2042: an append-dup of a 0644-class synthetic
+                // /proc binding — same deep edge, same absorbed sink;
+                // the bound write faces carry the exact EINVAL shape.
+                return Self::synthetic_proc_write_sink(true);
+            }
             FdWriteEndpoint::File(_) => unreachable!("handled above"),
         };
         if is_null_device(&path.to_string_lossy()) {
@@ -774,6 +1973,106 @@ impl Executor {
                 ));
         }
         OpenOptions::new().create(true).append(true).open(path)
+    }
+
+    /// The one append opener every face asks (rubash#1964). GNU
+    /// redir.c r_appending_to performs ONE open of the word
+    /// (redir.c:702 redir_open, O_WRONLY|O_CREAT|O_APPEND) — for a
+    /// /dev/tcp word that open IS the connection, for /dev/fd/N it
+    /// resolves through the descriptor, for a synthetic /proc entry
+    /// it is the entry's write-class open. The append faces used to
+    /// raw-open the mapped literal path instead, so a net target was
+    /// unreachable through them (the mapped name is not a file) and
+    /// an append probe could fail shapes the real open serves — up
+    /// to preempting an external command whose own redirect handling
+    /// would have connected. Classify first; only plain filesystem
+    /// spellings reach the mapped append open. Errors are raw:
+    /// callers apply posix_errors::path_error.
+    pub(in crate::executor) fn open_append_target(&self, target: &str) -> io::Result<File> {
+        use crate::special_paths::SpecialPathClass;
+        match crate::special_paths::classify_special_path(target) {
+            SpecialPathClass::NetRedirect => self.open_net_redirect_raw(target),
+            SpecialPathClass::NullDevice => {
+                OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .open(shell_path_to_windows(
+                        "/dev/null",
+                        &self.shell_state.env_vars,
+                    ))
+            }
+            // rubash#1898: /dev/zero appends discard like the null
+            // device; /dev/full appends take the sink stand-in (the
+            // open succeeds — GNU fails only the write; the direct
+            // builtin faces own that shape via OutputTarget).
+            SpecialPathClass::ZeroDevice => {
+                OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .open(shell_path_to_windows(
+                        "/dev/null",
+                        &self.shell_state.env_vars,
+                    ))
+            }
+            SpecialPathClass::FullDevice => Self::synthetic_proc_write_sink(true),
+            SpecialPathClass::FdAlias(fd) => {
+                if !super::redirection::dup_source_fd_open(
+                    &self.fd_table,
+                    fd,
+                    &std::collections::HashMap::new(),
+                ) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "No such file or directory",
+                    ));
+                }
+                // The descriptor is open: the append open resolves
+                // through its endpoint. Endpoint shapes that cannot
+                // take an append dup (the process stdio family) fall
+                // back to the mapped device open, which is the shape
+                // those spellings have always taken.
+                match self.open_output_fd_append(target) {
+                    Ok(file) => Ok(file),
+                    Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                        crate::executor::execution_misc::open_redirect_append(&self.session_path(
+                            shell_path_to_windows(target, &self.shell_state.env_vars),
+                        ))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            SpecialPathClass::SyntheticProc => {
+                match crate::special_paths::synthetic_proc_write_allowed(target) {
+                    Some(false) => Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "Permission denied",
+                    )),
+                    Some(true) => Self::synthetic_proc_write_sink(true),
+                    None => {
+                        crate::executor::execution_misc::open_redirect_append(&self.session_path(
+                            shell_path_to_windows(target, &self.shell_state.env_vars),
+                        ))
+                    }
+                }
+            }
+            SpecialPathClass::SyntheticLink => {
+                match crate::special_paths::synthetic_link_target(
+                    target,
+                    Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
+                ) {
+                    Some(link) => crate::executor::execution_misc::open_redirect_append(
+                        &std::path::PathBuf::from(&link.native),
+                    ),
+                    None => Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "No such file or directory",
+                    )),
+                }
+            }
+            SpecialPathClass::Filesystem => crate::executor::execution_misc::open_redirect_append(
+                &self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars)),
+            ),
+        }
     }
 
     pub(in crate::executor) fn write_output_fd_redirect(
@@ -828,6 +2127,19 @@ impl Executor {
             }
             FdWriteEndpoint::File(file_fd) => {
                 crate::fd::write_all(file_fd.handle, output)?;
+            }
+            FdWriteEndpoint::FullDevice => {
+                // rubash#1898: every write to a /dev/full binding
+                // fails ENOSPC; the payload carries the strerror so
+                // the sh_chkwrite rendering is exact on every
+                // platform (Windows' error table has no ENOSPC).
+                return Err(io::Error::new(io::ErrorKind::Other, "No space left on device").into());
+            }
+            FdWriteEndpoint::ProcContentWrite => {
+                // rubash#2042: every write to a 0644-class synthetic
+                // /proc binding fails EINVAL (procfs content without
+                // a write handler), same payload contract.
+                return Err(io::Error::new(io::ErrorKind::Other, "Invalid argument").into());
             }
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 let mut file = OpenOptions::new().create(true).append(true).open(path)?;
@@ -969,6 +2281,14 @@ impl Executor {
             FdWriteEndpoint::CoprocStdin { .. } | FdWriteEndpoint::ProcessSubstitution { .. } => {
                 write_stderr_bytes(output)
             }
+            // rubash#1898: fd 2 bound to /dev/full — the diagnostic
+            // write fails ENOSPC and is lost, exactly GNU's outcome
+            // for a failing builtin_error write.
+            FdWriteEndpoint::FullDevice => Ok(()),
+            // rubash#2042: fd 2 bound to a 0644-class synthetic /proc
+            // entry — the diagnostic write fails EINVAL and is lost,
+            // the same GNU outcome for the failing stderr write.
+            FdWriteEndpoint::ProcContentWrite => Ok(()),
             FdWriteEndpoint::File(file_fd) => crate::fd::write_all(file_fd.handle, output),
         };
         let _ = result;
@@ -1055,6 +2375,19 @@ impl Executor {
             }
             FdWriteEndpoint::File(file_fd) => {
                 crate::fd::write_all(file_fd.handle, output)?;
+            }
+            FdWriteEndpoint::FullDevice => {
+                // rubash#1898: every write to a /dev/full binding
+                // fails ENOSPC; the payload carries the strerror so
+                // the sh_chkwrite rendering is exact on every
+                // platform (Windows' error table has no ENOSPC).
+                return Err(io::Error::new(io::ErrorKind::Other, "No space left on device").into());
+            }
+            FdWriteEndpoint::ProcContentWrite => {
+                // rubash#2042: every write to a 0644-class synthetic
+                // /proc binding fails EINVAL (procfs content without
+                // a write handler), same payload contract.
+                return Err(io::Error::new(io::ErrorKind::Other, "Invalid argument").into());
             }
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 let mut file = OpenOptions::new().create(true).append(true).open(path)?;
@@ -1177,6 +2510,13 @@ impl Executor {
                     option_name,
                     enabled,
                 );
+                if option_name == "history" && enabled {
+                    // builtins/set.def:210 routes the `history` option through
+                    // bash_set_history; the FLAG_ON arm re-arms recording and
+                    // loads $HISTFILE when nothing has been recorded this
+                    // session (niubash#660 resume semantics).
+                    self.reload_history_file_on_rearm();
+                }
                 if option_name == "ignoreeof" {
                     // set.def:388-399 set_ignoreeof binds/unbinds IGNOREEOF —
                     // mirror the env write into the typed owner expansion
@@ -1280,11 +2620,26 @@ impl Executor {
     /// the delimiter, `cat` sees only the remainder. FUNCTION_STDIN keeps a
     /// FUNCTION_STDIN_OFFSET cursor for shell reads; feeding a child process
     /// must hand over only the unread tail.
+    ///
+    /// rubash#2111: PRESENCE of the mirror is the binding, not non-emptiness.
+    /// Every staging site inserts the pair only to bind a stage's / call's
+    /// fd 0 (and the live-handle faces — streaming tail, live stage 0 —
+    /// REMOVE it, rubash#761/#1873), so a present-but-empty mirror is a
+    /// bound input at EOF, never an unbound fd 0. GNU execute_cmd.c
+    /// execute_pipeline + do_piping (execute_cmd.c:6373) replaces every
+    /// element's fd 0 with the inter-stage pipe; an element whose producer
+    /// wrote nothing reads EOF from that pipe, not the shell's own stdin.
+    /// Judging by emptiness let empty-payload stages fall through to the
+    /// inherited process handle (the INHERIT_PROCESS_STDIN arms, the
+    /// comsub / function-call / exec-image stdin ladders): `true | command
+    /// cat` with the shell's stdin on a file printed the file, and on a
+    /// terminal it blocked. This is the FUNCTION_STDIN twin of rubash#2103,
+    /// which applied the same presence ruling to fd-table slot 0; the one
+    /// consumer that had already patched around the emptiness judge
+    /// (read_inherited_process_stdin_to_string, rubash#436) states this
+    /// invariant verbatim.
     pub(in crate::executor) fn function_stdin_remaining(&self) -> Option<String> {
         let input = self.shell_state.env_vars.get(FUNCTION_STDIN)?;
-        if input.is_empty() {
-            return None;
-        }
         let offset = self
             .shell_state
             .env_vars
@@ -1393,8 +2748,16 @@ impl Executor {
                 }
                 if let Some(body) = redirect.body.clone() {
                     if let Some(word) = body.strip_prefix('\u{1d}') {
-                        let mut input = decode_ansi_c_quoted_word(word)
-                            .unwrap_or_else(|| self.expand_word(word));
+                        // rubash#1965: a STORAGE_WORD_PREFIX here-string body
+                        // is already-decoded text whose $'...' blanks carry
+                        // the ANSI_C_IFS_GUARD carrier. The canonical funnel
+                        // (expand_stored_here_string_word, the
+                        // expand_heredoc_redirect_text ladder) strips the
+                        // guard at this value boundary; decoding/expanding
+                        // here without the strip leaked U+E401 into the
+                        // delivered stream on the pipeline staging route.
+                        // Route through the funnel function itself.
+                        let mut input = self.expand_stored_here_string_word(word);
                         input.push('\n');
                         return Some(input);
                     }
@@ -1490,8 +2853,16 @@ impl Executor {
                     }
                     if let Some(body) = redirect.body.as_deref() {
                         if let Some(word) = body.strip_prefix('\u{1d}') {
-                            let mut input = decode_ansi_c_quoted_word(word)
-                                .unwrap_or_else(|| self.expand_word(word));
+                            // rubash#1965: the same storage arm as the mut
+                            // ladder above — its decode-or-expand result must
+                            // pass the value-boundary ANSI_C_IFS_GUARD strip
+                            // the canonical funnel applies
+                            // (expand_stored_here_string_word, &mut-only, so
+                            // this &self ladder applies the identical strip).
+                            let mut input = crate::executor::markers::strip_ansi_c_ifs_guard(
+                                &decode_ansi_c_quoted_word(word)
+                                    .unwrap_or_else(|| self.expand_word(word)),
+                            );
                             input.push('\n');
                             return Some(input);
                         }
@@ -1593,7 +2964,14 @@ impl Executor {
                     // must stream 0xff through). Read bytes and re-encode to
                     // shell text; callers decode on the way out.
                     let mut buf = Vec::new();
-                    let _ = file.read_to_end(&mut buf);
+                    if file.read_to_end(&mut buf).is_err() && buf.is_empty() {
+                        // rubash#2101: a hard read error is not an
+                        // empty stream — a dup of a directory fd reads
+                        // EISDIR (GNU's reader reports it and fails).
+                        // Decline the text channel so the caller's
+                        // descriptor path surfaces the failure.
+                        return None;
+                    }
                     return Some(crate::executor::substitution_metadata::bytes_to_shell_text(
                         &buf,
                     ));
@@ -1657,6 +3035,28 @@ impl Executor {
                     &bytes,
                 ));
             }
+            // rubash#1903: on Windows a WinuxCmd fifo marker IS a regular
+            // file on disk, so the plain File::open below succeeds
+            // instantly and the slurp returns the 7 marker bytes — no
+            // rendezvous server is ever created and the writer side
+            // waits forever for a peer (the #2014 CI hang: `cat < f`
+            // and `read x < g` shapes). The text channel's one open of
+            // a marker is the read side of the named-pipe rendezvous,
+            // resolved exactly like open_input_redirect's consume arm
+            // (GNU's single open, redir.c do_redirection_internal).
+            #[cfg(windows)]
+            {
+                let win_path = self.session_path(crate::executor::path::windows_operand_file_path(
+                    shell_path_to_windows(&target, &self.shell_state.env_vars),
+                    &self.shell_state.env_vars,
+                ));
+                if let Some(result) =
+                    crate::winuxcmd_fifo::slurp_marker_bytes(&win_path, &self.shell_state.env_vars)
+                {
+                    let buf = result.ok()?;
+                    return String::from_utf8(buf).ok();
+                }
+            }
             let mut file = File::open(&path).ok()?;
             {
                 #[cfg(unix)]
@@ -1701,7 +3101,15 @@ impl Executor {
             if let Ok(mut file) = self.open_fd_read_endpoint(0, "fd 0") {
                 use std::io::Read as _;
                 let mut buf = Vec::new();
-                let _ = file.read_to_end(&mut buf);
+                if file.read_to_end(&mut buf).is_err() && buf.is_empty() {
+                    // rubash#2101: same decline as the dup arm above —
+                    // an exec-bound directory's EISDIR is not an empty
+                    // stream. Returning None (not the ambient buffer
+                    // below) keeps the endpoint's shadow over
+                    // FUNCTION_STDIN; descriptor-path consumers then
+                    // surface the read failure themselves.
+                    return None;
+                }
                 return Some(crate::executor::substitution_metadata::bytes_to_shell_text(
                     &buf,
                 ));
@@ -1752,6 +3160,55 @@ impl Executor {
     }
 }
 
+/// rubash#2131: one descriptor's fd-alias fact as the sync states
+/// it — the same three shapes the entries loop writes (a referent
+/// target, a device-class access mark, the closed tombstone), plus
+/// the two judgments a not-yet-bound redirect can require: copy
+/// another descriptor's fact (a dup — GNU's dup2 hands over the
+/// source's open file description) and leave the standing fact alone
+/// (shapes the mark vocabulary cannot express, e.g. a net socket).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::executor) enum FdFactMark {
+    Target(String),
+    Access(String),
+    Closed,
+    DupOf(u32),
+    Unchanged,
+}
+
+/// Decompose an engine-minted access mark into the entries loop's
+/// (class, can_r, can_w) variables. The mark's first byte is a class
+/// letter the sync itself minted (the evaluator's alphabet
+/// p/c/d/n/f/s — ASCII by construction); it is matched as a BYTE so
+/// no byte->char widening is involved
+/// (scripts/check-utf8-boundary-hygiene.sh). An empty or unknown
+/// mark decomposes to the pipe default, the historical ambient
+/// fallback.
+fn access_mark_parts(mark: &str) -> (char, bool, bool) {
+    let class = match mark.as_bytes().first() {
+        Some(b'c') => 'c',
+        Some(b'd') => 'd',
+        Some(b'n') => 'n',
+        Some(b's') => 's',
+        Some(b'f') => 'f',
+        _ => 'p',
+    };
+    (class, mark.contains('r'), mark.contains('w'))
+}
+
+/// The FD0_MIRROR_FACT encoding of a fact (`T:` target, `A:` access
+/// mark — empty after the colon is the closed tombstone, `D:` dup
+/// source); None for `Unchanged`, which records no key.
+pub(in crate::executor) fn encode_fd_fact_mark(mark: &FdFactMark) -> Option<String> {
+    match mark {
+        FdFactMark::Target(target) => Some(format!("T:{target}")),
+        FdFactMark::Access(access) => Some(format!("A:{access}")),
+        FdFactMark::Closed => Some("A:".to_string()),
+        FdFactMark::DupOf(source) => Some(format!("D:{source}")),
+        FdFactMark::Unchanged => None,
+    }
+}
+
 /// The fd-0 input redirect that wins under GNU left-to-right application
 /// (redir.c do_redirections): the last cmd.redirects entry targeting fd 0
 /// whose kind supplies stdin (`<`, `<&`, `<>`, `<&-`, `<<`, `<<<`).
@@ -1777,6 +3234,62 @@ pub(in crate::executor) fn fd0_stdin_redirect_winner(
         .map(|redirect| redirect.kind.clone())
 }
 
+/// rubash#2131: the winning fd-0 input redirect itself (the redirect
+/// `fd0_stdin_redirect_winner` selects), for callers that need its
+/// target, not just its kind. A `{var}` redirect binds no fixed
+/// descriptor and never wins here.
+pub(in crate::executor) fn fd0_stdin_redirect_winner_redirect(
+    cmd: &CommandNode,
+) -> Option<&crate::parser::Redirect> {
+    cmd.redirects.iter().rev().find(|redirect| {
+        redirect.fd_var.is_none()
+            && redirect.fd.unwrap_or(0) == 0
+            && matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Input
+                    | crate::parser::RedirectKind::DuplicateInput
+                    | crate::parser::RedirectKind::ReadWrite
+                    | crate::parser::RedirectKind::CloseInput
+                    | crate::parser::RedirectKind::HereDoc
+                    | crate::parser::RedirectKind::HereString
+            )
+    })
+}
+
+/// rubash#1902: whether an fd-0 binding that stages the FUNCTION_STDIN
+/// mirror (bind_command_fd0_input's text branch, the flat-subshell
+/// region feed in ast_exec) leaves the pipeline-stage pipe fact
+/// (FD0_STAGE_PIPE) standing. The mirror rebinds fd 0 to the command's
+/// OWN input source, superseding the inter-stage pipe the fact
+/// describes — GNU applies the element's redirections after do_piping
+/// (execute_cmd.c:2620). The fact survives only when that source is
+/// itself a pipe in GNU: heredocs and here-strings are fed through
+/// pipes (redir.c here_document_to_fd), and a process-substitution
+/// target is a pipe whatever its transport (streamed endpoint or
+/// collected text). No fd-0 winner in the redirects list means the
+/// staged text came from the node's heredoc fields — pipes again.
+pub(in crate::executor) fn fd0_mirror_binding_keeps_pipe_fact(cmd: &CommandNode) -> bool {
+    let winner = cmd.redirects.iter().rev().find(|redirect| {
+        redirect.fd.unwrap_or(0) == 0
+            && matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Input
+                    | crate::parser::RedirectKind::DuplicateInput
+                    | crate::parser::RedirectKind::ReadWrite
+                    | crate::parser::RedirectKind::CloseInput
+                    | crate::parser::RedirectKind::HereDoc
+                    | crate::parser::RedirectKind::HereString
+            )
+    });
+    match winner {
+        None => true,
+        Some(redirect) => match redirect.kind {
+            crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => true,
+            _ => redirect.target.starts_with("<("),
+        },
+    }
+}
+
 pub(crate) fn write_stdout_bytes(output: &[u8]) -> io::Result<()> {
     // Builtins that write directly to the process stdout (set -o, declare,
     // alias, ...) must still be captured by command substitution and
@@ -1786,6 +3299,27 @@ pub(crate) fn write_stdout_bytes(output: &[u8]) -> io::Result<()> {
         return stdout_capture_write(output);
     }
     write_real_stdout_uncaptured(output)
+}
+
+/// Flush the process stdio stdout buffer (rubash#2174). The uncaptured
+/// write path above ends at the Rust std stdout handle, whose internal
+/// line buffer keeps a block pending when it carries no newline; bytes
+/// in that buffer belong to the REAL process stdout by construction
+/// (capture writes never enter it). GNU never lets such bytes linger
+/// across a command boundary (execute_cmd.c:5648
+/// execute_builtin_or_function: fflush (stdout) after each builtin or
+/// function, before undoing redirections), because any foreign writer
+/// on the shared fd — an external command, a pipeline stage, a
+/// process-substitution consumer, a background child — writes straight
+/// to the fd and would overtake the pending bytes. The caller
+/// (execute_materialized_command) invokes this at the completion of
+/// every simple command, which keeps the invariant that the buffer is
+/// empty at every command boundary. With an empty buffer this is a
+/// no-op check (no syscall); stderr needs no twin — both of its write
+/// arms (write_stderr_bytes) write through unbuffered handles.
+pub(crate) fn flush_process_stdout() {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
 }
 
 /// Write to the REAL process stdout object, ignoring any active thread-local
@@ -2188,12 +3722,15 @@ pub(in crate::executor) fn write_pipeline_stream(
     }
 }
 
-/// True when `path` names an existing FIFO (unix). A FIFO open carries
+/// True when `path` names an existing FIFO. A FIFO open carries
 /// rendezvous semantics — a blocking open returns only when the peer
 /// side opens — so every throwaway probe/prepare open of a FIFO
 /// consumes a pairing the one real open needs (GNU opens a redirect
 /// target exactly once: redir.c do_redirection_internal). Windows has
-/// no filesystem FIFOs.
+/// no filesystem FIFO node type, but a WinuxCmd FIFO marker file
+/// (rubash#1903) carries the same rendezvous contract through its
+/// named-pipe bridge, so the marker answers true here and every
+/// carve-out keyed on this predicate covers it.
 pub(in crate::executor) fn redirect_path_is_fifo(path: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
@@ -2202,7 +3739,11 @@ pub(in crate::executor) fn redirect_path_is_fifo(path: &std::path::Path) -> bool
             .map(|meta| meta.file_type().is_fifo())
             .unwrap_or(false);
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        return crate::winuxcmd_fifo::path_is_winuxcmd_fifo(path);
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         false
@@ -2247,6 +3788,17 @@ pub(in crate::executor) fn redirect_fifo_access_error(
     }
 }
 
+/// Windows twin of the access(2) FIFO probe (rubash#1903): a marker
+/// file validates by plain file opens, which never touch the named
+/// pipe the rendezvous lives in.
+#[cfg(windows)]
+pub(in crate::executor) fn redirect_fifo_access_error(
+    path: &std::path::Path,
+    write: bool,
+) -> Option<std::io::Error> {
+    crate::winuxcmd_fifo::marker_access_error(path, write)
+}
+
 /// The setup walk's output probe (create/truncate side effect plus
 /// error surfacing) with the rubash#1820 FIFO carve-out: on a FIFO the
 /// create is a no-op whose blocking open consumes the bind open's
@@ -2257,7 +3809,18 @@ pub(in crate::executor) fn probe_output_redirect(
     target: &str,
     clobber: bool,
 ) -> std::io::Result<()> {
-    #[cfg(unix)]
+    // rubash#1967: a net target's probe must not connect — the probe
+    // connection is dropped unwritten while the bind's own open
+    // connects again, so the peer sees two connections where GNU's
+    // do_redirections (redir.c do_redirection_internal) opens one.
+    // Validate by resolution; the one real open performs the
+    // connect and surfaces a refusal with the same diagnostic.
+    if crate::special_paths::is_net_redirect_target(target) {
+        return executor
+            .validate_net_redirect_target(target)
+            .map_err(|e| crate::posix_errors::path_error(target, e));
+    }
+    #[cfg(any(unix, windows))]
     {
         let path = executor.session_path(shell_path_to_windows(
             &executor.redirect_output_path_target(target),
@@ -2273,12 +3836,23 @@ pub(in crate::executor) fn probe_output_redirect(
     executor.create_redirect_output(target, clobber).map(|_| ())
 }
 
-/// Append-arm twin of [`probe_output_redirect`].
+/// Append-arm twin of [`probe_output_redirect`]. The open itself
+/// classifies through the registry (Executor::open_append_target,
+/// rubash#1964): the probe IS an append open, so it must succeed and
+/// fail for exactly the shapes the bind's open does — a net target
+/// connects, a synthetic /proc entry answers by write class, a
+/// closed fd alias fails ENOENT.
 pub(in crate::executor) fn probe_output_redirect_append(
     executor: &Executor,
     target: &str,
 ) -> std::io::Result<()> {
-    #[cfg(unix)]
+    // rubash#1967: net arm of the same carve-out as probe_output_redirect.
+    if crate::special_paths::is_net_redirect_target(target) {
+        return executor
+            .validate_net_redirect_target(target)
+            .map_err(|e| crate::posix_errors::path_error(target, e));
+    }
+    #[cfg(any(unix, windows))]
     {
         let path = executor.session_path(shell_path_to_windows(
             target,
@@ -2291,11 +3865,10 @@ pub(in crate::executor) fn probe_output_redirect_append(
             return Ok(());
         }
     }
-    crate::executor::execution_misc::open_redirect_append(&executor.session_path(
-        shell_path_to_windows(target, &executor.shell_state.env_vars),
-    ))
-    .map(|_| ())
-    .map_err(|e| crate::posix_errors::path_error(target, e))
+    executor
+        .open_append_target(target)
+        .map(|_| ())
+        .map_err(|e| crate::posix_errors::path_error(target, e))
 }
 
 /// Feed a spawned child's stdin pipe with the shell's virtual-stdin

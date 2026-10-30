@@ -76,11 +76,24 @@ impl Executor {
         // convert it — flush it here so the mark can never leak into
         // the next input unit (whose first line must run normally,
         // seeing only the recorded $?=130).
+        //
+        // rubash#1997: the take must be unconditional, not Ok-gated.
+        // When this unit itself ends in Err — the common case being
+        // the post-command boundary poll adjudicating the shell's
+        // own unconsumed SIGINT delivery into ExitCode(130) AFTER
+        // the wait already set the mark — an Ok-only flush left the
+        // mark standing, and the next input unit's first boundary
+        // converted it, silently discarding that unit's first line
+        // and leaving $? at 130 for the line after. GNU's
+        // ADDINTERRUPT throw is consumed by the list that was
+        // executing when the interrupt landed (eval.c:111 reader
+        // DISCARD); it can never legitimately reach a later line.
+        // On the Err path the unit already ends with the
+        // interrupt's own verdict, so dropping the mark loses
+        // nothing; on the Ok path it converts as before.
+        let fg_sigint_unwind = std::mem::take(&mut self.fg_sigint_unwind);
         let result = match result {
-            Ok(()) if self.fg_sigint_unwind => {
-                self.fg_sigint_unwind = false;
-                Err(ExecuteError::SigintUnwind)
-            }
+            Ok(()) if fg_sigint_unwind => Err(ExecuteError::SigintUnwind),
             other => other,
         };
         // rubash#423: GNU has no per-run cwd undo. `cd` runs chdir(2) in the
@@ -438,6 +451,18 @@ impl Executor {
                     && !$command.inverted
                     && $command.and_or().is_none()
                 {
+                    // DE-06 (design 9.3; PLAN row 12): the parent
+                    // frame's errexit adjudication of the dead
+                    // region's status — park a selected `set -e`
+                    // filter here, in the restored parent state,
+                    // before the exit path runs. (The wait-side
+                    // ERR fire above has already run, so the GNU
+                    // trap-before-exit order holds.)
+                    self.debugger_note_exception_site(
+                        crate::debugger::ExceptionKind::Errexit,
+                        self.exit_code,
+                        None,
+                    )?;
                     return Err(ExecuteError::ExitCode(self.exit_code));
                 }
                 // Resume past the region's closing command — the subshell
@@ -487,6 +512,9 @@ impl Executor {
             // error never suppresses the ERR trap this command earns by
             // failing (GNU run_error_trap is per execute_simple_command).
             self.command_expansion_failed.set(false);
+            // rubash#2117: same one-command lifetime — a dispatch-level
+            // ERR-trap fire (and POSIX rescue) belongs to one command.
+            self.err_trap_fired_at_dispatch.set(false);
             // rubash#1164: sample was_error_trap for THIS command before it
             // executes (execute_cmd.c:914) — adjudication below and inside
             // dispatch consults the sample, so a trap this command installs
@@ -788,6 +816,9 @@ impl Executor {
                 self.evalerror_exit_toomany_pending.set(false);
                 self.evalerror_line.set(None);
             }
+            // Resolved once here and reused by the `-n` gates below (the
+            // dispatch branch already needed this lookup per command).
+            let noexec = self.noexec_enabled();
             if self.evalerror_exec_depth.get() == 1 {
                 // rubash#1494: one tick of the notification-lag clock per
                 // top-level reader command; the refresh below applies
@@ -802,11 +833,16 @@ impl Executor {
                 // escapes under (GNU reads newline-terminated lists one at
                 // a time; the first command of a line fixes the read-time
                 // locale for every word the reader pulls in that list).
+                // rubash#353's record feeds `$'...'` re-derivation at
+                // EXPANSION time; `-n` never expands (and noexec is sticky),
+                // so the per-command insert is dead state there.
                 if let Some(line) = command.line {
-                    self.line_lex_locales
-                        .borrow_mut()
-                        .entry(line)
-                        .or_insert_with(crate::locale::locale_name);
+                    if !noexec {
+                        self.line_lex_locales
+                            .borrow_mut()
+                            .entry(line)
+                            .or_insert_with(crate::locale::locale_name);
+                    }
                 }
                 // GNU eval.c:181 (reader_loop/parse_and_execute): stdin_redir
                 // is cleared before each top-level command, so a redirected
@@ -828,14 +864,25 @@ impl Executor {
                 // :2450) — <name> and <name>_PID unbind unconditionally, so
                 // `cat <&${A[0]}` for a reaped coproc reports `ambiguous
                 // redirect` (rubash#1023).
-                self.refresh_background_jobs()?;
+                //
+                // `-n`: GNU eval.c parse_command runs only
+                // run_pending_traps(); notify_and_cleanup (eval.c:236-238) is
+                // interactive-reader-only and reaping lives in the
+                // execute_command wait paths, so the trap dispatch below
+                // stays and these two do not run.
+                if !noexec {
+                    self.refresh_background_jobs()?;
+                }
                 self.run_pending_signal_traps()?;
                 // GNU eval.c:355 runs notify_and_cleanup after each top-level
                 // command: children killed by a signal get their stderr
                 // notice here (rubash#229, jobs.c:4625 notify_of_job_status).
                 // At this point __RUBASH_CURRENT_LINE is still the previous
                 // command's line, matching GNU's line_number at notify time.
-                self.report_pending_signal_notices()?;
+                // (no notice point without execute_command)
+                if !noexec {
+                    self.report_pending_signal_notices()?;
+                }
             }
             let _t_chain = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_CHAIN);
             // GNU `line_number` advances only while the reader parses each
@@ -847,7 +894,7 @@ impl Executor {
                 self.ambient_line.set(command.end_line.or(command.line));
             }
             self.set_current_line(command);
-            if self.noexec_enabled() {
+            if noexec {
                 // GNU shell.c/parse.y: `-n` (noexec) skips execution but the
                 // reader still parses each command — parse-time diagnostics
                 // (heredoc EOF warnings, syntax errors, unclosed compounds)
@@ -974,6 +1021,39 @@ impl Executor {
                             // stream's production schedule does not
                             // describe it (restored at the boundary).
                             self.timed_stdin = None;
+                            // rubash#1902: the same supersede as
+                            // bind_command_fd0_input's mirror branch —
+                            // the fed text is the region's own input
+                            // source, not an enclosing stage pipe,
+                            // unless the source is itself a pipe (the
+                            // wholesale boundary restore reverts this
+                            // with the rest of the state).
+                            if !super::shell_options::fd0_mirror_binding_keeps_pipe_fact(c) {
+                                self.shell_state.env_vars.remove(FD0_STAGE_PIPE);
+                            }
+                            // rubash#2131: the fed text is a staged
+                            // mirror with no fd-table entry — record
+                            // its source's fd-0 fact beside it, the
+                            // same statement bind_command_fd0_input's
+                            // mirror branch makes (reverted by the
+                            // wholesale boundary restore like the rest
+                            // of the fed state). A node with no fd-0
+                            // winner staged the enclosing channel's
+                            // remainder and leaves the key alone.
+                            if let Some(fact) = self.fd0_mirror_fact_value(c) {
+                                self.shell_state
+                                    .env_vars
+                                    .insert(FD0_MIRROR_FACT.to_string(), fact);
+                            }
+                            // rubash#2170: the same displacement as
+                            // bind_command_fd0_input's mirror branch —
+                            // the fed text is the region's fd-0 binding,
+                            // so a superseded fd-table entry (an
+                            // `exec 0<file` File binding) must not keep
+                            // governing the region's readers. The
+                            // region's cloned fd table is restored
+                            // wholesale at the boundary.
+                            self.fd_table.entries.remove(&0);
                         }
                         break;
                     }
@@ -1045,10 +1125,18 @@ impl Executor {
             // session's scope is the attachment itself, not the
             // functrace inheritance the trap path checks.
             let session_here = self.debugger_session_here();
+            // #682: a DEBUG fire (or debugger seam arrival) runs arbitrary
+            // action commands that leave their own line stamps behind —
+            // run_debug_trap does not restore __RUBASH_CURRENT_LINE — so the
+            // funnel's post-trap restamp is GNU's :936 SET_LINE_NUMBER after
+            // the action and must not be skipped by the stamped-by-caller
+            // contract below.
+            let mut line_stamp_dirty = false;
             if !skips_debug_trap
                 && ((debug_trap_active && self.debug_trap_in_scope()) || session_here)
                 && !self.debug_trap_running
             {
+                line_stamp_dirty = true;
                 // Bash exposes the about-to-run command's line via LINENO
                 // inside the DEBUG trap action (dbg-support2.tests).
                 self.set_current_line(command);
@@ -1396,6 +1484,29 @@ impl Executor {
                 for (started, posix_format) in queued_time_reports {
                     self.print_time_shell(posix_format, started);
                 }
+                // rubash#2117: a POSIX special-builtin failure inside
+                // the timed command was converted by the dispatch gate
+                // into a completed status (the gate's
+                // posix_special_status_converted mark) so the report
+                // above still prints; GNU adjudicates that exit in
+                // execute_time_command's caller, after print_time_info
+                // and after the ERR trap — whose own commands reset
+                // special_builtin_failed at execute_cmd.c:4480, so the
+                // flag is re-read here: a benign trap body rescued the
+                // exit exactly as in the untimed gate, a re-armed flag
+                // (or no trap) still jumps. Tested contexts exempt it
+                // like the errexit jump below (the gate itself only
+                // converts in an active context).
+                if self.posix_special_status_converted.replace(false)
+                    && self.special_builtin_failed.get()
+                    && self.errexit_is_active()
+                    && self.suppress_errexit == 0
+                    && !command.inverted
+                    && !time_command.inverted
+                    && command.and_or().is_none()
+                {
+                    return Err(ExecuteError::ExitCode(self.exit_code));
+                }
                 if self.errexit_enabled()
                     && self.errexit_is_active()
                     && self.suppress_errexit == 0
@@ -1404,6 +1515,15 @@ impl Executor {
                     && !time_command.inverted
                     && command.and_or().is_none()
                 {
+                    // DE-06 (design 9.3; PLAN row 12): the errexit
+                    // decision for a timed command is made here —
+                    // park a selected `set -e` filter before the
+                    // exit path runs.
+                    self.debugger_note_exception_site(
+                        crate::debugger::ExceptionKind::Errexit,
+                        self.exit_code,
+                        None,
+                    )?;
                     return Err(ExecuteError::ExitCode(self.exit_code));
                 }
                 if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
@@ -1627,6 +1747,14 @@ impl Executor {
                     && !command.inverted
                     && command.and_or().is_none()
                 {
+                    // DE-06 (design 9.3; PLAN row 12): the errexit
+                    // decision — park a selected `set -e` filter
+                    // before the exit path runs.
+                    self.debugger_note_exception_site(
+                        crate::debugger::ExceptionKind::Errexit,
+                        self.exit_code,
+                        None,
+                    )?;
                     return Err(ExecuteError::ExitCode(self.exit_code));
                 }
                 if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
@@ -1804,6 +1932,14 @@ impl Executor {
                         && !command.inverted
                         && command.and_or().is_none()
                     {
+                        // DE-06 (design 9.3; PLAN row 12): the
+                        // errexit decision — park a selected
+                        // `set -e` filter before the exit path runs.
+                        self.debugger_note_exception_site(
+                            crate::debugger::ExceptionKind::Errexit,
+                            self.exit_code,
+                            None,
+                        )?;
                         return Err(ExecuteError::ExitCode(self.exit_code));
                     }
                     close_subshell_region_if_ended!(command);
@@ -1898,6 +2034,15 @@ impl Executor {
             }
 
             drop(_t_chain);
+            // #682 stamped-by-caller contract: this loop's set_current_line
+            // above already stamped the node the funnel is about to dispatch
+            // (nothing between them stamped a different line unless a DEBUG
+            // fire / seam ran — tracked by line_stamp_dirty), so arm the
+            // funnel's skip. Consumed on entry, and suppressed while the
+            // funnel's trap-scope line branch would stamp a different value.
+            if !line_stamp_dirty {
+                self.pre_stamped_line.set(true);
+            }
             // rubash#1525: the absorbed-write marker belongs to one
             // command execution; a flag left by a command whose own
             // write site was skipped (a pipeline stage) must not
@@ -1994,6 +2139,14 @@ impl Executor {
                         && !command.inverted
                         && command.and_or().is_none()
                     {
+                        // DE-06 (design 9.3; PLAN row 12): the
+                        // errexit decision — park a selected
+                        // `set -e` filter before the exit path runs.
+                        self.debugger_note_exception_site(
+                            crate::debugger::ExceptionKind::Errexit,
+                            self.exit_code,
+                            None,
+                        )?;
                         return Err(ExecuteError::ExitCode(self.exit_code));
                     }
                     // GNU eval.c:111 (reader_loop case DISCARD): the rest of
@@ -2046,6 +2199,14 @@ impl Executor {
                         && !command.inverted
                         && command.and_or().is_none()
                     {
+                        // DE-06 (design 9.3; PLAN row 12): the
+                        // errexit decision — park a selected
+                        // `set -e` filter before the exit path runs.
+                        self.debugger_note_exception_site(
+                            crate::debugger::ExceptionKind::Errexit,
+                            1,
+                            None,
+                        )?;
                         return Err(ExecuteError::ExitCode(1));
                     }
                 }
@@ -2213,6 +2374,14 @@ impl Executor {
                 && !command.inverted
                 && command.and_or().is_none()
             {
+                // DE-06 (design 9.3; PLAN row 12): the errexit
+                // decision — park a selected `set -e` filter
+                // before the exit path runs.
+                self.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::Errexit,
+                    self.exit_code,
+                    None,
+                )?;
                 return Err(ExecuteError::ExitCode(self.exit_code));
             }
 

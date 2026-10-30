@@ -68,7 +68,7 @@ fn run_source_groups(
     let raw_lines: Vec<&str> = source.split_inclusive('\n').collect();
     let mut index = 0usize;
     let mut ran_any = false;
-    while let Some((pending, start_line, _group_lines, feeder_tokens)) =
+    while let Some((pending, start_line, _group_lines, feeder_tokens, gather_info)) =
         crate::script_driver::read_next_source_group(executor, &raw_lines, &mut index)
     {
         let line_offset = start_line.saturating_sub(1);
@@ -81,7 +81,44 @@ fn run_source_groups(
         // A group that ran to EOF while still incomplete (unclosed quote,
         // unterminated compound) needs run_source_with_line_offset's
         // unclosed-input diagnostics and prefix execution.
-        if !index_complete_group(&exec_text, parse_posix) {
+        //
+        // rubash#1940: the completeness verdict is only re-derived here
+        // when the gatherer did not already certify THIS text complete.
+        // read_next_source_group returns feeder tokens only when its loop
+        // broke at a complete group (see its doc:
+        // `broke_complete && !extglob_toggled`), and in the non-alias arm
+        // expand_group_aliases is the identity, so `exec_text` below is
+        // byte-identical to the certified `pending`. Re-running
+        // index_complete_group then re-scans the whole group text twice
+        // more (has_unclosed_input_syntax_posix +
+        // stdin_source_needs_more_posix, the latter with a full re-lex)
+        // for a verdict the reader already reached incrementally — on
+        // nvm.sh's single 165 KB brace group that re-check cost ~3.7 s of
+        // the ~5.2 s source run (debug, instrumented). GNU's
+        // parse_and_execute (builtins/evalstring.c:348) trusts the
+        // reader's own complete-command boundary the same way; there is
+        // no second whole-text scan.
+        //
+        // rubash#1961 extends the same trust two steps further, along
+        // the gather's own GroupGatherInfo: (a) an alias-live group that
+        // broke complete on the gather's incremental machines over the
+        // streaming expansion is certified for the caller's batch
+        // expansion when the two texts are byte-identical
+        // (`certified_expanded`) — the expansion the machines judged IS
+        // this text, so the re-check would re-derive a known verdict;
+        // (b) a group the gather loop exhausted at end of input without
+        // a complete break is known-incomplete from the collector's own
+        // state (`known_incomplete`), so the re-check — which on the
+        // truncated-nvm tail cost ~3 s — is skipped for the routing
+        // decision it could only confirm. Groups with neither (extglob
+        // toggle, parked-fallback breaks) keep the exact re-check and
+        // routing they had.
+        let gatherer_certified = feeder_tokens.is_some()
+            && (exec_text == pre_alias_text
+                || gather_info.certified_expanded.as_deref() == Some(exec_text.as_str()));
+        let group_complete = gatherer_certified
+            || (!gather_info.known_incomplete && index_complete_group(&exec_text, parse_posix));
+        if !group_complete {
             // The incomplete group's text is still the output of
             // expand_group_aliases above — aliases already ran at stream
             // level (parse.y:3249 alias_expand_token fires while reading,
@@ -139,6 +176,17 @@ fn run_source_groups(
             ran_any = true;
             let parse_error = executor.take_parse_error();
             if parse_error {
+                // DE-06 (design 9.3; PLAN row 12): the parse
+                // error aborts this sourced file — a selected
+                // `parse-error` filter reports the site and
+                // parks the session before the abort completes.
+                executor.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::ParseError,
+                    2,
+                    executor.shell_state.bash_source_stack.first().map(|file| {
+                        crate::debugger::SourceLocation::new(file.clone(), start_line as u32)
+                    }),
+                )?;
                 executor.set_exit_code(status);
                 // evalstring.c:585-601: a syntax error aborts the remaining
                 // sourced text as an ORDINARY failure — no jump_to_top_level.
@@ -154,15 +202,32 @@ fn run_source_groups(
                 // Err out of run_source_groups, so a jump pending at this
                 // point can only be the parse abort's.
                 executor.take_exit_jump_pending();
+                // rubash#2126: the "ordinary failure" reading above is
+                // only half of evalstring.c:585-601 — the same passage's
+                // parse branch (588-596) DOES jump_to_top_level
+                // (ERREXIT) with EX_BADUSAGE when the shell is
+                // non-interactive, posixly_correct, not under `command`,
+                // and the most recent dispatch is this source/eval
+                // itself (this_shell_builtin). Convert under exactly
+                // that gate; every other shape keeps the abort-as-
+                // ordinary-failure behavior.
+                if executor.evalstring_syntax_error_exits() {
+                    executor.set_exit_code(2);
+                    return Err(ExecuteError::ExitCode(2));
+                }
                 return Ok(());
             }
             continue;
         }
         // perf10: reuse the gather feeder's committed tokens when the gather
         // certified them equivalent to a fresh whole-group re-lex
-        // (read_next_source_group's doc: non-alias arm — exec_text is the
-        // pending verbatim there —, complete break, no effective extglob
-        // toggle). GNU anchor: parse.y:3557 read_token streams input once
+        // (read_next_source_group's doc: complete break, no effective
+        // extglob toggle, and the feeder's text is this exec_text — by
+        // identity in the non-alias arm, by the #1961 byte-compare
+        // certification in the alias-live arm; `gatherer_certified`
+        // above is exactly that conjunction, so the reuse is gated on
+        // it and any certification mismatch falls back to the fresh
+        // re-lex). GNU anchor: parse.y:3557 read_token streams input once
         // and never re-tokenizes consumed text; the previous unconditional
         // `tokenize_with_initial_posix(&exec_text, ...)` re-read every byte
         // the feeder had just scanned (perf7: ~1 s of `. ./nvm.sh`, huq
@@ -173,7 +238,7 @@ fn run_source_groups(
         // are identical because both streams are produced by the same
         // feeder code from the same pushes.
         let mut tokens = match feeder_tokens {
-            Some(mut tokens) => {
+            Some(mut tokens) if gatherer_certified => {
                 if tokens
                     .last()
                     .is_some_and(|token| token.kind == crate::lexer::TokenKind::Semicolon)
@@ -182,7 +247,7 @@ fn run_source_groups(
                 }
                 tokens
             }
-            None => crate::lexer::tokenize_with_initial_posix(&exec_text, parse_posix),
+            _ => crate::lexer::tokenize_with_initial_posix(&exec_text, parse_posix),
         };
         if let Some(line) = crate::lexer::heredoc_overflow_line() {
             executor.mark_parse_error();
@@ -273,18 +338,53 @@ fn run_source_groups(
         match group_result {
             Ok(()) if !parse_error => {}
             Ok(()) => {
+                // DE-06 (design 9.3; PLAN row 12): the parse
+                // error aborts this sourced file — a selected
+                // `parse-error` filter reports the site and
+                // parks the session before the abort completes.
+                executor.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::ParseError,
+                    2,
+                    executor.shell_state.bash_source_stack.first().map(|file| {
+                        crate::debugger::SourceLocation::new(file.clone(), start_line as u32)
+                    }),
+                )?;
                 // GNU evalstring.c:585-606: a syntax error aborts the
                 // remaining file; `.` itself returns 2.
                 executor.set_exit_code(2);
                 executor.take_exit_jump_pending();
+                // rubash#2126: evalstring.c:588-596's parse branch —
+                // under the POSIX gate with this source as the most
+                // recent dispatch, the abort is a jump_to_top_level
+                // (ERREXIT) at EX_BADUSAGE, not a return.
+                if executor.evalstring_syntax_error_exits() {
+                    return Err(ExecuteError::ExitCode(2));
+                }
                 return Ok(());
             }
             Err(ExecuteError::ExitCode(code)) if parse_error => {
+                // DE-06 (design 9.3; PLAN row 12): same site,
+                // on the flagged-jump arm.
+                executor.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::ParseError,
+                    code,
+                    executor.shell_state.bash_source_stack.first().map(|file| {
+                        crate::debugger::SourceLocation::new(file.clone(), start_line as u32)
+                    }),
+                )?;
                 executor.set_exit_code(code);
                 // Same discard-not-exit classification as the incomplete
                 // branch above: the flagged jump is the parse abort's, not a
                 // real `exit` (that returns Err with parse_error clear).
                 executor.take_exit_jump_pending();
+                // rubash#2126: same evalstring.c:588-596 conversion on
+                // the flagged-jump arm (the status normalizes to
+                // EX_BADUSAGE — the parse abort's code is already 2 on
+                // every shape that reaches here with the flag set).
+                if executor.evalstring_syntax_error_exits() {
+                    executor.set_exit_code(2);
+                    return Err(ExecuteError::ExitCode(2));
+                }
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -507,6 +607,15 @@ fn execute_source_with_args(
             // exit-shell jump (see run_source_groups' arms above): consume it
             // so the sourcing driver keeps reading (rubash#451 class B).
             executor.take_exit_jump_pending();
+            // rubash#2126: the "no longjmp" reading above holds only
+            // outside evalstring.c:588-596's four conditions — a
+            // non-interactive posixly_correct shell whose most recent
+            // dispatch is this source/eval takes the ERREXIT jump at
+            // EX_BADUSAGE instead of the ordinary return.
+            if executor.evalstring_syntax_error_exits() {
+                executor.set_exit_code(2);
+                return Err(ExecuteError::ExitCode(2));
+            }
             Ok(())
         }
         other => other,

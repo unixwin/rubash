@@ -35,7 +35,7 @@ fn run_rubash_file(script: &str, tag: &str) -> (String, String, Option<i32>, Str
     let path = std::env::temp_dir().join(format!("issue1184_f4_{}_{}.sh", tag, std::process::id()));
     std::fs::write(&path, script).expect("write probe script");
     let path_text = path.to_string_lossy().into_owned();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+    let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(&path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

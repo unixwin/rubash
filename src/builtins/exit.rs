@@ -6,7 +6,7 @@
 use std::io::{self, Write};
 
 const EXECUTION_FAILURE: i32 = 1;
-const EX_USAGE: i32 = 2;
+pub(crate) const EX_USAGE: i32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitAction {

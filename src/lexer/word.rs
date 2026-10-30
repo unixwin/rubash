@@ -608,7 +608,18 @@ impl<'a> Lexer<'a> {
                         }
                         Some('(') => {
                             self.advance();
-                            if self.peek() == Some('(') {
+                            // Same verdict as skip_cmd_subst's `$((` arm (GNU
+                            // parse.y:4464-4473 + parse_arith_cmd
+                            // parse.y:4970-4996): mid-word `$((` is arithmetic
+                            // only when the second `('s group closes right
+                            // before `)`; a subshell-or-list body
+                            // (`$(( cmd ) || cmd)`, nvm.sh:1336) must close at
+                            // the group match, not swallow for a `))` pair.
+                            if self.peek() == Some('(')
+                                && crate::lexer::dollar_double_paren_is_arithmetic(
+                                    &self.input[self.position..],
+                                )
+                            {
                                 self.advance();
                                 self.skip_arith_paren();
                             } else {

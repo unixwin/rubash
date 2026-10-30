@@ -25,6 +25,16 @@ pub(in crate::executor) struct CommandFd0InputGuard {
     /// shadowed (the rebound text is heredoc/herestring/loop input with
     /// no production timing of its own).
     saved_timed_stdin: Option<super::timed_input::SharedTimedInput>,
+    /// rubash#1902: the pipeline-stage fd-0 pipe fact in force when the
+    /// bind began; the mirror branch below may clear it (the rebound
+    /// mirror supersedes the inter-stage pipe), every other branch
+    /// leaves it, and restore puts the entry value back verbatim.
+    saved_stage_pipe_fact: Option<String>,
+    /// rubash#2131: the FD0_MIRROR_FACT in force when the bind began;
+    /// the mirror branch below may replace it with the staged source's
+    /// own fact, every other branch leaves it, and restore puts the
+    /// entry value back verbatim.
+    saved_mirror_fact: Option<String>,
     /// rubash#1141: when fd 0 was bound to a process-substitution
     /// stream's endpoint, the stream's registered path — restore writes
     /// the endpoint's consumed offset back into the stream.
@@ -80,10 +90,15 @@ impl Executor {
                 let _ = self.execute_dynamic_fd_var_redirect(redirect, false)?;
             }
         }
-        let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
-        if let Some((index, name)) = self.compound_output_dup_bad_fd(cmd) {
+        // The dup preflight runs before ANY bind so the abandonment it
+        // triggers leaves no half-applied descriptor state, and its
+        // left-to-right walk reports the FIRST failing dup in list order
+        // like GNU do_redirections (output side rubash#263/#266, input
+        // side rubash#2030).
+        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
             return self.abandon_compound_for_dup_bad_fd(cmd, index, &name);
         }
+        let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
         let saved_output = self.open_compound_output_redirects(cmd)?;
         let result = self.with_command_input_redirects_inner(cmd, execute);
         self.restore_compound_output_redirects(saved_output);
@@ -132,7 +147,37 @@ impl Executor {
         // child inheritance — so bind fd 0 to the handle instead of
         // slurping the text mirror. Text-production sources (procsubs,
         // heredocs, here-strings, /dev-aliases) keep the mirror below.
-        let Some(guard) = self.bind_command_fd0_input(cmd)? else {
+        let guard = match self.bind_command_fd0_input(cmd) {
+            Ok(guard) => guard,
+            Err(error) => {
+                // rubash#2124: the bind's net arm reports a refused
+                // /dev/tcp|udp connect as an io error — a compound
+                // abandoned by a failed fd-0 open takes the same
+                // shape as the open-failure channel above (diagnostic
+                // through the command's fd-2 routing, status 1, body
+                // never runs; GNU redir.c redirection_error). Other
+                // bind errors keep their propagation.
+                let net_fd0 = cmd.redirect_in.as_deref().is_some_and(|redirect| {
+                    redirect.fd.unwrap_or(0) == 0
+                        && crate::special_paths::is_net_redirect_target(
+                            &self.expand_redirect_target(redirect),
+                        )
+                });
+                if !net_fd0 {
+                    return Err(error);
+                }
+                let message = match &error {
+                    ExecuteError::IoError(io_error) => crate::posix_errors::message(io_error),
+                    other => other.to_string(),
+                };
+                let mut stderr = Vec::new();
+                let _ = writeln!(&mut stderr, "{}{}", self.error_prefix(), message.trim_end());
+                self.write_redirected_command_stderr(cmd, &stderr)?;
+                self.exit_code = 1;
+                return Ok(T::default());
+            }
+        };
+        let Some(guard) = guard else {
             return execute(self);
         };
         let result = execute(self);
@@ -155,6 +200,13 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Option<CommandFd0InputGuard>, ExecuteError> {
+        // rubash#1902: snapshot the stage-pipe fact before any branch
+        // can touch it; the guard restores it verbatim (the mirror
+        // branch is the one branch that may clear it, below).
+        let saved_stage_pipe_fact = self.shell_state.env_vars.get(FD0_STAGE_PIPE).cloned();
+        // rubash#2131: same snapshot discipline for the mirror fact;
+        // the mirror branch is the one branch that may replace it.
+        let saved_mirror_fact = self.shell_state.env_vars.get(FD0_MIRROR_FACT).cloned();
         // rubash#1141: compound commands (brace group, select, loops)
         // dispatch BEFORE the simple-command materialization gate, so
         // their `< <(...)` redirect_in can still carry the raw
@@ -169,10 +221,26 @@ impl Executor {
         // compound scope, so no stream registration or offset write-back
         // is needed. A body that fails to materialize falls through to
         // the existing paths unchanged.
+        // NOTE (rubash#1931 residual, resolved by rubash#2024): this arm —
+        // like the fd walk in stdin_string_for_command and
+        // loop_redirect_input — used to match the target's quote-stripped
+        // value, so a QUOTED "<(...)" compound input target was spawned
+        // here even though GNU treats it as a literal filename. Admission
+        // is now the same recorded-span check the simple-command path runs
+        // (external_setup's redirect_target_span_is_recorded): the spawn
+        // happens only for a span the parser saw unquoted. A quoted form
+        // never reaches the arm through the compound wrapper — the
+        // literal-target error channel (compound_stdin_open_failure)
+        // reports `<(echo hi): No such file or directory` and abandons the
+        // compound before the bind (GNU redir.c:916 redir_open →
+        // redirection_error, compound terminated without running) — the
+        // gate keeps the arm itself from materializing a literal by value
+        // on the faces that reach it with the channel not yet run.
         if let Some(redirect) = &cmd.redirect_in {
             if redirect.fd.unwrap_or(0) == 0
                 && redirect.fd_var.is_none()
                 && redirect.kind == crate::parser::RedirectKind::Input
+                && super::external_setup::redirect_target_span_is_recorded(redirect)
             {
                 if let Some(source) = redirect
                     .target
@@ -180,6 +248,39 @@ impl Executor {
                     .and_then(|target| target.strip_suffix(')'))
                     .map(str::to_string)
                 {
+                    // rubash#1952: stream first — GNU process_substitute
+                    // (subst.c:6362) binds the forked body's pipe, so
+                    // the compound's reads observe real arrival times
+                    // and a non-terminating producer no longer starves
+                    // the compound forever. The timed collection below
+                    // is the spawn-failure fallback (its recorded
+                    // schedule served #1141 before a live pipe could).
+                    if let Some(file_fd) =
+                        self.spawn_input_process_substitution_child(&source, cmd.line)
+                    {
+                        let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+                        let saved_function_stdin =
+                            self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
+                        let saved_function_stdin_offset = self
+                            .shell_state
+                            .env_vars
+                            .get(FUNCTION_STDIN_OFFSET)
+                            .cloned();
+                        self.fd_table
+                            .open_input(0, FdReadEndpoint::File(file_fd), false);
+                        return Ok(Some(CommandFd0InputGuard {
+                            saved_fd0_entry,
+                            saved_function_stdin,
+                            saved_function_stdin_offset,
+                            // The text channel is untouched in this
+                            // branch, so its timing stays valid; restore
+                            // writes the same value back.
+                            saved_timed_stdin: self.timed_stdin.clone(),
+                            saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                            saved_mirror_fact: saved_mirror_fact.clone(),
+                            procsub_stream_path: None,
+                        }));
+                    }
                     if let Some((output, body_timing)) =
                         self.process_substitution_output_bytes_timed(&source)
                     {
@@ -208,6 +309,8 @@ impl Executor {
                             // branch, so its timing stays valid; restore
                             // writes the same value back.
                             saved_timed_stdin: self.timed_stdin.clone(),
+                            saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                            saved_mirror_fact: saved_mirror_fact.clone(),
                             procsub_stream_path: None,
                         }));
                     }
@@ -255,7 +358,57 @@ impl Executor {
                         saved_function_stdin,
                         saved_function_stdin_offset,
                         saved_timed_stdin: self.timed_stdin.clone(),
+                        saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                        saved_mirror_fact: saved_mirror_fact.clone(),
                         procsub_stream_path: Some(path),
+                    }));
+                }
+            }
+        }
+        // rubash#2124: a winning /dev/tcp|udp fd-0 input on a compound
+        // never reached a bind: compound_fd0_stream_file classifies
+        // the target by filesystem metadata (a socket target is not a
+        // regular file, so it returns None) and the text fallback
+        // staged an empty string. GNU redir.c do_redirections opens
+        // it — redir_open -> netopen connects — before the body runs.
+        // Connect once here and bind the socket on fd 0 for the
+        // body's duration; a failed connect returns the path-shaped
+        // io error open_net_redirect already carries (the connect
+        // pre-line was emitted by connect_net_stream).
+        if let Some(redirect) = &cmd.redirect_in {
+            if redirect.fd.unwrap_or(0) == 0
+                && redirect.fd_var.is_none()
+                && matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+                )
+            {
+                let target = self.expand_redirect_target(redirect);
+                if crate::special_paths::is_net_redirect_target(&target) {
+                    let file = self.open_net_redirect(&target)?;
+                    let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+                    let saved_function_stdin =
+                        self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
+                    let saved_function_stdin_offset = self
+                        .shell_state
+                        .env_vars
+                        .get(FUNCTION_STDIN_OFFSET)
+                        .cloned();
+                    let file_fd = FileFd::from_file(file, target.into());
+                    self.fd_table
+                        .open_input(0, FdReadEndpoint::File(file_fd), false);
+                    return Ok(Some(CommandFd0InputGuard {
+                        saved_fd0_entry,
+                        saved_function_stdin,
+                        saved_function_stdin_offset,
+                        saved_timed_stdin: self.timed_stdin.clone(),
+                        // This branch (from the #2124 merge) does not touch
+                        // FD0_STAGE_PIPE, so the guard restores exactly the
+                        // fact it found — same shape as the compound-stream
+                        // branch below.
+                        saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                        saved_mirror_fact: saved_mirror_fact.clone(),
+                        procsub_stream_path: None,
                     }));
                 }
             }
@@ -280,6 +433,8 @@ impl Executor {
                 // The text channel is untouched in this branch, so its
                 // timing stays valid; restore writes the same value back.
                 saved_timed_stdin: self.timed_stdin.clone(),
+                saved_stage_pipe_fact: saved_stage_pipe_fact.clone(),
+                saved_mirror_fact: saved_mirror_fact.clone(),
                 procsub_stream_path: None,
             }));
         }
@@ -303,11 +458,55 @@ impl Executor {
         // text (heredoc / here-string / loop input) — the enclosing
         // stream's production schedule does not describe it.
         let saved_timed_stdin = self.timed_stdin.take();
+        // rubash#1902: the rebound mirror supersedes whatever fd 0 the
+        // enclosing scope had — including a pipeline stage's pipe, whose
+        // fact (FD0_STAGE_PIPE) the stage entry installed. The fact
+        // survives only when this binding's own source is a pipe in GNU
+        // (heredoc / here-string / process substitution); a file or
+        // device text source clears it for the scope's duration, and
+        // the guard restores the stage's fact at scope end. GNU's
+        // ordering is do_piping first, then the command's own
+        // redirections (execute_cmd.c:2620, redir.c
+        // do_redirection_internal).
+        if !super::shell_options::fd0_mirror_binding_keeps_pipe_fact(cmd) {
+            self.shell_state.env_vars.remove(FD0_STAGE_PIPE);
+        }
+        // rubash#2131: the mirror installs no fd-table entry, so the
+        // staged source's own fd-0 fact travels beside it in
+        // FD0_MIRROR_FACT for the fd-alias sync (the evaluator's
+        // /dev/stdin predicates must answer from the rebound source,
+        // not the ambient binding). A node with no fd-0 winner of its
+        // own staged the enclosing channel's remainder — the key is
+        // left as the enclosing scope set it.
+        if let Some(fact) = self.fd0_mirror_fact_value(cmd) {
+            self.shell_state
+                .env_vars
+                .insert(FD0_MIRROR_FACT.to_string(), fact);
+        }
+        // rubash#2170: the staged mirror IS fd 0's binding for the
+        // scope — GNU do_redirection_internal (redir.c:767-955)
+        // installs the command's own redirection on fd 0, superseding
+        // whatever the enclosing scope bound there. Every descriptor
+        // branch of this bind replaces the fd-table entry; the mirror
+        // branch left it in place, so a persistent File binding
+        // (`exec 0<file`) kept governing the body's readers — the
+        // builtin read's fd-table arm, the external-child stdin
+        // wiring and the fd-alias fact sync all answered from the
+        // superseded file while the staged channel claimed the
+        // mirror's source. Displace the entry for the scope's
+        // duration: the guard snapshotted it above and restores it
+        // verbatim at scope end, and with the slot empty every
+        // consumer sees the state the mirror's design always assumed
+        // (the #2131 fact pass already treats an absent slot as
+        // mirror-governed).
+        self.fd_table.entries.remove(&0);
         Ok(Some(CommandFd0InputGuard {
             saved_fd0_entry,
             saved_function_stdin,
             saved_function_stdin_offset,
             saved_timed_stdin,
+            saved_stage_pipe_fact,
+            saved_mirror_fact,
             procsub_stream_path: None,
         }))
     }
@@ -320,7 +519,7 @@ impl Executor {
         // the process-substitution stream's shared offset before the
         // descriptor binding is unwound.
         if let Some(path) = &guard.procsub_stream_path {
-            if let Some((_, offset)) = self.fd_table.input_snapshot_bytes(0) {
+            if let Some(offset) = self.fd_table.input_offset(0) {
                 self.procsub_stream_set_offset(path, offset);
             }
         }
@@ -328,6 +527,16 @@ impl Executor {
             &mut self.shell_state.env_vars,
             FUNCTION_STDIN,
             guard.saved_function_stdin,
+        );
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FD0_STAGE_PIPE,
+            guard.saved_stage_pipe_fact,
+        );
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FD0_MIRROR_FACT,
+            guard.saved_mirror_fact,
         );
         restore_optional_env_var(
             &mut self.shell_state.env_vars,
@@ -452,6 +661,19 @@ impl Executor {
                 .strip_prefix("<(")
                 .and_then(|target| target.strip_suffix(')'))
             {
+                // rubash#1952: stream first — GNU process_substitute
+                // (subst.c:6362) binds the forked body's pipe read end
+                // on the target fd; the collected form below is the
+                // spawn-failure fallback.
+                if let Some(file_fd) = self.spawn_input_process_substitution_child(source, cmd.line)
+                {
+                    self.set_fd_input_file(fd, file_fd, true);
+                    if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+                        self.set_fd_readwrite_file(fd, &target, true)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                    }
+                    continue;
+                }
                 let Some(output) = self.process_substitution_output(source) else {
                     continue;
                 };
@@ -471,6 +693,50 @@ impl Executor {
             if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                 self.set_fd_readwrite_file(fd, &target, true)
                     .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+            } else if crate::special_paths::is_zero_device(&target)
+                || crate::special_paths::is_full_device(&target)
+            {
+                // rubash#1898: the zero/full devices read as an
+                // unbounded zero stream — bind the pump-fed source.
+                let file = Self::zero_device_file(&target)
+                    .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                let file_fd = FileFd::from_file(file, target.clone().into());
+                self.set_fd_input_file(fd, file_fd, true);
+            } else if let Some(bytes) = crate::special_paths::synthetic_proc_content(&target) {
+                // Registry first (rubash#1917, same ladder-skip family
+                // as the exec-fd face): synthetic /proc content has no
+                // filesystem file behind the mapped path on Windows;
+                // serve the snapshot bytes through the fd byte channel.
+                self.set_fd_input_bytes(fd, bytes, true);
+            } else if let Some(link) = crate::special_paths::synthetic_link_target(
+                &target,
+                Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
+            ) {
+                // SyntheticLink (rubash#1900): open the resolved
+                // native target (session cwd answers for self/cwd).
+                // rubash#1937: a directory target binds the directory
+                // endpoint (GNU's bind succeeds; reads fail EISDIR) —
+                // see the exec-fd face in trap_exec.rs.
+                if crate::proc_vfs::proc_unary_facts(&target)
+                    .is_some_and(|facts| facts.is_link && facts.link_target_is_dir)
+                {
+                    self.set_fd_input_directory(fd, true);
+                } else {
+                    let file = FileFd::open_read(std::path::PathBuf::from(&link.native))
+                        .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                    self.set_fd_input_file(fd, file, true);
+                }
+            } else if crate::special_paths::is_net_redirect_target(&target) {
+                // rubash#2124: a /dev/tcp|udp target on a numbered fd
+                // of a compound or function call — GNU redir.c
+                // do_redirections connects it (redir_open ->
+                // netopen); the plain-file open below reported it
+                // ENOENT. The raw form is used because this ladder
+                // shapes its own errors with path_error.
+                let file = self
+                    .open_net_redirect_raw(&target)
+                    .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                self.set_fd_input_file(fd, FileFd::from_file(file, target.clone().into()), true);
             } else {
                 // niubash#177: same operand resolution as
                 // open_input_redirect — a virtual-root input operand may
@@ -479,6 +745,19 @@ impl Executor {
                     shell_path_to_windows(&target, &self.shell_state.env_vars),
                     &self.shell_state.env_vars,
                 ));
+                // rubash#1903: a WinuxCmd fifo marker bound on a
+                // numbered fd takes the rendezvous read open, not a
+                // plain open of the marker file (same family as the
+                // fd-0 bind in compound_fd0_stream_file).
+                #[cfg(windows)]
+                if crate::winuxcmd_fifo::path_is_winuxcmd_fifo(&path) {
+                    let file = crate::winuxcmd_fifo::open_winuxcmd_fifo_read(&path, &|| {
+                        crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+                    })
+                    .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                    self.set_fd_input_file(fd, FileFd::from_file(file, path), true);
+                    continue;
+                }
                 let file = FileFd::open_read(path)
                     .map_err(|error| crate::posix_errors::path_error(&target, error))?;
                 self.set_fd_input_file(fd, file, true);
@@ -1225,7 +1504,7 @@ impl Executor {
             eprintln!(
                 "[721] compound_stdin_open_failure redirect_in={:?} redirects={:?}",
                 cmd.redirect_in
-                    .as_ref()
+                    .as_deref()
                     .map(|r| format!("{} {:?}", r.target, r.kind)),
                 cmd.redirects
                     .iter()
@@ -1233,7 +1512,7 @@ impl Executor {
                     .collect::<Vec<_>>()
             );
         }
-        let redirect = cmd.redirect_in.as_ref()?;
+        let redirect = cmd.redirect_in.as_deref()?;
         if redirect.fd.unwrap_or(0) != 0 || redirect.fd_var.is_some() {
             return None;
         }
@@ -1253,12 +1532,32 @@ impl Executor {
         if crate::special_paths::synthetic_proc_content(&target).is_some() {
             return None;
         }
+        if crate::special_paths::is_synthetic_link_path(&target) {
+            return None;
+        }
         // niubash#177: same operand resolution as open_input_redirect so
         // this regular-file probe agrees with the read that follows.
         let path = self.session_path(super::path::windows_operand_file_path(
             super::path::shell_path_to_windows(&target, &self.shell_state.env_vars),
             &self.shell_state.env_vars,
         ));
+        // rubash#1903: a WinuxCmd fifo marker is a regular file on disk,
+        // so the metadata class below admits it and FileFd::open_read
+        // would bind a plain handle on the marker bytes — the body's
+        // reads would consume the marker while the writer waits for a
+        // rendezvous server that never exists (the #2014 CI hang's
+        // compound face). The fd-0 bind performs GNU's single open
+        // (redir.c do_redirection_internal) — for a marker that open
+        // is the read side of the named-pipe rendezvous, and the slot
+        // binds the live pipe handle.
+        #[cfg(windows)]
+        if crate::winuxcmd_fifo::path_is_winuxcmd_fifo(&path) {
+            let file = crate::winuxcmd_fifo::open_winuxcmd_fifo_read(&path, &|| {
+                crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+            })
+            .ok()?;
+            return Some(FileFd::from_file(file, path));
+        }
         if !std::fs::metadata(&path)
             .map(|meta| Self::compound_fd0_stream_source(&meta))
             .unwrap_or(false)
@@ -1274,8 +1573,18 @@ impl Executor {
     /// objects that yield a live kernel stream from open(2). Windows
     /// has no filesystem FIFOs or device nodes of this kind, so the
     /// class is regular files only there.
+    ///
+    /// rubash#2101: directories join the class on every platform.
+    /// GNU opens a directory for a compound's stdin exactly like a
+    /// file (redir.c redir_open) and binds the descriptor; the body
+    /// observes the read failure itself (the read builtin's EISDIR
+    /// diagnostic, an external reader's own error). Excluding them
+    /// dropped the binding to the text mirror, which swallowed the
+    /// error at bind time — `{ cat; } < dir` exited 0 silently. The
+    /// Windows open succeeds through the fd layer's directory retry
+    /// (open_file_read's FILE_FLAG_BACKUP_SEMANTICS arm).
     fn compound_fd0_stream_source(meta: &std::fs::Metadata) -> bool {
-        if meta.is_file() {
+        if meta.is_file() || meta.is_dir() {
             return true;
         }
         #[cfg(unix)]
@@ -1296,19 +1605,42 @@ impl Executor {
     /// (rubash#137). Mirrors loop_redirect_input's target resolution:
     /// closed targets (`<&-`), process substitutions (`<(`), /dev/fd
     /// aliases, /proc synthetic files and append-creates never fail here.
+    ///
+    /// rubash#2024: the `<(`-shaped skip is recorded-span admission, not a
+    /// raw-prefix blacklist — GNU records a process substitution only when
+    /// the parser saw the `<(` unquoted (parse.y read_token_word; the
+    /// executor-facing metadata is target_metadata.process_substitutions),
+    /// and a QUOTED `"<(echo hi)"` target is a literal filename that
+    /// redir.c:916 redir_open fails ENOENT:
+    /// `<(echo hi): No such file or directory`, compound abandoned, body
+    /// never runs. This probe IS the bind layer's literal-target error
+    /// channel: without it, declining a quoted span's spawn in
+    /// bind_command_fd0_input / loop_redirect_input falls through to the
+    /// ambient stdin and the compound hangs instead of failing.
     pub(in crate::executor) fn compound_stdin_open_failure(
         &mut self,
         cmd: &CommandNode,
     ) -> Option<String> {
-        let redirect = cmd.redirect_in.as_ref()?;
+        let redirect = cmd.redirect_in.as_deref()?;
         if redirect.fd.unwrap_or(0) != 0 {
             return None;
         }
-        if redirect.target.starts_with("<(") {
+        if redirect.target.starts_with("<(")
+            && super::external_setup::redirect_target_span_is_recorded(redirect)
+        {
             return None;
         }
         let target = self.expand_redirect_target(redirect);
         if super::execution_misc::is_closed_redirect_target(&target) {
+            return None;
+        }
+        // rubash#2124: a /dev/tcp|udp target is not a filesystem
+        // object — the plain File::open probe below reports it
+        // ENOENT, which is spurious. The compound bind
+        // (bind_command_fd0_input) connects the net target and owns
+        // its outcome, success or failure, like GNU redir.c
+        // do_redirections.
+        if crate::special_paths::is_net_redirect_target(&target) {
             return None;
         }
         if let Some(source) = super::execution_misc::dev_stdio_redirect_fd(&target) {
@@ -1351,6 +1683,34 @@ impl Executor {
         if crate::special_paths::synthetic_proc_content(&target).is_some() {
             return None;
         }
+        if crate::special_paths::is_synthetic_link_path(&target) {
+            return None;
+        }
+        // An empty expanded target is a literal name no file can match:
+        // GNU redir_open (redir.c:916) opens it and fails ENOENT — the
+        // outcome the simple-command face already reports (`echo hi < ""`
+        // → `: No such file or directory`). The session-path conversion
+        // below would instead resolve "" to the session directory, the
+        // probe open would succeed, and the compound would silently fall
+        // back to the ambient stdin — the failure the rubash#2024 nounset
+        // pin guards (`done < "$NOPE"` with NOPE unbound expands to "").
+        // Here-strings and heredocs carry their payload AS the target,
+        // so only the path-open kinds (Input / ReadWrite) take this arm.
+        if target.is_empty()
+            && matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+            )
+        {
+            return Some(format!(
+                "{}{}",
+                self.error_prefix(),
+                crate::posix_errors::path_error(
+                    &target,
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory",),
+                )
+            ));
+        }
         // niubash#177: same operand resolution as open_input_redirect —
         // a virtual-root input operand may exist only under its `.exe`
         // spelling on disk.
@@ -1382,10 +1742,15 @@ impl Executor {
         };
         match probe_error {
             None => None,
+            // rubash#2024: path_error shapes the GNU redirection failure
+            // text (`<target>: <strerror>`) and maps the
+            // ERROR_INVALID_NAME a `<`/`>`-bearing literal target
+            // (`"<(echo hi)"`) provokes on Windows to GNU's ENOENT —
+            // redirection_error (redir.c:135) prints the strerror text.
             Some(error) => Some(format!(
-                "{}{target}: {}",
+                "{}{}",
                 self.error_prefix(),
-                crate::posix_errors::message(&error)
+                crate::posix_errors::path_error(&target, error)
             )),
         }
     }
@@ -1405,10 +1770,13 @@ impl Executor {
         cmd: &CommandNode,
         body: impl FnOnce(&mut Executor) -> Result<T, ExecuteError>,
     ) -> Result<T, ExecuteError> {
-        let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
-        if let Some((index, name)) = self.compound_output_dup_bad_fd(cmd) {
+        // Same preflight-first discipline as with_command_input_redirects:
+        // the walk is pure, and the abandonment it triggers must not race
+        // half-applied binds.
+        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
             return self.abandon_compound_for_dup_bad_fd(cmd, index, &name);
         }
+        let saved_numbered = self.open_compound_numbered_input_redirects(cmd)?;
         let saved_output = self.open_compound_output_redirects(cmd)?;
         // rubash#1867: the numbered heredoc/herestring entries stage
         // through the same wrap as every other compound — a definition
@@ -1444,14 +1812,15 @@ impl Executor {
     /// descriptor`, and ABANDONS the compound without running the body —
     /// the element's status is 1 (WSL 5.3.0 probe: `{ printf X >&2; } 2>&3
     /// 3>&1 | cat` prints the diagnostic once, the pipe stays empty,
-    /// PIPESTATUS[0] = 1). The open walk itself
-    /// (`open_compound_output_redirects_inner` → fd_table::dup_output)
-    /// cannot express the abandonment, so the callers preflight the list
-    /// (`compound_output_dup_bad_fd`) and route the failure here. The
-    /// diagnostic goes through the fd 2 binding only the redirects BEFORE
-    /// the failing dup installed (`{ :; } 2>/dev/null 2>&3` is silent),
-    /// because do_redirections stops at the failing step.
-    fn abandon_compound_for_dup_bad_fd<T: Default>(
+    /// PIPESTATUS[0] = 1). The open walks themselves
+    /// (open_compound_numbered_input_redirects /
+    /// open_compound_output_redirects_inner → fd_table dup) cannot express
+    /// the abandonment, so the callers preflight the list
+    /// (`compound_dup_bad_fd`) and route the failure here. The diagnostic
+    /// goes through the fd 2 binding only the redirects BEFORE the failing
+    /// dup installed (`{ :; } 2>/dev/null 2>&3` is silent), because
+    /// do_redirections stops at the failing step.
+    pub(in crate::executor) fn abandon_compound_for_dup_bad_fd<T: Default>(
         &mut self,
         cmd: &CommandNode,
         index: usize,
@@ -1473,13 +1842,28 @@ impl Executor {
         Ok(T::default())
     }
 
-    /// Ordered preflight of a compound's output-dup redirects: the first
-    /// `M>&N` (or `M>&N-`) whose source fd N is not open — judged with the
-    /// same left-to-right opened/closed tracking as the simple-command
-    /// preflight (`command_output_redirect_fails` /
+    /// Ordered preflight of a compound's dup redirects — both sides in ONE
+    /// left-to-right walk, because GNU do_redirections applies the list in
+    /// order and stops at the first failing step (redir.c:255-260): the
+    /// first `M>&N`/`M<&N` (or `M>&N-`/`M<&N-` move) whose source fd N is
+    /// not open — judged with the same opened/closed tracking as the
+    /// simple-command preflight (`command_output_redirect_fails` /
     /// `dup_source_fd_open`) — returns `(index, diagnostic name)`. Pure:
     /// opens nothing, dups nothing.
-    fn compound_output_dup_bad_fd(&self, cmd: &CommandNode) -> Option<(usize, String)> {
+    ///
+    /// rubash#2030 (input side): a compound-level `<&N` whose source is
+    /// unbound used to dup silently (`let _ = dup_input`) and the level
+    /// fell back to the ambient descriptor — `{ while read x; …; done
+    /// <&3; }` read the pipeline's stdin instead of dying. GNU redir.c
+    /// do_redirection_internal (case r_duplicating_input, redir.c:1179
+    /// `dup2 (redir_fd, redirector) < 0 → return (errno)`) fails EBADF and
+    /// redirection_error (redir.c:149-158) names the SOURCE fd — WSL 5.3
+    /// probe: `done <&3` and `done 5<&3` with fd 3 closed both print
+    /// `3: Bad file descriptor`, the loop never runs, status 1.
+    pub(in crate::executor) fn compound_dup_bad_fd(
+        &self,
+        cmd: &CommandNode,
+    ) -> Option<(usize, String)> {
         let mut opened: HashMap<u32, bool> = HashMap::new();
         for (index, redirect) in cmd.redirects.iter().enumerate() {
             if redirect.fd_var.is_some() {
@@ -1493,14 +1877,22 @@ impl Executor {
                 | crate::parser::RedirectKind::CloseOutput => redirect.fd.unwrap_or(1),
                 crate::parser::RedirectKind::CombinedOutput
                 | crate::parser::RedirectKind::CombinedAppend => 1,
-                _ => continue,
+                crate::parser::RedirectKind::Input
+                | crate::parser::RedirectKind::ReadWrite
+                | crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::CloseInput
+                | crate::parser::RedirectKind::HereDoc
+                | crate::parser::RedirectKind::HereString => redirect.fd.unwrap_or(0),
+                crate::parser::RedirectKind::Unknown => continue,
             };
             let target = self.expand_redirect_target(redirect);
             match redirect.kind {
-                crate::parser::RedirectKind::CloseOutput => {
+                crate::parser::RedirectKind::CloseOutput
+                | crate::parser::RedirectKind::CloseInput => {
                     opened.insert(fd, false);
                 }
-                crate::parser::RedirectKind::DuplicateOutput => {
+                crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::DuplicateOutput => {
                     if is_closed_redirect_target(&target) {
                         opened.insert(fd, false);
                         continue;
@@ -1536,6 +1928,10 @@ impl Executor {
                 }
                 // Output | Append | ClobberOutput: a file open binds its
                 // redirector; an fd-alias name (/dev/fd/N) dups the alias.
+                // Input | ReadWrite | HereDoc | HereString: the same — a
+                // file/alias open or staged stdin-body text binds the
+                // redirector (the open walk reports its own failures), so
+                // it counts as open for a later dup's source check.
                 _ => {
                     if is_closed_redirect_target(&target) {
                         opened.insert(fd, false);

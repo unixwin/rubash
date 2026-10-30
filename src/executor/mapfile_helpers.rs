@@ -190,6 +190,19 @@ impl Executor {
                                 shell_path_to_windows(&target, &self.shell_state.env_vars),
                                 &self.shell_state.env_vars,
                             ));
+                        // rubash#1903: mapfile's fd-0 redirect slurp
+                        // takes a fifo marker's stream through the
+                        // rendezvous, not the marker bytes (same family
+                        // as read_redirected_fd).
+                        #[cfg(windows)]
+                        if let Some(Ok(bytes)) = crate::winuxcmd_fifo::slurp_marker_bytes(
+                            &path,
+                            &self.shell_state.env_vars,
+                        ) {
+                            return Some(
+                                crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
+                            );
+                        }
                         if let Ok(input) =
                             crate::executor::substitution_metadata::read_shell_input_file(path)
                         {
@@ -291,7 +304,7 @@ impl Executor {
     fn mapfile_virtual_fd_input(&mut self, fd: u32) -> Option<String> {
         if self.fd_table.is_open_for_read(fd) {
             if let Some(input) = self.fd_table.read_all_text(fd) {
-                if let Some((_, offset)) = self.fd_table.input_snapshot(fd) {
+                if let Some(offset) = self.fd_table.input_offset(fd) {
                     self.shell_state
                         .env_vars
                         .insert(fd_stdin_offset_key(fd), offset.to_string());
@@ -679,6 +692,9 @@ impl MapfileRecordSource {
                     next_fill_offset: 0,
                 }))
             }
+            // rubash#1937: a directory endpoint has no record
+            // source; the read face itself reports EISDIR.
+            FdReadEndpoint::Directory => None,
         }
     }
 

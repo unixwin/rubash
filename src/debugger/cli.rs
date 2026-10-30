@@ -47,6 +47,18 @@ pub struct DebugCliPreset {
     pub program: Option<String>,
     /// Arguments passed to the program as positional parameters.
     pub args: Vec<String>,
+    /// A startup file the host asks to have sourced into the
+    /// session before the program runs (niubash#692): the
+    /// niubash host maps the invocation's explicit `--rcfile`
+    /// here (already gated by `--norc` on the host side). The
+    /// rubash binary's own leading scan passes `None` — its
+    /// option model has no rcfile channel on this route.
+    /// Sourcing happens as the run input's first unit, in the
+    /// same session, so the file's functions and traps are live
+    /// for the debuggee and an `exit` inside it ends the run
+    /// with its status before the program starts — the
+    /// startup-file discipline every other route applies.
+    pub startup_file: Option<String>,
 }
 
 /// Run a `--debug` session on the controlling terminal.
@@ -107,8 +119,17 @@ pub fn run_debug_cli_with_stream(
 
     // The run input: source the program with its arguments as
     // positionals — one process, one session (design 6.3), the
-    // same input the DAP run builds.
-    let mut input = String::from(". ");
+    // same input the DAP run builds. A host-supplied startup
+    // file (niubash#692) is sourced as the input's first unit,
+    // ahead of the program line; with none, the input is
+    // byte-identical to the pre-#692 form.
+    let mut input = String::new();
+    if let Some(startup_file) = &preset.startup_file {
+        input.push_str(". ");
+        input.push_str(&super::dap::shell_single_quote(startup_file));
+        input.push('\n');
+    }
+    input.push_str(". ");
     input.push_str(&super::dap::shell_single_quote(&identity));
     for arg in &preset.args {
         input.push(' ');
@@ -186,6 +207,12 @@ struct CliStopLoop {
     pending_eval: Option<PendingEval>,
     /// Source text cache for `list`, by file identity.
     sources: std::collections::HashMap<String, Vec<String>>,
+    /// Queued command lines from `source` files (design 9.5/10):
+    /// the batch driver. Lines run before the terminal stream
+    /// resumes, and a nested `source` queues ahead of its
+    /// sourcer's remaining lines. The queue survives across
+    /// serves, so a sourced file may span several stops.
+    sourced: std::collections::VecDeque<String>,
 }
 
 impl CliStopLoop {
@@ -198,6 +225,7 @@ impl CliStopLoop {
             listsize: 10,
             pending_eval: None,
             sources: std::collections::HashMap::new(),
+            sourced: std::collections::VecDeque::new(),
         }
     }
 
@@ -228,6 +256,14 @@ impl CliStopLoop {
             StopReason::Step => "step".to_string(),
             StopReason::Watchpoint(id) => format!("watchpoint {}", id.number()),
             StopReason::Pause => "pause".to_string(),
+            StopReason::Exception(kind) => {
+                let kind = match kind {
+                    ExceptionKind::ErrTrap => "ERR trap",
+                    ExceptionKind::Errexit => "errexit",
+                    ExceptionKind::ParseError => "parse error",
+                };
+                format!("exception ({kind})")
+            }
         };
         match &stop.location {
             Some(loc) => {
@@ -367,6 +403,14 @@ impl CliStopLoop {
 }
 
 impl StopLoop for CliStopLoop {
+    /// A mid-run announcement (design 5.3's condition failure
+    /// report): the CLI's channel is its output stream, so the
+    /// report lands at the consult that produced it, ahead of
+    /// whatever the debuggee prints next.
+    fn announce(&mut self, _session: &DebugSession, text: &str) {
+        self.line(text);
+    }
+
     fn serve(&mut self, session: &mut DebugSession) -> StopLoopOutcome {
         // Re-entry after an evaluation: the same stop, still
         // parked; render the outcome and keep reading commands.
@@ -412,6 +456,7 @@ commands (design section 10, M1):
   exceptions <filter> on|off                           exception filters (WP-15)
   show listsize / set listsize N
   tty                                                  report the command stream
+  source <file>                                        run commands from a file
   help                                                 this text";
 
 impl CliStopLoop {
@@ -419,16 +464,24 @@ impl CliStopLoop {
         loop {
             let _ = write!(self.out, "(rubash-dbg) ");
             let _ = self.out.flush();
-            let mut raw = String::new();
-            match self.input.read_line(&mut raw) {
-                Ok(0) | Err(_) => {
-                    // EOF on the command stream is `quit`
-                    // (design 9.3).
-                    let _ = writeln!(self.out);
-                    return self.quit(session);
+            // `source`d lines are served before the terminal
+            // stream (design 9.5/10 batch driving).
+            let raw = match self.sourced.pop_front() {
+                Some(line) => line,
+                None => {
+                    let mut raw = String::new();
+                    match self.input.read_line(&mut raw) {
+                        Ok(0) | Err(_) => {
+                            // EOF on the command stream is `quit`
+                            // (design 9.3).
+                            let _ = writeln!(self.out);
+                            return self.quit(session);
+                        }
+                        _ => {}
+                    }
+                    raw
                 }
-                _ => {}
-            }
+            };
             let text = raw.trim();
             if text.is_empty() {
                 continue;
@@ -547,11 +600,37 @@ impl CliStopLoop {
             "tty" => {
                 self.line("tty: the debugger command stream (never the debuggee's stdin)");
             }
+            "source" => self.source_commands(rest),
             other => {
                 self.line(&format!("unknown command '{other}' — try 'help'"));
             }
         }
         None
+    }
+
+    /// `source <file>`: queue a file's lines as debugger
+    /// commands (design 9.5/10 — the batch driver for golden
+    /// sessions; command files come from files, not the
+    /// terminal). The file's lines run before anything already
+    /// queued, so a nested `source` completes before its
+    /// sourcer's remaining lines; when the queue drains, the
+    /// terminal stream resumes.
+    fn source_commands(&mut self, rest: &str) {
+        let path = rest.trim();
+        if path.is_empty() {
+            self.line("source: a command file path is required");
+            return;
+        }
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                for line in text.lines().rev() {
+                    self.sourced.push_front(line.to_string());
+                }
+            }
+            Err(error) => {
+                self.line(&format!("source: cannot read '{path}': {error}"));
+            }
+        }
     }
 
     fn set_breakpoint(&mut self, session: &mut DebugSession, rest: &str, one_shot: bool) {
@@ -800,22 +879,54 @@ impl CliStopLoop {
     /// The store is the session's — the same one the DAP
     /// adapter's `setExceptionBreakpoints` writes.
     fn exceptions(&mut self, session: &mut DebugSession, rest: &str) {
-        let mut parts = rest.split_whitespace();
-        let Some(filter) = parts.next() else {
-            let selected = session.exception_filters();
-            for id in EXCEPTION_FILTER_IDS {
-                let state = if selected.contains(&id) { "on" } else { "off" };
-                self.line(&format!("exception {id}: {state}"));
-            }
-            return;
+        let rest = rest.trim();
+        // The toggle form is `<filter> on|off`, and a filter id
+        // may itself contain a space (`set -e`): the state is
+        // the LAST word and the id is everything before it.
+        // (Row 12: the first-word grammar could never spell the
+        // `set -e` id, so the CLI face could not arm that filter
+        // at all.) A rest that names a known id whole is the
+        // query form; anything else with a second word is the
+        // malformed-toggle error the original grammar printed.
+        let toggle = match rest.rsplit_once(char::is_whitespace) {
+            Some((head, tail)) if tail == "on" || tail == "off" => Some((head.trim(), tail)),
+            _ => None,
         };
-        let Some(state) = parts.next() else {
-            let on = session.exception_filters().contains(&filter);
-            self.line(&format!(
-                "exception {filter}: {}",
-                if on { "on" } else { "off" }
-            ));
-            return;
+        let (filter, state) = match toggle {
+            Some((filter, state)) => (filter, state),
+            None => {
+                let mut parts = rest.split_whitespace();
+                let Some(filter) = parts.next() else {
+                    let selected = session.exception_filters();
+                    for id in EXCEPTION_FILTER_IDS {
+                        let state = if selected.contains(&id) { "on" } else { "off" };
+                        self.line(&format!("exception {id}: {state}"));
+                    }
+                    return;
+                };
+                match parts.next() {
+                    None => {
+                        let on = session.exception_filters().contains(&filter);
+                        self.line(&format!(
+                            "exception {filter}: {}",
+                            if on { "on" } else { "off" }
+                        ));
+                        return;
+                    }
+                    Some(state) if !EXCEPTION_FILTER_IDS.contains(&rest) => {
+                        self.line(&format!("exceptions: expected on|off, got '{state}'"));
+                        return;
+                    }
+                    Some(_) => {
+                        let on = session.exception_filters().contains(&rest);
+                        self.line(&format!(
+                            "exception {rest}: {}",
+                            if on { "on" } else { "off" }
+                        ));
+                        return;
+                    }
+                }
+            }
         };
         let mut selected: Vec<String> = session
             .exception_filters()

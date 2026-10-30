@@ -93,7 +93,7 @@ pub(in crate::executor) fn command_needs_process_substitution_materialization(
 
 fn word_metadata_needs_process_substitution_materialization(metadata: &WordMetadata) -> bool {
     !metadata.process_substitutions.is_empty()
-        || raw_word_contains_process_substitution(&metadata.raw)
+        || crate::parser::raw_word_has_unquoted_process_substitution(&metadata.raw)
 }
 
 pub(in crate::executor) fn shared_combined_output_process_substitution(
@@ -108,11 +108,46 @@ pub(in crate::executor) fn shared_combined_output_process_substitution(
     {
         return None;
     }
+    if !redirect_target_span_is_recorded(first) && !redirect_target_span_is_recorded(second) {
+        return None;
+    }
     first
         .target
         .strip_prefix(">(")
         .and_then(|target| target.strip_suffix(')'))
         .map(str::to_string)
+}
+
+/// rubash#1931: whether a redirect target whose VALUE text is one
+/// whole process-substitution span is a REAL span — the parser
+/// recorded it (unquoted) in the target's own metadata. The
+/// materialization arms in `command_with_process_substitution_files`
+/// match on the target's quote-stripped value, where a double-quoted
+/// `"<(cmd)"` / `">(cmd)"` is indistinguishable from a live span;
+/// GNU creates the substitution only for a span the parser saw
+/// unquoted (parse.y read_token_word) and treats the quoted form as
+/// a literal filename. Admission therefore consults the recorded
+/// spans, with the same raw-gated re-derivation the word loop in
+/// that function uses when a word's metadata carries none.
+pub(in crate::executor) fn redirect_target_span_is_recorded(redirect: &Redirect) -> bool {
+    let metadata = &redirect.target_metadata;
+    let recorded = if !metadata.process_substitutions.is_empty() {
+        metadata.process_substitutions.as_slice()
+    } else if crate::parser::raw_word_has_unquoted_process_substitution(&metadata.raw) {
+        return crate::parser::WordMetadata::new(
+            0,
+            redirect.target.clone(),
+            redirect.target.clone(),
+        )
+        .process_substitutions
+        .iter()
+        .any(|substitution| substitution.target == redirect.target);
+    } else {
+        return false;
+    };
+    recorded
+        .iter()
+        .any(|substitution| substitution.target == redirect.target)
 }
 
 fn dynamic_fd_word(word: &str) -> Option<&str> {
@@ -163,7 +198,14 @@ impl Executor {
                     )
                 {
                     let target = self.expand_redirect_target(redirect);
-                    if redirect_target_fd(&target).is_none() && !is_closed_redirect_target(&target)
+                    // rubash#2098: net targets are skipped — the
+                    // reject gate already settled a losing net entry's
+                    // one connect (and reported its failure); probing
+                    // a ReadWrite net target here would connect a
+                    // second time.
+                    if redirect_target_fd(&target).is_none()
+                        && !is_closed_redirect_target(&target)
+                        && !crate::special_paths::is_net_redirect_target(&target)
                     {
                         if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                             self.probe_input_redirect_readwrite(&target)?;
@@ -254,7 +296,16 @@ impl Executor {
             if redirect.fd.unwrap_or(0) == 0 && self.input_fd_redirects_to_process_stdin(&target) {
                 return Ok(());
             }
-            let file = if redirect.append {
+            let file = if redirect.append && crate::special_paths::is_net_redirect_target(&target) {
+                // rubash#2091: a net target has no filesystem path — the
+                // raw open below reported a bare ENOENT (no target
+                // named) and the connection never happened. redir.c
+                // netopen connects once; the socket serves the `<>`
+                // open in both directions (the plain `<` arm reaches
+                // the same class through open_input_redirect's registry
+                // walk).
+                self.open_net_redirect(&target)?
+            } else if redirect.append {
                 let path =
                     self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
                 // niubash#519: CON has no read+write handle; a child's fd 0
@@ -303,6 +354,204 @@ impl Executor {
         }
 
         Ok(())
+    }
+
+    /// The route seam's stdin realization for one call: the OS
+    /// handle the provider reads, derived from the same state
+    /// [`Executor::apply_external_stdin_redirect`] just adjudicated
+    /// for the prepared spawn (which ran first and owns all error
+    /// surfaces — a missing `< file` already failed the command
+    /// there). This walk only re-derives handles from that settled
+    /// state; it returns `None` — the route declines, the prepared
+    /// spawn proceeds — for the shapes it cannot faithfully hold:
+    ///
+    /// - a `<&N` dup of a text/process-substitution endpoint: the
+    ///   spawn arm's materialization CONSUMED the endpoint's text,
+    ///   so no bytes remain to hand the provider;
+    /// - a net (`/dev/tcp`) stdin target: the spawn arm's open is
+    ///   the one connection; a second connect would be observable.
+    ///
+    /// Text sources (heredoc/herestring bodies, the FUNCTION_STDIN
+    /// remainder) materialize to a carrier temp file positioned at
+    /// its start. The text comes from `stdin_string_for_command_mut`
+    /// — the spawn feed's OWN pull, not the read-only variant: the
+    /// read-only pull is capture-shaped (its heredoc readback trims
+    /// trailing newlines, SubstitutionOutput::readback) and its
+    /// bodies would arrive a newline short. Pulling with the feed's
+    /// function also performs the feed's side effects exactly once
+    /// (embedded substitutions run, the FUNCTION_STDIN offset
+    /// advances when the buffer is the source): on Completed /
+    /// Cancelled that is precisely the spawn's accounting, and on
+    /// a decline the realization returns the pulled text so the
+    /// caller hands it to the prepared spawn's feed — the feed
+    /// never pulls (and never re-runs a substitution) twice.
+    ///
+    /// File sources hand over a fresh open or a dup of the
+    /// fd-table description, sharing its offset exactly as the
+    /// child's dup would.
+    pub(in crate::executor) fn route_stdin_handle(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Option<super::external_redirects::RouteStdinRealization> {
+        use super::external_redirects::RouteKeepAlive;
+        use super::external_route::ExternalRouteHandle;
+
+        fn handle_of(file: File) -> (ExternalRouteHandle, Option<RouteKeepAlive>) {
+            let value = super::external_redirects::route_handle_value(&file);
+            (
+                ExternalRouteHandle::Handle(value),
+                Some(RouteKeepAlive::File(file)),
+            )
+        }
+
+        // A text source realized as a carrier temp file at offset 0,
+        // with the pulled text kept for the decline hand-off.
+        let text_file = |this: &Executor,
+                         text: &str|
+         -> Option<(ExternalRouteHandle, Option<RouteKeepAlive>)> {
+            let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(text);
+            let path = this.write_process_substitution_temp_bytes(&bytes).ok()?;
+            this.shell_state
+                .procsub_adhoc_carriers
+                .borrow_mut()
+                .push(path.clone());
+            let file = File::open(&path).ok()?;
+            Some(handle_of(file))
+        };
+
+        let realization = |handle: ExternalRouteHandle,
+                           keep_alive: Option<RouteKeepAlive>,
+                           pulled_text: Option<String>| {
+            super::external_redirects::RouteStdinRealization {
+                handle,
+                keep_alive,
+                pulled_text,
+            }
+        };
+
+        let stdin_body_wins = match crate::executor::shell_options::fd0_stdin_redirect_winner(cmd) {
+            Some(kind) => matches!(
+                kind,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+            ),
+            None => {
+                cmd.heredoc.is_some()
+                    || cmd.here_string.is_some()
+                    || cmd
+                        .heredoc_redirects
+                        .iter()
+                        .any(|redirect| redirect.fd == Some(0))
+            }
+        };
+        if stdin_body_wins {
+            // The losing-redirect probe opens already ran inside
+            // apply_external_stdin_redirect; only the body remains.
+            let text = self.stdin_string_for_command_mut(cmd)?;
+            let (handle, keep_alive) = text_file(self, &text)?;
+            return Some(realization(handle, keep_alive, Some(text)));
+        }
+        if let Some(ref redirect) = cmd.redirect_in {
+            let target = self.expand_redirect_target(redirect);
+            if redirect.fd.unwrap_or(0) == 0 {
+                if let Some((fd, _move_fd)) =
+                    redirect_target_fd_and_move(&target).filter(|_| target.starts_with('&'))
+                {
+                    return match self.fd_table.read_endpoint(fd) {
+                        Some(FdReadEndpoint::CoprocStdout { fd: pipe, .. }) => {
+                            let dup = crate::fd::duplicate_handle_inheritable(pipe.handle).ok()?;
+                            let (handle, keep_alive) = handle_of(crate::fd::handle_to_file(dup));
+                            Some(realization(handle, keep_alive, None))
+                        }
+                        Some(FdReadEndpoint::File(file_fd)) => {
+                            let dup = crate::fd::duplicate_handle(file_fd.handle).ok()?;
+                            let (handle, keep_alive) = handle_of(crate::fd::handle_to_file(dup));
+                            Some(realization(handle, keep_alive, None))
+                        }
+                        // Text/procsub endpoint (the spawn arm's
+                        // materialization consumed it) or an absent
+                        // fd (the spawn arm already errored): decline.
+                        _ => None,
+                    };
+                }
+            }
+            if is_closed_redirect_target(&target) {
+                if redirect.fd.unwrap_or(0) == 0 {
+                    let file = route_closed_stdin_file()?;
+                    let (handle, keep_alive) = handle_of(file);
+                    return Some(realization(handle, keep_alive, None));
+                }
+                return None;
+            }
+            if redirect.fd.unwrap_or(0) == 0
+                && redirect_target_fd(&target) == Some(0)
+                && (self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
+                    || self.virtual_fd_stdin_remaining(0).is_some())
+            {
+                // `< /dev/stdin` over the virtual stdin: the feed's
+                // own pull (an early return for a non-body winner —
+                // a copy, no offset advance), so the route copy is
+                // the same bytes by construction.
+                let text = self.stdin_string_for_command_mut(cmd)?;
+                let (handle, keep_alive) = text_file(self, &text)?;
+                return Some(realization(handle, keep_alive, Some(text)));
+            }
+            if redirect.fd.unwrap_or(0) == 0 && self.input_fd_redirects_to_process_stdin(&target) {
+                return Some(realization(ExternalRouteHandle::Inherit, None, None));
+            }
+            if crate::special_paths::is_net_redirect_target(&target) {
+                // The spawn arm's connect is the one connection.
+                return None;
+            }
+            let file = if redirect.append {
+                let path =
+                    self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                if is_con_device_path(&path) {
+                    File::open("CONIN$").ok()?
+                } else {
+                    OpenOptions::new()
+                        .create(true)
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                        .ok()?
+                }
+            } else {
+                self.open_input_redirect(&target).ok()?
+            };
+            if redirect.fd.unwrap_or(0) == 0 {
+                let (handle, keep_alive) = handle_of(file);
+                return Some(realization(handle, keep_alive, None));
+            }
+            return None;
+        }
+        if self.fd_table.is_closed(0)
+            || (self.fd_table.has_entry(0) && !self.fd_table.is_open_for_read(0))
+        {
+            let file = route_closed_stdin_file()?;
+            let (handle, keep_alive) = handle_of(file);
+            return Some(realization(handle, keep_alive, None));
+        }
+        if let Some(
+            FdReadEndpoint::File(file_fd) | FdReadEndpoint::CoprocStdout { fd: file_fd, .. },
+        ) = self.fd_table.read_endpoint(0)
+        {
+            let dup = crate::fd::duplicate_handle(file_fd.handle).ok()?;
+            let (handle, keep_alive) = handle_of(crate::fd::handle_to_file(dup));
+            return Some(realization(handle, keep_alive, None));
+        }
+        if self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
+            || self.virtual_fd_stdin_remaining(0).is_some()
+        {
+            // The ambient virtual stdin: the feed's pull drains it
+            // (the offset advance inside stdin_string_for_command_mut
+            // when the buffer is the command's source) — performed
+            // by the pull itself, once, whichever route the call
+            // finally takes.
+            let text = self.stdin_string_for_command_mut(cmd)?;
+            let (handle, keep_alive) = text_file(self, &text)?;
+            return Some(realization(handle, keep_alive, Some(text)));
+        }
+        Some(realization(ExternalRouteHandle::Inherit, None, None))
     }
 
     pub(in crate::executor) fn execute_external(
@@ -389,10 +638,9 @@ impl Executor {
                 .map(|metadata| metadata.process_substitutions.clone())
                 .unwrap_or_default();
             let substitutions = if substitutions.is_empty()
-                && metadata
-                    .as_ref()
-                    .is_some_and(|metadata| raw_word_contains_process_substitution(&metadata.raw))
-            {
+                && metadata.as_ref().is_some_and(|metadata| {
+                    crate::parser::raw_word_has_unquoted_process_substitution(&metadata.raw)
+                }) {
                 WordMetadata::new(
                     word_index,
                     rewritten.words[word_index].clone(),
@@ -424,8 +672,22 @@ impl Executor {
                 .target
                 .strip_prefix("<(")
                 .and_then(|target| target.strip_suffix(')'))
+                // rubash#1931: only a parser-recorded (unquoted) span
+                // materializes; a quoted "<(...)" target is a literal
+                // filename in GNU.
+                .filter(|_| redirect_target_span_is_recorded(redirect))
             {
-                if let Some((output, body_timing)) =
+                // rubash#1952: stream first — name the spawned body's
+                // pipe by its word fd (GNU subst.c:6362 hands the
+                // consumer a /dev/fd/N); the downstream redirect
+                // machinery resolves the alias to the live endpoint.
+                // The collected temp-carrier form below is the
+                // spawn-failure fallback.
+                if let Some(streamed) = self.process_substitution_child_fd_word(source, cmd_line) {
+                    let old_target = redirect.target.clone();
+                    redirect.target = streamed;
+                    redirect_target_rewrites.push((old_target, redirect.target.clone()));
+                } else if let Some((output, body_timing)) =
                     self.process_substitution_output_bytes_timed(source)
                 {
                     let path = self.write_process_substitution_temp_bytes(&output)?;
@@ -467,8 +729,8 @@ impl Executor {
         }
         let exec_words = rewritten.words.clone();
         if let Some(source) = shared_combined_output_process_substitution(
-            rewritten.redirect_out.as_ref(),
-            rewritten.redirect_err_append.as_ref(),
+            rewritten.redirect_out.as_deref(),
+            rewritten.redirect_err_append.as_deref(),
         ) {
             let path = self.empty_process_substitution_temp()?;
             let display_path = shell_display_path(&path.to_string_lossy());
@@ -489,8 +751,8 @@ impl Executor {
             });
         }
         if let Some(source) = shared_combined_output_process_substitution(
-            rewritten.append.as_ref(),
-            rewritten.redirect_err_append.as_ref(),
+            rewritten.append.as_deref(),
+            rewritten.redirect_err_append.as_deref(),
         ) {
             let path = self.empty_process_substitution_temp()?;
             let display_path = shell_display_path(&path.to_string_lossy());
@@ -516,6 +778,8 @@ impl Executor {
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    // rubash#1931: recorded-span admission, as above.
+                    .filter(|_| redirect_target_span_is_recorded(redirect))
                 {
                     let source = source.to_string();
                     let path = self.empty_process_substitution_temp()?;
@@ -536,6 +800,8 @@ impl Executor {
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    // rubash#1931: recorded-span admission, as above.
+                    .filter(|_| redirect_target_span_is_recorded(redirect))
                 {
                     let source = source.to_string();
                     let path = self.empty_process_substitution_temp()?;
@@ -556,6 +822,8 @@ impl Executor {
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    // rubash#1931: recorded-span admission, as above.
+                    .filter(|_| redirect_target_span_is_recorded(redirect))
                 {
                     let source = source.to_string();
                     let path = self.empty_process_substitution_temp()?;
@@ -576,6 +844,8 @@ impl Executor {
                     .target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    // rubash#1931: recorded-span admission, as above.
+                    .filter(|_| redirect_target_span_is_recorded(redirect))
                 {
                     let source = source.to_string();
                     let path = self.empty_process_substitution_temp()?;
@@ -621,6 +891,16 @@ impl Executor {
             .strip_prefix("<(")
             .and_then(|word| word.strip_suffix(')'))
         {
+            // rubash#1952: stream first — GNU process_substitute
+            // (subst.c:6362) forks the body onto a pipe at expansion
+            // time, so the consumer starts on the first bytes; the
+            // collected form below starves it until the body exits
+            // (forever for a non-terminating producer) and remains
+            // only as the spawn-failure fallback.
+            if let Some(streamed) = self.process_substitution_child_fd_word(source, line) {
+                *word = streamed;
+                return Ok(());
+            }
             let Some(output) = self.process_substitution_output_bytes(source) else {
                 return Ok(());
             };
@@ -661,6 +941,16 @@ impl Executor {
                 let display_path = self.process_substitution_output_fd_word(&path);
                 *word = word.replacen(&substitution.target, &display_path, 1);
             } else {
+                // rubash#1952: stream first (see
+                // materialize_standalone_process_substitution_word);
+                // the collected form below is the spawn-failure
+                // fallback.
+                if let Some(streamed) =
+                    self.process_substitution_child_fd_word(&substitution.source, line)
+                {
+                    *word = word.replacen(&substitution.target, &streamed, 1);
+                    continue;
+                }
                 let Some((output, body_timing)) =
                     self.process_substitution_output_bytes_timed(&substitution.source)
                 else {
@@ -778,6 +1068,16 @@ impl Executor {
                 word.replace_range(start..end, &word_form);
                 cursor = start + word_form.len();
             } else {
+                // rubash#1952: stream first (see
+                // materialize_process_substitution_word); the collected
+                // form below is the spawn-failure fallback.
+                if let Some(word_form) =
+                    self.process_substitution_child_fd_word(&substitution.source, None)
+                {
+                    word.replace_range(start..end, &word_form);
+                    cursor = start + word_form.len();
+                    continue;
+                }
                 let Some(output) = self.process_substitution_output_bytes(&substitution.source)
                 else {
                     continue;
@@ -837,6 +1137,19 @@ impl Executor {
                     cursor = start + word_form.len();
                 }
             } else {
+                // rubash#1952: stream first (see
+                // materialize_process_substitution_word); the
+                // registration happens even when the splice misses,
+                // mirroring the collected form below.
+                if let Some(word_form) =
+                    self.process_substitution_child_fd_word(&substitution.source, None)
+                {
+                    if let Some((start, end)) = range {
+                        word.replace_range(start..end, &word_form);
+                        cursor = start + word_form.len();
+                    }
+                    continue;
+                }
                 let Some(output) = self.process_substitution_output_bytes(&substitution.source)
                 else {
                     continue;
@@ -877,7 +1190,7 @@ impl Executor {
             .env_vars
             .insert(fd_stdin_offset_key(0), input_len);
         let target = shell_display_path(&path.to_string_lossy());
-        rewritten.redirect_in = Some(Redirect {
+        rewritten.redirect_in = Some(Box::new(Redirect {
             fd: Some(0),
             fd_var: None,
             operator: "<".to_string(),
@@ -895,7 +1208,7 @@ impl Executor {
             target,
             append: false,
             clobber: false,
-        });
+        }));
         files.inputs.push(path);
         Ok(())
     }
@@ -993,10 +1306,10 @@ impl Executor {
         // the enclosing command's $? with the body's).
         let saved_exit_code = self.exit_code;
         let targets = [
-            cmd.redirect_out.as_ref(),
-            cmd.append.as_ref(),
-            cmd.redirect_err.as_ref(),
-            cmd.redirect_err_append.as_ref(),
+            cmd.redirect_out.as_deref(),
+            cmd.append.as_deref(),
+            cmd.redirect_err.as_deref(),
+            cmd.redirect_err_append.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -1142,7 +1455,10 @@ impl Executor {
         // merged with the shell's env_vars, `__RUBASH_*` keys crossing only
         // through the spawn-inherited whitelist, and the parent's caught
         // traps cancelled for the child (subst.c:6421).
-        let mut env_map: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        let mut env_map: std::collections::BTreeMap<String, String> =
+            crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
                 env_map.insert(key.clone(), value.clone());
@@ -1152,6 +1468,25 @@ impl Executor {
             !(key.starts_with("__RUBASH_TRAP") && key != crate::builtins::trap::TRAP_ORIG_IGNORES)
         });
         env_map.insert("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string());
+        // rubash#2136: the provenance stamp the child's init validates
+        // against its actual parent (init.rs).
+        env_map.insert(
+            super::RESPAWN_SPAWNER_PID_KEY.to_string(),
+            super::spawner_stamp_value(),
+        );
+        // rubash#2032: process_substitute's consumer is a forked child
+        // (subst.c:6362), so it inherits the parent's positional
+        // parameters (POSITIONAL_PARAMS_TRANSPORT).
+        env_map.insert(
+            super::compound_exec::POSITIONAL_PARAMS_TRANSPORT.to_string(),
+            self.positional_params_transport_value(),
+        );
+        // rubash#2058: the fork-context stamp (call-stack views,
+        // PIPESTATUS cell, ARGV bottom state) — same fork, same
+        // transport set (see fork_context_transport_entries).
+        for (key, value) in self.fork_context_transport_entries() {
+            env_map.insert(key, value);
+        }
         // subst.c:6609 subshell_level++ — the procsub child runs one level
         // deeper than the parent for $BASH_SUBSHELL/$BASHPID.
         env_map.insert(
@@ -1220,7 +1555,7 @@ impl Executor {
         let pid = child.id();
         adopt_orphan_console(pid);
         if let Some(mut stdin) = child.stdin.take() {
-            std::thread::spawn(move || {
+            let feed = std::thread::spawn(move || {
                 use std::io::Write as _;
                 // A child that exits early leaves a broken pipe; the
                 // feed must end as EPIPE, not kill the shell (SIGPIPE is
@@ -1229,11 +1564,42 @@ impl Executor {
                 crate::builtins::kill::block_sigpipe_on_this_thread();
                 let _ = stdin.write_all(&input);
             });
+            // rubash#2179: the feed thread is not fire-and-forget. The
+            // payload it carries is the shell's half of the
+            // substitution rendezvous, and the shell's process lifetime
+            // can end (script exit, image replacement) before an
+            // unscheduled thread ever runs — the consumer then reads
+            // EOF with the payload never sent. Keep the handle so
+            // drain_procsub_feeds can complete the transfer at the
+            // lifetime boundary; prune finished handles so a
+            // long-lived shell does not accumulate them.
+            self.procsub_feed_handles
+                .retain(|handle| !handle.is_finished());
+            self.procsub_feed_handles.push(feed);
         }
         self.background_children
             .insert(pid, crate::fd::SpawnedChild::from(child));
         self.shell_state.last_background_pid = Some(pid);
         Ok(())
+    }
+
+    /// rubash#2179: complete every outstanding output-procsub feed.
+    /// Joining a feed thread blocks until its `write_all` returns —
+    /// the payload is then in the consumer's stdin pipe (or the
+    /// consumer closed it), which is the state GNU is in at the same
+    /// boundary by construction: process_substitute (subst.c:6362)
+    /// forks the consumer at materialization and the producer's own
+    /// writes fill the pipe during the command. The consumer itself
+    /// is NOT waited for — it keeps running detached, exactly like
+    /// GNU's async child; only the shell's own transfer completes.
+    /// Called at every end of this executor's process lifetime: Drop,
+    /// and the image-replacement paths (the nofork tail exec and the
+    /// `exec` builtin), where the process image is about to be
+    /// replaced and a still-pending feed would die with it.
+    pub(in crate::executor) fn drain_procsub_feeds(&mut self) {
+        for handle in std::mem::take(&mut self.procsub_feed_handles) {
+            let _ = handle.join();
+        }
     }
 
     /// GNU subst.c:6362 process_substitute(): the substituted word is
@@ -1258,27 +1624,66 @@ impl Executor {
     /// close-on-exec but keeps it in the parent, so a variable carrying
     /// `/dev/fd/N` remains resolvable later.
     fn register_process_substitution_fd(&mut self, output: &[u8]) -> u32 {
-        let mut fd = 63u32;
-        while fd > 3 && !self.fd_table_fd_free(fd) {
-            fd -= 1;
-        }
-        if fd <= 3 {
-            // move_to_high_fd (general.c:681) is dup2-backed in GNU — it
-            // scans downward from maxfd-1 via fcntl F_GETFD and dup2()s
-            // into the first free slot — a different mechanism from the
-            // fcntl F_DUPFD that backs {var} allocation (redir.c:942).
-            // The limit-aware fallback below is bounded by the same
-            // RLIMIT_NOFILE soft limit as every other dynamic allocation
-            // (rubash#773); its low-first pick order is a pre-existing
-            // simplification of GNU's high-side scan.
-            return self.allocate_dynamic_fd().unwrap_or(63);
-        }
+        let fd = self.allocate_process_substitution_word_fd();
         self.fd_table.open_input(
             fd,
             FdReadEndpoint::process_substitution_bytes(output.to_vec()),
             true,
         );
         fd
+    }
+
+    /// The fd a word-form input process substitution binds.
+    /// move_to_high_fd (general.c:681) is dup2-backed in GNU — it scans
+    /// downward from maxfd-1 via fcntl F_GETFD and dup2()s into the
+    /// first free slot — a different mechanism from the fcntl F_DUPFD
+    /// that backs {var} allocation (redir.c:942). The limit-aware
+    /// fallback below is bounded by the same RLIMIT_NOFILE soft limit
+    /// as every other dynamic allocation (rubash#773); its low-first
+    /// pick order is a pre-existing simplification of GNU's high-side
+    /// scan.
+    fn allocate_process_substitution_word_fd(&mut self) -> u32 {
+        let mut fd = 63u32;
+        while fd > 3 && !self.fd_table_fd_free(fd) {
+            fd -= 1;
+        }
+        if fd <= 3 {
+            return self.allocate_dynamic_fd().unwrap_or(63);
+        }
+        fd
+    }
+
+    /// rubash#1952: the streaming registration behind a word-form
+    /// input process substitution — spawn the body as a child shell
+    /// on a real pipe (GNU subst.c:6362 process_substitute) and bind
+    /// the pipe read end at the word fd, so the consumer starts on
+    /// the body's first bytes instead of after its exit. The fd is
+    /// command-scoped exactly like the collected form's (see
+    /// process_substitution_fd_word). Returns None when the spawn
+    /// could not be set up; the caller then collects synchronously.
+    fn register_process_substitution_child(
+        &mut self,
+        source: &str,
+        line: Option<usize>,
+    ) -> Option<u32> {
+        let file_fd = self.spawn_input_process_substitution_child(source, line)?;
+        let fd = self.allocate_process_substitution_word_fd();
+        self.fd_table
+            .open_input(fd, FdReadEndpoint::File(file_fd), true);
+        self.command_scoped_procsub_input_fds.push(fd);
+        Some(fd)
+    }
+
+    /// The word form of a streamed input process substitution:
+    /// `/dev/fd/N` per GNU subst.c:6362, naming the pipe read end
+    /// bound by register_process_substitution_child.
+    pub(in crate::executor) fn process_substitution_child_fd_word(
+        &mut self,
+        source: &str,
+        line: Option<usize>,
+    ) -> Option<String> {
+        self.register_process_substitution_child(source, line)
+            .map(|fd| format!("/dev/fd/{fd}"))
     }
 
     fn fd_table_fd_free(&self, fd: u32) -> bool {
@@ -1680,10 +2085,13 @@ fn sync_ordered_redirect_targets(command: &mut CommandNode) {
         let source = if redirect.fd.unwrap_or(1) == 2 {
             command
                 .redirect_err_append
-                .as_ref()
-                .or(command.redirect_err.as_ref())
+                .as_deref()
+                .or(command.redirect_err.as_deref())
         } else {
-            command.redirect_out.as_ref().or(command.append.as_ref())
+            command
+                .redirect_out
+                .as_deref()
+                .or(command.append.as_deref())
         };
         if let Some(source) = source {
             redirect.target = source.target.clone();
@@ -1692,45 +2100,24 @@ fn sync_ordered_redirect_targets(command: &mut CommandNode) {
     }
 }
 
-fn raw_word_contains_process_substitution(raw: &str) -> bool {
-    // Whitelist admission (rubash#117 discipline): the DFA below only
-    // reports `<(`/`>(` outside quotes. Without either byte pair no arm
-    // can fire, so skip the char-collect + scan. A present pair runs the
-    // full quote-aware scan unchanged.
-    if !raw.contains("<(") && !raw.contains(">(") {
-        return false;
+// The "raw word carries an unquoted process substitution" scan lives
+// solely in the parser (crate::parser::
+// raw_word_has_unquoted_process_substitution); this file used to carry a
+// verbatim copy of the same DFA.
+
+/// The file behind [`closed_stdin`], for the route seam: a
+/// write-only null device on unix (reads fail EBADF, exactly the
+/// closed-fd child contract), the plain null device elsewhere.
+pub(in crate::executor) fn route_closed_stdin_file() -> Option<File> {
+    #[cfg(unix)]
+    {
+        if let Ok(file) = OpenOptions::new().write(true).open("/dev/null") {
+            return Some(file);
+        }
     }
-    let chars = raw.chars().collect::<Vec<_>>();
-    let mut index = 0usize;
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
-    while index < chars.len() {
-        let ch = chars[index];
-        if escaped {
-            escaped = false;
-            index += 1;
-            continue;
-        }
-        if ch == '\\' && !single {
-            escaped = true;
-            index += 1;
-            continue;
-        }
-        if ch == '\'' && !double {
-            single = !single;
-            index += 1;
-            continue;
-        }
-        if ch == '"' && !single {
-            double = !double;
-            index += 1;
-            continue;
-        }
-        if !single && !double && matches!(ch, '<' | '>') && chars.get(index + 1) == Some(&'(') {
-            return true;
-        }
-        index += 1;
+    if cfg!(windows) {
+        OpenOptions::new().write(true).open("NUL").ok()
+    } else {
+        File::create("/dev/null").ok()
     }
-    false
 }

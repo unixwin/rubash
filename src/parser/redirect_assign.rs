@@ -23,7 +23,7 @@ pub(super) fn assign_redirect_out_target(
             redirect_node_with_fd_var(&tokens[index].value, fd, fd_var, &target, false, false);
         command.redirects.push(redirect.clone());
         if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
-            command.redirect_in = Some(redirect);
+            command.redirect_in = Some(Box::new(redirect));
         }
         return Some(next_i);
     }
@@ -52,7 +52,7 @@ pub(super) fn assign_redirect_out_target(
         // A `{var}` redirect allocates a fresh descriptor (GNU redir.c
         // redir_varassign) — never fd 1, so no redirect_out mirror.
         if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
-            command.redirect_out = Some(redirect);
+            command.redirect_out = Some(Box::new(redirect));
         }
         return Some(next_i);
     }
@@ -84,7 +84,7 @@ pub(super) fn assign_redirect_out_target(
         );
         command.redirects.push(redirect.clone());
         if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
-            command.redirect_in = Some(redirect);
+            command.redirect_in = Some(Box::new(redirect));
         }
         return Some(index + 1);
     }
@@ -127,7 +127,7 @@ pub(super) fn assign_append_target(
             redirect_node_with_fd_var(&tokens[index].value, fd, fd_var, &target, true, false);
         command.redirects.push(redirect.clone());
         if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
-            command.append = Some(redirect);
+            command.append = Some(Box::new(redirect));
         }
         return Some(next_i);
     }
@@ -169,26 +169,26 @@ pub(super) fn assign_redirect_err_target(
             .clone()
             .or_else(|| command.redirect_out.clone())
         {
-            command.redirect_err_append = Some(redirect_node_with_raw(
+            command.redirect_err_append = Some(Box::new(redirect_node_with_raw(
                 "2>>",
                 Some(2),
                 &redirect.target,
                 &redirect.target_metadata.raw,
                 true,
                 false,
-            ));
+            )));
             return Some(index + 1);
         }
     }
 
-    command.redirect_err = Some(redirect_node_with_raw(
+    command.redirect_err = Some(Box::new(redirect_node_with_raw(
         &tokens[index].value,
         Some(2),
         &target_value,
         &target_raw,
         false,
         tokens[index].value == "2>|",
-    ));
+    )));
     Some(index + 1)
 }
 
@@ -207,7 +207,7 @@ pub(super) fn assign_redirect_err_append_target(
         false,
     );
     command.redirects.push(redirect.clone());
-    command.redirect_err_append = Some(redirect);
+    command.redirect_err_append = Some(Box::new(redirect));
     Some(index + 1)
 }
 
@@ -245,17 +245,17 @@ pub(super) fn assign_output_redirect_raw(
     // the command's own stdout redirect. A `{var}` redirect allocates a
     // fresh descriptor (redir.c redir_varassign) and never binds fd 1.
     if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
-        command.redirect_out = Some(redirect);
+        command.redirect_out = Some(Box::new(redirect));
     }
     if operator == "&>" {
-        command.redirect_err_append = Some(redirect_node_with_raw(
+        command.redirect_err_append = Some(Box::new(redirect_node_with_raw(
             operator,
             Some(2),
             target,
             raw_target,
             true,
             false,
-        ));
+        )));
     }
 }
 
@@ -281,16 +281,16 @@ pub(super) fn assign_append_redirect_raw(
         redirect_node_with_fd_var_raw(operator, fd, fd_var, target, raw_target, true, false);
     command.redirects.push(redirect.clone());
     if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
-        command.append = Some(redirect);
+        command.append = Some(Box::new(redirect));
     }
     if operator == "&>>" {
-        command.redirect_err_append = Some(redirect_node_with_raw(
+        command.redirect_err_append = Some(Box::new(redirect_node_with_raw(
             operator,
             Some(2),
             target,
             raw_target,
             true,
             false,
-        ));
+        )));
     }
 }

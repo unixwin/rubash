@@ -65,7 +65,6 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
         token.value.clone(),
         token.raw.clone(),
         scans.process_substitutions,
-        scans.extglob_patterns,
         scans.pathname_patterns,
     ));
     // rubash#1520: freeze the #1218 verdict on the node as its head word
@@ -96,12 +95,36 @@ pub(super) struct WordScans {
 
 impl WordScans {
     pub fn run(value: &str, raw: &str) -> Self {
+        // Provably-empty admission (rubash#117 whitelist discipline): each
+        // scan below already gates on its own trigger byte — `*`/`?`/`[`
+        // for pathname patterns, `(` for extglob and process substitutions
+        // — so a value/raw pair carrying NONE of those bytes answers all
+        // three empty. One combined byte pass replaces the seven separate
+        // `contains` scans the ordinary word (`echo value_1`) used to pay;
+        // a false admission is impossible and a miss only costs the scans.
+        // GNU parse.y:5305 read_token_word builds the word once and runs no
+        // expansion analysis at parse time; these scans are the executor's
+        // metadata source, so skipping a provably-empty one is identity.
+        if !word_may_carry_parse_scans(value) && !word_may_carry_parse_scans(raw) {
+            return Self {
+                extglob_patterns: Vec::new(),
+                pathname_patterns: Vec::new(),
+                process_substitutions: Vec::new(),
+            };
+        }
         Self {
             extglob_patterns: extglob_patterns_in_word_with_raw(value, raw),
             pathname_patterns: pathname_patterns_in_word(value, raw),
             process_substitutions: process_substitutions_in_word_with_raw(value, raw),
         }
     }
+}
+
+#[inline]
+fn word_may_carry_parse_scans(text: &str) -> bool {
+    text.as_bytes()
+        .iter()
+        .any(|byte| matches!(*byte, b'*' | b'?' | b'[' | b'('))
 }
 
 pub(super) fn build_word_metadata(word_index: usize, value: &str, raw: &str) -> WordMetadata {
@@ -112,14 +135,44 @@ pub(super) fn collect_compound_word_value(
     tokens: &[Token],
     index: usize,
 ) -> Option<(String, usize)> {
-    if let Some((process_substitution, next_i)) = process_substitution_word_target(tokens, index) {
-        return Some((process_substitution.target, next_i + 1));
-    }
-
     if let Some((process_substitution, next_i)) =
-        output_process_substitution_word_target(tokens, index)
+        any_process_substitution_word_target(tokens, index)
     {
-        return Some((process_substitution.target, next_i + 1));
+        // rubash#1933: a word that BEGINS with a process substitution
+        // continues across every immediately adjacent fragment — GNU
+        // read_token_word (parse.y:5305) assembles ONE word from the
+        // span and the unspaced text glued to it (`[[ -n <(echo hi)x ]]`
+        // tests the fd path with an `x` suffix). A word-initial span is
+        // its own token run here, so keep consuming following fragments
+        // while they carry no leading whitespace: another span appends
+        // its target, a word-ish fragment appends its value. Fragments
+        // after whitespace start the next word, exactly as before.
+        let mut value = process_substitution.target;
+        let mut cursor = next_i + 1;
+        while let Some(token) = tokens.get(cursor) {
+            if !token.leading_ws.is_empty() {
+                break;
+            }
+            if let Some((more, more_next)) = any_process_substitution_word_target(tokens, cursor) {
+                value.push_str(&more.target);
+                cursor = more_next + 1;
+                continue;
+            }
+            if matches!(
+                token.kind,
+                TokenKind::Word
+                    | TokenKind::Variable
+                    | TokenKind::Assignment
+                    | TokenKind::CommandSubst
+                    | TokenKind::BraceExpand
+            ) {
+                value.push_str(&token.value);
+                cursor += 1;
+                continue;
+            }
+            break;
+        }
+        return Some((value, cursor));
     }
 
     let token = tokens.get(index)?;
@@ -179,6 +232,36 @@ pub(super) fn is_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
 /// raw differ from the de-quoted value. Fixes rubash#128.
 pub(super) fn is_unquoted_operator(token: &Token, value: &str) -> bool {
     token.value == value && token.raw == value
+}
+
+/// The blame text for an unexpected-token report on `token`. GNU's
+/// lexer returns the digit run of a numbered redirection as its own
+/// IO_NUMBER token (parse.y read_token), so an unexpected numbered
+/// redirection is blamed by its number alone (`for i in 1 2>err`
+/// blames `2'); this lexer fuses number and operator into one token
+/// whose value is the fused spelling (`2>'), so the report takes the
+/// digit run back off the front (rubash#2108).
+pub(super) fn near_blame_text(token: &Token) -> String {
+    if matches!(
+        token.kind,
+        TokenKind::RedirectIn
+            | TokenKind::RedirectOut
+            | TokenKind::Append
+            | TokenKind::RedirectErr
+            | TokenKind::RedirectErrAppend
+            | TokenKind::HereDoc
+            | TokenKind::HereString
+    ) {
+        let digits: String = token
+            .value
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            return digits;
+        }
+    }
+    token.value.clone()
 }
 
 pub(super) fn is_case_end_keyword(tokens: &[Token], index: usize) -> bool {
@@ -958,14 +1041,8 @@ pub(super) fn lone_word_function_head_candidate(cmd: &CommandNode) -> bool {
     bare.assignments
         .retain(|(name, _)| !name.starts_with("__RUBASH_"));
     bare.process_substitutions.clear();
-    bare.command_substitutions.clear();
-    bare.arithmetic_expansions.clear();
-    bare.parameter_expansions.clear();
-    bare.brace_expansions.clear();
     bare.extglob_patterns.clear();
-    bare.tilde_expansions.clear();
     bare.pathname_patterns.clear();
-    bare.word_quotes.clear();
     command_is_empty(&bare)
 }
 
@@ -975,14 +1052,8 @@ pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
         && cmd.compound_assignments.is_empty()
         && cmd.array_element_assignments.is_empty()
         && cmd.process_substitutions.is_empty()
-        && cmd.command_substitutions.is_empty()
-        && cmd.arithmetic_expansions.is_empty()
-        && cmd.parameter_expansions.is_empty()
-        && cmd.brace_expansions.is_empty()
         && cmd.extglob_patterns.is_empty()
-        && cmd.tilde_expansions.is_empty()
         && cmd.pathname_patterns.is_empty()
-        && cmd.word_quotes.is_empty()
         && cmd.heredoc.is_none()
         && cmd.heredoc_delimiter.is_none()
         && cmd.heredoc_redirects.is_empty()

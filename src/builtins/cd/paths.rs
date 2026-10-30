@@ -29,6 +29,41 @@ pub(super) fn current_logical_pwd(env_vars: &HashMap<String, String>, cwd: &Path
     cwd.to_path_buf()
 }
 
+/// The shell's VALIDATED logical cwd — the base `cd` builds a logical
+/// destination from. GNU builtins/cd.def change_to_directory makes the
+/// new path absolute against the_current_working_directory, never
+/// against the raw $PWD variable: a user assignment to $PWD
+/// desynchronizes the variable, and bash keeps building from the
+/// validated value until the next successful cd rebinds the variable
+/// from it (bindpwd, cd.def:136 — which still records the RAW old
+/// variable in OLDPWD, so current_logical_pwd keeps that job). rubash
+/// keeps no separate validated store, so the value is recomputed here
+/// with the same same-directory judgment pwd's logical face uses
+/// (logical_pwd_if_current) — itself the runtime form of the check
+/// variables.c set_pwd applies to an imported $PWD at startup
+/// (ABSPATH + same_file(temp_string, ".")): $PWD when it names the
+/// session's current directory, the physical session cwd otherwise
+/// (rubash#2143).
+pub(super) fn validated_logical_pwd(env_vars: &HashMap<String, String>, cwd: &Path) -> PathBuf {
+    if let Some(logical) = crate::builtins::pwd::logical_pwd_if_current(cwd, env_vars) {
+        return PathBuf::from(logical);
+    }
+
+    if cfg!(windows) && env_vars.contains_key("__RUBASH_PHYSICAL_PWD") {
+        // Bridge state (see logical_posix_test_dir in cd.rs): the
+        // session's logical names have no physical directory to
+        // validate against, so a '/'-spelled $PWD stays the logical
+        // truth exactly as current_logical_pwd has always treated it.
+        if let Some(pwd) = shell_var(env_vars, "PWD") {
+            if pwd.starts_with('/') {
+                return PathBuf::from(pwd);
+            }
+        }
+    }
+
+    cwd.to_path_buf()
+}
+
 pub(super) fn logical_destination(old_pwd: &Path, target: &Path) -> PathBuf {
     let combined = if target.is_absolute() {
         target.to_path_buf()

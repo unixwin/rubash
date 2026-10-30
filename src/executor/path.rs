@@ -4,7 +4,7 @@
 // - findcmd.c
 // - findcmd.h
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 #[cfg(windows)]
@@ -18,7 +18,7 @@ use crate::executor::markers::DATA_DOLLAR;
 
 pub(crate) const COMPATIBLE_SHELL_PATH_ENV: &str = "__RUBASH_COMPATIBLE_SHELL_PATH";
 
-/// Process-wide command-resolution cache.
+/// Process-wide command-resolution cache, sliced per session (rubash#2078).
 ///
 /// GNU bash remembers executed commands in its hash table (findcmd.c +
 /// builtins/hash.def) so a repeated name never pays a full PATH scan twice.
@@ -29,25 +29,27 @@ pub(crate) const COMPATIBLE_SHELL_PATH_ENV: &str = "__RUBASH_COMPATIBLE_SHELL_PA
 /// <name>` child process), so hits, misses, per-directory listings backing
 /// a merged PATH scan, and dispatcher probe outcomes are all cached
 /// (rubash#159).
+///
+/// The store holds one slice per session scope (SESSION_SCOPE_KEY, stamped
+/// by Executor::new) instead of a single fingerprint slot: an embedding host
+/// legitimately holds several Sessions in one process (API design §5.1,
+/// contract Q5), and a single slot made them serve each other's results —
+/// the `hashed` mirror deliberately survives fingerprint resets
+/// (rubash#1137), so one session's `hash -p` entry resolved another
+/// session's command, and one session's `hash -r`/PATH bind dropped
+/// another's remembered locations. Slices keyed by the session scope give
+/// every Session the isolated single-fingerprint cache rubash#159 designed;
+/// maps without the scope token (hand-built test maps, composed child env
+/// lookups) share the "" fallback slice with exactly the old behavior.
+///
+/// A slice holds ONLY the pure resolution cache below (fingerprint-guarded
+/// PATH-scan evidence). The hash-table mirror is NOT part of the slice:
+/// it is user-visible state, not a cache, so it lives in its own map on
+/// CommandLookupStores where the slice cap can never evict it
+/// (rubash#2078 review).
 struct CommandLookupCache {
     fingerprint: String,
     results: HashMap<String, Option<PathBuf>>,
-    /// Entries mirrored from the user-visible hash table (`hash -p`,
-    /// BASH_CMDS assignment — set_command_lookup_cache). GNU keeps these
-    /// in hashed_filenames (findcmd.c phash_search). The fingerprint
-    /// reset that invalidates PATH-scan results must not discard them
-    /// (rubash#1137: a `hash -p` entry inserted before the first PATH
-    /// scan vanished when the scan initialized the fingerprint, and the
-    /// registered command never executed) — but a PATH *bind* must:
-    /// variables.c:5819 registers sv_path for PATH and sv_path
-    /// (variables.c:5919) is exactly hashcmd.c:57 phash_flush, so every
-    /// PATH assignment empties the whole table (rubash#1551). That
-    /// flush is an explicit bind-time action in the owning shell state
-    /// (builtins::hash::flush_command_hash_table clears the state's
-    /// table and calls flush_command_lookup_cache_hashed below); it
-    /// cannot ride the fingerprint reset because interleaved executor
-    /// states share this process-global cache.
-    hashed: HashMap<String, Option<PathBuf>>,
     /// File-name listing per physical PATH directory. Replaces the PATH x
     /// PATHEXT per-candidate stat grid with one read_dir per directory
     /// (rubash#159); exact-case set + ASCII-lowercase fold map since #799.
@@ -74,6 +76,17 @@ struct CommandLookupCache {
 }
 
 impl CommandLookupCache {
+    fn empty() -> Self {
+        CommandLookupCache {
+            fingerprint: String::new(),
+            results: HashMap::new(),
+            listings: HashMap::new(),
+            probes: HashMap::new(),
+            path_dirs: None,
+            path_extensions: None,
+        }
+    }
+
     /// Drop everything keyed on the previous fingerprint. GNU's
     /// equivalent single flush point is phash_flush()
     /// (builtins/hash.def:150, `hash -r`); the fingerprint mismatch path
@@ -90,34 +103,165 @@ impl CommandLookupCache {
     }
 }
 
-static COMMAND_LOOKUP_CACHE: OnceLock<Mutex<CommandLookupCache>> = OnceLock::new();
+/// Session-scope transport key (rubash#2078): Executor::new stamps a fresh
+/// unique token under this name into the session's env_vars, and the
+/// command-lookup cache slices on it. In-memory only — `__RUBASH_*` names
+/// are excluded from the initial export set (env_helpers
+/// is_initial_export_candidate) and from the spawn env (the
+/// compound_exec/external_setup `rubash_spawn_inherited_state` filter), so
+/// the token never crosses a process boundary; each process slices its own
+/// static map. An env that already carries the token keeps it (a lineage
+/// re-entering Executor::new on a cloned env stays on the parent's slice —
+/// the same fork-sharing shape the hashed_cache_fork_guard brackets
+/// assume).
+pub(crate) const SESSION_SCOPE_KEY: &str = "__RUBASH_SESSION_SCOPE";
 
-fn command_lookup_cache() -> &'static Mutex<CommandLookupCache> {
-    COMMAND_LOOKUP_CACHE.get_or_init(|| {
-        Mutex::new(CommandLookupCache {
-            fingerprint: String::new(),
-            results: HashMap::new(),
-            hashed: HashMap::new(),
-            listings: HashMap::new(),
-            probes: HashMap::new(),
-            path_dirs: None,
-            path_extensions: None,
-        })
-    })
+/// The cache slice name for one env map: the session scope token when the
+/// map belongs to a session, else the shared fallback slice (hand-built
+/// maps keep the pre-#2078 single-store behavior).
+fn session_scope(env_vars: &HashMap<String, String>) -> String {
+    env_vars.get(SESSION_SCOPE_KEY).cloned().unwrap_or_default()
 }
 
-/// Forget only the hash-table mirror entries (the `hashed` map).
+/// Live RESOLUTION-slice cap. Sessions are heavyweight objects and
+/// embedding hosts hold a handful; a host churning through more distinct
+/// scopes than this (per-request sessions) pays a cache-cold cycle for
+/// the evicted slice only, never a correctness change — a slice is a
+/// pure cache (fingerprint-guarded PATH-scan evidence), so losing one
+/// costs a re-walk. The hash-table mirrors below are NOT slices and are
+/// never evicted (rubash#2078 review): they are user-visible state.
+const CACHE_SLICE_CAP: usize = 16;
+
+/// The process-global lookup stores: one capped set of pure resolution
+/// slices plus the uncapped per-scope hash-table mirrors, behind one
+/// mutex so a lookup that needs both stays a single lock scope (the
+/// shape find_user_command's pre/post-walk blocks already use — the walk
+/// itself runs with the lock dropped, as before).
+struct CommandLookupStores {
+    /// Pure per-scope resolution caches, capped at CACHE_SLICE_CAP with
+    /// single-slice LRU eviction.
+    slices: HashMap<String, CommandLookupCache>,
+    /// Recency order over `slices`, least-recently-used first.
+    recency: VecDeque<String>,
+    /// Entries mirrored from each session's user-visible hash table
+    /// (`hash -p`, BASH_CMDS assignment — set_command_lookup_cache),
+    /// keyed by session scope. GNU keeps these in hashed_filenames
+    /// (findcmd.c phash_search). The fingerprint reset that invalidates
+    /// PATH-scan results must not discard them (rubash#1137: a `hash -p`
+    /// entry inserted before the first PATH scan vanished when the scan
+    /// initialized the fingerprint, and the registered command never
+    /// executed) — but a PATH *bind* must: variables.c:5819 registers
+    /// sv_path for PATH and sv_path (variables.c:5919) is exactly
+    /// hashcmd.c:57 phash_flush, so every PATH assignment empties the
+    /// whole table (rubash#1551). That flush is an explicit bind-time
+    /// action in the owning shell state
+    /// (builtins::hash::flush_command_hash_table clears the state's
+    /// table and calls flush_command_lookup_cache_hashed below); it
+    /// cannot ride the fingerprint reset because interleaved executor
+    /// states share this process-global store.
+    ///
+    /// The mirrors are exempt from the slice cap and from eviction:
+    /// GNU keeps a shell's hash table for the shell's whole lifetime —
+    /// entries die only by that shell's own PATH assignment / `hash -r`
+    /// (both slice-scoped here) — so a store-level eviction must never
+    /// drop a live session's remembered locations. The map is bounded by
+    /// the scopes the host has created and each scope's own hash usage
+    /// (the per-scope self-cap in set_command_lookup_cache); only the
+    /// resolution slices' memory is bounded by CACHE_SLICE_CAP.
+    hashed: HashMap<String, HashMap<String, Option<PathBuf>>>,
+}
+
+impl CommandLookupStores {
+    fn new() -> Self {
+        CommandLookupStores {
+            slices: HashMap::new(),
+            recency: VecDeque::new(),
+            hashed: HashMap::new(),
+        }
+    }
+
+    /// Mark `scope` most-recently-used, creating its resolution slice
+    /// first if needed. Creation at the cap evicts the single
+    /// least-recently-used OTHER slice — never a global clear, and the
+    /// hash-table mirrors are not touched: eviction cold-cycles one
+    /// sibling's PATH-scan evidence, nothing user-visible.
+    fn touch_slice(&mut self, scope: &str) {
+        if self.slices.contains_key(scope) {
+            if let Some(pos) = self.recency.iter().position(|s| s == scope) {
+                self.recency.remove(pos);
+            }
+            self.recency.push_back(scope.to_string());
+            return;
+        }
+        if self.slices.len() >= CACHE_SLICE_CAP {
+            if let Some(victim) = self.recency.pop_front() {
+                self.slices.remove(&victim);
+            }
+        }
+        self.slices
+            .insert(scope.to_string(), CommandLookupCache::empty());
+        self.recency.push_back(scope.to_string());
+    }
+}
+
+static COMMAND_LOOKUP_STORES: OnceLock<Mutex<CommandLookupStores>> = OnceLock::new();
+
+fn command_lookup_stores() -> std::sync::MutexGuard<'static, CommandLookupStores> {
+    COMMAND_LOOKUP_STORES
+        .get_or_init(|| Mutex::new(CommandLookupStores::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Lock one session's resolution slice, creating it (with LRU eviction
+/// at the cap) as needed.
+fn session_lookup_slice<'a>(
+    stores: &'a mut CommandLookupStores,
+    scope: &str,
+) -> &'a mut CommandLookupCache {
+    stores.touch_slice(scope);
+    stores.slices.get_mut(scope).expect("slice just inserted")
+}
+
+/// Lock one session's hash-table mirror. Mirrors are state, not cache:
+/// this never creates a resolution slice and never evicts anything.
+fn session_hashed_mirror<'a>(
+    stores: &'a mut CommandLookupStores,
+    scope: &str,
+) -> &'a mut HashMap<String, Option<PathBuf>> {
+    stores.hashed.entry(scope.to_string()).or_default()
+}
+
+/// Lock one session's resolution slice AND its hash-table mirror in the
+/// same lock scope (find_user_command consults the mirror first, then
+/// the slice's scan evidence).
+fn session_slice_and_mirror<'a>(
+    stores: &'a mut CommandLookupStores,
+    scope: &str,
+) -> (
+    &'a mut CommandLookupCache,
+    &'a mut HashMap<String, Option<PathBuf>>,
+) {
+    stores.touch_slice(scope);
+    let slice = stores.slices.get_mut(scope).expect("slice just inserted");
+    let mirror = stores.hashed.entry(scope.to_string()).or_default();
+    (slice, mirror)
+}
+
+/// Forget only the hash-table mirror entries (the `hashed` map) of the
+/// session that owns `env_vars`.
 ///
 /// GNU sv_path (variables.c:5919, fired by every PATH bind/unbind) is
 /// hashcmd.c:57 phash_flush: the remembered locations die, while PATH
 /// scanning itself is untouched. The scan stores here stay in place —
 /// they are fingerprint-guarded, so results computed under the old PATH
-/// are dropped by the next lookup's reset anyway (rubash#1551).
-pub(crate) fn flush_command_lookup_cache_hashed() {
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.hashed.clear();
+/// are dropped by the next lookup's reset anyway (rubash#1551). The flush
+/// is slice-scoped (rubash#2078): a sibling session's PATH bind must not
+/// drop this session's remembered locations.
+pub(crate) fn flush_command_lookup_cache_hashed(env_vars: &HashMap<String, String>) {
+    let scope = session_scope(env_vars);
+    let mut stores = command_lookup_stores();
+    session_hashed_mirror(&mut stores, &scope).clear();
 }
 
 /// RAII bracket for an in-process fork boundary (pipeline element,
@@ -134,68 +278,77 @@ pub(crate) fn flush_command_lookup_cache_hashed() {
 /// child's `hash -p` would leak into them (rubash#1551). The owning
 /// state's `__RUBASH_HASH_TABLE` env entry is already cloned/restored
 /// by the boundary's own state snapshot; this guard covers the mirror.
-/// Same guard shape as builtins::kill::sigpipe_block_guard.
+/// Same guard shape as builtins::kill::sigpipe_block_guard. The bracket
+/// snapshots and restores only its own session's slice (rubash#2078) —
+/// a sibling session running on another thread during the boundary
+/// must not be rolled back by this drop.
 pub(crate) struct HashedCacheForkGuard {
+    scope: String,
     saved: HashMap<String, Option<PathBuf>>,
 }
 
-pub(crate) fn hashed_cache_fork_guard() -> HashedCacheForkGuard {
-    let cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    HashedCacheForkGuard {
-        saved: cache.hashed.clone(),
-    }
+pub(crate) fn hashed_cache_fork_guard(env_vars: &HashMap<String, String>) -> HashedCacheForkGuard {
+    let scope = session_scope(env_vars);
+    let saved = {
+        let mut stores = command_lookup_stores();
+        session_hashed_mirror(&mut stores, &scope).clone()
+    };
+    HashedCacheForkGuard { scope, saved }
 }
 
 impl Drop for HashedCacheForkGuard {
     fn drop(&mut self) {
-        let mut cache = command_lookup_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.hashed = std::mem::take(&mut self.saved);
+        let mut stores = command_lookup_stores();
+        *session_hashed_mirror(&mut stores, &self.scope) = std::mem::take(&mut self.saved);
     }
 }
 
-/// Forget all remembered command locations (`hash -r`, tests).
-pub(crate) fn clear_command_lookup_cache() {
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+/// Forget all remembered command locations (`hash -r`, tests) in the
+/// session that owns `env_vars`.
+pub(crate) fn clear_command_lookup_cache(env_vars: &HashMap<String, String>) {
+    let scope = session_scope(env_vars);
+    let mut stores = command_lookup_stores();
+    let (cache, mirror) = session_slice_and_mirror(&mut stores, &scope);
     // `hash -r` (phash_flush) forgets hashed_filenames too — unlike a
     // fingerprint reset, this clear drops the hash-table mirror as well.
-    cache.hashed.clear();
+    mirror.clear();
     cache.reset(String::new());
 }
 
-/// Forget one remembered command location.
+/// Forget one remembered command location in the session that owns
+/// `env_vars`.
 ///
 /// GNU `hash -d NAME` (builtins/hash.def) calls `phash_remove(w)` to drop a
 /// single entry from the hash table. Rubash keeps the user-visible hash table
 /// in `__RUBASH_HASH_TABLE` and the in-memory lookup cache here; both must be
 /// invalidated together or the next `find_user_command(name)` returns the
 /// stale cached path.
-pub(crate) fn remove_command_lookup_cache(name: &str) {
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+pub(crate) fn remove_command_lookup_cache(name: &str, env_vars: &HashMap<String, String>) {
+    let scope = session_scope(env_vars);
+    let mut stores = command_lookup_stores();
+    let (cache, mirror) = session_slice_and_mirror(&mut stores, &scope);
     cache.results.remove(name);
-    cache.hashed.remove(name);
+    mirror.remove(name);
 }
 
-/// Insert or override one remembered command location.
+/// Insert or override one remembered command location in the session that
+/// owns `env_vars`.
 ///
 /// GNU `hash -p PATH NAME` (builtins/hash.def) calls `phash_insert(w,
 /// pathname)` so the next lookup of `name` returns `pathname` without a PATH
 /// scan. `hash NAME` rehash also lands here after a fresh PATH search. The
 /// internal cache must mirror the user-visible table or `find_user_command`
 /// keeps returning the old result.
-pub(crate) fn set_command_lookup_cache(name: &str, path: Option<PathBuf>) {
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if cache.hashed.len() >= 4096 {
-        cache.hashed.clear();
+pub(crate) fn set_command_lookup_cache(
+    name: &str,
+    path: Option<PathBuf>,
+    env_vars: &HashMap<String, String>,
+) {
+    let scope = session_scope(env_vars);
+    let mut stores = command_lookup_stores();
+    let mirror = session_hashed_mirror(&mut stores, &scope);
+    if mirror.len() >= 4096 {
+        mirror.clear();
     }
     // This setter is the hash table's write path (`hash -p`, BASH_CMDS),
     // so the entry belongs ONLY in the hash-table mirror, whose entries
@@ -205,7 +358,7 @@ pub(crate) fn set_command_lookup_cache(name: &str, path: Option<PathBuf>) {
     // outlived phash_flush (a PATH bind clears the mirror) whenever the
     // fingerprint later coincided, resurrecting a flushed entry
     // (rubash#1551).
-    cache.hashed.insert(name.to_string(), path);
+    mirror.insert(name.to_string(), path);
 }
 
 /// Environment values that can change a lookup result. The cache resets
@@ -230,7 +383,7 @@ fn anchor_at_session_cwd(candidate: PathBuf, env_vars: &HashMap<String, String>)
     candidate
 }
 
-fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
+pub(crate) fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
     const ENV_KEYS: &[&str] = &[
         "PATH",
         // G-02: cached lookup results are anchored at the session cwd
@@ -241,7 +394,6 @@ fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {
         "HOME",
         "USERPROFILE",
         "__RUBASH_SHELL_ROOT",
-        "WINUXSH_ROOT",
         "RUBASH_ROOT",
         "COREUTILS_PATH",
         "SHELL_COREUTILS_DIR",
@@ -411,11 +563,11 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
     if !crate::builtins::set::shell_option_enabled(env_vars, "hashall")
         || env_vars.get("__RUBASH_TEMP_PATH").map(String::as_str) == Some("1")
     {
+        let scope = session_scope(env_vars);
         let fingerprint = command_lookup_fingerprint(env_vars);
         {
-            let mut cache = command_lookup_cache()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut stores = command_lookup_stores();
+            let cache = session_lookup_slice(&mut stores, &scope);
             if cache.fingerprint != fingerprint {
                 cache.reset(fingerprint.clone());
             } else if cache.results.get(name) == Some(&None) {
@@ -426,7 +578,7 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
                 // The probe grid re-stats every candidate spelling under
                 // every PATH dir; a hit means the file appeared
                 // mid-session, so drop the memo and take the real walk.
-                if memoized_miss_still_absent(&mut cache, name, env_vars, &fingerprint) {
+                if memoized_miss_still_absent(cache, name, env_vars, &fingerprint) {
                     return None;
                 }
                 cache.results.remove(name);
@@ -434,9 +586,8 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         }
         let result = find_user_command_uncached(name, env_vars, &fingerprint);
         if result.is_none() && !has_path_separator(name) {
-            let mut cache = command_lookup_cache()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut stores = command_lookup_stores();
+            let cache = session_lookup_slice(&mut stores, &scope);
             if cache.fingerprint == fingerprint {
                 if cache.results.len() >= 4096 {
                     cache.results.clear();
@@ -447,11 +598,11 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         return result;
     }
 
+    let scope = session_scope(env_vars);
     let fingerprint = command_lookup_fingerprint(env_vars);
     {
-        let mut cache = command_lookup_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut stores = command_lookup_stores();
+        let (cache, mirror) = session_slice_and_mirror(&mut stores, &scope);
         if cache.fingerprint != fingerprint {
             cache.reset(fingerprint.clone());
         }
@@ -460,10 +611,10 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         // hash table survives PATH changes — consult the mirrored
         // hash-table entries first, even right after a fingerprint reset
         // (rubash#1137).
-        if let Some(result) = cache.hashed.get(name).cloned() {
+        if let Some(result) = mirror.get(name).cloned() {
             if let Some(path) = &result {
                 if crate::builtins::shopt::checkhash_enabled() && !cached_path_still_valid(path) {
-                    cache.hashed.remove(name);
+                    mirror.remove(name);
                     cache.results.remove(name);
                 } else {
                     return Some(path.clone());
@@ -496,9 +647,8 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
 
     let result = find_user_command_uncached(name, env_vars, &fingerprint);
 
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut stores = command_lookup_stores();
+    let cache = session_lookup_slice(&mut stores, &scope);
     if cache.fingerprint != fingerprint {
         cache.reset(fingerprint);
     }
@@ -731,10 +881,10 @@ fn find_in_path_via_listings(
     env_vars: &HashMap<String, String>,
     fingerprint: &str,
 ) -> Option<PathBuf> {
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (dirs, extensions) = path_scan_scaffold(&mut cache, env_vars, fingerprint);
+    let scope = session_scope(env_vars);
+    let mut stores = command_lookup_stores();
+    let cache = session_lookup_slice(&mut stores, &scope);
+    let (dirs, extensions) = path_scan_scaffold(cache, env_vars, fingerprint);
     // Candidate spellings are per-NAME, not per-directory (GNU passes the
     // same NAME through the whole walk); derive them once so a miss costs
     // one contains() per PATH entry per PATHEXT candidate and no
@@ -742,7 +892,7 @@ fn find_in_path_via_listings(
     let candidates = listed_candidates(name, &extensions);
     for attempt in 0..2 {
         for dir in dirs.iter() {
-            let listing = cached_dir_listing(&mut cache, dir);
+            let listing = cached_dir_listing(cache, dir);
             for candidate in &candidates {
                 // rubash#799 relaxed by rubash#1283: within one directory a
                 // byte-equal listing hit (arm above) wins; this fold arm
@@ -791,7 +941,7 @@ fn find_in_path_via_listings(
         // unhashed lookup, so the negative answer always comes from the
         // filesystem, never from a cache. Hits return from the listing
         // scan above and never pay the probe grid.
-        if attempt == 0 && confirm_listing_miss(&mut cache, &dirs, &candidates).moved {
+        if attempt == 0 && confirm_listing_miss(cache, &dirs, &candidates).moved {
             continue;
         }
         break;
@@ -954,7 +1104,7 @@ fn find_user_command_uncached(
     if has_path_separator(name) {
         // `/bin/bash` / `/usr/bin/bash` normally resolve to the literal
         // file (execve semantics). The substitute chain below (explicit
-        // compatible-shell env, winuxsh, then a PATH search for `bash`)
+        // compatible-shell env, then a PATH search for `bash`)
         // is the Windows fixture: hosts without /bin need SOME bash to
         // satisfy suite shebangs. On unix the chain would invert lookup
         // priority — e.g. on macOS a homebrew bash at the front of PATH
@@ -965,9 +1115,6 @@ fn find_user_command_uncached(
         #[cfg(windows)]
         if is_standard_unix_bash_path(name) {
             if let Some(found) = configured_compatible_shell(env_vars) {
-                return Some(found);
-            }
-            if let Some(found) = configured_shell_root_winuxsh(env_vars) {
                 return Some(found);
             }
             if let Some(found) = find_user_command("bash", env_vars) {
@@ -1174,12 +1321,6 @@ fn configured_compatible_shell(env_vars: &HashMap<String, String>) -> Option<Pat
     executable_candidate(&candidate, env_vars)
 }
 
-#[cfg(windows)]
-fn configured_shell_root_winuxsh(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
-    let candidate = configured_shell_root(env_vars)?.join("winuxsh.exe");
-    executable_candidate(&candidate, env_vars)
-}
-
 pub fn should_run_with_shell(path: &Path) -> bool {
     if cfg!(windows) {
         if matches!(
@@ -1295,7 +1436,18 @@ fn push_external_args(command: &mut Command, args: &[String]) {
 #[cfg(windows)]
 fn windows_program_is_posix_runtime_hosted(command: &Command) -> bool {
     let program = command.get_program();
-    let Some(directory) = std::path::Path::new(program).parent() else {
+    program_dir_hosts_posix_runtime(std::path::Path::new(program))
+}
+
+/// Whether a program at `program` is hosted by an MSYS2/Cygwin POSIX
+/// runtime, detected by the runtime DLL shipping beside it — the
+/// path-shaped form of [`windows_program_is_posix_runtime_hosted`] for
+/// consumers that classify a child before a `Command` exists (the
+/// rubash#1905 operand policy in `proc_operands`). A failed lookup
+/// classifies the program as native.
+#[cfg(windows)]
+pub(in crate::executor) fn program_dir_hosts_posix_runtime(program: &Path) -> bool {
+    let Some(directory) = program.parent() else {
         return false;
     };
     ["msys-2.0.dll", "cygwin1.dll"].iter().any(|dll| {
@@ -1305,6 +1457,77 @@ fn windows_program_is_posix_runtime_hosted(command: &Command) -> bool {
             .map(|meta| meta.is_file())
             .unwrap_or(false)
     })
+}
+
+#[cfg(not(windows))]
+pub(in crate::executor) fn program_dir_hosts_posix_runtime(_program: &Path) -> bool {
+    false
+}
+
+/// rubash#1905: whether a child spawned for `program` resolves
+/// synthetic /proc spellings through a layer of its own, so the spawn
+/// boundary must hand such operands over VERBATIM instead of
+/// materializing them (see `executor::proc_operands`). Three classes
+/// own a namespace the shell must not rewrite into:
+///
+/// - namespace bridges (wsl/ssh/scp/sftp): the argv is interpreted in
+///   another filesystem namespace entirely (final ruling 2026-10-27
+///   item (a), the same axis the translation funnel honors);
+/// - MSYS2/Cygwin-runtime-hosted tools: their runtime serves a live
+///   /proc of its own (and answers `self` as the reader) — a shell
+///   snapshot would replace its format face and strip its self
+///   semantics;
+/// - scripts a POSIX-layer shell will interpret (`should_run_with_shell`
+///   minus the cmd/PowerShell-hosted forms): the interpreter owns the
+///   namespace (a rubash respawn carries the simulation itself; a
+///   shebang to an MSYS bash carries that runtime's /proc). Batch and
+///   PowerShell scripts are excluded from this arm: their hosts are
+///   native programs with no /proc layer, so their operands take the
+///   materialization like any native child's.
+///
+/// Everything else — native programs and the WinuxCmd family
+/// (`posix_aware_child` means it speaks shell-namespace PATH SPELLINGS;
+/// its native_path layer has /dev faces but no /proc) — has no /proc
+/// layer and receives materialized operands. Off Windows the question
+/// is empty (real procfs serves every child), so the stub answers
+/// false and the materialization pass stays inert there.
+#[cfg(windows)]
+pub(in crate::executor) fn child_resolves_synthetic_proc(program: &Path) -> bool {
+    is_namespace_bridge_program(program)
+        || program_dir_hosts_posix_runtime(program)
+        || (should_run_with_shell(program)
+            && !is_windows_batch_file(program)
+            && !is_windows_powershell_script(program))
+}
+
+#[cfg(not(windows))]
+pub(in crate::executor) fn child_resolves_synthetic_proc(_program: &Path) -> bool {
+    false
+}
+
+/// rubash#1905: the argument positions the operand materialization
+/// must leave alone for a given child — the data-primary positions
+/// (grep/sed/awk pattern words and kin) when the child is of the
+/// WinuxCmd class, exactly the protection the translation funnel
+/// applies to that class in `external_command_for_named_program`.
+/// Data is not an operand even when it is shaped like a path. For
+/// every other child class the dialect already translates
+/// path-shaped words wholesale (Option B), so the set is empty.
+pub(in crate::executor) fn synthetic_proc_skip_positions(
+    program: &Path,
+    env_vars: &HashMap<String, String>,
+    command_name: Option<&str>,
+    args: &[String],
+) -> std::collections::HashSet<usize> {
+    #[cfg(windows)]
+    {
+        if posix_aware_child(program, env_vars) {
+            return argv_data_primary_positions(command_name, args);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (program, env_vars, command_name, args);
+    std::collections::HashSet::new()
 }
 
 /// Quote one argument for a Windows command line so the child's argv sees
@@ -1416,10 +1639,25 @@ pub fn external_command_for_named_program(
     // native funnel (external_argument_path), exactly like a native
     // child's argv.
     #[cfg(windows)]
-    let data_primary_positions = if posix_aware {
-        argv_data_primary_positions(command_name, args)
-    } else {
+    let data_primary_positions = if argv_dialect_legacy(env_vars) {
         std::collections::HashSet::new()
+    } else {
+        // rubash#2063 (dsh-bash-native patch 0001, SpookyWaste): the set
+        // is a property of the tool's grammar, not of the child's path
+        // layer, so EVERY child class gets it — until now only the
+        // POSIX-aware class computed it, and a native child's
+        // pattern/script/program text was rewritten by both funnels
+        // below while the bundled toolchain's copies stayed protected.
+        // The legacy hatch keeps gating the mask with the rest of the
+        // Option B bundle, exactly as the posix_aware gate did. The
+        // grammar key is the caller's typed word (every production
+        // spawn route hands one in); the one route that hands in no
+        // word (external_command_for_program) keys the table on the
+        // program's own file stem instead — the grammar belongs to
+        // the program that runs.
+        let grammar_key =
+            command_name.or_else(|| program.file_stem().and_then(|stem| stem.to_str()));
+        argv_data_primary_positions(grammar_key, args)
     };
     let native_args = args
         .iter()
@@ -1441,13 +1679,14 @@ pub fn external_command_for_named_program(
             // Third-party tree members (rg/bat/fd/shim) are NOT posix_aware
             // and take this funnel (D6). Every other child class (native
             // exes, cmd, MSYS/Cygwin tools) is untouched and still gets the
-            // native form.
+            // native form. A data-primary word (rubash#2063) is not a path
+            // in any child class, so it skips this funnel too.
             #[cfg(windows)]
             if namespace_bridge {
                 return arg.clone();
             }
             #[cfg(windows)]
-            if !posix_aware {
+            if !posix_aware && !data_primary_positions.contains(&position) {
                 if let Some(translated) =
                     translated_virtual_system_root_argument(arg, shell_wrapped, env_vars)
                 {
@@ -1471,6 +1710,15 @@ pub fn external_command_for_named_program(
                 }
                 external_argument_path(arg, env_vars)
             } else {
+                #[cfg(windows)]
+                {
+                    // rubash#2063: a data-primary word is not a path,
+                    // whatever the child class — it reaches a native
+                    // child verbatim, exactly like a POSIX-aware one.
+                    if data_primary_positions.contains(&position) {
+                        return arg.clone();
+                    }
+                }
                 external_argument_path(arg, env_vars)
             }
         })
@@ -1566,7 +1814,12 @@ pub fn external_command_for_named_program(
         let lower = name.replace('\\', "/").to_ascii_lowercase();
         let is_sh =
             lower == "sh" || lower == "bash" || lower.ends_with("/sh") || lower.ends_with("/bash");
-        if !cfg!(unix) && is_sh && native_args.len() == 2 && native_args[0] == "-c" && !bash_argv0_supplied {
+        if !cfg!(unix)
+            && is_sh
+            && native_args.len() == 2
+            && native_args[0] == "-c"
+            && !bash_argv0_supplied
+        {
             command.arg(name);
         }
     }
@@ -1859,7 +2112,7 @@ fn argv_dialect_legacy(env_vars: &HashMap<String, String>) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("legacy"))
 }
 
-/// unixwin/rubash#592: the argv indices of a POSIX-aware child's arguments
+/// unixwin/rubash#592: the argv indices of a child's arguments
 /// that are DATA by the tool's own grammar — pattern/script/program text
 /// whose bytes must cross the boundary verbatim (invariant C, niubash#62:
 /// the shell cannot separate `ls /d/` from `grep -F "/h/"` by shape). Two
@@ -2216,7 +2469,7 @@ fn is_winuxcmd_applet(program: &Path, env_vars: &HashMap<String, String>) -> boo
 /// Windows file identity for hardlink detection: (volume serial, file
 /// index). Same pair as `builtins/test.rs` `file_identity` for `[ f -ef g ]`.
 #[cfg(windows)]
-fn file_identity(path: &Path) -> Option<(u32, u64)> {
+pub(crate) fn file_identity(path: &Path) -> Option<(u32, u64)> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -2321,11 +2574,11 @@ fn winuxcmd_has_command_cached(
     name: &str,
     env_vars: &HashMap<String, String>,
 ) -> bool {
+    let scope = session_scope(env_vars);
     let fingerprint = command_lookup_fingerprint(env_vars);
     {
-        let mut cache = command_lookup_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut stores = command_lookup_stores();
+        let cache = session_lookup_slice(&mut stores, &scope);
         if cache.fingerprint != fingerprint {
             cache.reset(fingerprint.clone());
         } else if let Some(cached) = cache.probes.get(name) {
@@ -2333,9 +2586,8 @@ fn winuxcmd_has_command_cached(
         }
     }
     let probed = winuxcmd_has_command(dispatcher, name, env_vars);
-    let mut cache = command_lookup_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut stores = command_lookup_stores();
+    let cache = session_lookup_slice(&mut stores, &scope);
     if cache.fingerprint != fingerprint {
         cache.reset(fingerprint);
     }
@@ -2582,7 +2834,7 @@ fn external_argument_path(arg: &str, env_vars: &HashMap<String, String>) -> Stri
         // A leading backslash is a valid native argument spelling (and is
         // commonly used by utilities for escape sequences such as `\\n`).
         // Only slash-prefixed shell paths belong to the logical root; treating
-        // `\\n` as `/n` changes data arguments into paths under WINUXSH_ROOT.
+        // `\\n` as `/n` changes data arguments into paths under the shell root.
         if arg.starts_with('\\') {
             return arg.to_string();
         }
@@ -2718,8 +2970,9 @@ fn windows_external_absolute_argument_needs_translation(
 /// temp base (niubash#94), /home to the real home's parent
 /// (HOME/USERPROFILE), and the install-tree components {bin,etc,lib,
 /// lib64,opt,sbin,usr,var} join below the configured shell root
-/// (WINUXSH_ROOT et al.) with the same Option B gating native children
-/// already use (niubash#124(b)). `normalized` must already be
+/// (__RUBASH_SHELL_ROOT / RUBASH_ROOT) with the same Option B gating
+/// native children already use (niubash#124(b)). `normalized` must
+/// already be
 /// backslash-folded; only `/`-prefixed spellings name the namespace.
 fn windows_virtual_system_root_argument(
     normalized: &str,
@@ -2989,6 +3242,20 @@ pub fn apply_required_windows_child_environment(
     process: &mut Command,
     env_vars: &HashMap<String, String>,
 ) {
+    for (name, value) in required_windows_child_environment_pairs(env_vars) {
+        process.env(name, value);
+    }
+}
+
+/// The data form of [`apply_required_windows_child_environment`]:
+/// the (name, value) pairs it would set on a child, in its order.
+/// The route seam (external_route) composes a routed call's
+/// environment from pairs, so the two forms share this one body.
+#[cfg(windows)]
+pub fn required_windows_child_environment_pairs(
+    env_vars: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
     for name in ["SystemRoot", "WINDIR", "ComSpec"] {
         let value = env_vars
             .get(name)
@@ -2996,7 +3263,7 @@ pub fn apply_required_windows_child_environment(
             .or_else(|| std::env::var(name).ok());
         if let Some(value) = value {
             if !value.contains('\0') {
-                process.env(name, value);
+                pairs.push((name.to_string(), value));
             }
         }
     }
@@ -3024,27 +3291,31 @@ pub fn apply_required_windows_child_environment(
         // rubash#329 source-(a) family, niubash#149), and the drive colon
         // then broke child scripts splicing $HOME into s:...: patterns.
         if !env_vars.contains_key("USERPROFILE") {
-            process.env("USERPROFILE", &native_home);
+            pairs.push(("USERPROFILE".to_string(), native_home.clone()));
         }
         if !env_vars.contains_key("HOME") {
-            process.env("HOME", &native_home);
+            pairs.push(("HOME".to_string(), native_home.clone()));
         }
         if let Some((drive, path)) = windows_drive_and_home_path(&native_home) {
             if !env_vars.contains_key("HOMEDRIVE") {
-                process.env("HOMEDRIVE", drive);
+                pairs.push(("HOMEDRIVE".to_string(), drive));
             }
             if !env_vars.contains_key("HOMEPATH") {
-                process.env("HOMEPATH", path);
+                pairs.push(("HOMEPATH".to_string(), path));
             }
         }
         let base = native_home.trim_end_matches('\\');
         if !env_vars.contains_key("APPDATA") {
-            process.env("APPDATA", format!("{base}\\AppData\\Roaming"));
+            pairs.push(("APPDATA".to_string(), format!("{base}\\AppData\\Roaming")));
         }
         if !env_vars.contains_key("LOCALAPPDATA") {
-            process.env("LOCALAPPDATA", format!("{base}\\AppData\\Local"));
+            pairs.push((
+                "LOCALAPPDATA".to_string(),
+                format!("{base}\\AppData\\Local"),
+            ));
         }
     }
+    pairs
 }
 
 #[cfg(not(windows))]
@@ -3052,6 +3323,13 @@ pub fn apply_required_windows_child_environment(
     _process: &mut Command,
     _env_vars: &HashMap<String, String>,
 ) {
+}
+
+#[cfg(not(windows))]
+pub fn required_windows_child_environment_pairs(
+    _env_vars: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    Vec::new()
 }
 
 #[cfg(windows)]
@@ -3087,6 +3365,26 @@ pub(crate) fn is_executable_file(path: &Path) -> bool {
 #[cfg(not(unix))]
 pub(crate) fn is_executable_file(path: &Path) -> bool {
     path.is_file()
+}
+
+/// Issue #2093: the literal-file existence gate for the registry's
+/// `SlashKind::RedirectToBuiltin` spellings (/bin and /usr/bin of
+/// echo, printf, pwd). GNU findcmd.c:383-385 treats a slash-bearing
+/// word as an absolute program — search_for_command hands it to execve
+/// verbatim, so when the path names a real file, that FILE answers
+/// (--help/--version banners, no shell-option sensitivity, physical
+/// pwd) and the builtin claim must stand down. The probe is exactly
+/// the literal resolution `find_user_command_uncached`'s slash branch
+/// performs FIRST (anchor_at_session_cwd over shell_path_to_windows,
+/// then executable_candidate) — deliberately without that branch's
+/// Windows basename-PATH fallbacks, so a PATH-resolvable `echo` with
+/// no literal file at the translated spelling keeps the emulated
+/// answer (the Windows no-/bin default stays a redirect). An existing
+/// but non-executable literal file also keeps the redirect, per the
+/// issue's two-clause gate (存在且可执行 -> 真实 exec，缺席 -> 维持改道).
+pub(crate) fn literal_executable_file(spelling: &str, env_vars: &HashMap<String, String>) -> bool {
+    let candidate = anchor_at_session_cwd(shell_path_to_windows(spelling, env_vars), env_vars);
+    executable_candidate(&candidate, env_vars).is_some()
 }
 
 fn executable_candidate(path: &Path, env_vars: &HashMap<String, String>) -> Option<PathBuf> {
@@ -3327,11 +3625,34 @@ fn shell_path_to_windows_inner(path: &str, env_vars: &HashMap<String, String>) -
         }
     }
 
+    // /dev/shm is the POSIX shared-memory tmpfs (rubash#1899). It is a
+    // real, writable directory namespace — not a capability device —
+    // so it must not fall into the /dev sentinel arm below (which made
+    // every /dev/shm file an unsupported-device error and sent data
+    // to a literal enclave path instead). Like /var/tmp it plays the
+    // temporary-files role in the simulation: a lazily materialized
+    // directory below the per-user temp base (<temp>/dev/shm), kept
+    // distinct from both /tmp and /var/tmp. This arm sits ahead of the
+    // /dev arm for that reason.
+    if cfg!(windows) && (normalized == "/dev/shm" || normalized.starts_with("/dev/shm/")) {
+        if let Some(shm) = windows_shm_dir() {
+            // Lazy materialization, same discipline as /var/tmp
+            // (rubash#328): create only when a /dev/shm path is
+            // actually resolved.
+            let _ = std::fs::create_dir_all(&shm);
+            return if normalized == "/dev/shm" {
+                shm
+            } else {
+                shm.join(normalized.strip_prefix("/dev/shm/").unwrap_or_default())
+            };
+        }
+    }
+
     // `/dev` is a capability namespace. Only specific /dev paths are mapped
     // on Windows; do not let unsupported fd/tty spellings become ordinary
     // files below the logical root.
     if cfg!(windows) && (normalized == "/dev" || normalized.starts_with("/dev/")) {
-        return PathBuf::from(r"\\.\WINUXSH_UNSUPPORTED_DEVICE");
+        return PathBuf::from(r"\\.\RUBASH_UNSUPPORTED_DEVICE");
     }
 
     if cfg!(windows) {
@@ -3622,6 +3943,18 @@ pub(in crate::executor) fn windows_var_tmp_dir() -> Option<PathBuf> {
     Some(PathBuf::from(base).join("var").join("tmp"))
 }
 
+/// The /dev/shm backing directory (rubash#1899): derived from the same
+/// temp base as /var/tmp, in a dev/shm subdirectory so the tmpfs
+/// namespace cannot collide with /tmp, /var/tmp, or unrelated %TEMP%
+/// contents.
+pub(in crate::executor) fn windows_shm_dir() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let base = crate::executor::local_helpers::safe_temp_dir_string();
+    Some(PathBuf::from(base).join("dev").join("shm"))
+}
+
 /// Best-effort creation of the /var/tmp backing directory at shell startup.
 /// Open() callers never mkdir, so without this every /var/tmp open fails.
 /// The backing directory lives below the per-user temp base even when a
@@ -3635,8 +3968,8 @@ pub(in crate::executor) fn ensure_var_tmp_dir(_env_vars: &HashMap<String, String
 fn configured_shell_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     // Walk the chain and take the first NON-EMPTY value: an empty entry must
     // not shadow later names (a host exporting an empty __RUBASH_SHELL_ROOT
-    // alongside WINUXSH_ROOT/RUBASH_ROOT used to disable root resolution).
-    let value = ["__RUBASH_SHELL_ROOT", "WINUXSH_ROOT", "RUBASH_ROOT"]
+    // alongside RUBASH_ROOT used to disable root resolution).
+    let value = ["__RUBASH_SHELL_ROOT", "RUBASH_ROOT"]
         .into_iter()
         .find_map(|name| env_vars.get(name).filter(|value| !value.is_empty()))?;
 
@@ -4261,7 +4594,7 @@ mod tests {
     #[test]
     fn windows_neutral_shell_root_env_drives_root_resolution() {
         // The neutral __RUBASH_SHELL_ROOT name must be sufficient on its own;
-        // WINUXSH_ROOT/RUBASH_ROOT are compatibility fallbacks only.
+        // RUBASH_ROOT is a compatibility fallback only.
         let root = std::env::temp_dir().join("rubash-neutral-shell-root");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("etc")).unwrap();
@@ -4275,6 +4608,61 @@ mod tests {
             root.join("etc").join("config")
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn winux_purge_s3_configured_shell_root_ignores_winuxsh_root() {
+        // Winux purge S3 (bridge demolition, not a rename): WINUXSH_ROOT
+        // is no longer a root-resolution input. A legacy-only environment
+        // resolves no root at all; the surviving names keep their order
+        // (__RUBASH_SHELL_ROOT leads, RUBASH_ROOT is the fallback).
+        let mut env_vars = HashMap::new();
+        env_vars.insert("WINUXSH_ROOT".to_string(), "/legacy/root".to_string());
+        assert_eq!(configured_shell_root(&env_vars), None);
+
+        env_vars.insert("RUBASH_ROOT".to_string(), "/fallback/root".to_string());
+        assert_eq!(
+            configured_shell_root(&env_vars),
+            Some(PathBuf::from("/fallback/root"))
+        );
+
+        env_vars.insert(
+            "__RUBASH_SHELL_ROOT".to_string(),
+            "/neutral/root".to_string(),
+        );
+        assert_eq!(
+            configured_shell_root(&env_vars),
+            Some(PathBuf::from("/neutral/root"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn winux_purge_s5_shell_root_with_only_winuxsh_exe_is_not_adopted() {
+        // Winux purge S5 (probe demolition): the engine no longer probes
+        // <shell-root>/winuxsh.exe when resolving a standard /bin/bash
+        // path. A configured root whose only shell-looking payload is
+        // the legacy exe name must not be adopted; resolution falls
+        // through to the PATH search (empty here, so no result).
+        let root = std::env::temp_dir().join("rubash-winux-purge-s5-winuxsh-only-root");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("winuxsh.exe"), b"").unwrap();
+        let empty_path_dir = std::env::temp_dir().join("rubash-winux-purge-s5-empty-path");
+        let _ = fs::remove_dir_all(&empty_path_dir);
+        fs::create_dir_all(&empty_path_dir).unwrap();
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "__RUBASH_SHELL_ROOT".to_string(),
+            root.to_string_lossy().to_string(),
+        );
+        env_vars.insert(
+            "PATH".to_string(),
+            empty_path_dir.to_string_lossy().to_string(),
+        );
+        assert_eq!(find_user_command("/bin/bash", &env_vars), None);
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&empty_path_dir);
     }
 
     #[cfg(windows)]
@@ -4331,7 +4719,7 @@ mod tests {
         );
         assert_eq!(
             shell_path_to_windows("/dev/fd/1", &env_vars),
-            PathBuf::from(r"\\.\WINUXSH_UNSUPPORTED_DEVICE")
+            PathBuf::from(r"\\.\RUBASH_UNSUPPORTED_DEVICE")
         );
     }
 
@@ -4344,7 +4732,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("rubash-tmpdir-base");
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().to_string(),
         );
         env_vars.insert("TMPDIR".to_string(), tmp.to_string_lossy().to_string());
@@ -4384,7 +4772,7 @@ mod tests {
         let root = std::env::temp_dir().join("rubash-var-tmp-shell-root");
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().to_string(),
         );
 
@@ -4429,7 +4817,7 @@ mod tests {
             .join("bob");
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             shell_root.to_string_lossy().to_string(),
         );
         env_vars.insert("HOME".to_string(), "/home/bob".to_string());
@@ -4453,7 +4841,7 @@ mod tests {
     fn windows_shell_root_selects_logical_standard_path() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -4502,7 +4890,7 @@ mod tests {
 
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             shell_root.to_string_lossy().to_string(),
         );
         env_vars.insert(
@@ -4546,7 +4934,7 @@ mod tests {
 
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             shell_root.to_string_lossy().to_string(),
         );
         env_vars.insert(
@@ -4578,7 +4966,7 @@ mod tests {
 
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             shell_root.to_string_lossy().to_string(),
         );
         let entries = shell_path_process_entries("/usr/bin", &env_vars);
@@ -4617,7 +5005,7 @@ mod tests {
     fn windows_cmd_switches_are_not_mapped_into_shell_root() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
         let program = PathBuf::from(r"C:\Windows\System32\cmd.exe");
@@ -4771,7 +5159,7 @@ mod tests {
         let root = std::env::temp_dir().join("rubash-native-argv-literals");
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().to_string(),
         );
 
@@ -4960,7 +5348,7 @@ mod tests {
         let root = std::env::temp_dir().join("rubash-preserve-backslash-argument");
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().to_string(),
         );
 
@@ -5025,7 +5413,7 @@ mod tests {
     fn windows_unc_path_with_single_leading_backslash_is_restored() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5042,7 +5430,7 @@ mod tests {
     fn windows_unc_path_with_share_is_restored() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5058,7 +5446,7 @@ mod tests {
     fn windows_root_relative_drive_path_not_treated_as_unc() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5075,7 +5463,7 @@ mod tests {
     fn windows_bare_leading_backslash_becomes_unc_root() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5088,7 +5476,7 @@ mod tests {
     fn windows_mnt_drive_paths_map_to_windows_drives() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5124,7 +5512,7 @@ mod tests {
     fn windows_mnt_drive_paths_are_case_insensitive() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5186,7 +5574,7 @@ mod tests {
         // and without a configured root.
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
         assert!(!windows_external_absolute_argument_needs_translation(
@@ -5202,7 +5590,7 @@ mod tests {
         std::fs::create_dir_all(root.join("bin")).unwrap();
         let mut rooted = HashMap::new();
         rooted.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().into_owned(),
         );
         assert!(windows_external_absolute_argument_needs_translation(
@@ -5228,7 +5616,7 @@ mod tests {
         let env = {
             let mut env_vars = HashMap::new();
             env_vars.insert(
-                "WINUXSH_ROOT".to_string(),
+                "__RUBASH_SHELL_ROOT".to_string(),
                 std::env::temp_dir().to_string_lossy().to_string(),
             );
             env_vars
@@ -5456,7 +5844,10 @@ mod tests {
             &home_root.join("winuxcmd-other").join("x.exe"),
             &env
         ));
-        assert!(!posix_aware_child(Path::new(r"D:\elsewhere\node.exe"), &env));
+        assert!(!posix_aware_child(
+            Path::new(r"D:\elsewhere\node.exe"),
+            &env
+        ));
 
         // Route 3: the per-tree winuxcmd.exe marker probe — a WinuxCmd
         // installation reached through PATH without any env configuration.
@@ -5471,10 +5862,7 @@ mod tests {
             &usr_bin.join("printf.exe"),
             &HashMap::new()
         ));
-        assert!(!posix_aware_child(
-            &usr_bin.join("fd.exe"),
-            &HashMap::new()
-        ));
+        assert!(!posix_aware_child(&usr_bin.join("fd.exe"), &HashMap::new()));
 
         // Flat (legacy) installation layout: marker directly in the root.
         let flat = std::env::temp_dir().join("rubash-optb-wcmd-flat");
@@ -5520,7 +5908,10 @@ mod tests {
         let ls = usr_bin.join("ls.exe");
 
         // Applet keeps the shell-tree spelling verbatim.
-        assert_eq!(child_argv(&ls, &["/tmp"], &env_vars), vec!["/tmp".to_string()]);
+        assert_eq!(
+            child_argv(&ls, &["/tmp"], &env_vars),
+            vec!["/tmp".to_string()]
+        );
 
         // Third-party gets a native path for the same operand.
         let rg_tmp = child_argv(&rg, &["/tmp"], &env_vars);
@@ -5584,7 +5975,7 @@ mod tests {
     fn windows_mnt_drive_paths_do_not_false_positive() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5609,7 +6000,8 @@ mod tests {
     // ---- unixwin/niubash#164: virtual system roots for every child class ----
 
     /// Fixture install tree: <root>/usr/bin/{winuxcmd.exe marker,ls.exe},
-    /// <root>/etc/i164.conf. WINUXSH_ROOT points at <root> so the root map
+    /// <root>/etc/i164.conf. __RUBASH_SHELL_ROOT points at <root> so the
+    /// root map
     /// (/usr -> <root>\usr etc.) is active, mirroring the niu host.
     #[cfg(windows)]
     fn i164_fixture_root() -> PathBuf {
@@ -5628,7 +6020,7 @@ mod tests {
     fn i164_rooted_env(root: &Path) -> HashMap<String, String> {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().into_owned(),
         );
         env_vars
@@ -6106,11 +6498,79 @@ mod tests {
             vec!["/a/b/c.txt".to_string(), ".txt".to_string()],
         );
         // Without a command name (external_command_for_program route) the
-        // grammar is unknown: nothing is masked, shapes translate.
+        // grammar keys on the program's own file stem (rubash#2063); `ls`
+        // is not a grammar tool, so nothing is masked, shapes translate.
         assert_eq!(
             child_argv(&applet, &["/d/repo/x"], &env_vars),
             vec![r"D:\repo\x".to_string()],
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn data_primary_positions_hold_for_native_children() {
+        // rubash#2063 (dsh-bash-native patch 0001, SpookyWaste): a
+        // third-party suite is never `posix_aware`, so its operands
+        // still take the native funnel; the pattern/script/program
+        // positions are grammar properties of the tool and must stay
+        // verbatim for this child class too.
+        let root = i164_fixture_root();
+        let env_vars = i164_rooted_env(&root);
+
+        // The production spawn routes hand the typed command word to
+        // the funnel and the table keys on it; this name-less helper
+        // hands in no word, so the executable's own file stem
+        // identifies the grammar instead.
+        let argv_for = |program: &Path, args: &[&str]| {
+            let owned = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+            let (command, _) = external_command_for_program(program, &owned, &env_vars);
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let grep = PathBuf::from(r"C:\tools\grep.exe");
+        let argv = argv_for(&grep, &["-F", "/tmp/pat", "/tmp/file.txt"]);
+        assert_eq!(argv[0], "-F");
+        assert_eq!(argv[1], "/tmp/pat", "the grep pattern stays verbatim");
+        assert_ne!(
+            argv[2], "/tmp/file.txt",
+            "the file operand still translates"
+        );
+
+        let sed = PathBuf::from(r"C:\tools\sed.exe");
+        let argv = argv_for(&sed, &["-n", "/tmp/x/p", "/tmp/file.txt"]);
+        assert_eq!(argv[1], "/tmp/x/p", "the sed script stays verbatim");
+
+        let awk = PathBuf::from(r"C:\tools\awk.exe");
+        let argv = argv_for(&awk, &["/tmp/x/{print}", "/tmp/file.txt"]);
+        assert_eq!(argv[0], "/tmp/x/{print}", "the awk program stays verbatim");
+
+        // `-e` carries data; `-f` carries a path, so only the former
+        // stays verbatim.
+        let argv = argv_for(&grep, &["-e", "/tmp/pat", "/tmp/file.txt"]);
+        assert_eq!(
+            argv[1], "/tmp/pat",
+            "a -e pattern is data and stays verbatim"
+        );
+        assert_ne!(
+            argv[2], "/tmp/file.txt",
+            "the file operand still translates"
+        );
+        let argv = argv_for(&grep, &["-f", "/tmp/pats.txt", "/tmp/file.txt"]);
+        assert_ne!(
+            argv[1], "/tmp/pats.txt",
+            "a pattern file is a path and translates"
+        );
+
+        // Drive-shaped data skips the second (native) funnel verbatim
+        // too, while a drive-shaped file operand still translates.
+        let argv = argv_for(&grep, &["-F", "/c/pat", "/c/file.txt"]);
+        assert_eq!(argv[1], "/c/pat", "the drive-shaped pattern stays verbatim");
+        assert_eq!(argv[2], r"C:\file.txt", "the file operand still translates");
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -6680,7 +7140,7 @@ mod tests {
         );
 
         // `hash -r` drops everything; the fresh listing sees the files.
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
         assert_eq!(
             find_user_command("late_tool", &env_vars),
             Some(dir.join("late_tool.exe"))
@@ -6688,7 +7148,7 @@ mod tests {
 
         // A PATH change still resets the scan scaffold (fingerprint
         // mismatch), and the newly created file is visible either way.
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
         assert_eq!(find_user_command("late_tool4", &env_vars), None);
         fs::write(dir.join("late_tool4.exe"), b"").unwrap();
         assert_eq!(
@@ -6805,25 +7265,33 @@ mod tests {
         env_vars.insert("PATH".to_string(), dir.to_string_lossy().to_string());
         env_vars.insert("__RUBASH_SETOPT_hashall".to_string(), "0".to_string());
 
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
         assert_eq!(find_user_command("gate_tool", &env_vars), None);
         // The miss is memoized (rubash#159)...
         assert_eq!(
-            command_lookup_cache()
-                .lock()
-                .unwrap()
-                .results
-                .get("gate_tool"),
-            Some(&None)
+            {
+                let mut stores = command_lookup_stores();
+                session_lookup_slice(&mut stores, "")
+                    .results
+                    .get("gate_tool")
+                    .cloned()
+            },
+            Some(None)
         );
         // ...and a still-absent repeat stays absent WITHOUT growing the
         // listings: the bounded probe grid (stat walk) ran, not the full
         // directory re-scan (rubash#159 miss-cost contract).
-        let listings_before = command_lookup_cache().lock().unwrap().listings.len();
+        let listings_before = {
+            let mut stores = command_lookup_stores();
+            session_lookup_slice(&mut stores, "").listings.len()
+        };
         assert_eq!(find_user_command("gate_tool", &env_vars), None);
         assert_eq!(find_user_command("gate_tool", &env_vars), None);
         assert_eq!(
-            command_lookup_cache().lock().unwrap().listings.len(),
+            {
+                let mut stores = command_lookup_stores();
+                session_lookup_slice(&mut stores, "").listings.len()
+            },
             listings_before
         );
 
@@ -6835,16 +7303,67 @@ mod tests {
             Some(dir.join("gate_tool.exe"))
         );
         assert_eq!(
-            command_lookup_cache()
-                .lock()
-                .unwrap()
-                .results
-                .get("gate_tool"),
+            {
+                let mut stores = command_lookup_stores();
+                session_lookup_slice(&mut stores, "")
+                    .results
+                    .get("gate_tool")
+                    .cloned()
+            },
             None
         );
 
         let _ = fs::remove_dir_all(dir);
-        clear_command_lookup_cache();
+        clear_command_lookup_cache(&HashMap::new());
+    }
+
+    // unixwin/niubash#659: std::fs::canonicalize on Windows returns
+    // extended-length verbatim paths (\\?\C:\..., \\?\UNC\...). GNU's
+    // physical path always comes from getcwd after a real chdir
+    // (builtins/common.c:592 get_working_directory), which never
+    // carries that prefix, so neither a session-cwd probe result nor
+    // the PWD display form may keep it (1.4.4 regression via G-02).
+    #[cfg(windows)]
+    #[test]
+    fn issue659_strip_verbatim_prefix_restores_getcwd_form() {
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\C:\Users\cmx\AppData\Local\Temp")),
+            PathBuf::from(r"C:\Users\cmx\AppData\Local\Temp")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share\dir")),
+            PathBuf::from(r"\\server\share\dir")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"C:\plain\dir")),
+            PathBuf::from(r"C:\plain\dir")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\server\share")),
+            PathBuf::from(r"\\server\share")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue659_canonicalize_native_reports_getcwd_form() {
+        let resolved = canonicalize_native(&std::env::temp_dir()).unwrap();
+        let text = resolved.to_string_lossy();
+        assert!(!text.starts_with(r"\\?\"), "{text}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue659_pwd_display_of_verbatim_physical_path_is_posix() {
+        assert_eq!(
+            shell_pwd_display_path(r"\\?\C:\Users\cmx\AppData\Local\Temp"),
+            "/c/Users/cmx/AppData/Local/Temp"
+        );
+        assert_eq!(shell_pwd_display_path("//?/C:/Users/cmx"), "/c/Users/cmx");
+        assert_eq!(
+            shell_pwd_display_path(r"\\?\UNC\server\share\dir"),
+            "//server/share/dir"
+        );
     }
 
     fn windows_shell_path(path: &Path) -> String {
@@ -6866,6 +7385,39 @@ mod tests {
     }
 }
 
+/// Windows extended-length ("verbatim") prefixes are an artifact of
+/// `std::fs::canonicalize` (`\\?\C:\…`, `\\?\UNC\server\share\…`).
+/// GNU's physical path always comes from getcwd after a real chdir
+/// (builtins/common.c:592 `get_working_directory`; builtins/cd.def:146
+/// bindpwd, cd.def:486 pwd) and getcwd never reports the verbatim
+/// form. The G-02 session-cwd probes (cd/pushd/popd) replaced
+/// chdir+getcwd with canonicalize, so a probe result must be returned
+/// to the getcwd form here, or every consumer of the physical path —
+/// the session cwd field, `pwd -P`, cd -P's $PWD — leaks `//?/…`
+/// (unixwin/niubash#659).
+pub(crate) fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    if !cfg!(windows) {
+        return path.to_path_buf();
+    }
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = value.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
+}
+
+/// `canonicalize` for the session-cwd probes: the same resolution and
+/// the same OS error codes chdir reported, with the result in the
+/// plain native form getcwd would have reported (see
+/// `strip_verbatim_prefix`).
+pub(crate) fn canonicalize_native(path: &Path) -> io::Result<PathBuf> {
+    path.canonicalize()
+        .map(|resolved| strip_verbatim_prefix(&resolved))
+}
+
 /// The canonical PWD display form: always the POSIX `/<drive>/…` spelling
 /// (`/d/…`) on Windows, exactly what GNU Bash on MSYS reports for `$PWD` /
 /// `pwd` / cd's bindpwd value (builtins/cd.def:136-175 bindpwd stores one
@@ -6877,6 +7429,22 @@ mod tests {
 /// WINUXSH_SHELL_PATH_STYLE native-spelling escape hatch is retired.
 pub fn shell_pwd_display_path(path: &str) -> String {
     let value = path.replace('\\', "/");
+    // unixwin/niubash#659: a canonicalize-derived physical path can
+    // still arrive at this exit in extended-length form (`//?/C:/…`,
+    // `//?/UNC/…`). The display form is a getcwd form, so the prefix
+    // goes here too — this is the one display exit every PWD producer
+    // (cd bindpwd, pwd, the startup PWD) shares.
+    let value = if cfg!(windows) {
+        if let Some(rest) = value.strip_prefix("//?/UNC/") {
+            format!("//{rest}")
+        } else if let Some(rest) = value.strip_prefix("//?/") {
+            rest.to_string()
+        } else {
+            value
+        }
+    } else {
+        value
+    };
     if cfg!(windows)
         && value.len() >= 3
         && value.as_bytes()[1] == b':'

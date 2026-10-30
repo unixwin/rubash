@@ -652,7 +652,7 @@ fn physical_cwd_for(
     } else {
         cwd.join(native)
     };
-    joined.canonicalize().unwrap_or(joined)
+    crate::executor::path::canonicalize_native(&joined).unwrap_or(joined)
 }
 
 /// The error chdir would have reported for a target that exists but
@@ -705,7 +705,7 @@ fn popd_chdir<E: Write>(
     } else {
         cwd.join(&native)
     };
-    let probed = match joined.canonicalize() {
+    let probed = match crate::executor::path::canonicalize_native(&joined) {
         Ok(path) if path.is_dir() => Ok(path),
         Ok(_) => Err(not_a_directory_error()),
         Err(error) => Err(error),

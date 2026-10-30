@@ -147,7 +147,53 @@ impl Executor {
             &mut stderr,
         )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        // GNU exit.def:147 (exit_or_logout -> bash_logout): once the
+        // exit arguments have validated — an argument error returns in
+        // GNU before bash_logout is ever reached, mirrored here by the
+        // Exit arm only — a login shell sources ~/.bash_logout before
+        // the exit unwinds, through the same latch the `logout` builtin
+        // uses (rubash#2140). GNU's other bash_logout guards map as:
+        // sourced_logout (the latch, preset on fork-copy executors so
+        // pipeline/comsub faces never source) and
+        // subshell_environment == 0 (flat subshells run in this
+        // executor at depth > 0 and skip it, exactly as the farewell
+        // echo above does).
+        if matches!(action, crate::builtins::exit::ExitAction::Exit(_))
+            && self.shell_state.subshell_depth.get() == 0
+            && self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_LOGIN_SHELL")
+                .map(String::as_str)
+                == Some("1")
+        {
+            self.source_bash_logout_once()?;
+        }
         Ok(action)
+    }
+
+    /// GNU exit.def:156-166 (bash_logout): source ~/.bash_logout at
+    /// most once per shell process. The caller establishes the login
+    /// shape; the latch (`bash_logout_sourced`, preset by the
+    /// fork-copy executor constructor) carries GNU's sourced_logout
+    /// and subshell_environment guards for the cloned faces.
+    fn source_bash_logout_once(&mut self) -> Result<(), ExecuteError> {
+        if let Some(home) = self.shell_state.env_vars.get("HOME").cloned() {
+            let logout_file = format!("{home}/.bash_logout");
+            if !self.bash_logout_sourced
+                && std::fs::metadata(shell_path_to_windows(
+                    &logout_file,
+                    &self.shell_state.env_vars,
+                ))
+                .is_ok()
+            {
+                self.bash_logout_sourced = true;
+                let mut node = CommandNode::default();
+                node.words = vec![".".to_string(), logout_file];
+                self.execute_source_command(&node)?;
+            }
+        }
+        Ok(())
     }
 
     pub(in crate::executor) fn execute_logout(
@@ -172,21 +218,7 @@ impl Executor {
 
         // GNU exit.def:147,156-166 (exit_or_logout -> bash_logout): a login
         // shell sources ~/.bash_logout once before exiting.
-        if let Some(home) = self.shell_state.env_vars.get("HOME").cloned() {
-            let logout_file = format!("{home}/.bash_logout");
-            if !self.bash_logout_sourced
-                && std::fs::metadata(shell_path_to_windows(
-                    &logout_file,
-                    &self.shell_state.env_vars,
-                ))
-                .is_ok()
-            {
-                self.bash_logout_sourced = true;
-                let mut node = CommandNode::default();
-                node.words = vec![".".to_string(), logout_file];
-                self.execute_source_command(&node)?;
-            }
-        }
+        self.source_bash_logout_once()?;
 
         // GNU exit.def:93-154 (exit_or_logout): jump_to_top_level(EXITBLTIN)
         // - the shell exits with the logout status (an optional numeric
@@ -253,9 +285,12 @@ impl Executor {
     /// information: the engine answers these itself — persona-valued fields
     /// come from `crate::executor::identity` — instead of spawning whatever
     /// `uname.exe` happens to sit on PATH (which also removes the spawn
-    /// cost, #130). Unlike the dirname/basename fast paths there is no
-    /// external fallback: full option parsing is handled in
-    /// `builtins/uname.rs`, so PATH never decides availability.
+    /// cost, #130). Full option parsing is handled in `builtins/uname.rs`.
+    /// Availability follows the registry stand-down policy (rubash#2104):
+    /// the caller reaches this function only when the name does not
+    /// resolve, or resolves to a native image; a resolution landing on a
+    /// script stands the face down so the script runs, as in GNU, where
+    /// no builtin outranks the PATH hit.
     pub(in crate::executor) fn execute_identity_tool(
         &mut self,
         cmd: &CommandNode,
@@ -317,22 +352,22 @@ impl Executor {
         // and fd-dup targets are dispatched after the builtin returns.
         let out_target = cmd
             .redirect_out
-            .as_ref()
+            .as_deref()
             .filter(|redirect| redirect.fd_var.is_none())
             .map(|redirect| self.expand_redirect_target(redirect));
         let append_target = cmd
             .append
-            .as_ref()
+            .as_deref()
             .filter(|redirect| redirect.fd_var.is_none())
             .map(|redirect| self.expand_redirect_target(redirect));
         let err_target = cmd
             .redirect_err
-            .as_ref()
+            .as_deref()
             .filter(|redirect| redirect.fd_var.is_none())
             .map(|redirect| self.expand_redirect_target(redirect));
         let err_append_target = cmd
             .redirect_err_append
-            .as_ref()
+            .as_deref()
             .filter(|redirect| redirect.fd_var.is_none())
             .map(|redirect| self.expand_redirect_target(redirect));
 
@@ -595,7 +630,7 @@ fn open_cd_redirect_file(
     }
 }
 
-fn simple_path_tool_operands(args: &[String]) -> Option<Vec<&str>> {
+pub(in crate::executor) fn simple_path_tool_operands(args: &[String]) -> Option<Vec<&str>> {
     let mut operands = Vec::new();
     let mut parse_options = true;
     for arg in args {
@@ -611,7 +646,7 @@ fn simple_path_tool_operands(args: &[String]) -> Option<Vec<&str>> {
     Some(operands)
 }
 
-fn basename_value(path: &str) -> String {
+pub(in crate::executor) fn basename_value(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     // niubash#709: an empty operand is the empty basename in GNU (`basename ''`
     // prints a blank line), but an all-slash operand stays `/` here because
@@ -692,7 +727,7 @@ fn trim_trailing_slashes(value: &str) -> String {
     }
 }
 
-fn strip_basename_suffix(name: &str, suffix: &str) -> String {
+pub(in crate::executor) fn strip_basename_suffix(name: &str, suffix: &str) -> String {
     if suffix.len() < name.len() && name.ends_with(suffix) {
         name[..name.len() - suffix.len()].to_string()
     } else {

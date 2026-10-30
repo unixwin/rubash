@@ -1042,6 +1042,57 @@ impl Executor {
     /// sentinel status that command_prepare translates to ExitCode(1).
     pub(in crate::executor) const FATAL_PARAMETER_EXPANSION_STATUS: i32 = i32::MIN;
 
+    /// rubash#1915: mask a command's recorded process-substitution
+    /// spans out of a text the parent-side expansion-error scans are
+    /// about to judge. GNU never expands a procsub body in the parent:
+    /// the word walk extracts it verbatim (subst.c:1311
+    /// extract_process_subst) and process_substitute (subst.c:6362)
+    /// hands it to the child shell, whose own parse owns every `$`
+    /// inside; the parent only ever sees the resulting /dev/fd word
+    /// (subst.c:11366-11385 expand_word_internal). The parser records
+    /// each real span with its verbatim target text (on the command
+    /// node, and on a redirect target's word metadata), so replacing
+    /// exactly those recorded spans — in recorded
+    /// order, one occurrence each — removes precisely the child text
+    /// and nothing else: look-alike text that is NOT a recorded span
+    /// (e.g. a `<(...)`-shaped string inside double quotes, where the
+    /// `$` stays a live parent reference) remains fully scanned.
+    pub(in crate::executor) fn mask_recorded_process_substitutions<'a>(
+        text: &'a str,
+        spans: &[crate::parser::ProcessSubstitution],
+    ) -> std::borrow::Cow<'a, str> {
+        Self::mask_recorded_span_targets(
+            text,
+            spans
+                .iter()
+                .map(|substitution| substitution.target.as_str()),
+        )
+    }
+
+    /// The masking core behind `mask_recorded_process_substitutions`,
+    /// over bare span target texts: replace each recorded span — in
+    /// recorded order, one occurrence each — with a single space, so
+    /// the text a scan judges no longer contains the child body. The
+    /// `[[ ]]` nounset scans hold only the recorded targets (paired
+    /// with their word in `Executor::conditional_procsub_span_targets`)
+    /// and enter here directly.
+    pub(in crate::executor) fn mask_recorded_span_targets<'a, 't>(
+        text: &'a str,
+        targets: impl Iterator<Item = &'t str>,
+    ) -> std::borrow::Cow<'a, str> {
+        let mut masked: Option<String> = None;
+        for target in targets {
+            if target.is_empty() {
+                continue;
+            }
+            let current: &str = masked.as_deref().unwrap_or(text);
+            if current.contains(target) {
+                masked = Some(current.replacen(target, " ", 1));
+            }
+        }
+        masked.map_or(std::borrow::Cow::Borrowed(text), std::borrow::Cow::Owned)
+    }
+
     pub(in crate::executor) fn parameter_expansion_error(
         &self,
         cmd: &CommandNode,
@@ -1077,7 +1128,9 @@ impl Executor {
                 unbound
             };
             for word in &cmd.words {
-                if let Some(name) = scan(word, &mut prefix_comsubs) {
+                let masked =
+                    Self::mask_recorded_process_substitutions(word, &cmd.process_substitutions);
+                if let Some(name) = scan(&masked, &mut prefix_comsubs) {
                     for body in &prefix_comsubs {
                         self.expand_command_substitution(body);
                     }
@@ -1086,7 +1139,9 @@ impl Executor {
                 }
             }
             for value in cmd.assignment_values() {
-                if let Some(name) = scan(&value, &mut prefix_comsubs) {
+                let masked =
+                    Self::mask_recorded_process_substitutions(value, &cmd.process_substitutions);
+                if let Some(name) = scan(&masked, &mut prefix_comsubs) {
                     for body in &prefix_comsubs {
                         self.expand_command_substitution(body);
                     }
@@ -1096,12 +1151,16 @@ impl Executor {
             }
         }
         for word in &cmd.words {
-            if let Some(error) = self.parameter_expansion_error_in_word(word) {
+            let masked =
+                Self::mask_recorded_process_substitutions(word, &cmd.process_substitutions);
+            if let Some(error) = self.parameter_expansion_error_in_word(&masked) {
                 return Some(error);
             }
         }
         for value in cmd.assignment_values() {
-            if let Some(error) = self.parameter_expansion_error_in_word(value) {
+            let masked =
+                Self::mask_recorded_process_substitutions(value, &cmd.process_substitutions);
+            if let Some(error) = self.parameter_expansion_error_in_word(&masked) {
                 return Some(error);
             }
         }
@@ -1129,16 +1188,19 @@ impl Executor {
         }
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             for text in cmd.words.iter().chain(cmd.assignment_values()) {
-                let (unbound, _bodies) = self.nounset_unbound_parameter_with_comsubs(text);
+                let masked =
+                    Self::mask_recorded_process_substitutions(text, &cmd.process_substitutions);
+                let (unbound, _bodies) = self.nounset_unbound_parameter_with_comsubs(&masked);
                 if unbound.is_some() {
                     return true;
                 }
             }
         }
-        cmd.words
-            .iter()
-            .chain(cmd.assignment_values())
-            .any(|word| self.parameter_expansion_error_in_word(word).is_some())
+        cmd.words.iter().chain(cmd.assignment_values()).any(|word| {
+            let masked =
+                Self::mask_recorded_process_substitutions(word, &cmd.process_substitutions);
+            self.parameter_expansion_error_in_word(&masked).is_some()
+        })
     }
 
     /// rubash#1540: side-effect-free prediction of the two DISCARD

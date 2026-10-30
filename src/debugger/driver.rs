@@ -62,6 +62,17 @@ pub trait StopLoop {
     /// Serve one stop. Called with the session already in the
     /// stopped state; return the outcome to apply.
     fn serve(&mut self, session: &mut DebugSession) -> StopLoopOutcome;
+
+    /// Render a debugger-side announcement that is not a stop.
+    /// The consult calls this while the debuggee is running —
+    /// design 5.3's once-per-breakpoint condition failure report
+    /// is the first user — so frontends with a mid-run channel
+    /// render it immediately, at the consult that produced it.
+    /// Frontends without one (and the test loops) inherit the
+    /// no-op; the driver's record still stands.
+    fn announce(&mut self, session: &DebugSession, text: &str) {
+        let _ = (session, text);
+    }
 }
 
 /// A session plus the stop loop that serves its stops.
@@ -125,6 +136,17 @@ impl SessionDriver {
     /// one the frontend reports).
     pub fn note_condition_error(&mut self, id: BreakpointId) -> bool {
         self.condition_error_reported.insert(id)
+    }
+
+    /// Design 5.3's report outlet: record a condition evaluation
+    /// failure for `id` and, when it is the breakpoint's first,
+    /// announce the rendered report through the stop loop. Later
+    /// failures of the same breakpoint stay silent (the failure
+    /// is reported once per breakpoint, not per hit).
+    pub fn announce_condition_error(&mut self, id: BreakpointId, report: &str) {
+        if self.note_condition_error(id) {
+            self.stop_loop.announce(&self.session, report);
+        }
     }
 }
 

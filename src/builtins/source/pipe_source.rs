@@ -20,9 +20,15 @@ pub fn execute_pipe_into_source(
     let Some(right) = commands.get(index + 1) else {
         return Ok(None);
     };
+    // The fd-0 spelling judgment is the registry's (redundancy audit
+    // R3/D5): this recognizer used to copy just the "/dev/stdin"
+    // spelling, so the same pipeline shape with `. /dev/fd/0` or
+    // `. /proc/self/fd/0` missed the fast path GNU's source6.sub shape
+    // takes. All three spellings name the pipe read end here.
     if !matches!(
         right.words.as_slice(),
-        [name, path] if matches!(name.as_str(), "." | "source") && path == "/dev/stdin"
+        [name, path] if matches!(name.as_str(), "." | "source")
+            && crate::special_paths::fd_alias_target(path) == Some(0)
     ) {
         return Ok(None);
     }

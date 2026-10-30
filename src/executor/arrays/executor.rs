@@ -34,9 +34,17 @@ impl Executor {
                 // fabricated `main` line (issue #519). Same gating as the
                 // dynamic_stack_array_values view.
                 let mut stack = self.shell_state.function_name_stack.clone();
-                if self.has_script_main_frame()
-                    && !stack.is_empty()
-                    && stack.last().map(String::as_str) != Some("main")
+                // rubash#2058: fork-inherited frames beneath this
+                // shell's own, with the main-frame rule applied to the
+                // composed stack (same composition as the
+                // dynamic_stack_array_values view).
+                let inherited = self.shell_state.inherited_fork_frames.as_ref();
+                if let Some(inherited) = inherited {
+                    stack.extend(inherited.function_names.iter().cloned());
+                }
+                let has_main = self.has_script_main_frame()
+                    || inherited.is_some_and(|frames| frames.has_main_frame);
+                if has_main && !stack.is_empty() && stack.last().map(String::as_str) != Some("main")
                 {
                     stack.push("main".to_string());
                 }
@@ -45,7 +53,34 @@ impl Executor {
             "BASH_ARGC" => return self.bash_argc_view(),
             "BASH_ARGV" => return self.bash_argv_view(),
             "BASH_LINENO" => return self.bash_lineno_view(),
-            "BASH_SOURCE" => return self.shell_state.bash_source_stack.clone(),
+            "BASH_SOURCE" => {
+                // Same gating as the dynamic_stack_array_values view:
+                // without a script main frame (`bash -c`, stdin
+                // scripts) the script-name bottom entry installed
+                // with $0 is not a BASH_SOURCE frame (shell.c:1635-
+                // 1650 pushes the synthetic bottom frames only for a
+                // script FILE), so the raw stack's bottom entry is
+                // dropped. Reading the raw stack here made the
+                // no-argument `caller` print that entry — the shell's
+                // own name/path — where GNU has no element at all and
+                // caller.def:89-105 renders a literal NULL
+                // (rubash#2142).
+                let mut stack = self.shell_state.bash_source_stack.clone();
+                // rubash#2058: same composition as the
+                // dynamic_stack_array_values view — the pop drops the
+                // $0 bottom entry, which a script parent's respawn
+                // child never has in its raw stack; the inherited view
+                // goes beneath.
+                let inherited = self.shell_state.inherited_fork_frames.as_ref();
+                let inherited_main = inherited.is_some_and(|frames| frames.has_main_frame);
+                if !self.has_script_main_frame() && !inherited_main && !stack.is_empty() {
+                    stack.pop();
+                }
+                if let Some(inherited) = inherited {
+                    stack.extend(inherited.sources.iter().cloned());
+                }
+                return stack;
+            }
             _ => {}
         }
         self.shell_state
@@ -151,6 +186,132 @@ impl Executor {
         let result = self.array_element_parameter_value_uncached(expression);
         crate::executor::expand_braced_indices::aepv_memo_store(expression, result.clone());
         result
+    }
+
+    /// Whether an assoc element read of `expression` (`name[key]`) was
+    /// already settled by the typed cell in
+    /// `array_element_parameter_value_uncached`: its assoc branch answers
+    /// a hit itself, and when the freshness gate is open for the storage
+    /// name and a structured assoc cell exists, its miss is authoritative
+    /// (the cell is a complete mirror of the render, rubash#616 Phase 1a
+    /// invariant) — the serialized storage cannot hold a value the cell
+    /// lacks. Callers that would otherwise re-derive the element from the
+    /// storage after the fetch returned None (the operator/array braced
+    /// handler) consult this to skip the whole-storage clone + linear
+    /// scan that can only agree with the cell, and to avoid evaluating a
+    /// side-effecting subscript a second time (GNU evaluates it once per
+    /// expansion). The check re-derives the fetch's own admission on the
+    /// same names, so every state the fetch declines — nameref that does
+    /// not resolve, assoc mark absent, gate closed, no assoc cell, the
+    /// all-elements `*` form (which the fetch answers as a join, not an
+    /// element) — reports false and the storage leg runs unchanged.
+    pub(in crate::executor) fn assoc_element_fetch_settled(&self, expression: &str) -> bool {
+        let Some((array_name, key)) = parse_array_subscript(expression) else {
+            return false;
+        };
+        if key == "*" {
+            return false;
+        }
+        let pre_attrs = self.shell_state.env_vars.attr_of(array_name);
+        let storage_owned: String;
+        let storage_name: &str = if pre_attrs.nameref {
+            match self.resolved_variable_name(array_name) {
+                Some(resolved) => {
+                    storage_owned = resolved;
+                    &storage_owned
+                }
+                None => return false,
+            }
+        } else {
+            array_name
+        };
+        let assoc_marked = if pre_attrs.nameref {
+            is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, storage_name)
+        } else {
+            pre_attrs.assoc
+        };
+        if !assoc_marked {
+            return false;
+        }
+        if self.shell_state.env_vars.array_cells_dirty()
+            && !self.shell_state.env_vars.cell_is_fresh(storage_name)
+        {
+            return false;
+        }
+        matches!(
+            self.shell_state
+                .variables
+                .get(storage_name)
+                .map(|variable| &variable.value),
+            Some(crate::shell::ShellValue::AssociativeArray(_))
+        )
+    }
+
+    /// rubash#2004: the settled assoc answer for a caller that already
+    /// holds the EVALUATED key — the `${#name[key]}` length legs, which
+    /// expand the subscript exactly once themselves (re-deriving it from
+    /// the expression text here would double-evaluate a side-effecting
+    /// subscript, the bug the F3 fix removed from the plain path).
+    /// Admission and authority mirror the typed assoc fetch in
+    /// `array_element_parameter_value_uncached` exactly: nameref resolved
+    /// to its storage name, assoc mark judged on the storage name, the
+    /// rubash#1510 freshness gate, and a structured assoc cell present —
+    /// then the cell (a complete mirror of the render, rubash#616
+    /// Phase 1a invariant) answers hit AND miss authoritatively:
+    /// `Some(Some(value))` / `Some(None)`. `None` = not settled; the
+    /// caller runs its storage leg unchanged. GNU anchor: assoc.c
+    /// assoc_reference is a single hash lookup, hit or miss — the storage
+    /// leg this bypasses cloned the whole render and re-hashed +
+    /// linear-scanned it on EVERY `${#m[k]}` call (measured on master
+    /// 16a42d78, Linux same-machine: length of a hit or missed key at
+    /// n=10000 cost 479-1115us per call vs GNU 4-16us, growing ~x5-11
+    /// per 10x of table size).
+    pub(in crate::executor) fn assoc_element_value_settled(
+        &self,
+        array_name: &str,
+        key: &str,
+    ) -> Option<Option<String>> {
+        let pre_attrs = self.shell_state.env_vars.attr_of(array_name);
+        let storage_owned: String;
+        let storage_name: &str = if pre_attrs.nameref {
+            match self.resolved_variable_name(array_name) {
+                Some(resolved) => {
+                    storage_owned = resolved;
+                    &storage_owned
+                }
+                None => return None,
+            }
+        } else {
+            array_name
+        };
+        let assoc_marked = if pre_attrs.nameref {
+            is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, storage_name)
+        } else {
+            pre_attrs.assoc
+        };
+        if !assoc_marked {
+            return None;
+        }
+        if self.shell_state.env_vars.array_cells_dirty()
+            && !self.shell_state.env_vars.cell_is_fresh(storage_name)
+        {
+            return None;
+        }
+        if !matches!(
+            self.shell_state
+                .variables
+                .get(storage_name)
+                .map(|variable| &variable.value),
+            Some(crate::shell::ShellValue::AssociativeArray(_))
+        ) {
+            return None;
+        }
+        Some(
+            self.shell_state
+                .variables
+                .associative_element(storage_name, key)
+                .map(str::to_string),
+        )
     }
 
     fn array_element_parameter_value_uncached(&self, expression: &str) -> Option<String> {

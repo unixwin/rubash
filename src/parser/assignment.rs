@@ -58,18 +58,6 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             operator: Some("+=".to_string()),
             append: true,
             element_index,
-            // wt44/parse4: the parameter / arithmetic / brace / tilde
-            // element records have zero readers (see WordMetadata::new).
-            subscript_brace_expansions: Vec::new(),
-            subscript_parameter_expansions: Vec::new(),
-            subscript_arithmetic_expansions: Vec::new(),
-            brace_expansions: Vec::new(),
-            parameter_expansions: Vec::new(),
-            arithmetic_expansions: Vec::new(),
-            extglob_patterns: extglob_patterns_in_word_with_raw(value, value),
-            pathname_patterns: pathname_patterns_in_word(value, value),
-            tilde_expansions: Vec::new(),
-            word_quotes: word_quotes_in_raw(value),
         };
     }
 
@@ -80,18 +68,6 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             operator: Some("=".to_string()),
             append: false,
             element_index,
-            // wt44/parse4: the parameter / arithmetic / brace / tilde
-            // element records have zero readers (see WordMetadata::new).
-            subscript_brace_expansions: Vec::new(),
-            subscript_parameter_expansions: Vec::new(),
-            subscript_arithmetic_expansions: Vec::new(),
-            brace_expansions: Vec::new(),
-            parameter_expansions: Vec::new(),
-            arithmetic_expansions: Vec::new(),
-            extglob_patterns: extglob_patterns_in_word_with_raw(value, value),
-            pathname_patterns: pathname_patterns_in_word(value, value),
-            tilde_expansions: Vec::new(),
-            word_quotes: word_quotes_in_raw(value),
         };
     }
 
@@ -101,18 +77,6 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
         operator: None,
         append: false,
         element_index,
-        subscript_brace_expansions: Vec::new(),
-        subscript_parameter_expansions: Vec::new(),
-        subscript_arithmetic_expansions: Vec::new(),
-        // wt44/parse4: zero-reader element records stay empty (see
-        // WordMetadata::new).
-        brace_expansions: Vec::new(),
-        parameter_expansions: Vec::new(),
-        arithmetic_expansions: Vec::new(),
-        extglob_patterns: extglob_patterns_in_word_with_raw(word, word),
-        pathname_patterns: pathname_patterns_in_word(word, word),
-        tilde_expansions: Vec::new(),
-        word_quotes: word_quotes_in_raw(word),
     }
 }
 

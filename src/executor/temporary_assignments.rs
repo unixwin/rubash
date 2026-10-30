@@ -2093,14 +2093,84 @@ impl Executor {
     /// att_* word) whitelists the shape; identical values skip both
     /// stores, otherwise both are written together so the #616/#618
     /// mirror-must-never-go-stale rule holds. None = fall through.
+    ///
+    /// F7 widening: admission is by attribute SHAPE plus a closed
+    /// registry of names whose bind semantics live INSIDE
+    /// apply_shell_assignment_inner itself.
+    /// - Attributes: only att_exported may be set, plus ONE further
+    ///   shape — att_integer alone (with or without att_exported) when
+    ///   the RHS is a pure numeric literal, whose evalexp result the
+    ///   lane computes in closed form (eval_integer_literal, after
+    ///   expr.c strlong()); every non-literal integer RHS still falls
+    ///   through to the real evalexp. Every other bit makes the
+    ///   generic tail perform work this lane must not skip
+    ///   (att_integer with an expression RHS -> variables.c:2937
+    ///   make_variable_value evalexp; att_uppercase / att_lowercase /
+    ///   capcase -> the case conversion in the same function;
+    ///   att_nameref -> find_variable_nameref resolution; att_array /
+    ///   att_assoc -> arrayfunc.c storage machinery; att_readonly ->
+    ///   the readonly refusal; att_declared_unset -> the tail's
+    ///   DECLARED_UNSET unmark). An exported-only variable's generic
+    ///   tail is exactly this lane's dual store: children are served
+    ///   from the spawn env built off the EXPORTED mark (#916), and
+    ///   set_process_env is gated to the process-env name set, which
+    ///   is excluded separately below.
+    /// - The name registry below holds only names with an INNER bind
+    ///   arm in apply_shell_assignment_inner: dynamic write-back
+    ///   (SECONDS / RANDOM / SRANDOM), swallow dynamics and noassign
+    ///   arrays (BASHPID, BASH_SUBSHELL, FUNCNAME, LINENO, BASH_COMMAND,
+    ///   BASH_ARGC / BASH_ARGV, BASH_LINENO, BASH_SOURCE, PIPESTATUS),
+    ///   and the sv_ignoreeof option sync (IGNOREEOF / ignoreeof,
+    ///   variables.c:6205). OPTIND is deliberately NOT in it: GNU
+    ///   creates OPTIND with att_integer (`declare -i OPTIND="1"`),
+    ///   so it reaches this lane through the integer-literal shape
+    ///   above, not as a plain name — its only inner act beyond the
+    ///   integer evaluation is dropping the __RUBASH_GETOPTS_OFFSET
+    ///   shadow, and the sv_optind hook (variables.c:5817) is carried
+    ///   by apply_shell_assignment's funnel, which drops BOTH getopts
+    ///   shadows after every bind attempt on every path — so the dual
+    ///   store of the evaluated value here is the whole observable
+    ///   effect of an OPTIND bind.
+    ///   (The tempenv shadow gate keeps its own copy of the wider list
+    ///   for a different decision — whether a tempvar may shadow at
+    ///   all — and is not synced with this registry.)
+    /// - allexport no longer excludes: the generic tail's only extra
+    ///   act for this shape is applying att_exported after the store
+    ///   (GNU bind_variable_internal does the same under
+    ///   mark_modified_vars, variables.c:3170), which the lane performs
+    ///   on its success exits below.
     fn bind_marks_free_scalar(&mut self, base: &str, value: &str) -> Option<bool> {
+        // Attribute shape: no att_* bit other than att_exported — plus
+        // one shape more: att_integer ALONE (with or without exported)
+        // whose RHS is a pure numeric literal. A GNU integer bind runs
+        // evalexp (variables.c:2937-2946); for a literal-only RHS that
+        // evaluation is a closed-form digit accumulation, reproduced
+        // exactly by eval_integer_literal below (checked i64: overflow
+        // or any non-literal shape falls through to the generic evalexp
+        // path, so expression shapes, name references and every
+        // error/DISCARD shape keep the generic behaviour bit-for-bit).
+        // This is also OPTIND's lane: GNU creates OPTIND with
+        // att_integer (`declare -i OPTIND="1"`), so `OPTIND=1` is an
+        // integer-literal bind, not a plain one.
+        let mut non_export_attrs = self.shell_state.env_vars.attr_of(base);
+        non_export_attrs.exported = false;
+        let integer_literal = if non_export_attrs.integer {
+            let mut only_integer = non_export_attrs;
+            only_integer.integer = false;
+            if only_integer == VarAttrs::default() {
+                Self::eval_integer_literal(value)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         if base.contains('[')
             || value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
             || value.starts_with(STORAGE_WORD_PREFIX)
             || matches!(
                 base,
-                "OPTIND"
-                    | "IGNOREEOF"
+                "IGNOREEOF"
                     | "ignoreeof"
                     | "SECONDS"
                     | "RANDOM"
@@ -2117,13 +2187,25 @@ impl Executor {
                     | "PIPESTATUS"
             )
             || shell_assignment_needs_process_env(base)
-            || self.shell_state.env_vars.attr_of(base) != VarAttrs::default()
+            || (non_export_attrs != VarAttrs::default() && integer_literal.is_none())
             || is_marked_var(&self.shell_state.env_vars, CAPCASE_VARS, base)
-            || crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport")
         {
             return None;
         }
+        let allexport =
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport");
         self.pending_scalar_assignment = false;
+        // For an integer-literal bind the stored form is the evaluated
+        // canonical decimal, exactly what the generic tail stores; the
+        // skip/store logic below then runs on that value unchanged.
+        let canonical_value;
+        let value = match integer_literal {
+            Some(evaluated) => {
+                canonical_value = evaluated.to_string();
+                canonical_value.as_str()
+            }
+            None => value,
+        };
         // Identical rebinds skip both stores. The cell flag rides along:
         // a readonly rebind still falls through to the generic bind's
         // diagnostic even when the value is unchanged (GNU
@@ -2135,6 +2217,9 @@ impl Executor {
             .is_some_and(|cur| cur == value)
             && matches!(self.shell_state.variables.get(base), Some(v) if !v.readonly && matches!(&v.value, crate::shell::ShellValue::Scalar(cur) if cur == value))
         {
+            if allexport {
+                self.mark_exported(base);
+            }
             return Some(true);
         }
         match self.shell_state.variables.get_mut(base) {
@@ -2172,7 +2257,86 @@ impl Executor {
                 .env_vars
                 .insert(base.to_string(), value.to_string());
         }
+        if allexport {
+            self.mark_exported(base);
+        }
         Some(true)
+    }
+
+    /// Closed-form evalexp for a PURE numeric literal RHS — the only
+    /// integer-bind shape the scalar lane evaluates itself. The grammar
+    /// is GNU expr.c `strlong()`'s single-literal token: optional
+    /// surrounding whitespace, one optional sign, then decimal /
+    /// 0-octal / 0x-hex / base#digits with strlong's digit values
+    /// (bases <= 36 read letters case-insensitively; above that
+    /// a-z = 10..35, A-Z = 36..61, @ = 62, _ = 63) and its base range
+    /// (2..=64, written in plain decimal). Accumulation is CHECKED
+    /// i64: overflow, an invalid digit for the base, an out-of-range
+    /// or leading-zero base, or ANY other shape (names, operators,
+    /// internal whitespace, empty) returns None, and the generic
+    /// evalexp path then reproduces the true result or error — so
+    /// this can only ever skip work, never change an outcome.
+    fn eval_integer_literal(value: &str) -> Option<i64> {
+        fn digit_value(c: char, base: i64) -> Option<i64> {
+            let v = match c {
+                '0'..='9' => i64::from(c as u32 - '0' as u32),
+                'a'..='z' => 10 + i64::from(c as u32 - 'a' as u32),
+                'A'..='Z' => {
+                    if base <= 36 {
+                        10 + i64::from(c as u32 - 'A' as u32)
+                    } else {
+                        36 + i64::from(c as u32 - 'A' as u32)
+                    }
+                }
+                '@' => 62,
+                '_' => 63,
+                _ => return None,
+            };
+            (v < base).then_some(v)
+        }
+        fn accumulate(digits: &str, base: i64) -> Option<i64> {
+            let mut acc: i64 = 0;
+            for c in digits.chars() {
+                acc = acc.checked_mul(base)?.checked_add(digit_value(c, base)?)?;
+            }
+            Some(acc)
+        }
+        let text = value.trim_matches(|c: char| c.is_ascii_whitespace());
+        let (negative, rest) = match text.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, text.strip_prefix('+').unwrap_or(text)),
+        };
+        if rest.is_empty() {
+            return None;
+        }
+        let magnitude = if let Some((base_text, digits)) = rest.split_once('#') {
+            if digits.is_empty()
+                || base_text.is_empty()
+                || !base_text.bytes().all(|b| b.is_ascii_digit())
+                || (base_text.len() > 1 && base_text.starts_with('0'))
+            {
+                return None;
+            }
+            let base: i64 = base_text.parse().ok()?;
+            if !(2..=64).contains(&base) {
+                return None;
+            }
+            accumulate(digits, base)?
+        } else if let Some(hex) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+            if hex.is_empty() {
+                return None;
+            }
+            accumulate(hex, 16)?
+        } else if rest.len() > 1 && rest.starts_with('0') {
+            accumulate(rest, 8)?
+        } else {
+            accumulate(rest, 10)?
+        };
+        if negative {
+            magnitude.checked_neg()
+        } else {
+            Some(magnitude)
+        }
     }
 
     /// rubash#616 (plan Phase 1c): apply an append-only compound write

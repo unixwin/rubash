@@ -328,12 +328,24 @@ impl Executor {
         // reach `2>f`.
         let saved_stdout = self.fd_table.entries.get(&1).cloned();
         let saved_stderr = self.fd_table.entries.get(&2).cloned();
+        // rubash#2131: stash the command's redirection list for the
+        // fd-alias sync's own-redirect overlay — `[[ ]]` binds only
+        // fds 1/2, so without the list the sync answers its fd-0
+        // predicates from the superseded ambient binding. Restored
+        // below once the evaluation is done, on every exit path.
+        let saved_conditional_redirects = std::mem::replace(
+            &mut self.current_conditional_redirects,
+            Some(cmd.redirects.clone()),
+        );
         // rubash#545 (cells 2+3): the `[[ ]]` command owns any input-procsub
         // fds realized for its operands and any `>(...)` bodies queued
         // during evaluation — close/run them at the command's end, the same
         // lifetime execute_materialized_command gives simple commands.
         let procsub_fd_base = self.command_scoped_procsub_input_fds.len();
-        self.bind_conditional_stdio_redirects(cmd)?;
+        if let Err(error) = self.bind_conditional_stdio_redirects(cmd) {
+            self.current_conditional_redirects = saved_conditional_redirects;
+            return Err(error);
+        }
         self.exit_code = self.execute_conditional_command(conditional_command);
         // rubash#1130: a [[ ]] operand hit a FATAL word-expansion error
         // (nounset unbound) — the diagnostic and exit_code are already
@@ -342,6 +354,9 @@ impl Executor {
         let conditional_fatal = self.conditional_expansion_fatal.replace(false);
         let conditional_fatal_status = self.conditional_fatal_status.replace(None);
         let conditional_error = self.conditional_expansion_error_status.take();
+        // rubash#2131: the evaluation is done; drop the stashed list
+        // before the unwind paths below run anything else.
+        self.current_conditional_redirects = saved_conditional_redirects;
         if conditional_fatal {
             // rubash#1201: execute_conditional_command just overwrote
             // exit_code with the predicate's own status (e.g. -z of the
@@ -410,7 +425,11 @@ impl Executor {
         // same fatal redirect-word class as a commanded target (rubash#535;
         // GNU probe: `set -u; > $nope` exits 1, no next line). The walker
         // has reported the diagnostic and set the status.
-        if let Some(rejection) = self.reject_invalid_redirects(cmd)? {
+        let settle_superseded_net_outputs =
+            self.superseded_net_output_settlement_applies(cmd, false);
+        if let Some(rejection) =
+            self.reject_invalid_redirects(cmd, settle_superseded_net_outputs)?
+        {
             if rejection == super::redirection::RedirectRejection::FatalNounset {
                 self.finish_heredoc_expansion_error(cmd, Self::FATAL_PARAMETER_EXPANSION_STATUS)?;
             }
@@ -798,11 +817,11 @@ impl Executor {
             Err(ExecuteError::IoError(error)) => {
                 let mut stderr = Vec::new();
                 let redirect_target = [
-                    cmd.redirect_in.as_ref(),
-                    cmd.redirect_out.as_ref(),
-                    cmd.append.as_ref(),
-                    cmd.redirect_err.as_ref(),
-                    cmd.redirect_err_append.as_ref(),
+                    cmd.redirect_in.as_deref(),
+                    cmd.redirect_out.as_deref(),
+                    cmd.append.as_deref(),
+                    cmd.redirect_err.as_deref(),
+                    cmd.redirect_err_append.as_deref(),
                 ]
                 .into_iter()
                 .flatten()
@@ -864,6 +883,17 @@ impl Executor {
                 self.maybe_run_error_trap(cmd)?;
             }
             self.errexit_status_converted.set(true);
+            // DE-06 (design 9.3; PLAN row 12): the errexit
+            // decision — park a selected `set -e` filter here,
+            // before the exit path (timed deaths park at the
+            // time branch's promotion instead).
+            if self.timed_dispatch_depth.get() == 0 {
+                self.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::Errexit,
+                    self.exit_code,
+                    None,
+                )?;
+            }
             return Err(ExecuteError::ExitCode(self.exit_code));
         }
         Ok(())
@@ -1065,14 +1095,8 @@ impl Executor {
             || !cmd.compound_assignments.is_empty()
             || !cmd.array_element_assignments.is_empty()
             || !cmd.process_substitutions.is_empty()
-            || !cmd.command_substitutions.is_empty()
-            || !cmd.arithmetic_expansions.is_empty()
-            || !cmd.parameter_expansions.is_empty()
-            || !cmd.brace_expansions.is_empty()
             || !cmd.extglob_patterns.is_empty()
-            || !cmd.tilde_expansions.is_empty()
             || !cmd.pathname_patterns.is_empty()
-            || !cmd.word_quotes.is_empty()
             || !cmd.redirects.is_empty()
             || cmd.redirect_in.is_some()
             || cmd.redirect_out.is_some()
@@ -2403,7 +2427,17 @@ impl Executor {
                 .get("IFS")
                 .is_some_and(|ifs| ifs.is_empty())
         {
-            return self.shell_state.positional_window_cloned();
+            // rubash#1993: the dollar_at word list this dispatches to
+            // drops entirely-empty parameters (the null-IFS branch of
+            // field_split_positional_values_with_ifs, measured on GNU
+            // 5.3.20) — returning the window verbatim kept an empty
+            // parameter as an empty word.
+            return self
+                .shell_state
+                .positional_window_cloned()
+                .into_iter()
+                .filter(|value| !value.is_empty())
+                .collect();
         }
         if word == "$*"
             && !raw_word_is_quoted(raw)
@@ -2413,7 +2447,13 @@ impl Executor {
                 .get("IFS")
                 .is_some_and(|ifs| ifs.is_empty())
         {
-            return self.shell_state.positional_window_cloned();
+            // rubash#1993: same empty-parameter drop as the `${*}` arm.
+            return self
+                .shell_state
+                .positional_window_cloned()
+                .into_iter()
+                .filter(|value| !value.is_empty())
+                .collect();
         }
         if !declare_assignment_word {
             // GNU param_expand's UNBRACED `$X` nameref branch (subst.c
@@ -3061,7 +3101,16 @@ impl Executor {
         let fragment_quoted = alternate.starts_with('"') && alternate.ends_with('"');
         if outer_double_quoted
             && !fragment_quoted
-            && (alternate.contains("$@") || alternate.contains("${@}"))
+            && (alternate.contains("$@")
+                || alternate.contains("${@}")
+                // rubash#1993: `$*` in the alternate of a double-quoted
+                // ${param+word} carries the same quoted context — GNU
+                // joins it with IFS[0] into the ONE field the affixes
+                // glue to (`"${1+  $*  }"` is `  a b  c  ` for
+                // `set -- "a b" '' c` with IFS unset), it does not
+                // field-split into one word per parameter.
+                || alternate.contains("$*")
+                || alternate.contains("${*}"))
         {
             // GNU subst.c:12026-12035 (expand_word_internal): the enclosing
             // double-quoted ${...} retains one empty field when the used
@@ -3098,7 +3147,18 @@ impl Executor {
                         // through expand_string_for_rhs -> W_SPLITSPACE over
                         // escaped elements: one preserved word per positional
                         // (exp9.sub `${var-$*}` with `set -- abc 'def ghi' jkl`).
-                        return Some(self.shell_state.positional_window_cloned());
+                        // rubash#1993: the split runs on the JOIN spaces, so
+                        // an entirely-empty positional contributes no word
+                        // (measured GNU 5.3.20: `${var-$*}` with
+                        // `set -- "a b" '' c` and IFS= yields [a b][c], not
+                        // [a b][][c]) — the verbatim window kept it.
+                        return Some(
+                            self.shell_state
+                                .positional_window_cloned()
+                                .into_iter()
+                                .filter(|value| !value.is_empty())
+                                .collect(),
+                        );
                     }
                 }
                 Some(ifs) => {
@@ -3616,10 +3676,13 @@ impl Executor {
         // gate's `"${X[0]}": Bad file descriptor` (issue #518). Placement
         // mirrors execute_materialized_command: before the tempenv applies,
         // because redirect words expand against the caller's bindings.
-        let redirect_rejection = match self.reject_invalid_redirects(&materialized_cmd) {
-            Ok(rejection) => rejection,
-            Err(error) => return Some(Err(error)),
-        };
+        let settle_superseded_net_outputs =
+            self.superseded_net_output_settlement_applies(&materialized_cmd, false);
+        let redirect_rejection =
+            match self.reject_invalid_redirects(&materialized_cmd, settle_superseded_net_outputs) {
+                Ok(rejection) => rejection,
+                Err(error) => return Some(Err(error)),
+            };
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
@@ -3694,6 +3757,12 @@ impl Executor {
                 self.finish_assignment_output_process_substitutions_for_command(&materialized_cmd);
             return Some(Err(ExecuteError::ExpansionFailure(1)));
         }
+        // rubash#2126: every skip path above (redirect rejection,
+        // failed tempenv) returns before this point, so reaching here is
+        // the function dispatch itself — execute_cmd.c:4813 assigns
+        // this_shell_builtin = (SHELL_VAR *)NULL for a function
+        // dispatch, disarming the evalstring tracker bit.
+        self.shell_state.last_dispatch_was_eval_or_source = false;
         // GNU variables.c push_context: the function-call tempenv becomes the
         // function's variable context — recorded so a posix special builtin's
         // merged tempenv inside the function (att_propagate,
@@ -4053,49 +4122,12 @@ fn compound_assignment_operand_word(cmd: &CommandNode, index: usize, word: &str)
 }
 
 fn raw_word_contains_process_substitution(raw: Option<&str>) -> bool {
-    let Some(raw) = raw else {
-        return false;
-    };
-    // Whitelist admission (rubash#117 discipline): the DFA below only
-    // reports `<(`/`>(` outside quotes. Without either byte pair no arm
-    // can fire, so skip the char-collect + scan. A present pair runs the
-    // full quote-aware scan unchanged.
-    if !raw.contains("<(") && !raw.contains(">(") {
-        return false;
-    }
-    let chars = raw.chars().collect::<Vec<_>>();
-    let mut index = 0usize;
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
-    while index < chars.len() {
-        let ch = chars[index];
-        if escaped {
-            escaped = false;
-            index += 1;
-            continue;
-        }
-        if ch == '\\' && !single {
-            escaped = true;
-            index += 1;
-            continue;
-        }
-        if ch == '\'' && !double {
-            single = !single;
-            index += 1;
-            continue;
-        }
-        if ch == '"' && !single {
-            double = !double;
-            index += 1;
-            continue;
-        }
-        if !single && !double && matches!(ch, '<' | '>') && chars.get(index + 1) == Some(&'(') {
-            return true;
-        }
-        index += 1;
-    }
-    false
+    // Sole implementation: the parser's quote-aware DFA (subst.c:11349-
+    // 11378 `expand_word_internal` cases '<' and '>'). This Option adapter
+    // and the external_setup call sites used to carry verbatim copies of
+    // the same scan; all of them now delegate to the one implementation so
+    // the answers can never drift apart.
+    raw.is_some_and(crate::parser::raw_word_has_unquoted_process_substitution)
 }
 
 /// Whether the raw source of an associative element-assignment word
@@ -6084,7 +6116,6 @@ mod command_word_materialization_tests {
         let ast = crate::parser::parse(&tokens);
         let cmd = &ast.commands[0];
         assert_eq!(cmd.words, vec!["[", "1", "-eq", "2", "]"]);
-        assert!(cmd.word_quotes.is_empty());
         assert!(cmd.process_substitutions.is_empty());
         for (index, word) in cmd.words.iter().enumerate() {
             let raw = cmd

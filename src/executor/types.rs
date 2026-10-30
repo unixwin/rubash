@@ -46,6 +46,54 @@ pub const FD_OUTPUT_PROCESS_SUBSTITUTION_PREFIX: &str = "__RUBASH_FD_OUTPUT_PROC
 pub const FD_CLOSED_PREFIX: &str = "__RUBASH_FD_CLOSED_";
 pub const FD_TERMINAL_PREFIX: &str = "__RUBASH_FD_TERMINAL_";
 pub const FD_PIPE_PREFIX: &str = "__RUBASH_FD_PIPE_";
+/// rubash#1902: the fd-alias facts the test/[[ evaluator consumes. A
+/// File-bound fd carries its target path in __RUBASH_FD_TARGET_<fd>
+/// (every file predicate answers from the referent, the procfs-symlink
+/// semantics); every other open fd carries its device class plus mode
+/// bits in __RUBASH_FD_ACCESS_<fd> (class char first: `p` fifo, `c`
+/// console, `d` directory, `n` null-style char device, `f` generic file;
+/// then the granted r/w/x letters). An empty value is the closed-entry
+/// tombstone: /proc/self/fd/N is gone and every predicate fails.
+pub const FD_TARGET_PREFIX: &str = "__RUBASH_FD_TARGET_";
+pub const FD_ACCESS_PREFIX: &str = "__RUBASH_FD_ACCESS_";
+/// rubash#1902 (stage face): "1" while a pipeline stage's fd 0 is the
+/// staged FUNCTION_STDIN mirror standing in for the inter-stage pipe
+/// (GNU execute_cmd.c:2620 execute_pipeline + do_piping,
+/// execute_cmd.c:6373: the element's fd 0 IS the pipe). The stage
+/// funnels clear the fd-table slot for the mirror's duration, so the
+/// entries-driven fd-fact sync has no row to classify; the stage entry
+/// installs this fact beside the mirror (and restores it with the
+/// mirror), and sync_fd_alias_facts turns it into the fd-0 access mark
+/// only when no fd-table entry produced one. It rides env_vars like
+/// the marks themselves so stage clones (command_substitution_executor
+/// fork copies) inherit it verbatim.
+pub const FD0_STAGE_PIPE: &str = "__RUBASH_FD0_STAGE_PIPE";
+/// rubash#2131: the fd-0 fact of a binding that travels as a staged
+/// FUNCTION_STDIN mirror (bind_command_fd0_input's text branch and the
+/// flat-subshell region feed): the mirror replaces fd 0 for its scope
+/// but installs no fd-table entry, so the entries-driven sync would
+/// answer from whatever binding the mirror superseded. The staging
+/// site records the staged source's own fact here — `T:<target>` for a
+/// file-referent fact, `A:<access mark>` for a device class, `D:<fd>`
+/// for a dup of another descriptor — in the same vocabulary the sync
+/// writes, and the guard restores it with the mirror. The sync lets
+/// it supersede the fd-0 entry mark only while the mirror actually
+/// governs fd 0 (the channel is staged, no pipeline stage owns fd 0,
+/// and the entry is still the ambient inherited one the mirror left
+/// untouched — an exec-bound File entry shadows the mirror upstream
+/// of the sync and keeps its own fact).
+pub const FD0_MIRROR_FACT: &str = "__RUBASH_FD0_MIRROR_FACT";
+/// rubash#2042: marks a file-backed open descriptor for the
+/// `test -r /proc/<pid>/fd/N` face. GNU answers -r TRUE for every
+/// live fd magic link regardless of the fd's open mode (measured on
+/// real procfs, bash 5.3.20, uid 1: `lr-x` regular read-only,
+/// `l-wx` write-only append, `lr-x` /dev/null all answer -r yes —
+/// the link is readable iff the descriptor exists). The pipe marker
+/// above deliberately does not cover regular files (rubash#1467
+/// keeps them unmarked so the pipe verdicts stay exact), so the
+/// file-backed class carries its own mark, rewritten fresh each
+/// call like the pipes.
+pub const FD_FILE_PREFIX: &str = "__RUBASH_FD_FILE_";
 pub const FD_STDOUT_TARGET: &str = "__RUBASH_FD_STDOUT";
 pub const FD_STDERR_TARGET: &str = "__RUBASH_FD_STDERR";
 pub const FD_COPROC_STDIN_TARGET_PREFIX: &str = "__RUBASH_COPROC_STDIN:";

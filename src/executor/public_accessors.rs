@@ -30,11 +30,19 @@ fn stamp_env_usize(env_vars: &mut VarTable, key: &str, line: usize) -> bool {
         }
     }
     let rendered = std::str::from_utf8(&buffer[position..]).unwrap_or("0");
-    if env_vars.get(key).map(String::as_str) != Some(rendered) {
-        env_vars.insert(key.to_string(), rendered.to_string());
+    // Reuse the stored key's allocation: `insert(key.to_string(), ...)`
+    // rebuilt the key String on every stamp (two stamps per command in the
+    // reader loop), and the map already owns that key. `get_mut` hashes the
+    // same way, so the only observable difference is the skipped alloc.
+    if let Some(slot) = env_vars.get_mut(key) {
+        if slot.as_str() == rendered {
+            return false;
+        }
+        *slot = rendered.to_string();
         true
     } else {
-        false
+        env_vars.insert(key.to_string(), rendered.to_string());
+        true
     }
 }
 
@@ -340,22 +348,33 @@ impl Executor {
     /// Tier A signal face (Session API RFC section 6.4; PLAN row
     /// 11, M-3): queue `signal` for this process through the
     /// engine's own delivery machinery — the same queue the
-    /// `kill` builtin's self-deliveries use. The delivery is
-    /// serviced at the next command boundary by the boundary
-    /// poll: a trapped signal runs its trap, an ignored one is
-    /// dropped, an untrapped fatal one ends the run with
-    /// 128 + signal. This replaces the `builtins::kill` console
-    /// hooks as the surface hosts consume; those hooks are the
-    /// engine's internal plumbing from here on.
+    /// `kill` builtin's self-deliveries use. The queue's real
+    /// contract is trap dispatch (measured contract, rubash#1986;
+    /// DECISIONS 2026-10-28 §6.4): the boundary poll services
+    /// the queue at the next command boundary — a trapped signal
+    /// runs its trap; a queued copy of an untrapped signal is
+    /// dropped as stale, because a handler exists only where a
+    /// trap (or the interactive rubash#1662 pin) installed one,
+    /// and it is the signal's kernel form, never the queued
+    /// copy, that ends a non-interactive process. The resident
+    /// fatal set (SIGSEGV, SIGBUS, SIGILL, SIGFPE) does not
+    /// include SIGINT. This replaces the `builtins::kill`
+    /// console hooks as the surface hosts consume; those hooks
+    /// are the engine's internal plumbing from here on.
     pub fn inject_signal(&mut self, signal: i32) {
         crate::builtins::kill::queue_self_signal(signal);
     }
 
     /// Tier A cooperative cancellation (RFC section 6.4): ask
     /// the running execution to end as if SIGINT had arrived —
-    /// an injected SIGINT, serviced at the next command
-    /// boundary with traps honored and the conventional 130
-    /// status for an untrapped interrupt.
+    /// an injected SIGINT, serviced under the contract
+    /// [`Executor::inject_signal`] documents: a trapped INT
+    /// runs its trap at the next command boundary; in an
+    /// interactive session the rubash#1662 handler pin routes
+    /// an untrapped delivery to a DISCARD of the current input
+    /// with status 130 and the session continues; a
+    /// non-interactive untrapped delivery is adjudicated by
+    /// kernel disposition, not by this queue.
     pub fn interrupt(&mut self) {
         self.inject_signal(2);
     }
@@ -418,6 +437,17 @@ impl Executor {
         self.exit_code = exit_code;
     }
 
+    /// GNU execute_cmd.c:4886-4888: mark the running simple command as
+    /// a failed POSIX special builtin (the builtin returned an
+    /// > EX_SHERRBASE error class — EX_USAGE for the caller here); the
+    /// dispatch gate in execute_materialized_command converts the mark
+    /// into the non-interactive POSIX exit (execute_cmd.c:1004-1017).
+    /// For builtin-layer code that holds the Executor across the module
+    /// boundary (builtins/source.rs) and cannot touch the field.
+    pub(crate) fn mark_special_builtin_failed(&self) {
+        self.special_builtin_failed.set(true);
+    }
+
     pub fn set_history_provider(&mut self, provider: crate::history::SharedHistoryProvider) {
         self.history_provider = Some(provider);
     }
@@ -438,6 +468,51 @@ impl Executor {
         let provider = self.history_provider.as_ref()?.clone();
         let entries = provider.borrow_mut().entries().unwrap_or_default();
         Some(entries)
+    }
+
+    /// Reconcile the dispatch-time stamp ledger with the provider list's
+    /// current length (niubash#646). GNU stamps an entry at its add
+    /// (readline/history.c hist_inittime, history.c:322-333); the engine
+    /// observed adds fill the ledger tail with the observation-time stamp
+    /// and removals truncate it. Position-level corrections for mid-list
+    /// surgery are done at the mutating site (`history -d`), which mirrors
+    /// the exact index operations onto the ledger before calling this.
+    pub(crate) fn sync_provider_stamp_ledger(&mut self) {
+        let Some(provider) = self.history_provider.as_ref().cloned() else {
+            return;
+        };
+        let len = match provider.borrow_mut().entries() {
+            Ok(entries) => entries.len(),
+            Err(_) => return,
+        };
+        let mut ledger = self.provider_stamp_ledger.borrow_mut();
+        ledger.truncate(len);
+        while ledger.len() < len {
+            ledger.push(crate::history::SessionHistory::now_stamp());
+        }
+    }
+
+    /// The effective per-entry stamps for the provider list (niubash#646).
+    /// `None` when no provider is installed. The host's own stamp channel
+    /// (`HistoryProvider::entry_timestamps`, niubash#622) wins when it is
+    /// aligned with the list and carries at least one stamp; otherwise the
+    /// engine's dispatch-time ledger stands in (synced first), so a host
+    /// predating the channel still gets GNU's interactive shape: every
+    /// listed entry carries a stamp (the unloaded-file entry takes its
+    /// read time, histfile.c add_history → hist_inittime — a listed
+    /// entry never renders the stamp-less `??` in a stamping shell).
+    pub(crate) fn provider_history_stamps(&mut self) -> Option<Vec<String>> {
+        let provider = self.history_provider.as_ref()?.clone();
+        {
+            let mut provider = provider.borrow_mut();
+            let entries = provider.entries().unwrap_or_default();
+            let host = provider.entry_timestamps();
+            if host.len() == entries.len() && host.iter().any(|stamp| !stamp.is_empty()) {
+                return Some(host);
+            }
+        }
+        self.sync_provider_stamp_ledger();
+        Some(self.provider_stamp_ledger.borrow().clone())
     }
 
     /// Rewrite the provider's most recent entry while it is still the raw
@@ -467,6 +542,9 @@ impl Executor {
             }
         }
         let _ = provider.borrow_mut().replace(entries);
+        // Count-preserving rewrite keeps the stamp; the None arm dropped an
+        // entry — the ledger tail goes with it.
+        self.sync_provider_stamp_ledger();
     }
 
     /// Remove the provider's most recent entry unconditionally (the
@@ -482,6 +560,10 @@ impl Executor {
         };
         entries.pop();
         let _ = provider.borrow_mut().replace(entries);
+        // The vetoed entry's stamp goes with it (GNU: a line recorded only
+        // outside remember_on_history never reaches add_history, so it
+        // never got a stamp to drop).
+        self.sync_provider_stamp_ledger();
     }
 
     /// Host completion hook. Given the in-progress command `line` and the
@@ -551,6 +633,23 @@ impl Executor {
             || self.shell_state.completion_specs.get("-E").is_some()
     }
 
+    /// The session's open fd numbers, ascending: every fd-table entry
+    /// holding a live read or write endpoint. This is the table the
+    /// `/dev/fd/N` spellings resolve against (the special-path
+    /// registry's fd-alias class), exposed for consumers that
+    /// enumerate that namespace — host completion lists exactly
+    /// these numbers under `/dev/fd/` (niubash#627; vfs audit §6.4:
+    /// the dynamic tier's source is the fd table itself, never a
+    /// name list).
+    pub fn open_fds(&self) -> Vec<u32> {
+        self.fd_table
+            .entries
+            .keys()
+            .copied()
+            .filter(|&fd| self.fd_table.is_open(fd))
+            .collect()
+    }
+
     pub fn set_external_file_builtins_enabled(&mut self, enabled: bool) {
         self.external_file_builtins_enabled = enabled;
     }
@@ -561,15 +660,10 @@ impl Executor {
     /// directory itself contains the real `bin`, `usr/bin`, `etc`, and `tmp`
     /// directories used by the shell.
     pub fn set_shell_root(&mut self, root: impl AsRef<std::path::Path>) {
-        let value = root.as_ref().to_string_lossy().into_owned();
-        self.shell_state
-            .env_vars
-            .insert("__RUBASH_SHELL_ROOT".to_string(), value.clone());
-        // deprecated: niu bridge, remove after niu stops reading
-        self.shell_state
-            .env_vars
-            .insert("WINUXSH_ROOT".to_string(), value);
-        self.mark_exported("WINUXSH_ROOT");
+        self.shell_state.env_vars.insert(
+            "__RUBASH_SHELL_ROOT".to_string(),
+            root.as_ref().to_string_lossy().into_owned(),
+        );
     }
 
     /// Configure the native WinuxCmd dispatcher used for shell commands that
@@ -651,6 +745,31 @@ impl Executor {
             + 'static,
     {
         self.host_external_command_handler = Some(HostExternalCommandHandler(Box::new(handler)));
+    }
+
+    /// Register the external-command route provider (niubash#567
+    /// P3; see `external_route` for the seam contract): after name
+    /// resolution, a simple command about to be spawned is offered
+    /// to the provider with its final argv, complete environment,
+    /// session cwd, live stdio handles, and a cancellation peek;
+    /// the provider executes it in-process or declines it back to
+    /// the spawn. Replaces any previous registration. Sessions
+    /// normally install it at build time through
+    /// `SessionBuilder::external_route_provider`.
+    pub fn set_external_route_provider(
+        &mut self,
+        provider: Box<dyn super::external_route::ExternalRouteProvider>,
+    ) {
+        self.external_route_provider = Some(std::rc::Rc::new(std::cell::RefCell::new(
+            super::external_route::ExternalRouteProviderSlot(provider),
+        )));
+    }
+
+    /// Remove the route provider registration, if any: dispatch
+    /// returns to spawn-only, byte-identical to an engine that
+    /// never had one.
+    pub fn clear_external_route_provider(&mut self) {
+        self.external_route_provider = None;
     }
 
     #[cfg(windows)]
@@ -1123,7 +1242,19 @@ impl Executor {
         // carries their registrations) is swapped back (rubash#1336).
         self.flush_region_owned_output_process_substitutions(&saved_state.env_vars);
         self.restore_shell_env(saved_state.env_vars.clone());
+        // rubash#1907: the region ran against this same PROCESS, so a
+        // `umask` inside it re-masked the process itself; GNU's fork
+        // discards that with the child. Re-apply the mask the save
+        // point snapshotted — LAST, so the deferred procsub bodies
+        // flushed above still ran in the region's context. Idempotent:
+        // callers that restore the same snapshot more than once (or a
+        // snapshot whose region never touched the mask) re-apply the
+        // same value.
+        let fork_saved_process_umask = saved_state.fork_saved_process_umask;
         self.shell_state = saved_state;
+        if let Some(mask) = fork_saved_process_umask {
+            crate::builtins::umask::apply_process_umask(mask);
+        }
     }
 
     pub fn aliases_snapshot(&self) -> HashMap<String, String> {
@@ -2531,6 +2662,14 @@ impl Drop for Executor {
             crate::builtins::kill::unregister_signal_mailbox(std::process::id());
         }
 
+        // rubash#2179: outstanding output-procsub feeds complete here,
+        // BEFORE the process-exit skip below: unlike the environment,
+        // a feed's payload is observable outside this process — it
+        // belongs to a consumer child that outlives the shell. The
+        // process-exit executor is exactly the one whose feeds race
+        // `std::process::exit`, so the drain is not skipped for it.
+        self.drain_procsub_feeds();
+
         // startup21: the process-env restore models an in-process child
         // leaving its parent's env untouched (rubash#182). The process-exit
         // executor's process dies with this drop — nothing can observe its
@@ -2564,7 +2703,17 @@ impl Drop for Executor {
             if current.as_deref() != final_state.as_deref() {
                 continue;
             }
-            match self.process_env_snapshot.get(name) {
+            // rubash#2178: the birth lookup goes through
+            // snapshot_birth_value — on Windows the snapshot's
+            // process-block spelling ("Path") and the journal's shell
+            // spelling ("PATH") name the same variable, and an
+            // exact-spelling miss here deleted the host's variable
+            // instead of restoring it.
+            match crate::executor::local_helpers::snapshot_birth_value(
+                &self.process_env_snapshot,
+                name,
+                cfg!(windows),
+            ) {
                 Some(value) => {
                     if is_valid_process_env(name, value) {
                         env::set_var(name, value);

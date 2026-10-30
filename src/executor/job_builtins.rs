@@ -116,6 +116,12 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
         self.refresh_background_jobs()?;
+        // GNU's jobs listing disposes dead coprocs before printing
+        // (jobs.c list_all_jobs/list_one_job call cleanup_dead_jobs,
+        // which reaps coprocs) — the same disposal point as the wait
+        // family (rubash#2053).
+        let _ = self.apply_pending_job_completions(true);
+        self.flush_pending_coproc_retirements();
         let mut stderr = Vec::new();
         let action = crate::builtins::jobs::execute_with_io(
             &cmd.words[1..],
@@ -922,19 +928,33 @@ impl Executor {
         // GNU execute_cmd.c:3267 REAP() runs once per loop iteration; an
         // empty table makes the scan plus cleanup below no-ops, so skip the
         // consults too. Any `&` spawn restores the full path next iteration.
-        if self.shell_state.job_table.jobs.is_empty() {
-            return;
-        }
         let interactive = self
             .shell_state
             .env_vars
             .contains_key("__RUBASH_INTERACTIVE");
         let job_control =
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor");
-        if !interactive || !job_control {
+        if interactive && job_control {
+            return;
+        }
+        if !self.shell_state.job_table.jobs.is_empty() {
             self.shell_state
                 .job_table
                 .reap_dead_jobs(self.shell_state.last_background_pid);
+        }
+        // rubash#2053: GNU's reap_dead_jobs disposes dead coprocs in
+        // the same motion (jobs.c cleanup_dead_jobs -> coproc_reap),
+        // so a loop iteration is a coproc disposal point too: a death
+        // recorded by the sweep is retired here, before the next
+        // iteration's commands expand. Without this arm a dead
+        // coproc's vars survived an entire builtin-only loop, where
+        // GNU tears them down per iteration (execute_cmd.c REAP() at
+        // :3105/:3267/:3606/:3838).
+        if !self.shell_state.coproc_names.is_empty() || !self.pending_coproc_retirements.is_empty()
+        {
+            let _ = self.refresh_background_jobs();
+            let _ = self.apply_pending_job_completions(true);
+            self.flush_pending_coproc_retirements();
         }
     }
 
@@ -1099,6 +1119,11 @@ impl Executor {
     /// the EXIT trap runs (GNU's notice precedes run_exit_trap).
     pub(crate) fn flush_job_notifications_at_stream_end(&mut self) -> Result<(), ExecuteError> {
         self.refresh_background_jobs()?;
+        // Stream end is the final disposal point (GNU coproc_flush
+        // disposes unconditionally at shell exit): retire whatever
+        // completions were recorded but never reached a disposal
+        // point during the stream.
+        self.flush_pending_coproc_retirements();
         self.report_pending_signal_notices()
     }
 
@@ -1178,6 +1203,18 @@ impl Executor {
             .set(self.foreground_wait_count.get() + 1);
     }
 
+    /// A whole-command emulation (external file builtins, host
+    /// handler, same-shell script, /bin/echo stand-in) just ran a
+    /// command GNU executes as a forked child: its completion is the
+    /// same reap/disposal observation point as that child's wait_for
+    /// (jobs.c:3064/3385), exactly like the emulated sleep fast path
+    /// in command_dispatch_primary. Without the mark, a coproc death
+    /// during an emulated `cat` would never reach a disposal point
+    /// (rubash#2053).
+    pub(in crate::executor) fn note_emulated_foreground_wait(&self) {
+        self.note_foreground_wait();
+    }
+
     fn refresh_background_jobs_impl(&mut self, force_observe: bool) -> Result<(), ExecuteError> {
         // part_036 (jobs.c waitchld lag): a reap becomes VISIBLE in the
         // job table only at a GNU observation point — the shell blocked
@@ -1220,7 +1257,38 @@ impl Executor {
         self.apply_pending_job_completions(observe)?;
         let mut finished = Vec::new();
         for (pid, child) in &mut self.background_children {
-            if let Some(status) = child.try_wait()? {
+            let mut reaped = child.try_wait()?;
+            if reaped.is_none() {
+                // rubash#1952: a streamed procsub producer closes its
+                // pipe during exit teardown, so an in-process consumer
+                // can observe EOF a hair before the producer becomes
+                // reapable; GNU wins the same race because wait_for
+                // (jobs.c:3064) reaps while blocked on the foreground
+                // process. Give a streamed producer one bounded grace
+                // wait (5 ms) at the first boundary that finds it
+                // unreaped, so `$!` liveness (`kill -0`) is
+                // deterministic for a producer that already delivered
+                // EOF. A genuinely live producer pays the grace once
+                // and stays registered.
+                let grace = matches!(self.procsub_stream_children.get(pid), Some(false));
+                if grace {
+                    self.procsub_stream_children.insert(*pid, true);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(5);
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(done)) => {
+                                reaped = Some(done);
+                                break;
+                            }
+                            Ok(None) if std::time::Instant::now() < deadline => {
+                                std::thread::sleep(std::time::Duration::from_micros(100));
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+            }
+            if let Some(status) = reaped {
                 // rubash#1776: sample the reaped child's CPU for the
                 // Windows CHILDREN half while its handle is live.
                 super::read_helpers::note_reaped_child_cpu(child);
@@ -1245,6 +1313,7 @@ impl Executor {
 
         for (pid, status, term_signal) in finished {
             self.background_children.remove(&pid);
+            self.procsub_stream_children.remove(&pid);
             // rubash#169: the reaped child no longer holds a capture pipe
             // write end — retire it from the writer set (drain when last).
             let drained = crate::executor::shell_options::retire_background_capture_writer(pid);
@@ -1257,10 +1326,31 @@ impl Executor {
                 }
             }
             self.join_coproc_stderr_forwarder(pid)?;
-            // Coproc disposal is per-command by contract (rubash#1023),
-            // and at an observation point a completion applies at once;
+            // At an observation point a completion applies at once;
             // anything else is stashed until the next observation
-            // point (see the waitchld-lag note above).
+            // point (see the waitchld-lag note above). Coproc
+            // completions follow the SAME gate (rubash#2053/#2057):
+            // GNU keeps the reap and the disposal in separate hands —
+            // waitchld records the status (execute_cmd.c:2326
+            // coproc_setstatus saves c_status; jobs.c bgpids for job
+            // children) and coproc_reap disposes only an already-reaped
+            // coproc, from cleanup points (jobs.c:1342
+            // cleanup_dead_jobs). A sweep that discovers a coproc death
+            // with its own try_wait and applies it in the same motion
+            // runs BEFORE the next command expands, so the recorded
+            // completion can steal that command's operand: `wait
+            // $C_PID` then meets a half-retired coproc, and `exec
+            // {C[1]}>&-` loses the array and reports an ambiguous
+            // redirect. The retirement half is therefore deferred
+            // separately (pending_coproc_retirements): it runs only
+            // at disposal points — a refresh that observed a
+            // foreground wait, or stream end. The earlier #1023
+            // contract (a dead coproc's vars are gone before the next
+            // command expands) is about deaths OBSERVED at a blocking
+            // point — the reader's foreground wait that preceded the
+            // boundary: that wait's refresh carries the foreground
+            // mark, so the retirement still lands before that next
+            // expansion.
             //
             // rubash#1604: one exception to "applies at once" — a job
             // the shell's OWN kill fatally signalled during this same
@@ -1278,12 +1368,22 @@ impl Executor {
                 && term_signal.is_some()
                 && !self.shell_state.coproc_names.contains_key(&pid)
                 && self.shell_state.job_table.take_fresh_fatal(pid);
-            if !fresh_fatal && (observe || self.shell_state.coproc_names.contains_key(&pid)) {
+            if !fresh_fatal && observe {
                 self.apply_job_completion(pid, status, term_signal)?;
             } else {
                 self.pending_job_completions
                     .push((pid, status, term_signal));
             }
+        }
+        // rubash#2053/#2057: a refresh that observed a foreground
+        // wait is one of GNU's coproc disposal points (the
+        // notify_and_cleanup inside wait_for, jobs.c:3385) — retire
+        // the coprocs whose completions have been recorded, including
+        // any recorded by this very refresh. A refresh that observed
+        // nothing (bare boundary) leaves them pending, so the next
+        // command still expands <name>/<name>_PID and {name[i]}.
+        if force_observe || foreground_blocked {
+            self.flush_pending_coproc_retirements();
         }
         Ok(())
     }
@@ -1359,8 +1459,32 @@ impl Executor {
         self.shell_state.job_table.mark_completed(pid, status);
         self.flush_timed_coproc_report(pid);
         self.run_sigchld_trap_for_reaped_child()?;
-        self.retire_completed_coproc(pid);
+        // rubash#2053/#2057: the completion is now visible (status
+        // recorded), but the coproc's retirement is a separate step
+        // on GNU's disposal cadence — see pending_coproc_retirements
+        // in mod.rs. flush_pending_coproc_retirements performs it at
+        // the next disposal point.
+        if self.shell_state.coproc_names.contains_key(&pid)
+            && !self.pending_coproc_retirements.contains(&pid)
+        {
+            self.pending_coproc_retirements.push(pid);
+        }
         Ok(())
+    }
+
+    /// Perform deferred coproc retirements (GNU coproc_reap via
+    /// cleanup_dead_jobs: vars unbound, endpoints closed). Called at
+    /// disposal points only: a refresh that observed a foreground
+    /// wait (force_observe, or foreground_wait_count moved), and at
+    /// stream end.
+    fn flush_pending_coproc_retirements(&mut self) {
+        if self.pending_coproc_retirements.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_coproc_retirements);
+        for pid in pending {
+            self.retire_completed_coproc(pid);
+        }
     }
 
     fn join_coproc_stderr_forwarder(&mut self, pid: u32) -> Result<(), ExecuteError> {
@@ -1625,6 +1749,7 @@ impl Executor {
         let Some(mut child) = self.background_children.remove(&pid) else {
             return Ok(WaitPidOutcome::NotFound);
         };
+        self.procsub_stream_children.remove(&pid);
         // GNU jobs.c:3064 wait_for + wait.def:178-191 wait_intr_flag: the
         // blocking waitpid is interruptible — a trapped signal longjmps out
         // and wait returns 128+sig while the job stays live. The mailbox
@@ -2019,6 +2144,7 @@ impl Executor {
                         .chain(self.background_children.keys().copied())
                         .collect();
                     self.background_children.clear();
+                    self.procsub_stream_children.clear();
                     for pid in &pids {
                         // rubash#1304: `disown -a` leaves nothing
                         // waitable (GNU: a later `wait <pid>` reports
@@ -2694,6 +2820,14 @@ impl Executor {
         }
         let provider = self.history_provider.as_ref().cloned();
         if let Some(provider) = provider {
+            // rubash#2007: the display base is host list state (readline
+            // history.c:113 history_base; a stifled store advances it like
+            // stifle_history/add_history, history.c:389-404,675-698), so the
+            // provider contract carries it — the trait default is the
+            // unstifled 1. Both the display numbering and the positive
+            // `history -d' operands (history.def:203-216,243-260) are
+            // history_base-based.
+            let provider_history_base = provider.borrow_mut().history_base();
             // Detect history file I/O modes (-a/-n/-r/-w) and optional -c.
             let mut has_io = false;
             let mut do_append = false;
@@ -2799,11 +2933,27 @@ impl Executor {
                     self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                     return Ok(null_filename_status);
                 }
-                let mut p = provider.borrow_mut();
+                // niubash#646: sv_histtimefmt (variables.c:6168-6177) arms
+                // the file faces whenever HISTTIMEFORMAT exists as a
+                // variable (`history_write_timestamps = (v != 0)`), and
+                // the effective stamps come from the host's
+                // entry_timestamps channel or the engine's dispatch-time
+                // ledger. Fetched before the scoped borrows below — and
+                // after a `-c` clears the list, so a stamp slice never
+                // outlives the list it ran parallel to.
                 if do_clear {
-                    p.clear()?;
+                    provider.borrow_mut().clear()?;
+                    // `-c` empties entries and timestamps together
+                    // (builtins/history.def:185); the ledger follows.
+                    self.sync_provider_stamp_ledger();
                     let _ = std::fs::write(&file, "");
                 }
+                let write_ts = self.get_env("HISTTIMEFORMAT").is_some();
+                let io_stamps = if write_ts {
+                    self.provider_history_stamps().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 // The file modes report through the builtin's own
                 // diagnostic surface, exactly like the session path in
                 // history_exec.rs: an io failure is a builtin outcome
@@ -2812,7 +2962,19 @@ impl Executor {
                 // `history -a <missing-dir>/f` through a host provider
                 // surfaced as just `No such file or directory`).
                 if do_append {
-                    if let Err(err) = p.append_history(&file) {
+                    // histfile.c:815 history_append: with
+                    // history_write_timestamps a stamped entry is two file
+                    // lines (`#<epoch>` then the command). The plain call
+                    // below is the unarmed legacy path — byte-identical
+                    // to the trait default.
+                    let outcome = if write_ts {
+                        provider
+                            .borrow_mut()
+                            .append_history_timestamped(&file, &io_stamps)
+                    } else {
+                        provider.borrow_mut().append_history(&file)
+                    };
+                    if let Err(err) = outcome {
                         // bashhist.c:450 maybe_append_history: the
                         // `cannot create' line belongs to the branch
                         // where the target does not exist (stat ->
@@ -2833,7 +2995,8 @@ impl Executor {
                     }
                 }
                 if do_read_new {
-                    if p.read_new_history(&file).is_err() {
+                    let outcome = provider.borrow_mut().read_new_history(&file);
+                    if outcome.is_err() {
                         // GNU read failures are silent: the
                         // read-error report in builtins/history.def
                         // is wrapped in `#if 0' in both the RFLAG
@@ -2844,16 +3007,38 @@ impl Executor {
                         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                         return Ok(1);
                     }
+                    // The list grew by the file's new entries; the ledger
+                    // fills their read-time stamps (histfile.c add_history
+                    // → hist_inittime; per-entry file stamp parsing through
+                    // a provider is the host's niubash#622 read face).
+                    self.sync_provider_stamp_ledger();
                 }
                 if do_read {
-                    if p.read_history(&file).is_err() {
+                    let outcome = provider.borrow_mut().read_history(&file);
+                    if outcome.is_err() {
                         // Silent, like -n above (rubash#1852).
                         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                         return Ok(1);
                     }
+                    self.sync_provider_stamp_ledger();
                 }
                 if do_write {
-                    if p.write_history(&file).is_err() {
+                    // histfile.c:738 history_write_slow: with
+                    // history_write_timestamps each entry that HAS a stamp
+                    // is preceded by its `#<epoch>` line; HISTFILESIZE
+                    // still counts command lines (histfile.c:633). The
+                    // plain call is the unarmed legacy path — a store that
+                    // has not opted into the stamp channel must not find
+                    // `#<epoch>` side lines its reader would swallow as
+                    // entries (the niubash#646 file-face blocker).
+                    let outcome = if write_ts {
+                        provider
+                            .borrow_mut()
+                            .write_history_timestamped(&file, &io_stamps)
+                    } else {
+                        provider.borrow_mut().write_history(&file)
+                    };
+                    if outcome.is_err() {
                         // GNU write_history failures are silent
                         // (histfile.c history_do_write returns the
                         // errno unreported).
@@ -2868,13 +3053,29 @@ impl Executor {
             let clear = do_clear || args.iter().any(|arg| arg == "-c" || arg == "-pc");
             let save = args.iter().position(|arg| arg == "-s" || arg == "-ps");
             let delete = args.iter().position(|arg| arg == "-d");
+            // niubash#646: display_history renders the entry stamps only
+            // when HISTTIMEFORMAT is set AND non-empty
+            // (builtins/history.def:400 `histtimefmt && *histtimefmt`),
+            // while sv_histtimefmt arms the file faces on the variable's
+            // bare existence (variables.c:6168-6177) — the same split the
+            // session path keeps in history_exec.rs.
+            let time_format = self
+                .get_env("HISTTIMEFORMAT")
+                .filter(|format| !format.is_empty())
+                .map(str::to_string);
             let entries = if clear {
                 provider.borrow_mut().clear()?;
+                // builtins/history.def:185: -c clears entries and
+                // timestamps together; the ledger follows.
+                self.sync_provider_stamp_ledger();
                 Vec::new()
             } else if let Some(index) = save {
                 let command = args[index + 1..].join(" ");
                 if !command.is_empty() {
                     provider.borrow_mut().append(command)?;
+                    // The -s push is an add_history: its stamp is the add
+                    // time (readline/history.c hist_inittime).
+                    self.sync_provider_stamp_ledger();
                 }
                 Vec::new()
             } else if let Some(index) = delete {
@@ -2893,7 +3094,10 @@ impl Executor {
                     if text.starts_with('-') && value < 0 {
                         Some(value + length)
                     } else if value > 0 {
-                        Some(value - 1)
+                        // Positive operands are display numbers, offset by
+                        // history_base (history.def:243-260) — the provider
+                        // base, not a hard-wired 1 (rubash#2007).
+                        Some(value - provider_history_base as i128)
                     } else {
                         Some(0)
                     }
@@ -2912,7 +3116,20 @@ impl Executor {
                                     && start <= end =>
                             {
                                 entries.drain(start as usize..=end as usize);
+                                // The stamp ledger mirrors the exact index
+                                // surgery: remove_history_range moves the
+                                // HIST_ENTRY structs with their timestamp
+                                // fields intact (lib/readline/history.c),
+                                // so survivors keep their own stamps.
+                                {
+                                    let mut ledger = self.provider_stamp_ledger.borrow_mut();
+                                    if (start as usize) < ledger.len() {
+                                        let last = (end as usize).min(ledger.len() - 1);
+                                        ledger.drain(start as usize..=last);
+                                    }
+                                }
                                 provider.borrow_mut().replace(entries.clone())?;
+                                self.sync_provider_stamp_ledger();
                             }
                             _ => {
                                 writeln!(
@@ -2927,7 +3144,18 @@ impl Executor {
                     } else if let Some(value) = history_number(arg) {
                         if value >= 0 && (value as usize) < entries.len() {
                             entries.remove(value as usize);
+                            // Ledger mirror: the removed entry's stamp goes
+                            // with it; the survivors' stamps travel with
+                            // their entries (remove_history_range keeps the
+                            // timestamp fields attached).
+                            {
+                                let mut ledger = self.provider_stamp_ledger.borrow_mut();
+                                if (value as usize) < ledger.len() {
+                                    ledger.remove(value as usize);
+                                }
+                            }
                             provider.borrow_mut().replace(entries.clone())?;
+                            self.sync_provider_stamp_ledger();
                         } else {
                             writeln!(
                                 stderr,
@@ -2944,10 +3172,26 @@ impl Executor {
                 provider.borrow_mut().entries()?
             };
             let mut surplus = false;
+            // niubash#646: the stamps behind the listing come from the
+            // host's entry_timestamps channel (niubash#622) or, when that
+            // is not carrying stamps, the engine's dispatch-time ledger —
+            // synced here so entries the engine never observed (loaded
+            // before the first dispatch) still carry their read-time
+            // stamps, the histfile.c add_history shape, instead of
+            // rendering stamp-less (`??`).
+            let stamps = if time_format.is_some() {
+                self.provider_history_stamps().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let status = crate::builtins::history::execute_with_history(
                 args,
                 &self.diagnostic_prefix(),
                 &entries,
+                provider_history_base,
+                time_format.as_deref(),
+                &stamps,
+                &self.shell_state.env_vars,
                 &mut stdout,
                 &mut stderr,
                 &mut surplus,
@@ -3006,17 +3250,38 @@ impl Executor {
                 &mut stderr,
             )?
         } else {
-            let provider_entries = match self.history_provider.as_ref() {
-                Some(provider) => provider.borrow_mut().entries()?,
-                None => Vec::new(),
-            };
+            // fc.def:328-335 over the host store: the provider path
+            // mirrors the interactive shapes the formula was written for.
+            // rh (remember_on_history) is ON — the bridge replaces the
+            // engine's interactive recording, which init_interactive arms
+            // unconditionally (shell.c:1830-1842 `remember_on_history =
+            // enable_history_list`, default 1); the host recorded the
+            // submitted line before dispatch (the contract's
+            // save-at-accept shape), so whether the in-flight line is
+            // actually IN the list comes from the provider's
+            // last_line_added channel (bashhist.c:174, set by
+            // really_add_history:957-964) instead of a hard-wired false —
+            // that hard-wiring is what let `fc -l` list the fc line
+            // itself and the whole history (rubash#2006). history_base is
+            // host list state (rubash#2007). Both trait channels default
+            // to the GNU C initializers, so providers predating the
+            // contract keep compiling and behave as before.
+            let (provider_entries, provider_base, provider_last_added) =
+                match self.history_provider.as_ref() {
+                    Some(provider) => {
+                        let mut p = provider.borrow_mut();
+                        let entries = p.entries()?;
+                        (entries, p.history_base(), p.last_line_added())
+                    }
+                    None => (Vec::new(), 1, false),
+                };
             crate::builtins::fc::execute_with_history(
                 &cmd.words[1..],
                 &self.diagnostic_prefix(),
                 provider_entries,
-                1,
-                false,
-                false,
+                provider_base,
+                provider_last_added,
+                true,
                 posix_mode,
                 &mut stdout,
                 &mut stderr,
@@ -3045,6 +3310,13 @@ impl Executor {
                             shell.entries.pop();
                             shell.timestamps.pop();
                         }
+                    } else {
+                        // fc.def:403-405 bash_delete_last_history
+                        // (bashhist.c:392-417) deletes from THE history
+                        // list; with no engine session the provider IS
+                        // that list (rubash#2006) — drop the fc line the
+                        // same way the session path pops above.
+                        self.history_provider_drop_last();
                     }
                 }
                 let indices: Vec<usize> = if rev {

@@ -23,7 +23,6 @@ fn test_named_coproc_parses_split_brace_group_body() {
     assert_eq!(name_metadata.word_index, 0);
     assert_eq!(name_metadata.value, "MYC");
     assert_eq!(name_metadata.raw, "MYC");
-    assert!(name_metadata.word_quotes.is_empty());
     assert!(coproc.words.is_empty());
     assert_eq!(coproc.body_kind, CoprocBodyKind::BraceGroup);
     assert_eq!(coproc.body_open_delimiter.as_deref(), Some("{"));
@@ -298,10 +297,7 @@ fn test_coproc_time_pipeline_allows_compound_later_stages() {
         assert_eq!(coproc.words, ["MYC", "time", "echo", "hi"]);
     }
     let if_pipeline = if_ast.commands[0].pipeline_command.as_ref().unwrap();
-    let subshell_pipeline = subshell_ast.commands[0]
-        .pipeline_command
-        .as_ref()
-        .unwrap();
+    let subshell_pipeline = subshell_ast.commands[0].pipeline_command.as_ref().unwrap();
     let brace_pipeline = brace_ast.commands[0].pipeline_command.as_ref().unwrap();
 
     assert!(if_pipeline.stages[1].if_command.is_some());
@@ -610,4 +606,3 @@ fn test_coproc_command_consumes_trailing_stdout_redirect() {
     assert_eq!(coproc.body_kind, CoprocBodyKind::BraceGroup);
     assert_eq!(command.redirect_out.as_ref().unwrap().target, "out.txt");
 }
-

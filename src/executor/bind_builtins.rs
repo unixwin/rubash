@@ -619,6 +619,20 @@ impl Executor {
         self.shell_state.bind_registry.borrow().editing_mode.clone()
     }
 
+    /// Current value of one readline variable, by name — the
+    /// `bind -v` table read as a single probe (rubash#2183). Hosts
+    /// that implement a variable's behavior read it here: niubash's
+    /// reedline bridge reads `keyseq-timeout` for its key-sequence
+    /// timeout. The same data plane as the keymap mirror above;
+    /// `None` when the engine has no variable of that name.
+    pub fn bind_readline_variable(&self, name: &str) -> Option<String> {
+        self.shell_state
+            .bind_registry
+            .borrow()
+            .variable_value(name)
+            .map(str::to_string)
+    }
+
     /// initialize_readline's inputrc leg (bashline.c:451: rl_readline_name,
     /// the rl_add_defun table, then rl_initialize → rl_read_init_file):
     /// readline reads `$INPUTRC`, else `~/.inputrc`, once per process —
@@ -931,5 +945,43 @@ mod tests {
         let mut executor = Executor::new();
         let outcome = executor.run_bind_x_command("exit 3", "line", 0, 0);
         assert_eq!(outcome.status, 3);
+    }
+
+    #[test]
+    fn issue2183_bind_readline_variable_reads_back_bind_set_value() {
+        let mut executor = executor_without_host_inputrc();
+        // Fresh registry: the readline default table is live, so the
+        // variable niubash's bridge probes reads back its GNU
+        // default (keyseq-timeout = 500ms).
+        assert_eq!(
+            executor.bind_readline_variable("keyseq-timeout").as_deref(),
+            Some("500")
+        );
+        // Set through the engine's own bind path
+        // (`bind 'set NAME VALUE'`, bind.def's rl_parse_and_bind
+        // leg); the accessor reads the same value back.
+        let code =
+            crate::script_driver::run_source(&mut executor, "bind 'set keyseq-timeout 250'", false);
+        assert_eq!(code, 0);
+        assert_eq!(
+            executor.bind_readline_variable("keyseq-timeout").as_deref(),
+            Some("250")
+        );
+        // A later set replaces the value the accessor reports.
+        let code =
+            crate::script_driver::run_source(&mut executor, "bind 'set keyseq-timeout 125'", false);
+        assert_eq!(code, 0);
+        assert_eq!(
+            executor.bind_readline_variable("keyseq-timeout").as_deref(),
+            Some("125")
+        );
+    }
+
+    #[test]
+    fn issue2183_bind_readline_variable_unknown_name_is_none() {
+        let executor = Executor::new();
+        // A name outside the readline variable table has no value;
+        // hosts read that as "the engine has no such variable".
+        assert_eq!(executor.bind_readline_variable("no-such-variable"), None);
     }
 }

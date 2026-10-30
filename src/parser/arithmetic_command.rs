@@ -298,7 +298,7 @@ fn set_arithmetic_command_words(
     command.words.push("))".to_string());
     let mut arithmetic = arithmetic_command(expression);
     arithmetic.raw_expression = raw_expression.filter(|raw| !raw.is_empty());
-    command.arithmetic_command = Some(arithmetic);
+    command.arithmetic_command = Some(Box::new(arithmetic));
     if !delimiters_balanced {
         command.insert_assignment(
             "__RUBASH_PARSE_ERROR__".to_string(),

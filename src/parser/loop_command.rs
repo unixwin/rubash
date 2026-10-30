@@ -37,7 +37,7 @@ pub(super) fn parse_loop_command(
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.logical_line = tokens.get(start).map(|token| token.logical_line);
-    command.loop_command = Some(LoopCommand {
+    command.loop_command = Some(Box::new(LoopCommand {
         keyword: tokens[start].value.clone(),
         keyword_metadata: build_loop_keyword_metadata(&tokens[start]),
         condition,
@@ -54,7 +54,7 @@ pub(super) fn parse_loop_command(
         end_keyword_metadata: build_loop_keyword_metadata(&tokens[done_index]),
         kind,
         until,
-    });
+    }));
 
     Some(finish_compound_command(command, tokens, done_index + 1))
 }

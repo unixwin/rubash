@@ -421,6 +421,37 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
+/// Whether `status` — the return of an execute_with_io /
+/// execute_with_child_stdio call over the same `args` — is the
+/// option-parse failure face: parse_options rejected the options (or
+/// `--help` was requested), so execute_impl returned EX_BADUSAGE
+/// without running anything. GNU exec.def returns EX_USAGE there
+/// (258 > EX_SHERRBASE), which execute_cmd.c:4886-4888 marks
+/// special_builtin_failed for a non-interactive POSIX shell. A command
+/// operand's own exit status 2 is NOT this face; the parse is what
+/// distinguishes them (rubash#2117).
+pub(crate) fn status_is_option_parse_failure(args: &[String], status: i32) -> bool {
+    if status != EX_BADUSAGE {
+        return false;
+    }
+    let mut clean_env = false;
+    let mut login = false;
+    let mut argv0 = None;
+    let mut help = false;
+    matches!(
+        parse_options(
+            args,
+            &mut io::sink(),
+            "rubash: ",
+            &mut clean_env,
+            &mut login,
+            &mut argv0,
+            &mut help,
+        ),
+        Ok(None)
+    )
+}
+
 pub(crate) fn command_operand_index(args: &[String]) -> Option<usize> {
     let mut clean_env = false;
     let mut login = false;

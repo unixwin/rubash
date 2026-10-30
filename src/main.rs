@@ -3,8 +3,6 @@
 //! Run with: cargo run
 
 use rubash::executor::Executor;
-use rubash::lexer::tokenize_with_initial_posix;
-use rubash::parser::parse;
 use rubash::script_driver::{
     check_binary_file, finish_shell, prepare_interactive_history, run_interactive_stdin,
     run_script_with_history, run_source, run_source_with_line_offset, script_uses_aliases,
@@ -14,7 +12,66 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 
+/// Drop environment entries Windows can hand a process but Unicode cannot represent.
+///
+/// An inherited entry can hold an unpaired surrogate, and `std::env::vars()` panics on one
+/// (`library/std/src/env.rs`). GNU bash reads its environment as bytes and carries an entry it cannot
+/// decode as an opaque string; this engine's variable table is Unicode, so the honest equivalent is to
+/// lose that one variable rather than abort before the first command runs.
+fn drop_undecodable_environment_entries() {
+    let undecodable = std::env::vars_os()
+        .filter(|(name, value)| name.to_str().is_none() || value.to_str().is_none())
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    for name in undecodable {
+        std::env::remove_var(name);
+    }
+}
+
+/// rubash#2129: this process's OWN invocation shape, recorded by the
+/// argv[0]/argv handling in this file as it runs — never imported from
+/// the environment. GNU decides startup behavior from the invocation
+/// itself: shell.c:540-549 makes a shell interactive only for
+/// `forced_interactive` (the `-i` flag) or the no-operand tty pair, and
+/// shell.c:497-503 sets LOGIN_SHELL only from `-l`/`--login` (with the
+/// argv[0] `-` mark at shell.c set_shell_name). The
+/// `__RUBASH_INTERACTIVE` / `__RUBASH_LOGIN_SHELL` env carriers are
+/// session state written by the shell that owns the session; an
+/// interactive parent exports them to every child, so a plain `-c`
+/// child that merely INHERITED them must not adopt the parent's
+/// startup behavior — with an rc/profile line that respawns the shell
+/// (fzf's `__fzf_orig_completion < <(complete -p ...)`), each
+/// generation re-sourced the startup files and respawned again,
+/// recursing without bound. The startup-shape decision therefore
+/// reads these statics, and the env carriers keep serving only the
+/// in-session faces (option state, `$-`, the exit echo) they already
+/// serve.
+static OWN_INTERACTIVE_SHELL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static OWN_LOGIN_SHELL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn own_interactive_shell() -> bool {
+    OWN_INTERACTIVE_SHELL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn own_login_shell() -> bool {
+    OWN_LOGIN_SHELL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// rubash#2133: run_startup_files' run-once guard as a process-local
+/// static. It used to be the `__RUBASH_STARTUP_FILES_DONE` env carrier,
+/// which Executor::set_env mirrors into the process env — so every
+/// child inherited "startup files already ran" from its parent, and a
+/// genuine nested login shell (`rubash -lc 'rubash -lc true'`) skipped
+/// its own profile chain entirely. As a static the guard still runs
+/// the chain at most once per process, but it can never cross a spawn
+/// boundary: DONE never enters any child's environment.
+static STARTUP_FILES_DONE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn main() {
+    drop_undecodable_environment_entries();
+
     let handle = std::thread::Builder::new()
         .name("rubash-main".to_string())
         // GNU variables.c FUNCNEST: 0/unset means no limit, so recursion
@@ -56,6 +113,32 @@ fn run_main() -> i32 {
     if invoked_as.is_some() {
         env::remove_var("NIU_INVOKED_AS");
     }
+    // rubash#2129/#2133: the intra-process startup-carrier family is
+    // THIS process's private startup bookkeeping, never an inheritable
+    // setting: __RUBASH_STARTUP_FILES_DONE (run_startup_files' run-once
+    // guard — a process-local static since #2133, stripped here so a
+    // stale inherited copy cannot re-enter through any other reader),
+    // __RUBASH_SOURCED_RC (the rc file THIS process's startup chain
+    // already sourced), and the --noprofile/--norc suppressors
+    // __RUBASH_NO_PROFILE/__RUBASH_NO_RC. Executor::set_env mirrors
+    // __RUBASH_* markers into the process env, so every child of a
+    // shell that ran its startup inherits copies describing the
+    // PARENT's startup, not this invocation: an inherited DONE made a
+    // genuine nested `rubash -lc 'rubash -lc true'` skip its own
+    // profile chain, and an inherited __RUBASH_NO_PROFILE defeated an
+    // explicit `-l` on this process's own argv. Strip the family
+    // consume-on-read — the same rule as NIU_INVOKED_AS above — before
+    // Executor::new imports the process environment; after this point
+    // only this process's own argv (--noprofile/--norc arms in
+    // run_args/parse_long_options) may arm the suppressors again.
+    for carrier in [
+        "__RUBASH_STARTUP_FILES_DONE",
+        "__RUBASH_SOURCED_RC",
+        "__RUBASH_NO_PROFILE",
+        "__RUBASH_NO_RC",
+    ] {
+        env::remove_var(carrier);
+    }
     let mut args: Vec<String> = env::args().collect();
     // niubash#362: a respawned async `&` child too large for the
     // OS command line arrives with its `-c` script named by
@@ -72,7 +155,7 @@ fn run_main() -> i32 {
     // process as a handshake consumer, which licenses the wrapper spawn
     // site to attach the argv flag to respawns; host CLIs that never call
     // this get env-only respawns and never see the niu-specific flag.
-    rubash::builtins::kill::consume_background_wrapper_handshake(&mut args);
+    rubash::script_driver::consume_background_wrapper_handshake(&mut args);
     // rubash#1035: an asynchronous-job respawn starts with SIGINT/SIGQUIT
     // ignored (GNU execute_cmd.c setup_async_signals, job_control == 0).
     // Consume the spawn-site marker here — before the executor seeds the
@@ -235,6 +318,7 @@ fn apply_invocation_shell_mode(executor: &mut Executor, argv0: Option<&str>) {
     // GNU shell.c set_shell_name: an argv[0] whose first character is '-'
     // (after the basename) marks a login shell, independent of --login/-l.
     if name.starts_with('-') {
+        OWN_LOGIN_SHELL.store(true, std::sync::atomic::Ordering::Relaxed);
         executor.mark_login_shell();
     }
     // GNU shell.c shell_is_restricted/maybe_make_restricted
@@ -390,6 +474,11 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
             return rubash::run_debug_cli(rubash::DebugCliPreset {
                 program: Some(args[start].clone()),
                 args: args[start + 1..].to_vec(),
+                // This binary's leading scan has no rcfile
+                // channel on the --debug route (niubash#692 is
+                // the niubash host's dispatch, which passes its
+                // --rcfile here).
+                startup_file: None,
             });
         }
     }
@@ -478,6 +567,11 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
     }
     let mut init_file: Option<String> = long_state.init_file.take();
     let pretty_print = long_state.pretty_print;
+    // GNU shell.c:506-510: dump mode lists the input's locale strings
+    // instead of executing (read_but_dont_execute); the -D short flag
+    // below can still raise it during the short-option scan.
+    let mut dump_strings = long_state.dump_strings;
+    let dump_po = long_state.dump_po;
     // niubash #107 / GNU shell.c: `-c` does not bind the NEXT argv — commands
     // are read from the FIRST NON-OPTION argument. Options between `-c` and
     // the command string (`bash -c -l 'echo hi'`) keep being parsed as
@@ -530,6 +624,7 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                 }
             }
             (false, "-i") => {
+                OWN_INTERACTIVE_SHELL.store(true, std::sync::atomic::Ordering::Relaxed);
                 executor.set_env("__RUBASH_INTERACTIVE", "1");
                 index += 1;
             }
@@ -560,6 +655,7 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                 // GNU shell.c:497-503: --login/-l flips LOGIN_SHELL; a login
                 // shell accepts the logout builtin and runs ~/.bash_logout
                 // at exit.
+                OWN_LOGIN_SHELL.store(true, std::sync::atomic::Ordering::Relaxed);
                 executor.mark_login_shell();
                 index += 1;
             }
@@ -623,6 +719,13 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                 read_from_stdin = true;
                 index += 1;
             }
+            (false, "-D") | (false, "+D") => {
+                // GNU shell.c:960-964 (case 'D', either sign):
+                // dump_translatable_strings — the input's locale strings
+                // are listed instead of executed (shell.c:506-510).
+                dump_strings = true;
+                index += 1;
+            }
             (false, "--") | (false, "-") => {
                 // GNU shell.c:905-911: a lone - or -- ends option parsing;
                 // the next argv is the script file. rubash#1480: the marker
@@ -653,6 +756,15 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                     }
                 }
                 if pending_command {
+                    if dump_strings {
+                        // GNU shell.c:506-510 with a -c string: the
+                        // string is read but not executed; its locale
+                        // strings dump (locale.c:550), anchored as `-c`
+                        // in PO mode. Nothing runs — no startup files,
+                        // no side effects (rubash#1977).
+                        dump_strings_text(script, dump_po, "-c");
+                        return 0;
+                    }
                     executor.set_env("BASH_EXECUTION_STRING", script);
                     if let Some(command_name) = args.get(index + 1) {
                         executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
@@ -680,6 +792,14 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                     stdin_positionals.push(script.to_string());
                     index += 1;
                     continue;
+                }
+                if dump_strings {
+                    // GNU shell.c:506-510 + locale.c:550: dump the script
+                    // file's locale strings and exit; the script never
+                    // executes (rubash#1977 — the flag used to be accepted
+                    // and silently dropped, so the operand ran).
+                    executor.set_env("__RUBASH_SCRIPT_NAME", script);
+                    return run_dump_strings(executor, script, dump_po);
                 }
                 if pretty_print {
                     // GNU shell.c:830-831: --pretty-print replaces execution
@@ -719,6 +839,17 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
         // `bash -c` -> "bash: -c: option requires an argument", exit 2.
         eprintln!("bash: -c: option requires an argument");
         return 2;
+    }
+
+    if dump_strings {
+        // GNU shell.c:506-510: with no script operand the dump pass
+        // reads standard input (the -s route included). PO anchors cite
+        // the shell's own argv[0] (locale.c yy_input_name).
+        let mut contents = String::new();
+        let _ = io::stdin().read_to_string(&mut contents);
+        let source_name = argv0.unwrap_or("bash");
+        dump_strings_text(&contents, dump_po, source_name);
+        return 0;
     }
 
     if pretty_print {
@@ -859,6 +990,8 @@ fn apply_startup_job_control(executor: &mut Executor) {
 struct LongOptionState {
     init_file: Option<String>,
     pretty_print: bool,
+    dump_strings: bool,
+    dump_po: bool,
 }
 
 /// The long-option table of the contractual GNU 5.3.0 build
@@ -939,6 +1072,7 @@ fn parse_long_options(
                 return (index, Some(0));
             }
             "login" => {
+                OWN_LOGIN_SHELL.store(true, std::sync::atomic::Ordering::Relaxed);
                 executor.mark_login_shell();
             }
             "posix" => {
@@ -955,6 +1089,16 @@ fn parse_long_options(
             "pretty-print" => {
                 state.pretty_print = true;
             }
+            "dump-strings" => {
+                state.dump_strings = true;
+            }
+            "dump-po-strings" => {
+                // GNU shell.c:506-507: --dump-po-strings implies
+                // dump_translatable_strings, rendered in PO format
+                // (locale.c mk_msgstr).
+                state.dump_strings = true;
+                state.dump_po = true;
+            }
             "noediting" => {
                 // shell.c:269 --noediting sets no_line_editing=1: both
                 // editing modes report off (`[[ -o emacs ]]` /
@@ -962,8 +1106,6 @@ fn parse_long_options(
                 // reads plain lines.
                 executor.set_env("__RUBASH_NO_EDITING", "1");
             }
-            // "dump-po-strings" | "dump-strings": accepted, no Windows
-            // counterpart today.
             // GNU shell.c:255: --debug writes the `debugging` variable that
             // NO code in bash ever reads — a write-only fossil, so the flag
             // carries zero observable GNU behavior to conflict with. niu
@@ -1019,15 +1161,14 @@ bash [GNU long option] [option] script-file ...
 // (issue #585 host-half): the niu launcher answers `bash --help` through
 // the lib so both binaries print byte-identical GNU usage.
 
-/// pretty_print_loop (eval.c:215-253): parse the script and print each
-/// command canonically (print_cmd.c) followed by one newline, then exit
-/// successfully (shell.c:830-831).
-fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
+/// Read a script operand for the --pretty-print / --dump-strings
+/// drivers (the same open_shell_script exit matrix as the script-file
+/// driver: ENOENT -> 127 (EX_NOTFOUND), any other open error -> 126
+/// (EX_NOINPUT) — `bash -D missing` exits 127, not 1 (rubash#262)).
+/// On error the diagnostic is printed here and the exit code returned.
+fn read_script_operand(executor: &mut Executor, script: &str) -> Result<String, i32> {
     let path = executor.resolve_shell_path(script);
     let Ok(contents) = rubash::script_driver::read_script_bytes(&path) else {
-        // Same open_shell_script exit matrix as the script-file driver:
-        // ENOENT -> 127 (EX_NOTFOUND), any other open error -> 126
-        // (EX_NOINPUT) — `bash -D missing` exits 127, not 1 (rubash#262).
         let (message, code) = match std::fs::metadata(&path) {
             Ok(metadata) if metadata.is_dir() => ("Is a directory".to_string(), 126),
             Ok(_) => ("Permission denied".to_string(), 126),
@@ -1045,136 +1186,70 @@ fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
             .or_else(|| executor.get_env("BASH_ARGV0"))
             .unwrap_or("bash");
         eprintln!("{shell_name}: {script}: {message}");
-        return code;
+        return Err(code);
     };
-    run_pretty_print_text(executor, &contents)
+    Ok(contents)
+}
+
+/// pretty_print_loop (eval.c:215-253): parse the script and print each
+/// command canonically (print_cmd.c) followed by one newline, then exit
+/// successfully (shell.c:830-831).
+fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
+    match read_script_operand(executor, script) {
+        Ok(contents) => run_pretty_print_text(executor, &contents),
+        Err(code) => code,
+    }
 }
 
 /// The contents-based core of [`run_pretty_print`] (pretty_print_loop,
 /// eval.c:215-253), shared by the script-file form and the stdin form.
+/// The loop itself lives in the library
+/// (`rubash::parser::ast_print::pretty_print_input`) so hosts print
+/// identically; this wrapper owns the executor-side parse-error
+/// report and the exit code.
 fn run_pretty_print_text(executor: &mut Executor, contents: &str) -> i32 {
-    let contents = contents.to_string();
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-    let mut output = String::new();
-    // pretty_print_loop (eval.c:215-253) reads one command at a time: a
-    // blank input line ends the current command, an empty parse prints one
-    // newline (suppressed right after another newline, last_was_newline),
-    // and each parsed command prints as its canonical text plus one newline.
-    // Commands with blank lines inside are kept whole while their syntax is
-    // still open.
-    let mut pending = String::new();
-    let mut last_was_newline = false;
-    for line in contents.lines() {
-        if line.trim().is_empty()
-            && !rubash::lexer::has_unclosed_input_syntax_posix(&pending, posix)
-        {
-            match flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline, executor)
-            {
-                Ok(next) => last_was_newline = next,
-                // GNU eval.c:215-253 pretty_print_loop: read_command's
-                // parse error longjmps to top_level — yyerror's stderr
-                // diagnostic already fired, commands parsed before the
-                // error have printed, nothing after it does, and the loop
-                // returns EXECUTION_FAILURE.
-                Err(()) => {
-                    print!("{output}");
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                    return 1;
-                }
-            }
-            pending.clear();
-            if !last_was_newline {
-                output.push('\n');
-                last_was_newline = true;
-            }
-            continue;
-        }
-        if !pending.is_empty() {
-            pending.push('\n');
-        }
-        pending.push_str(line);
+    let outcome = rubash::parser::ast_print::pretty_print_input(contents, posix);
+    if let Some(command) = &outcome.parse_error {
+        // GNU eval.c:215-253 pretty_print_loop: read_command's parse
+        // error longjmps to top_level — yyerror's stderr diagnostic
+        // already fired, commands parsed before the error have printed,
+        // nothing after it does, and the loop returns
+        // EXECUTION_FAILURE.
+        executor.report_pretty_print_parse_error(command);
+        print!("{}", outcome.output);
+        let _ = io::stdout().flush();
+        return 1;
     }
-    match flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline, executor) {
-        Ok(next) => last_was_newline = next,
-        Err(()) => {
-            print!("{output}");
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            return 1;
-        }
-    }
-    // GNU's reader delivers an empty parse at EOF after the last command
-    // (eval.c:225-247), printing one final newline.
-    if !last_was_newline && !output.is_empty() {
-        output.push('\n');
-    }
-    print!("{output}");
+    print!("{}", outcome.output);
     0
 }
 
-/// Print one parsed command batch the way pretty_print_loop does. Returns
-/// the updated last_was_newline state, or Err when a command parsed to a
-/// parse-error node (GNU aborts pretty-printing there after the parser's
-/// stderr diagnostic).
-fn flush_pretty_print_chunk(
-    chunk: &str,
-    posix: bool,
-    output: &mut String,
-    last_was_newline: bool,
-    executor: &mut rubash::Executor,
-) -> Result<bool, ()> {
-    let tokens = tokenize_with_initial_posix(chunk, posix);
-    let ast = parse(&tokens);
-    let mut printed = false;
-    for command in &ast.commands {
-        // The parse-error nodes carry their diagnostics as internal
-        // `__RUBASH_PARSE_*` marker assignments; pretty-printing those as
-        // command text leaks the markers into stdout. GNU's reader
-        // longjmps before any print (eval.c:225 `code = setjmp_nosigs
-        // (top_level)`); report the diagnostic and stop the loop.
-        if command.assignments.iter().any(|(name, _)| {
-            name.starts_with("__RUBASH_PARSE_ERROR") || name == "__RUBASH_COMPOUND_SYNTAX_ERROR"
-        }) {
-            executor.report_pretty_print_parse_error(command);
-            return Err(());
+/// -D / --dump-strings over a script file (shell.c:506-510,
+/// locale.c:550): dump the file's locale strings and exit; the script
+/// never executes (rubash#1977).
+fn run_dump_strings(executor: &mut Executor, script: &str, po: bool) -> i32 {
+    match read_script_operand(executor, script) {
+        Ok(contents) => {
+            dump_strings_text(&contents, po, script);
+            0
         }
-        if is_pretty_print_empty(command) {
-            continue;
-        }
-        output.push_str(&rubash::parser::ast_print::pretty_print_command(command));
-        output.push('\n');
-        printed = true;
+        Err(code) => code,
     }
-    if printed {
-        return Ok(false);
-    }
-    Ok(last_was_newline)
 }
 
-/// Comment-only and whitespace-only parses must not print (GNU parses them
-/// as empty commands and suppresses the output).
-fn is_pretty_print_empty(command: &rubash::parser::CommandNode) -> bool {
-    command.words.is_empty()
-        && command.assignments.is_empty()
-        && command.compound_assignments.is_empty()
-        && command.array_element_assignments.is_empty()
-        && command.for_command.is_none()
-        && command.select_command.is_none()
-        && command.loop_command.is_none()
-        && command.if_command.is_none()
-        && command.case_command.is_none()
-        && command.function_command.is_none()
-        && command.arithmetic_command.is_none()
-        && command.conditional_command.is_none()
-        && command.coproc_command.is_none()
-        && command.brace_group.is_none()
-        && command.pipeline_command.is_none()
-        && command.and_or_list.is_none()
-        && command.subshell_command.is_none()
-        && command.background_command.is_none()
-        && command.inverted_command.is_none()
-        && command.time_command.is_none()
+/// The text-based core of the dump drivers, shared by the script-file,
+/// -c and stdin forms: collect the locale strings through the library
+/// entry (`rubash::locale::collect_locale_strings`) and print the GNU
+/// rendering.
+fn dump_strings_text(contents: &str, po: bool, source_name: &str) {
+    let mut strings = Vec::new();
+    rubash::locale::collect_locale_strings(contents, 1, &mut strings);
+    print!(
+        "{}",
+        rubash::locale::render_locale_string_dump(&strings, po, source_name)
+    );
+    let _ = io::stdout().flush();
 }
 
 fn run_command_string_with_init(
@@ -1204,7 +1279,21 @@ fn run_command_string_with_init(
     // command output (empirical: `bash -m -c 'echo $-'` -> two stderr lines
     // then `hBc`).
     apply_startup_job_control(executor);
-    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+    // rubash#2072: a respawned internal child is GNU's forked subshell
+    // (execute_cmd.c:1576 execute_in_subshell), not a new interactive
+    // process — shell.c init_interactive runs only for a process the
+    // user invoked with -i, and this child's argv carries no -i (the
+    // __RUBASH_INTERACTIVE marker merely rode the spawn env from the
+    // interactive parent). Re-running the interactive defaults here
+    // clobbered the verbatim-inherited option state (a parent's
+    // `set +H` came back on inside every background child).
+    // rubash#2129: the same reasoning covers a NON-respawned `-c`
+    // child that inherited the marker — init_interactive is an
+    // own-invocation step (shell.c:540-549), so the gate reads the
+    // process's own shape, not the env carrier.
+    if own_interactive_shell()
+        && !rubash::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed)
+    {
         apply_init_interactive_defaults(executor);
     }
     // shell.c:722 run_startup_files runs before the rcfile/-c string
@@ -1235,7 +1324,17 @@ fn run_command_string_with_init(
     // for every interactive shell — including one executing a -c string —
     // after the startup files. rubash#151: this path previously skipped
     // prepare_interactive_history entirely.
-    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+    // rubash#2072: same fork-child exclusion as the defaults above — a
+    // respawned child neither loads $HISTFILE nor saves to it at exit;
+    // GNU runs the history-file protocol only in the top-level
+    // interactive shell (bashhist.c load_history / exit_shell's
+    // maybe_save_shell_history on the reader shell).
+    // rubash#2129: gated on the OWN invocation shape for the same
+    // reason as the defaults above — an inherited marker alone does
+    // not make this `-c` process interactive.
+    if own_interactive_shell()
+        && !rubash::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed)
+    {
         prepare_interactive_history(executor);
     }
     let line_offset = executor
@@ -1387,6 +1486,16 @@ fn run_script_file_with_init(
     if executor.get_env("__RUBASH_DEBUGGER_MODE").as_deref() == Some("1") {
         start_debugger(executor);
     }
+    // shell.c:546-547: forced_interactive (`-i script`) reaches
+    // init_interactive too, and shell.c:580 shell_initialize then applies
+    // the history-variable defaults (variables.c:654-661) — both BEFORE
+    // the startup files (shell.c:722). Without this arm the engine never
+    // defaults the history option or HISTFILE on the script-file path,
+    // and after the niubash#661 removal of the post-startup re-default
+    // the session would neither load nor save at all.
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+        apply_interactive_history_defaults(executor);
+    }
     let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
     if let Some(status) = run_startup_files(executor, init_file) {
         return finish_shell(executor, status, interactive);
@@ -1451,7 +1560,15 @@ fn run_script_file_with_init(
 /// NOT call this. `--noediting` (no_line_editing=1) and an explicit
 /// `-o vi` both keep emacs off.
 fn apply_init_interactive_defaults(executor: &mut Executor) {
-    executor.set_shell_option("history", true);
+    // GNU shell.c:1835-1837 init_interactive: `if (enable_history_list ==
+    // -1) enable_history_list = 1;` — the interactive default arms history
+    // only when nothing has set the option yet; a preset (an embedding
+    // host, a host contract carrier) stands. Forcing the option ON here is
+    // what a startup file's `set +o history` must be able to survive: the
+    // defaults run BEFORE the startup files, whose opt-out is the user's
+    // word (niubash#660 — the unconditional set made an opted-out shell
+    // record and save anyway).
+    apply_interactive_history_defaults(executor);
     executor.set_shell_option("histexpand", true);
     if executor.get_env("__RUBASH_NO_EDITING").as_deref() == Some("1") {
         return;
@@ -1460,6 +1577,41 @@ fn apply_init_interactive_defaults(executor: &mut Executor) {
         return;
     }
     executor.set_shell_option("emacs", true);
+}
+
+/// The interactive defaults of the history-WRITE family, applied at
+/// startup-option time — before the startup files can override either.
+///
+/// GNU shell.c:1835-1837 init_interactive: `if (enable_history_list == -1)
+/// enable_history_list = 1;` — the option default arms history only when
+/// nothing has set it yet. GNU variables.c:654-661 initialize_shell_variables
+/// (shell.c:580 shell_initialize, right after init_interactive at 547 and
+/// still BEFORE run_startup_files at 722): `if (remember_on_history) {
+/// name = bash_default_histfile(); set_if_not("HISTFILE", name); }` —
+/// bashhist.c:420 bash_default_histfile is the user's ~/.bash_history.
+/// Both are set_if_not-shaped: a preset or an inherited value stands, and
+/// a startup file may freely reassign or unset HISTFILE afterwards — the
+/// post-startup load site (shell.c:806-811) reads whatever HISTFILE then
+/// holds and never re-defaults it (niubash#661: the engine re-defaulted
+/// HISTFILE AFTER the startup files, resurrecting the default after an
+/// rcfile `unset HISTFILE` so the shell loaded and saved the default file
+/// anyway).
+fn apply_interactive_history_defaults(executor: &mut Executor) {
+    if executor.get_env("__RUBASH_SETOPT_history").is_none() {
+        executor.set_shell_option("history", true);
+    }
+    // The remember_on_history gate: the option default above just armed
+    // the carrier when absent, so the carrier now reads "1"/"0".
+    if executor.get_env("__RUBASH_SETOPT_history").as_deref() != Some("1") {
+        return;
+    }
+    if executor.get_env("HISTFILE").is_none() {
+        if let Some(home) = executor.get_env("HOME") {
+            if !home.is_empty() {
+                executor.set_env("HISTFILE", &format!("{home}/.bash_history"));
+            }
+        }
+    }
 }
 
 fn apply_interactive_alias_default(executor: &mut Executor, explicit: Option<bool>) {
@@ -1481,11 +1633,15 @@ fn run_no_script_with_init(
     // the same interactivity `-i` forces. stderr not a terminal (e.g.
     // `rubash 2>log` on a console) keeps the shell NON-interactive — GNU
     // then reads the tty stdin as a plain script with no prompts.
-    if executor.get_env("__RUBASH_INTERACTIVE").is_none()
-        && io::stdin().is_terminal()
-        && io::stderr().is_terminal()
-    {
-        executor.set_env("__RUBASH_INTERACTIVE", "1");
+    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        // rubash#2129: the tty pair is this process's OWN interactive
+        // shape (shell.c:540-549) — record it even when the env carrier
+        // already rode in, so a genuine nested interactive shell still
+        // sources its startup files.
+        OWN_INTERACTIVE_SHELL.store(true, std::sync::atomic::Ordering::Relaxed);
+        if executor.get_env("__RUBASH_INTERACTIVE").is_none() {
+            executor.set_env("__RUBASH_INTERACTIVE", "1");
+        }
     }
     apply_interactive_alias_default(executor, alias_expansion_override);
     executor.inherit_process_stdin();
@@ -1546,11 +1702,15 @@ fn run_stdin_script_with_init(
     // `(arg_index == argc) || read_from_stdin`; `-s` sets read_from_stdin,
     // so tty stdin + tty stderr make `bash -s` interactive too. Without
     // `-i` and with a piped stdin the shell stays non-interactive.
-    if executor.get_env("__RUBASH_INTERACTIVE").is_none()
-        && io::stdin().is_terminal()
-        && io::stderr().is_terminal()
-    {
-        executor.set_env("__RUBASH_INTERACTIVE", "1");
+    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        // rubash#2129: the tty pair is this process's OWN interactive
+        // shape (shell.c:540-549) — record it even when the env carrier
+        // already rode in, so a genuine nested interactive shell still
+        // sources its startup files.
+        OWN_INTERACTIVE_SHELL.store(true, std::sync::atomic::Ordering::Relaxed);
+        if executor.get_env("__RUBASH_INTERACTIVE").is_none() {
+            executor.set_env("__RUBASH_INTERACTIVE", "1");
+        }
     }
     apply_interactive_alias_default(executor, alias_expansion_override);
     executor.inherit_process_stdin();
@@ -1728,19 +1888,56 @@ fn run_init_file(executor: &mut Executor, init_file: &str) -> i32 {
 /// was cfg-gated out on Windows). `--noprofile` / `--norc` inhibit their
 /// respective branches.
 ///
+/// rubash#2129: WHICH branch runs is decided by this process's own
+/// invocation shape (the OWN_* statics: own argv `-i`/`-l`, the argv[0]
+/// `-` mark, the no-operand tty pair) — never by the inherited
+/// `__RUBASH_INTERACTIVE` / `__RUBASH_LOGIN_SHELL` env carriers — and a
+/// respawned internal child (RESPAWNED_CHILD) runs no branch at all,
+/// $BASH_ENV included.
+///
 /// Returns Some(exit_status) when a startup file executed `exit`
 /// (rubash#297: nothing after a startup-file exit runs) — the caller must
 /// return finish_shell immediately.
 fn run_startup_files(executor: &mut Executor, rc_override: Option<&str>) -> Option<i32> {
-    // Run once per process: the four *_with_init drivers are alternatives,
-    // but a respawned child re-entering a driver must not re-source.
-    if executor.get_env("__RUBASH_STARTUP_FILES_DONE").is_some() {
+    // rubash#2129: a respawned internal child (process substitution,
+    // coproc, async wrapper — every engine spawn site that re-execs
+    // this shell stamps `__RUBASH_SHELL_PID` or `__RUBASH_COPROC_CHILD`,
+    // which Executor::new folds into RESPAWNED_CHILD) is GNU's forked
+    // subshell (execute_cmd.c:1576 execute_in_subshell): it inherits
+    // the parent's POST-startup state through the respawn transport
+    // and never runs the startup chain — not the profile/rc branches
+    // and not $BASH_ENV. The #2072 fix gated the interactive defaults
+    // and the history faces on this same door; the startup files were
+    // the ungated face.
+    if rubash::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
     }
-    executor.set_env("__RUBASH_STARTUP_FILES_DONE", "1");
-    diagnose_bash_env_directory(executor);
-    let login = executor.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
-    let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
+    // Run once per process: the four *_with_init drivers are
+    // alternatives, but a driver re-entry must not re-source. The
+    // guard is the process-local STARTUP_FILES_DONE static
+    // (rubash#2133), not an env carrier — as a carrier it was exported
+    // to children and suppressed a genuine nested shell's own startup
+    // chain (see run_main's consume-on-read strip).
+    if STARTUP_FILES_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    // rubash#2129: the branch shape is this process's OWN invocation
+    // shape (shell.c:540-549, shell.c:497-503), never the inherited
+    // env carriers — see the OWN_* statics. A `-c` child of an
+    // interactive session therefore takes the plain non-interactive
+    // branch (no profile, no rc; $BASH_ENV only), exactly like GNU.
+    let login = own_login_shell();
+    let interactive = own_interactive_shell();
+    if !login {
+        // The exit door reads the same carrier (the logout-file face
+        // in finish_shell): a login mark this process did not earn
+        // from its own argv[0]/argv must not make it run
+        // ~/.bash_logout either — and dropping the carrier here also
+        // stops it riding into this process's children. A genuine
+        // login shell (own mark) keeps the carrier untouched.
+        executor.remove_env("__RUBASH_LOGIN_SHELL");
+    }
+    diagnose_bash_env_directory(executor, interactive);
     let no_profile = executor.get_env("__RUBASH_NO_PROFILE").as_deref() == Some("1");
     let no_rc = executor.get_env("__RUBASH_NO_RC").as_deref() == Some("1");
     let home = executor.get_env("HOME").unwrap_or_default();
@@ -1825,9 +2022,11 @@ fn login_profile_branch(
 /// on stderr, then continues (execution is unaffected). The standalone
 /// rubash binary silently ignored the failure (rubash#1146). Report
 /// the directory case here, once per process (guarded by the caller's
-/// startup-files-done marker).
-fn diagnose_bash_env_directory(executor: &mut Executor) {
-    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+/// run-once startup guard).
+fn diagnose_bash_env_directory(executor: &mut Executor, interactive: bool) {
+    // rubash#2129: `interactive` is the caller's OWN invocation shape,
+    // not the inherited env carrier (see run_startup_files).
+    if interactive {
         return;
     }
     let Some(bash_env) = executor

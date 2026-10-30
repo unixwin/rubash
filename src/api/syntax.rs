@@ -61,7 +61,7 @@ use crate::{Ast, CommandNode};
 /// the definition identity the engine itself records for the
 /// function-entry seam).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FunctionSite {
+pub struct FunctionSite {
     pub name: String,
     /// Line of the definition command itself (`name() ...`).
     pub definition_line: u32,
@@ -73,7 +73,7 @@ pub(crate) struct FunctionSite {
 /// file (debugger design section 5.1). Resolution maps these to
 /// `verified: false` plus the design's two reason strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LineClass {
+pub enum LineClass {
     /// A breakpoint here can stop the session.
     Stoppable,
     /// A command starts here but the seam never fires at it.
@@ -93,7 +93,7 @@ pub(crate) enum LineClass {
 /// the file's reader reached the end — only then is "no command
 /// on this line" a sound verdict for a line no unit covered.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SyntaxView {
+pub struct SyntaxView {
     /// The file identity, exactly as the engine's source stack
     /// reports it.
     pub file: String,
@@ -114,7 +114,7 @@ pub(crate) struct SyntaxView {
 
 impl SyntaxView {
     /// Build the view of one parsed reader unit of `file`.
-    pub(crate) fn from_ast(file: &str, ast: &Ast) -> SyntaxView {
+    pub fn from_ast(file: &str, ast: &Ast) -> SyntaxView {
         let mut view = SyntaxView {
             file: file.to_string(),
             ..SyntaxView::default()
@@ -135,7 +135,7 @@ impl SyntaxView {
     /// Fold another unit's view of the same file into this one:
     /// line sets union, function sites append when new, spans
     /// accumulate, completeness is sticky.
-    pub(crate) fn merge(&mut self, other: SyntaxView) {
+    pub fn merge(&mut self, other: SyntaxView) {
         debug_assert_eq!(self.file, other.file);
         self.command_lines.extend(other.command_lines);
         self.stoppable_lines.extend(other.stoppable_lines);
@@ -154,19 +154,19 @@ impl SyntaxView {
 
     /// Does this view's knowledge cover `line` — does it fall
     /// inside some parsed unit's span?
-    pub(crate) fn covers_line(&self, line: u32) -> bool {
+    pub fn covers_line(&self, line: u32) -> bool {
         self.spans
             .iter()
             .any(|(first, last)| *first <= line && line <= *last)
     }
 
     /// Record that the file's reader reached its end.
-    pub(crate) fn mark_complete(&mut self) {
+    pub fn mark_complete(&mut self) {
         self.complete = true;
     }
 
     /// The dead-line judgment for one line of this file.
-    pub(crate) fn classify_line(&self, line: u32) -> LineClass {
+    pub fn classify_line(&self, line: u32) -> LineClass {
         if self.stoppable_lines.contains(&line) {
             LineClass::Stoppable
         } else if self.command_lines.contains(&line) {
@@ -178,7 +178,7 @@ impl SyntaxView {
 
     /// The function site proving `name` is defined in this file,
     /// when the walk has seen its definition.
-    pub(crate) fn function_site(&self, name: &str) -> Option<&FunctionSite> {
+    pub fn function_site(&self, name: &str) -> Option<&FunctionSite> {
         self.functions.iter().find(|site| site.name == name)
     }
 }
@@ -213,12 +213,10 @@ impl Walker<'_> {
         // detached (section 6.3), whatever shape it has.
         let detached = detached || node.background;
         // Substitutions inside this node's own words execute as
-        // part of the node, in the node's context: command
-        // substitutions stay linked to the session; process
+        // part of the node, in the node's context: process
         // substitutions run in separate processes (detached).
-        for substitution in &node.command_substitutions {
-            self.walk_list(&substitution.commands, detached);
-        }
+        // (Command substitutions are not stored on the node — the
+        // wt44/parse4 record vectors were retired; see nodes.rs.)
         for substitution in &node.process_substitutions {
             self.walk_list(&substitution.commands, true);
         }

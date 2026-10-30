@@ -86,7 +86,14 @@ fn run_golden_fixture(name: &str, timeout_secs: u64, corpus: &[&str]) {
         Duration::from_secs(timeout_secs),
     );
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(!out.timed_out, "{name}: TIMED OUT after {timeout_secs}s");
+    assert!(
+        !out.timed_out,
+        "{name}: TIMED OUT after {timeout_secs}s (rubash pid {}); \
+         partial stdout:\n{}\npartial stderr:\n{}",
+        out.pid,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     let expected_out = std::fs::read(root.join(GOLDEN_DIR).join(format!("{name}.gnu.out")))
         .unwrap_or_else(|e| panic!("{name}: missing golden stdout: {e}"));
     let expected_err = std::fs::read(root.join(GOLDEN_DIR).join(format!("{name}.gnu.err")))
@@ -153,7 +160,154 @@ golden_fixture!(golden_issue1350_pushd_notdir => "issue1350-pushd-notdir", timeo
 golden_fixture!(golden_issue1351_trap_syntax => "issue1351-trap-syntax", timeout 60, corpus []);
 golden_fixture!(golden_issue1352_nameref_dynamic => "issue1352-nameref-dynamic", timeout 60, corpus []);
 golden_fixture!(golden_nounset_exit_matrix => "nounset-exit-matrix", timeout 60, corpus []);
-golden_fixture!(golden_nvm_load => "nvm-load", timeout 180, corpus ["nvm/nvm.sh"]);
+// rubash#1940 dual gate: the nvm-load fixture keeps its byte contract
+// (run_golden_fixture below) AND gains a same-machine timing budget.
+// Before #1940 this fixture's 180 s timeout was the only bound, so a
+// ~100x load-time regression (4.2 s vs GNU 0.04 s on the same machine)
+// passed silently. The timing half times `source nvm.sh` under this
+// build's rubash and under a GNU bash found on the host, and asserts a
+// RATIO bound: machine speed cancels, only the engine gap counts.
+// The oracle is validated (it must actually source the corpus with
+// exit 0); lanes without a real GNU bash (the Windows lane's PATH
+// offers only the WSL launcher stub) skip the timing half instead of
+// failing on a stub. RUBASH_GNU_BASH pins an explicit oracle path.
+#[test]
+fn golden_nvm_load() {
+    run_golden_fixture("nvm-load", 180, &["nvm/nvm.sh"]);
+    nvm_load_timing_gate();
+}
+
+/// One timed run of an arbitrary `-c` script in the gate scratch dir;
+/// None when the run fails, times out, or the program cannot be
+/// spawned.
+fn nvm_load_timed_run_script(
+    program: &Path,
+    dir: &Path,
+    script: &str,
+    limit: Duration,
+) -> Option<Duration> {
+    let mut cmd = Command::new(program);
+    cmd.args(["-c", script])
+        .current_dir(dir)
+        .env_clear()
+        .env("PATH", minimal_path())
+        .env("HOME", dir)
+        .env("NVM_DIR", dir.join("nvmdir"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let started = Instant::now();
+    let mut child = cmd.spawn().ok()?;
+    let out = wait_bounded(&mut child, limit);
+    if out.timed_out || out.code != Some(0) {
+        return None;
+    }
+    Some(started.elapsed())
+}
+
+/// Best-of-N estimator: on a shared CI box the minimum is the run
+/// least contaminated by foreign load, for both shells alike; a
+/// median would import the box's load ratio into the gate and flake
+/// (observed locally: wall medians 1.89 s vs 0.04 s under load, a
+/// ~47x ratio, vs ~26x on best-of-N for the same tree).
+fn best_duration(runs: Vec<Duration>) -> Duration {
+    runs.into_iter().min().expect("at least one run")
+}
+
+fn gnu_bash_oracle() -> Option<PathBuf> {
+    if let Ok(pinned) = std::env::var("RUBASH_GNU_BASH") {
+        let candidate = PathBuf::from(pinned);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let own = PathBuf::from(env!("CARGO_BIN_EXE_rubash"));
+    let path = std::env::var("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(if cfg!(windows) { "bash.exe" } else { "bash" });
+        if candidate.is_file() && candidate != own {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn nvm_load_timing_gate() {
+    let _guard = heavy_lock();
+    let Some(oracle) = gnu_bash_oracle() else {
+        eprintln!("golden_nvm_load timing gate: no GNU bash oracle found; skipped");
+        return;
+    };
+    let root = manifest_dir();
+    let dir = std::env::temp_dir().join(format!("rubash-nvm-timing-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("nvmdir")).expect("create timing scratch");
+    std::fs::copy(root.join(CORPUS_DIR).join("nvm/nvm.sh"), dir.join("nvm.sh"))
+        .expect("copy nvm corpus");
+
+    nvm_load_timing_gate_script(&oracle, &dir, ". ./nvm.sh", "plain");
+    // rubash#1961 alias-arm variant: the SAME load with one alias
+    // preset and expand_aliases on. The alias never occurs in nvm.sh,
+    // so the sourced bytes are identical — only the reader arm differs
+    // (pre-#1961 that arm re-derived group completeness per candidate
+    // line and hung past 120 s where the plain arm took ~1 s). The
+    // trailing `ll` command is the non-vacuity tripwire: the run only
+    // exits 0 when alias expansion was actually live for the driver,
+    // so the timing below cannot pass by silently taking the plain
+    // arm. Newlines separate the driver lines because an alias defined
+    // on the same line as its use is not yet in effect (parse.y reads
+    // one command at a time).
+    nvm_load_timing_gate_script(
+        &oracle,
+        &dir,
+        "alias ll='echo alias-live'\nshopt -s expand_aliases\n. ./nvm.sh\nll >/dev/null",
+        "alias-arm",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn nvm_load_timing_gate_script(oracle: &Path, dir: &Path, script: &str, label: &str) {
+    // Ratio asserted below, calibrated on the post-#1940-fix tree
+    // (debug build, loaded 2-core dev box): rubash best-of-5 ~0.9 s
+    // vs GNU best-of-5 ~0.035 s, a ~26x gap. The bound keeps ~2x
+    // headroom over that while still failing the pre-fix tree
+    // (~114x). The absolute slack absorbs oracle startup noise on
+    // fast machines where the GNU run is only a few tens of
+    // milliseconds.
+    const MAX_RATIO: f64 = 50.0;
+    const SLACK: Duration = Duration::from_millis(250);
+    const REPS: usize = 5;
+
+    let rubash = PathBuf::from(env!("CARGO_BIN_EXE_rubash"));
+    let mut oracle_runs = Vec::new();
+    for _ in 0..REPS {
+        match nvm_load_timed_run_script(oracle, dir, script, Duration::from_secs(60)) {
+            Some(d) => oracle_runs.push(d),
+            None => {
+                eprintln!(
+                    "golden_nvm_load timing gate ({label}): oracle {} failed the run; skipped",
+                    oracle.display()
+                );
+                return;
+            }
+        }
+    }
+    let mut rubash_runs = Vec::new();
+    for _ in 0..REPS {
+        let d = nvm_load_timed_run_script(&rubash, dir, script, Duration::from_secs(120))
+            .expect("rubash must source nvm.sh inside the timing gate");
+        rubash_runs.push(d);
+    }
+    let oracle_best = best_duration(oracle_runs);
+    let rubash_best = best_duration(rubash_runs);
+    let budget = oracle_best.mul_f64(MAX_RATIO) + SLACK;
+    assert!(
+        rubash_best <= budget,
+        "nvm.sh load timing gate ({label}): rubash best-of-{REPS} {rubash_best:.2?} exceeds \
+         {MAX_RATIO}x GNU best-of-{REPS} {oracle_best:.2?} + {SLACK:.2?} slack \
+         (budget {budget:.2?}); rubash#1940/#1961 regression class"
+    );
+}
 golden_fixture!(golden_redir_operand_battery => "redir-operand-battery", timeout 60, corpus []);
 golden_fixture!(golden_rustup_check_help => "rustup-check-help", timeout 60, corpus []);
 golden_fixture!(golden_trap_signal_matrix => "trap-signal-matrix", timeout 180, corpus []);
@@ -254,52 +408,104 @@ struct RunOutcome {
     stderr: Vec<u8>,
     code: Option<i32>,
     timed_out: bool,
+    /// Pid of the direct child (rubash#2056): carried so a timeout
+    /// failure can name the wedged process, not just the bound.
+    pid: u32,
 }
 
-fn wait_bounded(child: &mut Child, limit: Duration) -> RunOutcome {
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    let _ = pipe.read_to_end(&mut stdout);
+/// One child pipe being drained on its own thread (rubash#2056): the
+/// buffer accumulates for the whole wait, and `done` flips once the
+/// pipe reaches EOF (every write end closed) or errors. A child
+/// spawned without a pipe (Stdio::null) is born done and empty.
+struct PipeDrain {
+    buffer: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn start_drain<R: Read + Send + 'static>(pipe: Option<R>) -> PipeDrain {
+    let drain = PipeDrain {
+        buffer: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(pipe.is_none())),
+    };
+    if let Some(mut pipe) = pipe {
+        let buffer = drain.buffer.clone();
+        let done = drain.done.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buffer.lock().unwrap().extend_from_slice(&chunk[..n]),
                 }
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_end(&mut stderr);
-                }
-                return RunOutcome {
-                    stdout,
-                    stderr,
-                    code: status.code(),
-                    timed_out: false,
-                };
             }
-            Ok(None) => {
-                if start.elapsed() > limit {
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    drain
+}
+
+/// Bounded wait for a spawned child, hardened by rubash#2056.
+///
+/// The pre-hardening shape waited for exit first and drained the
+/// pipes afterwards with an unbounded `read_to_end`: if a descendant
+/// that outlived the child kept a write end open (a background fifo
+/// writer is exactly that), EOF never arrived, the nominal bound
+/// never fired, and one wedged shape ate a whole 25-minute CI job
+/// with zero diagnostics (the #1903 hang; the issue1903 module grew
+/// a private drained runner to work around it, now deleted in favor
+/// of this helper). The same shape also deadlocked any child that
+/// filled a pipe buffer before exiting, and its timeout path
+/// returned empty captures.
+///
+/// Now both pipes drain on threads from entry, the wait polls
+/// `try_wait`, and ONE deadline covers both the child's exit and
+/// the pipes reaching EOF. A timeout kills the child and returns
+/// the partial captures with the pid, so the failure the caller
+/// raises carries its evidence. The timeout stays a returned
+/// outcome rather than a panic here: at least one caller
+/// (nvm_load_timed_run_script) consumes `timed_out` as a value —
+/// the panic-with-diagnostics half of the shape lives at the
+/// assertion layer, as it did in the issue1903 runner trio.
+fn wait_bounded(child: &mut Child, limit: Duration) -> RunOutcome {
+    let pid = child.id();
+    let stdout = start_drain(child.stdout.take());
+    let stderr = start_drain(child.stderr.take());
+    let snapshot = |timed_out: bool, code: Option<i32>| RunOutcome {
+        stdout: stdout.buffer.lock().unwrap().clone(),
+        stderr: stderr.buffer.lock().unwrap().clone(),
+        code,
+        timed_out,
+        pid,
+    };
+    let start = Instant::now();
+    let mut exit_code: Option<Option<i32>> = None;
+    loop {
+        if exit_code.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => exit_code = Some(status.code()),
+                Ok(None) => {}
+                Err(_) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return RunOutcome {
-                        stdout: Vec::new(),
-                        stderr: Vec::new(),
-                        code: None,
-                        timed_out: true,
-                    };
+                    return snapshot(false, None);
                 }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return RunOutcome {
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                    code: None,
-                    timed_out: false,
-                };
             }
         }
+        if let Some(code) = exit_code {
+            let drained = stdout.done.load(std::sync::atomic::Ordering::SeqCst)
+                && stderr.done.load(std::sync::atomic::Ordering::SeqCst);
+            if drained {
+                return snapshot(false, code);
+            }
+        }
+        if start.elapsed() > limit {
+            if exit_code.is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return snapshot(true, exit_code.flatten());
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -417,6 +623,127 @@ fn run_rubash_piped_stdin_in(dir: &Path, args: &[&str], limit: Duration) -> RunO
     let outcome = wait_bounded(&mut child, limit);
     drop(child.stdin.take());
     outcome
+}
+
+/// Fake child for the issue2056 wait_bounded pins: the rubash binary
+/// itself running a `-c` script, pipes on both streams. What the
+/// script does (hang, orphan its pipe, flood its pipe) is the pin's
+/// variable; the spawn shape is constant.
+fn spawn_issue2056_fake_child(script: &str) -> Child {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    cmd.args(["-c", script])
+        .env_clear()
+        .env("PATH", minimal_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.spawn().expect("spawn issue2056 fake child")
+}
+
+/// rubash#2056: a child that prints markers and then never exits
+/// (external sleep as the foreground command) must be killed at the
+/// bound, and the timeout outcome must carry whatever it printed
+/// before wedging — the pre-hardening helper returned EMPTY captures
+/// on its timeout path, so a hang surfaced with zero evidence.
+#[test]
+fn issue2056_wait_bounded_kills_never_exiting_child_with_partial_output() {
+    let mut child = spawn_issue2056_fake_child(
+        "echo issue2056-out-marker\necho issue2056-err-marker >&2\nsleep 120\n",
+    );
+    let pid = child.id();
+    let started = Instant::now();
+    let out = wait_bounded(&mut child, Duration::from_secs(3));
+    let elapsed = started.elapsed();
+    assert!(
+        out.timed_out,
+        "never-exiting child must report timed_out; got code {:?}",
+        out.code
+    );
+    assert_eq!(out.pid, pid, "outcome must carry the child's pid");
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the 3s bound did not fire promptly: {elapsed:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("issue2056-out-marker"),
+        "partial stdout lost on timeout: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("issue2056-err-marker"),
+        "partial stderr lost on timeout: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        matches!(child.try_wait(), Ok(Some(_))),
+        "timed-out child was not killed and reaped"
+    );
+}
+
+/// rubash#2056, the #1903 shape: the child EXITS promptly with code 0
+/// but leaves a background orphan holding the stdout write end, so
+/// pipe EOF never arrives. The pre-hardening helper read the pipes
+/// only after exit with an unbounded read_to_end — this shape hung
+/// it forever (it ate a full 25-minute goldens job). The hardened
+/// helper must count the still-open pipe against the same bound and
+/// return the partial capture with the child's real exit code.
+#[test]
+fn issue2056_wait_bounded_bounds_post_exit_pipe_drain() {
+    let mut child =
+        spawn_issue2056_fake_child("echo issue2056-orphan-marker\nsleep 120 &\nexit 0\n");
+    let started = Instant::now();
+    let out = wait_bounded(&mut child, Duration::from_secs(3));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the 3s bound did not fire promptly: {elapsed:?}"
+    );
+    assert!(
+        out.timed_out,
+        "pipe held open by an orphan past the bound must report timed_out; got code {:?}",
+        out.code
+    );
+    assert_eq!(out.code, Some(0), "the child itself exited 0");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("issue2056-orphan-marker"),
+        "partial stdout lost: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// rubash#2056: a child that floods stdout past the pipe buffer
+/// (~176 KB here) can only finish if the pipes drain WHILE it runs.
+/// The pre-hardening helper never read before exit, so this shape
+/// deadlocked into a timeout with empty captures; the hardened
+/// helper must deliver the full payload, byte for byte.
+#[test]
+fn issue2056_wait_bounded_drains_pipes_while_waiting() {
+    let mut child = spawn_issue2056_fake_child(
+        "i=0\nwhile (( i < 4000 )); do echo \"issue2056-line-$i-abcdefghijklmnopqrstuvwxyz\"; (( i += 1 )); done\n",
+    );
+    let out = wait_bounded(&mut child, Duration::from_secs(30));
+    assert!(
+        !out.timed_out,
+        "pipe-flooding child timed out — pipes were not drained while waiting"
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let expected: String = (0..4000)
+        .map(|i| format!("issue2056-line-{i}-abcdefghijklmnopqrstuvwxyz\n"))
+        .collect();
+    assert_eq!(
+        out.stdout.len(),
+        expected.len(),
+        "drained payload is truncated"
+    );
+    assert!(
+        out.stdout == expected.as_bytes(),
+        "drained payload differs from what the child wrote"
+    );
 }
 
 fn assert_bytes_eq(actual: &[u8], expected: &[u8], label: &str, name: &str) {
@@ -773,8 +1100,12 @@ fn run_suite_snapshot(suite: &str) {
     });
     assert!(
         !out.timed_out,
-        "{suite}: suite run timed out ({}s)",
-        started.elapsed().as_secs()
+        "{suite}: suite run timed out ({}s, rubash pid {}); \
+         partial stdout:\n{}\npartial stderr:\n{}",
+        started.elapsed().as_secs(),
+        out.pid,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
     assert_bytes_eq(&normalized, &expected, "snapshot stdout", suite);
 }
@@ -823,12 +1154,18 @@ fn perf_canary_nvm_loader_parses_bounded() {
     std::fs::copy(root.join(CORPUS_DIR).join("nvm/nvm.sh"), dir.join("nvm.sh"))
         .expect("copy nvm corpus");
     let started = Instant::now();
-    let out = run_rubash_in(&dir, &["-n", "nvm.sh"], Duration::from_secs(240));
+    let out = run_rubash_in(&dir, &["-n", "nvm.sh"], Duration::from_secs(60));
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(out.code, Some(0), "bash -n nvm.sh must parse clean");
+    // rubash#1940: real budget, not just the blowup-class tripwire.
+    // Post-fix debug measurement on a loaded 2-core dev box: ~0.6 s.
+    // 10 s keeps >10x headroom for slow CI runners while failing the
+    // feeder re-lex regression class (defs-wrap shapes measure >= 10 s
+    // at this corpus scale when the join-resume machinery regresses)
+    // and the historical >300 s O(N^2) class alike.
     assert!(
-        started.elapsed() < Duration::from_secs(180),
-        "nvm.sh -n took {:.1}s (bound 180s; O(N^2) lexer regression class)",
+        started.elapsed() < Duration::from_secs(10),
+        "nvm.sh -n took {:.1}s (bound 10s; feeder re-lex / O(N^2) lexer regression class)",
         started.elapsed().as_secs_f32()
     );
 }
@@ -2811,11 +3148,15 @@ fn shift_bad_operand_status_matches_gnu() {
 /// script probing `command -v setopt` to detect zsh must get the GNU
 /// answer. After the removal `setopt x` is command-not-found (127),
 /// `builtin setopt x` is not-a-shell-builtin (1), and `enable -a` lists
-/// exactly GNU's 61 builtin names.
+/// no zsh-ism. The list itself is the unified registry projection
+/// (#2036 S2): GNU's 61 names plus rubash's one extension builtin
+/// `env` = 62. (The count was 61 while enable's hand-maintained list
+/// lacked env — the KD-1 drift; GNU's own 61 excludes env because GNU
+/// has no env builtin.)
 /// GNU 5.3.0 differential (WSL stdin probe 2026-10-18):
 ///   command -v setopt    -> rc 1, no output   (was "setopt", rc 0)
 ///   command -v unsetopt  -> rc 1, no output   (was "unsetopt", rc 0)
-///   enable -a | wc -l    -> 61                (was 64 on Windows)
+///   enable -a | wc -l    -> 61 on GNU (no env builtin there)
 #[test]
 fn zsh_option_builtins_are_gone() {
     let dir = case_scratch("759.setopt");
@@ -2832,11 +3173,14 @@ fn zsh_option_builtins_are_gone() {
     let mut lines = stdout.lines();
     assert_eq!(lines.next(), Some("v:1"), "command -v setopt misses");
     assert_eq!(lines.next(), Some("v:1"), "command -v unsetopt misses");
-    let listed = lines.filter(|line| !line.trim().is_empty()).count();
+    let rest = stdout.lines().skip(2).collect::<Vec<_>>().join("\n");
+    let listed = rest.lines().filter(|line| !line.trim().is_empty()).count();
     assert_eq!(
-        listed, 61,
-        "enable -a must list exactly GNU's 61 builtin names: {stdout}"
+        listed, 62,
+        "enable -a must list the 62-name registry projection (GNU 61 + env): {stdout}"
     );
+    assert!(rest.contains("enable env\n"), "env listed: {stdout}");
+    assert!(!rest.contains("setopt"), "no zsh-isms listed: {stdout}");
 
     let out = run_rubash_in(
         &dir,
@@ -3300,9 +3644,6 @@ mod k1_batch2 {
         );
     }
 
-
-
-
     /// rubash#1213: `return` with too many arguments is the no_args
     /// DISCARD class — message, status 2, rest of the line abandoned,
     /// in functions, at top level, and for the numeric path's caller.
@@ -3425,10 +3766,7 @@ mod k1_batch2 {
     /// it dispatches to an external `time` (absent here: 127).
     #[test]
     fn issue_1218_posix_time_dash_word() {
-        let (stdout, stderr, code) = run(
-            "k1-1218",
-            "set -o posix\ntime -p true\necho \"rc=$?\"\n",
-        );
+        let (stdout, stderr, code) = run("k1-1218", "set -o posix\ntime -p true\necho \"rc=$?\"\n");
         assert_eq!(code, Some(0), "stderr:\n{stderr}");
         assert_eq!(stdout, "rc=127\n");
         assert!(
@@ -3652,12 +3990,17 @@ mod win_face_fd_history {
     ///
     /// The assertion is the #1888 projection of the output — the two
     /// history lines, in order, and no "after history: 1" anywhere —
-    /// not the full byte stream: the file's POSIX-mode `-c` children
-    /// print their "after" lines where GNU's posix shell dies on the
-    /// special-builtin error, a separate pre-existing divergence the
-    /// committed errors.snap golden has absorbed (the golden is a
-    /// rubash-recorded snapshot; the two history lines are the part
-    /// the GNU 5.3.20 oracle adjudicated for this issue).
+    /// plus, since the RC audit phase-1 finding ④ fix, the errors10
+    /// numeric segment itself: the file's POSIX-mode `-c` children used
+    /// to print a second set of "after exit/shift/return" lines where
+    /// GNU's posix shell dies on the special-builtin error (EX_USAGE >
+    /// EX_SHERRBASE, execute_cmd.c:4886-4888 + :1004-1017), a
+    /// divergence the committed errors.snap golden had absorbed. The
+    /// product now converts the failure at the dispatch gate (and, for
+    /// `return`, in execute_return per builtins/return.def:62-65), the
+    /// golden was re-recorded from the GNU 5.3.20 oracle's output, and
+    /// the segment below pins the POSIX trio's absence: the
+    /// default-mode trio is followed DIRECTLY by the history lines.
     #[test]
     fn issue_1888_errors10_sub_verbatim() {
         let sub =
@@ -3681,6 +4024,195 @@ mod win_face_fd_history {
         assert!(
             !stdout.contains("after history: 1"),
             "history status folded to 1:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains(
+                "invalid numeric argument\nafter exit: 2\nafter shift: 2\nafter return: 2\nafter history: 2\n"
+            ),
+            "errors10 numeric segment diverged (the POSIX-mode trio must \
+             be absent — GNU's posix shell dies on the error):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+/// RC audit phase-1 finding ④ (errors10): in POSIX mode, a special
+/// builtin's EX_USAGE-class failure (numeric-argument error, `--help`)
+/// is FATAL to a non-interactive shell — GNU returns EX_USAGE (258 >
+/// EX_SHERRBASE) from the builtin, execute_simple_command marks
+/// special_builtin_failed (execute_cmd.c:4886-4888), and the command's
+/// frame exits (execute_cmd.c:1004-1017) unless the context is tested
+/// (ignore_return / invert) or the builtin ran under `command`.
+/// rubash used to report the error and run the next command; the
+/// committed errors.snap golden had absorbed the non-fatal bytes.
+/// Expectations are the GNU bash 5.3.20 oracle's, byte for byte
+/// (stdout / stderr / exit status); see the fix-errors10 REPORT for
+/// the full two-mode classification matrix.
+mod errors10_posix_fatal {
+    use super::*;
+
+    fn run(args: &[&str]) -> (String, String, Option<i32>) {
+        let dir = case_scratch("errors10");
+        let out = run_rubash_in(&dir, args, Duration::from_secs(30));
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    #[test]
+    fn errors10_posix_exit_numeric_is_fatal() {
+        let (stdout, stderr, code) = run(&["-o", "posix", "-c", "exit abcde; echo AFTER:$?"]);
+        assert_eq!(code, Some(2), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert_eq!(stdout, "", "stderr:\n{stderr}");
+        assert_eq!(
+            stderr,
+            "bash: line 1: exit: abcde: numeric argument required\n"
+        );
+    }
+
+    #[test]
+    fn errors10_posix_shift_numeric_is_fatal() {
+        let (stdout, stderr, code) = run(&[
+            "-o",
+            "posix",
+            "-c",
+            "set -- a b c; shift abcde; echo AFTER:$?",
+        ]);
+        assert_eq!(code, Some(2), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert_eq!(stdout, "", "stderr:\n{stderr}");
+        assert_eq!(
+            stderr,
+            "bash: line 1: shift: abcde: numeric argument required\n"
+        );
+    }
+
+    #[test]
+    fn errors10_posix_return_numeric_is_fatal() {
+        let (stdout, stderr, code) = run(&[
+            "-o",
+            "posix",
+            "-c",
+            "f(){ return abcde; echo INFUNC; }; f; echo AFTER:$?",
+        ]);
+        assert_eq!(code, Some(2), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert_eq!(stdout, "", "stderr:\n{stderr}");
+        assert_eq!(
+            stderr,
+            "bash: line 1: return: abcde: numeric argument required\n"
+        );
+    }
+
+    #[test]
+    fn errors10_posix_exit_help_is_fatal() {
+        let (stdout, _stderr, code) =
+            run(&["-o", "posix", "-c", "exit --help >/dev/null; echo AFTER:$?"]);
+        assert_eq!(code, Some(2), "stdout:\n{stdout}");
+        assert_eq!(stdout, "");
+    }
+
+    #[test]
+    fn errors10_posix_shift_help_is_fatal() {
+        let (stdout, _stderr, code) = run(&[
+            "-o",
+            "posix",
+            "-c",
+            "set -- a b c; shift --help >/dev/null; echo AFTER:$?",
+        ]);
+        assert_eq!(code, Some(2), "stdout:\n{stdout}");
+        assert_eq!(stdout, "");
+    }
+
+    #[test]
+    fn errors10_posix_return_help_is_fatal() {
+        let (stdout, _stderr, code) = run(&[
+            "-o",
+            "posix",
+            "-c",
+            "f(){ return --help >/dev/null; echo INFUNC:$?; }; f; echo AFTER:$?",
+        ]);
+        assert_eq!(code, Some(2), "stdout:\n{stdout}");
+        assert_eq!(stdout, "");
+    }
+
+    /// GNU return.def:62-65's other arm: in a TESTED context the posix
+    /// builtin returns EX_USAGE without unwinding, so the function body
+    /// runs on and the call's status is the body's last status.
+    #[test]
+    fn errors10_posix_tested_return_numeric_body_continues() {
+        let (stdout, stderr, code) = run(&[
+            "-o",
+            "posix",
+            "-c",
+            "f(){ return abcde; echo INFUNC; }; f || echo OR:$?; echo DONE:$?",
+        ]);
+        assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert_eq!(stdout, "INFUNC\nDONE:0\n", "stderr:\n{stderr}");
+    }
+
+    #[test]
+    fn errors10_default_exit_numeric_continues() {
+        let (stdout, stderr, code) = run(&["-c", "exit abcde; echo AFTER:$?"]);
+        assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert_eq!(stdout, "AFTER:2\n", "stderr:\n{stderr}");
+    }
+
+    #[test]
+    fn errors10_posix_command_exit_numeric_continues() {
+        let (stdout, stderr, code) =
+            run(&["-o", "posix", "-c", "command exit abcde; echo AFTER:$?"]);
+        assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert_eq!(stdout, "AFTER:2\n", "stderr:\n{stderr}");
+    }
+
+    #[test]
+    fn errors10_posix_if_exit_numeric_is_tested() {
+        let (stdout, stderr, code) = run(&[
+            "-o",
+            "posix",
+            "-c",
+            "if exit abcde; then echo T; else echo E:$?; fi; echo DONE",
+        ]);
+        assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert_eq!(stdout, "E:2\nDONE\n", "stderr:\n{stderr}");
+    }
+
+    /// Sibling branch: shift's negative / out-of-range counts are
+    /// EXECUTION_FAILURE (never > EX_SHERRBASE), so they stay non-fatal
+    /// in POSIX mode; the out-of-range diagnostic prints because
+    /// posix_initialize sets print_shift_error (general.c:112).
+    #[test]
+    fn errors10_posix_shift_out_of_range_continues() {
+        let (stdout, stderr, code) =
+            run(&["-o", "posix", "-c", "set -- a b c; shift 99; echo AFTER:$?"]);
+        assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert_eq!(stdout, "AFTER:1\n", "stderr:\n{stderr}");
+        assert_eq!(
+            stderr,
+            "bash: line 1: shift: 99: shift count out of range\n"
+        );
+    }
+
+    /// The too-many-arguments class is no_args DISCARD (mode
+    /// independent, NOT the special-builtin fatality channel): in
+    /// script-file form the failing line is abandoned, the function
+    /// (for `return`) unwinds, and the NEXT line runs with $?=2 —
+    /// exactly the errors10.sub tail segments.
+    #[test]
+    fn errors10_posix_too_many_script_form_continues() {
+        let dir = case_scratch("errors10-toomany");
+        std::fs::write(
+            dir.join("fg.sh"),
+            "set -- a b c\nexit 1 2\necho \"after exit: $?\"\nshift 1 2\necho \"after shift: $?\"\nf(){ return 1 2; echo INFUNC; }\nf\necho \"after return: $?\"\n",
+        )
+        .expect("write fg.sh");
+        let out = run_rubash_in(&dir, &["-o", "posix", "fg.sh"], Duration::from_secs(30));
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert_eq!(
+            stdout, "after exit: 2\nafter shift: 2\nafter return: 2\n",
+            "stderr:\n{stderr}"
         );
     }
 }
@@ -3741,5 +4273,1966 @@ mod issue_1904 {
         server.join().expect("server thread");
         assert_eq!(status, Some(0), "stderr:\n{stderr}");
         assert_eq!(stdout, "GOT:hello1904", "stderr:\n{stderr}");
+    }
+}
+
+/// rubash#1911: an arithmetic evaluation error (GNU expr.c `evalerror` ->
+/// `jump_to_top_level (DISCARD)`) discards only the current command. Inside
+/// an arithmetic-for BODY the error must end just the loop (status 1) and
+/// execution resumes after `done`; every sibling loop/compound body already
+/// behaved that way. The leak was `execute_arithmetic_for_command`
+/// (src/executor/compound_exec.rs) returning a body error without balancing
+/// its entry `loop_depth += 1`, which defeated the enclosing list walk's
+/// DISCARD absorption guard (`loop_depth == 0`) and made the error
+/// script-fatal. GNU execute_cmd.c:3219 `execute_arith_for_command` has a
+/// single exit whose `loop_level--` (execute_cmd.c:3296) is unconditional.
+/// Probe scripts and expectations below are GNU bash 5.3's, taken verbatim
+/// from the differential matrix that isolated the bug (script FILES, not
+/// `-c`: the discard unit is the reader's command list).
+mod issue_1911 {
+    use super::*;
+
+    fn run_script(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).trim_end().to_string(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// `want_err_part` empty skips the stderr assertion.
+    fn check(case: &str, script: &str, want_stdout: &str, want_status: i32, want_err_part: &str) {
+        let dir = case_scratch(case);
+        let (stdout, stderr, status) = run_script(&dir, script);
+        assert_eq!(status, Some(want_status), "case {case} stderr:\n{stderr}");
+        assert_eq!(stdout, want_stdout, "case {case} stderr:\n{stderr}");
+        if !want_err_part.is_empty() {
+            assert!(
+                stderr.contains(want_err_part),
+                "case {case}: stderr should contain {want_err_part:?}:\n{stderr}"
+            );
+        }
+    }
+
+    // --- the bug family: arith-for body, error at function top level ---
+
+    #[test]
+    fn issue1911_minimal_repro_division_by_zero() {
+        // The issue's minimal repro (division by zero on iteration i=1),
+        // with the follow-up echo on its own line: GNU discards just the
+        // loop, prints the marker with the loop's status 1, exits 0.
+        check(
+            "1911-min",
+            "for ((i=0;i<3;i++)); do x=$(( 100 / (i-1))); done\necho \"after_loop rc=$?\"\n",
+            "after_loop rc=1",
+            0,
+            "division by 0",
+        );
+    }
+
+    #[test]
+    fn issue1911_minimal_repro_same_line_form() {
+        // Control: with the echo on the SAME line as the loop, the
+        // discard eats the rest of that line too (the current-command
+        // unit is the whole line's list), so nothing prints and the
+        // script exits with the discarded loop's status 1 — in GNU and
+        // in rubash alike (GNU-probed; this shape alone cannot see the
+        // bug, it pins the line boundary of the discard).
+        check(
+            "1911-min-sameline",
+            "for ((i=0;i<3;i++)); do x=$(( 100 / (i-1))); done; echo \"after_loop rc=$?\"\n",
+            "",
+            1,
+            "division by 0",
+        );
+    }
+
+    #[test]
+    fn issue1911_body_error_loop_only_script() {
+        check(
+            "1911-p5",
+            "for ((__bs_i=0; __bs_i<3; __bs_i++)); do\nx=$(( 077 + 0xff - 0b101 ))\ndone\necho \"after_loop rc=$?\"\nunset __bs_i\necho \"after_unset rc=$?\"\n",
+            "after_loop rc=1\nafter_unset rc=0",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_body_error_one_liner() {
+        check(
+            "1911-p4",
+            "for ((i=0; i<3; i++)); do x=$(( 077 + 0xff - 0b101 )); echo \"iter $i\"; done\necho \"loop_done rc=$?\"\n",
+            "loop_done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_body_error_second_iteration() {
+        check(
+            "1911-q1",
+            "for ((i=0; i<3; i++)); do if (( i == 1 )); then x=$(( 0b101 )); fi; echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "iter 0\ndone rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_body_div_zero() {
+        check(
+            "1911-q6",
+            "for ((i=0; i<3; i++)); do x=$(( 10 / 0 )); echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "division by 0",
+        );
+    }
+
+    #[test]
+    fn issue1911_body_error_long_loop_tail_runs() {
+        check(
+            "1911-q7",
+            "for ((__bs_i=0; __bs_i<5000; __bs_i++)); do\nx=$(( 077 + 0xff - 0b101 ))\ndone\necho \"TAIL-RAN\"\n",
+            "TAIL-RAN",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_error_inside_function_called_from_body() {
+        check(
+            "1911-r5",
+            "f() { x=$(( 0b101 )); echo \"in-f\"; }\nfor ((i=0; i<3; i++)); do f; echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_comsub_then_error_in_body() {
+        check(
+            "1911-r6",
+            "for ((i=0; i<3; i++)); do x=$(echo hi); y=$(( 0b101 )); echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_subscript_error_in_body() {
+        check(
+            "1911-s1",
+            "arr=(1 2 3)\nfor ((i=0; i<3; i++)); do x=${arr[0b101]}; echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_arith_for_nested_in_while_body() {
+        // The leak pierced the outer while boundary too: GNU discards
+        // only up to the innermost enclosing list (the while body ends,
+        // status 1, outer script continues).
+        check(
+            "1911-s2",
+            "i=0\nwhile (( i < 3 )); do\n  for ((j=0; j<3; j++)); do x=$(( 0b101 )); echo \"inner $j\"; done\n  echo \"after-inner rc=$?\"\n  i=$((i+1))\ndone\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_arith_for_nested_in_arith_for() {
+        check(
+            "1911-s3",
+            "for ((i=0; i<2; i++)); do\n  for ((j=0; j<2; j++)); do x=$(( 0b101 )); echo \"inner $j\"; done\n  echo \"after-inner rc=$?\"\ndone\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_break_after_discarded_loop_is_outside_loop() {
+        // The leaked depth also corrupted later break adjudication: after
+        // the discarded loop, a bare `break` must again draw the GNU
+        // "only meaningful in a loop" diagnostic (and return 0), not act
+        // as an in-loop break swallowing the rest of the script.
+        check(
+            "1911-break-after",
+            "for ((i=0;i<3;i++)); do x=$(( 0b101 )); done\nbreak\necho \"after rc=$?\"\n",
+            "after rc=0",
+            0,
+            "only meaningful in a",
+        );
+    }
+
+    // --- sibling shapes that already matched GNU (guard the class) ---
+
+    #[test]
+    fn issue1911_control_top_level_assignment() {
+        check(
+            "1911-p1",
+            "x=$(( 077 + 0xff - 0b101 ))\necho \"after rc=$? x=[${x-UNSET}]\"\n",
+            "after rc=1 x=[UNSET]",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_top_level_next_line_runs() {
+        check(
+            "1911-p2",
+            "x=$(( 0b101 ))\necho alive\n",
+            "alive",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_error_as_last_command_exits_1() {
+        check(
+            "1911-p3",
+            "x=$(( 0b101 ))\n",
+            "",
+            1,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_while_body() {
+        check(
+            "1911-q2",
+            "i=0\nwhile (( i < 3 )); do x=$(( 0b101 )); i=$((i+1)); echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_until_body() {
+        check(
+            "1911-r2",
+            "i=0\nuntil (( i >= 3 )); do x=$(( 0b101 )); i=$((i+1)); echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_for_in_body() {
+        check(
+            "1911-r1",
+            "for i in 1 2 3; do x=$(( 0b101 )); echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_function_body() {
+        check(
+            "1911-q3",
+            "f() { x=$(( 0b101 )); echo \"in-f-after\"; }\nf\necho \"after-f rc=$?\"\n",
+            "after-f rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_if_body() {
+        check(
+            "1911-q4",
+            "if true; then x=$(( 0b101 )); echo \"in-if-after\"; fi\necho \"after-if rc=$?\"\n",
+            "after-if rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_group_body() {
+        check(
+            "1911-q5",
+            "{ x=$(( 0b101 )); echo \"in-group-after\"; }\necho \"after-group rc=$?\"\n",
+            "after-group rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_header_init_error() {
+        check(
+            "1911-r3",
+            "for ((i=0b101; i<3; i++)); do echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "done rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_header_step_error() {
+        check(
+            "1911-r4",
+            "for ((i=0; i<3; i+= (i==1 ? 0b101 : 1) )); do echo \"iter $i\"; done\necho \"done rc=$?\"\n",
+            "iter 0\ndone rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_arith_for_inside_function() {
+        check(
+            "1911-r7",
+            "g() { for ((i=0; i<3; i++)); do x=$(( 0b101 )); echo \"iter $i\"; done; echo \"in-g-after-loop rc=$?\"; }\ng\necho \"after-g rc=$?\"\n",
+            "after-g rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_arith_for_inside_group() {
+        check(
+            "1911-s4",
+            "{ for ((i=0; i<3; i++)); do x=$(( 0b101 )); echo \"iter $i\"; done; echo \"in-group-after rc=$?\"; }\necho \"after-group rc=$?\"\n",
+            "after-group rc=1",
+            0,
+            "value too great for base",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_plain_false_body_not_an_evalerror() {
+        // A plain failing command is NOT the DISCARD class: no
+        // diagnostic, the loop runs out its iterations, script exits 0.
+        check(
+            "1911-p7",
+            "for ((__bs_i=0; __bs_i<3; __bs_i++)); do\nfalse\ndone\nunset __bs_i\n",
+            "",
+            0,
+            "",
+        );
+    }
+
+    #[test]
+    fn issue1911_control_valid_arithmetic_loop() {
+        check(
+            "1911-p6",
+            "for ((__bs_i=0; __bs_i<3; __bs_i++)); do\nx=$(( 077 + 0xff - 0101 ))\ndone\necho \"after_loop rc=$? x=$x\"\nunset __bs_i\n",
+            "after_loop rc=0 x=253",
+            0,
+            "",
+        );
+    }
+}
+
+/// rubash#1917 A period (/proc fidelity & completion, design
+/// ~/workspace/vfs-1917-design/DESIGN.md §6.2): the synthetic /proc is
+/// a userland value-add layer, NOT a GNU contract surface — the
+/// expectations are the Linux procfs shapes downstream tools consume,
+/// checked against the real procfs on Linux and the simulation on
+/// Windows (the Windows face is the point of every pin here; where a
+/// pin also holds on Linux it guards both).
+mod issue_1917 {
+    use super::*;
+
+    fn run(dir: &Path, code: &str) -> (String, String, Option<i32>) {
+        let out = run_rubash_in(dir, &["-c", code], Duration::from_secs(30));
+        (
+            String::from_utf8_lossy(&out.stdout).trim_end().to_string(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// A-1: /proc/version keeps its Linux shape (main-session ruling
+    /// 2026-10-28: the string stays Linux-form; corpus consumers key
+    /// on the prefix).
+    #[test]
+    fn issue1917_a1_version_shape() {
+        let dir = case_scratch("1917-a1");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "read -r line < /proc/version; case $line in 'Linux version '*) echo VER-OK;; *) echo VER-BAD;; esac",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "VER-OK", "stderr:\n{stderr}");
+    }
+
+    /// A-1b: the read faces of synthetic content, one vehicle per
+    /// invocation so a failure names its face. (Added when A-1's
+    /// simple-read vehicle failed on Windows CI while the comsub
+    /// quick-read of the same content passed — the faces do not share
+    /// one resolution path, so they are pinned separately.)
+    #[test]
+    fn issue1917_a1b_read_faces() {
+        let dir = case_scratch("1917-a1b");
+        let faces: &[(&str, &str, &str)] = &[
+            (
+                "simple-read-top",
+                "read -r l < /proc/meminfo; case $l in MemTotal:*) echo OK;; *) echo \"BAD:[$l]\";; esac",
+                "OK",
+            ),
+            (
+                "simple-read-pid",
+                "read -r l < /proc/self/status; case $l in Name:*) echo OK;; *) echo \"BAD:[$l]\";; esac",
+                "OK",
+            ),
+            (
+                "cat-face",
+                "x=$(cat /proc/version); case $x in 'Linux version '*) echo OK;; *) echo \"BAD:[$x]\";; esac",
+                "OK",
+            ),
+            (
+                "exec-fd-face",
+                "exec 9</proc/version; read -r l <&9; case $l in 'Linux version '*) echo OK;; *) echo \"BAD:[$l]\";; esac",
+                "OK",
+            ),
+            (
+                "compound-face",
+                "while read -r l; do case $l in 'Linux version '*) echo OK; break;; *) echo \"BAD:[$l]\"; break;; esac; done < /proc/version",
+                "OK",
+            ),
+        ];
+        for (name, code, expected) in faces {
+            let (stdout, stderr, status) = run(&dir, code);
+            assert_eq!(
+                stdout, *expected,
+                "face {name}: status={status:?} stderr:\n{stderr}"
+            );
+        }
+    }
+
+    /// A-1c: the comsub `cat` shortcuts consult the registry — the
+    /// plain shortcut (A-1b's cat-face root cause: it fs::read the
+    /// mapped path directly and reported every synthetic file ENOENT
+    /// on Windows) and its timed sibling (`$(time cat …)`, whose arm
+    /// read the filesystem the same way and silently swallowed the
+    /// miss). The mixed face puts a SyntheticLink operand first:
+    /// /proc/self/cwd resolves through the registry to the session
+    /// directory, whose read fails (rc 1, as GNU's EISDIR read does),
+    /// and the following content operand must still land — pre-fix on
+    /// Windows both operands missed and the capture was empty. (A
+    /// direct /proc/self/exe capture face is deliberately absent:
+    /// capturing the whole running image through a substitution takes
+    /// ~40s for a debug binary, over the harness timeout; exe link
+    /// reading end to end is A-4's pin, and the shortcut's link branch
+    /// uses the same registry entry as external_cat.) On Linux the
+    /// real procfs masks both defects, exactly as for A-1/A-4;
+    /// Windows CI is the proof.
+    #[test]
+    fn issue1917_a1c_comsub_cat_registry_faces() {
+        let dir = case_scratch("1917-a1c");
+        let faces: &[(&str, &str, &str)] = &[
+            (
+                "comsub-cat-link-then-content",
+                "x=$(cat /proc/self/cwd /proc/version); rc=$?; case $x in 'Linux version '*) echo \"OK:$rc\";; *) echo \"BAD:[$x]:$rc\";; esac",
+                "OK:1",
+            ),
+            (
+                "timed-comsub-cat-content",
+                "x=$(time cat /proc/version); case $x in 'Linux version '*) echo OK;; *) echo \"BAD:[$x]\";; esac",
+                "OK",
+            ),
+            (
+                "timed-comsub-cat-status",
+                "x=$(time cat /proc/version); echo \"rc:$?\"",
+                "rc:0",
+            ),
+        ];
+        for (name, code, expected) in faces {
+            let (stdout, stderr, status) = run(&dir, code);
+            assert_eq!(
+                stdout, *expected,
+                "face {name}: status={status:?} stderr:\n{stderr}"
+            );
+        }
+    }
+
+    /// A-2: /proc/self/cmdline carries the TRUE argv — a known marker
+    /// argument placed on the shell's own command line must appear as
+    /// a NUL-separated field. Pre-fix on Windows the file contained
+    /// only the image name (the ToolHelp snapshot knows nothing else),
+    /// so the marker and the `-c` field were both absent.
+    #[test]
+    fn issue1917_a2_cmdline_true_argv() {
+        let dir = case_scratch("1917-a2");
+        let out = run_rubash_in(
+            &dir,
+            &[
+                "-c",
+                "while IFS= read -r -d '' a; do printf '%s|' \"$a\"; done < /proc/self/cmdline; echo END",
+                "rubash",
+                "MARKER1917A2",
+            ],
+            Duration::from_secs(30),
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.code, Some(0), "stderr:\n{stderr}");
+        assert!(
+            stdout.contains("MARKER1917A2"),
+            "known argv marker missing from cmdline:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("-c|"),
+            "the -c field of the true argv is missing:\n{stdout}"
+        );
+    }
+
+    /// A-7: an exited pid's /proc directory vanishes — files under it
+    /// fail like ENOENT and test -e answers false (procfs semantics,
+    /// both platforms).
+    #[test]
+    fn issue1917_a7_dead_pid_vanishes() {
+        let dir = case_scratch("1917-a7");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "\"${THIS_SH}\" -c 'exit 0' & p=$!; wait $p; \
+             if test -e /proc/$p/status; then echo STILL-THERE; else echo GONE-OK; fi; \
+             cat /proc/$p/status 2>/dev/null; echo catrc=$?",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "GONE-OK\ncatrc=1", "stderr:\n{stderr}");
+    }
+
+    /// A3: glob over /proc enumerates the synthetic root (file table +
+    /// self + live pids) and per-pid directories (entry table). Pre-fix
+    /// on Windows the pattern matched nothing and echoed literally.
+    #[test]
+    fn issue1917_a3_glob_proc_enumeration() {
+        let dir = case_scratch("1917-a3");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "hit_mem=; hit_self=; hit_pid=; \
+             for e in /proc/*; do case $e in /proc/meminfo) hit_mem=1;; /proc/self) hit_self=1;; /proc/$$) hit_pid=1;; esac; done; \
+             echo \"root:$hit_mem$hit_self$hit_pid\"; \
+             hit_exe=; hit_cwd=; hit_status=; \
+             for e in /proc/self/*; do case $e in /proc/self/exe) hit_exe=1;; /proc/self/cwd) hit_cwd=1;; /proc/self/status) hit_status=1;; esac; done; \
+             echo \"self:$hit_exe$hit_cwd$hit_status\"; \
+             set -- /proc/*/status; if [ $# -ge 2 ]; then echo pids:many; else echo pids:few; fi",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "root:111\nself:111\npids:many", "stderr:\n{stderr}");
+    }
+}
+
+/// rubash#1900: /proc/<pid>/exe and /proc/<pid>/cwd were not
+/// simulated at all — every face (open, test, glob) fell through to a
+/// filesystem that has no such names on Windows. The pins assert the
+/// link semantics end to end: test -e/-L/-f/-d from registry facts,
+/// and reading /proc/self/exe yields the running image's own magic
+/// bytes (MZ on Windows, ELF on Linux's real procfs).
+mod issue_1900 {
+    use super::*;
+
+    fn run(dir: &Path, code: &str) -> (Vec<u8>, String, Option<i32>) {
+        let out = run_rubash_in(dir, &["-c", code], Duration::from_secs(30));
+        (
+            out.stdout,
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    #[test]
+    fn issue1900_a4_exe_cwd_links() {
+        let dir = case_scratch("1900-a4");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "test -e /proc/self/exe && test -L /proc/self/exe && test -f /proc/self/exe \
+             && test -e /proc/self/cwd && test -d /proc/self/cwd && echo A4-OK; \
+             IFS= read -r -N 2 magic < /proc/self/exe; echo \"len:${#magic}\"; printf '%s' \"$magic\"",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        let text = String::from_utf8_lossy(&stdout).into_owned();
+        assert!(text.contains("A4-OK"), "link tests failed:\n{text}");
+        assert!(text.contains("len:2"), "short read of exe:\n{text}");
+        if cfg!(windows) {
+            assert!(stdout.windows(2).any(|w| w == b"MZ"), "exe magic:\n{text}");
+        } else {
+            assert!(
+                stdout.windows(2).any(|w| w == [0x7f, b'E']),
+                "exe magic:\n{text}"
+            );
+        }
+    }
+
+    /// A-5: /proc/self/cwd tracks the SESSION cwd — after `cd` into a
+    /// subdirectory it still answers as an existing directory (its
+    /// target text equality with the session cwd is pinned at the
+    /// proc_vfs unit level, where the session value is injected).
+    #[test]
+    fn issue1900_a5_self_cwd_tracks_session() {
+        let dir = case_scratch("1900-a5");
+        std::fs::create_dir(dir.join("sub")).expect("create subdir");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "cd sub && test -d /proc/self/cwd && test -e /proc/self/cwd && echo A5-OK",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        let text = String::from_utf8_lossy(&stdout).into_owned();
+        assert_eq!(text.trim(), "A5-OK");
+    }
+}
+
+/// rubash#1918: /proc/<pid>/status PPid was fabricated (self answered
+/// 0, every other pid answered the shell's own pid) while the ToolHelp
+/// snapshot's real parent field was discarded. The pin spawns a child
+/// shell and reads status through it: the reported PPid must never be
+/// the fabricated 0, and this shell's own PPid must be a real third
+/// party (nonzero, not itself). No parentage equality is asserted —
+/// rubash's spawn architecture interposes on both platforms
+/// (in-process THIS_SH children on Linux; an interposed spawn process
+/// on Windows). The exact-value property against ground truth is
+/// proven in proc_vfs's unit pins (rendered PPid == snapshot record,
+/// for self and for another live pid).
+mod issue_1918 {
+    use super::*;
+
+    fn run(dir: &Path, code: &str) -> (String, String, Option<i32>) {
+        let out = run_rubash_in(dir, &["-c", code], Duration::from_secs(30));
+        (
+            String::from_utf8_lossy(&out.stdout).trim_end().to_string(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    #[test]
+    fn issue1918_a3_ppid_known_parent_child() {
+        let dir = case_scratch("1918-a3");
+        std::fs::write(
+            dir.join("child.sh"),
+            "while IFS= read -r line; do\n\
+             case $line in\n\
+             PPid:*) set -- ${line#PPid:}; echo \"$1\"; break;;\n\
+             esac\n\
+             done < /proc/self/status\n",
+        )
+        .expect("write child.sh");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "child=$(\"${THIS_SH}\" ./child.sh); echo \"CHILD:$child\"; echo \"ME:$$\"; \
+             while IFS= read -r line; do case $line in PPid:*) set -- ${line#PPid:}; mine=$1;; esac; done < /proc/self/status; \
+             if [ -n \"$mine\" ] && [ \"$mine\" != 0 ] && [ \"$mine\" != \"$$\" ]; then echo SELF-OK; else echo \"SELF-BAD:$mine\"; fi",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.contains("SELF-OK"), "own PPid truth:\n{stdout}");
+        let field = |name: &str| -> u32 {
+            stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or_else(|| panic!("{name} field missing:\n{stdout}"))
+        };
+        let (child_ppid, _me) = (field("CHILD:"), field("ME:"));
+        // The fabricated shape is dead on every platform: a process's
+        // PPid is never 0 (pre-fix Windows answered exactly that
+        // fiction for every self read).
+        assert_ne!(child_ppid, 0, "fabricated zero:\n{stdout}");
+        // No script-level parentage equality is asserted, on any
+        // platform: rubash's spawn architecture gives the "child" a
+        // different immediate creator than the invoking shell on both
+        // — on Linux a THIS_SH child of the shell's own binary runs
+        // IN-PROCESS (verified with ps: a single OS process; the
+        // status it reads is the shell's own, whose PPid is the
+        // shell's parent), and on Windows a real child process is
+        // created through an interposed spawn process (CI-observed
+        // PPid 8404 vs the shell's $$ 2344). PPid truth means "the
+        // real creator per the OS record", which the proc_vfs unit
+        // pin proves value-for-value against the snapshot record.
+    }
+}
+
+/// rubash#1952 (RC audit A-F1): process substitution materialized its
+/// whole output before any consumer could start, so a producer that
+/// never terminates starved the consumer forever (`cat <(echo x;
+/// sleep 20)` printed nothing until EOF). GNU process_substitute
+/// (subst.c:6362) forks the body onto a pipe and hands the consumer
+/// the read end at once: consumers observe the first bytes while the
+/// producer still runs. The pins use a bounded producer — first line,
+/// sleep 2, flag file, second line — so the flag orders each line's
+/// arrival against the producer's exit without clocks: pre-fix every
+/// line reads late/starved because the flag is created during the
+/// up-front collection, before the consumer starts.
+mod issue_1952 {
+    use super::*;
+
+    fn run(dir: &Path, code: &str) -> (String, String, Option<i32>) {
+        let out = run_rubash_in(dir, &["-c", code], Duration::from_secs(30));
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// Redirect form: the while-read loop must see line 1 before the
+    /// producer creates the flag (i.e. before it exits).
+    #[test]
+    fn issue1952_redirect_loop_streams_first_line() {
+        let dir = case_scratch("1952-loop");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "rm -f pd\n\
+             while IFS= read -r l; do\n\
+               if [ -e pd ]; then echo \"late:$l\"; else echo \"early:$l\"; fi\n\
+             done < <(printf 'first\\n'; sleep 2; touch pd; printf 'second\\n')\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "early:first\nlate:second\n", "stderr:\n{stderr}");
+    }
+
+    /// Argument form: the producer itself observes the cat output
+    /// file mid-flight — cat must have written line 1 into it before
+    /// the producer's post-sleep check.
+    #[test]
+    fn issue1952_cat_argument_streams_first_line() {
+        let dir = case_scratch("1952-cat");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "rm -f pd out.txt\n\
+             cat <(printf 'first\\n'; sleep 2; \
+               if [ -s out.txt ]; then touch pd; fi; \
+               printf 'second\\n') > out.txt\n\
+             if [ -e pd ]; then echo streamed; else echo starved; fi\n\
+             cat out.txt\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "streamed\nfirst\nsecond\n", "stderr:\n{stderr}");
+    }
+
+    /// Pipeline form: `head -1` completes the pipeline from line 1
+    /// alone, before the producer's flag exists.
+    ///
+    /// The rubash#1959 drain (the parent read the producer to EOF into a
+    /// temp file before spawn) is fixed — the word face now streams
+    /// through the #1903 fifo-marker rendezvous, pinned Windows-green in
+    /// tests/issue1959_procsub_argv_streaming.rs. This literal pin still
+    /// cannot run on Windows for two tool-side reasons, neither a rubash
+    /// gap: the suite's airtight PATH resolves an MSYS head that does
+    /// not speak the marker rendezvous at all, and WinuxCmd#1442 tracks
+    /// the head line-mode fifo-operand gap for the toolchain that does.
+    /// It runs again on non-Windows (the unix face pins the read end at
+    /// the operand's fd, unchanged since #1952).
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows tool-side: suite PATH head is not marker-aware and WinuxCmd#1442 (head line-mode on fifo operand); the #1959 rendezvous itself is pinned in tests/issue1959_procsub_argv_streaming.rs"
+    )]
+    fn issue1952_pipeline_head_streams_first_line() {
+        let dir = case_scratch("1952-pipe");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "rm -f pd\n\
+             head -1 <(printf 'first\\n'; sleep 2; touch pd; \
+               printf 'second\\n' 2>/dev/null) | cat\n\
+             if [ -e pd ]; then echo late; else echo early; fi\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "first\nearly\n", "stderr:\n{stderr}");
+    }
+
+    /// Control: the exec-bound form streamed even before this fix
+    /// (rubash#1021) — it must keep streaming.
+    #[test]
+    fn issue1952_exec_redirect_control_still_streams() {
+        let dir = case_scratch("1952-exec");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "rm -f pd\n\
+             exec 3< <(printf 'first\\n'; sleep 2; touch pd; printf 'second\\n')\n\
+             IFS= read -r l <&3\n\
+             if [ -e pd ]; then echo \"late:$l\"; else echo \"early:$l\"; fi\n\
+             exec 3<&-\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "early:first\n", "stderr:\n{stderr}");
+    }
+
+    /// $! names the real producer: `wait` collects its real status,
+    /// and once a finished producer is consumed its pid is reaped, so
+    /// `kill -0` reports ESRCH like GNU (rubash#1022 parity for the
+    /// streamed child).
+    #[test]
+    fn issue1952_bang_wait_status_and_reaped_kill0() {
+        let dir = case_scratch("1952-bang");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "cat <(exit 3) >/dev/null\n\
+             wait $!; echo \"wait:$?\"\n\
+             cat <(echo hi) >/dev/null\n\
+             kill -0 $! 2>/dev/null; echo \"kill0:$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "wait:3\nkill0:1\n", "stderr:\n{stderr}");
+    }
+
+    /// R3/D6: the comsub quick-read used to strip only the `/dev/fd/`
+    /// prefix itself, so `$(</proc/self/fd/N)` missed the fd table and
+    /// fell to the filesystem (ENOENT on Windows). GNU reads the fd
+    /// (subst.c read_comsub opens the spelling; procfs resolves it).
+    #[test]
+    fn r3_comsub_quick_read_proc_self_fd_spelling() {
+        let dir = case_scratch("r3-comsub-self");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf 'probe-r3\\n' > in.txt\n\
+             exec 3<in.txt\n\
+             x=$(</proc/self/fd/3)\n\
+             echo \"got:[$x]\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "got:[probe-r3]\n", "stderr:\n{stderr}");
+    }
+
+    /// R3/D6: `/dev/fd/+3` is not an fd spelling anywhere in GNU — the
+    /// literal open fails ENOENT on every face (oracle-verified), so
+    /// the quick-read must not serve fd 3's bytes for it. Before the
+    /// convergence this face's own parse accepted the sign and did.
+    #[test]
+    fn r3_comsub_quick_read_plus_fd_spelling_rejected() {
+        let dir = case_scratch("r3-comsub-plus");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf 'probe-r3\\n' > in.txt\n\
+             exec 3<in.txt\n\
+             x=$(</dev/fd/+3)\n\
+             echo \"got:[$x]\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "got:[]\n", "stderr:\n{stderr}");
+    }
+
+    /// R3/D4: `test -p` on a live pipe fd answers through the pipe-mark
+    /// matrix; the `+3` spelling used to parse to fd 3 and inherit its
+    /// mark. GNU: `/dev/fd/+3` stats ENOENT, so -p is false, while the
+    /// canonical spelling of the same pipe stays true.
+    #[test]
+    fn r3_test_pipe_plus_fd_spelling_rejected() {
+        let dir = case_scratch("r3-test-plus");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "exec 3< <(printf 'x\\n')\n\
+             if [ -p /dev/fd/3 ]; then echo canon-pipe; else echo canon-not-pipe; fi\n\
+             if [ -p /dev/fd/+3 ]; then echo plus-pipe; else echo plus-not-pipe; fi\n\
+             exec 3<&-\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "canon-pipe\nplus-not-pipe\n", "stderr:\n{stderr}");
+    }
+
+    /// R3/D5 control: the pipe-into-source fast path now recognizes
+    /// every registry fd-0 spelling; the sourced output must stay the
+    /// pipe's text for each (the general path answered these before,
+    /// so this pins the fast path to the same result).
+    #[test]
+    fn r3_pipe_source_fd0_spellings() {
+        let dir = case_scratch("r3-pipe-source");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "echo \"echo via-dev-fd-0\" | . /dev/fd/0\n\
+             echo \"echo via-proc-fd-0\" | . /proc/self/fd/0\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "via-dev-fd-0\nvia-proc-fd-0\n", "stderr:\n{stderr}");
+    }
+
+    /// R3/D6: `source /dev/fd/+3` must fail like GNU's (ENOENT
+    /// diagnostic, nothing sourced); the fd's bytes sit in a Text
+    /// endpoint (herestring), the one shape the old parse-and-serve
+    /// fallback could reach. Canonical /dev/fd/3 sourcing is the
+    /// control in the same script family (oracle-verified pair).
+    #[test]
+    fn r3_source_plus_fd_spelling_rejected() {
+        let dir = case_scratch("r3-source-plus");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "exec 3<<< 'echo should-not-run'\n\
+             . /dev/fd/+3\n\
+             echo after-marker\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "after-marker\n", "stderr:\n{stderr}");
+    }
+
+    /// R3/D1: an external command's `/dev/fd/+3` operand is not an fd
+    /// operand — the word reaches the child literally and the open
+    /// fails in the child (GNU: cat reports ENOENT, rc 1). Before the
+    /// convergence the operand layer parsed the sign, materialized
+    /// fd 3, and cat read it successfully. Canonical /dev/fd/3 is the
+    /// control.
+    #[test]
+    fn r3_external_operand_plus_fd_spelling_rejected() {
+        let dir = case_scratch("r3-operand-plus");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf 'probe-r3\\n' > in.txt\n\
+             exec 3<in.txt\n\
+             cat /dev/fd/3\n\
+             cat /dev/fd/+3 2>/dev/null; echo \"catrc:$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "probe-r3\ncatrc:1\n", "stderr:\n{stderr}");
+    }
+}
+
+/// rubash#2003: a pipeline element 0 whose own fd-0 redirect aliases
+/// another descriptor (`<&N`, `0<&N`, `< /dev/fd/N`) lost its entire
+/// input. GNU forks every element with the shell's own descriptors
+/// (execute_cmd.c:2620 execute_pipeline) and the element applies its
+/// own redirections inside the fork (execute_cmd.c:4617
+/// execute_simple_command -> redir.c do_redirection_internal), so the
+/// element's reads ARE the aliased descriptor's reads, exactly once.
+/// Rubash's stage-0 payload resolution served the alias by draining
+/// the shared descriptor to EOF, while the stage funnels that consume
+/// stdin through the descriptor channel itself (the inline cat arm
+/// re-resolving the redirect, a compound stage binding fd 0 to the
+/// endpoint, function stages on fd-table-sharing clones, the external
+/// spawner materializing the endpoint by handle) then read EOF from
+/// the drained descriptor — `cat < <(seq 5) | wc -l` inside a command
+/// substitution captured 0, `exec 3<file; cat <&3 | wc -l` printed 0.
+/// The payload resolution now materializes the aliased fd's endpoint
+/// (buffered endpoints get their pre-resolution offset back;
+/// handle-backed endpoints are replaced by a buffered endpoint
+/// carrying the payload bytes), restoring single consumption.
+/// Expectations hand-measured against GNU Bash 5.3.20 (the vendored
+/// oracle build) on 2026-10-29; producers use the printf builtin so
+/// the pins stay self-contained.
+mod issue_2003 {
+    use super::*;
+
+    fn run(dir: &Path, code: &str) -> (String, String, Option<i32>) {
+        let out = run_rubash_in(dir, &["-c", code], Duration::from_secs(30));
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// The reported shape: a procsub-fed consumer that is itself
+    /// piped, inside a command substitution.
+    #[test]
+    fn issue2003_comsub_pipeline_keeps_procsub_redirect_payload() {
+        let dir = case_scratch("2003-comsub-wc");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "x=$(cat < <(printf '1\\n2\\n3\\n4\\n5\\n') | wc -l)\n\
+             echo \"count:[$x]\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "count:[5]\n", "stderr:\n{stderr}");
+    }
+
+    /// Same funnel, payload-consuming second stage (grep arm).
+    #[test]
+    fn issue2003_comsub_pipeline_keeps_procsub_redirect_for_grep() {
+        let dir = case_scratch("2003-comsub-grep");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "x=$(cat < <(printf 'a\\nb\\nc\\n') | grep b)\n\
+             echo \"got:[$x]\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "got:[b]\n", "stderr:\n{stderr}");
+    }
+
+    /// Stage 0 with a `<&N` dup of a regular file: the stage reads
+    /// the file through the dup, and the shared cursor is spent
+    /// afterwards (a second identical pipeline sees EOF), like GNU.
+    #[test]
+    fn issue2003_dup_redirect_stage0_delivers_file_payload() {
+        let dir = case_scratch("2003-dup-file");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             cat <&3 | wc -l\n\
+             cat <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n0\n", "stderr:\n{stderr}");
+    }
+
+    /// The `/dev/fd/N` spelling of the same dup.
+    #[test]
+    fn issue2003_devfd_spelling_stage0_delivers_file_payload() {
+        let dir = case_scratch("2003-devfd-file");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             cat < /dev/fd/3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// Stage 0 with a `<&N` dup of a streamed procsub pipe bound by
+    /// an earlier `exec`: the pipe bytes survive the stage-0 payload
+    /// resolution (handle-backed endpoint materialization).
+    #[test]
+    fn issue2003_dup_redirect_stage0_delivers_procsub_pipe() {
+        let dir = case_scratch("2003-dup-procsub");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "exec 3< <(printf '1\\n2\\n3\\n4\\n5\\n')\n\
+             cat <&3 | wc -l\n\
+             cat <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n0\n", "stderr:\n{stderr}");
+    }
+
+    /// A compound stage (read loop) binds fd 0 to the aliased
+    /// endpoint itself; it must read the payload through that bind.
+    #[test]
+    fn issue2003_compound_stage0_dup_redirect_reads_through() {
+        let dir = case_scratch("2003-loop-dup");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             while IFS= read -r l; do echo \"r:$l\"; done <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// A function stage carrying the dup redirect on the call.
+    #[test]
+    fn issue2003_function_stage0_dup_redirect_reads_through() {
+        let dir = case_scratch("2003-func-dup");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "f() { cat; }\n\
+             printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             f <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// The cat `-` operand resolves to the same redirected fd 0.
+    #[test]
+    fn issue2003_cat_dash_operand_reads_redirect_payload() {
+        let dir = case_scratch("2003-cat-dash");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             cat - <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// Control: at stage 1 the element's own dup redirect wins over
+    /// the pipe (single resolution at the stage, no stage-0 payload
+    /// involved) — GNU behavior before and after the fix.
+    #[test]
+    fn issue2003_stage1_dup_redirect_still_wins_over_pipe() {
+        let dir = case_scratch("2003-stage1-dup");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "printf '1\\n2\\n3\\n4\\n5\\n' > five.txt\n\
+             exec 3<five.txt\n\
+             printf '9\\n8\\n' | cat <&3 | wc -l\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "5\n", "stderr:\n{stderr}");
+    }
+
+    /// Control: the direct procsub redirect on a top-level pipeline
+    /// element streamed even before this fix (rubash#1952) and must
+    /// keep working.
+    #[test]
+    fn issue2003_direct_procsub_pipeline_control() {
+        let dir = case_scratch("2003-direct");
+        let (stdout, stderr, status) = run(&dir, "cat < <(printf '1\\n2\\n') | wc -l\n");
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "2\n", "stderr:\n{stderr}");
+    }
+}
+
+/// rubash#1976: the bidirectional netopen face (`exec 3<>/dev/tcp/host/port`)
+/// opened the connection but every fd-3 read AND write failed with
+/// `Invalid argument`. GNU netopen returns ONE connected socket descriptor
+/// that serves both directions of any `/dev/tcp|udp` face (redir.c:660
+/// redir_open calls netopen for RF_DEVTCP/RF_DEVUDP whatever the `<`/`>`/`<>`
+/// spelling; lib/sh/netopen.c:282 netopen → socket + connect at :178
+/// _netopen4, then plain read(2)/write(2) on that fd). Rubash adopts the
+/// socket as the fd slot's raw handle, and the handle byte primitives used
+/// to serve it through ReadFile/WriteFile with a NULL OVERLAPPED — rejected
+/// with ERROR_INVALID_PARAMETER on an overlapped socket handle, so the peer
+/// only ever saw the connection close (EOF). The fd layer now routes socket
+/// handles through the socket API (recv/send, select for bounded waits).
+///
+/// Expectations hand-measured against WSL GNU Bash 5.3.20
+/// (/usr/local/bin/bash, 2026-10-28): the TCP round trip below and the
+/// bounded read on a silent endpoint (`read -t 2 -u 3` → `rc=142`, variable
+/// empty). Complements the issue1026 pin in
+/// tests/issue1025_1026_1068_1103_1359_redirect_fd_regressions.rs (which
+/// stays byte-identical — it is PR #1970's acceptance gate), driven from
+/// script files.
+///
+/// Known follow-up (verified 2026-10-28, out of this issue's handle-shape
+/// scope): a `read -u 3` record off a DATAGRAM (`/dev/udp`) fd still cannot
+/// be served by the byte-wise record loop — GNU routes a socket through the
+/// buffered zreadc chunk reader (read.def:668: a socket is neither tty nor
+/// fd_ispipe, so unbuffered_read stays 0) and zsyncfd keeps the overage
+/// when its rewind lseek fails (lib/sh/zread.c:294-309), while winsock's
+/// recv DISCARDS a datagram larger than the receive buffer entirely
+/// (WSAEMSGSIZE). Serving datagram records needs the chunked keep-overage
+/// reader, a read-builtin buffering-profile change of its own.
+mod issue_1976 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    #[test]
+    fn issue1976_dev_tcp_readwrite_fd_round_trips() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 5];
+            stream.read_exact(&mut buf).expect("read ping");
+            assert_eq!(&buf, b"ping\n");
+            stream.write_all(b"pong\n").expect("write pong");
+        });
+        let dir = case_scratch("1976-tcp");
+        let script = format!(
+            "exec 3<>/dev/tcp/127.0.0.1/{port}\necho ping >&3\nread -u 3 line\necho \"got=[$line]\"\n"
+        );
+        let (stdout, stderr, status) = run(&dir, &script);
+        server.join().expect("server thread");
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "got=[pong]\n", "stderr:\n{stderr}");
+        assert_eq!(stderr, "", "stderr:\n{stderr}");
+    }
+
+    #[test]
+    fn issue1976_read_t_timeout_on_quiet_socket_fd() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        // Accept and stay silent past the read deadline, GNU-side.
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            std::thread::sleep(Duration::from_secs(4));
+            drop(stream);
+        });
+        let dir = case_scratch("1976-quiet");
+        let script = format!(
+            "exec 3<>/dev/tcp/127.0.0.1/{port}\nread -t 2 -u 3 line\necho \"rc=$?\"\necho \"line=[$line]\"\n"
+        );
+        let (stdout, stderr, status) = run(&dir, &script);
+        server.join().expect("server thread");
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "rc=142\nline=[]\n", "stderr:\n{stderr}");
+    }
+}
+mod issue_1584 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// rubash#1584: GNU execute_cmd.c:2525 execute_coproc forks once
+    /// and the child execs a simple external command itself, so $!
+    /// is the program's own pid (comm=cat). The respawn route put a
+    /// `rubash -c` wrapper at $! and ran cat as a grandchild. The
+    /// direct route must keep the data surface byte-identical (fds
+    /// 63/60, echo-back, wait status) while the pid names cat.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_cat_pid_is_cat() {
+        let dir = case_scratch("1584-cat");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc cat\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo \"fds=${COPROC[0]},${COPROC[1]}\"\n\
+             echo hello >&${COPROC[1]}\n\
+             read -u ${COPROC[0]} line\n\
+             echo \"back=$line\"\n\
+             eval \"exec ${COPROC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(
+            stdout, "comm=cat\nfds=63,60\nback=hello\nrc=0\n",
+            "stderr:\n{stderr}"
+        );
+        assert_eq!(stderr, "", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584: `kill $!` must reach the command itself. With
+    /// the wrapper at $! the TERM killed the wrapper (wait still
+    /// reported 143) and the sleep was never signalled.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_kill_reaches_the_command() {
+        let dir = case_scratch("1584-kill");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc sleep 30\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             kill -TERM $p\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=sleep\nrc=143\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584: a slash-path head takes the same direct route.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_slash_path_pid_is_the_program() {
+        let dir = case_scratch("1584-slash");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc /bin/cat\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo yo >&${COPROC[1]}\n\
+             read -u ${COPROC[0]} line\n\
+             echo \"back=$line\"\n\
+             eval \"exec ${COPROC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=cat\nback=yo\nrc=0\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584: an external command with plain arguments is
+    /// direct too (the args are expanded in the parent only because
+    /// the admitted classes make parent expansion identical to the
+    /// child's).
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_external_with_args() {
+        let dir = case_scratch("1584-args");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc grep --line-buffered foo\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo \"xfooy\" >&${COPROC[1]}\n\
+             read -u ${COPROC[0]} line\n\
+             echo \"back=$line\"\n\
+             eval \"exec ${COPROC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=grep\nback=xfooy\nrc=0\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584: a named coproc binds <NAME>_PID to the same
+    /// direct process.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_named_coproc_pid_is_the_program() {
+        let dir = case_scratch("1584-named");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc NC cat\n\
+             p=${NC_PID}\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo hello >&${NC[1]}\n\
+             read -u ${NC[0]} line\n\
+             echo \"back=$line\"\n\
+             eval \"exec ${NC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=cat\nback=hello\nrc=0\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1584 (negative control): a builtin coproc keeps a
+    /// shell-image child — GNU's coproc child for `read` is bash
+    /// itself, so the respawn route (comm=rubash) is the faithful
+    /// shape and must not be direct-spawned.
+    #[cfg(unix)]
+    #[test]
+    fn issue1584_coproc_builtin_keeps_shell_image() {
+        let dir = case_scratch("1584-builtin");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc read x\n\
+             p=$!\n\
+             echo \"comm=$(ps -o comm= -p $p 2>/dev/null)\"\n\
+             echo \"someval\" >&${COPROC[1]}\n\
+             eval \"exec ${COPROC[1]}>&-\"\n\
+             wait $p 2>/dev/null\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "comm=rubash\nrc=0\n", "stderr:\n{stderr}");
+    }
+}
+
+mod issue_1582 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// rubash#1582 (contract pin, adjudication pending): at a
+    /// spawn-realized level the identity narrative is already
+    /// GNU-consistent — an async subshell's $BASHPID is the pid its
+    /// children observe as $PPID. Any resolution of the flat-level
+    /// projection must preserve this.
+    #[cfg(unix)]
+    #[test]
+    fn issue1582_async_subshell_bashpid_matches_child_ppid() {
+        let dir = case_scratch("1582-async");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "( /bin/sh -c 'echo $PPID > pp.txt'; echo $BASHPID > bp.txt ) &\n\
+             wait $!\n\
+             if [ \"$(cat pp.txt)\" = \"$(cat bp.txt)\" ]; then echo MATCH; else echo DIFFER; fi\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "MATCH\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1582 (contract pin): $PPID is a startup-frozen value
+    /// in GNU (variables.c set_ppid runs once from
+    /// initialize_shell_variables; subshell forks inherit it), and
+    /// rubash matches — a subshell must NOT observe its parent
+    /// shell's pid through $PPID.
+    #[cfg(unix)]
+    #[test]
+    fn issue1582_ppid_is_frozen_in_subshell() {
+        let dir = case_scratch("1582-ppid");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "t=$PPID\n\
+             ( if [ \"$PPID\" = \"$t\" ]; then echo FROZEN; else echo CHANGED; fi )\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "FROZEN\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1582 (contract pin): `kill $BASHPID` inside a flat
+    /// subshell is scoped to that subshell layer (the #1461
+    /// interception): the layer dies by the signal (status 143,
+    /// no survival output) and the parent shell lives on. Any
+    /// projection change that points $BASHPID at the host process
+    /// must keep this kill scoped, never suicidal to the host.
+    #[cfg(unix)]
+    #[test]
+    fn issue1582_kill_own_bashpid_stays_scoped_to_the_subshell() {
+        let dir = case_scratch("1582-kill");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "( kill -TERM $BASHPID; echo SURVIVED )\n\
+             echo \"rc=$?\"\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "rc=143\n", "stderr:\n{stderr}");
+    }
+}
+
+mod issue_1646 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(30),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// rubash#1646 (varredir_close arm): GNU closes a `{var}` descriptor
+    /// when the owning command COMPLETES (redir.c undo_redirections), so
+    /// the command's own `>&$f` write lands and the `>(...)` consumer
+    /// drains it; only a LATER write sees the closed fd. Closing at
+    /// application time (the old behavior) rejected the first write with
+    /// EBADF and the consumer's stream was lost entirely. GNU bash
+    /// 5.3.20 oracle output for this probe: first-rc=0, the second write
+    /// reports Bad file descriptor, file:[one].
+    #[test]
+    fn issue1646_varredir_close_procsub_write_survives_own_command() {
+        let dir = case_scratch("1646-varredir-procsub");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "shopt -s varredir_close\n\
+             echo one {f}> >(cat > out.txt) >&$f\n\
+             echo \"first-rc=$?\"\n\
+             echo two >&$f 2>/dev/null || echo second-failed\n\
+             sleep 0.5\n\
+             echo \"file:[$(cat out.txt)]\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(
+            stdout, "first-rc=0\nsecond-failed\nfile:[one]\n",
+            "stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("Bad file descriptor"),
+            "the post-completion write must report EBADF: {stderr}"
+        );
+    }
+
+    /// rubash#1646 (varredir_close arm, plain-file form of the same
+    /// invariant): a `{f}>file` descriptor closed at application time
+    /// rejected the owning command's write too — first-rc was 1 and the
+    /// file stayed empty. GNU: first-rc=0, second write EBADF, file
+    /// holds exactly the first line.
+    #[test]
+    fn issue1646_varredir_close_plain_file_write_survives_own_command() {
+        let dir = case_scratch("1646-varredir-file");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "shopt -s varredir_close\n\
+             echo one {f}>plain.txt >&$f\n\
+             echo \"first-rc=$?\"\n\
+             echo two >&$f 2>/dev/null || echo second-failed\n\
+             echo \"file:[$(cat plain.txt)]\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(
+            stdout, "first-rc=0\nsecond-failed\nfile:[one]\n",
+            "stderr:\n{stderr}"
+        );
+    }
+
+    /// rubash#1646 (headline form): a persistent `exec {f}> >(...)`
+    /// stream that is never explicitly closed must still reach the
+    /// consumer when the shell exits — GNU's consumer drains at EOF
+    /// (subst.c:6362 process_substitute pipe semantics); the shell-exit
+    /// sweep is rubash's drain point. Byte-exact content check after
+    /// the process has exited.
+    #[test]
+    fn issue1646_persistent_procsub_drains_at_exit() {
+        let dir = case_scratch("1646-exit-drain");
+        let (_stdout, stderr, code) = run(
+            &dir,
+            "exec {f}> >(cat > out.txt)\nprintf 'a\\nb\\nc\\n' >&$f\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        let drained = std::fs::read(dir.join("out.txt")).expect("consumer output exists");
+        assert_eq!(drained, b"a\nb\nc\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1646 (default mode): with varredir_close off (the GNU
+    /// default) the descriptor persists across commands, both writes
+    /// land, and the accumulated stream drains whole at shell exit.
+    #[test]
+    fn issue1646_dynamic_fd_procsub_accumulates_and_drains_at_exit() {
+        let dir = case_scratch("1646-default-drain");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "echo one {f}> >(cat > out.txt) >&$f\necho \"first-rc=$?\"\necho two >&$f\necho \"second-rc=$?\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "first-rc=0\nsecond-rc=0\n", "stderr:\n{stderr}");
+        let drained = std::fs::read(dir.join("out.txt")).expect("consumer output exists");
+        assert_eq!(drained, b"one\ntwo\n", "stderr:\n{stderr}");
+    }
+}
+
+mod issue_1951 {
+    use super::*;
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let path = dir.join("case.sh");
+        std::fs::write(&path, script).expect("write probe script");
+        let out = run_rubash_in(
+            dir,
+            &[path.to_str().expect("utf8 scratch path")],
+            Duration::from_secs(60),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// rubash#1951: the streamed input-procsub endpoint serves a
+    /// line-wise `while read` loop completely and in order — the count
+    /// over 20k produced lines is exact (the materialized endpoint this
+    /// replaces lost its constant-factor footing entirely: ~0.29ms per
+    /// line at the audit tip). GNU bash 5.3.20 prints the same count.
+    #[test]
+    fn issue1951_procsub_endpoint_while_read_count_exact() {
+        let dir = case_scratch("1951-stream-count");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "n=0\nwhile read -r l; do n=$((n+1)); done < <(seq 1 20000)\necho \"read=$n\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "read=20000\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1951 (content face): lines arrive whole and in order —
+    /// the first, middle and last records read off the endpoint match
+    /// the producer's sequence exactly.
+    #[test]
+    fn issue1951_procsub_endpoint_records_whole_and_ordered() {
+        let dir = case_scratch("1951-stream-order");
+        let (stdout, stderr, code) = run(
+            &dir,
+            "n=0\nfirst= mid= last=\nwhile read -r l; do n=$((n+1)); case $n in 1) first=$l;; 1000) mid=$l;; esac; last=$l; done < <(seq 1 2000)\necho \"$first/$mid/$last/$n\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "1/1000/2000/2000\n", "stderr:\n{stderr}");
+    }
+}
+
+/// rubash#1903: a WinuxCmd `mkfifo` marker was not recognized by shell
+/// redirections — `echo hi > f` truncated the marker as a plain file
+/// and `cat f` read the marker bytes, so the two halves of the
+/// ecosystem never rendezvoused. GNU anchor: a fifo redirect target is
+/// opened exactly once (redir.c do_redirection_internal) and the open
+/// blocks until the peer side opens (fifo open semantics).
+///
+/// The pins cover the shell half of the WinuxCmd protocol
+/// (crate::winuxcmd_fifo): marker creation by the emulated `mkfifo`, the
+/// redirect round trip in the issue's exact shape, both blocking-open
+/// directions across two shell processes (the cross-process shape is
+/// what pairs with a WinuxCmd tool on the other side), the append and
+/// redirect-fed read forms, and a marker created OUTSIDE the shell
+/// (the WinuxCmd on-disk format written by hand) being honored.
+#[cfg(windows)]
+mod issue_1903 {
+    use super::*;
+
+    /// Per-invocation bound for every rubash child this module spawns.
+    /// The shapes below complete in well under a second when the
+    /// rendezvous pairs; 20s is pure failure headroom.
+    const BOUND: Duration = Duration::from_secs(20);
+
+    /// Spawn one rubash child for a script this module writes into
+    /// the scratch dir; `run` and the blocked shapes then wait on it
+    /// through the SHARED wait_bounded. This module originally
+    /// carried a private runner (spawn_drained / wait_drained)
+    /// because wait_bounded read the child's pipes only after exit,
+    /// with an unbounded read_to_end — a background job process that
+    /// outlives the shell (a fifo writer parked in its pairing open
+    /// is exactly that) inherits the write end and the read never
+    /// returned, so the nominal bound never fired and one wedged
+    /// shape ate the whole CI job (the #2014 hang: the goldens job
+    /// burned its full 25-minute timeout inside this module).
+    /// rubash#2056 promoted the drained shape into wait_bounded
+    /// itself (pipes drained on threads while waiting, try_wait
+    /// poll, one deadline over exit + pipe EOF, partial captures on
+    /// timeout), so the private runner is deleted and this module
+    /// converges onto the shared helper. The environment discipline
+    /// is run_rubash_in's airtight one, unchanged.
+    fn spawn_script(dir: &Path, script_name: &str, script: &str) -> Child {
+        let path = dir.join(script_name);
+        std::fs::write(&path, script).expect("write probe script");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
+        cmd.arg(path.to_str().expect("utf8 scratch path"))
+            .current_dir(dir)
+            .env_clear()
+            .env("PATH", minimal_path())
+            .env("HOME", dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for name in [
+            "SystemRoot",
+            "SystemDrive",
+            "WINDIR",
+            "COMSPEC",
+            "PATHEXT",
+            "OS",
+            "TEMP",
+            "TMP",
+        ] {
+            if let Ok(value) = std::env::var(name) {
+                cmd.env(name, value);
+            }
+        }
+        cmd.spawn().expect("spawn rubash")
+    }
+
+    fn run(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+        let mut child = spawn_script(dir, "case.sh", script);
+        let out = wait_bounded(&mut child, BOUND);
+        assert!(
+            !out.timed_out,
+            "rubash pid {} still running after {BOUND:?} — subprocess state: \
+             partial stdout:\n{}\npartial stderr:\n{}",
+            out.pid,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    /// Spawn a shell that is expected to BLOCK (its fifo open has no
+    /// peer yet). The shared wait_bounded starts draining when it is
+    /// called on the child rather than at spawn; a child parked in
+    /// its pairing open has printed nothing, so nothing is lost by
+    /// the later drain start.
+    fn spawn_blocked(dir: &Path, script: &str) -> Child {
+        spawn_script(dir, "blocked.sh", script)
+    }
+
+    fn assert_still_blocked(child: &mut Child, what: &str) {
+        std::thread::sleep(Duration::from_millis(2000));
+        assert!(
+            matches!(child.try_wait(), Ok(None)),
+            "{what}: completed without a peer — the fifo open did not block"
+        );
+    }
+
+    fn marker_bytes_and_attrs(path: &Path) -> (Vec<u8>, u32) {
+        use std::os::windows::fs::MetadataExt;
+        let bytes = std::fs::read(path).expect("read marker");
+        let attrs = std::fs::metadata(path)
+            .expect("marker metadata")
+            .file_attributes();
+        (bytes, attrs)
+    }
+
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x0000_0004;
+    const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+
+    #[test]
+    fn issue1903_mkfifo_creates_winuxcmd_marker() {
+        let dir = case_scratch("1903-create");
+        let (stdout, stderr, code) = run(&dir, "mkfifo f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "");
+        let (bytes, attrs) = marker_bytes_and_attrs(&dir.join("f"));
+        assert_eq!(bytes, b"!<fifo>", "marker content");
+        assert_ne!(
+            attrs & FILE_ATTRIBUTE_SYSTEM,
+            0,
+            "marker must carry FILE_ATTRIBUTE_SYSTEM (attrs {attrs:#x})"
+        );
+
+        // Existing target: GNU reports per-operand and exits 1.
+        let (_, stderr, code) = run(&dir, "mkfifo f\n");
+        assert_eq!(code, Some(1));
+        assert!(
+            stderr.contains("mkfifo: cannot create fifo 'f': File exists"),
+            "stderr:\n{stderr}"
+        );
+
+        // No operand: GNU's missing-operand failure (the pre-#1903
+        // handler silently exited 0).
+        let (_, stderr, code) = run(&dir, "mkfifo\n");
+        assert_eq!(code, Some(1));
+        assert!(
+            stderr.contains("mkfifo: missing operand"),
+            "stderr:\n{stderr}"
+        );
+
+        // A mode without any write bit maps to the readonly attribute
+        // (WinuxCmd's rule).
+        let (_, stderr, code) = run(&dir, "mkfifo -m 444 g\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        let (_, attrs) = marker_bytes_and_attrs(&dir.join("g"));
+        assert_ne!(
+            attrs & FILE_ATTRIBUTE_READONLY,
+            0,
+            "-m 444 must set FILE_ATTRIBUTE_READONLY (attrs {attrs:#x})"
+        );
+    }
+
+    #[test]
+    fn issue1903_redirect_round_trip_background_writer() {
+        // The issue's exact shape, several rounds: the rendezvous is a
+        // pairing race by nature, so one pass proves little (the
+        // #1820 pins set this precedent).
+        for round in 0..3 {
+            let dir = case_scratch(&format!("1903-roundtrip-{round}"));
+            let (stdout, stderr, code) = run(&dir, "mkfifo f\necho hi > f &\ncat f\n");
+            assert_eq!(code, Some(0), "round {round} stderr:\n{stderr}");
+            assert_eq!(stdout, "hi\n", "round {round} stderr:\n{stderr}");
+            // The write went through the pipe, not into the marker:
+            // the marker file still holds exactly the marker bytes.
+            let (bytes, _) = marker_bytes_and_attrs(&dir.join("f"));
+            assert_eq!(bytes, b"!<fifo>", "round {round}: marker was written into");
+        }
+    }
+
+    #[test]
+    fn issue1903_read_open_blocks_until_writer_arrives() {
+        let dir = case_scratch("1903-block-read");
+        let (_, stderr, code) = run(&dir, "mkfifo f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        let mut reader = spawn_blocked(&dir, "cat f\n");
+        assert_still_blocked(&mut reader, "cat f with no writer");
+        let (stdout, stderr, code) = run(&dir, "echo hi > f\n");
+        assert_eq!(code, Some(0), "writer stderr:\n{stderr}");
+        assert_eq!(stdout, "");
+        let out = wait_bounded(&mut reader, BOUND);
+        assert!(
+            !out.timed_out,
+            "reader pid {} never completed after the writer arrived; partial stderr:\n{}",
+            out.pid,
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert_eq!(out.code, Some(0));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+    }
+
+    #[test]
+    fn issue1903_write_open_blocks_until_reader_arrives() {
+        let dir = case_scratch("1903-block-write");
+        let (_, stderr, code) = run(&dir, "mkfifo f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        let mut writer = spawn_blocked(&dir, "echo hi > f\n");
+        assert_still_blocked(&mut writer, "echo hi > f with no reader");
+        let (stdout, stderr, code) = run(&dir, "cat f\n");
+        assert_eq!(code, Some(0), "reader stderr:\n{stderr}");
+        assert_eq!(stdout, "hi\n");
+        let out = wait_bounded(&mut writer, BOUND);
+        assert!(
+            !out.timed_out,
+            "writer pid {} never completed after the reader arrived; partial stderr:\n{}",
+            out.pid,
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert_eq!(out.code, Some(0));
+    }
+
+    #[test]
+    fn issue1903_append_and_redirect_fed_read_forms() {
+        let dir = case_scratch("1903-forms");
+        // Append form: `>>` is the same write-side rendezvous.
+        let (stdout, stderr, code) = run(&dir, "mkfifo f\necho via-append >> f &\ncat < f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "via-append\n");
+        // Builtin read fed by an input redirect, writer in background.
+        let (stdout, stderr, code) = run(
+            &dir,
+            "mkfifo g\necho line1 > g &\nread x < g\necho \"got=[$x]\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "got=[line1]\n");
+    }
+
+    #[test]
+    fn issue1903_foreign_winuxcmd_marker_is_honored() {
+        // A marker in WinuxCmd's on-disk format created OUTSIDE the
+        // shell (here: by hand — content + SYSTEM attribute, the two
+        // things detection keys on) must rendezvous exactly like one
+        // the shell's own mkfifo made. This is the issue's literal
+        // repro: the marker came from the other half of the ecosystem.
+        let dir = case_scratch("1903-foreign");
+        let marker = dir.join("f");
+        std::fs::write(&marker, b"!<fifo>").expect("write foreign marker");
+        let status = Command::new("attrib")
+            .arg("+S")
+            .arg(&marker)
+            .status()
+            .expect("attrib +S");
+        assert!(status.success(), "attrib +S failed");
+        let (stdout, stderr, code) = run(&dir, "echo hi > f &\ncat f\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "hi\n");
+    }
+}
+
+/// rubash#1905: synthetic /proc operands handed to external children.
+/// The engine's /proc lives only inside the shell; a child without a
+/// /proc layer of its own (System32's native findstr is the regression
+/// PATH's first match) must receive a readable spawn-time snapshot at
+/// the operand boundary, while a child with its own layer (Git's
+/// MSYS-hosted tools) keeps the literal spelling and answers through
+/// it — where `self` names the reader itself, never the shell.
+#[cfg(windows)]
+mod issue_1905 {
+    use super::*;
+
+    fn run_script(case: &str, script: &str) -> (String, String, Option<i32>) {
+        let dir = case_scratch(case);
+        std::fs::write(dir.join("case.sh"), script).expect("write case script");
+        let out = run_rubash_in(&dir, &["case.sh"], Duration::from_secs(30));
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.code,
+        )
+    }
+
+    #[test]
+    fn issue1905_native_child_reads_proc_stat_operand() {
+        // The proc-vfs plan's CLI acceptance shape: a real external
+        // program reads generated /proc content through the operand.
+        let (stdout, stderr, code) = run_script("1905-stat", "findstr /B \"cpu \" /proc/stat\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.starts_with("cpu "), "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_native_child_reads_proc_meminfo_operand() {
+        let (stdout, stderr, code) =
+            run_script("1905-meminfo", "findstr /B \"MemTotal:\" /proc/meminfo\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.contains("MemTotal:"), "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_env_forwarded_child_reads_proc_operand() {
+        let (stdout, stderr, code) = run_script("1905-env", "env findstr /B \"cpu \" /proc/stat\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.starts_with("cpu "), "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_operand_materializes_inside_command_substitution() {
+        let (stdout, stderr, code) = run_script(
+            "1905-comsub",
+            "x=$(findstr /B \"cpu \" /proc/stat)\necho \"head:${x:0:3}\"\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "head:cpu\n");
+    }
+
+    #[test]
+    fn issue1905_operand_materializes_in_a_pipeline_stage() {
+        // /C: pins findstr's phrase form: a plain quoted string is
+        // term-split on spaces by findstr itself, which would make
+        // the count depend on the runner's core count (the stat
+        // snapshot carries one `cpuN` line per core).
+        let (stdout, stderr, code) = run_script(
+            "1905-pipeline",
+            "findstr /B /C:\"cpu \" /proc/stat | wc -l\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout.trim(), "1", "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_exec_child_reads_proc_operand() {
+        let (stdout, stderr, code) =
+            run_script("1905-exec", "exec findstr /B \"cpu \" /proc/stat\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.starts_with("cpu "), "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_background_shape_serves_operand_through_wrapper() {
+        // The background direct-spawn fast path owns no operand
+        // plumbing: a /proc operand declines it to the wrapper route,
+        // whose child materializes through the foreground machinery.
+        let (stdout, stderr, code) = run_script(
+            "1905-background",
+            "findstr /B \"cpu \" /proc/stat > bg.out &\nwait $!\ncat bg.out\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.starts_with("cpu "), "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_coproc_shape_serves_operand() {
+        let (stdout, stderr, code) = run_script(
+            "1905-coproc",
+            "coproc findstr /B \"cpu \" /proc/stat\ncat <&${COPROC[0]}\n",
+        );
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.starts_with("cpu "), "stdout:\n{stdout}");
+    }
+
+    #[test]
+    fn issue1905_hosted_child_keeps_literal_and_answers_for_itself() {
+        // Git's cat is hosted by the MSYS runtime (msys-2.0.dll beside
+        // it): it keeps the literal spelling, resolves it through its
+        // own /proc, and `self` is the reader — the status must name
+        // cat, never the shell. This pins both the verbatim child
+        // class and the ruling that /proc/self is never materialized
+        // from the shell's side.
+        let (stdout, stderr, code) =
+            run_script("1905-self", "cat /proc/self/status | grep \"^Name:\"\n");
+        assert_eq!(code, Some(0), "stderr:\n{stderr}");
+        assert!(stdout.contains("Name:"), "stdout:\n{stdout}");
+        assert!(stdout.contains("cat"), "stdout:\n{stdout}");
     }
 }

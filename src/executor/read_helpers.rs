@@ -252,13 +252,14 @@ pub(in crate::executor) fn format_time_report(
 
     // GNU execute_cmd.c:1245: without `time -p` the default format is
     // BASH_TIMEFORMAT — a leading blank line, tab separators and the
-    // minute form (`\nreal\t%3lR\nuser\t%3lU\nsys\t%3lS`); only a set
-    // TIMEFORMAT overrides it (print_time_info, execute_cmd.c:1552-1557).
+    // minute form (`\nreal\t%3lR\nuser\t%3lU\nsys\t%3lS`, with REAL
+    // control characters in the value); only a set TIMEFORMAT
+    // overrides it (print_time_info, execute_cmd.c:1552-1557).
     // POSIX_TIMEFORMAT (:1244) is exclusively the `time -p` format above.
     let format = env_vars
         .get("TIMEFORMAT")
         .map(String::as_str)
-        .unwrap_or("\\nreal\\t%3lR\\nuser\\t%3lU\\nsys\\t%3lS");
+        .unwrap_or("\nreal\t%3lR\nuser\t%3lU\nsys\t%3lS");
 
     if format.is_empty() {
         return None;
@@ -280,19 +281,13 @@ fn expand_time_format(format: &str, metrics: TimeCommandMetrics) -> Result<Strin
     let mut output = String::new();
     let mut chars = format.chars().peekable();
 
+    // GNU print_formatted_time (execute_cmd.c:1346): only `%`
+    // directives are special — every other byte, backslash included,
+    // is copied verbatim (rubash#1939: `TIMEFORMAT='A\nB'` prints
+    // the two characters `\` and `n`, not a newline).
     while let Some(ch) = chars.next() {
         match ch {
             '%' => expand_time_format_percent(&mut output, &mut chars, metrics)?,
-            '\\' => match chars.next() {
-                Some('n') => output.push('\n'),
-                Some('t') => output.push('\t'),
-                Some('\\') => output.push('\\'),
-                Some(other) => {
-                    output.push('\\');
-                    output.push(other);
-                }
-                None => output.push('\\'),
-            },
             other => output.push(other),
         }
     }
@@ -772,6 +767,30 @@ fn take_untrapped_sigint() -> bool {
     false
 }
 
+/// niubash#684: true when a 0x04 byte read from fd 0 carries canonical
+/// line-discipline VEOF semantics. GNU gets Ctrl-D EOF for free: in
+/// canonical mode the kernel line discipline turns the VEOF char into
+/// a zero-length read (builtins/read.def's zread, lib/sh/zread.c:99,
+/// sees EOF; read.def:767 breaks with eof=1). A Windows console in
+/// cooked (line-input) mode has no such discipline — conhost delivers
+/// the 0x04 as ordinary line data — so the read transports translate it
+/// themselves: at an empty record the byte IS the EOF; mid-record it
+/// merely flushes the buffered prefix, which a byte-wise reader has
+/// already received, so the byte is dropped and the record continues.
+/// Armed only when the handle is a console in line-input mode AND the
+/// read did not switch it to one-char mode (read.def:570-590): in
+/// one-char mode ICANON is off and 0x04 is data, exactly as GNU sees
+/// it. On Unix canonical ttys the kernel consumes VEOF itself, so the
+/// translation simply never fires there.
+pub(in crate::executor) fn stdin_veof_armed(
+    stdin_handle: crate::fd::HANDLE,
+    onechar_active: bool,
+) -> bool {
+    !onechar_active
+        && crate::fd::is_console_handle(stdin_handle)
+        && crate::fd::console_line_input_mode(stdin_handle)
+}
+
 pub(in crate::executor) fn read_stdin_until(
     deadline: Option<std::time::Instant>,
     silent: bool,
@@ -825,6 +844,9 @@ pub(in crate::executor) fn read_stdin_until(
     } else {
         None
     };
+    // niubash#684: canonical-console VEOF translation state for the byte
+    // loop below (see stdin_veof_armed).
+    let veof_armed = stdin_veof_armed(stdin_handle, onechar.is_some());
     // Echo ownership follows the mode guard: on a console the onechar mode
     // silenced the driver's echo, so a non-silent read re-emits each
     // consumed unit itself (read.def ttfd_onechar keeps ECHO on).
@@ -913,6 +935,21 @@ pub(in crate::executor) fn read_stdin_until(
                     break;
                 }
                 buf => {
+                    // niubash#684: canonical-console VEOF — see
+                    // stdin_veof_armed. At an empty record the marker
+                    // IS the EOF; do not count it as a read byte (the
+                    // callers key EOF-with-nothing-served on the byte
+                    // count, exactly like a zread that returned 0).
+                    // Mid-record the marker only flushes the buffered
+                    // prefix — already delivered byte-wise — so it is
+                    // dropped and the record continues.
+                    if veof_armed && buf[0] == 0x04 {
+                        if output.is_empty() {
+                            eof = true;
+                            break;
+                        }
+                        continue;
+                    }
                     read += buf.len();
                     decoder.queue_byte(buf[0]);
                 }

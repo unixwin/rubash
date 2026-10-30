@@ -500,10 +500,21 @@ fn eval_unary(
     operand: &str,
     env_vars: &crate::shell::var_table::VarTable,
 ) -> Result<bool, String> {
+    // rubash#1902: the executor mirrors the fd table before this runs, so
+    // an fd-alias operand answers the bound fd's facts here.
+    if let Some(result) = fd_alias_fact_test(op, operand, env_vars) {
+        return Ok(result);
+    }
     if let Some(result) = virtual_device_test(op, operand) {
         return Ok(result);
     }
     if let Some(result) = fd_pipe_test(op, operand, env_vars) {
+        return Ok(result);
+    }
+    if let Some(result) = fd_file_test(op, operand, env_vars) {
+        return Ok(result);
+    }
+    if let Some(result) = proc_unary_test(op, operand) {
         return Ok(result);
     }
 
@@ -589,7 +600,15 @@ fn virtual_device_test(op: &str, operand: &str) -> Option<bool> {
     if cfg!(unix) && matches!(op, "-O" | "-G") {
         return None;
     }
-    if crate::executor::path::is_shell_null_device(operand) {
+    // rubash#1898: /dev/zero and /dev/full carry the null device's
+    // exact truth table in GNU (measured against the 5.3.20 oracle:
+    // -e -r -w -c true; -x -s -b -f false) — they are the same class
+    // of always-present character device, so one arm serves all
+    // three spellings, judged by the registry.
+    if crate::executor::path::is_shell_null_device(operand)
+        || crate::special_paths::is_zero_device(operand)
+        || crate::special_paths::is_full_device(operand)
+    {
         return Some(match op {
             "-a" | "-e" | "-r" | "-w" | "-c" => true,
             "-x" | "-s" | "-b" | "-p" | "-S" | "-u" | "-g" | "-k" | "-h" | "-L" | "-O" | "-G"
@@ -613,7 +632,17 @@ fn virtual_device_test(op: &str, operand: &str) -> Option<bool> {
         });
     }
 
-    if matches!(operand, "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0") {
+    // UN-SYNCED FALLBACK (rubash#1902): reached only where no executor ran
+    // the fd-alias fact sync (source/upstream harness bridges, direct
+    // execute() embedders). Every real [ ]/[[ ]] evaluation carries the
+    // __RUBASH_FD_TARGET_<fd>/__RUBASH_FD_ACCESS_<fd> marks and is answered
+    // by fd_alias_fact_test before this point, so these tables never
+    // shadow a live fd fact. The spelling judgment is the registry's
+    // (issue rubash#1973): `fd_alias_target == Some(0)` accepts exactly
+    // the canonical spellings the literal table carried — GNU rejects the
+    // leading-zero family on every face, so `test -e /dev/fd/00` falls
+    // through to the filesystem and fails there, like the oracle.
+    if crate::special_paths::fd_alias_target(operand) == Some(0) {
         return Some(match op {
             "-a" | "-e" | "-r" | "-c" => true,
             "-w" | "-x" | "-s" | "-b" | "-p" | "-S" | "-u" | "-g" | "-k" | "-h" | "-L" | "-O"
@@ -622,17 +651,10 @@ fn virtual_device_test(op: &str, operand: &str) -> Option<bool> {
         });
     }
 
-    // stdout (fd 1) and stderr (fd 2) are writable virtual devices.
-    // GNU test.c `unary_test` checks the actual fd via `sh_eaccess`; in
-    // the test-suite context these fds are open and writable.
+    // Same fallback for the fd 1 / fd 2 spellings.
     if matches!(
-        operand,
-        "/dev/stdout"
-            | "/proc/self/fd/1"
-            | "/dev/fd/1"
-            | "/dev/stderr"
-            | "/proc/self/fd/2"
-            | "/dev/fd/2"
+        crate::special_paths::fd_alias_target(operand),
+        Some(1) | Some(2)
     ) {
         return Some(match op {
             "-a" | "-e" | "-w" => true,
@@ -645,10 +667,154 @@ fn virtual_device_test(op: &str, operand: &str) -> Option<bool> {
     None
 }
 
+/// rubash#1902: an fd-alias operand (`/dev/stdin`, `/dev/stdout`,
+/// `/dev/stderr`, `/dev/fd/N`, `/proc/self/fd/N`, the own-pid spelling)
+/// answers from the fd FACT. GNU never special-cases these names in
+/// test.c — unary_test (test.c:544) hands the word to sh_stat/sh_eaccess,
+/// and sh_eaccess routes path_is_devfd operands (eaccess.c:63-77) through
+/// sh_stataccess (eaccess.c:116): stat the CURRENTLY BOUND descriptor and
+/// check the mode bits of what it found. The executor mirrors the binding
+/// into __RUBASH_FD_TARGET_<fd> / __RUBASH_FD_ACCESS_<fd> (and an empty
+/// tombstone for entries it closed) right before this evaluator runs.
+fn fd_alias_fact_test(
+    op: &str,
+    operand: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> Option<bool> {
+    // GNU switches on op (test.c:544 unary_test): only the file cases hand
+    // the word to sh_stat/sh_eaccess. The string/option/variable cases
+    // (-z -n -o -v -R -t) judge the LITERAL word — never resolve it.
+    if matches!(op, "-z" | "-n" | "-o" | "-v" | "-R" | "-t") {
+        return None;
+    }
+    let fd = crate::special_paths::fd_alias_target(operand)?;
+    let access = env_vars.get(&format!("__RUBASH_FD_ACCESS_{fd}"));
+    if let Some(target) = env_vars.get(&format!("__RUBASH_FD_TARGET_{fd}")) {
+        // -h/-L lstat the NODE (test.c:594-604): on the oracle platform
+        // /dev/fd/N and /dev/std* are procfs symlinks, so a live fd is
+        // always a symlink — the same probe-verified verdict the pipe
+        // faces carry (rubash#545/#1467).
+        if op == "-h" || op == "-L" {
+            return Some(true);
+        }
+        // The other file predicates stat THROUGH the link: answer from the
+        // referent by re-entering the evaluator on the bound target — a
+        // chain (an fd bound to another alias) follows one more hop, like
+        // the kernel resolving /proc/self/fd/N. Cycle-guarded: a path that
+        // still names an alias after 8 hops falls through.
+        ALIAS_CHAIN_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        let result = if ALIAS_CHAIN_DEPTH.with(|depth| depth.get()) > 8 {
+            None
+        } else {
+            eval_unary(op, target, env_vars).ok()
+        };
+        ALIAS_CHAIN_DEPTH.with(|depth| depth.set(depth.get() - 1));
+        return result;
+    }
+    // No target: the access mark is either the closed tombstone (empty —
+    // /proc/self/fd/N is gone, every predicate fails ENOENT) or the
+    // endpoint's device class plus mode bits.
+    let bits = access?;
+    if bits.is_empty() {
+        return Some(false);
+    }
+    // procfs symlink node, same verdict as the target-marked faces above.
+    if op == "-h" || op == "-L" {
+        return Some(true);
+    }
+    // `bits` is an engine-minted ASCII access mark (device-class letter
+    // plus rwx flag chars), so byte 0 is always ASCII (< 0x80) and can
+    // never be a UTF-8 continuation byte.
+    let class = char::from(bits.as_bytes()[0]);
+    let granted = |flag: char| bits.chars().skip(1).any(|bit| bit == flag);
+    Some(match class {
+        // fifo prw-r--r--; the probe-verified live-pipe matrix
+        // (rubash#545/#1467).
+        'p' => match op {
+            "-a" | "-e" | "-p" | "-r" | "-w" | "-O" | "-G" => true,
+            "-f" | "-d" | "-x" | "-s" | "-S" | "-b" | "-c" | "-u" | "-g" | "-k" | "-N" => false,
+            _ => return None,
+        },
+        // pts crw--w---- owned by this user: r+w, character device.
+        'c' => match op {
+            "-a" | "-e" | "-r" | "-w" | "-c" | "-O" | "-G" => true,
+            "-f" | "-d" | "-x" | "-s" | "-p" | "-S" | "-b" | "-u" | "-g" | "-k" | "-N" => false,
+            _ => return None,
+        },
+        // The synthetic 755 directory bind (rubash#1937).
+        'd' => match op {
+            "-a" | "-e" | "-d" | "-r" | "-w" | "-x" | "-O" | "-G" => true,
+            "-f" | "-s" | "-p" | "-S" | "-b" | "-c" | "-u" | "-g" | "-k" | "-N" => false,
+            _ => return None,
+        },
+        // A socket inode (rubash#2132: an inherited socketpair end
+        // classified by its handle). Socket mode bits are the
+        // creation-mode 0777 class, so r/w answer from the granted
+        // letters exactly like the generic-file class; -S is the one
+        // verdict that is the class's own.
+        's' => match op {
+            "-a" | "-e" | "-S" | "-O" | "-G" => true,
+            "-r" => granted('r'),
+            "-w" => granted('w'),
+            "-f" | "-d" | "-x" | "-s" | "-p" | "-b" | "-c" | "-u" | "-g" | "-k" | "-N" => false,
+            _ => return None,
+        },
+        // The null-device inode crw-rw-rw- (rubash#1898's symbolic bind).
+        'n' => match op {
+            "-a" | "-e" | "-r" | "-w" | "-c" => true,
+            "-f" | "-d" | "-x" | "-s" | "-p" | "-S" | "-b" | "-u" | "-g" | "-k" | "-N" => false,
+            _ => return None,
+        },
+        // Generic file inode, default 0644-ish; the mode-answerable ops
+        // consult the granted letters.
+        'f' => match op {
+            "-a" | "-e" | "-f" | "-O" | "-G" => true,
+            "-r" => granted('r'),
+            "-w" => granted('w'),
+            "-x" => granted('x'),
+            "-d" | "-s" | "-p" | "-S" | "-b" | "-c" | "-u" | "-g" | "-k" | "-N" => false,
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+thread_local! {
+    /// Cycle guard for the target-chain re-entry in fd_alias_fact_test.
+    static ALIAS_CHAIN_DEPTH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
 /// rubash#1467: `/dev/fd/N` and `/proc/self/fd/N` operands naming a
 /// pipe-like descriptor in the executor's fd table (process
 /// substitution, coproc, text feeds). The executor mirrors those
 /// descriptors into __RUBASH_FD_PIPE_<fd> before the builtin runs
+/// Synthetic /proc paths (rubash#1900): the facts come from the
+/// registry tables plus pid liveness in `proc_vfs::proc_unary_facts` —
+/// this face previously fell to `virtual_device_test`'s constant table
+/// (rubash#1902) or to a filesystem that has no such names. Only the
+/// ops whose truth the facts determine are answered here; the rest
+/// fall through to the filesystem faces.
+fn proc_unary_test(op: &str, operand: &str) -> Option<bool> {
+    let facts = crate::proc_vfs::proc_unary_facts(operand)?;
+    Some(match op {
+        "-e" | "-a" => true,
+        "-d" => facts.is_dir || (facts.is_link && facts.link_target_is_dir),
+        "-f" => facts.is_file || (facts.is_link && !facts.link_target_is_dir),
+        "-h" | "-L" => facts.is_link,
+        "-r" => true,
+        // rubash#1936: -w/-x are mode questions the facts now carry
+        // (procfs modes are definitional — see ProcUnaryFacts); they
+        // previously fell through to the filesystem, which has no
+        // such names on Windows and answered false for every entry,
+        // including the writable per-pid files and the executable
+        // exe link.
+        "-w" => facts.writable,
+        "-x" => facts.executable,
+        "-s" => facts.is_file || (facts.is_link && !facts.link_target_is_dir),
+        _ => return None,
+    })
+}
+
 /// (sync_fd_pipe_marks), because the paths are virtual here and stat()
 /// on them would interrogate the host process's unrelated fd N. The
 /// verdict matrix is the probe-verified one the [[ ]] path uses
@@ -661,11 +827,12 @@ fn fd_pipe_test(
     operand: &str,
     env_vars: &crate::shell::var_table::VarTable,
 ) -> Option<bool> {
-    let fd: u32 = operand
-        .strip_prefix("/dev/fd/")
-        .or_else(|| operand.strip_prefix("/proc/self/fd/"))?
-        .parse()
-        .ok()?;
+    // The spelling judgment is the registry's (redundancy audit R3/D4):
+    // the local strip+parse also accepted `/dev/fd/+3`, which GNU
+    // rejects on every face (redir.c's special-filename handling never
+    // parses a sign; on the oracle platform the literal open fails
+    // ENOENT in procfs).
+    let fd: u32 = crate::special_paths::fd_alias_target(operand)?;
     if env_vars
         .get(&format!("__RUBASH_FD_PIPE_{fd}"))
         .map(String::as_str)
@@ -680,7 +847,48 @@ fn fd_pipe_test(
     })
 }
 
+/// rubash#2042: the file-backed sibling of [`fd_pipe_test`]. A
+/// file-backed descriptor (`exec 4</dev/null`, `exec 6>>f`) is a live
+/// fd magic link too, and GNU answers `test -r` TRUE for it
+/// regardless of the fd's open mode: sh_eaccess (test.c:553 ->
+/// lib/sh/eaccess.c:194) on real procfs answers yes for `lr-x`
+/// read-only, `l-wx` write-only append, and `lr-x` /dev/null links
+/// alike (bash 5.3.20, uid 1 — the class question is the link's
+/// liveness, not the open mode). Only -r is answered here: the rest
+/// of the unary matrix for file links falls through to the faces it
+/// always used, and the pipe class stays on fd_pipe_test's matrix.
+fn fd_file_test(
+    op: &str,
+    operand: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> Option<bool> {
+    let fd: u32 = crate::special_paths::fd_alias_target(operand)?;
+    if env_vars
+        .get(&format!("{}{fd}", crate::executor::types::FD_FILE_PREFIX))
+        .map(String::as_str)
+        != Some("1")
+    {
+        return None;
+    }
+    match op {
+        "-r" => Some(true),
+        _ => None,
+    }
+}
+
 fn test_path(operand: &str, env_vars: &crate::shell::var_table::VarTable) -> std::path::PathBuf {
+    // rubash#2071: GNU hands the operand string to the syscall verbatim —
+    // test.c:549-550 `sh_stat (arg, &stat_buf)` for -a/-e, test.c:552-559
+    // `sh_eaccess (arg, R_OK|W_OK|X_OK)` for -r/-w/-x, lstat likewise for
+    // -h/-L — so an empty operand fails ENOENT and every path unary is
+    // false. The $PWD anchoring below would instead join "" onto the cwd
+    // and stat the cwd itself (exists, directory, readable/writable/
+    // executable, owned, setgid…), silently answering true. Keep the
+    // empty operand empty so every downstream stat/access fails exactly
+    // like the syscall does.
+    if operand.is_empty() {
+        return std::path::PathBuf::new();
+    }
     let path = crate::executor::path::shell_path_to_windows_for_lookup(operand, env_vars);
     if path.is_absolute() {
         return path;

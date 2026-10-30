@@ -6,7 +6,7 @@
 use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
-const EX_USAGE: i32 = 2;
+pub(crate) const EX_USAGE: i32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalAction {

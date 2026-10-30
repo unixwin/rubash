@@ -67,6 +67,19 @@ jobs:
       - name: Ledger copies are identical
         run: cmp rubash/docs/api-ledger.md niubash/docs/api-ledger.md
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Completeness (ledger §5.4): existence of the recorded
+      # symbols is not coverage. Every rubash:: path niubash
+      # consumes must be recorded in the ledger — the debugger
+      # front doors and the builtins::bind helpers were consumed
+      # for a full release cycle unrecorded before this check
+      # existed.
+      - name: Ledger covers everything niubash consumes
+        run: python3 rubash/scripts/check-api-ledger.py --repo rubash --ledger rubash/docs/api-ledger.md --niu niubash
+
       - uses: dtolnay/rust-toolchain@stable
 
       # --locked, and no `cargo update -p rubash`: under the [patch]

@@ -38,7 +38,6 @@ fn shell_bin() -> PathBuf {
 }
 
 struct Output {
-    status: i32,
     stdout: String,
     stderr: String,
 }
@@ -51,7 +50,6 @@ fn run_c(script: &str) -> Output {
         .output()
         .expect("run rubash");
     Output {
-        status: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).replace('\r', ""),
     }
@@ -85,6 +83,7 @@ fn declare_na_on_scalar_moves_value_to_element_zero() {
 
 /// Same for the associative shape.
 #[test]
+#[allow(non_snake_case)] // name mirrors the literal `declare -nA` flag pair (vs `-na`)
 fn declare_nA_on_scalar_moves_value_to_element_zero() {
     let out = run_c("s7=hello; declare -nA s7; echo rc=$?; declare -p s7");
     assert_eq!(
@@ -141,6 +140,7 @@ fn declare_na_on_existing_array_conflicts() {
 
 /// And for the associative shape.
 #[test]
+#[allow(non_snake_case)] // name mirrors the literal `declare -nA` flag pair (vs `-na`)
 fn declare_nA_on_existing_assoc_conflicts() {
     let out = run_c("declare -A aq; declare -nA aq; echo rc=$?; declare -p aq");
     assert_eq!(out.stdout, "rc=1\ndeclare -A aq\n");

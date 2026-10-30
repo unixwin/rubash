@@ -679,7 +679,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     // `{var}` redirects allocate a fresh descriptor (GNU
                     // redir.c redir_varassign) — never the fd-0 mirror.
                     if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
-                        state.current_cmd.redirect_in = Some(redirect);
+                        state.current_cmd.redirect_in = Some(Box::new(redirect));
                     }
                     *i = next_i;
                 } else if let Some((mut process_substitution, next_i)) =
@@ -752,7 +752,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     );
                     state.current_cmd.redirects.push(redirect.clone());
                     if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
-                        state.current_cmd.redirect_in = Some(redirect);
+                        state.current_cmd.redirect_in = Some(Box::new(redirect));
                     }
                     *i += 1;
                 } else if let Some(error) = missing_redirect_target_node(
@@ -814,7 +814,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 let redirect =
                     redirect_node(&token.value, Some(2), &target, false, token.value == "2>|");
                 state.current_cmd.redirects.push(redirect.clone());
-                state.current_cmd.redirect_err = Some(redirect);
+                state.current_cmd.redirect_err = Some(Box::new(redirect));
                 *i = next_i;
             } else if let Some(next_i) =
                 assign_redirect_err_target(tokens, *i, &mut state.current_cmd)
@@ -844,7 +844,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     .push(process_substitution);
                 let redirect = redirect_node(&token.value, Some(2), &target, true, false);
                 state.current_cmd.redirects.push(redirect.clone());
-                state.current_cmd.redirect_err_append = Some(redirect);
+                state.current_cmd.redirect_err_append = Some(Box::new(redirect));
                 *i = next_i;
             } else if let Some(next_i) =
                 assign_redirect_err_append_target(tokens, *i, &mut state.current_cmd)
@@ -1230,6 +1230,20 @@ fn collect_adjacent_process_substitution_word(
     tokens: &[Token],
     start: usize,
 ) -> Option<(String, String, usize)> {
+    // Provably-empty admission (rubash#117 whitelist discipline): the
+    // builder below only returns a value when one of the walked tokens IS a
+    // `<(...)`/`>(...)` fragment, and every production
+    // `any_process_substitution_word_target` can find requires such a
+    // token. Walk the same adjacency run WITHOUT building the two output
+    // strings first: the previous code appended every adjacent word's
+    // value/raw into two fresh Strings on every ordinary word
+    // (`echo value_1` did it twice) only to throw them away when no
+    // process substitution was found. GNU parse.y:5305 read_token_word
+    // assembles a word in one pass and only a `<(`/`>(` span takes the
+    // process-substitution route, so the early answer is the same.
+    if !adjacent_run_has_process_substitution(tokens, start) {
+        return None;
+    }
     let mut index = start;
     let mut end = tokens.get(start)?.column;
     let mut value = String::new();
@@ -1265,6 +1279,47 @@ fn collect_adjacent_process_substitution_word(
     }
 
     (saw_process_substitution && index > start).then_some((value, raw, index - 1))
+}
+
+/// The allocation-free pre-pass of
+/// [`collect_adjacent_process_substitution_word`]: report whether the
+/// adjacency run starting at `start` contains a process-substitution
+/// target. The walk mirrors the builder's loop exactly (same adjacency
+/// test, same `adjacent_word_token` continuation, same `end` tracking),
+/// only without the `value`/`raw` accumulation.
+fn adjacent_run_has_process_substitution(tokens: &[Token], start: usize) -> bool {
+    let mut index = start;
+    let mut end = match tokens.get(start) {
+        Some(token) => token.column,
+        None => return false,
+    };
+    let mut started = false;
+    while let Some(token) = tokens.get(index) {
+        if started && token.column != end {
+            return false;
+        }
+        if let Some((substitution, next_i)) = any_process_substitution_word_target(tokens, index) {
+            if !substitution.target.is_empty() {
+                started = true;
+            }
+            let Some(close) = tokens.get(next_i) else {
+                return true;
+            };
+            end = close.column + close.raw.len();
+            index = next_i + 1;
+            continue;
+        }
+        if adjacent_word_token(token) {
+            if !token.value.is_empty() {
+                started = true;
+            }
+            end = token.column + token.raw.len();
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    false
 }
 
 fn collect_adjacent_assignment_process_substitution<'a>(

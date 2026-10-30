@@ -1,3 +1,4 @@
+use super::command_registry::{primary_dispatch_slot, PrimarySlot};
 use super::*;
 
 impl Executor {
@@ -6,9 +7,31 @@ impl Executor {
         cmd: &CommandNode,
         word: &str,
     ) -> Result<Option<Result<(), ExecuteError>>, ExecuteError> {
-        let result = match word {
-            "exit" => self.execute_exit_command_word(cmd)?,
-            "echo" => {
+        // GNU Bash has no `sudo` builtin (issue #759 item 4): without an
+        // embedding-host elevation handler the word takes the PATH route
+        // like any external command; with one, the host-capability
+        // builtin intercepts it (introspection keeps reporting external,
+        // the docs/builtins.md §3 hidden-builtin contract). Not a
+        // registry claim (rubash#2036 S3): the cfg(windows) handler
+        // pre-check stays ahead of the table, with the historical
+        // fall-through to `Ok(None)` when no handler is registered.
+        #[cfg(windows)]
+        if word == "sudo" && self.elevation_handler.is_some() {
+            let result = if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "sudo")
+            {
+                self.execute_external(cmd)
+            } else {
+                self.exit_code = self.execute_sudo(cmd)?;
+                Ok(())
+            };
+            return Ok(Some(result));
+        }
+        // rubash#2036 S3: the name set is the registry's SimpPrimary
+        // projection (command_registry::PRIMARY_DISPATCH); the slot
+        // match carries the historical per-name bodies verbatim.
+        let result = match primary_dispatch_slot(word) {
+            Some(PrimarySlot::Exit) => self.execute_exit_command_word(cmd)?,
+            Some(PrimarySlot::Echo) => {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "echo") {
                     self.execute_external(cmd)
                 } else {
@@ -16,20 +39,22 @@ impl Executor {
                     Ok(())
                 }
             }
-            "eval" => self.execute_eval(cmd),
-            "enable" => {
+            Some(PrimarySlot::Eval) => self.execute_eval(cmd),
+            Some(PrimarySlot::Enable) => {
                 self.exit_code = self.execute_enable(cmd)?;
                 Ok(())
             }
-            "exec" => self.execute_exec_command(cmd),
-            "logout" => {
+            Some(PrimarySlot::Exec) => self.execute_exec_command(cmd),
+            Some(PrimarySlot::Logout) => {
                 self.exit_code = self.execute_logout(cmd)?;
                 Ok(())
             }
-            "return" => self.execute_return(cmd),
-            "break" => self.execute_loop_control(cmd, LoopControlKind::Break),
-            "continue" => self.execute_loop_control(cmd, LoopControlKind::Continue),
-            "pwd" => {
+            Some(PrimarySlot::Return) => self.execute_return(cmd),
+            Some(PrimarySlot::Break) => self.execute_loop_control(cmd, LoopControlKind::Break),
+            Some(PrimarySlot::Continue) => {
+                self.execute_loop_control(cmd, LoopControlKind::Continue)
+            }
+            Some(PrimarySlot::Pwd) => {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "pwd") {
                     self.execute_external(cmd)
                 } else {
@@ -37,8 +62,8 @@ impl Executor {
                     Ok(())
                 }
             }
-            "source" | "." => self.execute_source_command(cmd),
-            "printf" => {
+            Some(PrimarySlot::Source) => self.execute_source_command(cmd),
+            Some(PrimarySlot::Printf) => {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "printf") {
                     self.execute_external(cmd)
                 } else {
@@ -46,63 +71,49 @@ impl Executor {
                     Ok(())
                 }
             }
-            "command" => self.execute_command_builtin_command(cmd)?,
-            "builtin" => self.execute_builtin_direct_command(cmd),
-            // GNU Bash has no `sudo` builtin (issue #759 item 4): without an
-            // embedding-host elevation handler the word takes the PATH route
-            // like any external command; with one, the host-capability
-            // builtin intercepts it (introspection keeps reporting external,
-            // the docs/builtins.md §3 hidden-builtin contract).
-            #[cfg(windows)]
-            "sudo" if self.elevation_handler.is_some() => {
-                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "sudo") {
-                    self.execute_external(cmd)
-                } else {
-                    self.exit_code = self.execute_sudo(cmd)?;
-                    Ok(())
-                }
-            }
-            "cd" => {
+            Some(PrimarySlot::Command) => self.execute_command_builtin_command(cmd)?,
+            Some(PrimarySlot::Builtin) => self.execute_builtin_direct_command(cmd),
+            Some(PrimarySlot::Cd) => {
                 self.exit_code = self.execute_cd(cmd)?;
                 Ok(())
             }
-            "pushd" => {
+            Some(PrimarySlot::Pushd) => {
                 self.exit_code =
                     self.execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Pushd)?;
                 Ok(())
             }
-            "popd" => {
+            Some(PrimarySlot::Popd) => {
                 self.exit_code =
                     self.execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Popd)?;
                 Ok(())
             }
-            "dirs" => {
+            Some(PrimarySlot::Dirs) => {
                 self.exit_code =
                     self.execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Dirs)?;
                 Ok(())
             }
-            "alias" => {
+            Some(PrimarySlot::Alias) => {
                 self.exit_code = self.execute_alias(cmd)?;
                 Ok(())
             }
-            "declare" | "typeset" => self.execute_declare_command(cmd),
-            "local" => {
+            Some(PrimarySlot::Declare) => self.execute_declare_command(cmd),
+            Some(PrimarySlot::Local) => {
                 self.exit_code = self.execute_local(cmd)?;
                 Ok(())
             }
-            "unalias" => {
+            Some(PrimarySlot::Unalias) => {
                 self.exit_code = self.execute_unalias(cmd)?;
                 Ok(())
             }
-            "export" => {
+            Some(PrimarySlot::Export) => {
                 self.exit_code = self.execute_export(cmd)?;
                 Ok(())
             }
-            "readonly" => {
+            Some(PrimarySlot::Readonly) => {
                 self.exit_code = self.execute_readonly(cmd)?;
                 Ok(())
             }
-            ":" => {
+            Some(PrimarySlot::Colon) => {
                 let redirect_failed = self.apply_no_output_builtin_redirects_with_status(cmd)?;
                 self.exit_code = if redirect_failed {
                     1
@@ -111,7 +122,7 @@ impl Executor {
                 };
                 Ok(())
             }
-            "true" => {
+            Some(PrimarySlot::True) => {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "true") {
                     self.execute_external(cmd)
                 } else {
@@ -125,7 +136,7 @@ impl Executor {
                     Ok(())
                 }
             }
-            "false" => {
+            Some(PrimarySlot::False) => {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "false") {
                     self.execute_external(cmd)
                 } else {
@@ -139,7 +150,7 @@ impl Executor {
                     Ok(())
                 }
             }
-            "sleep" => {
+            Some(PrimarySlot::Sleep) => {
                 if !self.emulated_external_stands_down("sleep")
                     && crate::builtins::sleep::can_execute_fast_path(&cmd.words[1..])
                     // rubash#1497: a stamped -c tail command must reach
@@ -235,20 +246,32 @@ impl Executor {
                     self.execute_external(cmd)
                 }
             }
-            "env" => {
-                self.execute_env_command(cmd)?;
-                Ok(())
+            Some(PrimarySlot::Env) => {
+                // #2036 S2 (KD-1): env is in BUILTIN_NAMES and, now
+                // that enable's list projects from the same registry,
+                // it is enable-managed like every other builtin. The
+                // per-arm `enable -n` check the sibling arms carry was
+                // never wired here (enable refused the name outright,
+                // so the disabled set could never contain it); without
+                // it, `enable -n env` would report success while
+                // dispatch ignored the disable.
+                if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "env") {
+                    self.execute_external(cmd)
+                } else {
+                    self.execute_env_command(cmd)?;
+                    Ok(())
+                }
             }
-            "set" => self.execute_set_command(cmd),
-            "getopts" => {
+            Some(PrimarySlot::Set) => self.execute_set_command(cmd),
+            Some(PrimarySlot::Getopts) => {
                 self.exit_code = self.execute_getopts_command(cmd)?;
                 Ok(())
             }
-            "shopt" => {
+            Some(PrimarySlot::Shopt) => {
                 self.exit_code = self.execute_shopt(cmd)?;
                 Ok(())
             }
-            "hash" => {
+            Some(PrimarySlot::Hash) => {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "hash") {
                     self.execute_external(cmd)
                 } else {
@@ -256,15 +279,15 @@ impl Executor {
                     Ok(())
                 }
             }
-            "help" => {
+            Some(PrimarySlot::Help) => {
                 self.exit_code = self.execute_help(cmd)?;
                 Ok(())
             }
-            "kill" => {
+            Some(PrimarySlot::Kill) => {
                 self.exit_code = self.execute_kill(cmd)?;
                 Ok(())
             }
-            _ => return Ok(None),
+            None => return Ok(None),
         };
         Ok(Some(result))
     }
@@ -311,6 +334,16 @@ impl Executor {
                     )?;
                     self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                     self.exit_code = 2;
+                    // get_exitstat's failure return is EX_USAGE (258 >
+                    // EX_SHERRBASE=256): execute_simple_command marks
+                    // special_builtin_failed (execute_cmd.c:4886-4888), so
+                    // in POSIX non-interactive mode this failure is fatal
+                    // at this frame unless the context is tested — the
+                    // gate in execute_materialized_command converts
+                    // (execute_cmd.c:1004-1017). RC audit phase-1 finding
+                    // ④ / errors10: the committed errors.snap golden had
+                    // absorbed the non-fatal behavior.
+                    self.special_builtin_failed.set(true);
                     return Ok(Ok(()));
                 }
             }
@@ -353,6 +386,15 @@ impl Executor {
             }
             crate::builtins::exit::ExitAction::Continue(status) => {
                 self.exit_code = status;
+                // The only Continue outcome reachable past the intercept
+                // above is CHECK_HELPOPT's `--help` (builtins/exit.def:59),
+                // which RETURNS EX_USAGE from the builtin itself — the
+                // same special-builtin failure class as the numeric error
+                // (execute_cmd.c:4886-4888), fatal in POSIX
+                // non-interactive mode via the dispatch gate.
+                if status == crate::builtins::exit::EX_USAGE {
+                    self.special_builtin_failed.set(true);
+                }
                 Ok(())
             }
         })

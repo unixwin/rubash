@@ -53,6 +53,36 @@ engine builtins (full option parsing, coreutils/MSYS2 output shapes), and
 `type`/`enable`/`compgen -b` keep reporting them as external commands, and
 they work even when PATH carries no `uname.exe` at all.
 
+## Known platform divergence: carriage-return handling
+
+On Windows rubash strips carriage returns that immediately precede a newline
+in script and heredoc lines, command-substitution capture, and `read` values;
+on every other platform CR passes through byte-identical. This is an
+established, deliberate platform divergence — not an open gap.
+
+- **GNU's own rule is CR-as-data off MSYS.** Upstream's only CR handling is
+  `#ifdef __MSYS__`-gated: `parse.y:1609 yy_getc()` (MSYS skips `\r`
+  entirely at the input getter), `parse.y:2596` (MSYS drops `\r` while
+  reading a script line) and `subst.c:6788` (MSYS strips a `\r` before a
+  newline in command-substitution accumulation). On non-MSYS GNU bash —
+  including the WSL GNU Bash 5.3.x baseline — a CR is ordinary word data:
+  CRLF scripts fail with `$'getopts\r': command not found`, and
+  `printf 'a\r\n' | read x` leaves `x` as `a\r`.
+- **Why Windows strips: CRLF robustness.** Windows-native text terminates
+  lines with CRLF — `core.autocrlf` checkouts, Notepad-sourced scripts, CRT
+  text-mode pipes — and the shipped oh-my-niu bundle is 100% CRLF. Reading
+  the CR as data would make `getopts\r`-style failures the default
+  experience on the primary platform. Only the CR belonging to a CRLF
+  terminator is stripped: a lone carriage return stays literal word data
+  (niubash#106; rubash#140 records the tolerance as a Windows product
+  decision, niubash#120 family).
+- **Scope.** The stripping is `cfg!(windows)`-gated at every site, so unix
+  and macOS keep GNU behavior byte-for-byte (line numbers at this writing):
+  `src/lexer/mod.rs:908` and `:1174` (heredoc bodies and logical lines),
+  `src/executor/command_subst_helpers.rs:390`/`:403` (`trim_capture_terminator`,
+  command-substitution capture), `src/executor/read_helpers.rs:1103`/`:1113`
+  and `src/executor/pipeline_exec.rs:42` (`read`, `read -t`).
+
 ## Platform status narrative (2026-09 state)
 
 **Platform status — cross-platform, Windows-first**: Windows is the primary

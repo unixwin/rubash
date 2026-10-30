@@ -75,7 +75,7 @@ pub(super) fn collect_trailing_redirections(
                 // (GNU redir.c redir_varassign) — it never binds fd 0, so it
                 // must not mirror into redirect_in.
                 if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
-                    command.redirect_in = Some(redirect);
+                    command.redirect_in = Some(Box::new(redirect));
                 }
                 *index = next_i + 1;
                 continue;
@@ -112,7 +112,7 @@ pub(super) fn collect_trailing_redirections(
                 // same rule). Mirroring it rerouted the command's
                 // stdout into the procsub target/file.
                 if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
-                    command.redirect_out = Some(redirect);
+                    command.redirect_out = Some(Box::new(redirect));
                 }
                 *index = next_i + 1;
                 continue;
@@ -145,12 +145,12 @@ pub(super) fn collect_trailing_redirections(
                 if token.kind == TokenKind::RedirectErrAppend {
                     let redirect = redirect_node(&token.value, Some(2), &target, true, false);
                     command.redirects.push(redirect.clone());
-                    command.redirect_err_append = Some(redirect);
+                    command.redirect_err_append = Some(Box::new(redirect));
                 } else {
                     let redirect =
                         redirect_node(&token.value, Some(2), &target, false, token.value == "2>|");
                     command.redirects.push(redirect.clone());
-                    command.redirect_err = Some(redirect);
+                    command.redirect_err = Some(Box::new(redirect));
                 }
                 *index = next_i + 1;
                 continue;
@@ -192,7 +192,7 @@ pub(super) fn collect_trailing_redirections(
                 );
                 command.redirects.push(redirect.clone());
                 if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
-                    command.redirect_in = Some(redirect);
+                    command.redirect_in = Some(Box::new(redirect));
                 }
             }
             TokenKind::RedirectOut => {
@@ -222,7 +222,7 @@ pub(super) fn collect_trailing_redirections(
                         );
                         command.redirects.push(redirect.clone());
                         if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
-                            command.redirect_in = Some(redirect);
+                            command.redirect_in = Some(Box::new(redirect));
                         }
                         *index = next_i + 1;
                         continue;
@@ -240,7 +240,7 @@ pub(super) fn collect_trailing_redirections(
                     );
                     command.redirects.push(redirect.clone());
                     if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
-                        command.redirect_in = Some(redirect);
+                        command.redirect_in = Some(Box::new(redirect));
                     }
                 } else {
                     let (dup_value, dup_raw) = dup_close_target(command, &token.value, target);

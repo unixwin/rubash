@@ -57,6 +57,180 @@ pub(in crate::executor) fn rubash_spawn_inherited_state(key: &str) -> bool {
     key.starts_with("__RUBASH_SETOPT_") || KEYS.contains(&key)
 }
 
+/// Transport key for the fork-inherited positional parameters. GNU fork
+/// children inherit the parent's dollar_vars verbatim (variables.c), but
+/// a respawned `rubash -c` child re-imports only its process
+/// environment, so every fork-shaped spawn (async/subshell wrapper,
+/// coproc, both process-substitution forms) stamps the live positional
+/// window under this key and `Executor::new` consumes and strips it for
+/// internal respawns (init.rs). Without the stamp the child's body saw
+/// `$#` = 0 — bats-exec-suite read `"$@"` inside `< <(...)` as one empty
+/// word and ran zero tests (rubash#2032). The value rides the indexed
+/// array storage codec (`format_indexed_array_values`/`array_values`),
+/// the same round-trip the array-variable transport uses.
+pub(in crate::executor) const POSITIONAL_PARAMS_TRANSPORT: &str = "__RUBASH_POSITIONAL_PARAMS";
+
+impl Executor {
+    /// The live positional window (`shift`-visible `$1..$#`) rendered
+    /// for a fork-shaped respawn; see POSITIONAL_PARAMS_TRANSPORT.
+    pub(in crate::executor) fn positional_params_transport_value(&self) -> String {
+        format_indexed_array_values(self.shell_state.positional_window().to_vec())
+    }
+}
+
+/// rubash#2058: transport keys for the rest of the fork-inherited
+/// state (docs/design/respawn-transport-census.md). A GNU fork copies
+/// the parent's call-stack arrays and PIPESTATUS cell verbatim
+/// (variables.c); a respawned `rubash -c` child re-imports only its
+/// process environment, so every fork-shaped spawn (async/subshell
+/// wrapper, coproc, both process-substitution forms) stamps the
+/// parent's effective views under these keys and `Executor::new`
+/// consumes and strips them for internal respawns (init.rs). List
+/// values ride the indexed-array storage codec, the same round-trip
+/// POSITIONAL_PARAMS_TRANSPORT uses. The ARGV bottom frame gets its
+/// own key whose PRESENCE is the materialization bit: GNU's fork
+/// inherits `bash_argv_initialized` as-is, and an unmaterialized
+/// child's reads must not synthesize a bottom from the live window
+/// while the child runs in the parent's function context
+/// (variables.c:1656 get_bashargcv initializes only at
+/// variable_context == 0).
+pub(in crate::executor) const FORK_FUNCNAME_TRANSPORT: &str = "__RUBASH_FORK_FUNCNAME";
+pub(in crate::executor) const FORK_SOURCE_TRANSPORT: &str = "__RUBASH_FORK_BASH_SOURCE";
+pub(in crate::executor) const FORK_LINENO_TRANSPORT: &str = "__RUBASH_FORK_BASH_LINENO";
+pub(in crate::executor) const FORK_ARGV_TRANSPORT: &str = "__RUBASH_FORK_BASH_ARGV";
+pub(in crate::executor) const FORK_ARGC_TRANSPORT: &str = "__RUBASH_FORK_BASH_ARGC";
+pub(in crate::executor) const FORK_ARGV_BOTTOM_TRANSPORT: &str = "__RUBASH_FORK_ARGV_BOTTOM";
+pub(in crate::executor) const FORK_IN_FUNCTION_TRANSPORT: &str = "__RUBASH_FORK_IN_FUNCTION";
+pub(in crate::executor) const FORK_MAIN_FRAME_TRANSPORT: &str = "__RUBASH_FORK_MAIN_FRAME";
+pub(in crate::executor) const FORK_PIPESTATUS_TRANSPORT: &str = "__RUBASH_FORK_PIPESTATUS";
+
+/// Every FORK_* transport key, for the child's unconditional strip.
+pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 9] = [
+    FORK_FUNCNAME_TRANSPORT,
+    FORK_SOURCE_TRANSPORT,
+    FORK_LINENO_TRANSPORT,
+    FORK_ARGV_TRANSPORT,
+    FORK_ARGC_TRANSPORT,
+    FORK_ARGV_BOTTOM_TRANSPORT,
+    FORK_IN_FUNCTION_TRANSPORT,
+    FORK_MAIN_FRAME_TRANSPORT,
+    FORK_PIPESTATUS_TRANSPORT,
+];
+
+impl Executor {
+    /// rubash#2058: the fork-context stamp every fork-shaped respawn
+    /// carries, as (key, value) entries the spawn sites merge into the
+    /// child's environment next to POSITIONAL_PARAMS_TRANSPORT. The
+    /// stack lists are this shell's EFFECTIVE views (own frames above
+    /// any frames this shell itself inherited), so a nested respawn
+    /// re-stamps the full chain. The bottom frame is peeked, never
+    /// installed: forking in GNU does not materialize the parent's
+    /// arrays, so the stamp must not either.
+    pub(in crate::executor) fn fork_context_transport_entries(&self) -> Vec<(String, String)> {
+        let inherited = self.shell_state.inherited_fork_frames.as_ref();
+        let mut argv_frames = self.shell_state.bash_argv_stack.clone();
+        let mut argc_frames = self.shell_state.bash_argc_stack.clone();
+        if let Some(inherited) = inherited {
+            argv_frames.extend(inherited.argv_frames.iter().cloned());
+            argc_frames.extend(inherited.argc_frames.iter().cloned());
+        }
+        let mut entries = vec![
+            (
+                FORK_FUNCNAME_TRANSPORT.to_string(),
+                format_indexed_array_values(
+                    self.dynamic_stack_array_values("FUNCNAME")
+                        .unwrap_or_default(),
+                ),
+            ),
+            (
+                FORK_SOURCE_TRANSPORT.to_string(),
+                format_indexed_array_values(
+                    self.dynamic_stack_array_values("BASH_SOURCE")
+                        .unwrap_or_default(),
+                ),
+            ),
+            (
+                FORK_LINENO_TRANSPORT.to_string(),
+                format_indexed_array_values(self.bash_lineno_view()),
+            ),
+            (
+                FORK_ARGV_TRANSPORT.to_string(),
+                format_indexed_array_values(argv_frames),
+            ),
+            (
+                FORK_ARGC_TRANSPORT.to_string(),
+                format_indexed_array_values(argc_frames),
+            ),
+            (
+                FORK_PIPESTATUS_TRANSPORT.to_string(),
+                crate::shell::state::encode_pipestatus_state(
+                    self.shell_state.pipestatus_shape,
+                    &self.shell_state.pipestatus,
+                ),
+            ),
+        ];
+        // The installed bottom frame rides verbatim; its key is
+        // present exactly when the parent's arrays have materialized.
+        // A respawn child's own bottom was seeded into its RefCell at
+        // birth, so the plain peek covers the nested case.
+        if let Some(bottom) = self.shell_state.bash_arg_bottom.borrow().clone() {
+            entries.push((
+                FORK_ARGV_BOTTOM_TRANSPORT.to_string(),
+                format_indexed_array_values(bottom),
+            ));
+        }
+        if self.shell_state.function_depth > 0 || inherited.is_some_and(|frames| frames.in_function)
+        {
+            entries.push((FORK_IN_FUNCTION_TRANSPORT.to_string(), "1".to_string()));
+        }
+        if self.has_script_main_frame() || inherited.is_some_and(|frames| frames.has_main_frame) {
+            entries.push((FORK_MAIN_FRAME_TRANSPORT.to_string(), "1".to_string()));
+        }
+        entries
+    }
+}
+
+/// The parent-source line of the first command that will execute from
+/// `cmd`'s transported text: descend through subshell / brace-group /
+/// pipeline / list / wrapper nodes to the first leaf. The respawn
+/// line seed must name where the child's body text starts — GNU's
+/// forked child reports each body command's own line, and the
+/// serialized body collapses onto the seed line, so the seed is the
+/// first leaf's line (compound nodes' own `line` is their closing
+/// line, which mis-seeded async subshells by the body's height).
+pub(in crate::executor) fn first_leaf_command_line(cmd: &CommandNode) -> Option<usize> {
+    if let Some(subshell) = &cmd.subshell_command {
+        if let Some(first) = subshell.body.first() {
+            return first_leaf_command_line(first);
+        }
+    }
+    if let Some(group) = &cmd.brace_group {
+        if let Some(first) = group.body.first() {
+            return first_leaf_command_line(first);
+        }
+    }
+    if let Some(pipeline) = &cmd.pipeline_command {
+        if let Some(first) = pipeline.stages.first() {
+            return first_leaf_command_line(first);
+        }
+    }
+    if let Some(list) = &cmd.and_or_list {
+        if let Some(first) = list.commands.first() {
+            return first_leaf_command_line(first);
+        }
+    }
+    if let Some(background) = &cmd.background_command {
+        return first_leaf_command_line(&background.command);
+    }
+    if let Some(time) = &cmd.time_command {
+        return first_leaf_command_line(&time.command);
+    }
+    if let Some(inverted) = &cmd.inverted_command {
+        return first_leaf_command_line(&inverted.command);
+    }
+    cmd.line
+}
+
 /// GNU jobs.c:2455/2460 pipeline_pgrp at fork time, recorded as j->pgrp
 /// (jobs.c:649) and substituted by `jobs -x` (builtins/jobs.def
 /// execute_list_with_replacements `itos (j->pgrp)`, rubash#1096): with job
@@ -173,6 +347,82 @@ fn dup_process_std_handle(fd: u32) -> Option<std::fs::File> {
     crate::fd::duplicate_handle_inheritable(handle)
         .ok()
         .map(crate::fd::handle_to_file)
+}
+
+/// One side of a coproc child's stdio while the ordered output
+/// redirects are applied (rubash#1644, transplanted from PR #1695):
+/// a dup copies the current spec, so it must be cloneable without
+/// consuming it.
+enum CoprocFdSpec {
+    Null,
+    Pipe(std::io::PipeWriter),
+    File(std::fs::File),
+}
+
+impl CoprocFdSpec {
+    fn dup(&self) -> std::io::Result<Self> {
+        Ok(match self {
+            CoprocFdSpec::Null => CoprocFdSpec::Null,
+            CoprocFdSpec::Pipe(writer) => CoprocFdSpec::Pipe(writer.try_clone()?),
+            CoprocFdSpec::File(file) => CoprocFdSpec::File(file.try_clone()?),
+        })
+    }
+
+    fn into_stdio(self) -> Stdio {
+        match self {
+            CoprocFdSpec::Null => Stdio::null(),
+            CoprocFdSpec::Pipe(writer) => Stdio::from(writer),
+            CoprocFdSpec::File(file) => Stdio::from(file),
+        }
+    }
+}
+
+/// Seed for a coproc dup target (rubash#1644): a fresh owned handle
+/// duplicating the parent's process fd 1/2, so a `>&2` child stdout
+/// writes where the parent's stderr writes. Unlike
+/// dup_process_std_handle this reports failure (and maps a missing
+/// std handle to /dev/null / NUL) because the seed feeds the ordered
+/// redirect application, whose errors already have a reporting path.
+fn dup_coproc_process_fd(fd: u32) -> std::io::Result<std::fs::File> {
+    let handle = crate::fd::process_std_handle(fd);
+    if handle == 0 || handle == -1 {
+        return if cfg!(windows) {
+            std::fs::OpenOptions::new().write(true).open("NUL")
+        } else {
+            std::fs::File::create("/dev/null")
+        };
+    }
+    let dup = crate::fd::duplicate_handle(handle)?;
+    Ok(crate::fd::handle_to_file(dup))
+}
+
+/// rubash#1632 save-slot hand-back under the ordered redirect pass
+/// (rubash#1644): replacing the fd-1 spec must not drop the coproc
+/// pipe writer while the coproc lives — when the spec still holds
+/// it, the writer moves to the displaced slot (the caller keeps it
+/// alive for the coproc's lifetime) instead of closing here.
+fn replace_coproc_out_spec(
+    spec: &mut CoprocFdSpec,
+    replacement: CoprocFdSpec,
+    displaced: &mut Option<std::io::PipeWriter>,
+) {
+    let old = std::mem::replace(spec, replacement);
+    if let CoprocFdSpec::Pipe(writer) = old {
+        *displaced = Some(writer);
+    }
+}
+
+/// Outcome of applying a coproc command's own redirects at spawn.
+enum CoprocRedirectOutcome {
+    /// Spawn proceeds; carries the coproc pipe writer when an fd-1
+    /// redirect displaced it from the child's stdout (rubash#1632:
+    /// GNU's redirect save slot in the forked child, held by the
+    /// caller until the coproc retires).
+    Proceed(Option<std::io::PipeWriter>),
+    /// A redirect was declined after printing its diagnostic
+    /// (rubash#1644 `2>&word`): no coproc is created; the caller
+    /// fails the command with status 1 (#846 convention).
+    Declined,
 }
 
 /// Resolved stdio disposition for one of a background child's fds 0-2,
@@ -666,7 +916,10 @@ impl Executor {
             .unwrap_or_else(|| "rubash".into());
         // Environment block for the child: process env merged with the
         // shell's env_vars (same filter the old Command::env loop applied).
-        let mut env_map: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        let mut env_map: std::collections::BTreeMap<String, String> =
+            crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
                 env_map.insert(key.clone(), value.clone());
@@ -685,7 +938,7 @@ impl Executor {
         // Strip by the KEYS PRESENT IN env_map, not the live trap table:
         // stale OS-env copies of removed traps (the std::env mirror writes
         // through setattr apply.rs but is not cleaned on trap removal) ride
-        // into env_map via std::env::vars() above, and a strip driven by
+        // into env_map via the process-env ingest above, and a strip driven by
         // env_vars would leave them (trap.tests: __RUBASH_TRAP_SIGHUP/
         // __RUBASH_TRAP_SIGUSR2 leaked into the monitored `sleep N &`
         // children after `trap - HUP`/`trap - USR2` had cleared the table).
@@ -762,6 +1015,27 @@ impl Executor {
             }
         }
         env_map.insert("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string());
+        // rubash#2136: the provenance stamp the child's init validates
+        // against its actual parent (init.rs) — this process's own pid,
+        // which is the pid the spawned child will observe via getppid.
+        env_map.insert(
+            super::RESPAWN_SPAWNER_PID_KEY.to_string(),
+            super::spawner_stamp_value(),
+        );
+        // rubash#2032: GNU's forked async/subshell child inherits the
+        // parent's positional parameters (execute_cmd.c:1576
+        // execute_in_subshell runs a whole-copy fork); stamp the live
+        // window for the child's init to seed (POSITIONAL_PARAMS_TRANSPORT).
+        env_map.insert(
+            POSITIONAL_PARAMS_TRANSPORT.to_string(),
+            self.positional_params_transport_value(),
+        );
+        // rubash#2058: the fork-context stamp (call-stack views,
+        // PIPESTATUS cell, ARGV bottom state) — same fork, same
+        // transport set (see fork_context_transport_entries).
+        for (key, value) in self.fork_context_transport_entries() {
+            env_map.insert(key, value);
+        }
         // rubash#1074: the wrapper child is one subshell level deeper than
         // this shell (execute_in_subshell's subshell_level++); carry the
         // target depth so the child's BASH_SUBSHELL starts at parent + 1.
@@ -776,9 +1050,11 @@ impl Executor {
         // these markers (init.rs keeps them for __RUBASH_SHELL_PID carriers).
         if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             env_map.insert("__RUBASH_SCRIPT_NAME".to_string(), script_name.clone());
-            let line = background_command
-                .command
-                .line
+            // rubash#2058: the seed line is where the transported body
+            // text starts — the first leaf command's line. A compound
+            // node's own `line` is its closing line, which put the
+            // seed at the END of a multi-line `( ... ) &` body.
+            let line = first_leaf_command_line(&background_command.command)
                 .map(|line| line.to_string())
                 .or_else(|| {
                     self.shell_state
@@ -788,7 +1064,19 @@ impl Executor {
                 })
                 .unwrap_or_else(|| "1".to_string());
             env_map.insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
-            let line_offset = line.parse::<usize>().unwrap_or(1).saturating_sub(1);
+            // The child source is prelude + body text, so the body's
+            // first line sits prelude_newlines + 1 lines into it; the
+            // offset compensates exactly like the output-procsub
+            // consumer site (external_setup.rs) — without it every
+            // body line (and every BASH_LINENO call line pushed inside)
+            // drifts by the prelude's newline count, which varies
+            // with the transported function bodies (rubash#2058).
+            let prelude_newlines = self.background_function_prelude().matches('\n').count();
+            let line_offset = line
+                .parse::<usize>()
+                .unwrap_or(1)
+                .saturating_sub(1)
+                .saturating_sub(prelude_newlines);
             env_map.insert("__RUBASH_LINE_OFFSET".to_string(), line_offset.to_string());
         }
         // rubash#737: mark this as a background-job wrapper. Children it
@@ -1337,6 +1625,15 @@ impl Executor {
         if super::external_inner::is_enoexec_candidate(&program) {
             return None;
         }
+        // rubash#1905: a word naming a synthetic /proc operand needs
+        // the spawn-boundary materialization the foreground external
+        // path owns (proc_operands); the direct spawn has no operand
+        // plumbing, so the shape keeps the wrapper, whose child
+        // serves the operand there — the same decline family as
+        // process substitutions above.
+        if crate::executor::proc_operands::args_name_synthetic_proc(&expanded.words) {
+            return None;
+        }
         Some((program, expanded.words))
     }
 
@@ -1800,6 +2097,11 @@ impl Executor {
                 }
             }
             Some(FdReadEndpoint::InheritedProcessStdin) => BackgroundStdio::Inherit,
+            // rubash#1937: a directory endpoint has no spawnable
+            // handle; the null device is the closest state (the
+            // child's reads see EOF instead of EISDIR — the
+            // cross-boundary residual class).
+            Some(FdReadEndpoint::Directory) => BackgroundStdio::Null,
             // fd 0 closed or absent: the closest spawnable state to GNU's
             // inherited-but-unreadable descriptor.
             None => BackgroundStdio::Null,
@@ -1933,6 +2235,9 @@ impl Executor {
         // timed command's inner dispatch — clear any stale value before
         // the inner runs (the mark is taken right after it below).
         self.errexit_status_converted.set(false);
+        // rubash#2117: the POSIX special-builtin conversion mark is
+        // scoped the same way; the ast_exec time branch takes it.
+        self.posix_special_status_converted.set(false);
         // rubash#1218: in posix mode a dash word right after `time`
         // means `time` was never a keyword (GNU parse.y), so the
         // reconstructed command (`time`, the prefix words, then the
@@ -1999,6 +2304,7 @@ impl Executor {
         // below runs its own commands first; their conversions must not
         // be mistaken for the inner command's).
         self.errexit_status_converted.set(false);
+        self.posix_special_status_converted.set(false);
         // Snapshot the parse-error latch: a parse-diagnostic ExitCode(2)
         // out of the inner dispatch means the timed command never
         // executed (GNU reports no timing for it), unlike a genuine
@@ -2063,6 +2369,7 @@ impl Executor {
                     // must not be read as the inner command's
                     // conversion mark.
                     self.errexit_status_converted.set(false);
+                    self.posix_special_status_converted.set(false);
                     self.execute_command(&time_command.command)
                 }
                 Err(error) => Err(error),
@@ -2342,8 +2649,16 @@ impl Executor {
         // with *okp = 1 — the evaluation is skipped, not failed.
         let init_skipped = if self.debug_trap_in_scope() && !arithmetic.init.trim().is_empty() {
             restore_for_line(self);
-            self.run_debug_trap(crate::debugger::SeamKind::ArithForInit, &arithmetic.init)?
-                .is_some()
+            // An Err here unwinds past the loop: balance the ENTRY
+            // increment before returning (single-exit invariant,
+            // execute_cmd.c:3296; see the body match below, #1911).
+            match self.run_debug_trap(crate::debugger::SeamKind::ArithForInit, &arithmetic.init) {
+                Ok(outcome) => outcome.is_some(),
+                Err(error) => {
+                    self.shell_state.loop_depth -= 1;
+                    return Err(error);
+                }
+            }
         } else {
             false
         };
@@ -2401,9 +2716,16 @@ impl Executor {
                 && ((debug_may_fire && self.debug_trap_in_scope()) || self.debugger_session_here())
             {
                 restore_for_line(self);
-                test_skipped = self
-                    .run_debug_trap(crate::debugger::SeamKind::ArithForTest, &arithmetic.test)?
-                    .is_some();
+                // Balance the ENTRY increment on an unwinding Err
+                // (single-exit invariant, execute_cmd.c:3296; #1911).
+                match self.run_debug_trap(crate::debugger::SeamKind::ArithForTest, &arithmetic.test)
+                {
+                    Ok(outcome) => test_skipped = outcome.is_some(),
+                    Err(error) => {
+                        self.shell_state.loop_depth -= 1;
+                        return Err(error);
+                    }
+                }
             }
             if test_skipped {
                 break;
@@ -2472,7 +2794,24 @@ impl Executor {
                     self.shell_state.loop_depth -= 1;
                     return Err(ExecuteError::Continue(level - 1));
                 }
-                Err(error) => return Err(error),
+                // Any other unwind crossing this loop (an expansion
+                // failure from the body, an exit/return jump, ...):
+                // balance the ENTRY increment before returning, like
+                // the Break/Continue arms above. GNU
+                // execute_arith_for_command (execute_cmd.c:3219) has a
+                // single exit whose loop_level-- (execute_cmd.c:3296)
+                // runs unconditionally — the body result there is a
+                // status, never an escape past the frame. Leaving the
+                // depth raised here defeats the enclosing list walk's
+                // DISCARD absorption, whose guard reads
+                // loop_depth == 0: an evalerror raised in the body
+                // (expr.c evalerror -> jump_to_top_level (DISCARD))
+                // then escapes as a script-fatal error instead of
+                // discarding just this for command (rubash#1911).
+                Err(error) => {
+                    self.shell_state.loop_depth -= 1;
+                    return Err(error);
+                }
             }
 
             // execute_cmd.c:3191-3199: the skipped update evaluates as 0 —
@@ -2488,11 +2827,18 @@ impl Executor {
                 && ((debug_may_fire && self.debug_trap_in_scope()) || self.debugger_session_here())
             {
                 restore_for_line(self);
-                self.run_debug_trap(
+                // Balance the ENTRY increment on an unwinding Err
+                // (single-exit invariant, execute_cmd.c:3296; #1911).
+                match self.run_debug_trap(
                     crate::debugger::SeamKind::ArithForUpdate,
                     &arithmetic.update,
-                )?
-                .is_some()
+                ) {
+                    Ok(outcome) => outcome.is_some(),
+                    Err(error) => {
+                        self.shell_state.loop_depth -= 1;
+                        return Err(error);
+                    }
+                }
             } else {
                 false
             };
@@ -2835,7 +3181,8 @@ impl Executor {
         let saved_state = self.shell_state.clone_for_child_save();
         // rubash#1551: the fork bracket also covers the process-global
         // hash-table mirror (see executor::path::hashed_cache_fork_guard).
-        let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        let _hashed_fork =
+            crate::executor::path::hashed_cache_fork_guard(&self.shell_state.env_vars);
         // The fd table is executor state, not ShellState: a forked child's
         // descriptor table is a copy (execute_in_subshell after make_child),
         // so `( exec 3<&- )` cannot close the parent's fd 3. Rc-shared
@@ -2915,10 +3262,10 @@ impl Executor {
         // apply_command_output_redirects splices into the body only for a
         // stdio-slot redirect; with neither, the stored slice runs as-is.
         let redirect_needs_ps_rewrite = [
-            cmd.redirect_out.as_ref(),
-            cmd.append.as_ref(),
-            cmd.redirect_err.as_ref(),
-            cmd.redirect_err_append.as_ref(),
+            cmd.redirect_out.as_deref(),
+            cmd.append.as_deref(),
+            cmd.redirect_err.as_deref(),
+            cmd.redirect_err_append.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -2967,31 +3314,35 @@ impl Executor {
         };
         if stdio_redirect_cmd
             .redirect_in
-            .as_ref()
+            .as_deref()
             .is_some_and(is_numbered)
         {
             stdio_redirect_cmd.redirect_in = None;
         }
         if stdio_redirect_cmd
             .redirect_out
-            .as_ref()
+            .as_deref()
             .is_some_and(is_numbered)
         {
             stdio_redirect_cmd.redirect_out = None;
         }
-        if stdio_redirect_cmd.append.as_ref().is_some_and(is_numbered) {
+        if stdio_redirect_cmd
+            .append
+            .as_deref()
+            .is_some_and(is_numbered)
+        {
             stdio_redirect_cmd.append = None;
         }
         if stdio_redirect_cmd
             .redirect_err
-            .as_ref()
+            .as_deref()
             .is_some_and(is_numbered)
         {
             stdio_redirect_cmd.redirect_err = None;
         }
         if stdio_redirect_cmd
             .redirect_err_append
-            .as_ref()
+            .as_deref()
             .is_some_and(is_numbered)
         {
             stdio_redirect_cmd.redirect_err_append = None;
@@ -3295,6 +3646,15 @@ impl Executor {
             self.shell_state.loop_depth += 1;
             let result = self.execute_ast_inner(body);
             self.shell_state.loop_depth -= 1;
+            // GNU execute_cmd.c:3838 REAP() (execute_while_or_until):
+            // dead jobs — and, via cleanup_dead_jobs -> coproc_reap,
+            // dead coprocs (rubash#2053) — are silently reaped after
+            // every while/until body in a non-interactive or
+            // non-job-control shell. The alias-reparse path had this
+            // call (alias_loops.rs); the AST path missed it, so a
+            // coproc that died during a while loop kept its variables
+            // for the whole loop.
+            self.reap_dead_jobs_after_loop_body();
             self.run_pending_signal_traps()?;
             match result {
                 Ok(()) => {
@@ -3523,6 +3883,224 @@ impl Executor {
         }
     }
 
+    /// rubash#1584: plan a direct spawn for a simple-command coproc
+    /// whose GNU execution ends in execve of an external program.
+    ///
+    /// GNU execute_cmd.c:2525 execute_coproc make_child(FORK_ASYNC)
+    /// forks once, and the child runs execute_in_subshell on the same
+    /// parse tree: for a simple external command the forked child
+    /// execs the program itself, so the coproc pid ($!, <NAME>_PID)
+    /// IS the program's pid (ps shows comm=cat for `coproc cat`).
+    /// Rubash's respawn route interposes a `rubash -c` wrapper, so $!
+    /// named the wrapper and the program ran as a grandchild — kill
+    /// $! hit the wrapper, and process inspection saw the wrong
+    /// image. This planner admits the direct route only where the
+    /// parent can reproduce the child's view exactly:
+    ///
+    /// * the body is a simple command with no prefix assignments
+    ///   (tempenv binding is the child shell's work);
+    /// * every word's expansion is context-free between parent and
+    ///   coproc child: no command/process substitution and no
+    ///   arithmetic expansion (the child evaluates those AFTER the
+    ///   fork, asynchronously and in its own variable scope), no
+    ///   process-identity dynamics (BASHPID/PPID/BASH_SUBSHELL —
+    ///   the child's values name the coproc process itself), and no
+    ///   RANDOM/SRANDOM draws (the child's sequence is a fork copy;
+    ///   a parent draw would advance the wrong sequence);
+    /// * error placement stays in the child: under `set -u` any
+    ///   expansion at all, and under failglob any glob word, stands
+    ///   down, because a parent-side expansion failure would report
+    ///   (and, for -u, abort) in the parent where GNU's failure is
+    ///   scoped to the coproc child;
+    /// * the expanded head resolves the way the child's dispatch
+    ///   would resolve it, minus the shell: a function, alias, or
+    ///   builtin head stands down (GNU's child runs those AS a
+    ///   shell, so the wrapper's shell image is the faithful one),
+    ///   as does an unresolvable name (the child owns the 127);
+    /// * the resolved file is a kernel-exec'able image (ELF, Mach-O,
+    ///   or a `#!` script): an exec-format failure in GNU reruns
+    ///   the file as a shell script inside the child, which only
+    ///   the respawn route can reproduce.
+    ///
+    /// Every stand-down falls back to the respawn route unchanged,
+    /// so a miss costs process-tree fidelity, never semantics. The
+    /// route is Unix-only for now: the Windows spawn model (no
+    /// fork/exec, handle stdio) keeps the respawn route until its
+    /// own adjudication.
+    fn plan_direct_coproc_command(
+        &mut self,
+        cmd: &CommandNode,
+        coproc_cmd: &crate::parser::CoprocCommand,
+    ) -> Option<(std::path::PathBuf, Vec<String>)> {
+        #[cfg(not(unix))]
+        return {
+            let _ = (cmd, coproc_cmd);
+            None
+        };
+        #[cfg(unix)]
+        self.plan_direct_coproc_command_unix(cmd, coproc_cmd)
+    }
+
+    #[cfg(unix)]
+    fn plan_direct_coproc_command_unix(
+        &mut self,
+        cmd: &CommandNode,
+        coproc_cmd: &crate::parser::CoprocCommand,
+    ) -> Option<(std::path::PathBuf, Vec<String>)> {
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if coproc_cmd.body.is_some()
+                || coproc_cmd.body_kind != crate::parser::CoprocBodyKind::SimpleCommand
+            {
+                return None;
+            }
+            let words = &coproc_cmd.words;
+            if words.is_empty() || words[0].starts_with('-') {
+                return None;
+            }
+            // Prefix assignments (tempenv) bind in the child shell.
+            // The first word that is not assignment-shaped is the
+            // head; any assignment before it stands the route down,
+            // as does an all-assignment body (no command at all).
+            let mut head_index = 0;
+            while head_index < words.len() {
+                let word = &words[head_index];
+                let raw = coproc_cmd
+                    .word_metadata
+                    .get(head_index)
+                    .map(|meta| meta.raw.as_str())
+                    .unwrap_or(word.as_str());
+                let Some(eq) = raw.find('=') else { break };
+                let name = raw[..eq].strip_suffix('+').unwrap_or(&raw[..eq]);
+                if name.is_empty() || !is_shell_name(name) || !raw.starts_with(name) {
+                    break;
+                }
+                head_index += 1;
+            }
+            if head_index > 0 {
+                return None;
+            }
+            let nounset =
+                crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset");
+            let failglob =
+                crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "failglob");
+            for (index, word) in words.iter().enumerate() {
+                let meta = coproc_cmd.word_metadata.get(index);
+                let value = meta.map(|meta| meta.value.as_str()).unwrap_or(word);
+                let raw = meta.map(|meta| meta.raw.as_str()).unwrap_or(word);
+                for text in [word.as_str(), value, raw] {
+                    if text.contains("$(")
+                        || text.contains('`')
+                        || text.contains("<(")
+                        || text.contains(">(")
+                        || text.contains("BASHPID")
+                        || text.contains("PPID")
+                        || text.contains("BASH_SUBSHELL")
+                        || text.contains("RANDOM")
+                        || text.contains("SRANDOM")
+                    {
+                        return None;
+                    }
+                    if nounset && text.contains('$') {
+                        return None;
+                    }
+                    if failglob && (text.contains('*') || text.contains('?') || text.contains('['))
+                    {
+                        return None;
+                    }
+                }
+            }
+            // Redirect targets are expanded by the parent on both
+            // routes, but a process substitution among them is
+            // created for the executing child; an {fd} allocation
+            // binds in the parent shell. Both stay with the respawn.
+            let mut redirect_texts: Vec<&str> = cmd
+                .redirects
+                .iter()
+                .map(|redirect| redirect.target.as_str())
+                .collect();
+            if let Some(redirect_in) = &cmd.redirect_in {
+                redirect_texts.push(redirect_in.target.as_str());
+                if redirect_in.fd_var.is_some() {
+                    return None;
+                }
+            }
+            if cmd
+                .redirects
+                .iter()
+                .any(|redirect| redirect.fd_var.is_some())
+            {
+                return None;
+            }
+            for text in redirect_texts {
+                if text.contains("<(") || text.contains(">(") {
+                    return None;
+                }
+            }
+            // Expand in the parent with the ordinary simple-command
+            // pipeline; the admitted word classes make this a pure
+            // read of the same table the child's snapshot would hold.
+            let mut scratch = CommandNode::new();
+            scratch.line = cmd.line;
+            scratch.logical_line = cmd.logical_line;
+            scratch.words = words.clone();
+            scratch.word_metadata = coproc_cmd.word_metadata.clone();
+            let expanded = self.expand_command_words(&scratch).ok()?;
+            if !expanded.assignments.is_empty() {
+                return None;
+            }
+            let argv = expanded.words;
+            let head = argv.first()?;
+            if self.shell_state.functions.contains_key(head)
+                || self.shell_state.aliases.contains_key(head)
+                || is_shell_builtin_name(head)
+                || is_shell_keyword(head)
+            {
+                return None;
+            }
+            let program = if head.contains('/') {
+                let path = if std::path::Path::new(head).is_absolute() {
+                    std::path::PathBuf::from(head)
+                } else {
+                    self.shell_state.cwd.join(head)
+                };
+                path
+            } else {
+                std::path::PathBuf::from(self.command_path_without_bridge(head, false)?)
+            };
+            let metadata = std::fs::metadata(&program).ok()?;
+            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+                return None;
+            }
+            // Kernel-exec'able image check: ELF, Mach-O (either
+            // endianness, thin or fat), or a `#!` interpreter script.
+            // Anything else fails execve with ENOEXEC, which GNU
+            // answers by running the file as a shell script in the
+            // child — respawn-route territory.
+            let mut magic = [0u8; 4];
+            {
+                use std::io::Read as _;
+                let mut file = std::fs::File::open(&program).ok()?;
+                let read = file.read(&mut magic).ok()?;
+                if read < 2 {
+                    return None;
+                }
+            }
+            let execable = magic[..2] == *b"#!"
+                || magic == [0x7f, b'E', b'L', b'F']
+                || magic == [0xfe, 0xed, 0xfa, 0xce]
+                || magic == [0xfe, 0xed, 0xfa, 0xcf]
+                || magic == [0xce, 0xfa, 0xed, 0xfe]
+                || magic == [0xcf, 0xfa, 0xed, 0xfe]
+                || magic == [0xca, 0xfe, 0xba, 0xbe]
+                || magic == [0xbe, 0xba, 0xfe, 0xca];
+            if !execable {
+                return None;
+            }
+            Some((program, argv))
+        }
+    }
+
     pub(in crate::executor) fn execute_coproc_command(
         &mut self,
         cmd: &CommandNode,
@@ -3558,7 +4136,21 @@ impl Executor {
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
 
-        let mut child = if let Some(body) = &coproc_cmd.body {
+        // rubash#1584: a simple-command coproc that the planner
+        // admits spawns the program itself as the coproc process;
+        // everything below (pipes, stderr plan, coproc redirects,
+        // job registration, endpoint binding) is shared with the
+        // respawn route — only the child image and its environment
+        // differ (an external child gets the ordinary external
+        // environment, not the shell-state snapshot a `rubash -c`
+        // child re-imports).
+        let direct_plan = self.plan_direct_coproc_command(cmd, coproc_cmd);
+        let mut child = if let Some((program, argv)) = &direct_plan {
+            let mut command = Command::new(program);
+            command.args(&argv[1..]);
+            self.apply_external_environment(&CommandNode::new(), &mut command, program);
+            command
+        } else if let Some(body) = &coproc_cmd.body {
             // Compound command body: coproc [NAME] { body; } or ( body )
             let body_text = bash_command_sequence_text(body);
             let mut child = Command::new(&exe);
@@ -3610,67 +4202,102 @@ impl Executor {
             return Ok(());
         };
 
-        for (key, value) in &self.shell_state.env_vars {
-            if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
+        // The env snapshot and the rubash-child state keys below are
+        // the respawn route's inheritance transport; a direct child
+        // (rubash#1584) is a foreign program and already received
+        // the ordinary external environment at construction.
+        if direct_plan.is_none() {
+            for (key, value) in &self.shell_state.env_vars {
+                if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
+                    child.env(key, value);
+                }
+            }
+            // GNU coproc forks (execute_cmd.c coproc_getfd -> make_child), so the
+            // coprocess shell inherits the parent's FULL function table — not
+            // just `export -f` names. A DEBUG trap installed before the coproc
+            // (e.g. oh-my-bash's bash-preexec `__bp_preexec_invoke_exec`) fires
+            // inside the child and must resolve (unixwin/rubash#441). Ship a
+            // snapshot as BASH_FUNC_name%% entries: the child's Executor::new
+            // imports them as functions and strips the carrier keys, so the
+            // entries never surface as variables and never leak back into the
+            // parent's table (the parent keeps its own functions untouched).
+            for (name, body) in &self.shell_state.functions {
+                if !is_exportable_function_name(name) {
+                    continue;
+                }
+                let def_redirects = self
+                    .shell_state
+                    .function_def_infos
+                    .get(name)
+                    .map(|info| info.def_redirects.as_slice())
+                    .unwrap_or(&[]);
+                child.env(
+                    exported_function_env_name(name),
+                    exported_function_env_value(&body.commands, def_redirects),
+                );
+            }
+            // Preserve the parent script location for diagnostics emitted by the
+            // coprocess shell, while keeping internal executor state isolated.
+            if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
+                child.env("__RUBASH_SCRIPT_NAME", script);
+                // rubash#2058: seed where the transported body text
+                // starts (first leaf command's line), not the coproc
+                // node's own line. Simple-command coprocs keep the
+                // node's line — the command IS the body.
+                let line = coproc_cmd
+                    .body
+                    .as_ref()
+                    .and_then(|body| body.first())
+                    .and_then(first_leaf_command_line)
+                    .or_else(|| cmd.line)
+                    .map(|line| line.to_string())
+                    .or_else(|| {
+                        self.shell_state
+                            .env_vars
+                            .get("__RUBASH_CURRENT_LINE")
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| "1".to_string());
+                child.env("__RUBASH_CURRENT_LINE", line.clone());
+                // The child re-parses `-c` source from line 1. Preserve the
+                // parent's physical call-site line when assigning child AST lines.
+                let line_offset = line.parse::<usize>().unwrap_or(1).saturating_sub(1);
+                child.env("__RUBASH_LINE_OFFSET", line_offset.to_string());
+            }
+            // rubash#2032: the coproc child is a GNU fork (execute_cmd.c
+            // coproc_getfd -> make_child), so it inherits the parent's
+            // positional parameters like every other fork-shaped respawn
+            // (POSITIONAL_PARAMS_TRANSPORT).
+            child.env(
+                POSITIONAL_PARAMS_TRANSPORT,
+                self.positional_params_transport_value(),
+            );
+            // rubash#2058: the fork-context stamp, like every other
+            // fork-shaped respawn (see fork_context_transport_entries).
+            for (key, value) in self.fork_context_transport_entries() {
                 child.env(key, value);
             }
-        }
-        // GNU coproc forks (execute_cmd.c coproc_getfd -> make_child), so the
-        // coprocess shell inherits the parent's FULL function table — not
-        // just `export -f` names. A DEBUG trap installed before the coproc
-        // (e.g. oh-my-bash's bash-preexec `__bp_preexec_invoke_exec`) fires
-        // inside the child and must resolve (unixwin/rubash#441). Ship a
-        // snapshot as BASH_FUNC_name%% entries: the child's Executor::new
-        // imports them as functions and strips the carrier keys, so the
-        // entries never surface as variables and never leak back into the
-        // parent's table (the parent keeps its own functions untouched).
-        for (name, body) in &self.shell_state.functions {
-            if !is_exportable_function_name(name) {
-                continue;
-            }
-            let def_redirects = self
-                .shell_state
-                .function_def_infos
-                .get(name)
-                .map(|info| info.def_redirects.as_slice())
-                .unwrap_or(&[]);
+            // rubash#2058: this site never stamped the shell-pid
+            // carrier, so the coproc child's $$ projected neither the
+            // parent shell's pid (the #1582 projection its sibling
+            // spawn sites produce) nor its own BASHPID.
+            child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
+            // Coprocess children own a shell-created stdin pipe. Keep builtin
+            // readers attached to it and let TERM use native termination when a
+            // blocked read cannot consume the shell signal mailbox.
+            child.env(INHERIT_PROCESS_STDIN, "1");
+            child.env("__RUBASH_COPROC_CHILD", "1");
+            // rubash#2136: provenance stamp — the child's init validates
+            // the coproc claim against its actual parent (init.rs).
+            child.env(super::RESPAWN_SPAWNER_PID_KEY, super::spawner_stamp_value());
+            // rubash#1074: the coproc body runs in a forked subshell
+            // (execute_in_subshell: subshell_level++), so the child's
+            // BASH_SUBSHELL starts at this shell's depth + 1.
             child.env(
-                exported_function_env_name(name),
-                exported_function_env_value(&body.commands, def_redirects),
+                "__RUBASH_SUBSHELL_DEPTH",
+                (self.shell_state.subshell_depth.get() + 1).to_string(),
             );
         }
-        // Preserve the parent script location for diagnostics emitted by the
-        // coprocess shell, while keeping internal executor state isolated.
-        if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
-            child.env("__RUBASH_SCRIPT_NAME", script);
-            let line = cmd
-                .line
-                .map(|line| line.to_string())
-                .or_else(|| {
-                    self.shell_state
-                        .env_vars
-                        .get("__RUBASH_CURRENT_LINE")
-                        .cloned()
-                })
-                .unwrap_or_else(|| "1".to_string());
-            child.env("__RUBASH_CURRENT_LINE", line.clone());
-            // The child re-parses `-c` source from line 1. Preserve the
-            // parent's physical call-site line when assigning child AST lines.
-            let line_offset = line.parse::<usize>().unwrap_or(1).saturating_sub(1);
-            child.env("__RUBASH_LINE_OFFSET", line_offset.to_string());
-        }
-        // Coprocess children own a shell-created stdin pipe. Keep builtin
-        // readers attached to it and let TERM use native termination when a
-        // blocked read cannot consume the shell signal mailbox.
-        child.env(INHERIT_PROCESS_STDIN, "1");
-        child.env("__RUBASH_COPROC_CHILD", "1");
-        // rubash#1074: the coproc body runs in a forked subshell
-        // (execute_in_subshell: subshell_level++), so the child's
-        // BASH_SUBSHELL starts at this shell's depth + 1.
-        child.env(
-            "__RUBASH_SUBSHELL_DEPTH",
-            (self.shell_state.subshell_depth.get() + 1).to_string(),
-        );
 
         // Create pipes for bidirectional communication
         let stdin_result = std::io::pipe();
@@ -3703,16 +4330,30 @@ impl Executor {
             // coproc child's own redirect failure exits inverted and the
             // parent flips it back — net status 1, no flip. Mark it so an
             // enclosing `!` suppresses its flip.
-            let displaced_stdout_writer =
-                match self.apply_coproc_redirects(cmd, &mut child, stdout_writer) {
-                    Ok(writer) => writer,
-                    Err(error) => {
-                        if matches!(error, ExecuteError::IoError(_)) {
-                            self.note_compound_redirect_failure();
-                        }
-                        return Err(error);
+            let displaced_stdout_writer = match self.apply_coproc_redirects(
+                cmd,
+                &mut child,
+                stdout_writer,
+                &coproc_stderr_target,
+            ) {
+                Ok(CoprocRedirectOutcome::Proceed(writer)) => writer,
+                Ok(CoprocRedirectOutcome::Declined) => {
+                    // rubash#1644: the ordered pass declined a
+                    // redirect after printing its diagnostic
+                    // (`2>&word` ambiguous): no coproc is created,
+                    // the command fails with status 1 per the #846
+                    // coproc-failure convention, and the script
+                    // continues.
+                    self.exit_code = 1;
+                    return Ok(());
+                }
+                Err(error) => {
+                    if matches!(error, ExecuteError::IoError(_)) {
+                        self.note_compound_redirect_failure();
                     }
-                };
+                    return Err(error);
+                }
+            };
             // rubash#1632: a coproc-level `>file`/`>>file` (or `>&-`)
             // displaced the pipe writer from the child's stdout. GNU
             // applies the redirect in the forked child, where the
@@ -4071,15 +4712,30 @@ impl Executor {
                     Err(_) => CoprocStderrPlan::Direct(Stdio::inherit()),
                 }
             }
+            // rubash#1898: fd 2 bound to /dev/full — the child's
+            // stderr writes are absorbed (the ENOSPC profile cannot
+            // cross the spawn boundary; the in-shell faces carry it).
+            Some(FdWriteEndpoint::FullDevice) => CoprocStderrPlan::Direct(Stdio::null()),
+            // rubash#2042: fd 2 bound to a 0644-class synthetic /proc
+            // content entry — same boundary: the EINVAL write profile
+            // cannot cross into the child's handle; writes absorb.
+            Some(FdWriteEndpoint::ProcContentWrite) => CoprocStderrPlan::Direct(Stdio::null()),
         }
     }
 
+    /// Applies the coproc command's output redirects to the child
+    /// in list order, on top of its stdin body / input redirect.
+    /// Returns Proceed (carrying the displaced pipe writer, if any)
+    /// to continue to spawn, or Declined when a redirect was
+    /// refused after printing its diagnostic (no coproc is created;
+    /// the caller fails the command with status 1).
     fn apply_coproc_redirects(
         &mut self,
         cmd: &CommandNode,
         child: &mut Command,
         stdout_writer: std::io::PipeWriter,
-    ) -> Result<Option<std::io::PipeWriter>, ExecuteError> {
+        stderr_forward: &Option<CoprocStderrForwardTarget>,
+    ) -> Result<CoprocRedirectOutcome, ExecuteError> {
         // rubash#1651: a memory-backed stdin body (here-string,
         // heredoc) that wins fd 0 replaces the coproc pipe as the
         // child's stdin. GNU redir.c do_redirections binds fd 0
@@ -4123,73 +4779,241 @@ impl Executor {
         }
         if body_stdin.is_none() {
             if let Some(redirect) = &cmd.redirect_in {
-            if redirect.fd.unwrap_or(0) == 0 {
-                let target = self.expand_redirect_target(redirect);
-                if is_closed_redirect_target(&target) {
-                    child.stdin(Stdio::null());
-                } else if redirect_target_fd(&target).is_none() {
-                    child.stdin(Stdio::from(self.open_input_redirect(&target)?));
+                if redirect.fd.unwrap_or(0) == 0 {
+                    let target = self.expand_redirect_target(redirect);
+                    if is_closed_redirect_target(&target) {
+                        child.stdin(Stdio::null());
+                    } else if redirect_target_fd(&target).is_none() {
+                        child.stdin(Stdio::from(self.open_input_redirect(&target)?));
+                    }
                 }
             }
-            }
         }
 
-        // rubash#1632: the coproc command's own stdout redirections
-        // displace the pipe writer instead of replacing-and-dropping it:
-        // the writer is handed back to the caller, which keeps it alive
-        // for the coproc's lifetime (GNU's redirect save slot in the
-        // forked child) so the parent's read end cannot see EOF early.
-        // A dup target (`>&2`) replaces nothing — the pipe stays the
-        // child's stdout and the writer is consumed here as before.
-        let mut stdout_displaced = false;
-        if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_redirect_target(redirect);
-            if is_closed_redirect_target(&target) {
-                child.stdout(Stdio::null());
-                stdout_displaced = true;
-            } else if redirect_target_fd(&target).is_none() {
-                child.stdout(Stdio::from(
-                    self.create_redirect_output(&target, redirect.clobber)?,
-                ));
-                stdout_displaced = true;
+        // rubash#1644/#1655 (transplanted from PR #1695 by
+        // a-rookie-of-C-language): the coproc command's OUTPUT
+        // redirects apply to the child in GNU's left-to-right order
+        // — redir.c do_redirections runs in the forked child after
+        // the coproc pipes are dup'd. The old code only handled the
+        // single-field file redirects and dropped every dup (`>&2`
+        // never reached the child: a simple command's output landed
+        // in the coproc pipe instead of the shell's stderr, and a
+        // named group's output sat in the pipe unread — lost
+        // entirely). The ordered loop below replaces the field
+        // blocks, which additionally misread `>file 2>&1` (the
+        // `2>&1` arrived as a bogus Append field). Input kinds are
+        // skipped here: stdin is handled above (redirect_in) and by
+        // the stdin body. A dup whose source is fd >= 3 is left
+        // unchanged: the spawned child inherits no extra fds in
+        // rubash's spawn model, so there is nothing faithful to dup
+        // to (pre-existing limitation, same as the old code).
+        //
+        // rubash#1632 interplay: the fd-1 spec starts as the coproc
+        // pipe writer; whenever a redirect replaces it,
+        // replace_coproc_out_spec hands the writer back as the
+        // displaced writer (kept alive by the caller for the
+        // coproc's lifetime, GNU's redirect save slot) instead of
+        // dropping it here.
+        let mut out_spec = CoprocFdSpec::Pipe(stdout_writer);
+        let mut displaced_writer: Option<std::io::PipeWriter> = None;
+        // The child's stderr target, for dup resolution only: the
+        // caller has already set child.stderr (the direct endpoint
+        // or the forwarder's pipe), so this spec mirrors where
+        // stderr WOULD go; it is applied to the child only when an
+        // err redirect touches fd 2.
+        let mut err_spec = match stderr_forward {
+            Some(CoprocStderrForwardTarget::Stdout) => {
+                CoprocFdSpec::File(dup_coproc_process_fd(1)?)
             }
-        } else if let Some(redirect) = &cmd.append {
-            let target = self.expand_redirect_target(redirect);
-            if is_closed_redirect_target(&target) {
-                child.stdout(Stdio::null());
-                stdout_displaced = true;
-            } else if redirect_target_fd(&target).is_none() {
-                child.stdout(Stdio::from(open_redirect_append(&self.session_path(
-                    shell_path_to_windows(&target, &self.shell_state.env_vars),
-                ))?));
-                stdout_displaced = true;
+            Some(CoprocStderrForwardTarget::File(path)) => {
+                // The forwarder itself append-opens this path per
+                // chunk, so an append open here lands in the same
+                // file with the same semantics.
+                CoprocFdSpec::File(open_redirect_append(path)?)
             }
-        }
-        let displaced_writer = if stdout_displaced {
-            Some(stdout_writer)
-        } else {
-            child.stdout(stdout_writer);
-            None
+            None => self.coproc_stderr_direct_spec()?,
         };
-
-        if let Some(redirect) = &cmd.redirect_err {
+        let mut err_touched = false;
+        for redirect in &cmd.redirects {
             let target = self.expand_redirect_target(redirect);
-            if is_closed_redirect_target(&target) {
-                child.stderr(Stdio::null());
-            } else if redirect_target_fd(&target).is_none() {
-                child.stderr(Stdio::from(
-                    self.create_redirect_output(&target, redirect.clobber)?,
-                ));
+            match redirect.kind {
+                crate::parser::RedirectKind::Output
+                | crate::parser::RedirectKind::ClobberOutput => {
+                    let file = self.create_redirect_output(&target, redirect.clobber)?;
+                    match redirect.fd.unwrap_or(1) {
+                        1 => replace_coproc_out_spec(
+                            &mut out_spec,
+                            CoprocFdSpec::File(file),
+                            &mut displaced_writer,
+                        ),
+                        2 => {
+                            err_spec = CoprocFdSpec::File(file);
+                            err_touched = true;
+                        }
+                        _ => {}
+                    }
+                }
+                crate::parser::RedirectKind::Append => {
+                    let file =
+                        open_redirect_append(&self.session_path(shell_path_to_windows(
+                            &target,
+                            &self.shell_state.env_vars,
+                        )))?;
+                    match redirect.fd.unwrap_or(1) {
+                        1 => replace_coproc_out_spec(
+                            &mut out_spec,
+                            CoprocFdSpec::File(file),
+                            &mut displaced_writer,
+                        ),
+                        2 => {
+                            err_spec = CoprocFdSpec::File(file);
+                            err_touched = true;
+                        }
+                        _ => {}
+                    }
+                }
+                crate::parser::RedirectKind::CombinedOutput => {
+                    let file = self.create_redirect_output(&target, redirect.clobber)?;
+                    let shared = file.try_clone()?;
+                    replace_coproc_out_spec(
+                        &mut out_spec,
+                        CoprocFdSpec::File(file),
+                        &mut displaced_writer,
+                    );
+                    err_spec = CoprocFdSpec::File(shared);
+                    err_touched = true;
+                }
+                crate::parser::RedirectKind::CombinedAppend => {
+                    let file =
+                        open_redirect_append(&self.session_path(shell_path_to_windows(
+                            &target,
+                            &self.shell_state.env_vars,
+                        )))?;
+                    let shared = file.try_clone()?;
+                    replace_coproc_out_spec(
+                        &mut out_spec,
+                        CoprocFdSpec::File(file),
+                        &mut displaced_writer,
+                    );
+                    err_spec = CoprocFdSpec::File(shared);
+                    err_touched = true;
+                }
+                crate::parser::RedirectKind::CloseOutput => match redirect.fd.unwrap_or(1) {
+                    1 => replace_coproc_out_spec(
+                        &mut out_spec,
+                        CoprocFdSpec::Null,
+                        &mut displaced_writer,
+                    ),
+                    2 => {
+                        err_spec = CoprocFdSpec::Null;
+                        err_touched = true;
+                    }
+                    _ => {}
+                },
+                crate::parser::RedirectKind::DuplicateOutput => {
+                    let fd = redirect.fd.unwrap_or(1);
+                    if fd != 1 && fd != 2 {
+                        continue;
+                    }
+                    if is_closed_redirect_target(&target) {
+                        match fd {
+                            1 => replace_coproc_out_spec(
+                                &mut out_spec,
+                                CoprocFdSpec::Null,
+                                &mut displaced_writer,
+                            ),
+                            _ => {
+                                err_spec = CoprocFdSpec::Null;
+                                err_touched = true;
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
+                        // A dup of an fd onto itself is a no-op in
+                        // GNU, and the move form's self-close is
+                        // excepted (rubash#1236): leave both specs
+                        // untouched.
+                        if source_fd == fd {
+                            continue;
+                        }
+                        let spec = match source_fd {
+                            1 => out_spec.dup()?,
+                            2 => err_spec.dup()?,
+                            _ => continue,
+                        };
+                        match fd {
+                            1 => {
+                                replace_coproc_out_spec(&mut out_spec, spec, &mut displaced_writer)
+                            }
+                            _ => {
+                                err_spec = spec;
+                                err_touched = true;
+                            }
+                        }
+                        // GNU `>&M-` moves: the source closes in
+                        // the child after the dup — except a
+                        // self-move, handled above (rubash#1236).
+                        if move_source {
+                            match source_fd {
+                                1 => replace_coproc_out_spec(
+                                    &mut out_spec,
+                                    CoprocFdSpec::Null,
+                                    &mut displaced_writer,
+                                ),
+                                2 => {
+                                    err_spec = CoprocFdSpec::Null;
+                                    err_touched = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                    // Non-numeric word target.
+                    if fd == 1 {
+                        // GNU redir.c:832-838 r_err_and_out:
+                        // `>&word` / `1>&word` opens ONE file
+                        // for both fds (shared description).
+                        // The stored target still carries the
+                        // operator's `&` (like the compound
+                        // arms); strip it for the open.
+                        let path = target.strip_prefix('&').unwrap_or(&target);
+                        let file = self.create_redirect_output(path, redirect.clobber)?;
+                        let shared = file.try_clone()?;
+                        replace_coproc_out_spec(
+                            &mut out_spec,
+                            CoprocFdSpec::File(file),
+                            &mut displaced_writer,
+                        );
+                        err_spec = CoprocFdSpec::File(shared);
+                        err_touched = true;
+                    } else {
+                        // `2>&word` is an ambiguous redirect in
+                        // GNU (and in rubash's plain commands):
+                        // report it once and decline the spawn
+                        // (Declined); an Err here would make the
+                        // IoError reporter print the message a
+                        // second time.
+                        let raw_word = redirect
+                            .target_metadata
+                            .raw
+                            .strip_prefix('&')
+                            .unwrap_or(&redirect.target_metadata.raw);
+                        eprintln!(
+                            "{}{}: ambiguous redirect",
+                            self.diagnostic_prefix(),
+                            raw_word
+                        );
+                        return Ok(CoprocRedirectOutcome::Declined);
+                    }
+                }
+                _ => {}
             }
-        } else if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_redirect_target(redirect);
-            if is_closed_redirect_target(&target) {
-                child.stderr(Stdio::null());
-            } else if redirect_target_fd(&target).is_none() {
-                child.stderr(Stdio::from(open_redirect_append(&self.session_path(
-                    shell_path_to_windows(&target, &self.shell_state.env_vars),
-                ))?));
-            }
+        }
+        child.stdout(out_spec.into_stdio());
+        if err_touched {
+            child.stderr(err_spec.into_stdio());
         }
 
         // The body pipe replaces the coproc pipe set by the caller
@@ -4199,7 +5023,40 @@ impl Executor {
             child.stdin(stdio);
         }
 
-        Ok(displaced_writer)
+        Ok(CoprocRedirectOutcome::Proceed(displaced_writer))
+    }
+
+    /// rubash#1644: the fd-2 spec a coproc dup (`>&2`) must copy
+    /// when the child's stderr was handed over directly at spawn
+    /// (rubash#1882 CoprocStderrPlan::Direct): an owned dup of the
+    /// same endpoint coproc_stderr_plan resolved from fd 2.
+    fn coproc_stderr_direct_spec(&mut self) -> Result<CoprocFdSpec, ExecuteError> {
+        if self.fd_table.is_closed(2) {
+            // The plan hands the child /dev/null; the spec is Null.
+            return Ok(CoprocFdSpec::Null);
+        }
+        Ok(match self.fd_table.write_endpoint(2) {
+            None | Some(FdWriteEndpoint::Stderr) => CoprocFdSpec::File(dup_coproc_process_fd(2)?),
+            Some(FdWriteEndpoint::Stdout) => CoprocFdSpec::File(dup_coproc_process_fd(1)?),
+            Some(FdWriteEndpoint::File(file_fd)) => CoprocFdSpec::File(crate::fd::handle_to_file(
+                crate::fd::duplicate_handle_inheritable(file_fd.handle)?,
+            )),
+            Some(FdWriteEndpoint::ProcessSubstitution { path, .. }) => {
+                // The plan always forwards this endpoint, so the
+                // direct seed never serves it in practice; mirror
+                // the forwarder's append-open if it ever did.
+                CoprocFdSpec::File(open_redirect_append(&path)?)
+            }
+            Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => CoprocFdSpec::File(
+                crate::fd::handle_to_file(crate::fd::duplicate_handle_inheritable(fd.handle)?),
+            ),
+            // rubash#1898: mirrors the plan's /dev/full arm.
+            Some(FdWriteEndpoint::FullDevice) => CoprocFdSpec::Null,
+            // rubash#2042: mirrors the plan's synthetic-/proc arm —
+            // the child's stderr writes absorb (Null), exactly like
+            // the /dev/full binding's ENOSPC ceiling.
+            Some(FdWriteEndpoint::ProcContentWrite) => CoprocFdSpec::Null,
+        })
     }
 
     pub(in crate::executor) fn execute_case_command(
@@ -4543,7 +5400,7 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = cmd
             .redirect_out
-            .as_ref()
+            .as_deref()
             .filter(|r| is_stdout_splice_redirect(cmd, r))
         {
             let target = self.expand_redirect_target(redirect);
@@ -4557,7 +5414,11 @@ impl Executor {
             for clause in &mut case_command.clauses {
                 apply_stdout_append_redirect(&mut clause.body, &append_redirect);
             }
-        } else if let Some(redirect) = cmd.append.as_ref().filter(|r| is_stdout_write_redirect(r)) {
+        } else if let Some(redirect) = cmd
+            .append
+            .as_deref()
+            .filter(|r| is_stdout_write_redirect(r))
+        {
             let mut append_redirect = redirect.clone();
             append_redirect.target = self.expand_redirect_target(redirect);
             for clause in &mut case_command.clauses {
@@ -4567,7 +5428,7 @@ impl Executor {
 
         if let Some(redirect) = cmd
             .redirect_err
-            .as_ref()
+            .as_deref()
             .filter(|r| is_stderr_splice_redirect(cmd, r))
         {
             let target = self.expand_redirect_target(redirect);
@@ -4583,7 +5444,7 @@ impl Executor {
             }
         } else if let Some(redirect) = cmd
             .redirect_err_append
-            .as_ref()
+            .as_deref()
             .filter(|r| is_stderr_splice_redirect(cmd, r))
         {
             let mut append_redirect = redirect.clone();
@@ -4638,14 +5499,8 @@ fn if_condition_is_side_effect_free(condition: &[CommandNode]) -> bool {
         && command.compound_assignments.is_empty()
         && command.array_element_assignments.is_empty()
         && command.process_substitutions.is_empty()
-        && command.command_substitutions.is_empty()
-        && command.arithmetic_expansions.is_empty()
-        && command.parameter_expansions.is_empty()
-        && command.brace_expansions.is_empty()
         && command.extglob_patterns.is_empty()
-        && command.tilde_expansions.is_empty()
         && command.pathname_patterns.is_empty()
-        && command.word_quotes.is_empty()
         && command.redirects.is_empty()
         && command.redirect_in.is_none()
         && command.redirect_out.is_none()
@@ -4701,14 +5556,8 @@ fn for_body_is_bare_colon(body: &[CommandNode]) -> Option<&CommandNode> {
         && command.compound_assignments.is_empty()
         && command.array_element_assignments.is_empty()
         && command.process_substitutions.is_empty()
-        && command.command_substitutions.is_empty()
-        && command.arithmetic_expansions.is_empty()
-        && command.parameter_expansions.is_empty()
-        && command.brace_expansions.is_empty()
         && command.extglob_patterns.is_empty()
-        && command.tilde_expansions.is_empty()
         && command.pathname_patterns.is_empty()
-        && command.word_quotes.is_empty()
         && command.redirects.is_empty()
         && command.redirect_in.is_none()
         && command.redirect_out.is_none()

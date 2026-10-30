@@ -1123,6 +1123,26 @@ impl Executor {
             if redirect.fd_var.is_some() {
                 continue;
             }
+            // rubash#2031: a leg INJECTED by an enclosing compound's splice
+            // (GROUP_REDIRECT_INJECTED_MARK) is not part of this call's own
+            // redirect list in GNU terms — execute_cmd.c:5606 applies the
+            // call's written list once, and an ancestor compound's binding
+            // reaches the body through the descriptors themselves. Here that
+            // binding is already realized on the fd table by the ancestor's
+            // scope, and this call's own with_compound_output_redirects wrap
+            // keeps it in force (skipping the re-bind via
+            // injected_redirect_fd_is_bound) or lets the call's genuine legs
+            // displace it. Re-splicing the injected leg into the body copies
+            // it WITHOUT that context onto leaves that run after a nearer
+            // scope rebinds the fd — e.g. the call's own `>&2` dup onto a
+            // command-substitution capture (an Stdout endpoint, not the
+            // File endpoint injected_redirect_fd_is_bound recognizes) — and
+            // the leaf then re-opens the ancestor's target over the dup
+            // binding, silently swallowing the output
+            // (`$( ( a x >&2 ) 2>&1 >/dev/null )` lost the message).
+            if crate::executor::support_names::is_injected_group_redirect(redirect) {
+                continue;
+            }
             if !suppress_stdout && is_stdout_write_redirect(redirect) {
                 let target = self.expand_redirect_target(redirect);
                 // A combined entry's fd-1 leg is the single open both
@@ -1371,6 +1391,23 @@ impl Executor {
                 }
             }
             return Ok((None, false, None));
+        }
+        // rubash#2124: a /dev/tcp|udp call target is not a filesystem
+        // object — the metadata classification below fell through to
+        // the non-regular arm and FileFd::open_read reported it
+        // ENOENT. GNU redir.c do_redirections connects it (redir_open
+        // -> netopen) and binds it on fd 0 for the body's duration.
+        // open_net_redirect's error already carries the path-shaped
+        // message (the connect pre-line was emitted by the connect).
+        if crate::special_paths::is_net_redirect_target(&target) {
+            let file = self.open_net_redirect(&target)?;
+            let saved = self.fd_table.entries.get(&0).cloned();
+            self.fd_table.open_input(
+                0,
+                FdReadEndpoint::File(FileFd::from_file(file, target.clone().into())),
+                false,
+            );
+            return Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })));
         }
         let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
         if !std::fs::metadata(&path)

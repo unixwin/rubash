@@ -57,17 +57,18 @@ impl Executor {
             if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
                 return result;
             }
-            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-            file.write_all(output)?;
+            let file = self.create_redirect_output(&target, redirect.clobber)?;
+            crate::fd::write_file_all(&file, output)?;
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
             if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
                 return result;
             }
-            let mut file = open_redirect_append(
-                &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
-            )?;
-            file.write_all(output)?;
+            // Classified append open (rubash#1964): the raw mapped
+            // open this replaces could not reach /dev/tcp targets
+            // (their mapped name is not a file).
+            let file = self.open_append_target(&target)?;
+            crate::fd::write_file_all(&file, output)?;
         } else {
             self.write_default_stdout(output)?;
         }
@@ -103,9 +104,10 @@ impl Executor {
         if crate::executor::execution_misc::redirect_target_fd(&target).is_some() {
             return Ok(None);
         }
-        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
         if append {
-            return Ok(Some(open_redirect_append(&path)?));
+            // Classified append open (rubash#1964), the streaming
+            // twin of write_cat_output's append arm.
+            return Ok(Some(self.open_append_target(&target)?));
         }
         Ok(Some(self.create_redirect_output(&target, clobber)?))
     }
@@ -186,7 +188,7 @@ impl Executor {
             .env_vars
             .contains_key("__RUBASH_SCRIPT_NAME")
             && !self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
-            && self.fd_table.input_snapshot(0).is_none()
+            && self.fd_table.input_offset(0).is_none()
             && !expanded_is_this_shell
         {
             return Ok(false);
@@ -366,7 +368,14 @@ impl Executor {
             // readonly, UID/EUID/PPID, SHELLOPTS/BASHOPTS replay, SHLVL+1,
             // IFS default). Without this the in-process child fell back to
             // indexed-array handling for ${!BASH_CMDS[@]} (assoc audit C1).
-            Self::initialize_fresh_shell_env_vars(&mut child_env, &self.shell_state.cwd.clone());
+            Self::initialize_fresh_shell_env_vars(
+                &mut child_env,
+                &self.shell_state.cwd.clone(),
+                // An exec'd shell image is a genuinely new shell:
+                // SHLVL takes the startup increment (rubash#2058's
+                // keep applies only to fork-shaped respawns).
+                false,
+            );
             // The in-process child shares the parent's OS process, so the
             // child's PPID is the parent shell's pid (a real child would see
             // getppid() == the parent shell's getpid()).
@@ -539,7 +548,7 @@ impl Executor {
         // dups the file (shared offset). Install a real File endpoint on
         // fd 0 for plain file redirects; text sources (heredoc/here-string)
         // keep the FUNCTION_STDIN channel.
-        let file_stdin = cmd.redirect_in.as_ref().and_then(|redirect| {
+        let file_stdin = cmd.redirect_in.as_deref().and_then(|redirect| {
             if redirect.fd.unwrap_or(0) != 0 {
                 return None;
             }
@@ -673,8 +682,10 @@ impl Executor {
             None
         };
         let saved_process_env: Option<HashMap<String, String>> = if fresh_shell {
-            let saved: HashMap<String, String> = env::vars().collect();
-            for (name, _) in env::vars() {
+            let saved: HashMap<String, String> = crate::executor::env_helpers::process_env_pairs()
+                .into_iter()
+                .collect();
+            for (name, _) in crate::executor::env_helpers::process_env_pairs() {
                 env::remove_var(&name);
             }
             for (name, value) in self.shell_state.env_vars.values_map() {
@@ -734,7 +745,7 @@ impl Executor {
         }
 
         if let Some(saved) = saved_process_env {
-            for (name, _) in env::vars() {
+            for (name, _) in crate::executor::env_helpers::process_env_pairs() {
                 env::remove_var(&name);
             }
             for (name, value) in saved {
@@ -744,7 +755,16 @@ impl Executor {
 
         self.restore_shell_env(saved_env);
         if let Some(saved_shell_state) = saved_shell_state {
+            // rubash#1907: this direct-assignment restore bypasses
+            // restore_flat_subshell, so apply its process-umask half
+            // explicitly — the in-process child script ran against
+            // this same process, and a `umask` inside it must die at
+            // this process boundary like GNU's exec'd child.
+            let fork_saved_process_umask = saved_shell_state.fork_saved_process_umask;
             self.shell_state = saved_shell_state;
+            if let Some(mask) = fork_saved_process_umask {
+                crate::builtins::umask::apply_process_umask(mask);
+            }
         }
         self.shell_state.coproc_names = saved_coproc_names;
         self.shell_state.last_background_pid = saved_last_background_pid;

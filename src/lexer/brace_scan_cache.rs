@@ -137,7 +137,7 @@ pub(crate) enum HeredocOpEntry {
     Resume(HeredocOpScanResume),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct BraceScanCache {
     brace_entries: Vec<(usize, BraceScanEntry)>,
     operator_entries: Vec<(usize, HeredocOpEntry)>,

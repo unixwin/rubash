@@ -27,7 +27,13 @@ impl Executor {
         // (`a=9 echo >&$(echo $a)` sees the outer a, not 9). Expanding here —
         // before apply_temporary_assignments — seeds the redirect-target memo
         // with the correct pre-binding values; the apply sites reuse them.
-        let redirect_rejection = self.reject_invalid_redirects(cmd)?;
+        // rubash#2121: classify the apply funnel so the reject gate
+        // settles superseded net output entries only where the funnel
+        // itself would lose them.
+        let settle_superseded_net_outputs =
+            self.superseded_net_output_settlement_applies(cmd, false);
+        let redirect_rejection =
+            self.reject_invalid_redirects(cmd, settle_superseded_net_outputs)?;
         let mut skip_command = redirect_rejection.is_some();
         if redirect_rejection == Some(super::redirection::RedirectRejection::FatalNounset) {
             // rubash#535: an unbound variable in a redirect word is a fatal
@@ -197,8 +203,44 @@ impl Executor {
         let result = if redirect_rejected {
             Ok(())
         } else {
-            self.execute_prepared_command(cmd)
+            // rubash#2124: GNU redir.c do_redirections opens a winning
+            // /dev/tcp|udp input redirect before the body runs, for
+            // in-process classes too — the funnel's bind performs the
+            // one connect and binds the socket for the dispatch; a
+            // failed connect was already diagnosed there (status 1)
+            // and skips the dispatch like a gate rejection.
+            match self.bind_simple_command_net_inputs(cmd) {
+                Ok(saved_net_binds) => {
+                    let result = self.execute_prepared_command(cmd);
+                    self.restore_simple_command_net_inputs(saved_net_binds);
+                    result
+                }
+                Err(()) => Ok(()),
+            }
         };
+        // rubash#2174: GNU flushes its stdio stdout after EVERY builtin
+        // or function executed in the current shell context
+        // (execute_cmd.c:5648 execute_builtin_or_function:
+        // fflush (stdout), done "before undoing the effects of any
+        // redirections" — hence before the process-substitution
+        // teardown below). rubash's stdio analog is the Rust std
+        // stdout handle's line buffer: builtin blocks routed to the
+        // real process stdout stay pending there when they carry no
+        // newline, while foreign writers on the shared fd (external
+        // commands, pipeline stages, procsub consumers, background
+        // children) write straight to the fd and overtake them
+        // (`printf 'A'; /usr/bin/printf 'B'` printed BAC). This funnel
+        // is the one completion point every simple command passes —
+        // builtins, functions, externals, and pipeline-stage
+        // re-dispatches alike — so flushing here keeps the buffer
+        // empty at every command boundary by construction. It is the
+        // RAW std handle flush, not an fd-table endpoint write: GNU's
+        // `printf 'A'; exec >file` leaves the pre-redirect A on the
+        // OLD stdout, which is exactly where the raw handle points.
+        // Cost: an empty-buffer no-op check when nothing is pending;
+        // after an external dispatch the buffer is empty by this same
+        // invariant, so spawn-heavy paths pay no extra syscall.
+        super::shell_options::flush_process_stdout();
         let external_ran = self.external_dispatch_ran.get();
         self.external_dispatch_ran.set(saved_external_marker);
         // rubash#1525: with a tempenv PIPESTATUS and an in-process
@@ -404,9 +446,47 @@ impl Executor {
         // here would double it once the Ok result reaches them), and
         // maybe_run_error_trap's own gates (inverted / &&-|| context /
         // errtrace function depth) match the errexit conditions.
+        // The :1004 check is itself gated on `ignore_return == 0 &&
+        // invert == 0' (and the ERR-trap call at :993 shares that gate):
+        // a special builtin failing inside a tested context — an if/while
+        // condition, a non-final &&/|| member, a `!' inversion, or a
+        // function body reached from such a call — reports its status and
+        // execution continues. rubash's with_errexit_suppressed marks
+        // exactly those contexts (the executor's CMD_IGNORE_RETURN model:
+        // conditions, non-final list members and inverted commands are
+        // dispatched under it, and it stays raised across a tested
+        // function call), and the errexit branch at the bottom of this
+        // function already consults the same predicate, so the fatality
+        // channel reads it too. (RC audit phase-1 finding ④ / errors10:
+        // before this, failures already wired into the channel — the
+        // `set' family — died inside conditions where GNU continues.)
+        //
+        // rubash#2082: GNU's single do_redirections verdict reaches
+        // rubash through two channels. The apply layer's failures
+        // surface as IoError and are converted in execute_command's
+        // arm; the reject gate's RedirectRejection::Command — the
+        // dup / input-open / ambiguous class, redir.c:255-260's first
+        // failing entry — is adjudicated here instead: for a special
+        // builtin in a posixly_correct non-interactive shell it is the
+        // same EX_REDIRFAIL conversion (execute_cmd.c:4865-4875), an
+        // exit at EXECUTION_FAILURE that precedes the outcome chain
+        // because GNU's jump is not gated on ignore_return. The gate
+        // already rendered the diagnostic and set status 1; the
+        // FatalNounset rejection keeps its own adjudication above and
+        // is not this class.
+        if redirect_rejected
+            && matches!(
+                redirect_rejection,
+                Some(super::redirection::RedirectRejection::Command)
+            )
+            && self.posix_special_redirect_failure_exits(cmd)
+        {
+            return Err(ExecuteError::ExitCode(1));
+        }
         let outcome = if result.is_ok()
             && self.special_builtin_failed.get()
             && self.command_builtin_depth == 0
+            && self.errexit_is_active()
             && self.posix_mode_enabled()
             && self
                 .shell_state
@@ -415,6 +495,20 @@ impl Executor {
                 .map(String::as_str)
                 != Some("1")
         {
+            // rubash#2117: GNU's order in execute_command_internal is
+            // the ERR-trap call (execute_cmd.c:993-1001) BEFORE the
+            // special_builtin_failed check (:1004-1017), and every
+            // simple command resets the flag at entry
+            // (execute_cmd.c:4480) — so the trap body's own commands
+            // clear the flag the failing builtin set, and the check
+            // reads the CLEARED flag: a benign ERR trap rescues the
+            // shell from the POSIX exit, while a trap body that itself
+            // ends in a failing special builtin re-arms the flag and
+            // the exit still fires. Capture the completed command's
+            // status first: GNU's exit carries exec_result
+            // (last_command_exit_value = exec_result, :1010), not the
+            // trap body's last status.
+            let completed_status = self.exit_code;
             // rubash#1611: inside a timed dispatch the ERR trap is
             // adjudicated once, by the ast_exec time branch, when the
             // timed command completes (rubash#1277) — firing here too
@@ -422,13 +516,26 @@ impl Executor {
             if self.timed_dispatch_depth.get() == 0 {
                 self.maybe_run_error_trap(cmd)?;
             }
-            // rubash#1611: this is a conversion of a COMPLETED command's
-            // status, not a jump out of it — mark it so an enclosing
-            // execute_time_ast_command can still print its report (GNU
-            // adjudicates this exit in execute_time_command's caller,
-            // after print_time_info).
-            self.errexit_status_converted.set(true);
-            Err(ExecuteError::ExitCode(self.exit_code))
+            if self.special_builtin_failed.get() {
+                // rubash#1611: this is a conversion of a COMPLETED command's
+                // status, not a jump out of it — mark it so an enclosing
+                // execute_time_ast_command can still print its report (GNU
+                // adjudicates this exit in execute_time_command's caller,
+                // after print_time_info).
+                self.errexit_status_converted.set(true);
+                // rubash#2117: this conversion is the POSIX
+                // special-builtin death, not an errexit one — the time
+                // branch's jump is gated on posix fatality, not `set -e`.
+                self.posix_special_status_converted.set(true);
+                Err(ExecuteError::ExitCode(completed_status))
+            } else {
+                // Rescued by the ERR trap: the trap already fired for
+                // this command at this dispatch — mark it so the list
+                // loop's own ERR adjudication does not fire it again
+                // (rubash#2117).
+                self.err_trap_fired_at_dispatch.set(true);
+                result
+            }
         } else if matches!(result, Err(ExecuteError::Return(_)))
             && (self.shell_state.function_depth > 0 || self.source_nest_depth > 0)
         {
@@ -462,7 +569,32 @@ impl Executor {
             if result.is_ok() {
                 self.errexit_status_converted.set(true);
             }
-            Err(ExecuteError::ExitCode(self.exit_code))
+            // DE-06 (design 9.3; PLAN row 12): this conversion is
+            // the errexit decision — a selected `set -e` filter
+            // reports the site and parks the session before the
+            // exit path runs. Inside a timed dispatch the death
+            // is decided later, by the ast_exec time branch,
+            // which parks at its own promotion instead. Only the
+            // frame that ORIGINATES the conversion parks: an Err
+            // already in flight was adjudicated at the deeper
+            // frame where its command completed, and the frames
+            // it unwinds through (a sourced file's `.` call, a
+            // function call) re-enter this arm with the same
+            // status — parking there too would report one death
+            // as two exception stops.
+            let site_result = if self.timed_dispatch_depth.get() == 0 && result.is_ok() {
+                self.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::Errexit,
+                    self.exit_code,
+                    None,
+                )
+            } else {
+                Ok(())
+            };
+            match site_result {
+                Ok(()) => Err(ExecuteError::ExitCode(self.exit_code)),
+                Err(error) => Err(error),
+            }
         } else {
             result
         };
@@ -500,6 +632,13 @@ impl Executor {
             self.exit_code = 1;
             return Ok(());
         }
+        // rubash#2126: this funnel is where a simple command commits to
+        // dispatch (execute_cmd.c:4813's this_shell_builtin assignment
+        // point) — a restricted refusal above never dispatches, so the
+        // note belongs after it. The classification itself (eval /
+        // source / `.` arm, everything else disarms, disabled names
+        // resolve externally) lives in note_simple_command_dispatch.
+        self.note_simple_command_dispatch(word);
         if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word) {
             return self.execute_external(cmd);
         }

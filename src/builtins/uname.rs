@@ -249,8 +249,9 @@ pub fn execute_arch(args: &[String]) -> IdentityToolOutput {
 }
 
 /// coreutils error shape: `uname: invalid option -- 'z'` plus the
-/// "Try 'uname --help'" hint (smart quotes as printed by the MSYS2
-/// coreutils build; Git Bash probe 2026-09-26).
+/// "Try 'uname --help'" hint, in the GNU C-locale ASCII quote style
+/// (rubash#2046 C2; the MSYS2 build's locale-dependent ‘’ forms are
+/// not the contract anchor).
 fn invalid_option_short(tool: &str, option: char) -> IdentityToolOutput {
     IdentityToolOutput {
         status: 1,
@@ -274,11 +275,17 @@ fn invalid_option_long(tool: &str, arg: &str) -> IdentityToolOutput {
 }
 
 fn extra_operand(tool: &str, operand: &str) -> IdentityToolOutput {
+    // rubash#2046 C2: the diagnostic quote style is the GNU C-locale
+    // ASCII form, like the sibling invalid-option texts below — the
+    // Unicode ‘’ pair this used to print is what the MSYS2 build
+    // emits under a UTF-8 locale, and the contract's anchor is the
+    // C-locale GNU text (the S6 sibling census found this was the
+    // only non-ASCII quote site in the emulation texts).
     IdentityToolOutput {
         status: 1,
         stdout: Vec::new(),
         stderr: format!(
-            "{tool}: extra operand \u{2018}{operand}\u{2019}\nTry '{tool} --help' for more information.\n"
+            "{tool}: extra operand '{operand}'\nTry '{tool} --help' for more information.\n"
         )
         .into_bytes(),
     }
@@ -313,14 +320,49 @@ fn version_banner(tool: &str) -> IdentityToolOutput {
     }
 }
 
-/// `--help`: the coreutils usage headline on stdout with exit 0.
+/// `--help`: the exact GNU coreutils 9.4 help text on stdout with
+/// exit 0 (rubash#2046 C1 — the two-line short answer the engine
+/// used to give displaced the real file's full page wherever the
+/// spelling resolved here). Same stance as `version_banner`: the
+/// compatibility contract names the 9.4 baseline build. WinuxCmd's
+/// own `--help` is framework-generated from its registration
+/// synopsis and differs in the description body; the recorded
+/// three-way anchor for this face is the GNU text (S5 corpus).
 fn usage_text(tool: &str) -> String {
-    let body = if tool == "arch" {
-        "Print machine hardware name (same as uname -m).\n"
-    } else {
-        "Print certain system information.  With no OPTION, same as -s.\n"
-    };
-    format!("Usage: {tool} [OPTION]...\n{body}")
+    if tool == "arch" {
+        return "Usage: arch [OPTION]...\n\
+                Print machine architecture.\n\
+                \n\
+                \x20     --help        display this help and exit\n\
+                \x20     --version     output version information and exit\n\
+                \n\
+                GNU coreutils online help: <https://www.gnu.org/software/coreutils/>\n\
+                Report any translation bugs to <https://translationproject.org/team/>\n\
+                Full documentation <https://www.gnu.org/software/coreutils/arch>\n\
+                or available locally via: info '(coreutils) arch invocation'\n"
+            .to_string();
+    }
+    "Usage: uname [OPTION]...\n\
+     Print certain system information.  With no OPTION, same as -s.\n\
+     \n\
+     \x20 -a, --all                print all information, in the following order,\n\
+     \x20                            except omit -p and -i if unknown:\n\
+     \x20 -s, --kernel-name        print the kernel name\n\
+     \x20 -n, --nodename           print the network node hostname\n\
+     \x20 -r, --kernel-release     print the kernel release\n\
+     \x20 -v, --kernel-version     print the kernel version\n\
+     \x20 -m, --machine            print the machine hardware name\n\
+     \x20 -p, --processor          print the processor type (non-portable)\n\
+     \x20 -i, --hardware-platform  print the hardware platform (non-portable)\n\
+     \x20 -o, --operating-system   print the operating system\n\
+     \x20     --help        display this help and exit\n\
+     \x20     --version     output version information and exit\n\
+     \n\
+     GNU coreutils online help: <https://www.gnu.org/software/coreutils/>\n\
+     Report any translation bugs to <https://translationproject.org/team/>\n\
+     Full documentation <https://www.gnu.org/software/coreutils/uname>\n\
+     or available locally via: info '(coreutils) uname invocation'\n"
+        .to_string()
 }
 
 #[cfg(test)]
@@ -484,7 +526,7 @@ mod uname_tests {
         assert_eq!(out.status, 1);
         let text = String::from_utf8_lossy(&out.stderr);
         assert!(
-            text.starts_with("arch: extra operand \u{2018}extra\u{2019}"),
+            text.starts_with("arch: extra operand 'extra'"),
             "stderr: {text}"
         );
     }

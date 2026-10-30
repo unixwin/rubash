@@ -73,6 +73,7 @@ mod declare_local;
 mod dev_fd_operands;
 mod dynamic_arrays;
 mod exec_profile;
+pub(in crate::executor) mod proc_operands;
 pub(in crate::executor) use dynamic_arrays::dense_view_element;
 pub(in crate::executor) use dynamic_arrays::env_derived_dynamic_parameter_value;
 pub(crate) mod embedded_mutations;
@@ -88,6 +89,7 @@ mod external_file_builtins;
 mod external_finish;
 mod external_inner;
 mod external_redirects;
+mod external_route;
 mod external_setup;
 pub(crate) mod fd_table;
 mod function_calls;
@@ -96,7 +98,10 @@ mod getopts_enable;
 pub mod identity;
 mod init;
 
-pub use init::RESPAWNED_CHILD;
+pub(crate) use init::spawner_stamp_value;
+pub use init::{
+    respawn_provenance_validated_from_process_env, RESPAWNED_CHILD, RESPAWN_SPAWNER_PID_KEY,
+};
 pub mod profiler;
 // rubash#331: the binary crate renders its self-produced path values
 // (BASH, argv[0]-derived $0) through the same POSIX-form display the
@@ -184,9 +189,14 @@ mod alias_helpers;
 pub(crate) mod assignment_helpers;
 mod ast_exec;
 mod builtin_names;
+#[allow(dead_code)]
+// rubash#2036: consumers landed through S4 (introspection, dispatch,
+// pipeline and comsub projections); a few registration-only fields
+// are read by the module's consistency pins rather than hot paths.
+pub(crate) mod command_registry;
 mod command_subst_helpers;
 mod command_text;
-mod env_helpers;
+pub(crate) mod env_helpers;
 mod execution_misc;
 mod function_env;
 pub(crate) mod local_helpers;
@@ -264,7 +274,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 pub struct HostExternalCommandOutput {
@@ -272,6 +282,11 @@ pub struct HostExternalCommandOutput {
     pub stderr: Vec<u8>,
     pub status: i32,
 }
+
+pub use external_route::{
+    ExternalRouteHandle, ExternalRouteOutcome, ExternalRouteProvider, ExternalRouteRequest,
+    ExternalRouteStdio,
+};
 
 struct HostExternalCommandHandler(
     Box<dyn FnMut(&[String], &HashMap<String, String>) -> Option<HostExternalCommandOutput>>,
@@ -567,6 +582,23 @@ pub struct Executor {
     /// executors keep the restore.
     is_process_exit_executor: bool,
     background_children: HashMap<u32, crate::fd::SpawnedChild>,
+    /// rubash#2179: writer threads feeding output process-substitution
+    /// consumers (external_setup::spawn_output_process_substitution_child).
+    /// The feed is the shell's half of the substitution rendezvous: in
+    /// GNU the producer's bytes enter the live pipe during the command
+    /// itself (subst.c:6362 process_substitute forks the consumer at
+    /// materialization), so at shell exit nothing remains to deliver.
+    /// Rubash's deferred feed must therefore be COMPLETED, not
+    /// abandoned, before this executor's process lifetime ends —
+    /// drain_procsub_feeds joins these threads, and Drop plus the
+    /// image-replacement paths call it. Finished handles are pruned at
+    /// the next spawn so a long-lived shell does not accumulate them.
+    procsub_feed_handles: Vec<std::thread::JoinHandle<()>>,
+    /// rubash#1952: pids spawned as streamed input process
+    /// substitutions (real children in background_children), mapped
+    /// to whether the boundary reap has spent its one bounded grace
+    /// wait for the pid (see refresh_background_jobs_impl).
+    procsub_stream_children: HashMap<u32, bool>,
     /// Background-job completions the boundary reap has already
     /// observed (try_wait returned) but whose job-table visibility is
     /// deferred to the next GNU observation point — a foreground
@@ -575,6 +607,22 @@ pub struct Executor {
     /// refresh_background_jobs in job_builtins.rs). Entries are
     /// (pid, flattened status, killing signal).
     pending_job_completions: Vec<(u32, i32, Option<i32>)>,
+    /// rubash#2053/#2057: coproc pids whose completion has been
+    /// applied (status recorded in completed_statuses) but whose
+    /// retirement — coproc_unsetvars + endpoint close, GNU's
+    /// coproc_reap via coproc_dispose — is deferred to a disposal
+    /// point. GNU separates the reap from the disposal: waitchld
+    /// records the status asynchronously (execute_cmd.c:2326
+    /// coproc_setstatus), while coproc_reap runs from
+    /// cleanup_dead_jobs, whose non-interactive callers are the
+    /// notify_and_cleanup inside a foreground wait_for (jobs.c:3385),
+    /// the wait/jobs builtins, and stream end — never a bare command
+    /// boundary. Retiring at the boundary that merely RECORDED the
+    /// completion unbinds <name>/<name>_PID before the next command
+    /// expands, stealing a `wait $C_PID` operand (bare wait reports
+    /// 0 instead of the recorded status) or a `{C[1]}` redirect
+    /// operand (ambiguous redirect).
+    pending_coproc_retirements: Vec<u32>,
     /// rubash#1528: deferred `time` reports for timed coproc commands.
     /// GNU times a coproc like any async job — the interval is the
     /// job's lifetime (spawn to completion) and the report prints when
@@ -646,6 +694,14 @@ pub struct Executor {
     /// tempenv cell). Saved/restored around each dispatch so nested
     /// commands cannot leak their class into the enclosing one.
     external_dispatch_ran: Cell<bool>,
+    /// rubash#2124: fds the simple-command dispatch bind
+    /// (bind_simple_command_net_inputs) has bound to a connected
+    /// /dev/tcp|udp stream for the command currently executing. The
+    /// read builtin's own net serve consults this so a winning net
+    /// input is connected exactly once — by the bind, not again by
+    /// the serve. Entries are pushed by the bind and removed by its
+    /// restore, so the set is empty outside a bound dispatch.
+    dispatch_net_bound_fds: Vec<u32>,
     /// rubash#1525: set by the simple-command funnel when it has
     /// already performed this command's PIPESTATUS completion write
     /// against the still-bound tempenv cell; the ast_exec loop's
@@ -672,6 +728,15 @@ pub struct Executor {
     /// carrier (the same finish the simple-command path gives output
     /// process substitutions).
     conditional_output_procsubs: Vec<(std::path::PathBuf, String, Option<usize>)>,
+    /// rubash#2131: the redirection list of the `[[ ]]` command
+    /// currently evaluating, stashed by
+    /// execute_conditional_command_with_redirects for the fd-alias
+    /// sync's own-redirect overlay: `[[ ]]` binds only its fds 1/2
+    /// (bind_conditional_stdio_redirects), so its fd-0 binding never
+    /// reaches the fd table, and the evaluator runs through no
+    /// CommandNode the sync could read the list from. Saved and
+    /// restored around the evaluation like the fd 1/2 entries.
+    current_conditional_redirects: Option<Vec<crate::parser::Redirect>>,
     pending_scalar_assignment: bool,
     suppress_errexit: usize,
     /// rubash#1563: depth of GNU's CMD_IGNORE_RETURN clearing frame for
@@ -763,6 +828,18 @@ pub struct Executor {
     /// not against the map value (rubash perf12: the map-value gate
     /// produced stale alias/declare line numbers after an ambient restore).
     line_env_os_value: std::cell::RefCell<Option<String>>,
+    /// #682 stamped-by-caller contract: the execute_ast command loop stamps
+    /// `__RUBASH_CURRENT_LINE`/`__RUBASH_CMD_START_LINE` for the node it is
+    /// about to dispatch (GNU stamps line_number once per command,
+    /// execute_cmd.c SET_LINE_NUMBER); the funnel's own re-stamp recomputes
+    /// the identical value from the same node and the same ambient line, so
+    /// when this flag is set the funnel skips its copy. Only the ast_exec
+    /// loop sets it — immediately before its funnel call, and only when no
+    /// DEBUG fire / debugger seam ran this iteration (a trap action leaves
+    /// its own lines behind, and the funnel's re-stamp is then GNU's
+    /// post-trap SET_LINE_NUMBER and must run). Consumed on entry, so a
+    /// nested execute_command always stamps normally.
+    pre_stamped_line: std::cell::Cell<bool>,
     /// The background direct-spawn eligibility gate (#809) expands the async
     /// command's words in the PARENT as a probe; GNU expands the forked
     /// child's words inside the child, so the parent never observes a
@@ -1024,6 +1101,21 @@ pub struct Executor {
     /// (ExpansionFailure), mirroring the simple-command handling of
     /// the same error class.
     pub(crate) conditional_expansion_error_status: Cell<Option<i32>>,
+    /// rubash#1915: the process-substitution span targets the parser
+    /// recorded for the operands of the `[[ ]]` command currently
+    /// being evaluated, each paired with the exact operand text it was
+    /// recorded for. `execute_conditional_command` installs the table
+    /// (save/restore around the evaluation); the conditional nounset
+    /// scan points mask exactly the spans recorded for the word under
+    /// scan before judging it — GNU's parent word walk extracts a
+    /// procsub span verbatim (subst.c:1311 extract_process_subst) and
+    /// never expands its body (subst.c:6362 process_substitute owns
+    /// it), the same structural criterion the simple-command pre-scan
+    /// applies through `CommandNode::process_substitutions`. A
+    /// look-alike span in a quoted sibling operand was never recorded
+    /// for THAT word, so its `$` stays a live parent reference. Empty
+    /// outside conditional evaluation.
+    pub(crate) conditional_procsub_span_targets: Vec<(String, Vec<String>)>,
     /// rubash#637: marks a pending evalerror abort as bad-subscript class.
     /// The eval boundary absorbs exactly this class (eval returns failure,
     /// the caller continues — GNU evalstring.c:365,422-442 swallowing
@@ -1099,6 +1191,17 @@ pub struct Executor {
     /// assignment expansion error sites, reset at each execute_ast loop
     /// iteration, consulted by maybe_run_error_trap.
     pub(crate) command_expansion_failed: Cell<bool>,
+    /// rubash#2117: the dispatch-level special_builtin_failed gate in
+    /// execute_materialized_command fired this command's ERR trap and
+    /// the trap body's own dispatches cleared the flag (GNU's order:
+    /// run_error_trap at execute_cmd.c:993-1001 reads before the
+    /// :1004-1017 check, and every simple command resets the flag at
+    /// :4480), so the POSIX exit was rescued and the command completes
+    /// normally. The mark tells maybe_run_error_trap the trap already
+    /// fired for THIS command, so the list loop's own adjudication
+    /// does not fire it a second time. Reset at each execute_ast loop
+    /// iteration, like command_expansion_failed.
+    pub(crate) err_trap_fired_at_dispatch: Cell<bool>,
     /// rubash#1164: GNU samples `was_error_trap` (execute_cmd.c:914/851 —
     /// signal_is_trapped(ERROR_TRAP) && !signal_is_ignored) BEFORE a
     /// command executes and adjudicates that command's failure against the
@@ -1273,6 +1376,16 @@ pub struct Executor {
     /// (expand_assignment_value_inner → expand_command_substitution_mut_typed
     /// and expand_embedded_parameters_mut → expand_command_substitution_mut).
     last_heredoc_warning_source: RefCell<Option<String>>,
+    /// Decline-only memo for the heredoc comsub shortcut: the
+    /// (IFS_GLUE-stripped) source whose most recent admission attempt
+    /// declined. The mut dispatcher tries the typed heredoc entry
+    /// first and, on decline, falls through to routes that retry the
+    /// readback entry for the same source; the memo lets that retry
+    /// skip a second tokenize/parse + admission pass. It can never
+    /// admit anything — a hit only routes the body to the real
+    /// executor — so a stale record costs at most the shortcut, never
+    /// semantics. An unrelated heredoc attempt clears it.
+    heredoc_admission_declined_source: RefCell<Option<String>>,
     /// Leading newlines in the comsub source (before trimming). Used to
     /// adjust heredoc warning line numbers: when `$(` is at end of line,
     /// the comsub body starts on the next line.
@@ -1368,6 +1481,29 @@ pub struct Executor {
     /// execute_time_ast_command entry and taken right after its inner
     /// dispatch, so a stale mark can never be consumed.
     pub(crate) errexit_status_converted: Cell<bool>,
+    /// rubash#2117: set alongside errexit_status_converted by the ONE
+    /// conversion site that is a POSIX special-builtin failure (the
+    /// special_builtin_failed branch of execute_materialized_command's
+    /// tail), so the ast_exec time branch can tell that death apart
+    /// from a plain errexit conversion: its jump is gated on posix
+    /// fatality (not on `set -e`) and on the flag surviving the time
+    /// branch's own ERR-trap fire. Cleared at every
+    /// execute_time_ast_command entry; taken by the time branch after
+    /// its inner dispatch completes, so a stale mark is never consumed.
+    pub(crate) posix_special_status_converted: Cell<bool>,
+    /// rubash#2125: set by execute_exec when the `{var}` fd_var apply
+    /// (apply_dynamic_fd_var_redirects) fails for an operand-bearing
+    /// `exec`. GNU reaches that failure inside do_redirections, BEFORE
+    /// exec_builtin's search/execve (exec.def:151+), so it is an
+    /// ordinary redirection failure — status 1, shell continues —
+    /// never exec.def's failed_exec exit, which covers only the
+    /// search/execve failure. execute_exec_command consumes the mark
+    /// to complete the command at status 1 WITHOUT routing through
+    /// finish_exec_replacement. In POSIX mode the same failure takes
+    /// the EX_REDIRFAIL jump instead (execute_cmd.c:4865-4875) and the
+    /// mark is never set. One-shot: set and consumed within a single
+    /// execute_exec_command call.
+    pub(crate) exec_do_redirections_failed: Cell<bool>,
     /// Depth of enclosing execute_time_ast_command inner dispatches.
     /// While > 0, the dispatch-level errexit conversion sites convert
     /// WITHOUT firing the ERR trap: the timed command completes through
@@ -1451,6 +1587,16 @@ pub struct Executor {
         Option<String>,
         Option<crate::shell::variables::Variable>,
     )>,
+    /// rubash#1646: descriptors a `{var}` redirection opened under
+    /// `shopt varredir_close` on a command-scoped application. GNU closes
+    /// them when the owning command COMPLETES (redir.c undo_redirections
+    /// at execute_cmd.c command end); closing at application time — the
+    /// previous behavior — rejected the command's own `>&$var` writes
+    /// with EBADF and silently dropped a `>(...)` consumer's whole
+    /// stream. execute_dynamic_fd_var_redirect therefore only RECORDS
+    /// the fd here; execute_command drains the records its command added
+    /// (watermark discipline, so nested commands keep their own closes).
+    deferred_varredir_closes: Vec<u32>,
     /// builtins/read.def read_timeout: absolute deadline for `read -t N`
     /// (and the TMOUT default). Set only while a `read` builtin call is
     /// active; consulted by the genuinely blocking endpoints (inherited
@@ -1476,6 +1622,19 @@ pub struct Executor {
     /// partial record is still assigned; only the status becomes 1. Merged
     /// with the fd-table copy by `take_read_eof_no_delimiter`.
     pub(crate) read_eof_no_delimiter: bool,
+    /// niubash#684: the armed inherited-stdin transport read fd 0 itself
+    /// and hit a genuine EOF (zero-length read) with no record to serve.
+    /// GNU builtin_read reads exactly ONE descriptor
+    /// (builtins/read.def:294) and a zread EOF ends the builtin
+    /// (read.def:767 `eof = 1`; :949 `retval = eof ? EXECUTION_FAILURE`)
+    /// — EOF is a verdict, not a "try the next transport" signal. The
+    /// read builtin's None cascade consults this flag so an EOF on the
+    /// process stdin is never re-asked of a second blocking reader
+    /// (which swallowed the EOF and consumed the NEXT input line as the
+    /// record). Reset beside read_eof_no_delimiter at every acquisition;
+    /// set only by read_inherited_process_stdin's EOF-with-nothing
+    /// return, never by a timeout/interrupt break.
+    pub(crate) read_process_stdin_eof: bool,
     /// rubash#1141: production timing of the input currently staged on
     /// FUNCTION_STDIN (a pipeline stage's captured producer output), so
     /// `read`/`select` can judge an armed deadline against the stream's
@@ -1528,6 +1687,32 @@ pub struct Executor {
     /// endpoint. Reset at the start of every `apply_external_redirects`.
     external_stdio_piped_fallback: bool,
     host_external_command_handler: Option<HostExternalCommandHandler>,
+    /// The external-command route seam's registered provider
+    /// (niubash#567 P3, external_route.rs): consulted by
+    /// `execute_external_inner` after name resolution when a simple
+    /// command is about to be spawned. `None` (the default) leaves
+    /// dispatch byte-identical to the pre-seam engine. Shared
+    /// (`Rc`) with command-substitution fork copies: the provider
+    /// is a process-level host service (the motivating host's is a
+    /// process singleton), and a forked comsub child routes through
+    /// the same registration as its parent. `RefCell` because a
+    /// fork shares the registration while the parent executor may
+    /// be mid-dispatch; the dispatch consults it through
+    /// `try_borrow_mut`, so a re-entrant routed call (a provider
+    /// that itself runs shell commands) declines to spawn instead
+    /// of panicking.
+    external_route_provider:
+        Option<std::rc::Rc<std::cell::RefCell<external_route::ExternalRouteProviderSlot>>>,
+    /// The fd 1/2 slots the last successful stdio plan walked
+    /// (external_redirects::PlannedStdioSlots), stashed by
+    /// `plan_external_stdio` so the route seam can realize the same
+    /// bindings as OS handles without walking the redirects a
+    /// second time (a second walk would re-open — re-truncate —
+    /// the command's targets). Consumed by the route attempt that
+    /// immediately follows the `apply_external_redirects` which
+    /// produced it; reset at the start of every
+    /// `apply_external_redirects`.
+    external_stdio_slots: Option<external_redirects::PlannedStdioSlots>,
     #[cfg(windows)]
     elevation_handler: Option<ElevationHandler>,
     external_file_builtins_enabled: bool,
@@ -1537,6 +1722,21 @@ pub struct Executor {
     /// whose current value still equals the journal's final state.
     env_write_journal: EnvWriteJournal,
     history_provider: Option<crate::history::SharedHistoryProvider>,
+    /// The engine's dispatch-time stamp ledger for the provider list,
+    /// parallel to it (niubash#646). GNU stamps every add_history at the
+    /// add moment (readline/history.c hist_inittime); on the provider
+    /// contract the host records the accepted line before the engine sees
+    /// it, so the engine stamps when it first observes the entry — the
+    /// interactive dispatch (`pre_process_interactive_line`) and the
+    /// builtin's own provider mutations (`history -s` appends, `-d`
+    /// removals, `-c`), reconciling by position each time. `Rc<RefCell>`
+    /// so an Executor fork copy (command_substitute's clone) shares the
+    /// ledger exactly like it shares the provider itself — a subshell's
+    /// `history` listing must not fork the stamps off the parent's.
+    /// Hosts that carry their own stamps report them through
+    /// `HistoryProvider::entry_timestamps` (niubash#622) and take
+    /// precedence when the channel is aligned and non-empty.
+    provider_stamp_ledger: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
 }
 
 #[cfg(test)]

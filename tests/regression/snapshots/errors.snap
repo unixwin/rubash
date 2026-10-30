@@ -6,7 +6,6 @@ after f
 after f
 1
 TEST
-TEST
 1
 2
 after readonly assignment
@@ -53,9 +52,6 @@ DEBUG
 DEBUG
 DEBUG
 invalid numeric argument
-after exit: 2
-after shift: 2
-after return: 2
 after exit: 2
 after shift: 2
 after return: 2

@@ -21,7 +21,7 @@ use crate::shell::VariableStore;
 use assign::assign_declare_names;
 use attrs::{apply_declare_attrs, DeclareOptions};
 use diagnostic::diagnostic_prefix;
-use marks::{marked_vars, unmark_typed};
+use marks::unmark_typed;
 use names::{
     check_selfref, declare_base_name, valid_array_reference, valid_declare_name, valid_identifier,
     valid_nameref_value,
@@ -82,8 +82,6 @@ pub(crate) fn sync_typed_assignments(
     variables: &crate::shell::var_table::VarTable,
     store: &mut VariableStore,
 ) {
-    let arrays = marked_vars(variables, ARRAY_VARS);
-    let assocs = marked_vars(variables, ASSOC_VARS);
     let mut parse_options = true;
     for arg in args {
         if parse_options && arg == "--" {
@@ -100,7 +98,7 @@ pub(crate) fn sync_typed_assignments(
         let Some(value) = variables.get(base) else {
             continue;
         };
-        if arrays.contains(base) {
+        if variables.is_marked(ARRAY_VARS, base) {
             let entries = indexed_array_entries(value);
             // rubash#616: preserve sparse keys — a values-only replace
             // enumerates densely, so `declare -a a=([5]=x [2]=y)` seeded
@@ -113,7 +111,7 @@ pub(crate) fn sync_typed_assignments(
             if store.replace_indexed_array_entries(base, keyed).is_err() {
                 crate::executor::drop_typed_indexed_array(store, base);
             }
-        } else if assocs.contains(base) {
+        } else if variables.is_marked(ASSOC_VARS, base) {
             let _ = store.replace_associative_array(base, parse_assoc_words(value));
         }
     }
@@ -125,14 +123,6 @@ pub(crate) fn sync_typed_attributes(
     variables: &crate::shell::var_table::VarTable,
     store: &mut VariableStore,
 ) {
-    let exported = marked_vars(variables, EXPORTED_VARS);
-    let readonly = marked_vars(variables, READONLY_VARS);
-    let arrays = marked_vars(variables, ARRAY_VARS);
-    let assocs = marked_vars(variables, ASSOC_VARS);
-    let integer = marked_vars(variables, INTEGER_VARS);
-    let uppercase = marked_vars(variables, UPPERCASE_VARS);
-    let lowercase = marked_vars(variables, LOWERCASE_VARS);
-    let namerefs = marked_vars(variables, NAMEREF_VARS);
     // A case attribute in THIS command rewrites stored values in the
     // mirror (attrs.rs apply_varcasemod pass), not just the marks: an
     // already-shaped typed cell must be refreshed from the mirror or
@@ -173,8 +163,8 @@ pub(crate) fn sync_typed_attributes(
             let value = variables.get(base).cloned().unwrap_or_default();
             let _ = store.set_scalar(base, value);
         } else if case_touched
-            && !arrays.contains(base)
-            && !assocs.contains(base)
+            && !variables.is_marked(ARRAY_VARS, base)
+            && !variables.is_marked(ASSOC_VARS, base)
             && matches!(
                 store.get(base).map(|v| &v.value),
                 Some(crate::shell::ShellValue::Scalar(_))
@@ -198,7 +188,7 @@ pub(crate) fn sync_typed_attributes(
                 }
             }
         }
-        if arrays.contains(base)
+        if variables.is_marked(ARRAY_VARS, base)
             && (case_touched
                 || !matches!(
                     store.get(base).map(|v| &v.value),
@@ -232,7 +222,7 @@ pub(crate) fn sync_typed_attributes(
                 };
                 crate::executor::replace_typed_indexed_array(store, base, elements);
             }
-        } else if assocs.contains(base)
+        } else if variables.is_marked(ASSOC_VARS, base)
             && (case_touched
                 || !matches!(
                     store.get(base).map(|v| &v.value),
@@ -261,12 +251,12 @@ pub(crate) fn sync_typed_attributes(
             let _ = store.replace_associative_array(base, entries);
         }
         if let Some(variable) = store.get_mut(base) {
-            variable.exported = exported.contains(base);
-            variable.readonly = readonly.contains(base);
-            variable.integer = integer.contains(base);
-            variable.uppercase = uppercase.contains(base);
-            variable.lowercase = lowercase.contains(base);
-            variable.nameref = if namerefs.contains(base) {
+            variable.exported = variables.is_marked(EXPORTED_VARS, base);
+            variable.readonly = variables.is_marked(READONLY_VARS, base);
+            variable.integer = variables.is_marked(INTEGER_VARS, base);
+            variable.uppercase = variables.is_marked(UPPERCASE_VARS, base);
+            variable.lowercase = variables.is_marked(LOWERCASE_VARS, base);
+            variable.nameref = if variables.is_marked(NAMEREF_VARS, base) {
                 arg.split_once('=').map(|(_, value)| value.to_string())
             } else {
                 None
@@ -360,11 +350,10 @@ fn declare_nameref_chain(
     if !variables.is_marked(NAMEREF_VARS, name) {
         return None;
     }
-    let namerefs = marked_vars(variables, NAMEREF_VARS);
     let mut last = name.to_string();
     let mut current = name.to_string();
     for _ in 0..16 {
-        if !namerefs.contains(current.as_str()) {
+        if !variables.is_marked(NAMEREF_VARS, &current) {
             break;
         }
         let cell = variables.get(&current)?.clone();
@@ -639,10 +628,6 @@ where
     // attribute marks and the assignment routing must run with the nameref
     // bit off.
     let mut nameref_marks = nameref;
-    let arrays = marked_vars(variables, ARRAY_VARS);
-    let assocs = marked_vars(variables, ASSOC_VARS);
-    let namerefs = marked_vars(variables, NAMEREF_VARS);
-    let readonly_vars = marked_vars(variables, READONLY_VARS);
     for name in &names {
         // GNU builtins/declare.def:549-580 runs the nameref-specific lexical
         // checks on the LHS and RHS before the generic identifier check, and
@@ -781,9 +766,9 @@ where
             // below must be the one to fire.
             if !append
                 && value.is_empty()
-                && !namerefs.contains(lhs)
-                && !arrays.contains(lhs)
-                && !assocs.contains(lhs)
+                && !variables.is_marked(NAMEREF_VARS, lhs)
+                && !variables.is_marked(ARRAY_VARS, lhs)
+                && !variables.is_marked(ASSOC_VARS, lhs)
                 && variables.get(lhs).is_some_and(|current| {
                     // A compound/array-storage cell is not a nameref value at
                     // all -- GNU reaches the array-rejection diagnostic for
@@ -808,8 +793,10 @@ where
             // the invalid-value error first (nameref22.sub:69 reports
             // `(one two three)': invalid variable name, then :70 reports the
             // array rejection for the same variable).
-            if (arrays.contains(lhs) || assocs.contains(lhs))
-                && !(namerefs.contains(lhs) && value.is_empty() && !variables.contains_key(lhs))
+            if (variables.is_marked(ARRAY_VARS, lhs) || variables.is_marked(ASSOC_VARS, lhs))
+                && !(variables.is_marked(NAMEREF_VARS, lhs)
+                    && value.is_empty()
+                    && !variables.contains_key(lhs))
             {
                 writeln!(
                     stderr,
@@ -835,7 +822,7 @@ where
                 attr_status = EXECUTION_FAILURE;
                 continue;
             }
-            if readonly_vars.contains(lhs) {
+            if variables.is_marked(READONLY_VARS, lhs) {
                 writeln!(
                     stderr,
                     "{}{command_name}: {}: readonly variable",
@@ -875,7 +862,7 @@ where
         // The refusal is all-or-nothing: a mixed request like -ix on a
         // readonly variable applies nothing. -p is display-only and never
         // reaches this gate.
-        if !print && readonly_vars.contains(lhs) {
+        if !print && variables.is_marked(READONLY_VARS, lhs) {
             let invalid_attrs = integer
                 || array
                 || assoc
@@ -935,7 +922,7 @@ where
             valid_assign_names.push(name);
             continue;
         };
-        if (array || assoc) && namerefs.contains(var_name) {
+        if (array || assoc) && variables.is_marked(NAMEREF_VARS, var_name) {
             let operand_has_subscript = name.starts_with(var_name)
                 && name.len() > var_name.len()
                 && name[var_name.len()..].starts_with('[');
@@ -974,7 +961,10 @@ where
                 variables.remove(var_name);
             }
         }
-        if assoc && arrays.contains(var_name) && !assocs.contains(var_name) {
+        if assoc
+            && variables.is_marked(ARRAY_VARS, var_name)
+            && !variables.is_marked(ASSOC_VARS, var_name)
+        {
             writeln!(
                 stderr,
                 "{}{command_name}: {}: cannot convert indexed to associative array",
@@ -984,7 +974,10 @@ where
             attr_status = EXECUTION_FAILURE;
             continue;
         }
-        if array && assocs.contains(var_name) && !arrays.contains(var_name) {
+        if array
+            && variables.is_marked(ASSOC_VARS, var_name)
+            && !variables.is_marked(ARRAY_VARS, var_name)
+        {
             // GNU declare.def -> convert_var_to_array refusal: the operand
             // errors and the variable keeps its assoc value untouched —
             // clearing it would print `declare -A m` where GNU still shows

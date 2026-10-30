@@ -500,6 +500,9 @@ fn ansi_c_shell_quote_bytes(bytes: &[u8]) -> String {
 }
 
 fn push_ansic_escaped_chars(quoted: &mut String, chars: impl Iterator<Item = char>) {
+    // R8: the locale cannot change inside one quoting walk (it changes
+    // only at command boundaries), so read it once instead of per char.
+    let utf8 = crate::locale::is_utf8();
     for ch in chars {
         match ch {
             '\\' => quoted.push_str("\\\\"),
@@ -517,7 +520,7 @@ fn push_ansic_escaped_chars(quoted: &mut String, chars: impl Iterator<Item = cha
             // only on the UTF-8-locale multibyte branch (266-282); under
             // a non-UTF-8 locale its bytes are escaped one at a time
             // (rubash#1464).
-            ch if !ch.is_ascii() && !crate::locale::is_utf8() => {
+            ch if !ch.is_ascii() && !utf8 => {
                 let mut buffer = [0u8; 4];
                 for byte in ch.encode_utf8(&mut buffer).as_bytes() {
                     quoted.push_str(&format!("\\{byte:03o}"));
@@ -530,6 +533,9 @@ fn push_ansic_escaped_chars(quoted: &mut String, chars: impl Iterator<Item = cha
 
 fn ansi_c_shell_quote(value: &str) -> String {
     let mut quoted = String::from("$'");
+    // R8: one locale read per walk, not per character (see
+    // push_ansic_escaped_chars).
+    let utf8 = crate::locale::is_utf8();
     for ch in value.chars() {
         match ch {
             '\\' => quoted.push_str("\\\\"),
@@ -545,7 +551,7 @@ fn ansi_c_shell_quote(value: &str) -> String {
             ch if ch.is_ascii_control() => quoted.push_str(&format!("\\{:03o}", ch as u32)),
             // Same non-UTF-8-locale per-byte rule as
             // push_ansic_escaped_chars (rubash#1464).
-            ch if !ch.is_ascii() && !crate::locale::is_utf8() => {
+            ch if !ch.is_ascii() && !utf8 => {
                 let mut buffer = [0u8; 4];
                 for byte in ch.encode_utf8(&mut buffer).as_bytes() {
                     quoted.push_str(&format!("\\{byte:03o}"));

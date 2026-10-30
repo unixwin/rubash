@@ -190,7 +190,7 @@ fn parse_if_command_after_condition(
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.logical_line = tokens.get(start).map(|token| token.logical_line);
-    command.if_command = Some(IfCommand {
+    command.if_command = Some(Box::new(IfCommand {
         keyword: tokens[start].value.clone(),
         keyword_metadata,
         condition,
@@ -205,7 +205,7 @@ fn parse_if_command_after_condition(
         else_body,
         end_keyword: tokens[index].value.clone(),
         end_keyword_metadata: build_keyword_metadata(&tokens[index]),
-    });
+    }));
 
     Some(finish_compound_command(command, tokens, index + 1))
 }

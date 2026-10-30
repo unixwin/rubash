@@ -9,14 +9,19 @@
 //! on any host; verified against GNU bash 5.3.20 as root (euid/egid 0,
 //! /dev/null owned by 0:0 -> both true).
 
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 
+#[cfg(unix)]
 fn run_with_stdin(script: &str, stdin_file: &std::fs::File) -> (String, String, Option<i32>) {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
         .arg(script)
-        .stdin(Stdio::from(stdin_file.try_clone().expect("clone stdin file")))
+        .stdin(Stdio::from(
+            stdin_file.try_clone().expect("clone stdin file"),
+        ))
         .output()
         .expect("run rubash");
     (
@@ -26,6 +31,7 @@ fn run_with_stdin(script: &str, stdin_file: &std::fs::File) -> (String, String, 
     )
 }
 
+#[cfg(unix)]
 fn verdict(want_true: bool) -> &'static str {
     if want_true {
         "0"
@@ -34,6 +40,9 @@ fn verdict(want_true: bool) -> &'static str {
     }
 }
 
+// Expectations are derived from /proc/self's uid/gid and /dev/null's
+// ownership — probes that only exist on unix — so the test is unix-only.
+#[cfg(unix)]
 #[test]
 fn issue1708_dash_o_g_dev_null_and_stdin() {
     let dir = std::env::temp_dir().join(format!("rubash1708-{}", std::process::id()));

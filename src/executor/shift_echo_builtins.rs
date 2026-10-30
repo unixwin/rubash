@@ -21,6 +21,20 @@ impl Executor {
         match action {
             crate::builtins::shift::ShiftAction::Complete(status) => {
                 self.exit_code = status;
+                // GNU builtins/shift.def: a non-numeric operand fails via
+                // get_numeric_arg -> sh_neednumarg -> EX_USAGE, and
+                // CHECK_HELPOPT returns EX_USAGE for `--help`; both are
+                // 258 > EX_SHERRBASE, so execute_simple_command marks
+                // special_builtin_failed (execute_cmd.c:4886-4888) and
+                // the failure is fatal in POSIX non-interactive mode
+                // unless the context is tested (execute_cmd.c:1004-1017,
+                // converted at the gate in execute_materialized_command).
+                // Negative / out-of-range counts return EXECUTION_FAILURE
+                // instead and never mark it (see the Shift arm below).
+                // RC audit phase-1 finding ④ / errors10.
+                if status == crate::builtins::shift::EX_USAGE {
+                    self.special_builtin_failed.set(true);
+                }
             }
             // rubash#1650: the no_args DISCARD channel, shared with
             // `exit 1 2` (command_dispatch_primary.rs): set

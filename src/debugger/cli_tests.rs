@@ -80,18 +80,48 @@ fn program_file(name: &str, source: &str) -> (std::path::PathBuf, String) {
 /// Run one scripted CLI session; return (status, transcript with
 /// the program path normalized to `<PROG>`).
 fn run_cli(program: &str, commands: &str) -> (i32, String) {
+    run_cli_with_startup(program, None, commands)
+}
+
+/// Run one scripted CLI session with a host-supplied startup
+/// file (niubash#692: the `--rcfile` channel); the startup
+/// path is normalized to `<RC>` in the transcript as well.
+fn run_cli_with_startup(program: &str, startup: Option<&str>, commands: &str) -> (i32, String) {
     let out = SharedOut(Rc::new(RefCell::new(Vec::new())));
     let status = run_debug_cli_with_stream(
         DebugCliPreset {
             program: Some(program.to_string()),
             args: Vec::new(),
+            startup_file: startup.map(str::to_string),
         },
         Box::new(BufReader::new(Cursor::new(commands.as_bytes().to_vec()))),
         Box::new(out.clone()),
     );
     let bytes = out.0.borrow().clone();
     let text = String::from_utf8_lossy(&bytes).into_owned();
-    (status, text.replace(program, "<PROG>"))
+    let text = text.replace(program, "<PROG>");
+    let text = match startup {
+        Some(path) => text.replace(path, "<RC>"),
+        None => text,
+    };
+    (status, text)
+}
+
+/// Write `source` to a named file inside an existing temp dir;
+/// return its identity-form path (the canonicalization
+/// `program_file` applies).
+fn sibling_file(dir: &std::path::Path, name: &str, source: &str) -> String {
+    let path = dir.join(name);
+    std::fs::write(&path, source).expect("write sibling file");
+    let canonical = std::fs::canonicalize(&path).expect("canonicalize");
+    let text = canonical.to_string_lossy().into_owned();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        text
+    }
 }
 
 const SESSION_SCRIPT: &str = "\
@@ -392,6 +422,535 @@ fn cli_and_dap_stop_at_the_same_lines_for_the_same_script() {
             .map(|line| i64::from(*line))
             .collect::<Vec<_>>(),
         "DAP step sequence must equal the CLI's: {protocol}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------
+// PLAN row 12: the DE-06 exception-site producers, CLI face.
+// A selected filter reports the site and parks the session
+// BEFORE the pending engine action; resuming lets the action
+// proceed unchanged. An unselected filter produces nothing.
+// ---------------------------------------------------------------------
+
+const ERR_TRAP_SCRIPT: &str = "\
+T=none
+trap 'T=hit' ERR
+X=5
+false
+echo after
+";
+
+#[test]
+fn err_trap_filter_parks_before_the_action_and_the_action_still_runs() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("errsite", ERR_TRAP_SCRIPT);
+    let commands = "\
+exceptions err-trap on
+break 5
+continue
+print T
+print X
+continue
+print T
+continue
+";
+    let (status, transcript) = run_cli(&program, commands);
+    assert_eq!(status, 0, "the session runs to a clean exit: {transcript}");
+    for needle in [
+        // The site is reported, and the session parks at the
+        // failing command's line.
+        "exception site: ERR trap (status 1) at <PROG>:4",
+        "Stopped (exception (ERR trap)) at <PROG>:4",
+        // Parked BEFORE the trap action: T is untouched, the
+        // failing command's own effects are all visible.
+        "T = none",
+        "X = 5",
+        // After the resume the action ran, then the line-5
+        // breakpoint stops the run as usual.
+        "Stopped (breakpoint 1) at <PROG>:5: echo after",
+        "T = hit",
+    ] {
+        assert!(
+            transcript.contains(needle),
+            "transcript must contain {needle:?}:\n{transcript}"
+        );
+    }
+    // The park precedes the action: "T = none" is read at the
+    // exception stop, "T = hit" only after the resume.
+    let parked = transcript.find("T = none").expect("parked read");
+    let acted = transcript.find("T = hit").expect("post-resume read");
+    assert!(
+        parked < acted,
+        "the action ran only after the resume:\n{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+const ERREXIT_SCRIPT: &str = "\
+set -e
+X=7
+false
+echo unreachable
+";
+
+#[test]
+fn errexit_filter_parks_before_the_exit_and_the_run_still_exits() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("errexitsite", ERREXIT_SCRIPT);
+    let commands = "\
+exceptions set -e on
+continue
+print X
+continue
+";
+    let (status, transcript) = run_cli(&program, commands);
+    assert_eq!(status, 1, "the errexit exit still happens: {transcript}");
+    for needle in [
+        "exception site: errexit (status 1) at <PROG>:3",
+        "Stopped (exception (errexit)) at <PROG>:3",
+        // The corpse is inspectable at the park.
+        "X = 7",
+    ] {
+        assert!(
+            transcript.contains(needle),
+            "transcript must contain {needle:?}:\n{transcript}"
+        );
+    }
+    // One death, one report: the exit unwinds through the
+    // frame of the `.` that sourced this program; that frame
+    // must not re-report the site the origin frame parked.
+    assert_eq!(
+        transcript.matches("exception site: errexit").count(),
+        1,
+        "exactly one exception note:\n{transcript}"
+    );
+    assert_eq!(
+        transcript.matches("Stopped (exception").count(),
+        1,
+        "exactly one exception stop:\n{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn an_unselected_filter_neither_reports_nor_parks() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("nofilter", ERREXIT_SCRIPT);
+    let (status, transcript) = run_cli(&program, "continue\n");
+    assert_eq!(status, 1, "the run still exits under set -e: {transcript}");
+    assert!(
+        !transcript.contains("exception site:"),
+        "no site is reported without the filter:\n{transcript}"
+    );
+    assert!(
+        !transcript.contains("Stopped (exception"),
+        "no exception stop without the filter:\n{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+const PARSE_SCRIPT: &str = "\
+echo before
+echo )
+echo after
+";
+
+#[test]
+fn parse_error_filter_parks_and_the_run_still_exits_2() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("parsesite", PARSE_SCRIPT);
+    let commands = "\
+exceptions parse-error on
+continue
+continue
+";
+    let (status, transcript) = run_cli(&program, commands);
+    assert_eq!(
+        status, 2,
+        "the parse error still ends the run: {transcript}"
+    );
+    for needle in [
+        "exception site: parse error (status 2) at <PROG>:2",
+        "Stopped (exception (parse error)) at <PROG>:2",
+    ] {
+        assert!(
+            transcript.contains(needle),
+            "transcript must contain {needle:?}:\n{transcript}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------
+// rubash#1962: breakpoint-condition defects (RC audit phase 2,
+// cell group ②). Line 2 of ISSUE1962_SCRIPT is inside the loop
+// (three consults), line 4 is after it (one consult). The three
+// confirmed cells get pins asserting the debugger-side report,
+// the consult line in the quoted diagnostic, the debuggee's
+// survival, and the session status; the three overturned cells
+// get parity pins so the fix cannot regress them.
+
+const ISSUE1962_SCRIPT: &str = "\
+for i in 1 2 3; do
+  echo \"iter $i\"
+done
+echo after-loop
+";
+
+#[test]
+fn issue1962_condition_break_in_loop_reports_once_and_debuggee_survives() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("condbreak", ISSUE1962_SCRIPT);
+    let (status, transcript) = run_cli(&program, "break 2 if break\nbreak 4\ncontinue\ncontinue\n");
+    assert_eq!(status, 0, "{transcript}");
+    // The in-loop `break` unwinds inside the evaluation: a failed
+    // condition (design 5.3) — reported exactly once for the
+    // three consults, not folded silently and not per hit.
+    assert_eq!(
+        transcript
+            .matches("breakpoint 1: condition 'break' failed at <PROG>:2, treated as false")
+            .count(),
+        1,
+        "{transcript}"
+    );
+    // The debuggee was not disturbed: it reaches the line-4
+    // breakpoint after the loop.
+    assert!(
+        transcript.contains("Stopped (breakpoint 2) at <PROG>:4"),
+        "{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn issue1962_condition_numeric_error_reports_once_at_the_consult_line() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("condnum", ISSUE1962_SCRIPT);
+    let (status, transcript) = run_cli(&program, "break 2 if break 2x\ncontinue\n");
+    assert_eq!(status, 0, "{transcript}");
+    assert_eq!(
+        transcript
+            .matches("breakpoint 1: condition 'break 2x' failed at <PROG>:2, treated as false")
+            .count(),
+        1,
+        "{transcript}"
+    );
+    // The engine diagnostic appears exactly once — inside the
+    // report, quoted — and carries the consult line (the
+    // debuggee's line 2), not the condition text's own line 1.
+    assert_eq!(
+        transcript.matches("numeric argument required").count(),
+        1,
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("  <PROG>: line 2: break: 2x: numeric argument required"),
+        "{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn issue1962_condition_too_many_arguments_cannot_kill_the_debuggee() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("condtoomany", ISSUE1962_SCRIPT);
+    let (status, transcript) = run_cli(
+        &program,
+        "break 2 if break 1 2\nbreak 4\ncontinue\ncontinue\n",
+    );
+    assert_eq!(status, 0, "{transcript}");
+    assert_eq!(
+        transcript
+            .matches("breakpoint 1: condition 'break 1 2' failed at <PROG>:2, treated as false")
+            .count(),
+        1,
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("  <PROG>: line 2: break: too many arguments"),
+        "{transcript}"
+    );
+    // The too-many-arguments DISCARD the condition armed died
+    // with the evaluation: the debuggee lives to stop at line 4.
+    assert!(
+        transcript.contains("Stopped (breakpoint 2) at <PROG>:4"),
+        "{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn issue1962_condition_break_outside_the_loop_commits_its_stop() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("condoutside", ISSUE1962_SCRIPT);
+    let (status, transcript) = run_cli(&program, "break 4 if break\ncontinue\ncontinue\n");
+    assert_eq!(status, 0, "{transcript}");
+    // An out-of-loop `break` is status 0 in GNU, so the verdict
+    // is true and the stop commits — and a true verdict is not
+    // reported as a failure.
+    assert!(
+        transcript.contains("Stopped (breakpoint 1) at <PROG>:4"),
+        "{transcript}"
+    );
+    assert!(
+        !transcript.contains("condition 'break' failed"),
+        "{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn issue1962_condition_true_in_loop_stops_exactly_once() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("condtruein", ISSUE1962_SCRIPT);
+    let (status, transcript) = run_cli(&program, "break 2 if [[ $i == 2 ]]\ncontinue\ncontinue\n");
+    assert_eq!(status, 0, "{transcript}");
+    assert_eq!(
+        transcript.matches("Stopped (breakpoint 1)").count(),
+        1,
+        "{transcript}"
+    );
+    assert!(!transcript.contains("failed"), "{transcript}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn issue1962_condition_true_outside_stops_exactly_once() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("condtrueout", ISSUE1962_SCRIPT);
+    let (status, transcript) = run_cli(&program, "break 4 if [[ $i == 3 ]]\ncontinue\ncontinue\n");
+    assert_eq!(status, 0, "{transcript}");
+    assert_eq!(
+        transcript.matches("Stopped (breakpoint 1)").count(),
+        1,
+        "{transcript}"
+    );
+    assert!(!transcript.contains("failed"), "{transcript}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn issue1962_condition_command_substitution_runs_once_per_consult() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("condcomsub", ISSUE1962_SCRIPT);
+    let ticks = dir.join("ticks");
+    // The path is embedded into shell text (the condition), so
+    // it must carry the shell-facing spelling: a native Windows
+    // path's backslashes are the lexer's escape character and
+    // would be eaten by quote removal before the redirect ever
+    // opens (the ticks then land in a separator-stripped namesake
+    // file, one per consult — the count semantics are not what
+    // fails on Windows, the spelling is). Same convention as the
+    // other shell-text path embeddings in the test tree.
+    let ticks = ticks.to_string_lossy().replace('\\', "/");
+    // A false condition whose substitution appends one tick per
+    // evaluation: three consults, exactly three ticks, no stop.
+    let commands = format!("break 2 if [[ $(echo tick >> {ticks}; echo $i) == 99 ]]\ncontinue\n");
+    let (status, transcript) = run_cli(&program, &commands);
+    assert_eq!(status, 0, "{transcript}");
+    assert!(!transcript.contains("Stopped (breakpoint"), "{transcript}");
+    let recorded = std::fs::read_to_string(&ticks).expect("ticks recorded");
+    assert_eq!(
+        recorded.lines().count(),
+        3,
+        "one tick per consult: {recorded}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn issue1962_source_command_file_drives_the_session() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("sourcecmds", ISSUE1962_SCRIPT);
+    let cmds = dir.join("session.cmds");
+    std::fs::write(&cmds, "break 4\ncontinue\n").expect("write command file");
+    let commands = format!("source {}\ncontinue\n", cmds.to_string_lossy());
+    let (status, transcript) = run_cli(&program, &commands);
+    assert_eq!(status, 0, "{transcript}");
+    assert!(
+        transcript.contains("Stopped (breakpoint 1) at <PROG>:4"),
+        "{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn issue1962_source_nested_file_preempts_the_sourcer() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("sourcenested", ISSUE1962_SCRIPT);
+    let inner = dir.join("inner.cmds");
+    std::fs::write(&inner, "continue\n").expect("write inner file");
+    let outer = dir.join("outer.cmds");
+    std::fs::write(
+        &outer,
+        format!("source {}\nbreak 4\n", inner.to_string_lossy()),
+    )
+    .expect("write outer file");
+    // The nested file's `continue` runs before the outer file's
+    // remaining `break 4` line: the resume spends the serve with
+    // no breakpoint set, so nothing ever stops.
+    let commands = format!("source {}\n", outer.to_string_lossy());
+    let (status, transcript) = run_cli(&program, &commands);
+    assert_eq!(status, 0, "{transcript}");
+    assert!(!transcript.contains("Stopped (breakpoint"), "{transcript}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn issue1962_source_missing_file_reports_and_the_session_lives() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("sourcemissing", ISSUE1962_SCRIPT);
+    let (status, transcript) = run_cli(
+        &program,
+        "source /nonexistent-1962/nope.cmds\nbreak 4\ncontinue\ncontinue\n",
+    );
+    assert_eq!(status, 0, "{transcript}");
+    assert!(
+        transcript.contains("source: cannot read '/nonexistent-1962/nope.cmds'"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("Stopped (breakpoint 1) at <PROG>:4"),
+        "{transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------
+// niubash#692: the host-supplied startup file (the niubash
+// host's `--rcfile` channel) is sourced into the session
+// before the program — its definitions are live for the
+// debuggee, a function-valued DEBUG trap it installs coexists
+// with breakpoints (the niubash#681 shape, whose repro was
+// written against this very loading face), and an `exit`
+// inside it ends the run before the program starts.
+
+#[test]
+fn startup_file_definitions_are_live_for_the_debuggee() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file(
+        "rcdefs",
+        "\
+rc_helper
+echo \"after helper\"
+",
+    );
+    let rc = sibling_file(
+        &dir,
+        "rcdefs-rc.sh",
+        "\
+RC_MARKER=loaded-from-rc
+rc_helper() {
+  HELPER_RAN=yes
+  return 3
+}
+",
+    );
+    let (status, transcript) = run_cli_with_startup(
+        &program,
+        Some(&rc),
+        "break 2\ncontinue\nprint RC_MARKER\nprint HELPER_RAN\ncontinue\n",
+    );
+    assert_eq!(status, 0, "the session runs to a clean exit: {transcript}");
+    assert!(
+        transcript.contains("Stopped (breakpoint 1) at <PROG>:2: echo \"after helper\""),
+        "the program breakpoint must stop after the rc-defined call: {transcript}"
+    );
+    assert!(
+        transcript.contains("RC_MARKER = loaded-from-rc"),
+        "the rc's variable must be set in the session: {transcript}"
+    );
+    assert!(
+        transcript.contains("HELPER_RAN = yes"),
+        "the rc-defined function must have run: {transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn startup_file_debug_trap_function_coexists_with_breakpoints() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file(
+        "rctrap",
+        "\
+A=1
+B=2
+echo done
+",
+    );
+    let rc = sibling_file(
+        &dir,
+        "rctrap-rc.sh",
+        "\
+rc_trap_handler() {
+  TRAP_HITS=$(( ${TRAP_HITS:-0} + 1 ))
+}
+trap 'rc_trap_handler' DEBUG
+",
+    );
+    let (status, transcript) = run_cli_with_startup(
+        &program,
+        Some(&rc),
+        "break 2\ncontinue\nprint TRAP_HITS\ncontinue\n",
+    );
+    assert_eq!(status, 0, "the session runs to a clean exit: {transcript}");
+    assert!(
+        transcript.contains("Stopped (breakpoint 1) at <PROG>:2: B=2"),
+        "a function-valued DEBUG trap from the rc must not kill the breakpoint \
+         (niubash#681): {transcript}"
+    );
+    assert!(
+        transcript.contains("TRAP_HITS = "),
+        "the rc's DEBUG trap must be live during the program: {transcript}"
+    );
+    assert!(
+        !transcript.contains("TRAP_HITS = 0"),
+        "the rc's DEBUG trap must have fired before the line-2 stop: {transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn startup_file_exit_ends_the_run_before_the_program() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("rcexit", "echo never\n");
+    let rc = sibling_file(&dir, "rcexit-rc.sh", "exit 7\n");
+    let (status, transcript) = run_cli_with_startup(&program, Some(&rc), "continue\n");
+    assert_eq!(
+        status, 7,
+        "an exit in the startup file ends the run with its status: {transcript}"
+    );
+    assert!(
+        transcript.contains("Stopped (entry) — <PROG>"),
+        "the entry stop still comes first: {transcript}"
+    );
+    assert!(
+        !transcript.contains("<PROG>:1"),
+        "the program must not start after the startup file exits: {transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn startup_file_missing_does_not_abort_the_session() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("rcmissing", "echo reached\n");
+    let missing = sibling_file(&dir, "rcmissing-rc.sh", "exit 99\n");
+    std::fs::remove_file(&missing).expect("remove the startup file");
+    // The source builtin reports the missing file on the
+    // debuggee's stderr (its own pinned diagnostic); the point
+    // here is the session still runs the program — the failure
+    // is visible, never a silent drop and never a refusal.
+    let (status, transcript) =
+        run_cli_with_startup(&program, Some(&missing), "break 1\ncontinue\ncontinue\n");
+    assert_eq!(
+        status, 0,
+        "the program still runs to completion: {transcript}"
+    );
+    assert!(
+        transcript.contains("Stopped (breakpoint 1) at <PROG>:1: echo reached"),
+        "the program breakpoint must still stop: {transcript}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

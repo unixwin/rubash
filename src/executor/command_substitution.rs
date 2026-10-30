@@ -1,3 +1,4 @@
+use super::command_registry::{comsub_word_slot, ComsubWordSlot};
 use super::*;
 use crate::executor::markers::DATA_DOLLAR;
 
@@ -646,7 +647,8 @@ impl Executor {
         // rubash#1551: the fork bracket also covers the process-global
         // hash-table mirror — the child's `hash -p` writes and PATH-bind
         // flushes must not reach the parent's remembered locations.
-        let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        let _hashed_fork =
+            crate::executor::path::hashed_cache_fork_guard(&self.shell_state.env_vars);
         // rubash#403: subshell_depth is NOT bumped here. GNU increments
         // subshell_level exactly once per substitution — in the CHILD
         // (execute_in_subshell; variables.c get_bash_subshell reads the
@@ -819,11 +821,21 @@ impl Executor {
         // be provably equivalent, and it is not when tracing or when the
         // inherited DEBUG trap fires) and the body falls to the real
         // parser/executor below (rubash#254, rubash#825).
-        if source == "false" && !self.xtrace_enabled() && !self.err_trap_inherited_into_comsub() {
+        // The exact-body shortcuts key on the registry's COMSUB_WORD
+        // projection (rubash#2036 S4): the slot is Some(False) exactly
+        // for the body "false", and True/Colon exactly for "true"/":".
+        if comsub_word_slot(source) == Some(ComsubWordSlot::False)
+            && !self.xtrace_enabled()
+            && !self.err_trap_inherited_into_comsub()
+        {
             self.last_command_substitution_status.set(Some(1));
             return String::new();
         }
-        if matches!(source, "true" | ":") && !self.xtrace_enabled() {
+        if matches!(
+            comsub_word_slot(source),
+            Some(ComsubWordSlot::True | ComsubWordSlot::Colon)
+        ) && !self.xtrace_enabled()
+        {
             self.last_command_substitution_status.set(Some(0));
             return String::new();
         }
@@ -884,7 +896,15 @@ impl Executor {
             return output;
         }
 
-        if words.first().map(String::as_str) == Some("echo") {
+        // The first-word chain below keys on the registry's
+        // COMSUB_WORD projection (rubash#2036 S4). Each arm keeps its
+        // historical condition tail and fall-through exactly: an arm
+        // whose inner conditions fail still declines to the shared
+        // tail (the describe call, the external face, full
+        // execution), never to a sibling arm.
+        let word_slot = words.first().and_then(|word| comsub_word_slot(word));
+
+        if word_slot == Some(ComsubWordSlot::Echo) {
             let expanded_args = self.brace_expanded_substitution_args(&words, &word_parts);
             let output = echo_command_substitution_output(&expanded_args);
             // The body's command is echo and echo cannot fail here: pin the
@@ -896,7 +916,7 @@ impl Executor {
             return output;
         }
 
-        if words.first().map(String::as_str) == Some("printf") {
+        if word_slot == Some(ComsubWordSlot::Printf) {
             let expanded_args: Vec<String> = words[1..]
                 .iter()
                 .enumerate()
@@ -951,7 +971,7 @@ impl Executor {
         // The file-operand fast path must not claim a bare `cat` (or flag/
         // `-` operands): those read fd 0, which lives in FUNCTION_STDIN and
         // shares the caller's cursor — external_cat owns that semantics.
-        if words.first().map(String::as_str) == Some("cat")
+        if word_slot == Some(ComsubWordSlot::Cat)
             && !self.emulated_external_stands_down("cat")
             && words[1..].iter().all(|word| !word.starts_with('-'))
             && words.len() > 1
@@ -972,62 +992,55 @@ impl Executor {
             let mut output = String::new();
             let mut status = 0;
             for word in &words[1..] {
-                // Process substitution `<(...)`: Bash materializes it to a
-                // temporary file holding the command's output, so `cat` reads
-                // that output. Run the inner command directly instead of
-                // treating the literal `<(...)` text as a file path.
-                if let Some(source) = word
-                    .strip_prefix("<(")
-                    .and_then(|rest| rest.strip_suffix(')'))
-                {
-                    let mut executor = self.command_substitution_executor();
-                    crate::builtins::trap::reset_for_subshell_child(
-                        &mut executor.shell_state.env_vars,
-                    );
-                    output.push_str(&executor.expand_command_substitution(source));
-                    continue;
-                }
+                // No `<(...)` operand arm here (redundancy R7): the
+                // triviality gate above admits only the byte set
+                // [A-Za-z0-9 \t_-+=.,/:@%^], which contains neither `<`
+                // nor `(`, so a procsub operand can never reach this
+                // loop — such bodies fall to full execution earlier.
                 let path = self.expand_word(word);
                 // `/dev/stdin`/`/dev/fd/0`/`/proc/self/fd/0` read fd 0 —
                 // the FUNCTION_STDIN cursor (the gate above already sent
-                // N>0 descriptors to full execution). Consuming fd 0 here
-                // writes the cursor back the way the external fast path
-                // does (comsub_stdin_writeback).
+                // N>0 descriptors to full execution).
                 if crate::executor::dev_fd_operands::dev_operand_fd(&path) == Some(0) {
-                    if let Some(text) = self.shell_state.env_vars.get(FUNCTION_STDIN) {
-                        self.comsub_stdin_writeback
-                            .set(Some((text.len(), Self::function_stdin_fingerprint(text))));
-                    }
-                    output.push_str(&self.function_stdin_remaining().unwrap_or_default());
+                    output.push_str(&self.comsub_cat_function_stdin_text());
                     continue;
                 }
-                // niubash#177: same operand resolution as the argv funnel —
-                // a virtual-root file operand may exist only under its
-                // `.exe` spelling on disk.
-                //
-                // Read bytes, not a decoded String: GNU cat.c reads the file
-                // as raw bytes (safe_read -> write), so a non-UTF-8 file is
-                // content, not an error. `read_to_string` rejected any
-                // invalid sequence as ENOENT and the shortcut then reported a
-                // file that plainly exists as "No such file" and returned an
-                // empty value (rubash#772). The bytes ride the same
-                // bytes_to_shell_text carrier contract as every other
-                // substitution capture, and GNU read_comsub discards NUL
-                // bytes while reading the child pipe (substitution_metadata
-                // SubstitutionOutput::readback), so drop NUL first.
-                match fs::read(
-                    self.session_path(crate::executor::path::windows_operand_file_path(
-                        shell_path_to_windows(&path, &self.shell_state.env_vars),
-                        &self.shell_state.env_vars,
-                    )),
-                ) {
+                // Byte source: the ladder shared with the timed cat arm
+                // (comsub_cat_operand_bytes). This arm's own policy is
+                // unchanged: read bytes, not a decoded String — GNU cat.c
+                // reads the file as raw bytes (safe_read -> write), so a
+                // non-UTF-8 file is content, not an error. `read_to_string`
+                // rejected any invalid sequence as ENOENT and the shortcut
+                // then reported a file that plainly exists as "No such
+                // file" and returned an empty value (rubash#772). The bytes
+                // ride the same bytes_to_shell_text carrier contract as
+                // every other substitution capture, and GNU read_comsub
+                // discards NUL bytes while reading the child pipe
+                // (substitution_metadata SubstitutionOutput::readback), so
+                // drop NUL first; a failed read diagnoses and sets status
+                // 1 — unlike the timed arm, which skips silently at
+                // status 0 (that fork is deliberate and stays unfused;
+                // see T2 in the redundancy audit).
+                match self.comsub_cat_operand_bytes(&path) {
                     Ok(mut bytes) => {
                         bytes.retain(|byte| *byte != 0);
                         output.push_str(&bytes_to_shell_text(&bytes));
                     }
-                    Err(_) => {
+                    Err(error) => {
                         status = 1;
-                        eprintln!("cat: '{}': No such file or directory", path);
+                        // rubash#1949: report the read's real strerror,
+                        // never a blanket ENOENT — GNU cat names the actual
+                        // errno (`Is a directory`, `Not a directory`, ELOOP).
+                        // rubash#2027: GNU cat renders the operand through
+                        // quotef (coreutils cat.c `error (0, errno, "%s",
+                        // quotef (name))`), so an operand holding shell
+                        // special characters prints quoted:
+                        // `cat: '<(echo hi)': No such file or directory`.
+                        eprintln!(
+                            "cat: {}: {}",
+                            gnu_cat_quoted_operand(&path),
+                            crate::posix_errors::path_strerror(&path, &error)
+                        );
                     }
                 }
             }
@@ -1035,31 +1048,55 @@ impl Executor {
             return output.trim_capture_terminator().to_string();
         }
 
-        if words.first().map(String::as_str) == Some("basename") {
-            let Some(path) = words.get(1).map(|word| self.expand_word(word)) else {
-                self.last_command_substitution_status.set(Some(1));
-                return String::new();
-            };
-            let trimmed = path.trim_end_matches(['/', '\\']);
-            let name = trimmed
-                .rsplit(['/', '\\'])
-                .next()
-                .filter(|name| !name.is_empty())
-                .unwrap_or(trimmed);
-            let suffix = words.get(2).map(|word| self.expand_word(word));
-            let output = suffix
-                .as_deref()
-                .and_then(|suffix| name.strip_suffix(suffix))
-                .unwrap_or(name);
-            self.last_command_substitution_status.set(Some(0));
-            return output.to_string();
+        if word_slot == Some(ComsubWordSlot::Basename)
+            && !self.emulated_external_stands_down("basename")
+        {
+            // rubash#2043 A2/A3: this arm used to be a second, divergent
+            // basename implementation — it silently dropped operands
+            // past the second, treated option words as the path, kept a
+            // suffix the simple face strips (and stripped one it keeps),
+            // and never produced a diagnostic. The arm now shares the
+            // simple face's exact machinery (rubash#2036 consolidation):
+            // expand the argv, admit only what
+            // simple_path_tool_operands admits with 1..=2 operands, and
+            // compute with basename_value / strip_basename_suffix.
+            // Every other shape — extra operands, option words, no
+            // operand — declines to full execution below, where the
+            // simple face and then the real basename answer with GNU's
+            // result and diagnostics (subst.c:7143
+            // command_substitute: the arm is an accelerator for exactly
+            // the shapes it can answer byte-identically, nothing more).
+            //
+            // rubash#2046 B1 (S3-adjudicated, DECISIONS 2026-10-29):
+            // the arm's gate above consults the same stand-down
+            // predicate as the sibling cat arm — the projection's
+            // Unchecked cell for this face is now FailClosed. When
+            // PATH holds no basename the arm declines and full
+            // execution answers 127 like GNU (and like this
+            // evaluator's dirname shape, which has no arm at all).
+            let expanded: Vec<String> = words[1..]
+                .iter()
+                .map(|word| self.expand_word(word))
+                .collect();
+            if let Some(operands) =
+                super::printf_path_builtins::simple_path_tool_operands(&expanded)
+            {
+                if !operands.is_empty() && operands.len() <= 2 {
+                    let mut value = super::printf_path_builtins::basename_value(operands[0]);
+                    if let Some(suffix) = operands.get(1) {
+                        value = super::printf_path_builtins::strip_basename_suffix(&value, suffix);
+                    }
+                    self.last_command_substitution_status.set(Some(0));
+                    return value;
+                }
+            }
         }
 
         if let Some(output) = self.command_describe_substitution_output(&words) {
             return output;
         }
 
-        if words.first().map(String::as_str) == Some("umask") {
+        if word_slot == Some(ComsubWordSlot::UMask) {
             // Run the real builtin like the ulimit branch below (rubash#1251:
             // the old canned lookup ignored the arguments entirely, so
             // `$(umask -S)` printed the octal mask and `$(umask 077)` set
@@ -1094,7 +1131,7 @@ impl Executor {
                 .to_string();
         }
 
-        if words.first().map(String::as_str) == Some("ulimit") {
+        if word_slot == Some(ComsubWordSlot::ULimit) {
             // Run the real builtin engine (getrlimit/setrlimit on unix, the
             // emulated table on Windows) instead of a canned lookup, so
             // `$(ulimit -n)` cannot drift from `ulimit -n` (rubash#261).
@@ -1120,7 +1157,7 @@ impl Executor {
                 .to_string();
         }
 
-        if words.first().map(String::as_str) == Some("pwd") {
+        if word_slot == Some(ComsubWordSlot::Pwd) {
             if words.get(1).map(String::as_str) == Some("-P") {
                 // rubash#537: the raw session cwd is a Windows path; the
                 // builtin renders get_working_directory in the one
@@ -1139,7 +1176,7 @@ impl Executor {
                 .unwrap_or_default();
         }
 
-        if words.first().map(String::as_str) == Some("type")
+        if word_slot == Some(ComsubWordSlot::Type)
             && words.get(1).map(String::as_str) == Some("-t")
             && words.len() >= 3
         {
@@ -1155,8 +1192,7 @@ impl Executor {
             }
         }
 
-        if words.first().map(String::as_str) == Some("kill")
-            && words.get(1).map(String::as_str) == Some("-l")
+        if word_slot == Some(ComsubWordSlot::Kill) && words.get(1).map(String::as_str) == Some("-l")
         {
             if let Some(word) = words.get(2) {
                 // The spec may reference variables set by a running trap
@@ -1173,7 +1209,7 @@ impl Executor {
             }
         }
 
-        if words.first().map(String::as_str) == Some("mktemp") {
+        if word_slot == Some(ComsubWordSlot::Mktemp) {
             if let Some(path) = self.mktemp_command_substitution(&words) {
                 return path;
             }
@@ -1183,11 +1219,12 @@ impl Executor {
             return output;
         }
 
-        if words.first().map(String::as_str) == Some("mktemp") {
-            if let Some(path) = self.mktemp_command_substitution(&words) {
-                return path;
-            }
-        }
+        // No second mktemp dispatch here (redundancy R7): the in-process
+        // attempt above already ran with these exact words; its decline
+        // paths create nothing and are deterministic, and the external
+        // attempt just declined too (it returns None for mktemp whenever
+        // it must not claim the body), so a repeat call could only
+        // reproduce the first result.
 
         // Fallback: run the source through the real parser/executor in a
         // subshell and capture stdout (function calls, pipelines, compound
@@ -1656,6 +1693,7 @@ impl Executor {
             conditional_expansion_fatal: Cell::new(false),
             conditional_fatal_status: Cell::new(None),
             conditional_expansion_error_status: Cell::new(None),
+            conditional_procsub_span_targets: Vec::new(),
             evalerror_subscript_pending: Cell::new(false),
             evalerror_failglob_pending: Cell::new(false),
             evalerror_arith_pending: Cell::new(false),
@@ -1663,6 +1701,7 @@ impl Executor {
             eval_list_depth: Cell::new(None),
             evalerror_line: Cell::new(None),
             command_expansion_failed: Cell::new(false),
+            err_trap_fired_at_dispatch: Cell::new(false),
             err_trap_armed_sample: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),
@@ -1686,7 +1725,10 @@ impl Executor {
             inside_compound_condition: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
             background_children: HashMap::new(),
+            procsub_feed_handles: Vec::new(),
+            procsub_stream_children: HashMap::new(),
             pending_job_completions: Vec::new(),
+            pending_coproc_retirements: Vec::new(),
             pending_timed_coproc_reports: Vec::new(),
             timed_coproc_death_instants: std::collections::HashMap::new(),
             reap_prev_mark: Cell::new((0, None, 0)),
@@ -1699,10 +1741,12 @@ impl Executor {
             defer_locale_assignment_warnings: Cell::new(false),
             deferred_locale_assignment_binds: Vec::new(),
             external_dispatch_ran: Cell::new(false),
+            dispatch_net_bound_fds: Vec::new(),
             pipestatus_write_absorbed: Cell::new(false),
             tempenv_pipestatus_state: None,
             command_scoped_procsub_input_fds: Vec::new(),
             conditional_output_procsubs: Vec::new(),
+            current_conditional_redirects: None,
             pending_scalar_assignment: false,
             suppress_errexit: self.suppress_errexit,
             // rubash#1563: a fork copy inherits the parent's GNU frame
@@ -1734,6 +1778,7 @@ impl Executor {
             // units are its own text, never the parent's file.
             debug_syntax_unit_file: None,
             line_env_os_value: std::cell::RefCell::new(None),
+            pre_stamped_line: std::cell::Cell::new(false),
             expansion_probe_active: std::cell::Cell::new(false),
             return_trap_running: false,
             signal_trap_running: false,
@@ -1769,6 +1814,7 @@ impl Executor {
             pipeline_stage_pre_traced: std::cell::Cell::new(false),
             pipeline_stage_restricted_refused: std::cell::Cell::new(false),
             last_heredoc_warning_source: RefCell::new(None),
+            heredoc_admission_declined_source: RefCell::new(None),
             comsub_leading_newlines: Cell::new(0),
             current_shell_substitution_exit: Cell::new(self.current_shell_substitution_exit.get()),
             last_command_substitution_parse_error: Cell::new(false),
@@ -1785,6 +1831,8 @@ impl Executor {
             noclobber_prepared_targets: std::cell::RefCell::new(std::collections::HashSet::new()),
             exit_jump_pending: Cell::new(false),
             errexit_status_converted: Cell::new(false),
+            posix_special_status_converted: Cell::new(false),
+            exec_do_redirections_failed: Cell::new(false),
             timed_dispatch_depth: Cell::new(0),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
@@ -1793,11 +1841,13 @@ impl Executor {
             redirect_target_single_glob_match: RefCell::new(std::collections::HashSet::new()),
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             fd_var_external_undo: Vec::new(),
+            deferred_varredir_closes: Vec::new(),
             read_deadline: None,
             read_timed_out: false,
             read_interrupted_signal: None,
             read_sigint_guard_armed: false,
             read_eof_no_delimiter: false,
+            read_process_stdin_eof: false,
             // rubash#1141: the fork copy reads the SAME staged input
             // stream as its parent (FUNCTION_STDIN crosses in the cloned
             // shell state), so its production timing crosses too — the
@@ -1816,6 +1866,8 @@ impl Executor {
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,
+            external_route_provider: self.external_route_provider.clone(),
+            external_stdio_slots: None,
             #[cfg(windows)]
             elevation_handler: None,
             external_file_builtins_enabled: self.external_file_builtins_enabled,
@@ -1833,7 +1885,9 @@ impl Executor {
             // through the bare-$NAME std::env::var fallback in
             // embedded_parameters.rs).
             process_env_snapshot: crate::executor::local_helpers::with_process_state_lock(|| {
-                std::env::vars().collect()
+                crate::executor::env_helpers::process_env_pairs()
+                    .into_iter()
+                    .collect()
             }),
             // G-03: a fork copy starts a fresh journal. (When the body runs
             // under a parent's execute_ast the journal stack attributes its
@@ -1841,6 +1895,10 @@ impl Executor {
             // the parent restores them at its own Drop.)
             env_write_journal: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
             history_provider: self.history_provider.clone(),
+            // The stamp ledger rides the same Rc the provider does (see
+            // the field docs): a fork copy must not fork the stamps off
+            // the parent's list.
+            provider_stamp_ledger: self.provider_stamp_ledger.clone(),
         }
     }
 
@@ -2113,16 +2171,31 @@ impl Executor {
         // (subst.c process_substitute + move_to_high_fd): the bytes live in
         // the fd table's ProcessSubstitution endpoint, not on disk. Reading
         // the path with fs would fail with ENOENT where GNU reads the fd.
-        if let Some(fd_text) = file_word.strip_prefix("/dev/fd/") {
-            if let Ok(fd) = fd_text.parse::<u32>() {
-                if let Some((data, offset)) = self.fd_table.input_snapshot_bytes(fd) {
-                    if let Some(content) = data.get(offset..).map(<[u8]>::to_vec) {
-                        self.last_command_substitution_status.set(Some(0));
-                        return bytes_to_shell_text(&content)
-                            .trim_capture_terminator()
-                            .to_string();
-                    }
+        // The spelling judgment is the registry's fd-alias family
+        // (redundancy audit R3/D6): this face used to strip only the
+        // `/dev/fd/` prefix and parse the tail itself, so
+        // `$(</proc/self/fd/N)` missed the fd table and fell to the
+        // filesystem (ENOENT on Windows, where GNU reads the fd), while
+        // `/dev/fd/+3` was accepted here even though GNU rejects that
+        // spelling on every face.
+        if let Some(fd) = crate::special_paths::fd_alias_target(file_word) {
+            if let Some((data, offset)) = self.fd_table.input_snapshot_bytes(fd) {
+                if let Some(content) = data.get(offset..).map(<[u8]>::to_vec) {
+                    self.last_command_substitution_status.set(Some(0));
+                    return bytes_to_shell_text(&content)
+                        .trim_capture_terminator()
+                        .to_string();
                 }
+            }
+            // rubash#1952: a streamed procsub binds a live File
+            // endpoint instead of a buffered one — drain it
+            // through the shared handle (reads to EOF, the
+            // quick-read's defining semantics).
+            if let Some(content) = self.fd_table.read_file_endpoint_bytes(fd) {
+                self.last_command_substitution_status.set(Some(0));
+                return bytes_to_shell_text(&content)
+                    .trim_capture_terminator()
+                    .to_string();
             }
         }
         // The canonical ladder steps this quick-read ladder used to
@@ -2609,6 +2682,40 @@ fn restore_old_style_backtick_markers(value: &str) -> String {
 
 fn readfile_path_is_quoted(path: &str) -> bool {
     path.chars().any(|ch| matches!(ch, '\'' | '"' | '\\'))
+}
+
+/// GNU cat's quotef rendering of an operand in its open/read diagnostics
+/// (rubash#2027; coreutils gnulib quotearg shell-escape style, measured
+/// against coreutils 9.4: `/tmp`, `./missing`, `a+b`, `a,b`, `a@b`, `a%b`,
+/// `a~b`, `a#b`, `a{b` print bare, while `a:b`, `a=b`, `a^b`, `a[b`, `a b`,
+/// `a"b`, `x*y`, `<(echo hi)` print single-quoted). An operand is printed
+/// verbatim only when every character is in that shell-safe set; anything
+/// else wraps the WHOLE operand in `'...'`, with an embedded `'` broken as
+/// `'` + `\'` + `'` the way shell single-quote escaping does.
+pub(in crate::executor) fn gnu_cat_quoted_operand(path: &str) -> String {
+    let safe = |ch: char| {
+        ch.is_alphanumeric()
+            || matches!(
+                ch,
+                '_' | '.' | '/' | '-' | '+' | ',' | '@' | '%' | '~' | '#' | '{' | '}'
+            )
+    };
+    if path.chars().all(safe) {
+        return path.to_string();
+    }
+    let mut quoted = String::with_capacity(path.len() + 2);
+    quoted.push('\'');
+    for ch in path.chars() {
+        if ch == '\'' {
+            // `'` cannot appear inside a single-quoted shell string; the
+            // escape spelling quotearg emits is `'\''`.
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn command_substitution_result_status(result: Result<(), ExecuteError>, exit_code: i32) -> i32 {

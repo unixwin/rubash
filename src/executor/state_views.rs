@@ -492,10 +492,15 @@ impl Executor {
         options
     }
 
-    /// One option's state by name across both families.
+    /// One option's state by name across both families. Flag-only
+    /// shell options (GNU flags.c shell_flags[], rubash#2040) read
+    /// through the same key the executor's restricted-shell consumers
+    /// consult, keeping get/set symmetric over the flag surface.
     pub(crate) fn view_option_enabled(&self, name: &str) -> Option<bool> {
         let env = self.shell_state.env_vars.values_map();
         if self.is_shell_option(name) {
+            Some(crate::builtins::set::shell_option_enabled(env, name))
+        } else if crate::builtins::set::is_flag_only_shell_option(name) {
             Some(crate::builtins::set::shell_option_enabled(env, name))
         } else if crate::builtins::shopt::is_supported_option(name) {
             Some(crate::builtins::shopt::option_enabled(env, name))
