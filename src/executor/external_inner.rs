@@ -182,6 +182,7 @@ impl Executor {
             &config.command[1..],
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
+            Some(program.as_path()),
         );
         // rubash#1905: synthetic /proc operands become spawn-time
         // snapshot files for a child without its own /proc layer; the
@@ -872,6 +873,7 @@ impl Executor {
             &cmd.words[1..],
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
+            Some(program.as_path()),
         );
         // rubash#1905: synthetic /proc operands become spawn-time
         // snapshot files for a child without its own /proc layer; the

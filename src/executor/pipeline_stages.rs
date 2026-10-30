@@ -1311,6 +1311,7 @@ impl Executor {
             &args,
             dev_stdin,
             crate::executor::dev_fd_operands::DevOperandStdout::Capture,
+            Some(program.as_path()),
         );
         // rubash#1905: synthetic /proc operands become spawn-time
         // snapshot files for a child without its own /proc layer; the
