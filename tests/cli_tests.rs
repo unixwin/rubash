@@ -425,7 +425,6 @@ fn typed_cell_stays_consistent_across_builtin_writes() {
     ];
     for (script, expected) in cases {
         let output = rubash_command()
-            .arg("--")
             .arg("-c")
             .arg(script)
             .output()
@@ -616,7 +615,6 @@ fn typed_cell_interleaved_matrix() {
     ];
     for (script, expected) in cases {
         let output = rubash_command()
-            .arg("--")
             .arg("-c")
             .arg(script)
             .output()
@@ -638,7 +636,6 @@ fn typed_cell_interleaved_matrix() {
 fn typed_cell_interleaved_matrix_illegal_and_coproc() {
     // R4b: illegal subscript diagnostics (regex avoids the shell-name prefix).
     let output = rubash_command()
-        .arg("--")
         .arg("-c")
         .arg("declare -ai n=(1 2); x=${n[0]}; n[]=X")
         .output()
@@ -652,7 +649,6 @@ fn typed_cell_interleaved_matrix_illegal_and_coproc() {
     // R9a: coproc after an established cell; fd numbers vary so match
     // them with a regex instead of asserting specific digits.
     let output = rubash_command()
-        .arg("--")
         .arg("-c")
         .arg("a=(1 2 3); x=${a[0]}; coproc C { printf 'coproc-ok\\n'; }; read -r out <&\"${C[0]}\"; echo \"$out\"; wait \"$C_PID\"")
         .output()
@@ -664,7 +660,6 @@ fn typed_cell_interleaved_matrix_illegal_and_coproc() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "coproc-ok\n");
     let output = rubash_command()
-        .arg("--")
         .arg("-c")
         .arg("a=(1 2 3); x=${a[0]}; coproc C { sleep 1; }; printf '%s %s\\n' \"${C[0]}\" \"${C[1]}\"; wait \"$C_PID\"")
         .output()
@@ -681,7 +676,6 @@ fn typed_cell_interleaved_matrix_illegal_and_coproc() {
 #[test]
 fn c_command_retires_finished_coproc_endpoints_before_later_redirects() {
     let output = rubash_command()
-        .arg("--")
         .arg("-c")
         .arg(
             "coproc C { :; }; sleep 1; \
@@ -710,7 +704,6 @@ fn unset_scalar_base_index_zero_is_unset_for_operators() {
     // scalar keeps its empty element 0. A dynamic scalar (RANDOM) reads
     // live through element 0. Probed against GNU bash 5.3.
     let output = rubash_command()
-        .arg("--")
         .arg("-c")
         .arg(
             "unset Z; printf 'minus0=[%s] minus5=[%s] plus=[%s] colonminus=[%s] plain=[%s]\\n' \
@@ -748,7 +741,6 @@ fn unset_scalar_base_index_zero_is_unset_for_operators() {
 #[test]
 fn c_command_materializes_persistent_stderr_to_stdout_for_external_children() {
     let output = rubash_command()
-        .arg("--")
         .arg("-c")
         .arg(
             "exec 2>&1; /usr/bin/cat /definitely-missing-rubash-fd2-path; \
@@ -766,7 +758,6 @@ fn c_command_materializes_persistent_stderr_to_stdout_for_external_children() {
 #[test]
 fn c_command_pipeline_stages_inherit_persistent_stderr_to_stdout() {
     let output = rubash_command()
-        .arg("--")
         .arg("-c")
         .arg(
             "exec 2>&1; cat /definitely-missing-rubash-pipeline-fd2-path | cat; \
@@ -785,7 +776,6 @@ fn c_command_pipeline_stages_inherit_persistent_stderr_to_stdout() {
 #[test]
 fn c_command_coproc_child_inherits_persistent_stderr_to_stdout() {
     let output = rubash_command()
-        .arg("--")
         .arg("-c")
         .arg(
             "exec 2>&1; coproc xcase -n -u; wait \"$COPROC_PID\"; \
@@ -803,7 +793,6 @@ fn c_command_coproc_child_inherits_persistent_stderr_to_stdout() {
 #[test]
 fn c_command_echo_reports_persistent_closed_stdout() {
     let output = rubash_command()
-        .arg("--")
         .arg("-c")
         .arg(
             "coproc C { :; }; sleep 1; exec 2>&1; exec >&${C[1]}-; \
