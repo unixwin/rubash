@@ -93,7 +93,10 @@ fn fd_is_anonymous_pipe(fd: std::os::unix::io::RawFd) -> bool {
 /// descriptor, so it keeps the pin guard's protection.
 #[cfg(unix)]
 fn fd_is_stdio_pipe_alias(fd: std::os::unix::io::RawFd) -> bool {
-    fn pipe_identity(fd: std::os::unix::io::RawFd) -> Option<(libc::dev_t, libc::ino_t)> {
+    // Identity fields are widened to u64: the raw stat field types
+    // and the dev_t/ino_t aliases disagree on 32-bit Android (u64
+    // fields vs u32 aliases), and only equality is ever tested.
+    fn pipe_identity(fd: std::os::unix::io::RawFd) -> Option<(u64, u64)> {
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstat(fd, &mut stat) } != 0 {
             return None;
@@ -102,7 +105,7 @@ fn fd_is_stdio_pipe_alias(fd: std::os::unix::io::RawFd) -> bool {
         if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT)) != u32::from(libc::S_IFIFO) {
             return None;
         }
-        Some((stat.st_dev, stat.st_ino))
+        Some((stat.st_dev as u64, stat.st_ino as u64))
     }
     let Some(identity) = pipe_identity(fd) else {
         return false;
