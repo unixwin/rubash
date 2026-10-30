@@ -200,6 +200,27 @@ impl Executor {
         // restored around the dispatch so a nested command's class
         // cannot leak into this command's verdict.
         let saved_external_marker = self.external_dispatch_ran.replace(false);
+        if redirect_rejected {
+            // rubash#2279: the funnel's speculative `{var}` apply
+            // (apply_dynamic_fd_var_redirects in execute_command_with_
+            // procsub_scope) is paired with an undo owned by the
+            // dispatch class: execute_external undoes for disk commands,
+            // builtins/functions keep the binding (GNU redir_varassign
+            // persists in the shell's own context — it survives even a
+            // later redirect's failure, verified against GNU 5.3.20).
+            // A rejected DISK command never reaches execute_external,
+            // so without this the allocation and the variable leak into
+            // the parent (`/bin/true {v}<seed < /missing` left v set);
+            // GNU's varassign for a disk command happens only in the
+            // forked child (execute_cmd.c do_redirections after fork)
+            // and the child dies with it — rejected or not.
+            let in_process = cmd.words.first().is_some_and(|word| {
+                is_shell_builtin_name(word) || self.function_name_for_command_word(word).is_some()
+            });
+            if !in_process {
+                self.undo_child_fd_var_redirects();
+            }
+        }
         let result = if redirect_rejected {
             Ok(())
         } else {
