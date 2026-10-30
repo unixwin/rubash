@@ -356,7 +356,7 @@ stdio 载体路径的接线，需定向探针护航。
 5. 时序约束：niubash 依赖 rubash master git 分支，因此产品层基线只能在引擎
    合并后刷新；分支开发期以引擎层基线为准，合并后补产品层。
 
-### 3.8 引擎去 winux 化（embedding hygiene，2026-09-20 决策；低优先级）
+### 3.8 引擎去 winux 化（embedding hygiene，2026-09-20 决策；1.5.0 已完成，见节末完成注记）
 
 **动机**：不是为第三方嵌入（大概率没有别家用），而是**引擎里的 winuxsh 痕迹
 刺眼**——产品关切不该污染引擎层，且 `WINUXSH_ROOT` 泄漏进测试环境会作废整轮
@@ -399,6 +399,8 @@ root 定位），**不允许直接删**；做法是**改名迁移**，且只在�
 winuxcmd 的引用仅允许存在于注释。
 
 **Supersede 注记（2026-10-27，用户裁定）**：上段「相关决策」中「不做 FFI」与「引擎对 winuxcmd 的引用仅允许存在于注释」两点自本日起被 supersede。FFI 以 unixwin/niubash#567 与 ffi-route DESIGN 所定的形态获准存在：默认关闭的 opt-in 加速面，PATH 集成仍是默认、回退与等价性参照；引擎侧只认中性的 route provider 接缝，DLL 与 winuxcmd 名字不进引擎——这与本段「概念上引擎只认 "coreutils provider"」的中立精神一致。回应本 ADR 原两条理由（模型边界、成本收益）的证据见 ffi-route DESIGN §0。§3.8 其余内容（改名迁移、coreutils provider 概念）继续有效。
+
+**完成注记（2026-10-30，1.5.0 winux 清除）**：本节的「改名迁移」计划已被用户 2026-10-30 裁定取代——遗留桥**整桥拆除、不保留 legacy**，不走「新名 + 兼容别名迁移期」路线。执行结果（rubash 侧）：S1 两仓 shim 停读 WINUXSH_SHELL / WINUXSH 与 winuxsh.exe 探测（PR #2205 + niubash #716）；S3 引擎 `set_shell_root` 停写停导出 WINUXSH_ROOT、`configured_shell_root` 删兜底位、命令查找指纹表删名（PR #2206）；S4 `winux_fifo*` 标识符改名 `winuxcmd_fifo*`（协议字面量不动，PR #2207）；S5 拆除引擎 `<root>/winuxsh.exe` 存在性探针（`configured_shell_root_winuxsh`）、设备哨兵改名 `\\.\RUBASH_UNSUPPORTED_DEVICE`、测试夹具与死名钉收尾。niu 侧桥拆除为 niubash PR #715（S2）。上文 2026-09-20 逐站点表的行号已整体过期（`zsh_options.rs`、`pwd.rs` 等定点在当前 master 已不存在或移位），该表自此仅作当日盘点记录，不得按其行号施工。本节的 coreutils provider 概念与 FFI 注记继续有效。
 
 ## 四、热点文件提示（改动需extra谨慎）
 
