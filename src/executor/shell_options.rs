@@ -1084,9 +1084,10 @@ impl Executor {
                         target = Some(path);
                     }
                     FdFactMark::Access(mark) => {
-                        class = mark.as_bytes().first().map_or('p', |byte| *byte as char);
-                        can_r = mark.contains('r');
-                        can_w = mark.contains('w');
+                        let (fact_class, fact_r, fact_w) = access_mark_parts(&mark);
+                        class = fact_class;
+                        can_r = fact_r;
+                        can_w = fact_w;
                     }
                     _ => {
                         class = 'p';
@@ -1153,8 +1154,9 @@ impl Executor {
                                 }
                             }
                             FdFactMark::Access(mark) => {
-                                class = mark.as_bytes().first().map_or('p', |byte| *byte as char);
-                                can_r = mark.contains('r');
+                                let (fact_class, fact_r, _) = access_mark_parts(&mark);
+                                class = fact_class;
+                                can_r = fact_r;
                             }
                             _ => {}
                         }
@@ -1178,8 +1180,9 @@ impl Executor {
                                 }
                             }
                             FdFactMark::Access(mark) => {
-                                class = mark.as_bytes().first().map_or('p', |byte| *byte as char);
-                                can_r = mark.contains('r');
+                                let (fact_class, fact_r, _) = access_mark_parts(&mark);
+                                class = fact_class;
+                                can_r = fact_r;
                             }
                             _ => {}
                         }
@@ -3171,6 +3174,26 @@ pub(in crate::executor) enum FdFactMark {
     Closed,
     DupOf(u32),
     Unchanged,
+}
+
+/// Decompose an engine-minted access mark into the entries loop's
+/// (class, can_r, can_w) variables. The mark's first byte is a class
+/// letter the sync itself minted (the evaluator's alphabet
+/// p/c/d/n/f/s — ASCII by construction); it is matched as a BYTE so
+/// no byte->char widening is involved
+/// (scripts/check-utf8-boundary-hygiene.sh). An empty or unknown
+/// mark decomposes to the pipe default, the historical ambient
+/// fallback.
+fn access_mark_parts(mark: &str) -> (char, bool, bool) {
+    let class = match mark.as_bytes().first() {
+        Some(b'c') => 'c',
+        Some(b'd') => 'd',
+        Some(b'n') => 'n',
+        Some(b's') => 's',
+        Some(b'f') => 'f',
+        _ => 'p',
+    };
+    (class, mark.contains('r'), mark.contains('w'))
 }
 
 /// The FD0_MIRROR_FACT encoding of a fact (`T:` target, `A:` access
