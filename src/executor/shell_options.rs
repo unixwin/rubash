@@ -2676,6 +2676,22 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Option<String> {
+        // rubash#2238: a pull that resolves the carrier redirect
+        // apply_default_external_stdin_file rewrote for a pending
+        // stdin fold is an in-process consumer taking the endpoint's
+        // text through the pull — mark the fold so its settle applies
+        // this face's pull-and-drain accounting instead of the
+        // measured one (the spawn that would have measured it never
+        // happens on that path).
+        if let Some(fold) = self.pending_stdin_fold.as_mut() {
+            if let Some(target) = fold.target.as_deref() {
+                if cmd.redirect_in.as_ref().is_some_and(|redirect| {
+                    redirect.fd.unwrap_or(0) == 0 && redirect.target == target
+                }) {
+                    fold.pulled = true;
+                }
+            }
+        }
         self.apply_comsub_stdin_writeback();
         // fd-0 stdin source: GNU redir.c do_redirections applies
         // redirections left to right, so the LAST fd-0 input redirect in
