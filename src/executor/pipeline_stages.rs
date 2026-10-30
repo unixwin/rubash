@@ -1033,7 +1033,26 @@ impl Executor {
         let _profiler_external = super::profiler::enter_external(
             command.words.first().map(String::as_str).unwrap_or("?"),
         );
-        let result = self.execute_external_pipeline_stage_inner(&command, input, stdin_inherit);
+        // rubash#2272: GNU applies every element's redirections in
+        // the element's fork (execute_cmd.c:2620 execute_pipeline ->
+        // redir.c:237 do_redirections), {var} entries included. The
+        // stage spawner bypasses the simple-command funnel whose
+        // applier binds {var} entries into the fd table, so without
+        // this the element's {var} bindings never exist and the
+        // shared delivery helper (apply_external_fd_delivery) has
+        // nothing to deliver. Apply them here, scoped by the same
+        // undo the external face uses: the binding lives only for
+        // this stage's spawn. A failed {var} redirect kills the
+        // element with status 1 — the applier has already rendered
+        // the diagnostic — exactly like a numbered redirect failure
+        // in the element; the pipeline itself continues.
+        let fd_var_failed = self.apply_dynamic_fd_var_redirects(&command, true)?;
+        let result = if fd_var_failed {
+            Ok(Some((String::new(), String::new(), 1)))
+        } else {
+            self.execute_external_pipeline_stage_inner(&command, input, stdin_inherit)
+        };
+        self.undo_child_fd_var_redirects();
         let finish_result = self.finish_process_substitutions(process_substitution_files);
         let output = result?;
         finish_result?;
