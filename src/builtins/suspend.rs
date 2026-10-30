@@ -69,35 +69,64 @@ where
             // SAFETY: getpgid/killpg with our own pgrp are pure queries.
             let pgrp = unsafe { libc::getpgid(0) };
             if pgrp > 0 {
-                unsafe {
-                    libc::killpg(pgrp, libc::SIGSTOP);
-                }
-                // rubash#1474: the group stop is process-directed — in
-                // this multithreaded executor another thread can field it
-                // first, and the executing thread then runs several more
-                // commands before the stop lands on it (observed: a whole
-                // `e1..e5; sleep` tail executed after `suspend -f`). GNU's
-                // single-threaded killpg (builtins/suspend.def
-                // suspend_builtin) stops the shell before the next command
-                // runs. Stop THIS thread thread-directed as well: a
-                // pending SIGSTOP on the calling thread takes effect on
-                // the tgkill return-to-userspace path, before any further
-                // command executes. On SIGCONT both stops release and the
-                // builtin returns success as before.
-                // SYS_gettid/SYS_tgkill are Linux-only; macOS libc has
-                // neither constant (E0425 on the macos cross-check),
-                // pthread_kill on the calling thread is the same
-                // thread-directed SIGSTOP.
+                // GNU is single-threaded: its killpg stop is dequeued by
+                // the executing thread at the killpg exit path, so the
+                // shell stops AT the builtin and one SIGCONT resumes it.
+                // In this multithreaded executor neither half holds for a
+                // bare killpg (measured on a two-thread harness and on
+                // this binary under load):
+                // - rubash#1474: a process-directed SIGSTOP is dequeued
+                //   by whichever thread the kernel wakes; a RUNNING
+                //   executing thread crosses many syscall exits without
+                //   joining the stop, so commands after `suspend -f`
+                //   execute before the stop lands (a whole `e1..e5`
+                //   tail). Only a THREAD-directed SIGSTOP stops the
+                //   executing thread deterministically, at that call's
+                //   own exit path.
+                // - rubash#2203: sending BOTH (killpg, then a
+                //   thread-directed SIGSTOP as the #1474 clamp did)
+                //   leaves two stop generations pending in this
+                //   process; the one the executing thread does not
+                //   dequeue survives the stop episode, so the first
+                //   SIGCONT (pid- or group-addressed — exactly what
+                //   `fg` sends) is followed by a re-stop and a second
+                //   SIGCONT is required (15/40 runs under load; the
+                //   #1637 harness note records the same lost wakeup).
+                // So: every OTHER process in the group gets its own
+                // process-directed SIGSTOP (for them, a single
+                // generation), and this process stops solely through
+                // the thread-directed SIGSTOP — prompt (#1474) and the
+                // only in-process generation, hence consumed by the
+                // episode: one SIGCONT resumes (#2203). A member that
+                // exits mid-enumeration is ignored (ESRCH); a process
+                // joining the group concurrently is the one corner
+                // where this differs from killpg's atomicity.
                 #[cfg(target_os = "linux")]
                 {
-                    let pid = unsafe { libc::getpid() };
-                    let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::pid_t;
-                    unsafe {
-                        libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGSTOP);
+                    if stop_other_group_members(pgrp) {
+                        unsafe {
+                            let pid = libc::getpid();
+                            let tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
+                            libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGSTOP);
+                        }
+                    } else {
+                        // /proc unavailable: fall back to the historical
+                        // killpg + thread-directed clamp (prompt; the
+                        // #2203 second-generation corner returns only
+                        // in this degraded path).
+                        unsafe {
+                            libc::killpg(pgrp, libc::SIGSTOP);
+                            let pid = libc::getpid();
+                            let tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
+                            libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGSTOP);
+                        }
                     }
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(not(target_os = "linux"))]
                 unsafe {
+                    libc::killpg(pgrp, libc::SIGSTOP);
+                    // rubash#1474 clamp, unchanged on this platform:
+                    // stop the executing thread at a signal boundary.
                     libc::pthread_kill(libc::pthread_self(), libc::SIGSTOP);
                 }
             }
@@ -110,4 +139,53 @@ where
         "{diagnostic_prefix}suspend: cannot suspend: no job control"
     )?;
     Ok((EXECUTION_FAILURE, false))
+}
+
+/// Linux: send a process-directed SIGSTOP to every process in `pgrp`
+/// except this one (see the rubash#2203 sequencing note in
+/// `execute_with_io`). Returns false when /proc cannot be enumerated
+/// at all, so the caller can fall back to killpg.
+#[cfg(target_os = "linux")]
+fn stop_other_group_members(pgrp: libc::pid_t) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    let own_pid = unsafe { libc::getpid() };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        if pid == own_pid {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue; // raced an exit, or not ours to inspect
+        };
+        // comm is parenthesized and may itself contain spaces/parens;
+        // the fields after the LAST ')' are state, ppid, pgrp, ...
+        let Some(after_comm) = stat.rsplit(')').next() else {
+            continue;
+        };
+        let mut fields = after_comm.split_whitespace();
+        let _state = fields.next();
+        let _ppid = fields.next();
+        let Some(member_pgrp) = fields
+            .next()
+            .and_then(|value| value.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        if member_pgrp == pgrp {
+            // ESRCH (it exited) and EPERM alike: nothing more this
+            // builtin can do for that member; keep going.
+            unsafe {
+                libc::kill(pid, libc::SIGSTOP);
+            }
+        }
+    }
+    true
 }
