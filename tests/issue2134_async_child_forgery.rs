@@ -72,13 +72,19 @@ fn spawn(args: &[&str], extra_env: &[(&str, &str)], stdin: &[u8]) -> Run {
             Some(status) => {
                 // Shell-convention exit status: 128 + signal when the
                 // process died by a signal (status.code() is None then).
-                break Some(match status.code() {
-                    Some(code) => code,
+                // Death-by-signal is a unix wait-status concept; a
+                // Windows exit status always carries an exit code.
+                #[cfg(unix)]
+                let code = match status.code() {
+                    Some(code) => Some(code),
                     None => {
                         use std::os::unix::process::ExitStatusExt;
-                        128 + status.signal().unwrap_or(0)
+                        Some(128 + status.signal().unwrap_or(0))
                     }
-                });
+                };
+                #[cfg(not(unix))]
+                let code = status.code();
+                break code;
             }
             None => {
                 assert!(Instant::now() < deadline, "watchdog: child hung");
