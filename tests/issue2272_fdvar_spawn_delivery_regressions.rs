@@ -192,6 +192,15 @@ fn issue2272_fdvar_allocation_skips_ambient_slots() {
     let dir = scratch("collision");
     // GNU: fd 10 is already open in the parent, so the var binding
     // takes 11 in the child; the ambient fd 10 is inherited as-is.
+    // The trailing parent `cat <&10` prints NOTHING: the child's own
+    // `cat <&10` read the inherited descriptor to EOF, and a forked
+    // child's duplicate descriptor shares the parent's open file
+    // description — offset included — so the parent resumes at EOF.
+    // (Oracle-verified against GNU bash 5.3.20: exact-shape,
+    // child-skips-ambient, and plain-fork probes in the
+    // fix-2272-ambient-pin workdir. The trailing read still guards
+    // that the parent's binding survives: a destroyed fd 10 would
+    // fail the redirect and the script's exit code.)
     let script = format!(
         "exec 10<amb.txt\nunset v\n{} {{v}}<seed.txt\necho \"rc=$? v=[${{v-unset}}]\"\ncat <&10\n",
         child("cat <&11; cat <&10")
@@ -200,7 +209,7 @@ fn issue2272_fdvar_allocation_skips_ambient_slots() {
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(
         stdout,
-        "seed-line-1\nseed-line-2\namb-line-1\nrc=0 v=[unset]\namb-line-1\n"
+        "seed-line-1\nseed-line-2\namb-line-1\nrc=0 v=[unset]\n"
     );
 }
 
