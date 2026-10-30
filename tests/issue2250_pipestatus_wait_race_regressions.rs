@@ -20,7 +20,10 @@
 //! machinery reported 141 on both concurrent wait sites (the
 //! single-try_wait reverse reap in the non-Windows concurrent executor,
 //! and the 100 ms deadline arm of the shared member wait). The pins are
-//! expected RED on the pre-fix build and GREEN after it.
+//! expected RED on the pre-fix build and GREEN after it. One guard pin
+//! below (the late-write shape) is not a discriminator: it is 141 on
+//! both builds by design, pinning GNU's consumer-lifetime semantics
+//! against read-end-hoarding fixes.
 //!
 //! Unix-only: the shapes rely on explicit fd closing, `sleep` timing
 //! and coreutils `yes`/`head` SIGPIPE semantics.
@@ -84,19 +87,59 @@ fn issue2250_closed_stdout_lingering_producer_reports_real_status() {
     assert_eq!(rc, Some(0));
 }
 
-/// Same lingering producer feeding an in-shell builtin tail (`true`):
-/// the streaming-tail reap waits the producer against NO downstream, so
+/// The streaming-tail discriminator: the producer closes fd 1 FIRST
+/// (the tail side sees EOF instantly), then lingers a full second
+/// before exiting 7, feeding an in-shell builtin tail (`true`). The
+/// streaming-tail reap waits the producer against NO downstream, so
 /// the pre-fix deadline armed immediately and the member was killed
 /// 100 ms in — recorded 141. GNU reports the member's real 7.
+///
+/// The producer deliberately does NOT write before closing. With a
+/// non-reading tail, a write races the consumer's exit: GNU runs the
+/// tail as a forked child (execute_cmd.c:2620 execute_pipeline; the
+/// parent closes its own read-end copy once the children are forked),
+/// so the last read end closes when `true` exits — almost surely
+/// before an exec'ing interpreter producer lands its first write —
+/// and the producer dies of a GENUINE kernel SIGPIPE. Measured on
+/// the GNU 5.3.20 oracle, the writing variant of this shape
+/// (`echo hi; exec 1>&-; sleep 1; exit 7`) reports 141 in 15/15 runs,
+/// so a writing producer cannot discriminate the wait race on this
+/// route. The close-first shape can: no write exists that could
+/// SIGPIPE, so any 141 is the wait path's own kill. Verified pre-fix
+/// (master 050d3c87 build): this exact script reports a fast 141;
+/// the fixed build and GNU report 7 after the full second.
 #[test]
 fn issue2250_streaming_tail_lingering_producer_reports_real_status() {
     let scratch = Scratch::new("linger-tail");
     let (out, err, rc) = scratch.rubash_file(
-        "/bin/bash -c 'echo hi; exec 1>&-; sleep 1; exit 7' | true\n\
+        "/bin/bash -c 'exec 1>&-; sleep 1; exit 7' | true\n\
          echo \"ps=${PIPESTATUS[0]} ${PIPESTATUS[1]}\"\n",
         &[],
     );
     assert_eq!(out, "ps=7 0\n");
+    assert_eq!(err, "");
+    assert_eq!(rc, Some(0));
+}
+
+/// Guard for the streaming tail's consumer-lifetime semantics (NOT a
+/// wait-race discriminator — it reports 141 before and after the
+/// fix): a producer that writes only AFTER the non-reading tail has
+/// exited (0.3 s in; the tail returned after microseconds) writes
+/// into a pipe with no readers and dies of the kernel's SIGPIPE —
+/// GNU reports the genuine 141, and so must rubash. This pins the
+/// boundary against "fixes" that would keep the pipe's read end open
+/// until the producers are reaped: those would report 7 here and
+/// hang `yes | true` outright, diverging from GNU's model where the
+/// read end's lifetime is the consumer's own.
+#[test]
+fn issue2250_streaming_tail_late_write_dies_genuine_sigpipe() {
+    let scratch = Scratch::new("linger-tail-late-write");
+    let (out, err, rc) = scratch.rubash_file(
+        "/bin/bash -c 'sleep 0.3; echo hi; exec 1>&-; sleep 1; exit 7' | true\n\
+         echo \"ps=${PIPESTATUS[0]} ${PIPESTATUS[1]}\"\n",
+        &[],
+    );
+    assert_eq!(out, "ps=141 0\n");
     assert_eq!(err, "");
     assert_eq!(rc, Some(0));
 }
