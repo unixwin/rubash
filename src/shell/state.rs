@@ -28,6 +28,46 @@ use crate::shell::Variable;
 use super::var_table::{VarAttrs, VarTable};
 use super::variables::VariableStore;
 
+/// rubash#2058: call-stack state a fork-shaped respawn inherits from
+/// its parent (docs/design/respawn-transport-census.md). GNU's fork
+/// children (subst.c:6362 process_substitute, execute_cmd.c:1576
+/// execute_in_subshell, coproc make_child) copy the parent's
+/// FUNCNAME / BASH_SOURCE / BASH_LINENO / BASH_ARGV / BASH_ARGC stacks
+/// verbatim (variables.c); a respawned `rubash -c` child re-imports
+/// only its process environment, so the four spawn sites stamp the
+/// parent's effective views and `Executor::new` installs them here.
+/// The dynamic views compose the child's own frames above these.
+///
+/// The three stack views are captured as the parent's EFFECTIVE views
+/// (post main-frame rendering), so composition is plain concatenation.
+/// The BASH_ARGV bottom frame is NOT here: when materialized it seeds
+/// `bash_arg_bottom` at birth like any installed frame; the
+/// unmaterialized state is represented by `argv_bottom` staying out of
+/// that cell plus `in_function` gating read-time synthesis
+/// (variables.c:1656 get_bashargcv initializes only at
+/// variable_context == 0).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InheritedForkFrames {
+    /// Effective FUNCNAME view at spawn (may end in "main").
+    pub(crate) function_names: Vec<String>,
+    /// Effective BASH_SOURCE view at spawn.
+    pub(crate) sources: Vec<String>,
+    /// Effective BASH_LINENO view at spawn (may end in "0").
+    pub(crate) linenos: Vec<String>,
+    /// BASH_ARGV frames above the bottom frame, innermost first.
+    pub(crate) argv_frames: Vec<String>,
+    /// BASH_ARGC frame counts, matching `argv_frames`.
+    pub(crate) argc_frames: Vec<String>,
+    /// The parent executed with variable_context > 0 at spawn time:
+    /// an unmaterialized BASH_ARGV stays unmaterialized in the child.
+    pub(crate) in_function: bool,
+    /// The parent ran a script file (shell.c open_shell_script's main
+    /// frame existed): the child's FUNCNAME view gains "main" beneath
+    /// its own frames, and its BASH_SOURCE raw stack holds only real
+    /// frames (no $0 bottom entry is installed on the respawn path).
+    pub(crate) has_main_frame: bool,
+}
+
 #[derive(Debug)]
 pub struct ShellState {
     /// variables.c shell_variables — typed store carrying attributes,
@@ -115,6 +155,11 @@ pub struct ShellState {
     /// variables.c BASH_LINENO/BASH_SOURCE stacks.
     pub(crate) bash_lineno_stack: Vec<String>,
     pub(crate) bash_source_stack: Vec<String>,
+    /// rubash#2058: the fork-inherited call-stack frames a respawned
+    /// child was born with (see InheritedForkFrames). None for ordinary
+    /// shells; the dynamic views read the child's own frames above
+    /// these, exactly like GNU's fork copying the parent's stacks.
+    pub(crate) inherited_fork_frames: Option<InheritedForkFrames>,
     /// variables.c variable_context — local scope stacks.
     pub(crate) local_var_scopes: Vec<HashMap<String, Option<String>>>,
     pub(crate) local_attr_scopes: Vec<HashMap<String, VarAttrs>>,
@@ -621,6 +666,7 @@ impl Clone for ShellState {
             bash_arg_bottom: self.bash_arg_bottom.clone(),
             bash_lineno_stack: self.bash_lineno_stack.clone(),
             bash_source_stack: self.bash_source_stack.clone(),
+            inherited_fork_frames: self.inherited_fork_frames.clone(),
             local_var_scopes: self.local_var_scopes.clone(),
             local_attr_scopes: self.local_attr_scopes.clone(),
             local_typed_scopes: self.local_typed_scopes.clone(),

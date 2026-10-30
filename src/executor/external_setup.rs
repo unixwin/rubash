@@ -1283,6 +1283,12 @@ impl Executor {
             super::compound_exec::POSITIONAL_PARAMS_TRANSPORT.to_string(),
             self.positional_params_transport_value(),
         );
+        // rubash#2058: the fork-context stamp (call-stack views,
+        // PIPESTATUS cell, ARGV bottom state) — same fork, same
+        // transport set (see fork_context_transport_entries).
+        for (key, value) in self.fork_context_transport_entries() {
+            env_map.insert(key, value);
+        }
         // subst.c:6609 subshell_level++ — the procsub child runs one level
         // deeper than the parent for $BASH_SUBSHELL/$BASHPID.
         env_map.insert(
