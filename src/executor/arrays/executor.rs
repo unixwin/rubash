@@ -45,7 +45,24 @@ impl Executor {
             "BASH_ARGC" => return self.bash_argc_view(),
             "BASH_ARGV" => return self.bash_argv_view(),
             "BASH_LINENO" => return self.bash_lineno_view(),
-            "BASH_SOURCE" => return self.shell_state.bash_source_stack.clone(),
+            "BASH_SOURCE" => {
+                // Same gating as the dynamic_stack_array_values view:
+                // without a script main frame (`bash -c`, stdin
+                // scripts) the script-name bottom entry installed
+                // with $0 is not a BASH_SOURCE frame (shell.c:1635-
+                // 1650 pushes the synthetic bottom frames only for a
+                // script FILE), so the raw stack's bottom entry is
+                // dropped. Reading the raw stack here made the
+                // no-argument `caller` print that entry — the shell's
+                // own name/path — where GNU has no element at all and
+                // caller.def:89-105 renders a literal NULL
+                // (rubash#2142).
+                let mut stack = self.shell_state.bash_source_stack.clone();
+                if !self.has_script_main_frame() && !stack.is_empty() {
+                    stack.pop();
+                }
+                return stack;
+            }
             _ => {}
         }
         self.shell_state
