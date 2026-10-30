@@ -22,12 +22,37 @@ enum NumberedDupBinding {
     /// list, so the wired slot the spawn arranged IS the binding
     /// the dup saw at its position (the #2277 step-5 shape).
     ChildSlot(u32),
-    /// A parent-side inheritable duplicate of the shell's ambient
-    /// stdio descriptor, captured at the dup's position: a later
-    /// entry rebinds the source slot, so the at-position binding is
-    /// the ambient one even though the child's wired slot will
-    /// hold the later binding.
+    /// A parent-side handle captured at the dup's position: a
+    /// later entry rebinds the source slot, so the at-position
+    /// binding is the captured one even though the child's wired
+    /// slot will hold the later binding. On the simple-command
+    /// face the handle duplicates the shell's ambient stdio
+    /// descriptor; on the pipeline stage face it can instead be
+    /// the stage's stdin channel carrier (see StageStdioContext).
     Handle(crate::fd::HANDLE),
+}
+
+/// rubash#2293: the pipeline stage face's stdio context for the
+/// shared fd delivery. GNU binds every pipeline element's fds
+/// 0/1/2 to the inter-element pipes BEFORE the element's own
+/// do_redirections walk runs (execute_cmd.c:2620
+/// execute_pipeline), so a numbered dup of a stdio slot copies
+/// the descriptor as bound at the dup's position — for a stage
+/// that is the stage channel (the payload feeding fd 0, the
+/// capture pipes on fds 1/2), never the shell's ambient
+/// descriptor and never the binding a later list entry installs.
+/// The stage spawner knows those channels; the simple-command
+/// face passes None (its child's wired stdio is exactly what the
+/// existing dup arms model).
+pub(in crate::executor) struct StageStdioContext {
+    /// Raw handle of the carrier read end holding the stage's
+    /// stdin payload, when the spawner materialized one: fd 0's
+    /// at-position binding for a dup that precedes the entry
+    /// rebinding fd 0 (the stdin face wires the WINNER into the
+    /// child's fd 0, so the payload channel exists only as this
+    /// carrier). None when the stage's fd 0 is the live inherited
+    /// descriptor — the ambient capture already names it.
+    pub stdin_channel: Option<crate::fd::HANDLE>,
 }
 
 /// rubash#1626: pin the shell's ambient fd-table descriptors at their
@@ -1863,6 +1888,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         mut process: &mut Command,
+        stage_stdio: Option<&StageStdioContext>,
     ) -> Vec<crate::fd::HANDLE> {
         // rubash#180: GNU's forked disk-command child inherits every fd >= 3
         // the command opened (`"$SH" -c 'echo hi >&3' 3>f` writes f) or that
@@ -2058,6 +2084,7 @@ impl Executor {
                         &mut parent_side_dups,
                         &mut walk_opened,
                         &mut numbered_dup_bindings,
+                        stage_stdio,
                     );
                     continue;
                 }
@@ -2641,6 +2668,7 @@ impl Executor {
             std::rc::Rc<crate::executor::fd_table::FileFd>,
         >,
         numbered_dup_bindings: &mut std::collections::HashMap<u32, NumberedDupBinding>,
+        stage_stdio: Option<&StageStdioContext>,
     ) {
         let write = matches!(redirect.kind, crate::parser::RedirectKind::DuplicateOutput);
         // (1) A binding this walk already delivered for the source.
@@ -2757,6 +2785,41 @@ impl Executor {
                         == source_fd
             });
             if rebound_later {
+                // rubash#2293: on the pipeline stage face the
+                // at-position binding is the stage channel, not the
+                // shell's ambient descriptor — GNU binds the
+                // element's stdio to the inter-element pipes before
+                // the element's own walk runs (execute_cmd.c:2620
+                // execute_pipeline). Fds 1/2 are wired to the
+                // stage's capture pipes (the routing walk places
+                // their payloads afterwards), so the child's wired
+                // slot already holds the at-position binding and
+                // the child-local pin below is the delivery. Fd 0
+                // is wired to the later WINNER by the stdin face,
+                // so its at-position binding is the payload channel
+                // the spawner materialized as the context's
+                // stdin_channel; when the stage's fd 0 is the live
+                // inherited descriptor the channel is None and the
+                // ambient capture below already names it.
+                if let Some(stage) = stage_stdio {
+                    if source_fd == 0 {
+                        if let Some(channel) = stage.stdin_channel {
+                            #[cfg(unix)]
+                            command_fd_pins.push((channel, fd));
+                            #[cfg(not(unix))]
+                            let _ = &*command_fd_pins;
+                            numbered_dup_bindings.insert(fd, NumberedDupBinding::Handle(channel));
+                            return;
+                        }
+                    } else {
+                        #[cfg(unix)]
+                        command_fd_pins.push((source_fd as std::os::unix::io::RawFd, fd));
+                        #[cfg(not(unix))]
+                        let _ = &*command_fd_pins;
+                        numbered_dup_bindings.insert(fd, NumberedDupBinding::ChildSlot(source_fd));
+                        return;
+                    }
+                }
                 #[cfg(unix)]
                 if let Ok(dup) =
                     crate::fd::duplicate_handle_inheritable(source_fd as std::os::unix::io::RawFd)
@@ -2805,7 +2868,7 @@ impl Executor {
         // command's own numbered redirects, the unix pin
         // registration) is shared with the sequential pipeline stage
         // spawner — see apply_external_fd_delivery.
-        let parent_side_dups = self.apply_external_fd_delivery(cmd, &mut process);
+        let parent_side_dups = self.apply_external_fd_delivery(cmd, &mut process, None);
         // rubash#229: restore GNU's child signal dispositions between fork
         // and exec (trap.c:1489 restore_original_signals) — without this a
         // policy/trap SIG_IGN in the shell survives exec and makes children

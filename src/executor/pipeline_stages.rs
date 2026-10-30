@@ -1574,6 +1574,65 @@ impl Executor {
             }
         }
 
+        // rubash#2293: when the stdin face above rebound this
+        // stage's fd 0 (fd0_redirect_wins), a numbered dup sourcing
+        // fd 0 EARLIER in the element's list copies the element's
+        // stdin channel — the payload the stage was fed through,
+        // bound before the element's own walk runs
+        // (execute_cmd.c:2620 execute_pipeline) — not the winner
+        // the child's fd 0 will hold and not the shell's ambient
+        // stdin. In this composition the payload exists only as
+        // this spawner's `input` text, so materialize it into a
+        // carrier pipe (the text-endpoint delivery shape) and hand
+        // its read end to the shared delivery as fd 0's
+        // at-position binding.
+        let dup0_precedes_fd0_winner = fd0_redirect_wins && {
+            let last_fd0 = command.redirects.iter().rposition(|entry| {
+                entry.fd_var.is_none()
+                    && entry
+                        .fd
+                        .unwrap_or(if entry.is_input_side() { 0 } else { 1 })
+                        == 0
+            });
+            match last_fd0 {
+                Some(last) => command.redirects.iter().take(last).any(|entry| {
+                    entry.fd_var.is_none()
+                        && matches!(entry.kind, crate::parser::RedirectKind::DuplicateInput)
+                        && redirect_target_fd(&self.expand_redirect_target(entry)) == Some(0)
+                }),
+                None => false,
+            }
+        };
+        let mut stage_stdio = super::external_inner::StageStdioContext {
+            stdin_channel: None,
+        };
+        let mut stage_stdin_carrier: Option<os_pipe::PipeReader> = None;
+        if dup0_precedes_fd0_winner {
+            if let Ok((reader, mut writer)) = os_pipe::pipe() {
+                #[cfg(unix)]
+                let channel = {
+                    use std::os::unix::io::AsRawFd;
+                    reader.as_raw_fd() as crate::fd::HANDLE
+                };
+                #[cfg(windows)]
+                let channel = {
+                    use std::os::windows::io::AsRawHandle;
+                    reader.as_raw_handle() as crate::fd::HANDLE
+                };
+                #[cfg(not(any(unix, windows)))]
+                let channel = 0 as crate::fd::HANDLE;
+                let payload =
+                    crate::executor::substitution_metadata::shell_text_to_raw_bytes(input);
+                std::thread::spawn(move || {
+                    #[cfg(unix)]
+                    crate::builtins::kill::block_sigpipe_on_this_thread();
+                    let _ = writer.write_all(&payload);
+                });
+                stage_stdio.stdin_channel = Some(channel);
+                stage_stdin_carrier = Some(reader);
+            }
+        }
+
         // rubash#1688 + rubash#2255: this sequential stage spawner
         // builds its child by hand, so run the SAME fd delivery
         // spawn_external_process runs for a simple command
@@ -1584,7 +1643,8 @@ impl Executor {
         // element's own redirections in its fork before exec
         // (redir.c:237 do_redirections), so a stage child must find
         // its `3<seed` binding at fd 3.
-        let stage_fd_delivery_dups = self.apply_external_fd_delivery(command, &mut process);
+        let stage_fd_delivery_dups =
+            self.apply_external_fd_delivery(command, &mut process, Some(&stage_stdio));
         // rubash#438: pin the buffered process-substitution pipe read ends at
         // their /dev/fd/N numbers in the child (fork-exec dup2), so the
         // literal argv word resolves through the OS /dev/fd layer.
@@ -1600,6 +1660,11 @@ impl Executor {
         for dup in stage_fd_delivery_dups {
             crate::fd::close_handle(dup);
         }
+        // rubash#2293: the child holds its own dup2'd copy of the
+        // stdin channel after the pin; drop the parent-side carrier
+        // read end now that the spawn resolved, so the writer
+        // thread sees EOF/EPIPE and ends.
+        drop(stage_stdin_carrier);
         let mut child = spawned?;
         adopt_orphan_console(child.id());
         // Drop the Command NOW: std retains the `Stdio::from(PipeWriter)`
