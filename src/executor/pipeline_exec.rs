@@ -2446,6 +2446,39 @@ impl Executor {
         {
             return Ok(None);
         }
+        // rubash#2255 (§8 face): an EXTERNAL producer carrying its own
+        // numbered or {var} redirect (a list-only entry such as
+        // `3<seed`) must not take this path. The producer runs through
+        // the sequential stage spawner, whose fd delivery opens the
+        // binding and registers a pre_exec pin for its slot — but this
+        // path has already spawned the consumers on pre-created pipes,
+        // so the producer child is forked while those foreign
+        // anonymous pipes occupy the low descriptor slots. One parks
+        // exactly on the pin's target, and the pin guard
+        // (pin_ambient_fds_in_child, rubash#1626/#2284) cannot tell a
+        // foreign pipe apart from std's exec-error channel, so it
+        // skips the pin and the binding is silently dropped
+        // (`sh -c 'cat <&3' 3<seed.txt | cat | wc -c` printed 0; the
+        // child had no fd 3 at all, while fd >= 4 targets survived —
+        // the foreign pipes only reach the lowest slots). GNU
+        // applies the element's own list in its fork
+        // (execute_cmd.c:2620 execute_pipeline; redir.c:237
+        // do_redirections), so decline to the sequential stage loop,
+        // which spawns stage 0 in a clean fd layout and delivers the
+        // binding — the same decline the concurrent admissions make
+        // for list-only members (concurrent_external_stage_spec).
+        // Compound and function producers bind their numbered
+        // redirects through their own stage funnels, not the pin,
+        // and keep this path.
+        if !command_is_compound_pipeline_stage(commands[0])
+            && !self.command_first_word_is_function(commands[0])
+            && commands[0]
+                .redirects
+                .iter()
+                .any(|redirect| redirect.is_list_only_redirect())
+        {
+            return Ok(None);
+        }
         // The producer's own fd-1 target must be the pipe: `>file` needs the
         // sequential routing walk. A stderr redirect is fine — the element's
         // body applies it internally (execute_compound_pipeline_stage).

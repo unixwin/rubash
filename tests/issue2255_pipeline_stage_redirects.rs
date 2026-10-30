@@ -30,6 +30,20 @@
 //! red on master, red with either change alone, and green once
 //! both land — see the cluster REPORT for the integration note.
 //! The two control pins are green on master and guard the routing.
+//!
+//! §8 extension (reopened #2255): in a >=3-stage pipeline whose
+//! downstream stages are all concurrent-eligible externals, the
+//! shell-writer composition (execute_shell_writer_pipeline)
+//! claimed stage 0 and spawned the consumers on pre-created pipes
+//! BEFORE running the producer, so a foreign anonymous pipe
+//! occupied the producer child's fd 3 at pin time and the pin
+//! guard skipped the stage's own binding — the child had no fd 3
+//! at all (fd >= 4 targets survived; the 2-stage composition's
+//! only foreign pipe is the stage's own stream pipe, which the
+//! guard's stdio-alias check recognizes). The stage0 three/four-
+//! stage pins below pin the admission decline that routes such
+//! producers to the sequential stage loop; the middle-stage pin
+//! is the control that already worked there.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -166,6 +180,65 @@ fn issue2255_pipeline_stage_ambient_dup_control() {
     // decline gate must not disturb it.
     let dir = test_dir("ambient");
     let (stdout, stderr, code) = run_in(&dir, "exec 3<seed.txt\ncat <&3 | wc -c\n");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "10\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+}
+
+#[test]
+fn issue2255_pipeline_stage0_numbered_input_three_stage() {
+    // §8 of the reopened issue: with two concurrent-eligible
+    // consumers behind it, the shell-writer composition used to
+    // claim stage 0 and lose its `3<seed` binding entirely (the
+    // child had NO fd 3: dash reported `3: Bad file descriptor`).
+    // GNU forks the element and applies its whole list in the
+    // child, so the seed reaches wc through both consumers.
+    let dir = test_dir("stage0-3stage");
+    let (stdout, stderr, code) = run_in(&dir, "sh -c 'cat <&3' 3<seed.txt | cat | wc -c\n");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "10\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+}
+
+#[test]
+fn issue2255_pipeline_stage0_numbered_input_four_stage() {
+    // Same §8 face, one more consumer in the chain.
+    let dir = test_dir("stage0-4stage");
+    let (stdout, stderr, code) = run_in(&dir, "sh -c 'cat <&3' 3<seed.txt | cat | cat | wc -c\n");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "10\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+}
+
+#[test]
+fn issue2255_pipeline_stage0_numbered_output_three_stage() {
+    // §8 face, write side: the producer's own `3>o.txt` binding was
+    // dropped the same way, so `>&3` wrote into the stage pipe
+    // instead of the file (o.txt stayed empty, wc counted the
+    // payload). GNU: the file gets the bytes, the pipe gets none.
+    let dir = test_dir("stage0-output-3stage");
+    let (stdout, stderr, code) = run_in(&dir, "sh -c 'echo o >&3' 3>o.txt | cat | wc -c\n");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "0\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert!(
+        wait_file_contents(&dir.join("o.txt"), "o\n"),
+        "o.txt contents: {:?}",
+        std::fs::read_to_string(dir.join("o.txt"))
+    );
+}
+
+#[test]
+fn issue2255_pipeline_middle_stage_numbered_input_control() {
+    // Control (green on master): a numbered binding on a MIDDLE
+    // stage already declined every fast path (the concurrent specs
+    // refuse list-only members) and was delivered by the sequential
+    // stage loop; the §8 admission decline must not disturb it.
+    let dir = test_dir("middle-stage");
+    let (stdout, stderr, code) = run_in(
+        &dir,
+        "printf 'ab\\n' | sh -c 'cat <&3' 3<seed.txt | wc -c\n",
+    );
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "10\n", "stderr: {stderr}");
     assert_eq!(stderr, "");
