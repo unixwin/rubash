@@ -130,6 +130,18 @@ where
         return Ok(EXECUTION_FAILURE);
     };
 
+    // GNU builtins/cd.def (cd_builtin error tail): when every attempt
+    // has failed, the diagnostic names `dirname` — the operand as given.
+    // resolve_target's $HOME/$OLDPWD substitutions already rewrote it,
+    // exactly as cd.def reassigns dirname for those two cases; the
+    // CDPATH and cdable_vars attempts below work on candidates (temp)
+    // and never reassign it — only the errno comes from the last
+    // attempt. Keep the operand's display name aside before the
+    // candidate substitutions replace it (rubash#2221: the substituted
+    // target's display leaked into the error tail, so a failed
+    // cdable_vars lookup reported the variable's VALUE, where GNU
+    // reports the operand).
+    let dirname_display = target.display.clone();
     let target = match resolve_cdpath(&target, env_vars, cwd) {
         Some(found) => found,
         None => target,
@@ -216,9 +228,11 @@ where
             // reports the user-given path, not the Windows-converted path.
             // general.c printable_filename: non-printing bytes render through
             // ansic_quote ($'5\247@3\231+\306S8\237\242\352\263' in unicode3.sub).
-            let display_path = target
-                .display
+            // `dirname` here is the pre-substitution operand name kept in
+            // dirname_display (rubash#2221), not the attempted candidate.
+            let display_path = dirname_display
                 .as_deref()
+                .or(target.display.as_deref())
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| target.path.to_string_lossy().to_string());
             let display_path = if crate::executor::ansic_shouldquote(&display_path) {
