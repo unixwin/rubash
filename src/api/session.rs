@@ -98,6 +98,37 @@ pub struct RunOutcome {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// What [`Session::close_with_report`] reports (the close
+/// boundary as a value, rubash#2039): the exit path's final
+/// status plus the session state at the close boundary, read
+/// **after** the exit path (EXIT trap, logout rules, the finish
+/// machinery's stream-end duties) completed.
+///
+/// A host whose contract reads session state after close takes
+/// it from this value instead of snapshotting before
+/// [`Session::close`] — a pre-close snapshot cannot see the
+/// EXIT trap's own effects, which is the structural premise the
+/// niu cwd funnel of rubash#668 tripped over. `#[non_exhaustive]`
+/// so the reported state set can grow within a minor version,
+/// exactly as [`RunOutcome`]'s can.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CloseReport {
+    /// The final status — the same value [`Session::close`]
+    /// returns: the close-time status as the exit path resolved
+    /// it. GNU trap.c:1027 `run_exit_trap()` saves the entry
+    /// status into `trap_saved_exit_value` (trap.c:1036) and
+    /// returns it (trap.c:1052, 1094) — a bare `exit` inside the
+    /// EXIT trap keeps the saved value.
+    pub status: i32,
+    /// The session's working directory at the close boundary,
+    /// read after the exit path ran: the same value the §5.3
+    /// [`Session::cwd`] face reports, at the one point a
+    /// pre-close read cannot reach (the EXIT trap's own `cd` is
+    /// the session's last cwd write).
+    pub cwd: PathBuf,
+}
+
 /// The result of [`Session::parse`]: the tier-B syntax view of
 /// the unit (Q4: owned view types, never the internal `Ast`),
 /// plus whether the source is incomplete as fed.
@@ -165,7 +196,10 @@ pub enum PreparedLine {
 ///
 /// Closing: [`Session::close`] runs the exit path (EXIT trap,
 /// logout rules, the finish machinery's stream-end duties) and
-/// returns the final status. Dropping a session without
+/// returns the final status; [`Session::close_with_report`] is
+/// the same close reporting the close-boundary state as a
+/// value, for host contracts that would otherwise have to read
+/// state after close (rubash#2039). Dropping a session without
 /// `close` is defined: no EXIT trap runs and no session
 /// finalization happens; the executor's own drop-time
 /// bookkeeping (signal-mailbox unregister, and the journaled
@@ -673,16 +707,41 @@ impl Session {
     // Close (§5.1)
     // ----------------------------------------------------------
 
+    /// Close the session and report the close boundary as a
+    /// value (rubash#2039): run the exit path — EXIT trap,
+    /// logout rules, and the finish machinery's stream-end
+    /// duties (session history write, end-of-stream job
+    /// notification flush, persistent process-substitution
+    /// close — the duties whose absence in a host was the
+    /// consumption audit's data-loss finding) — then return the
+    /// final status plus the close-boundary state as a
+    /// [`CloseReport`], read after the exit path ran. Consumes
+    /// the session, exactly as [`Session::close`] does. This is
+    /// the face for host contracts that read session state
+    /// after close: a pre-close snapshot cannot see the EXIT
+    /// trap's own effects (the rubash#668 cwd funnel's
+    /// structural premise).
+    pub fn close_with_report(mut self) -> CloseReport {
+        let status = self.executor.last_exit_code();
+        let status = script_driver::finish_shell(&mut self.executor, status, self.interactive);
+        CloseReport {
+            status,
+            cwd: self.executor.session_cwd().to_path_buf(),
+        }
+    }
+
     /// Close the session: run the exit path — EXIT trap,
     /// logout rules, and the finish machinery's stream-end
     /// duties (session history write, end-of-stream job
     /// notification flush, persistent process-substitution
     /// close — the duties whose absence in a host was the
     /// consumption audit's data-loss finding) — and return
-    /// the final status. Consumes the session.
-    pub fn close(mut self) -> i32 {
-        let status = self.executor.last_exit_code();
-        script_driver::finish_shell(&mut self.executor, status, self.interactive)
+    /// the final status. Consumes the session. Hosts that also
+    /// need session state after close use
+    /// [`Session::close_with_report`] (rubash#2039) instead of
+    /// snapshotting before this call.
+    pub fn close(self) -> i32 {
+        self.close_with_report().status
     }
 
     // ----------------------------------------------------------
