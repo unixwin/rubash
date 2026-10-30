@@ -1735,6 +1735,18 @@ pub struct Executor {
     /// time. Reset at the start of every `apply_external_redirects`.
     own_input_bindings:
         std::collections::HashMap<u32, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+    /// rubash#2238: a foreground external command that inherits the
+    /// shell's stdin stream (the FUNCTION_STDIN mirror or a virtual
+    /// fd-0 text endpoint) is handed a duplicate of one open file
+    /// description holding the unread remainder, so the child's reads
+    /// advance a position the parent can measure — GNU fd 0 is one
+    /// kernel description whose offset every consumer shares
+    /// (lib/sh/zread.c:99). The pending fold records that description
+    /// between `apply_external_stdin_redirect` and the settle in
+    /// `execute_external`, which moves the stream cursor by exactly
+    /// the measured consumption instead of the old drain-to-EOF
+    /// accounting. `None` outside that window.
+    pending_stdin_fold: Option<external_setup::PendingStdinFold>,
     #[cfg(windows)]
     elevation_handler: Option<ElevationHandler>,
     external_file_builtins_enabled: bool,

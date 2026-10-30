@@ -1383,14 +1383,32 @@ impl Executor {
         drop(stdin.keep_alive);
         let captured =
             drain.map(|(handle, generation)| (handle.join().unwrap_or_default(), generation));
-        // The spawn plan's own capture outcome record is spent:
-        // on a decline the prepared spawn's Command already holds
-        // the realized stdio, but the record must not leak into
-        // the NEXT command's take.
-        self.external_stdio_outcome = None;
         match outcome {
+            // A decline leaves every piece of spawn state exactly
+            // as the preparation left it (this fn's contract above)
+            // — INCLUDING the spawn plan's capture outcome record.
+            // The record owns the capture pipe's reader when the
+            // plan bound fd 1 to the active capture, and the
+            // prepared spawn's drain is keyed off it: spending the
+            // record here dropped the reader and disarmed that
+            // drain, so the spawned child wrote into a pipe nobody
+            // routed into the capture and its output vanished
+            // (niubash#729: `command perl ... | wc -c` printed 0 in
+            // niubash, whose session always registers a provider,
+            // while the provider-less rubash binary exited this fn
+            // at the no-provider gate above and stayed correct).
+            // The prepared spawn is the record's owner on this
+            // path: spawn_external_process consumes it on every
+            // success path and drops it on the spawn-error path,
+            // so keeping it leaks nothing into the next command.
             ExternalRouteOutcome::Declined => Ok(RouteAttempt::Declined(pulled_text)),
             ExternalRouteOutcome::Completed(status) => {
+                // The route ran the call and no spawn follows: the
+                // spawn plan's capture outcome record is spent here
+                // so it cannot leak into the NEXT command's take;
+                // the routed bytes enter the capture through the
+                // realization's own drain instead.
+                self.external_stdio_outcome = None;
                 if let Some((bytes, generation)) = captured {
                     super::shell_options::write_stdout_capture_at_generation(&bytes, generation)?;
                 }
@@ -1398,6 +1416,9 @@ impl Executor {
                 Ok(RouteAttempt::Handled)
             }
             ExternalRouteOutcome::Cancelled => {
+                // Same record spend as Completed: this fn owns the
+                // cancelled call's finish and no spawn follows.
+                self.external_stdio_outcome = None;
                 if let Some((bytes, generation)) = captured {
                     super::shell_options::write_stdout_capture_at_generation(&bytes, generation)?;
                 }
