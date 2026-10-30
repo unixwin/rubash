@@ -27,13 +27,16 @@
 //! opens block inside raw Win32 calls, which is fine for a short-lived
 //! command process. A shell redirect open must stay interruptible —
 //! GNU's blocking open(2) returns EINTR when a caught signal arrives —
-//! so both waits here run in slices and poll the pending-signal queue
-//! (see [`fifo_wait_interrupted`]). The server connect runs on a
-//! helper thread performing the blocking ConnectNamedPipeW on a plain
-//! synchronous handle while the caller polls; on interrupt the caller
-//! closes the handle, which aborts the pending connect. The handle
-//! that lands in the fd table is therefore an ordinary synchronous
-//! pipe handle the fd layer's ReadFile/WriteFile paths already serve
+//! so both waits here poll the pending-signal queue
+//! (see [`fifo_wait_interrupted`]). The server create and connect
+//! run back-to-back on a helper thread — the create→connect gap is
+//! a rendezvous race window (a writer already spinning in its open
+//! retry loop can connect, write and disconnect inside it, losing
+//! its bytes; see `open_winux_fifo_read`) — while the caller polls
+//! and, on interrupt, closes the handle, which aborts the pending
+//! connect. The handle that lands in the fd table is therefore an
+//! ordinary synchronous pipe handle the fd layer's
+//! ReadFile/WriteFile paths already serve
 //! (an OVERLAPPED handle would not be: this fd layer issues
 //! NULL-overlapped ReadFile, the same constraint the netopen socket
 //! split in rubash#1987 works around).
@@ -354,27 +357,52 @@ mod imp {
     ) -> io::Result<std::fs::File> {
         let pipe_name = winux_fifo_pipe_name(path);
         let wide = wide_z(&pipe_name);
-        let handle = unsafe {
-            CreateNamedPipeW(
-                wide.as_ptr(),
-                PIPE_ACCESS_INBOUND,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                PIPE_UNLIMITED_INSTANCES,
-                64 * 1024,
-                64 * 1024,
-                0,
-                std::ptr::null(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
+        // CreateNamedPipeW and the blocking ConnectNamedPipeW run
+        // back-to-back on the helper thread, and the thread's spawn
+        // latency falls BEFORE the pipe exists: the create→connect
+        // gap is a rendezvous race window. A writer that was blocked
+        // first is spinning in its CreateFileW retry loop; were the
+        // pipe created on the caller thread and the connect deferred
+        // to a helper, that writer could complete its whole
+        // lifecycle — connect, write, close — inside the
+        // thread-scheduling gap, and a client that disconnects
+        // before the server pends its connect loses its buffered
+        // bytes: the connect (or the first read) then fails
+        // ERROR_BROKEN_PIPE. Observed as a one-shot goldens flake
+        // (issue1903_write_open_blocks_until_reader_arrives: reader
+        // `cat: f: Broken pipe`, exit 1, no timeout burned).
+        // WinuxCmd's reference bridge keeps create and connect
+        // adjacent on one thread for the same reason. The helper
+        // hands the created handle back before pending the connect
+        // so the caller can still abort on interrupt by closing it
+        // (the pipe object is gone, the connect call fails).
+        enum ConnectMsg {
+            Created(HANDLE),
+            CreateFailed(io::Error),
+            Connected(io::Result<()>),
         }
-        // ConnectNamedPipeW blocks until a writer connects. It runs on
-        // a helper thread so the caller can poll the interrupt
-        // predicate in slices; closing the handle aborts a pending
-        // connect (the pipe object is gone, the call fails).
-        let (sender, receiver) = std::sync::mpsc::channel::<io::Result<()>>();
+        let (sender, receiver) = std::sync::mpsc::channel::<ConnectMsg>();
         std::thread::spawn(move || {
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    wide.as_ptr(),
+                    PIPE_ACCESS_INBOUND,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    PIPE_UNLIMITED_INSTANCES,
+                    64 * 1024,
+                    64 * 1024,
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                let _ = sender.send(ConnectMsg::CreateFailed(io::Error::last_os_error()));
+                return;
+            }
+            if sender.send(ConnectMsg::Created(handle)).is_err() {
+                unsafe { CloseHandle(handle) };
+                return;
+            }
             let ok = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
             let result = if ok != 0 {
                 Ok(())
@@ -388,17 +416,35 @@ mod imp {
                     Err(error)
                 }
             };
-            let _ = sender.send(result);
+            let _ = sender.send(ConnectMsg::Connected(result));
         });
+        // The create outcome arrives first; it is a single syscall
+        // on the helper, so this wait is bounded by thread startup.
+        let handle = match receiver.recv() {
+            Ok(ConnectMsg::Created(handle)) => handle,
+            Ok(ConnectMsg::CreateFailed(error)) => return Err(error),
+            Ok(ConnectMsg::Connected(_)) | Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "fifo create thread exited",
+                ));
+            }
+        };
         loop {
             match receiver.recv_timeout(std::time::Duration::from_millis(10)) {
-                Ok(Ok(())) => {
+                Ok(ConnectMsg::Connected(Ok(()))) => {
                     use std::os::windows::io::FromRawHandle;
                     return Ok(unsafe { std::fs::File::from_raw_handle(handle as *mut c_void) });
                 }
-                Ok(Err(error)) => {
+                Ok(ConnectMsg::Connected(Err(error))) => {
                     unsafe { CloseHandle(handle) };
                     return Err(error);
+                }
+                Ok(ConnectMsg::Created(_)) | Ok(ConnectMsg::CreateFailed(_)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "fifo connect thread protocol error",
+                    ));
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if interrupted() {
