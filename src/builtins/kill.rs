@@ -3680,6 +3680,47 @@ pub fn child_pre_exec_reset_async() -> std::io::Result<()> {
     Ok(())
 }
 
+/// rubash#2241: the child side of job-control process grouping. GNU
+/// jobs.c make_child places every job child into the job's process
+/// group between fork and exec (jobs.c:2390 `setpgid (mypid,
+/// pipeline_pgrp)`); for a single-process job pipeline_pgrp is the
+/// child's own pid (jobs.c:2446-2449). Without it the child stays in
+/// the shell's inherited group and the group-addressed signal form
+/// `kill -SIG -- -$!` — the only way to emulate a terminal ^C against
+/// a whole job tree — fails with ESRCH. Spawn sites select this
+/// fragment only when the monitor option is on; the decision is the
+/// parent's, made at hook-selection time, never re-read in the child
+/// (rubash#866). The parent repeats the call after the spawn returns
+/// (see [`group_spawned_child`]).
+#[cfg(unix)]
+pub fn child_pre_exec_setpgid() -> std::io::Result<()> {
+    if unsafe { libc::setpgid(0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Composed pre_exec hook for a job-control async spawn: the plain
+/// entry-disposition reset, then the grouping fragment above.
+#[cfg(unix)]
+pub fn child_pre_exec_reset_grouped() -> std::io::Result<()> {
+    child_pre_exec_reset()?;
+    child_pre_exec_setpgid()
+}
+
+/// Parent half of the job-control grouping (rubash#2241): GNU repeats
+/// the child's setpgid in the parent after fork (jobs.c:2455, "to
+/// avoid possible race conditions", POSIX Rationale B.4.3.3) so the
+/// group already exists when the spawn returns and `$!` names it. A
+/// failure is an expected race — the child grouped itself first, or
+/// already exited — and is ignored, as in GNU.
+#[cfg(unix)]
+pub fn group_spawned_child(pid: u32) {
+    unsafe {
+        libc::setpgid(pid as libc::pid_t, pid as libc::pid_t);
+    }
+}
+
 #[cfg(all(test, unix))]
 mod kernel_signal_tests {
     #[test]

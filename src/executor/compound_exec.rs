@@ -235,9 +235,12 @@ pub(in crate::executor) fn first_leaf_command_line(cmd: &CommandNode) -> Option<
 /// (jobs.c:649) and substituted by `jobs -x` (builtins/jobs.def
 /// execute_list_with_replacements `itos (j->pgrp)`, rubash#1096): with job
 /// control the first pipeline pid becomes the group; without job control
-/// every job shares the shell's own pgrp. Rubash never calls setpgid, but
-/// the RECORDED value is what `jobs -x` prints, and without job control
-/// GNU's value is exactly the live shell pgrp — so read getpgid(0) here.
+/// every job shares the shell's own pgrp. The RECORDED value is what
+/// `jobs -x` prints, and without job control GNU's value is exactly the
+/// live shell pgrp — so read getpgid(0) here. Since rubash#2241 the
+/// job-control case is also the child's real group: the async spawn
+/// sites setpgid the child into it (child side jobs.c:2390, parent
+/// side jobs.c:2455), so the record and the kernel state agree.
 /// Non-unix has no pgrp concept; the job pid keeps today's observable.
 fn async_job_pgrp(first_pid: u32, job_control: bool) -> u32 {
     if !job_control {
@@ -1093,7 +1096,9 @@ impl Executor {
                 use std::os::unix::process::CommandExt;
                 if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor")
                 {
-                    process.pre_exec(crate::builtins::kill::child_pre_exec_reset);
+                    // rubash#2241: with job control the child also takes
+                    // its own process group (GNU jobs.c:2390 make_child).
+                    process.pre_exec(crate::builtins::kill::child_pre_exec_reset_grouped);
                 } else {
                     process.pre_exec(crate::builtins::kill::child_pre_exec_reset_async);
                 }
@@ -1110,6 +1115,13 @@ impl Executor {
                         &self.shell_state.env_vars,
                         "monitor",
                     );
+                    // rubash#2241: parent half of the grouping
+                    // (GNU jobs.c:2455) — the recorded pgrp in
+                    // async_job_pgrp already assumed this group exists.
+                    #[cfg(unix)]
+                    if job_control {
+                        crate::builtins::kill::group_spawned_child(pid);
+                    }
                     let job_id = self.shell_state.job_table.register_process_with_stages(
                         pid,
                         display_source.clone(),
@@ -1539,6 +1551,13 @@ impl Executor {
             extra_handles,
             // G-02: the respawned child starts in the session cwd.
             cwd: Some(self.shell_state.cwd.clone()),
+            // rubash#2241: under job control the respawned async child
+            // leads its own process group (GNU jobs.c:2390 make_child),
+            // matching the pgrp the job table records for it below.
+            new_process_group: crate::builtins::set::shell_option_enabled(
+                &self.shell_state.env_vars,
+                "monitor",
+            ),
         });
         for h in owned_handles {
             crate::fd::close_handle(h);
@@ -4656,6 +4675,16 @@ impl Executor {
                 }
             }
 
+            // rubash#2241: a coproc is an async child — under job
+            // control it leads its own process group like any other
+            // async spawn (GNU jobs.c:2390 make_child).
+            #[cfg(unix)]
+            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor") {
+                unsafe {
+                    use std::os::unix::process::CommandExt as _;
+                    child.pre_exec(crate::builtins::kill::child_pre_exec_setpgid);
+                }
+            }
             suppress_orphan_console(&mut child);
             child.current_dir(&self.shell_state.cwd);
             match child.spawn() {
@@ -4688,6 +4717,12 @@ impl Executor {
                         &self.shell_state.env_vars,
                         "monitor",
                     );
+                    // rubash#2241: parent half of the grouping
+                    // (GNU jobs.c:2455).
+                    #[cfg(unix)]
+                    if job_control {
+                        crate::builtins::kill::group_spawned_child(pid);
+                    }
                     let job_id = self.shell_state.job_table.register_process_with_stages(
                         pid,
                         bash_command_source_text(cmd),
