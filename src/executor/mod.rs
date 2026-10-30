@@ -1586,6 +1586,16 @@ pub struct Executor {
     /// must run `echo hi` once, rubash#254). Keyed by (name, raw value);
     /// cleared at each execute_command entry like redirect_target_memo.
     assignment_expansion_memo: RefCell<HashMap<(String, String), String>>,
+    /// rubash#2062: memo for the alias-introduced select probe's
+    /// first-word-bearing scan (alias_select.rs). The scan is a pure
+    /// function of the command list, but the probe runs at every list
+    /// index, so a long tail of wordless commands (plain assignments)
+    /// was re-scanned at every index — Θ(N²) over an N-command list.
+    /// The memo records (list address, list length, scan start, first
+    /// word-bearing index); execute_ast_inner_walk saves and restores
+    /// it around each list walk, so it can only ever describe the list
+    /// currently executing.
+    alias_select_scan_memo: RefCell<Option<(usize, usize, usize, usize)>>,
     /// GNU execute_cmd.c: external commands (and the forced fork of a
     /// wordless `{var}` command, execute_null_command:4203-4278) run
     /// do_redirections in the child — the `{var}` bind never reaches the

@@ -564,6 +564,33 @@ where
             continue;
         }
 
+        // rubash#2236: a delivery addressed to the process's own pid
+        // from inside an in-process child shell (direct-child route
+        // armed) is addressed to the CHILD — GNU's child is a separate
+        // process whose $$ is its own pid, so the kill can only kill
+        // the child. It joins the ancestor lane (ANCESTOR_SIGNALS):
+        // that lane's contract is exactly the child's — no kernel
+        // disposition judges it (the stale-handler check in
+        // run_pending_signal_traps does not apply), the boundary
+        // dispatch adjudicates it against the then-current (child)
+        // trap table, and an untrapped verdict ends only the child's
+        // run. The plain self-signal queue would be wrong here: its
+        // entries carry the stale check, and an untrapped signal has
+        // no kernel handler installed by design (#226), so the
+        // delivery would be dropped instead of adjudicated. Raising
+        // it into the hosting process instead killed the outer shell
+        // with the child's signal.
+        #[cfg(unix)]
+        if pid == std::process::id()
+            && signal != 0
+            && direct_child_route_active()
+            && boundary_adjudicable_signal(signal)
+        {
+            queue_ancestor_signal(signal);
+            any_succeeded = true;
+            continue;
+        }
+
         match deliver_rubash_signal(pid, signal) {
             Ok(true) => {
                 any_succeeded = true;
@@ -1225,6 +1252,70 @@ impl Drop for AncestorRouteGuard {
     fn drop(&mut self) {
         ANCESTOR_ROUTE.with(|flag| flag.set(self.previous));
     }
+}
+
+thread_local! {
+    /// Armed by Executor::execute_direct_shell_script for the span of
+    /// an in-process child shell's run (rubash#2236): a kill delivery
+    /// addressed to the hosting process's own pid from inside the
+    /// child is judged by the CHILD, not delivered to the host. GNU
+    /// runs the child as its own process, where the same kill(2) can
+    /// only terminate the child; the emulation runs the child on this
+    /// thread, so an unrouted raise(2) killed the outer shell with the
+    /// child's signal. Routed deliveries join the ancestor lane
+    /// (ANCESTOR_SIGNALS), whose boundary dispatch
+    /// (run_pending_signal_traps) adjudicates against the
+    /// then-current — child — trap table without a kernel-disposition
+    /// judge: a trapped signal runs the child's action, an untrapped
+    /// one ends the child with 128+signal and the parent survives.
+    /// Signal 0 probes and
+    /// non-adjudicable signals (SIGKILL, stop class) keep the raw
+    /// path, the same boundary the ancestor route (#1654) draws.
+    static DIRECT_CHILD_ROUTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The signal of the most recent untrapped-signal adjudication
+/// (rubash#2236). run_pending_signal_traps and
+/// observe_signals_while_blocked record it when they end a layer with
+/// 128+signal, so an in-process child's exit boundary can tell "the
+/// child died by signal N" apart from a plain exit and queue the
+/// parent's job-death notice, the way a wait(2) status would report
+/// it. Cleared by execute_direct_shell_script on entry and taken on
+/// exit, so a record can never cross a child boundary in either
+/// direction.
+static ADJUDICATED_SIGNAL_DEATH: std::sync::Mutex<Option<i32>> = std::sync::Mutex::new(None);
+
+pub(crate) fn direct_child_route_active() -> bool {
+    DIRECT_CHILD_ROUTE.with(|flag| flag.get())
+}
+
+/// RAII arm for the direct-child route (rubash#2236).
+pub(crate) struct DirectChildRouteGuard {
+    previous: bool,
+}
+
+pub(crate) fn arm_direct_child_route() -> DirectChildRouteGuard {
+    let previous = DIRECT_CHILD_ROUTE.with(|flag| flag.replace(true));
+    DirectChildRouteGuard { previous }
+}
+
+impl Drop for DirectChildRouteGuard {
+    fn drop(&mut self) {
+        DIRECT_CHILD_ROUTE.with(|flag| flag.set(self.previous));
+    }
+}
+
+pub(crate) fn note_adjudicated_signal_death(signal: i32) {
+    *ADJUDICATED_SIGNAL_DEATH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(signal);
+}
+
+pub(crate) fn take_adjudicated_signal_death() -> Option<i32> {
+    ADJUDICATED_SIGNAL_DEATH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
 }
 
 // rubash#375/perf3: the per-command signal-poll's Windows-port catch_flag.
@@ -3033,14 +3124,34 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
     let no_reset = !env_vars.contains_key("__RUBASH_TRAP_RESET");
     // Any armed signal trap forces the slow path. Every trap-table key
     // for a signal shares the __RUBASH_TRAP_SIG prefix — the managed
-    // set's and the fatal pair's alike (rubash#1475: the pair's routing
-    // bits live outside the managed state, but their keys must still
-    // defeat this fast path). One prefix pass over the var keys, no
-    // allocation, no per-signal probing (the managed table outgrew a
-    // fixed probe list with rubash#1511).
-    let any_armed = env_vars
-        .keys()
-        .any(|key| key.starts_with("__RUBASH_TRAP_SIG"));
+    // set's and the fatal quartet's alike (rubash#1475: the pair's
+    // routing bits live outside the managed state, but their keys must
+    // still defeat this fast path). Two detections of the same verdict,
+    // chosen by table size (rubash#2062): on a small table a prefix
+    // pass over the keys is cheaper than hashing ~55 probes; on a
+    // large table that pass is Θ(#variables) at every command
+    // boundary — Θ(n²) over a script that creates n variables — so
+    // probe the fixed key universe instead: the managed table itself
+    // (the same generative table the slow path iterates, so the probe
+    // set cannot fall behind it the way the rubash#1511-era hand list
+    // did) plus the fatal quartet's literal keys, which
+    // reconcile_fatal consults below. Those are the only
+    // __RUBASH_TRAP_SIG* keys with a reader: a user-forged key outside
+    // the universe changes no disposition on either path (the slow
+    // path never consults it), so the verdict is unchanged.
+    let any_armed = if env_vars.len() <= 512 {
+        env_vars
+            .keys()
+            .any(|key| key.starts_with("__RUBASH_TRAP_SIG"))
+    } else {
+        managed_trap_keys()
+            .iter()
+            .any(|(_, _, key)| env_vars.contains_key(key.as_str()))
+            || env_vars.contains_key("__RUBASH_TRAP_SIGSEGV")
+            || env_vars.contains_key("__RUBASH_TRAP_SIGBUS")
+            || env_vars.contains_key("__RUBASH_TRAP_SIGILL")
+            || env_vars.contains_key("__RUBASH_TRAP_SIGFPE")
+    };
     // An armed EXIT trap also forces the slow path: it routes every
     // otherwise-untrapped managed signal through the handler
     // (sig.c:226-229, rubash#1332 — see the disposition loop below).

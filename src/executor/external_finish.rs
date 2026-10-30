@@ -173,7 +173,13 @@ impl Executor {
                 // execution leaked the script's variable assignments back
                 // into the caller's typed variable store, and let the
                 // script see the caller's unexported variables).
-                self.execute_direct_shell_script(cmd, &expanded_command_name, &script_path, true)?;
+                self.execute_direct_shell_script(
+                    cmd,
+                    &expanded_command_name,
+                    &script_path,
+                    true,
+                    true,
+                )?;
                 return Ok(true);
             }
         }
@@ -214,7 +220,7 @@ impl Executor {
         if !script_path.is_file() {
             return Ok(false);
         }
-        self.execute_direct_shell_script(cmd, &script, &script_path, false)?;
+        self.execute_direct_shell_script(cmd, &script, &script_path, false, true)?;
         Ok(true)
     }
 
@@ -240,7 +246,7 @@ impl Executor {
             return Ok(());
         };
         let script = self.expand_word(command_name);
-        self.execute_direct_shell_script(cmd, &script, program, true)
+        self.execute_direct_shell_script(cmd, &script, program, true, false)
     }
 
     fn execute_direct_shell_script(
@@ -249,7 +255,19 @@ impl Executor {
         script: &str,
         script_path: &std::path::Path,
         exec_model_entry: bool,
+        contain_child_signals: bool,
     ) -> Result<(), ExecuteError> {
+        // rubash#2236: capture the parent's job-notice text for this
+        // command before the child env replaces the parent's — if the
+        // child dies by an untrapped signal, the parent queues the
+        // notice from this text, as the real-child wait path does.
+        // ENOEXEC children (contain_child_signals == false) keep the
+        // historical fork-child model and never read it.
+        let child_notice_text = if contain_child_signals {
+            self.signal_notice_command_text(cmd)
+        } else {
+            String::new()
+        };
         let source = fs::read_to_string(script_path)?;
         // bashhist.c pre_process_line: a fresh `bash script` child expands
         // history per input line, so an in-process THIS_SH child whose
@@ -715,6 +733,44 @@ impl Executor {
         // clears can only ever erase this child's own stale latches.
         let saved_lock_depth = super::EXECUTION_LOCK_DEPTH.with(|depth| depth.get());
         super::EXECUTION_LOCK_DEPTH.with(|depth| depth.set(0));
+        // rubash#2236: contain the child's self-addressed signals for
+        // the span of its run. GNU's child is a separate process: its
+        // $$ is its own pid and a kill to that pid can only kill the
+        // child. The emulation shares this process, so (a) the child's
+        // shell_pid must read as this process's pid — an adopted
+        // ancestor pid (a respawned subshell adopted the OUTER shell's
+        // pid) would name the outer process, and the child's suicide
+        // escaped into it as a real kill(2); (b) kill deliveries to
+        // that pid route to the ancestor lane (see builtins/kill.rs
+        // DIRECT_CHILD_ROUTE) so the child's own trap table
+        // adjudicates them; (c) a stale adjudicated-death record
+        // from an outer layer is cleared so the exit boundary below
+        // reads only this child's record. The PPID env entry was
+        // already built from the pre-swap pid above, so the child's
+        // view of its parent is unchanged.
+        if contain_child_signals {
+            let _ = crate::builtins::kill::take_adjudicated_signal_death();
+        }
+        let saved_shell_pid = self.shell_pid;
+        if contain_child_signals {
+            self.shell_pid = std::process::id();
+            // The child is a fresh shell in GNU, so for the span of
+            // its run this executor presents at subshell depth 0 (the
+            // tail restores saved_depth). A host executor carrying a
+            // layer's depth — a respawned subshell adopted depth 1 —
+            // would otherwise trip the run_pending_signal_traps
+            // flat-layer suppression (depth > 0 at the process's own
+            // pid) for the whole child run and defer the child's
+            // adjudication to this exit drain, letting the child run
+            // commands past its own death. Layers the child itself
+            // opens still count from 0 exactly as in a fresh process.
+            self.shell_state.subshell_depth.set(0);
+        }
+        let _direct_child_route = if contain_child_signals {
+            Some(crate::builtins::kill::arm_direct_child_route())
+        } else {
+            None
+        };
         let result = if uses_history_driver && fresh_shell {
             // bashhist.c pre_process_line / shell.c reader loop: expand and
             // record history group-by-group so `!!`/`!str` see the entries
@@ -730,6 +786,29 @@ impl Executor {
             self.execute_ast(&ast)
         };
         super::EXECUTION_LOCK_DEPTH.with(|depth| depth.set(saved_lock_depth));
+        // rubash#2236: adjudicate a contained self-delivery that
+        // arrived as the child's LAST command — the command-boundary
+        // polls inside the run cannot see it any more once the run has
+        // ended, and letting it reach the parent's boundary poll would
+        // judge it by the PARENT's trap table (the fresh-shell flavor
+        // would even discard it below and report a plain Ok status).
+        // The drain judges as the child itself, at child depth 0: the
+        // run_pending_signal_traps flat-layer suppression keys on
+        // subshell_depth, and a child invoked from inside a parent
+        // subshell layer still owns its own verdict (GNU's child is a
+        // process regardless of the parent's layering).
+        let result = if contain_child_signals && result.is_ok() {
+            let drain_depth = self.shell_state.subshell_depth.get();
+            self.shell_state.subshell_depth.set(0);
+            let drained = self.run_pending_signal_traps();
+            self.shell_state.subshell_depth.set(drain_depth);
+            match drained {
+                Ok(()) => result,
+                Err(error) => Err(error),
+            }
+        } else {
+            result
+        };
         let mut status = self.exit_code;
         // GNU shell.c exit_shell -> run_exit_trap: both ${THIS_SH} and
         // ENOEXEC children are fresh shells (shell.c:429-464
@@ -743,6 +822,20 @@ impl Executor {
                 status = trap_status;
             }
         }
+        // rubash#2236: collect this child's adjudicated signal death
+        // (set when its trap table judged an untrapped delivery) and
+        // end the shell_pid swap — the EXIT trap above still ran as
+        // the child, so its $$ read the child's pid, as GNU's dying
+        // shell would. The notice is queued only after the parent's
+        // state is restored below, and only if the final status is
+        // still the death status (an EXIT trap that exits with its
+        // own code replaces the death, exactly like a real child).
+        let child_signal_death = if contain_child_signals {
+            crate::builtins::kill::take_adjudicated_signal_death()
+        } else {
+            None
+        };
+        self.shell_pid = saved_shell_pid;
 
         if let Some(saved) = saved_process_env {
             for (name, _) in crate::executor::env_helpers::process_env_pairs() {
@@ -838,6 +931,17 @@ impl Executor {
         self.assignment_command_name = saved_assignment_command_name;
         self.shell_state.cwd = saved_cwd;
         self.exit_code = status;
+        // rubash#2236: the child died by an untrapped signal and the
+        // death is the final status — queue the parent's job-death
+        // notice, the counterpart of the real-child wait path's
+        // note_child_signal_death call (jobs.c child-death reporting).
+        // The emulated child's pid is this process's pid: that is the
+        // pid the child's $$ named while it ran.
+        if let Some(signal) = child_signal_death {
+            if status == 128 + signal {
+                self.note_child_signal_death(std::process::id(), signal, child_notice_text, true);
+            }
+        }
 
         // A child script is a process boundary: every fatal error becomes
         // the child's exit status and can never propagate into the parent's
