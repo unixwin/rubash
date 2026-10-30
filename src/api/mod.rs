@@ -71,8 +71,9 @@ pub mod views;
 #[cfg(windows)]
 pub use capabilities::ElevationHandler;
 pub use capabilities::{
-    Candidate, CompletionProvider, DiagnosticSink, ExternalCommandHandler, RcPolicy, StartupClass,
-    StartupContext,
+    Candidate, CompletionProvider, DiagnosticSink, ExternalCommandHandler, ExternalRouteHandle,
+    ExternalRouteOutcome, ExternalRouteProvider, ExternalRouteRequest, ExternalRouteStdio,
+    RcPolicy, StartupClass, StartupContext,
 };
 pub use diagnostic::{Diagnostic, DiagnosticKind, ParseFailure, SessionError};
 pub use events::{CommandEvent, JobInfo, SessionEvents};
