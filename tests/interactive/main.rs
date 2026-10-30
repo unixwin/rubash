@@ -5,6 +5,7 @@
 //! elsewhere); the faces skip cleanly where no terminal host is
 //! available.
 
+mod hangup_pty;
 mod read_conpty;
 mod read_pty;
 mod stty_conpty;

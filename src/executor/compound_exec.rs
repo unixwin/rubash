@@ -1098,6 +1098,12 @@ impl Executor {
                 {
                     // rubash#2241: with job control the child also takes
                     // its own process group (GNU jobs.c:2390 make_child).
+                    // (The rubash#2233 Gap-2 hunk that added a bare
+                    // pre_exec setpgid at this same site was dropped in
+                    // the merge with master: reset_grouped already
+                    // composes reset + setpgid, and the parent-side
+                    // group_spawned_child below completes the pair —
+                    // keeping both would setpgid twice.)
                     process.pre_exec(crate::builtins::kill::child_pre_exec_reset_grouped);
                 } else {
                     process.pre_exec(crate::builtins::kill::child_pre_exec_reset_async);
