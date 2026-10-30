@@ -14,6 +14,7 @@
 //! All expectations were measured against GNU bash 5.3.20. Tests only.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -69,6 +70,9 @@ impl Scratch {
     }
 
     /// Run a script and report (stdout, stderr, terminating signal).
+    /// Death-by-signal is a unix wait-status concept (`ExitStatusExt`);
+    /// a Windows exit status carries only an exit code.
+    #[cfg(unix)]
     fn run_signal(&self, script: &str) -> (String, String, Option<i32>) {
         let case = self.dir.join("case.sh");
         fs::write(&case, script).unwrap();
@@ -114,6 +118,7 @@ fn issue151_interactive_dash_c_includes_h_letter() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn issue741_fatal_signal_kills_the_shell_itself() {
     let s = Scratch::new("i741");
