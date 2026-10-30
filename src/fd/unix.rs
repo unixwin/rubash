@@ -600,6 +600,11 @@ pub struct WhitelistedSpawn {
     /// G-02: the child's working directory (the spawning session's cwd).
     /// None keeps the process cwd (host-level spawns with no session).
     pub cwd: Option<std::path::PathBuf>,
+    /// rubash#2241: job-control grouping for async respawns — the child
+    /// takes its own process group between fork and exec (GNU jobs.c:2390
+    /// make_child) and the parent repeats the call after spawn
+    /// (jobs.c:2455). Set from the spawning shell's monitor option.
+    pub new_process_group: bool,
 }
 
 #[derive(Debug)]
@@ -662,6 +667,7 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
     // dup2(fd, fd) between fork and exec pins the number and clears CLOEXEC
     // (the inheritable-duplicate effect).
     let extras = spec.extra_handles.clone();
+    let new_process_group = spec.new_process_group;
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
@@ -681,10 +687,20 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
             // env — rubash#866 — and the race is adjudicated against the
             // expected parent pid, never the constant 1 — rubash#867).
             crate::builtins::kill::child_pre_exec_reset()?;
+            // rubash#2241: job-control grouping, decided by the parent
+            // and carried into the closure as a plain bool (never
+            // re-read from ambient state in the child).
+            if new_process_group {
+                crate::builtins::kill::child_pre_exec_setpgid()?;
+            }
             Ok(())
         });
     }
     let child = cmd.spawn()?;
+    // rubash#2241: parent half of the grouping (GNU jobs.c:2455).
+    if new_process_group {
+        crate::builtins::kill::group_spawned_child(child.id());
+    }
     // Parent side: the extras were dup2'd onto their own numbers in the
     // child by pre_exec; the parent's originals stay open (callers own them,
     // as on Windows).
@@ -769,6 +785,7 @@ mod tests {
             std_handles: [0, 1, 2],
             extra_handles: vec![extra],
             cwd: None,
+            new_process_group: false,
         })
         .unwrap();
         let status = child.wait().unwrap();

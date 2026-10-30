@@ -95,14 +95,26 @@ impl Executor {
             );
         }
 
-        let mut redirect_cmd = cmd.clone();
-        let group_outputs =
-            self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
-        let mut select_command = select_command.clone();
-        let mut body = Ast {
-            commands: select_command.body,
-        };
-        let result = self.apply_command_output_redirects(&redirect_cmd, &mut body);
+        // rubash#2246: same borrow conversion as the if wrapper — the
+        // cmd + select_command deep clones existed only for the
+        // procsub materialization (gated on a `>(` mirror target) and
+        // the per-leaf body splice, which
+        // prepare_compound_output_redirects replaces with the entry
+        // side effects alone. The parameter's fields (words, body) are
+        // read below exactly as the clone's were.
+        let mut redirect_owned;
+        let group_outputs;
+        let redirect_cmd: &CommandNode =
+            if super::pipeline_exec::compound_redirect_needs_procsub_rewrite(cmd) {
+                redirect_owned = cmd.clone();
+                group_outputs =
+                    self.materialize_compound_output_process_substitutions(&mut redirect_owned)?;
+                &redirect_owned
+            } else {
+                group_outputs = Vec::new();
+                cmd
+            };
+        let result = self.prepare_compound_output_redirects(redirect_cmd);
         let status = self.exit_code;
         if let Err(error) = result {
             // rubash#846 (GNU execute_cmd.c:854-883): the select's OWN
@@ -115,7 +127,6 @@ impl Executor {
             finish_result?;
             return Err(error);
         }
-        select_command.body = body.commands;
 
         let values: Vec<String> = if select_command.default_positional {
             self.shell_state.positional_window_cloned()

@@ -2134,10 +2134,57 @@ impl Executor {
     /// like a reaped signal death. Kill(2)-caused deliveries (any
     /// sender process, including this shell's own kill builtin) keep
     /// GNU's defer-to-completion semantics untouched, as do
-    /// non-terminating trapped signals (WINCH, CHLD...). A kill(2)
-    /// addressed to the whole process group still defers: the queues
-    /// cannot distinguish its addressing from a pid-addressed kill,
-    /// and no real child exists whose death could report it.
+    /// non-terminating trapped signals (WINCH, CHLD...).
+    ///
+    /// rubash#2241 refines the kill(2) boundary: siginfo cannot say
+    /// whether a kill(2) addressed this pid or this whole process
+    /// group, but the SENDER's group membership can (see
+    /// delivery_would_kill_virtual_child). bats' CTRL-C tests deliver
+    /// `kill -INT -- -pgid` from a driver process outside the group;
+    /// GNU's real sleep dies from that delivery and the trap runs at
+    /// once, so the virtual child dies the same death. A sender
+    /// inside the group is one of the shell's own jobs (`kill -INT
+    /// $$`), whose addressing was the shell alone — deferral stands.
+    /// rubash#2241: would a real foreground child have died from the
+    /// latest kill(2) delivery of `signal`? The emulated sleep's
+    /// virtual child shares the shell's process group exactly when
+    /// job control is off (GNU jobs.c:2390 make_child groups the
+    /// child only under job control; without it the child stays in
+    /// the shell's group, and with it a delivery that reached the
+    /// shell never reached the child's own group). A kill(2) arriving
+    /// from a sender OUTSIDE the shell's process group was addressed
+    /// to the shell alone or to its whole group; addressed to the
+    /// group, GNU's real child dies from it and jobs.c:3064 wait_for
+    /// dispatches the pending trap immediately. A sender INSIDE the
+    /// group — one of the shell's own jobs running `kill -INT $$` —
+    /// is rubash#1034's shape: the addressing was the shell alone and
+    /// the child sleeps on, so the trap keeps deferring. An exited
+    /// sender (getpgid fails) also defers: the #1034 sender exits
+    /// right after sending, while a group-kill sender (bats' driver)
+    /// is still alive, waiting on the group it killed. The one
+    /// indistinguishable residue — an outside sender pid-addressing
+    /// the shell alone — is accepted and modeled as a group delivery:
+    /// no observable separates the two, and deferring there is the
+    /// failure mode this issue is about.
+    #[cfg(unix)]
+    fn delivery_would_kill_virtual_child(&self, signal: i32) -> bool {
+        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor") {
+            return false;
+        }
+        let Some(sender) = crate::builtins::kill::last_delivery_sender_pid(signal) else {
+            return false;
+        };
+        if sender == std::process::id() {
+            return false;
+        }
+        let sender_pgid = unsafe { libc::getpgid(sender as libc::pid_t) };
+        if sender_pgid <= 0 {
+            return false;
+        }
+        let own_pgid = unsafe { libc::getpgid(0) };
+        own_pgid > 0 && sender_pgid != own_pgid
+    }
+
     pub(crate) fn sleep_interruptibly(
         &mut self,
         seconds: f64,
@@ -2209,7 +2256,12 @@ impl Executor {
                 #[cfg(unix)]
                 {
                     crate::builtins::kill::kernel_handler_installed(signal)
-                        && crate::builtins::kill::last_delivery_kernel_caused(signal)
+                        // Kernel-caused (terminal ^C): the real child
+                        // dies, rubash#1034. Kill(2)-caused: the real
+                        // child dies only when the delivery addressed
+                        // the shared process group (rubash#2241).
+                        && (crate::builtins::kill::last_delivery_kernel_caused(signal)
+                            || self.delivery_would_kill_virtual_child(signal))
                         && signal_trap_name(signal).is_some_and(|name| {
                             crate::builtins::trap::get_trap_action(
                                 &self.shell_state.env_vars,
@@ -2590,7 +2642,7 @@ impl Executor {
         //
         // rubash#940: the stdio arms run in PARSE ORDER (their position in
         // `command.redirects`), matching GNU do_redirection_internal
-        // (redir.c:767-955) and the brace path's apply_brace_group_redirects
+        // (redir.c:767-955) and the brace path's prepare_brace_group_redirects
         // — `( :; ) 2>cap.txt > /missing` must perform the `2>` open
         // (truncate/create side effect) BEFORE the `>` open fails, and the
         // failure report must see the binding it established. The old
@@ -2618,6 +2670,133 @@ impl Executor {
         // `1>&3` against the group's binding rather than a spliced-in
         // re-dup of their own fd 1 (which mis-binds inside pipelines).
 
+        Ok(())
+    }
+
+    /// rubash#2246: the entry half of a compound command's stdio
+    /// redirections, WITHOUT the per-leaf splice. GNU runs
+    /// do_redirections ONCE at compound entry (execute_cmd.c:854-883 —
+    /// save_redirects (854), REDIRECTIONS saved per command (866), the
+    /// do_redirections call itself (883); dispose at 1762,
+    /// dispose_command_redirects): the body then executes against the
+    /// bound fd table and no leaf ever re-opens the target. The fd-table
+    /// binding half of that model already lives in
+    /// with_command_input_redirects (open_compound_output_redirects
+    /// walks cmd.redirects in list order and binds each target once);
+    /// what the splice arms additionally performed, and what this pass
+    /// preserves verbatim, is the parse-order ENTRY side effects that
+    /// must land before the binder and the body run:
+    ///
+    /// * target expansion in parse order (each arm's expansion can
+    ///   consume state — command substitutions, arithmetic — that a
+    ///   later arm or the body observes), including the failglob abort
+    ///   (subst.c:12663-12668);
+    /// * the ONE create/truncate of each non-append file target
+    ///   (create_redirect_output_prepared), which also records the
+    ///   noclobber prepared target the binder consumes instead of
+    ///   re-creating — including the rubash#940 ordering where an
+    ///   earlier arm's create precedes a later arm's failure.
+    ///
+    /// Every consumer of the old injected entries already treated them
+    /// as "realized by the fd-table binding — skip" (the ordered walk
+    /// in redirection.rs, plan_external_stdio, the builtin setup walk),
+    /// and command_output_fd_state seeds from the fd table, so dropping
+    /// the splice changes no leaf's visible endpoint — only who pays
+    /// for it: one entry binding instead of a deep clone of the whole
+    /// compound subtree plus one splice walk per wrapper call.
+    ///
+    /// Error contract is the apply pass's: an IoError from a create
+    /// propagates to the wrapper, which adjudicates it through
+    /// note_compound_redirect_failure (rubash#846) exactly as before.
+    pub(in crate::executor) fn prepare_compound_output_redirects(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<(), ExecuteError> {
+        for arm in compound_stdio_arms_in_parse_order(cmd) {
+            match arm {
+                CompoundStdioArm::Out => self.prepare_compound_out_arm(cmd)?,
+                CompoundStdioArm::Append => self.prepare_compound_append_arm(cmd)?,
+                CompoundStdioArm::Err => self.prepare_compound_err_arm(cmd)?,
+                CompoundStdioArm::ErrAppend => self.prepare_compound_err_append_arm(cmd)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_compound_out_arm(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(redirect) = cmd
+            .redirect_out
+            .as_deref()
+            .filter(|r| r.fd.unwrap_or(1) == 1)
+        {
+            // The expansion reports the word as written, exactly as in
+            // apply_compound_out_arm; the binder re-expands the same
+            // word when it opens the target (the prepared-target record
+            // below is what keeps the create itself single).
+            let expanded = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before creating.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+            // Mirror of the apply arm's prepare step: `>&1`-style dup
+            // targets are entry-bound already (never created), and
+            // closed targets (`>&-`) create nothing.
+            if !is_closed_redirect_target(&expanded) && redirect_target_fd(&expanded).is_none() {
+                self.create_redirect_output_prepared(&expanded, redirect.clobber)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_compound_append_arm(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(redirect) = cmd.append.as_deref().filter(|r| r.fd.unwrap_or(1) == 1) {
+            let _expanded = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before binding.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+            // The apply arm creates nothing for appends (the binder's
+            // own open creates on demand); the expansion above is the
+            // arm's only entry side effect.
+        }
+        Ok(())
+    }
+
+    fn prepare_compound_err_arm(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(redirect) = cmd
+            .redirect_err
+            .as_deref()
+            .filter(|r| r.fd.unwrap_or(2) == 2)
+        {
+            let expanded = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before creating.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+            // Mirror of the apply arm's prepare step, including the
+            // /dev/null and closed-target carve-outs.
+            if redirect_target_fd(&expanded).is_none()
+                && !is_closed_redirect_target(&expanded)
+                && !is_null_device(&expanded)
+            {
+                self.create_redirect_output_prepared(&expanded, redirect.clobber)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_compound_err_append_arm(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(redirect) = cmd
+            .redirect_err_append
+            .as_deref()
+            .filter(|r| r.fd.unwrap_or(2) == 2)
+        {
+            let _expanded = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before binding.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+        }
         Ok(())
     }
 
@@ -3823,7 +4002,7 @@ impl Executor {
             // (exec redirections are never undone). A failed redirect stops
             // the list — do_redirections returns on the first error.
             if redirect.fd_var.is_some() {
-                match self.execute_dynamic_fd_var_redirect(redirect, false) {
+                match self.execute_dynamic_fd_var_redirect(redirect, false, false) {
                     Ok(_) => {}
                     Err(ExecuteError::IoError(error)) => {
                         let mut stderr = Vec::new();
@@ -5039,6 +5218,8 @@ impl Executor {
         }
         let mut redirect_failed = false;
         self.fd_var_external_undo.clear();
+        self.fd_var_pending_closes.clear();
+        self.fd_var_close_restore.clear();
         for redirect in &cmd.redirects {
             let Some(name) = redirect.fd_var.as_deref() else {
                 continue;
@@ -5056,7 +5237,7 @@ impl Executor {
             let prior_typed = self.shell_state.variables.get(&resolved).cloned();
             self.fd_var_external_undo
                 .push((resolved, prior, prior_typed));
-            match self.execute_dynamic_fd_var_redirect(redirect, auto_close) {
+            match self.execute_dynamic_fd_var_redirect(redirect, auto_close, true) {
                 Ok(_) => {}
                 Err(ExecuteError::IoError(error)) => {
                     let mut stderr = Vec::new();
@@ -5194,12 +5375,51 @@ impl Executor {
                 }
             }
         }
+        // rubash#2272: closes the finishing command recorded
+        // (fd_var_pending_closes) were performed in the table by
+        // apply_external_fd_delivery for the spawn; restore the
+        // parent's bindings from its snapshots now that the command
+        // has completed. Closes no delivery consumed (in-process and
+        // force-fork null faces) are dropped unapplied — GNU scopes
+        // them to the command as well.
+        self.fd_var_pending_closes.clear();
+        let close_restore = std::mem::take(&mut self.fd_var_close_restore);
+        for (fd, entry, marker) in close_restore {
+            match entry {
+                Some(entry) => {
+                    self.fd_table.entries.insert(fd, entry);
+                }
+                None => {
+                    self.fd_table.entries.remove(&fd);
+                }
+            }
+            match marker {
+                Some(value) => {
+                    self.shell_state.env_vars.insert(fd_closed_key(fd), value);
+                }
+                None => {
+                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                }
+            }
+        }
     }
 
     pub(in crate::executor) fn execute_dynamic_fd_var_redirect(
         &mut self,
         redirect: &Redirect,
         auto_close: bool,
+        // rubash#2272: when true (the simple-command funnel), the
+        // closes a `{var}` entry asks for — close-form targets and
+        // move-form dup sources — are only RECORDED in
+        // fd_var_pending_closes, not performed in this table: GNU
+        // scopes them to the command (in the fork for external
+        // commands), and performing them here destroyed the parent's
+        // bindings and made the ordered redirect preflight reject
+        // the very dup the applier had just serviced. The exec face
+        // and the compound scope path pass false: exec's closes are
+        // persistent by definition, and the scope restores its own
+        // snapshots.
+        defer_closes: bool,
     ) -> Result<bool, ExecuteError> {
         let Some(name) = redirect.fd_var.as_deref() else {
             return Ok(false);
@@ -5274,7 +5494,15 @@ impl Executor {
                         format!("{name}: ambiguous redirect"),
                     )));
                 }
-                self.close_dynamic_input_fd(name);
+                // rubash#2272: on the funnel path the close is only
+                // recorded (see the defer_closes parameter) — GNU
+                // closes the descriptor in the command's own context,
+                // and the parent's binding must survive the command.
+                if defer_closes {
+                    self.record_fd_var_pending_close(name);
+                } else {
+                    self.close_dynamic_input_fd(name);
+                }
                 return Ok(true);
             }
             crate::parser::RedirectKind::CloseOutput => {
@@ -5284,7 +5512,11 @@ impl Executor {
                         format!("{name}: ambiguous redirect"),
                     )));
                 }
-                self.close_dynamic_output_fd(name)?;
+                if defer_closes {
+                    self.record_fd_var_pending_close(name);
+                } else {
+                    self.close_dynamic_output_fd(name)?;
+                }
                 return Ok(true);
             }
             crate::parser::RedirectKind::DuplicateInput => {
@@ -5313,7 +5545,14 @@ impl Executor {
                         )));
                     }
                     if move_source {
-                        self.close_persistent_fd(source_fd)?;
+                        // rubash#2272: the move close is scoped to
+                        // the command like every other close on the
+                        // funnel path (see defer_closes).
+                        if defer_closes {
+                            self.fd_var_pending_closes.push(source_fd);
+                        } else {
+                            self.close_persistent_fd(source_fd)?;
+                        }
                     }
                     close_after_success(self, fd)?;
                     return Ok(true);
@@ -5339,7 +5578,11 @@ impl Executor {
                         )));
                     }
                     if move_source {
-                        self.close_persistent_fd(source_fd)?;
+                        if defer_closes {
+                            self.fd_var_pending_closes.push(source_fd);
+                        } else {
+                            self.close_persistent_fd(source_fd)?;
+                        }
                     }
                     close_after_success(self, fd)?;
                     return Ok(true);
@@ -5717,6 +5960,17 @@ impl Executor {
         )
     }
 
+    /// rubash#2272: record the descriptor a `{var}<&-` / `{var}>&-`
+    /// entry closes — the number the var currently holds — in
+    /// fd_var_pending_closes instead of closing it in this table
+    /// (see the defer_closes parameter of
+    /// execute_dynamic_fd_var_redirect).
+    fn record_fd_var_pending_close(&mut self, name: &str) {
+        if let Some(fd) = self.dynamic_fd_variable_value(name) {
+            self.fd_var_pending_closes.push(fd);
+        }
+    }
+
     pub(in crate::executor) fn close_dynamic_fd(&mut self, name: &str) -> Result<(), ExecuteError> {
         if let Some(fd) = self.dynamic_fd_variable_value(name) {
             self.close_persistent_fd(fd)?;
@@ -5764,7 +6018,7 @@ impl Executor {
         Ok(())
     }
 
-    fn dynamic_fd_variable_value(&self, name: &str) -> Option<u32> {
+    pub(in crate::executor) fn dynamic_fd_variable_value(&self, name: &str) -> Option<u32> {
         if let Some((array_name, index)) = parse_array_numeric_subscript(name) {
             return self
                 .array_element_parameter_value(&format!("{array_name}[{index}]"))
@@ -6057,7 +6311,7 @@ fn exec_has_only_redirects(cmd: &CommandNode) -> bool {
 
 /// The four stdio-slot redirect arms of a compound command, ordered by
 /// their position in the command's parse-order redirect list (rubash#940 —
-/// the same contract apply_brace_group_redirects follows for `{ }`,
+/// the same contract prepare_brace_group_redirects follows for `{ }`,
 /// rubash#826). An arm whose mirror entry cannot be found in the list (a
 /// synthesized desugar) keeps its field order after every matched arm, so
 /// the sort is total and stable.

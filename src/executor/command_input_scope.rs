@@ -87,7 +87,7 @@ impl Executor {
             .collect::<Vec<_>>();
         for redirect in &cmd.redirects {
             if redirect.fd_var.is_some() {
-                let _ = self.execute_dynamic_fd_var_redirect(redirect, false)?;
+                let _ = self.execute_dynamic_fd_var_redirect(redirect, false, false)?;
             }
         }
         // The dup preflight runs before ANY bind so the abandonment it
@@ -687,6 +687,31 @@ impl Executor {
                         .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                 }
                 continue;
+            }
+            // rubash#2235: an fd-alias target (/dev/fd/N,
+            // /proc/self/fd/N, /dev/std*) names the fd table's
+            // current endpoint at N — GNU resolves the alias through
+            // the descriptor layer (an open of /proc/self/fd/N dups
+            // the description; the rubash#1963 alias service). Bind
+            // by dup'ing that endpoint, never by opening the spelling
+            // as a filesystem path: the process's real fd N is an
+            // unrelated descriptor, so the plain open below reports
+            // a spurious ENOENT (or worse, opens an unrelated file).
+            // A list-level input procsub materialized for the
+            // external composition rewrites its entry to exactly
+            // this spelling, so this arm is what lets the in-process
+            // binders consume the same materialized node. An alias
+            // whose endpoint is absent falls through: the plain
+            // open's ENOENT is GNU's dangling-alias error.
+            if let Some(alias_fd) = super::execution_misc::dev_stdio_redirect_fd(&target) {
+                if self.fd_table.read_endpoint(alias_fd).is_some() {
+                    let _ = self.fd_table.dup_input(fd, alias_fd);
+                    if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+                        self.set_fd_readwrite_file(fd, &target, true)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                    }
+                    continue;
+                }
             }
             // Real handle on the slot: [N]<> is a single O_RDWR open file
             // description (redir.c r_input_output), otherwise O_RDONLY.
