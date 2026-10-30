@@ -151,6 +151,10 @@ impl Executor {
         // sample must be intact when its adjudication runs after the
         // nested list returns.
         let saved_err_trap_sample = self.err_trap_armed_sample.get();
+        // rubash#2062: the alias-select scan memo describes only the
+        // list being walked; a nested walk starts empty and the
+        // enclosing walk's memo is restored on return.
+        let saved_alias_select_scan_memo = self.alias_select_scan_memo.borrow_mut().take();
         // rubash#1497: the -c tail exec-replacement stamp survives only
         // the final unit's own top frame (and, via the one-shot hold, an
         // and_or_list tail element's wrapper frame — GNU
@@ -169,6 +173,7 @@ impl Executor {
             self.exec_replace_shlvl_snapshot.set(None);
         }
         let result = self.execute_ast_inner_body(commands);
+        *self.alias_select_scan_memo.borrow_mut() = saved_alias_select_scan_memo;
         self.exec_replace_dispatch_stamp
             .set(saved_exec_replace_stamp);
         self.exec_replace_shlvl_snapshot
