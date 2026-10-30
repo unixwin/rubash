@@ -2011,6 +2011,10 @@ impl Executor {
             host_external_command_handler: None,
             external_route_provider: self.external_route_provider.clone(),
             external_stdio_slots: None,
+            // A forked comsub child starts with no pending stdin fold:
+            // the fold belongs to the parent's in-flight external
+            // dispatch, whose child description the fork does not own.
+            pending_stdin_fold: None,
             #[cfg(windows)]
             elevation_handler: None,
             external_file_builtins_enabled: self.external_file_builtins_enabled,
