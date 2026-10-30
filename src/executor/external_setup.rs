@@ -809,7 +809,9 @@ impl Executor {
         // materializing from them alone both duplicated a
         // substitution (the parser's `2>&1` mirror — see the
         // redirect_err_append arm) and never saw list-only entries
-        // (numbered and {var} fds, #2196). Every materialization
+        // (numbered fds, #2196; {var} entries are list-only too but
+        // belong to the dynamic-fd applier, not to this function).
+        // Every materialization
         // records its list position; a list pass after the field
         // arms covers each entry no field served, and spawn plans
         // are computed from these positions at the end.
@@ -1204,13 +1206,13 @@ impl Executor {
             }
         }
         // rubash#2196: the list pass — output substitutions no field
-        // serves. Numbered fds (`3> >(...)`) and {var} fds are
-        // list-only (nodes.rs: the dedicated mirrors carry only fds
-        // 0-2), so the field arms never saw them and the consumer
-        // was never spawned. Materialize each unserved entry keyed
-        // by position: an identical target text on another entry is
-        // a distinct substitution (GNU forks one consumer per
-        // redirect entry — redir.c:237 with subst.c:6362).
+        // serves. Numbered fds (`3> >(...)`) are list-only (nodes.rs:
+        // the dedicated mirrors carry only fds 0-2), so the field
+        // arms never saw them and the consumer was never spawned.
+        // Materialize each unserved entry keyed by position: an
+        // identical target text on another entry is a distinct
+        // substitution (GNU forks one consumer per redirect entry —
+        // redir.c:237 with subst.c:6362).
         for position in 0..rewritten.redirects.len() {
             if materialized_positions
                 .iter()
@@ -1224,12 +1226,25 @@ impl Executor {
                 // entry is field-served by construction (the
                 // shared-combined arms above own it), so treating
                 // it as unserved could only double-materialize it.
+                // {var} entries are not unserved either: they are
+                // list-only, but the dynamic-fd applier owns them —
+                // apply_dynamic_fd_var_redirects runs on the original
+                // node before materialization and binds the fd to a
+                // persistent process-substitution endpoint whose body
+                // runs at close (open_persistent_output_process_
+                // substitution; GNU's redir_varassign, redir.c:1133).
+                // Materializing one here as well spawned a second
+                // consumer fed by an empty carrier, and the two
+                // consumers raced on the body's output — the stream
+                // was lost whenever the empty one wrote last
+                // (rubash#1646 regression).
                 if !matches!(
                     redirect.kind,
                     crate::parser::RedirectKind::Output
                         | crate::parser::RedirectKind::Append
                         | crate::parser::RedirectKind::ClobberOutput
-                ) || exec_keeps_output_process_substitution(&exec_words, redirect)
+                ) || redirect.fd_var.is_some()
+                    || exec_keeps_output_process_substitution(&exec_words, redirect)
                 {
                     continue;
                 }
