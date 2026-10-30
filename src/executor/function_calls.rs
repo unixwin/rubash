@@ -1409,7 +1409,32 @@ impl Executor {
             );
             return Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })));
         }
-        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+        // rubash#2240: resolve the operand with the same ladder every
+        // other input face uses (open_input_redirect,
+        // open_compound_numbered_input_redirects): map the spelling,
+        // apply the virtual-root .exe resolution, then anchor a
+        // relative result at the SESSION cwd. GNU keeps exactly one
+        // cwd — cd moves the process's (builtins/cd.def
+        // change_to_directory -> chdir) and execute_function's
+        // do_redirections opens the expanded word with redir_open's
+        // plain open — so a relative operand lands in the directory
+        // the shell most recently cd'd to. Under G-02 the process cwd
+        // never moves after startup, so the bare mapped path this
+        // replaces resolved against the STARTUP directory: a function
+        // call's `< file` missed files sitting in the current
+        // directory after any cd (the #2211 disease, on the
+        // function-call path #2211's fix did not cover). The empty
+        // word stays un-joined: it names nothing in any directory,
+        // and joining it would manufacture the session directory
+        // itself (the #2211 empty-operand rule).
+        let path = if target.is_empty() {
+            shell_path_to_windows(&target, &self.shell_state.env_vars)
+        } else {
+            self.session_path(crate::executor::path::windows_operand_file_path(
+                shell_path_to_windows(&target, &self.shell_state.env_vars),
+                &self.shell_state.env_vars,
+            ))
+        };
         if !std::fs::metadata(&path)
             .map(|m| m.is_file())
             .unwrap_or(false)
