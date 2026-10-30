@@ -3414,6 +3414,16 @@ impl Executor {
             "__RUBASH_SUBSHELL_DEPTH",
             (self.shell_state.subshell_depth.get() + 1).to_string(),
         );
+        // rubash#1582: the same fork makes the producer's own pid the
+        // pid of the seeded level (variables.c:1511 get_bashpid =
+        // getpid), so the BASHPID origin base rides with the depth —
+        // the consumer form (external_setup.rs) stamps the pair, and
+        // without the base this child's $BASHPID read its real pid + 1
+        // while its own children observed the real pid as $PPID.
+        child.env(
+            "__RUBASH_BG_BASHPID_BASE",
+            (self.shell_state.subshell_depth.get() + 1).to_string(),
+        );
         // rubash#2032: process_substitute's producer is a forked child
         // (subst.c:6362), so it inherits the parent's positional
         // parameters (POSITIONAL_PARAMS_TRANSPORT). Before this stamp
