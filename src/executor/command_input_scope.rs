@@ -87,7 +87,7 @@ impl Executor {
             .collect::<Vec<_>>();
         for redirect in &cmd.redirects {
             if redirect.fd_var.is_some() {
-                let _ = self.execute_dynamic_fd_var_redirect(redirect, false)?;
+                let _ = self.execute_dynamic_fd_var_redirect(redirect, false, false)?;
             }
         }
         // The dup preflight runs before ANY bind so the abandonment it

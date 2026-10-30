@@ -397,7 +397,7 @@ impl Executor {
         self.own_input_binding_before(cmd, fd, dup_position)
     }
 
-    fn own_input_binding_before(
+    pub(in crate::executor) fn own_input_binding_before(
         &mut self,
         cmd: &CommandNode,
         fd: u32,

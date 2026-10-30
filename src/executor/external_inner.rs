@@ -1,5 +1,14 @@
 use super::*;
 
+/// rubash#2272: the command's own pre_exec pin list. On Unix the
+/// pins carry raw fds; on other platforms the list stays empty (the
+/// env channel alone delivers there) but the fd_var delivery arms
+/// still record into it uniformly.
+#[cfg(unix)]
+type FdPinVec = Vec<(std::os::unix::io::RawFd, u32)>;
+#[cfg(not(unix))]
+type FdPinVec = Vec<(i32, u32)>;
+
 /// rubash#1626: pin the shell's ambient fd-table descriptors at their
 /// slot numbers in a forked child, between fork and exec — GNU's child
 /// inherits every descriptor `exec N>file` bound, at the same number.
@@ -14,6 +23,17 @@ use super::*;
 /// that number in the child (its exec-error channel). It is
 /// recognizable as an open FIFO at the target that is not one of the
 /// pin sources; overwriting it would corrupt spawn error reporting.
+/// One FIFO shape is NOT the error channel: a stdio pipe the spawn
+/// machinery dup2'd onto its slot (0/1/2) and left open at its
+/// original number until exec. A pipeline stage's own stdout pipe
+/// parks exactly like that, and when its number collides with a
+/// pin's target the pin is GNU's redirection for the element
+/// (execute_cmd.c:2620 execute_pipeline runs redir.c:237
+/// do_redirections in the forked child) and must win the slot
+/// (rubash#2255). The two are told apart by identity: both ends of
+/// one pipe share an inode, so a FIFO whose (dev, inode) matches a
+/// stdio descriptor is the stdio leftover, while the error channel
+/// is a pipe of its own and never matches.
 #[cfg(unix)]
 pub(in crate::executor) fn pin_ambient_fds_in_child(
     pins: &[(std::os::unix::io::RawFd, u32)],
@@ -38,7 +58,10 @@ pub(in crate::executor) fn pin_ambient_fds_in_child(
         }
     }
     for (temp, target) in staged {
-        if !sources.contains(&target) && fd_is_anonymous_pipe(target) {
+        if !sources.contains(&target)
+            && fd_is_anonymous_pipe(target)
+            && !fd_is_stdio_pipe_alias(target)
+        {
             unsafe { libc::close(temp) };
             continue;
         }
@@ -60,6 +83,36 @@ fn fd_is_anonymous_pipe(fd: std::os::unix::io::RawFd) -> bool {
     // bionic (Android) types the S_IF* constants as u16 while st_mode
     // is u32, so the raw comparison does not compile there.
     (u32::from(stat.st_mode) & u32::from(libc::S_IFMT)) == u32::from(libc::S_IFIFO)
+}
+
+/// Whether `fd` is the same anonymous pipe as one of the child's
+/// arranged stdio descriptors (0/1/2) — the spawn machinery's stdio
+/// leftover at its pre-dup2 number (see pin_ambient_fds_in_child).
+/// Both ends of a pipe share one (dev, inode) identity; std's
+/// exec-error channel is a separate pipe and never matches a stdio
+/// descriptor, so it keeps the pin guard's protection.
+#[cfg(unix)]
+fn fd_is_stdio_pipe_alias(fd: std::os::unix::io::RawFd) -> bool {
+    // Identity fields are widened to u64: the raw stat field types
+    // and the dev_t/ino_t aliases disagree on 32-bit Android (u64
+    // fields vs u32 aliases), and only equality is ever tested.
+    fn pipe_identity(fd: std::os::unix::io::RawFd) -> Option<(u64, u64)> {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+            return None;
+        }
+        // Widened through u32 like fd_is_anonymous_pipe above (bionic).
+        if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT)) != u32::from(libc::S_IFIFO) {
+            return None;
+        }
+        Some((stat.st_dev as u64, stat.st_ino as u64))
+    }
+    let Some(identity) = pipe_identity(fd) else {
+        return false;
+    };
+    [0, 1, 2]
+        .iter()
+        .any(|&stdio_fd| pipe_identity(stdio_fd) == Some(identity))
 }
 
 /// The result of one route-seam attempt (see
@@ -1803,6 +1856,32 @@ impl Executor {
         // simply see one extra env var (same limitation the background path
         // documents).
         let mut parent_side_dups: Vec<crate::fd::HANDLE> = Vec::new();
+        // rubash#2272: perform this command's deferred {var} closes
+        // (close-form targets and move-form dup sources, recorded by
+        // the dynamic-fd applier in fd_var_pending_closes) in the
+        // table before stamping what the child inherits: GNU applies
+        // them in the fork, so the child must not inherit those
+        // slots, while the parent's bindings survive the command —
+        // the snapshots taken here are what
+        // undo_child_fd_var_redirects restores afterwards. Only the
+        // closed flag is set: the endpoints stay in place so the
+        // {var} dup resolution below can still read a source
+        // description from them (the stamp and the pin computation
+        // both skip closed slots).
+        if !self.fd_var_pending_closes.is_empty() {
+            let pending = std::mem::take(&mut self.fd_var_pending_closes);
+            for fd in pending {
+                let entry = self.fd_table.entries.get(&fd).cloned();
+                let marker = self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned();
+                self.fd_var_close_restore.push((fd, entry, marker));
+                if let Some(entry) = self.fd_table.entries.get_mut(&fd) {
+                    entry.closed = true;
+                }
+                self.shell_state
+                    .env_vars
+                    .insert(fd_closed_key(fd), "1".to_string());
+            }
+        }
         for (fd, entry) in &self.fd_table.entries {
             if *fd < 3 || entry.closed {
                 continue;
@@ -1855,10 +1934,29 @@ impl Executor {
         // pin (merged into the pin registration below): the env channel
         // reaches only rubash children, so a foreign child otherwise gets
         // EBADF on the command's own fds even though the file was created.
-        #[cfg(unix)]
-        let mut command_fd_pins: Vec<(std::os::unix::io::RawFd, u32)> = Vec::new();
-        for redirect in &cmd.redirects {
+        let mut command_fd_pins: FdPinVec = Vec::new();
+        // rubash#2272: descriptions this walk itself delivered, by
+        // slot, so a later {var} dup entry in the same list copies
+        // the command's OWN earlier binding (GNU's single ordered
+        // walk, redir.c:237 do_redirections) instead of the ambient
+        // table entry the dynamic-fd applier resolved against.
+        let mut walk_opened: std::collections::HashMap<
+            u32,
+            std::rc::Rc<crate::executor::fd_table::FileFd>,
+        > = std::collections::HashMap::new();
+        let mut fd_var_claimed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for (position, redirect) in cmd.redirects.iter().enumerate() {
             if redirect.fd_var.is_some() {
+                self.deliver_fd_var_redirect(
+                    cmd,
+                    position,
+                    redirect,
+                    &mut process,
+                    &mut command_fd_pins,
+                    &mut parent_side_dups,
+                    &walk_opened,
+                    &mut fd_var_claimed,
+                );
                 continue;
             }
             let fd = match redirect.fd {
@@ -1890,6 +1988,7 @@ impl Executor {
                         self.fd_table.read_endpoint(alias_fd)
                     {
                         let file = file.clone();
+                        walk_opened.insert(fd, file.clone());
                         if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
                             #[cfg(unix)]
                             command_fd_pins.push((dup, fd));
@@ -2038,9 +2137,42 @@ impl Executor {
                 },
             );
             parent_side_dups.push(dup);
+            // rubash#2272: remember the description delivered at this
+            // slot for a later {var} dup in the same list (see
+            // walk_opened above).
+            let walk_file = match (&stashed, &opened_file) {
+                (Some(file), _) => Some(file.clone()),
+                (None, Some(file)) => file.try_clone().ok().map(|clone| {
+                    crate::executor::fd_table::FileFd::from_file(clone, target.clone().into())
+                }),
+                (None, None) => None,
+            };
+            if let Some(file) = walk_file {
+                walk_opened.insert(fd, file);
+            }
             // The parent's own open was transient (GNU closes it after the
             // fork); the dup above is what the child holds.
             drop(opened_file);
+        }
+        // rubash#2272: `{var}<<EOF` bindings live in
+        // heredoc_redirects, not redirects; the applier installed
+        // their bodies as Text endpoints in the fd table. Deliver
+        // each at its var's number through the same carrier shape as
+        // the redirects-list text arm (deliver_fd_var_redirect).
+        for redirect in &cmd.heredoc_redirects {
+            let Some(name) = redirect.fd_var.as_deref() else {
+                continue;
+            };
+            let Some(var_fd) = self.dynamic_fd_variable_value(name) else {
+                continue;
+            };
+            fd_var_claimed.insert(var_fd);
+            self.deliver_fd_var_text_binding(
+                var_fd,
+                &mut process,
+                &mut command_fd_pins,
+                &mut parent_side_dups,
+            );
         }
         // rubash#1626: the env channel above only reaches rubash children
         // (init.rs restores the named handles at startup); a foreign child
@@ -2076,6 +2208,328 @@ impl Executor {
             }
         }
         parent_side_dups
+    }
+
+    /// rubash#2272: the env + pin stamp the numbered walk's tail
+    /// performs, factored for the {var} delivery arms: duplicate the
+    /// source handle as inheritable, name it in the child's
+    /// environment at `fd`, and (on Unix) record the pre_exec pin so
+    /// a foreign child receives the raw descriptor at that number —
+    /// the same two channels as every other spawn delivery.
+    fn stamp_child_fd_handle(
+        &mut self,
+        process: &mut Command,
+        command_fd_pins: &mut FdPinVec,
+        parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+        fd: u32,
+        write: bool,
+        raw: crate::fd::HANDLE,
+        path_label: String,
+    ) {
+        let Ok(dup) = crate::fd::duplicate_handle_inheritable(raw) else {
+            return;
+        };
+        #[cfg(unix)]
+        command_fd_pins.push((dup, fd));
+        #[cfg(not(unix))]
+        let _ = &*command_fd_pins;
+        process.env(
+            format!("__RUBASH_FD_{}HANDLE_{fd}", if write { "W" } else { "" }),
+            format!("{dup:#x}"),
+        );
+        process.env(
+            format!("__RUBASH_FD_{}PATH_{fd}", if write { "W" } else { "" }),
+            path_label,
+        );
+        parent_side_dups.push(dup);
+    }
+
+    /// rubash#2272: deliver one `{var}` redirect's binding to the
+    /// spawn. The dynamic-fd applier (trap_exec.rs
+    /// apply_dynamic_fd_var_redirects) ran ahead of dispatch and
+    /// bound the var's descriptor into the fd table — the mirror of
+    /// GNU binding in the forked child (redir.c:237 do_redirections;
+    /// the {var} assignment proper is redir_varassign, redir.c:1010
+    /// and :1113). Delivery then splits by what the applier
+    /// installed:
+    ///
+    /// - File kinds (`<`, `>`, `>>`, `<>`): a File endpoint in the
+    ///   table — the ambient stamp/pin in apply_external_fd_delivery
+    ///   already delivers it at the var's number. Nothing to add.
+    /// - Close forms: the applier recorded the close; the delivery
+    ///   prologue above performed it in the table, so the ambient
+    ///   stamp skips the slot — the child inherits it closed, as
+    ///   GNU's child does. Nothing to add.
+    /// - Heredoc / here-string: a Text endpoint — no OS descriptor
+    ///   exists to stamp. Materialize the body into a carrier file
+    ///   and deliver the carrier at the var's number (the #2270
+    ///   shape for numbered heredocs).
+    /// - Dup forms: the applier copied the source endpoint into the
+    ///   var's slot. A File copy rides the ambient delivery, but a
+    ///   text or stdio copy has no stampable handle, and a source
+    ///   bound earlier in the command's OWN list was never visible
+    ///   to the applier (it resolves against the ambient table
+    ///   only). GNU walks ONE ordered list in the child
+    ///   (redir.c:237), so deliver_fd_var_dup resolves the source
+    ///   here — own list first, then the ambient table.
+    fn deliver_fd_var_redirect(
+        &mut self,
+        cmd: &CommandNode,
+        position: usize,
+        redirect: &crate::parser::Redirect,
+        process: &mut Command,
+        command_fd_pins: &mut FdPinVec,
+        parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+        walk_opened: &std::collections::HashMap<
+            u32,
+            std::rc::Rc<crate::executor::fd_table::FileFd>,
+        >,
+        fd_var_claimed: &mut std::collections::HashSet<u32>,
+    ) {
+        let Some(name) = redirect.fd_var.as_deref() else {
+            return;
+        };
+        match redirect.kind {
+            crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => {
+                if let Some(var_fd) = self.dynamic_fd_variable_value(name) {
+                    fd_var_claimed.insert(var_fd);
+                    self.deliver_fd_var_text_binding(
+                        var_fd,
+                        process,
+                        command_fd_pins,
+                        parent_side_dups,
+                    );
+                }
+            }
+            crate::parser::RedirectKind::DuplicateInput
+            | crate::parser::RedirectKind::DuplicateOutput => {
+                self.deliver_fd_var_dup(
+                    cmd,
+                    position,
+                    redirect,
+                    name,
+                    process,
+                    command_fd_pins,
+                    parent_side_dups,
+                    walk_opened,
+                    fd_var_claimed,
+                );
+            }
+            // File kinds and close forms ride the ambient delivery
+            // (see the doc comment above).
+            _ => {}
+        }
+    }
+
+    /// rubash#2272: materialize the text body bound at `var_fd` (a
+    /// heredoc / here-string body the dynamic-fd applier stored as
+    /// a Text endpoint) into a carrier file and stamp/pin the
+    /// carrier at that number — the installation the numbered
+    /// heredoc arm performs with external_fd_heredoc_input (#2270),
+    /// except the body here comes from the fd table's snapshot: the
+    /// applier already expanded it, and a partially consumed
+    /// persistent binding delivers its remaining text, as a GNU
+    /// descriptor positioned at the same offset would.
+    fn deliver_fd_var_text_binding(
+        &mut self,
+        var_fd: u32,
+        process: &mut Command,
+        command_fd_pins: &mut FdPinVec,
+        parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+    ) {
+        let Some((text, offset)) = self.fd_table.input_snapshot(var_fd) else {
+            return;
+        };
+        let body = text.get(offset.min(text.len())..).unwrap_or("").to_string();
+        let Ok(carrier) = self.write_process_substitution_temp(&body) else {
+            return;
+        };
+        self.shell_state
+            .procsub_adhoc_carriers
+            .borrow_mut()
+            .push(carrier.clone());
+        let carrier = carrier.display().to_string();
+        let Ok(file) = self.open_input_redirect(&carrier) else {
+            return;
+        };
+        #[cfg(windows)]
+        let raw = {
+            use std::os::windows::io::AsRawHandle;
+            file.as_raw_handle() as crate::fd::HANDLE
+        };
+        #[cfg(unix)]
+        let raw = {
+            use std::os::unix::io::AsRawFd;
+            file.as_raw_fd()
+        };
+        self.stamp_child_fd_handle(
+            process,
+            command_fd_pins,
+            parent_side_dups,
+            var_fd,
+            false,
+            raw,
+            carrier,
+        );
+    }
+
+    /// rubash#2272: the descriptor number a `{var}` delivery lands
+    /// on: the number the applier recorded in the var when it bound
+    /// the entry. When the applier could not bind — its source
+    /// resolution sees only the ambient table, and an own-list
+    /// source is the case in point — allocate the number the way
+    /// the applier's allocator does (fd_table.rs
+    /// allocate_dynamic_with_limit): the lowest slot >= 10 free in
+    /// the fd table, not claimed by the command's own numbered
+    /// redirects, and not already claimed by an earlier {var}
+    /// delivery in this walk. The parent variable itself stays
+    /// untouched: GNU's assignment for an external command happens
+    /// in the child and never reaches the parent (redir.c
+    /// redir_varassign in the fork), so only the child's slot needs
+    /// the number.
+    fn fd_var_delivery_fd(
+        &self,
+        cmd: &CommandNode,
+        name: &str,
+        claimed: &mut std::collections::HashSet<u32>,
+    ) -> u32 {
+        if let Some(fd) = self.dynamic_fd_variable_value(name) {
+            claimed.insert(fd);
+            return fd;
+        }
+        let mut candidate = 10u32;
+        loop {
+            let taken = claimed.contains(&candidate)
+                || cmd
+                    .redirects
+                    .iter()
+                    .any(|entry| entry.fd == Some(candidate))
+                || cmd
+                    .heredoc_redirects
+                    .iter()
+                    .any(|entry| entry.fd == Some(candidate))
+                || self.fd_table.entries.get(&candidate).is_some_and(|entry| {
+                    !entry.closed && (entry.read.is_some() || entry.write.is_some())
+                });
+            if !taken {
+                claimed.insert(candidate);
+                return candidate;
+            }
+            candidate += 1;
+        }
+    }
+
+    /// rubash#2272: deliver a `{var}` dup entry (`{v}<&N`, `{v}>&N`,
+    /// and the move spellings — GNU's child observes a move as a
+    /// copy plus a close of the source, and the close rides
+    /// fd_var_pending_closes). Resolution order mirrors GNU's
+    /// single ordered walk (redir.c:237 do_redirections):
+    /// (1) a binding this walk already delivered for the source,
+    /// (2) the fd-0 replay for the command's own stdin binding,
+    /// (3) the applier's ambient copy when it is a File endpoint
+    /// (already delivered by the ambient stamp), (4) the applier's
+    /// copy when it is a text snapshot (carrier), (5) a stdio
+    /// source, pinned child-locally.
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_fd_var_dup(
+        &mut self,
+        cmd: &CommandNode,
+        position: usize,
+        redirect: &crate::parser::Redirect,
+        name: &str,
+        process: &mut Command,
+        command_fd_pins: &mut FdPinVec,
+        parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+        walk_opened: &std::collections::HashMap<
+            u32,
+            std::rc::Rc<crate::executor::fd_table::FileFd>,
+        >,
+        fd_var_claimed: &mut std::collections::HashSet<u32>,
+    ) {
+        let target = self.expand_redirect_target(redirect);
+        let Some((source_fd, _move_source)) = redirect_target_fd_and_move(&target) else {
+            return;
+        };
+        let write = matches!(redirect.kind, crate::parser::RedirectKind::DuplicateOutput);
+        // (1) The command's own earlier binding for the source.
+        if let Some(file) = walk_opened.get(&source_fd).cloned() {
+            let var_fd = self.fd_var_delivery_fd(cmd, name, fd_var_claimed);
+            let path = file.path.to_string_lossy().into_owned();
+            self.stamp_child_fd_handle(
+                process,
+                command_fd_pins,
+                parent_side_dups,
+                var_fd,
+                write,
+                file.handle,
+                path,
+            );
+            return;
+        }
+        // (2) fd-0 sources: fd-0 entries never enter this walk (the
+        // stdin face owns them), so resolve the command's own stdin
+        // binding through the #2235 replay.
+        if !write && source_fd == 0 {
+            if let Some(file) = self.own_input_binding_before(cmd, 0, position) {
+                let var_fd = self.fd_var_delivery_fd(cmd, name, fd_var_claimed);
+                let path = file.path.to_string_lossy().into_owned();
+                self.stamp_child_fd_handle(
+                    process,
+                    command_fd_pins,
+                    parent_side_dups,
+                    var_fd,
+                    false,
+                    file.handle,
+                    path,
+                );
+                return;
+            }
+        }
+        let Some(var_fd) = self.dynamic_fd_variable_value(name) else {
+            // The applier bound nothing and no own binding resolves
+            // the source: the dup already failed with GNU's
+            // diagnostic on the preflight face (the dup-before-bind
+            // shapes) — there is nothing to deliver.
+            return;
+        };
+        fd_var_claimed.insert(var_fd);
+        // (3) The applier's copy is a File endpoint: the ambient
+        // stamp already delivers it at the var's number.
+        let file_delivered = if write {
+            matches!(
+                self.fd_table.write_endpoint(var_fd),
+                Some(crate::executor::fd_table::FdWriteEndpoint::File(_))
+            )
+        } else {
+            matches!(
+                self.fd_table.read_endpoint(var_fd),
+                Some(crate::executor::fd_table::FdReadEndpoint::File(_))
+            )
+        };
+        if file_delivered {
+            return;
+        }
+        // (4) The applier's copy is a text snapshot (a heredoc
+        // body, a materialized stdin): deliver its remaining bytes
+        // through a carrier, like the heredoc arm.
+        if !write && self.fd_table.input_snapshot(var_fd).is_some() {
+            self.deliver_fd_var_text_binding(var_fd, process, command_fd_pins, parent_side_dups);
+            return;
+        }
+        // (5) A stdio source: the description the child must share
+        // is its OWN wired stdio slot, which exists only in the
+        // child — pin the slot number across the fork.
+        // std::process arranges the child's stdio before the
+        // pre_exec callbacks run, and the pin helper stages sources
+        // above the pin ceiling before dup2'ing, so the pin copies
+        // the wired slot (the command's redirected stdin/stdout),
+        // never the parent's, and never clobbers the slot itself.
+        if source_fd <= 2 {
+            #[cfg(unix)]
+            command_fd_pins.push((source_fd as std::os::unix::io::RawFd, var_fd));
+            #[cfg(not(unix))]
+            let _ = &*command_fd_pins;
+        }
     }
 
     fn spawn_external_process(
