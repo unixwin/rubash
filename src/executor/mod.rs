@@ -710,6 +710,15 @@ pub struct Executor {
     /// carrier (the same finish the simple-command path gives output
     /// process substitutions).
     conditional_output_procsubs: Vec<(std::path::PathBuf, String, Option<usize>)>,
+    /// rubash#2131: the redirection list of the `[[ ]]` command
+    /// currently evaluating, stashed by
+    /// execute_conditional_command_with_redirects for the fd-alias
+    /// sync's own-redirect overlay: `[[ ]]` binds only its fds 1/2
+    /// (bind_conditional_stdio_redirects), so its fd-0 binding never
+    /// reaches the fd table, and the evaluator runs through no
+    /// CommandNode the sync could read the list from. Saved and
+    /// restored around the evaluation like the fd 1/2 entries.
+    current_conditional_redirects: Option<Vec<crate::parser::Redirect>>,
     pending_scalar_assignment: bool,
     suppress_errexit: usize,
     /// rubash#1563: depth of GNU's CMD_IGNORE_RETURN clearing frame for
@@ -801,6 +810,18 @@ pub struct Executor {
     /// not against the map value (rubash perf12: the map-value gate
     /// produced stale alias/declare line numbers after an ambient restore).
     line_env_os_value: std::cell::RefCell<Option<String>>,
+    /// #682 stamped-by-caller contract: the execute_ast command loop stamps
+    /// `__RUBASH_CURRENT_LINE`/`__RUBASH_CMD_START_LINE` for the node it is
+    /// about to dispatch (GNU stamps line_number once per command,
+    /// execute_cmd.c SET_LINE_NUMBER); the funnel's own re-stamp recomputes
+    /// the identical value from the same node and the same ambient line, so
+    /// when this flag is set the funnel skips its copy. Only the ast_exec
+    /// loop sets it — immediately before its funnel call, and only when no
+    /// DEBUG fire / debugger seam ran this iteration (a trap action leaves
+    /// its own lines behind, and the funnel's re-stamp is then GNU's
+    /// post-trap SET_LINE_NUMBER and must run). Consumed on entry, so a
+    /// nested execute_command always stamps normally.
+    pre_stamped_line: std::cell::Cell<bool>,
     /// The background direct-spawn eligibility gate (#809) expands the async
     /// command's words in the PARENT as a probe; GNU expands the forked
     /// child's words inside the child, so the parent never observes a
@@ -1583,6 +1604,19 @@ pub struct Executor {
     /// partial record is still assigned; only the status becomes 1. Merged
     /// with the fd-table copy by `take_read_eof_no_delimiter`.
     pub(crate) read_eof_no_delimiter: bool,
+    /// niubash#684: the armed inherited-stdin transport read fd 0 itself
+    /// and hit a genuine EOF (zero-length read) with no record to serve.
+    /// GNU builtin_read reads exactly ONE descriptor
+    /// (builtins/read.def:294) and a zread EOF ends the builtin
+    /// (read.def:767 `eof = 1`; :949 `retval = eof ? EXECUTION_FAILURE`)
+    /// — EOF is a verdict, not a "try the next transport" signal. The
+    /// read builtin's None cascade consults this flag so an EOF on the
+    /// process stdin is never re-asked of a second blocking reader
+    /// (which swallowed the EOF and consumed the NEXT input line as the
+    /// record). Reset beside read_eof_no_delimiter at every acquisition;
+    /// set only by read_inherited_process_stdin's EOF-with-nothing
+    /// return, never by a timeout/interrupt break.
+    pub(crate) read_process_stdin_eof: bool,
     /// rubash#1141: production timing of the input currently staged on
     /// FUNCTION_STDIN (a pipeline stage's captured producer output), so
     /// `read`/`select` can judge an armed deadline against the stream's

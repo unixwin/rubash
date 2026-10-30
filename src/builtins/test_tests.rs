@@ -208,8 +208,41 @@ fn ownership_unary_operators_check_existing_file() {
     let _ = fs::remove_file(missing);
     fs::write(path, "data").unwrap();
 
-    assert_eq!(run(&["-O", path], false).0, EXECUTION_SUCCESS);
-    assert_eq!(run(&["-G", path], false).0, EXECUTION_SUCCESS);
+    // GNU test.c:561-567: -O/-G are exactly `st_uid == euid` /
+    // `st_gid == egid` — nothing about who created the file. A file
+    // created inside a setgid directory inherits the directory's
+    // group, which need not be the process's egid (under an
+    // id-mapped home the inherited group has no mapping and reads
+    // back as the overflow gid, and GNU answers -G false there
+    // too). Assert against the stat() ground truth instead of
+    // assuming self-ownership, so the pin holds at full strength
+    // in every environment: on a plain home both expectations are
+    // true, under a foreign setgid parent the -G expectation flips
+    // and the pin demands the failure verdict GNU also gives.
+    #[cfg(unix)]
+    let (expect_owned_user, expect_owned_group) = {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path).unwrap();
+        (
+            metadata.uid() == unsafe { libc::geteuid() },
+            metadata.gid() == unsafe { libc::getegid() },
+        )
+    };
+    // Off unix the predicates fall back to existence (see
+    // file_owned_by_effective_user / file_owned_by_effective_group
+    // in test.rs), so an existing file passes both.
+    #[cfg(not(unix))]
+    let (expect_owned_user, expect_owned_group) = (true, true);
+    let verdict = |owned: bool| {
+        if owned {
+            EXECUTION_SUCCESS
+        } else {
+            EXECUTION_FAILURE
+        }
+    };
+
+    assert_eq!(run(&["-O", path], false).0, verdict(expect_owned_user));
+    assert_eq!(run(&["-G", path], false).0, verdict(expect_owned_group));
     assert_eq!(run(&["-O", missing], false).0, EXECUTION_FAILURE);
     assert_eq!(run(&["-G", missing], false).0, EXECUTION_FAILURE);
 

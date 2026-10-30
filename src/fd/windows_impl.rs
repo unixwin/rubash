@@ -451,10 +451,23 @@ const CREATE_NEW: DWORD = 1;
 const OPEN_ALWAYS: DWORD = 4;
 const FILE_END: DWORD = 2;
 
+// FILE_FLAG_BACKUP_SEMANTICS (defined with the other file-flag
+// constants above) is what lets CreateFileW open a DIRECTORY
+// handle (backup/restore semantics).
+
 fn create_file(
     path: &std::path::Path,
     access: DWORD,
     disposition: DWORD,
+) -> std::io::Result<HANDLE> {
+    create_file_with_flags(path, access, disposition, 0)
+}
+
+fn create_file_with_flags(
+    path: &std::path::Path,
+    access: DWORD,
+    disposition: DWORD,
+    flags: DWORD,
 ) -> std::io::Result<HANDLE> {
     let wide: Vec<u16> = path
         .as_os_str()
@@ -468,7 +481,7 @@ fn create_file(
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             disposition,
-            0,
+            flags,
             0,
         )
     };
@@ -491,7 +504,29 @@ pub fn open_file_read(path: &std::path::Path) -> std::io::Result<HANDLE> {
     if let Some(content) = crate::special_paths::synthetic_proc_content(&posix_text) {
         return install_bytes_read_pipe(&content);
     }
-    create_file(path, GENERIC_READ, OPEN_EXISTING)
+    match create_file(path, GENERIC_READ, OPEN_EXISTING) {
+        Ok(handle) => Ok(handle),
+        Err(error) => {
+            // rubash#2101: a directory is a legal input in GNU —
+            // redir.c redir_open opens it and the child receives the
+            // descriptor; only a READING child fails, with its own
+            // diagnostic. CreateFileW refuses directories without
+            // FILE_FLAG_BACKUP_SEMANTICS, so the plain open killed
+            // the command at redirect time with Permission denied.
+            // Retry directories with the flag; every other failure
+            // keeps the original error.
+            if std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()) {
+                create_file_with_flags(
+                    path,
+                    GENERIC_READ,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS,
+                )
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 /// Create an anonymous pipe pre-filled with `content`, write end closed:
@@ -741,6 +776,19 @@ pub fn disk_file_path(h: HANDLE) -> Option<std::path::PathBuf> {
 pub fn is_console_handle(h: HANDLE) -> bool {
     let mut mode: DWORD = 0;
     (unsafe { GetConsoleMode(h, &mut mode) }) != 0
+}
+
+/// True when the console input handle is in line-input (cooked) mode.
+/// A cooked Windows console has no VEOF of its own: conhost assembles a
+/// line and hands its bytes — Ctrl-D included — to ReadFile as data,
+/// where a Unix canonical line discipline would have turned the same
+/// keystroke into an EOF/flush. The read transports consult this to
+/// translate a received 0x04 byte back into those semantics
+/// (niubash#684). ENABLE_LINE_INPUT is defined with the one-char guard
+/// constants below.
+pub fn console_line_input_mode(h: HANDLE) -> bool {
+    let mut mode: DWORD = 0;
+    (unsafe { GetConsoleMode(h, &mut mode) }) != 0 && (mode & ENABLE_LINE_INPUT) != 0
 }
 
 /// FILE_TYPE_CHAR check for `test -c` (GNU test.c filetest → S_ISCHR):

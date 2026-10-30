@@ -1577,7 +1577,11 @@ impl Executor {
         // their only judge (trapped -> run, ignored -> drop,
         // untrapped -> the 128+sig death).
         let signals = crate::builtins::kill::take_pending_signals(std::process::id())?;
-        let mut queue: Vec<(i32, bool)> = Vec::with_capacity(signals.len() + 4);
+        // #682: with_capacity(4) heap-allocated at every command boundary
+        // even when no delivery is pending (the common case); Vec::new()
+        // defers the allocation to the first push — identical growth
+        // semantics, one malloc/free per command removed from the floor.
+        let mut queue: Vec<(i32, bool)> = Vec::new();
         #[cfg(unix)]
         queue.extend(
             crate::builtins::kill::take_ancestor_signals()

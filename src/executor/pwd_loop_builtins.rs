@@ -80,6 +80,22 @@ impl Executor {
         cmd: &CommandNode,
         kind: LoopControlKind,
     ) -> Result<(), ExecuteError> {
+        // GNU builtins/common.h:29-36 CHECK_HELPOPT (break.def /
+        // continue.def run it first): the RAW first word `--help`
+        // prints the long help to stdout and the builtin RETURNS
+        // EX_USAGE (258 > EX_SHERRBASE) — before check_loop_level, so
+        // there is no "only meaningful" diagnostic outside a loop, and
+        // without setting `breaking`/`continuing`, so a loop body runs
+        // on after it. Mirrors execute_return's --help face
+        // (rubash#2128, the #1229 family's residual face).
+        if cmd.words.get(1).map(String::as_str) == Some("--help") {
+            let mut stdout = Vec::new();
+            crate::builtins::help::print_builtin_help(kind.name(), &mut stdout)?;
+            self.write_buffered_builtin_output(cmd, &stdout, &[])?;
+            self.exit_code = 2;
+            self.special_builtin_failed.set(true);
+            return Ok(());
+        }
         let mut stderr = Vec::new();
         // GNU loop_level as seen by this executor: loops executing HERE
         // (loop_depth) plus the depth a fork boundary carried in
@@ -212,7 +228,12 @@ impl Executor {
                 // (EXITPROG): the whole shell exits 2 (verified WSL GNU
                 // 5.3.0: a script dies at the first `break 2x`, rc 2);
                 // interactive fatal=2 is DISCARD — the current command list
-                // is abandoned and the reader continues.
+                // is abandoned and the reader continues. The status must
+                // also be PARKED: the POSIX completion channel reads
+                // self.exit_code rather than the error value, so without
+                // the park a POSIX-mode script (or -c string) unwound
+                // correctly but exited with the stale code (rubash#2127).
+                self.exit_code = 2;
                 if self.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
                     return Err(ExecuteError::ExpansionFailure(2));
                 }
@@ -343,14 +364,20 @@ impl Executor {
             .get("__RUBASH_IN_SOURCE")
             .map(String::as_str)
             == Some("1");
-        if numeric_failed && (in_function || in_source) {
+        if numeric_failed {
             // GNU builtins/return.def:62-65: on an invalid numeric
             // argument in a non-interactive POSIX shell (and not under
             // the `command' builtin), return_builtin RETURNS EX_USAGE
             // instead of longjmping the return_catch — "the
             // return_catch targets aren't set up to deal with
-            // EXITSHELL, so we just jump_to_top_level directly". The
-            // completion machinery owns the outcome from there:
+            // EXITSHELL, so we just jump_to_top_level directly". That
+            // raw return precedes the return_catch check, so it fires
+            // in EVERY context: inside a function/source the completion
+            // machinery owns the outcome from there (below), and at the
+            // top level it suppresses the can-only-`return' report
+            // entirely — GNU prints only the numeric diagnostic there
+            // (rubash#2127; in default mode both lines print, pinned by
+            // the fall-through to the bottom arm).
             // execute_simple_command marks special_builtin_failed
             // (execute_cmd.c:4888) and the return command's own frame
             // exits the shell when the context is untested

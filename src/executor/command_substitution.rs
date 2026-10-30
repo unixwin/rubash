@@ -1745,6 +1745,7 @@ impl Executor {
             tempenv_pipestatus_state: None,
             command_scoped_procsub_input_fds: Vec::new(),
             conditional_output_procsubs: Vec::new(),
+            current_conditional_redirects: None,
             pending_scalar_assignment: false,
             suppress_errexit: self.suppress_errexit,
             // rubash#1563: a fork copy inherits the parent's GNU frame
@@ -1776,6 +1777,7 @@ impl Executor {
             // units are its own text, never the parent's file.
             debug_syntax_unit_file: None,
             line_env_os_value: std::cell::RefCell::new(None),
+            pre_stamped_line: std::cell::Cell::new(false),
             expansion_probe_active: std::cell::Cell::new(false),
             return_trap_running: false,
             signal_trap_running: false,
@@ -1844,6 +1846,7 @@ impl Executor {
             read_interrupted_signal: None,
             read_sigint_guard_armed: false,
             read_eof_no_delimiter: false,
+            read_process_stdin_eof: false,
             // rubash#1141: the fork copy reads the SAME staged input
             // stream as its parent (FUNCTION_STDIN crosses in the cloned
             // shell state), so its production timing crosses too — the
