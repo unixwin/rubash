@@ -412,13 +412,214 @@ fn replace_coproc_out_spec(
     }
 }
 
+/// rubash#2200: a construct-level binding for a numbered fd
+/// (>= 3), resolved during apply_coproc_redirects' ordered walk —
+/// the state GNU's coproc child holds after do_redirections
+/// (execute_cmd.c:4244 execute_in_subshell). File carries the
+/// opened description plus the access the binding was created
+/// with (the __RUBASH_FD_* env channel names read and write
+/// handles separately).
+#[derive(Clone)]
+enum CoprocFdBinding {
+    File {
+        file: Rc<FileFd>,
+        read: bool,
+        write: bool,
+    },
+    Closed,
+}
+
+/// How a numbered-fd dup in the coproc redirect walk resolved
+/// (rubash#2200).
+enum CoprocDupBind {
+    /// Nothing bound (the source has no transportable
+    /// description, or the dup is a self-dup).
+    Unbound,
+    /// Bound. If Some, it carries the fd-1/2 source of a move
+    /// (`>&N-`) whose spec the caller must still close — the
+    /// helper cannot touch the specs from behind the borrow.
+    Bound(Option<u32>),
+}
+
+/// The File binding a coproc fd-1/2 spec contributes to a
+/// numbered-fd dup (rubash#2200): a fresh owned copy of the
+/// spec's description. Spec files are write descriptions, so
+/// the binding is write-only; a Null spec binds Closed; the
+/// coproc pipe writer clones like any other description (a
+/// `3>&1` on the construct gives the body a second handle on
+/// its own output pipe, as GNU's fork leaves it).
+fn coproc_spec_binding(spec: &CoprocFdSpec, path: &Option<PathBuf>) -> Option<CoprocFdBinding> {
+    match spec {
+        CoprocFdSpec::File(file) => {
+            let cloned = file.try_clone().ok()?;
+            Some(CoprocFdBinding::File {
+                file: Rc::new(FileFd {
+                    handle: crate::fd::into_handle(cloned),
+                    path: path.clone().unwrap_or_default(),
+                }),
+                read: false,
+                write: true,
+            })
+        }
+        CoprocFdSpec::Null => Some(CoprocFdBinding::Closed),
+        CoprocFdSpec::Pipe(writer) => {
+            let cloned = writer.try_clone().ok()?;
+            Some(CoprocFdBinding::File {
+                file: Rc::new(FileFd {
+                    handle: crate::fd::into_handle(cloned),
+                    path: PathBuf::from("coproc:pipe"),
+                }),
+                read: false,
+                write: true,
+            })
+        }
+    }
+}
+
+/// Resolve a `N>&M` / `N<&M` dup whose TARGET fd is >= 3 in the
+/// coproc redirect walk (rubash#2200): GNU's child dups whatever
+/// description the source fd holds at that point in the sequence
+/// — a binding established earlier in this walk, an fd-1/2 spec,
+/// or the parent shell's fd-table endpoint.
+#[allow(clippy::too_many_arguments)]
+fn coproc_numbered_dup_binding(
+    fd_table: &FdTable,
+    bindings: &mut std::collections::BTreeMap<u32, CoprocFdBinding>,
+    out_spec: &CoprocFdSpec,
+    err_spec: &CoprocFdSpec,
+    out_path: &Option<PathBuf>,
+    err_path: &Option<PathBuf>,
+    fd: u32,
+    target: &str,
+    write_side: bool,
+) -> CoprocDupBind {
+    if is_closed_redirect_target(target) {
+        bindings.insert(fd, CoprocFdBinding::Closed);
+        return CoprocDupBind::Bound(None);
+    }
+    let Some((source_fd, move_source)) = redirect_target_fd_and_move(target) else {
+        // Non-numeric word target: the `>&word` shared-file form
+        // is an fd-1/2 shape in GNU (redir.c r_err_and_out); a
+        // numbered target with a word source binds nothing here.
+        return CoprocDupBind::Unbound;
+    };
+    if source_fd == fd {
+        // A dup of an fd onto itself is a no-op in GNU, and the
+        // move form's self-close is excepted (rubash#1236).
+        return CoprocDupBind::Unbound;
+    }
+    let binding = if let Some(binding) = bindings.get(&source_fd) {
+        Some(binding.clone())
+    } else {
+        match source_fd {
+            1 => coproc_spec_binding(out_spec, out_path),
+            2 => coproc_spec_binding(err_spec, err_path),
+            _ => {
+                let read_file = match fd_table.read_endpoint(source_fd) {
+                    Some(FdReadEndpoint::File(file)) => Some(file),
+                    Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some(fd),
+                    _ => None,
+                };
+                let write_file = match fd_table.write_endpoint(source_fd) {
+                    Some(FdWriteEndpoint::File(file)) => Some(file),
+                    Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => Some(fd),
+                    _ => None,
+                };
+                match (read_file, write_file) {
+                    (Some(read), Some(write)) if Rc::ptr_eq(&read, &write) => {
+                        Some(CoprocFdBinding::File {
+                            file: read,
+                            read: true,
+                            write: true,
+                        })
+                    }
+                    (read, write) => {
+                        let preferred = if write_side {
+                            write
+                                .map(|file| (file, false, true))
+                                .or_else(|| read.map(|file| (file, true, false)))
+                        } else {
+                            read.map(|file| (file, true, false))
+                                .or_else(|| write.map(|file| (file, false, true)))
+                        };
+                        preferred.map(|(file, read, write)| CoprocFdBinding::File {
+                            file,
+                            read,
+                            write,
+                        })
+                    }
+                }
+            }
+        }
+    };
+    let Some(binding) = binding else {
+        return CoprocDupBind::Unbound;
+    };
+    bindings.insert(fd, binding);
+    if move_source {
+        if source_fd >= 3 {
+            bindings.insert(source_fd, CoprocFdBinding::Closed);
+        } else {
+            return CoprocDupBind::Bound(Some(source_fd));
+        }
+    }
+    CoprocDupBind::Bound(None)
+}
+
+/// The fd-1/2 spec a numbered SOURCE fd contributes to a coproc
+/// dup (rubash#2200), with its path label: a binding from this
+/// walk first, then the parent fd table's File endpoint. The
+/// spec owns a fresh dup of the description.
+fn coproc_source_spec(
+    fd_table: &FdTable,
+    bindings: &std::collections::BTreeMap<u32, CoprocFdBinding>,
+    source_fd: u32,
+) -> Option<(CoprocFdSpec, Option<PathBuf>)> {
+    if let Some(binding) = bindings.get(&source_fd) {
+        return match binding {
+            CoprocFdBinding::File { file, .. } => {
+                let dup = crate::fd::duplicate_handle_inheritable(file.handle).ok()?;
+                Some((
+                    CoprocFdSpec::File(crate::fd::handle_to_file(dup)),
+                    Some(file.path.clone()),
+                ))
+            }
+            CoprocFdBinding::Closed => Some((CoprocFdSpec::Null, None)),
+        };
+    }
+    let file = match fd_table.write_endpoint(source_fd) {
+        Some(FdWriteEndpoint::File(file)) => Some(file),
+        Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => Some(fd),
+        _ => match fd_table.read_endpoint(source_fd) {
+            Some(FdReadEndpoint::File(file)) => Some(file),
+            Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some(fd),
+            _ => None,
+        },
+    }?;
+    let dup = crate::fd::duplicate_handle_inheritable(file.handle).ok()?;
+    Some((
+        CoprocFdSpec::File(crate::fd::handle_to_file(dup)),
+        Some(file.path.clone()),
+    ))
+}
+
 /// Outcome of applying a coproc command's own redirects at spawn.
 enum CoprocRedirectOutcome {
     /// Spawn proceeds; carries the coproc pipe writer when an fd-1
     /// redirect displaced it from the child's stdout (rubash#1632:
     /// GNU's redirect save slot in the forked child, held by the
-    /// caller until the coproc retires).
-    Proceed(Option<std::io::PipeWriter>),
+    /// caller until the coproc retires), plus the rubash#2200
+    /// numbered-fd transport: the parent-side inheritable dups
+    /// backing the child's fd>=3 bindings (the caller closes them
+    /// once the spawn settles), the env pairs naming them for a
+    /// respawned child, and the (dup, fd) pairs a direct-route
+    /// caller pins onto the child's raw fds.
+    Proceed {
+        displaced_writer: Option<std::io::PipeWriter>,
+        fd_dups: Vec<crate::fd::HANDLE>,
+        fd_env: Vec<(String, String)>,
+        fd_pins: Vec<(crate::fd::HANDLE, u32)>,
+    },
     /// A redirect was declined after printing its diagnostic
     /// (rubash#1644 `2>&word`): no coproc is created; the caller
     /// fails the command with status 1 (#846 convention).
@@ -4303,6 +4504,10 @@ impl Executor {
         let stdin_result = std::io::pipe();
         let stdout_result = std::io::pipe();
 
+        // rubash#2200: parent-side dups backing the child's
+        // numbered-fd bindings; closed after the spawn settles
+        // (the child holds its own copies by then).
+        let mut coproc_fd_dups: Vec<crate::fd::HANDLE> = Vec::new();
         if let (Ok((stdin_reader, stdin_writer)), Ok((stdout_reader, stdout_writer))) =
             (stdin_result, stdout_result)
         {
@@ -4336,7 +4541,42 @@ impl Executor {
                 stdout_writer,
                 &coproc_stderr_target,
             ) {
-                Ok(CoprocRedirectOutcome::Proceed(writer)) => writer,
+                Ok(CoprocRedirectOutcome::Proceed {
+                    displaced_writer,
+                    fd_dups,
+                    fd_env,
+                    fd_pins,
+                }) => {
+                    // rubash#2200: a respawned child learns its
+                    // numbered-fd bindings from the env pairs (its
+                    // init restores them into its fd table); a
+                    // direct (foreign-program) child gets them
+                    // pinned onto its raw fds on unix — registered
+                    // BEFORE the displaced-writer pre_exec below,
+                    // whose first-free-slot scan must skip the
+                    // pinned numbers.
+                    if direct_plan.is_none() {
+                        for (key, value) in fd_env {
+                            child.env(key, value);
+                        }
+                    } else {
+                        let _ = &fd_env;
+                        #[cfg(unix)]
+                        if !fd_pins.is_empty() {
+                            let pins = fd_pins.clone();
+                            unsafe {
+                                use std::os::unix::process::CommandExt as _;
+                                child.pre_exec(move || {
+                                    super::external_inner::pin_ambient_fds_in_child(&pins)
+                                });
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        let _ = &fd_pins;
+                    }
+                    coproc_fd_dups = fd_dups;
+                    displaced_writer
+                }
                 Ok(CoprocRedirectOutcome::Declined) => {
                     // rubash#1644: the ordered pass declined a
                     // redirect after printing its diagnostic
@@ -4662,6 +4902,17 @@ impl Executor {
             self.exit_code = 1;
         }
 
+        // rubash#2200: the child holds its own copies of the
+        // numbered-fd dups (init-restored handles on the respawn
+        // route, raw-fd pins on the direct route); the parent's
+        // close here, on every path past the spawn attempt. (The
+        // Declined / redirect-error returns above precede dup
+        // creation in apply_coproc_redirects, so there is nothing
+        // to close on those paths.)
+        for dup in coproc_fd_dups {
+            crate::fd::close_handle(dup);
+        }
+
         Ok(())
     }
 
@@ -4803,10 +5054,18 @@ impl Executor {
         // blocks, which additionally misread `>file 2>&1` (the
         // `2>&1` arrived as a bogus Append field). Input kinds are
         // skipped here: stdin is handled above (redirect_in) and by
-        // the stdin body. A dup whose source is fd >= 3 is left
-        // unchanged: the spawned child inherits no extra fds in
-        // rubash's spawn model, so there is nothing faithful to dup
-        // to (pre-existing limitation, same as the old code).
+        // the stdin body.
+        //
+        // rubash#2200: numbered fds (>= 3) are bound during the
+        // same walk into extra_bindings below. GNU's coproc child
+        // applies do_redirections for ANY fd in the forked child
+        // (execute_cmd.c:4244), so a construct-level `3>file` is
+        // live in the body; rubash's spawn model has no fork, so
+        // the bindings ride the __RUBASH_FD_* env channel to a
+        // respawned child (init.rs restores them) and raw-fd pins
+        // to a direct child — see the transport build after the
+        // loop. The fd-1/2 spec paths are tracked alongside so a
+        // dup FROM a spec can label its binding.
         //
         // rubash#1632 interplay: the fd-1 spec starts as the coproc
         // pipe writer; whenever a redirect replaces it,
@@ -4834,42 +5093,96 @@ impl Executor {
             None => self.coproc_stderr_direct_spec()?,
         };
         let mut err_touched = false;
+        // rubash#2200: session paths behind the fd-1/2 File specs
+        // (labels for dup bindings), and the numbered-fd bindings.
+        let mut out_path: Option<PathBuf> = None;
+        let mut err_path: Option<PathBuf> = match &stderr_forward {
+            Some(CoprocStderrForwardTarget::File(path)) => Some(path.clone()),
+            _ => None,
+        };
+        let mut extra_bindings: std::collections::BTreeMap<u32, CoprocFdBinding> =
+            std::collections::BTreeMap::new();
         for redirect in &cmd.redirects {
             let target = self.expand_redirect_target(redirect);
             match redirect.kind {
                 crate::parser::RedirectKind::Output
                 | crate::parser::RedirectKind::ClobberOutput => {
                     let file = self.create_redirect_output(&target, redirect.clobber)?;
-                    match redirect.fd.unwrap_or(1) {
-                        1 => replace_coproc_out_spec(
-                            &mut out_spec,
-                            CoprocFdSpec::File(file),
-                            &mut displaced_writer,
-                        ),
+                    let fd = redirect.fd.unwrap_or(1);
+                    match fd {
+                        1 => {
+                            replace_coproc_out_spec(
+                                &mut out_spec,
+                                CoprocFdSpec::File(file),
+                                &mut displaced_writer,
+                            );
+                            out_path = Some(self.session_path(shell_path_to_windows(
+                                &target,
+                                &self.shell_state.env_vars,
+                            )));
+                        }
                         2 => {
                             err_spec = CoprocFdSpec::File(file);
                             err_touched = true;
+                            err_path = Some(self.session_path(shell_path_to_windows(
+                                &target,
+                                &self.shell_state.env_vars,
+                            )));
                         }
-                        _ => {}
+                        _ => {
+                            // rubash#2200: the file was already
+                            // created by the open above (as before);
+                            // now the binding is kept for the child
+                            // instead of being dropped.
+                            extra_bindings.insert(
+                                fd,
+                                CoprocFdBinding::File {
+                                    file: Rc::new(FileFd {
+                                        handle: crate::fd::into_handle(file),
+                                        path: self.session_path(shell_path_to_windows(
+                                            &target,
+                                            &self.shell_state.env_vars,
+                                        )),
+                                    }),
+                                    read: false,
+                                    write: true,
+                                },
+                            );
+                        }
                     }
                 }
                 crate::parser::RedirectKind::Append => {
-                    let file =
-                        open_redirect_append(&self.session_path(shell_path_to_windows(
-                            &target,
-                            &self.shell_state.env_vars,
-                        )))?;
-                    match redirect.fd.unwrap_or(1) {
-                        1 => replace_coproc_out_spec(
-                            &mut out_spec,
-                            CoprocFdSpec::File(file),
-                            &mut displaced_writer,
-                        ),
+                    let session_target = self
+                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let file = open_redirect_append(&session_target)?;
+                    let fd = redirect.fd.unwrap_or(1);
+                    match fd {
+                        1 => {
+                            replace_coproc_out_spec(
+                                &mut out_spec,
+                                CoprocFdSpec::File(file),
+                                &mut displaced_writer,
+                            );
+                            out_path = Some(session_target);
+                        }
                         2 => {
                             err_spec = CoprocFdSpec::File(file);
                             err_touched = true;
+                            err_path = Some(session_target);
                         }
-                        _ => {}
+                        _ => {
+                            extra_bindings.insert(
+                                fd,
+                                CoprocFdBinding::File {
+                                    file: Rc::new(FileFd {
+                                        handle: crate::fd::into_handle(file),
+                                        path: session_target,
+                                    }),
+                                    read: false,
+                                    write: true,
+                                },
+                            );
+                        }
                     }
                 }
                 crate::parser::RedirectKind::CombinedOutput => {
@@ -4882,13 +5195,15 @@ impl Executor {
                     );
                     err_spec = CoprocFdSpec::File(shared);
                     err_touched = true;
+                    let session_target = self
+                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    out_path = Some(session_target.clone());
+                    err_path = Some(session_target);
                 }
                 crate::parser::RedirectKind::CombinedAppend => {
-                    let file =
-                        open_redirect_append(&self.session_path(shell_path_to_windows(
-                            &target,
-                            &self.shell_state.env_vars,
-                        )))?;
+                    let session_target = self
+                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let file = open_redirect_append(&session_target)?;
                     let shared = file.try_clone()?;
                     replace_coproc_out_spec(
                         &mut out_spec,
@@ -4897,34 +5212,104 @@ impl Executor {
                     );
                     err_spec = CoprocFdSpec::File(shared);
                     err_touched = true;
+                    out_path = Some(session_target.clone());
+                    err_path = Some(session_target);
                 }
-                crate::parser::RedirectKind::CloseOutput => match redirect.fd.unwrap_or(1) {
-                    1 => replace_coproc_out_spec(
-                        &mut out_spec,
-                        CoprocFdSpec::Null,
-                        &mut displaced_writer,
-                    ),
-                    2 => {
-                        err_spec = CoprocFdSpec::Null;
-                        err_touched = true;
+                crate::parser::RedirectKind::CloseOutput => {
+                    let fd = redirect.fd.unwrap_or(1);
+                    match fd {
+                        1 => {
+                            replace_coproc_out_spec(
+                                &mut out_spec,
+                                CoprocFdSpec::Null,
+                                &mut displaced_writer,
+                            );
+                            out_path = None;
+                        }
+                        2 => {
+                            err_spec = CoprocFdSpec::Null;
+                            err_touched = true;
+                            err_path = None;
+                        }
+                        _ => {
+                            extra_bindings.insert(fd, CoprocFdBinding::Closed);
+                        }
                     }
-                    _ => {}
-                },
+                }
                 crate::parser::RedirectKind::DuplicateOutput => {
                     let fd = redirect.fd.unwrap_or(1);
+                    if fd >= 3 {
+                        // rubash#2200: a numbered target binds from
+                        // the walk state (bindings, specs, fd
+                        // table) instead of being dropped. A
+                        // non-numeric, non-close target is an
+                        // ambiguous redirect in GNU (the `>&word`
+                        // shared-file form exists only for fd 1,
+                        // redir.c r_err_and_out) — the same
+                        // diagnostic and Declined disposition as
+                        // the fd-2 word arm below.
+                        if !is_closed_redirect_target(&target)
+                            && redirect_target_fd_and_move(&target).is_none()
+                        {
+                            let raw_word = redirect
+                                .target_metadata
+                                .raw
+                                .strip_prefix('&')
+                                .unwrap_or(&redirect.target_metadata.raw);
+                            eprintln!(
+                                "{}{}: ambiguous redirect",
+                                self.diagnostic_prefix(),
+                                raw_word
+                            );
+                            return Ok(CoprocRedirectOutcome::Declined);
+                        }
+                        let outcome = coproc_numbered_dup_binding(
+                            &self.fd_table,
+                            &mut extra_bindings,
+                            &out_spec,
+                            &err_spec,
+                            &out_path,
+                            &err_path,
+                            fd,
+                            &target,
+                            true,
+                        );
+                        if let CoprocDupBind::Bound(Some(source)) = outcome {
+                            // Move form with an fd-1/2 source: the
+                            // helper bound the target; the source
+                            // spec still closes here.
+                            if source == 1 {
+                                replace_coproc_out_spec(
+                                    &mut out_spec,
+                                    CoprocFdSpec::Null,
+                                    &mut displaced_writer,
+                                );
+                                out_path = None;
+                            } else {
+                                err_spec = CoprocFdSpec::Null;
+                                err_touched = true;
+                                err_path = None;
+                            }
+                        }
+                        continue;
+                    }
                     if fd != 1 && fd != 2 {
                         continue;
                     }
                     if is_closed_redirect_target(&target) {
                         match fd {
-                            1 => replace_coproc_out_spec(
-                                &mut out_spec,
-                                CoprocFdSpec::Null,
-                                &mut displaced_writer,
-                            ),
+                            1 => {
+                                replace_coproc_out_spec(
+                                    &mut out_spec,
+                                    CoprocFdSpec::Null,
+                                    &mut displaced_writer,
+                                );
+                                out_path = None;
+                            }
                             _ => {
                                 err_spec = CoprocFdSpec::Null;
                                 err_touched = true;
+                                err_path = None;
                             }
                         }
                         continue;
@@ -4937,18 +5322,31 @@ impl Executor {
                         if source_fd == fd {
                             continue;
                         }
-                        let spec = match source_fd {
-                            1 => out_spec.dup()?,
-                            2 => err_spec.dup()?,
-                            _ => continue,
+                        // rubash#2200: a numbered SOURCE resolves
+                        // through this walk's bindings and the
+                        // parent fd table (coproc_source_spec);
+                        // before, it hit the catch-all and the dup
+                        // was dropped.
+                        let (spec, source_path) = match source_fd {
+                            1 => (out_spec.dup()?, out_path.clone()),
+                            2 => (err_spec.dup()?, err_path.clone()),
+                            _ => {
+                                match coproc_source_spec(&self.fd_table, &extra_bindings, source_fd)
+                                {
+                                    Some(pair) => pair,
+                                    None => continue,
+                                }
+                            }
                         };
                         match fd {
                             1 => {
-                                replace_coproc_out_spec(&mut out_spec, spec, &mut displaced_writer)
+                                replace_coproc_out_spec(&mut out_spec, spec, &mut displaced_writer);
+                                out_path = source_path;
                             }
                             _ => {
                                 err_spec = spec;
                                 err_touched = true;
+                                err_path = source_path;
                             }
                         }
                         // GNU `>&M-` moves: the source closes in
@@ -4956,16 +5354,24 @@ impl Executor {
                         // self-move, handled above (rubash#1236).
                         if move_source {
                             match source_fd {
-                                1 => replace_coproc_out_spec(
-                                    &mut out_spec,
-                                    CoprocFdSpec::Null,
-                                    &mut displaced_writer,
-                                ),
+                                1 => {
+                                    replace_coproc_out_spec(
+                                        &mut out_spec,
+                                        CoprocFdSpec::Null,
+                                        &mut displaced_writer,
+                                    );
+                                    out_path = None;
+                                }
                                 2 => {
                                     err_spec = CoprocFdSpec::Null;
                                     err_touched = true;
+                                    err_path = None;
                                 }
-                                _ => {}
+                                _ => {
+                                    if extra_bindings.contains_key(&source_fd) {
+                                        extra_bindings.insert(source_fd, CoprocFdBinding::Closed);
+                                    }
+                                }
                             }
                         }
                         continue;
@@ -4988,6 +5394,10 @@ impl Executor {
                         );
                         err_spec = CoprocFdSpec::File(shared);
                         err_touched = true;
+                        let session_target = self
+                            .session_path(shell_path_to_windows(path, &self.shell_state.env_vars));
+                        out_path = Some(session_target.clone());
+                        err_path = Some(session_target);
                     } else {
                         // `2>&word` is an ambiguous redirect in
                         // GNU (and in rubash's plain commands):
@@ -5008,8 +5418,167 @@ impl Executor {
                         return Ok(CoprocRedirectOutcome::Declined);
                     }
                 }
+                crate::parser::RedirectKind::DuplicateInput => {
+                    let fd = redirect.fd.unwrap_or(0);
+                    if fd >= 3 {
+                        // rubash#2200: a dup INTO a numbered fd,
+                        // resolved like the output dup's numbered
+                        // target (coproc_numbered_dup_binding). A
+                        // non-numeric, non-close target is an
+                        // ambiguous redirect in GNU, as on the
+                        // output side.
+                        if !is_closed_redirect_target(&target)
+                            && redirect_target_fd_and_move(&target).is_none()
+                        {
+                            let raw_word = redirect
+                                .target_metadata
+                                .raw
+                                .strip_prefix('&')
+                                .unwrap_or(&redirect.target_metadata.raw);
+                            eprintln!(
+                                "{}{}: ambiguous redirect",
+                                self.diagnostic_prefix(),
+                                raw_word
+                            );
+                            return Ok(CoprocRedirectOutcome::Declined);
+                        }
+                        let outcome = coproc_numbered_dup_binding(
+                            &self.fd_table,
+                            &mut extra_bindings,
+                            &out_spec,
+                            &err_spec,
+                            &out_path,
+                            &err_path,
+                            fd,
+                            &target,
+                            false,
+                        );
+                        if let CoprocDupBind::Bound(Some(source)) = outcome {
+                            // Move form with an fd-1/2 source: the
+                            // helper bound the target; the source
+                            // spec still closes here.
+                            if source == 1 {
+                                replace_coproc_out_spec(
+                                    &mut out_spec,
+                                    CoprocFdSpec::Null,
+                                    &mut displaced_writer,
+                                );
+                                out_path = None;
+                            } else {
+                                err_spec = CoprocFdSpec::Null;
+                                err_touched = true;
+                                err_path = None;
+                            }
+                        }
+                    }
+                    // Fds 0-2 keep the pre-#2200 behavior: stdin
+                    // dups belong to the redirect_in pre-pass, and
+                    // list-level input dups on 1/2 were never
+                    // applied here.
+                }
+                crate::parser::RedirectKind::Input => {
+                    let fd = redirect.fd.unwrap_or(0);
+                    if fd >= 3 {
+                        // rubash#2200: a numbered input redirect
+                        // binds in the child; the file opens here,
+                        // as the output arms' files do.
+                        if is_closed_redirect_target(&target) {
+                            extra_bindings.insert(fd, CoprocFdBinding::Closed);
+                        } else if redirect_target_fd(&target).is_none() {
+                            // /dev/fd-style alias targets keep the
+                            // alias machinery (the fd-0 pre-pass
+                            // makes the same distinction); plain
+                            // paths open now.
+                            let file = self.open_input_redirect(&target)?;
+                            extra_bindings.insert(
+                                fd,
+                                CoprocFdBinding::File {
+                                    file: Rc::new(FileFd {
+                                        handle: crate::fd::into_handle(file),
+                                        path: self.session_path(shell_path_to_windows(
+                                            &target,
+                                            &self.shell_state.env_vars,
+                                        )),
+                                    }),
+                                    read: true,
+                                    write: false,
+                                },
+                            );
+                        }
+                    }
+                }
+                crate::parser::RedirectKind::ReadWrite => {
+                    let fd = redirect.fd.unwrap_or(0);
+                    if fd >= 3 {
+                        // rubash#2200: a numbered read-write
+                        // redirect binds both directions.
+                        let session_target = self.session_path(shell_path_to_windows(
+                            &target,
+                            &self.shell_state.env_vars,
+                        ));
+                        let file = std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(&session_target)?;
+                        extra_bindings.insert(
+                            fd,
+                            CoprocFdBinding::File {
+                                file: Rc::new(FileFd {
+                                    handle: crate::fd::into_handle(file),
+                                    path: session_target,
+                                }),
+                                read: true,
+                                write: true,
+                            },
+                        );
+                    }
+                }
+                crate::parser::RedirectKind::CloseInput => {
+                    let fd = redirect.fd.unwrap_or(0);
+                    if fd >= 3 {
+                        extra_bindings.insert(fd, CoprocFdBinding::Closed);
+                    }
+                }
                 _ => {}
             }
+        }
+        // rubash#2200: materialize the numbered-fd bindings. Each
+        // File binding is duplicated to a fresh inheritable
+        // handle; the binding crosses as __RUBASH_FD_* env pairs
+        // (a respawned child's init restores them into its fd
+        // table) and, for a direct-route child on unix, as a
+        // (dup, fd) pin pair the caller registers in pre_exec.
+        // Closed bindings need no transport: the child inherits
+        // nothing at >= 3 except through this channel. Dups are
+        // created only here, after the walk — the Declined and
+        // Err exits above precede this point, so no dup can leak
+        // on a refused spawn.
+        let mut fd_dups: Vec<crate::fd::HANDLE> = Vec::new();
+        let mut fd_env: Vec<(String, String)> = Vec::new();
+        let mut fd_pins: Vec<(crate::fd::HANDLE, u32)> = Vec::new();
+        for (fd, binding) in &extra_bindings {
+            let CoprocFdBinding::File { file, read, write } = binding else {
+                continue;
+            };
+            let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) else {
+                continue;
+            };
+            if *read {
+                fd_env.push((format!("__RUBASH_FD_HANDLE_{fd}"), format!("{dup:#x}")));
+                fd_env.push((
+                    format!("__RUBASH_FD_PATH_{fd}"),
+                    file.path.to_string_lossy().into_owned(),
+                ));
+            }
+            if *write {
+                fd_env.push((format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}")));
+                fd_env.push((
+                    format!("__RUBASH_FD_WPATH_{fd}"),
+                    file.path.to_string_lossy().into_owned(),
+                ));
+            }
+            fd_pins.push((dup, *fd));
+            fd_dups.push(dup);
         }
         child.stdout(out_spec.into_stdio());
         if err_touched {
@@ -5023,7 +5592,12 @@ impl Executor {
             child.stdin(stdio);
         }
 
-        Ok(CoprocRedirectOutcome::Proceed(displaced_writer))
+        Ok(CoprocRedirectOutcome::Proceed {
+            displaced_writer,
+            fd_dups,
+            fd_env,
+            fd_pins,
+        })
     }
 
     /// rubash#1644: the fd-2 spec a coproc dup (`>&2`) must copy
