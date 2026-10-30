@@ -1073,6 +1073,8 @@ impl Executor {
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             alias_select_scan_memo: RefCell::new(None),
             fd_var_external_undo: Vec::new(),
+            fd_var_pending_closes: Vec::new(),
+            fd_var_close_restore: Vec::new(),
             deferred_varredir_closes: Vec::new(),
             read_deadline: None,
             read_timed_out: false,

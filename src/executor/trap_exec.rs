@@ -3790,7 +3790,7 @@ impl Executor {
             // (exec redirections are never undone). A failed redirect stops
             // the list — do_redirections returns on the first error.
             if redirect.fd_var.is_some() {
-                match self.execute_dynamic_fd_var_redirect(redirect, false) {
+                match self.execute_dynamic_fd_var_redirect(redirect, false, false) {
                     Ok(_) => {}
                     Err(ExecuteError::IoError(error)) => {
                         let mut stderr = Vec::new();
@@ -5006,6 +5006,8 @@ impl Executor {
         }
         let mut redirect_failed = false;
         self.fd_var_external_undo.clear();
+        self.fd_var_pending_closes.clear();
+        self.fd_var_close_restore.clear();
         for redirect in &cmd.redirects {
             let Some(name) = redirect.fd_var.as_deref() else {
                 continue;
@@ -5023,7 +5025,7 @@ impl Executor {
             let prior_typed = self.shell_state.variables.get(&resolved).cloned();
             self.fd_var_external_undo
                 .push((resolved, prior, prior_typed));
-            match self.execute_dynamic_fd_var_redirect(redirect, auto_close) {
+            match self.execute_dynamic_fd_var_redirect(redirect, auto_close, true) {
                 Ok(_) => {}
                 Err(ExecuteError::IoError(error)) => {
                     let mut stderr = Vec::new();
@@ -5161,12 +5163,51 @@ impl Executor {
                 }
             }
         }
+        // rubash#2272: closes the finishing command recorded
+        // (fd_var_pending_closes) were performed in the table by
+        // apply_external_fd_delivery for the spawn; restore the
+        // parent's bindings from its snapshots now that the command
+        // has completed. Closes no delivery consumed (in-process and
+        // force-fork null faces) are dropped unapplied — GNU scopes
+        // them to the command as well.
+        self.fd_var_pending_closes.clear();
+        let close_restore = std::mem::take(&mut self.fd_var_close_restore);
+        for (fd, entry, marker) in close_restore {
+            match entry {
+                Some(entry) => {
+                    self.fd_table.entries.insert(fd, entry);
+                }
+                None => {
+                    self.fd_table.entries.remove(&fd);
+                }
+            }
+            match marker {
+                Some(value) => {
+                    self.shell_state.env_vars.insert(fd_closed_key(fd), value);
+                }
+                None => {
+                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                }
+            }
+        }
     }
 
     pub(in crate::executor) fn execute_dynamic_fd_var_redirect(
         &mut self,
         redirect: &Redirect,
         auto_close: bool,
+        // rubash#2272: when true (the simple-command funnel), the
+        // closes a `{var}` entry asks for — close-form targets and
+        // move-form dup sources — are only RECORDED in
+        // fd_var_pending_closes, not performed in this table: GNU
+        // scopes them to the command (in the fork for external
+        // commands), and performing them here destroyed the parent's
+        // bindings and made the ordered redirect preflight reject
+        // the very dup the applier had just serviced. The exec face
+        // and the compound scope path pass false: exec's closes are
+        // persistent by definition, and the scope restores its own
+        // snapshots.
+        defer_closes: bool,
     ) -> Result<bool, ExecuteError> {
         let Some(name) = redirect.fd_var.as_deref() else {
             return Ok(false);
@@ -5241,7 +5282,15 @@ impl Executor {
                         format!("{name}: ambiguous redirect"),
                     )));
                 }
-                self.close_dynamic_input_fd(name);
+                // rubash#2272: on the funnel path the close is only
+                // recorded (see the defer_closes parameter) — GNU
+                // closes the descriptor in the command's own context,
+                // and the parent's binding must survive the command.
+                if defer_closes {
+                    self.record_fd_var_pending_close(name);
+                } else {
+                    self.close_dynamic_input_fd(name);
+                }
                 return Ok(true);
             }
             crate::parser::RedirectKind::CloseOutput => {
@@ -5251,7 +5300,11 @@ impl Executor {
                         format!("{name}: ambiguous redirect"),
                     )));
                 }
-                self.close_dynamic_output_fd(name)?;
+                if defer_closes {
+                    self.record_fd_var_pending_close(name);
+                } else {
+                    self.close_dynamic_output_fd(name)?;
+                }
                 return Ok(true);
             }
             crate::parser::RedirectKind::DuplicateInput => {
@@ -5280,7 +5333,14 @@ impl Executor {
                         )));
                     }
                     if move_source {
-                        self.close_persistent_fd(source_fd)?;
+                        // rubash#2272: the move close is scoped to
+                        // the command like every other close on the
+                        // funnel path (see defer_closes).
+                        if defer_closes {
+                            self.fd_var_pending_closes.push(source_fd);
+                        } else {
+                            self.close_persistent_fd(source_fd)?;
+                        }
                     }
                     close_after_success(self, fd)?;
                     return Ok(true);
@@ -5306,7 +5366,11 @@ impl Executor {
                         )));
                     }
                     if move_source {
-                        self.close_persistent_fd(source_fd)?;
+                        if defer_closes {
+                            self.fd_var_pending_closes.push(source_fd);
+                        } else {
+                            self.close_persistent_fd(source_fd)?;
+                        }
                     }
                     close_after_success(self, fd)?;
                     return Ok(true);
@@ -5684,6 +5748,17 @@ impl Executor {
         )
     }
 
+    /// rubash#2272: record the descriptor a `{var}<&-` / `{var}>&-`
+    /// entry closes — the number the var currently holds — in
+    /// fd_var_pending_closes instead of closing it in this table
+    /// (see the defer_closes parameter of
+    /// execute_dynamic_fd_var_redirect).
+    fn record_fd_var_pending_close(&mut self, name: &str) {
+        if let Some(fd) = self.dynamic_fd_variable_value(name) {
+            self.fd_var_pending_closes.push(fd);
+        }
+    }
+
     pub(in crate::executor) fn close_dynamic_fd(&mut self, name: &str) -> Result<(), ExecuteError> {
         if let Some(fd) = self.dynamic_fd_variable_value(name) {
             self.close_persistent_fd(fd)?;
@@ -5731,7 +5806,7 @@ impl Executor {
         Ok(())
     }
 
-    fn dynamic_fd_variable_value(&self, name: &str) -> Option<u32> {
+    pub(in crate::executor) fn dynamic_fd_variable_value(&self, name: &str) -> Option<u32> {
         if let Some((array_name, index)) = parse_array_numeric_subscript(name) {
             return self
                 .array_element_parameter_value(&format!("{array_name}[{index}]"))
