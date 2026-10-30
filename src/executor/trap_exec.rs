@@ -1623,6 +1623,11 @@ impl Executor {
                     continue;
                 }
                 self.exit_code = 128 + signal;
+                // rubash#2236: record the death so an in-process
+                // child's exit boundary can queue the parent's
+                // job-death notice for it (a real child's wait(2)
+                // status carries the same fact).
+                crate::builtins::kill::note_adjudicated_signal_death(signal);
                 // rubash#1662: in an interactive shell this abort is a
                 // DISCARD-class unwind (GNU: the interrupted command
                 // ends with 128+sig and the reader prompts again), not
@@ -1877,6 +1882,10 @@ impl Executor {
                     {
                         self.signal_discard_pending = true;
                     }
+                    // rubash#2236: same death record as the boundary
+                    // dispatch — a blocked wait inside an in-process
+                    // child adjudicates the child's death too.
+                    crate::builtins::kill::note_adjudicated_signal_death(signal);
                     return Err(ExecuteError::ExitCode(128 + signal));
                 }
             }
@@ -3464,6 +3473,16 @@ impl Executor {
         // where GNU reads parent + 1.
         child.env(
             "__RUBASH_SUBSHELL_DEPTH",
+            (self.shell_state.subshell_depth.get() + 1).to_string(),
+        );
+        // rubash#1582: the same fork makes the producer's own pid the
+        // pid of the seeded level (variables.c:1511 get_bashpid =
+        // getpid), so the BASHPID origin base rides with the depth —
+        // the consumer form (external_setup.rs) stamps the pair, and
+        // without the base this child's $BASHPID read its real pid + 1
+        // while its own children observed the real pid as $PPID.
+        child.env(
+            "__RUBASH_BG_BASHPID_BASE",
             (self.shell_state.subshell_depth.get() + 1).to_string(),
         );
         // rubash#2032: process_substitute's producer is a forked child
