@@ -299,6 +299,43 @@ pub(crate) fn mirror_env_remove(name: &str) {
     });
 }
 
+/// rubash#2178: birth-value lookup for the G-03 Drop restore — the one
+/// place a journal key (shell spelling) is matched against the birth
+/// snapshot (process-block spelling). The snapshot is a verbatim import
+/// of the process environment block: it also seeds the variable table,
+/// whose names are case-sensitive shell names (GNU variables.c
+/// initialize_shell_variables imports environ with its stored
+/// spelling), so canonicalizing the snapshot itself would corrupt the
+/// table import. The two spellings must instead meet here, on the
+/// platform's own identity rules. Windows environment names are
+/// case-insensitive (std::env's get/set/remove all resolve
+/// case-insensitively there) and the block commonly stores "Path"
+/// where the journal speaks "PATH", so under `windows_case_rules` an
+/// exact-spelling miss falls back to a case-insensitive scan. The
+/// exact match is tried first: when the block somehow carries both
+/// spellings, the journal's own spelling is the unambiguous one.
+/// Without Windows rules a case variant is a DIFFERENT variable
+/// (POSIX names are case-sensitive), so the lookup stays exact and
+/// POSIX behavior is unchanged. A journaled key whose birth entry
+/// exists under any spelling must never fall into the restore's
+/// remove branch.
+pub(crate) fn snapshot_birth_value<'a>(
+    snapshot: &'a std::collections::HashMap<String, String>,
+    name: &str,
+    windows_case_rules: bool,
+) -> Option<&'a String> {
+    if let Some(value) = snapshot.get(name) {
+        return Some(value);
+    }
+    if !windows_case_rules {
+        return None;
+    }
+    snapshot
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value)
+}
+
 pub(crate) fn set_process_env(name: &str, value: impl AsRef<str>) {
     // #916: the process env mirrors exactly the special-name set below.
     // Every other name reaches children through the explicit env built at
@@ -452,5 +489,64 @@ pub(in crate::executor) fn set_marked_var(
         mark_env_name(env_vars, key, name);
     } else {
         unmark_env_name(env_vars, key, name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_birth_value;
+    use std::collections::HashMap;
+
+    fn snapshot_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn issue2178_snapshot_birth_value_prefers_the_exact_spelling() {
+        // When the block somehow carries both spellings, the journal's
+        // own spelling is the unambiguous one — the case-insensitive
+        // scan must not shadow it.
+        let snapshot = snapshot_of(&[("Path", "variant"), ("PATH", "exact")]);
+        assert_eq!(
+            snapshot_birth_value(&snapshot, "PATH", true).map(String::as_str),
+            Some("exact")
+        );
+        assert_eq!(
+            snapshot_birth_value(&snapshot, "Path", true).map(String::as_str),
+            Some("variant")
+        );
+    }
+
+    #[test]
+    fn issue2178_snapshot_birth_value_finds_case_variant_under_windows_rules() {
+        // The #2178 shape itself: the Windows block spells it "Path",
+        // the journal speaks "PATH" — the birth value must be found,
+        // or the Drop restore deletes the host's PATH.
+        let snapshot = snapshot_of(&[("Path", "birth")]);
+        assert_eq!(
+            snapshot_birth_value(&snapshot, "PATH", true).map(String::as_str),
+            Some("birth")
+        );
+    }
+
+    #[test]
+    fn issue2178_snapshot_birth_value_case_variant_is_distinct_without_windows_rules() {
+        // POSIX names are case-sensitive: "Path" and "PATH" are
+        // different variables, so the variant must NOT resolve.
+        let snapshot = snapshot_of(&[("Path", "birth")]);
+        assert_eq!(snapshot_birth_value(&snapshot, "PATH", false), None);
+    }
+
+    #[test]
+    fn issue2178_snapshot_birth_value_absent_name_stays_absent() {
+        // A name genuinely absent at birth must still miss under both
+        // rule sets, so the restore keeps removing session-created
+        // variables (the G-03 semantics are unchanged).
+        let snapshot = snapshot_of(&[("OTHER", "x")]);
+        assert_eq!(snapshot_birth_value(&snapshot, "PATH", true), None);
+        assert_eq!(snapshot_birth_value(&snapshot, "PATH", false), None);
     }
 }

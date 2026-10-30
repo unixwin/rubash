@@ -877,6 +877,73 @@ mod unit_tests {
         );
         assert_eq!(executor.last_exit_code(), 1);
     }
+
+    // rubash#2178: on Windows the process block spells the variable
+    // "Path" while the write journal records the shell spelling
+    // "PATH". The Drop restore must still find the birth value: a
+    // journaled write restores to it, and a journaled removal
+    // reinstates it — neither may delete the host's PATH. The
+    // snapshot's spelling is arranged by hand so the pin does not
+    // depend on the runner's block details (the standard Windows
+    // block spells it "Path" anyway); the write/removal themselves go
+    // through the production mirror funnel.
+    #[cfg(windows)]
+    #[test]
+    fn issue2178_drop_restore_finds_birth_value_spelled_path_in_snapshot() {
+        let ambient = std::env::var_os("PATH");
+        let birth = "issue2178-birth-value";
+        let journal_value = "issue2178-journal-value";
+        let mut executor = Executor::new();
+        let _ = executor.process_env_snapshot.remove("PATH");
+        executor
+            .process_env_snapshot
+            .insert("Path".to_string(), birth.to_string());
+        {
+            let _journal =
+                crate::executor::local_helpers::push_env_journal(&executor.env_write_journal);
+            crate::executor::local_helpers::set_process_env("PATH", journal_value);
+        }
+        drop(executor);
+        let after = std::env::var_os("PATH");
+        match ambient {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(
+            after.as_deref().and_then(|value| value.to_str()),
+            Some(birth),
+            "Drop restore must return PATH to its birth value, not delete it"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue2178_drop_restore_reinstates_path_removed_during_lifetime() {
+        let ambient = std::env::var_os("PATH");
+        let birth = "issue2178-birth-value";
+        let mut executor = Executor::new();
+        let _ = executor.process_env_snapshot.remove("PATH");
+        executor
+            .process_env_snapshot
+            .insert("Path".to_string(), birth.to_string());
+        std::env::set_var("PATH", "issue2178-live-value");
+        {
+            let _journal =
+                crate::executor::local_helpers::push_env_journal(&executor.env_write_journal);
+            crate::executor::local_helpers::unset_process_env("PATH");
+        }
+        drop(executor);
+        let after = std::env::var_os("PATH");
+        match ambient {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(
+            after.as_deref().and_then(|value| value.to_str()),
+            Some(birth),
+            "Drop restore must reinstate the birth PATH, not leave it deleted"
+        );
+    }
 }
 
 mod dollar_flags_tests {
