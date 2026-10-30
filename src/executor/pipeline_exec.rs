@@ -620,6 +620,33 @@ pub(in crate::executor) fn compound_redirect_needs_procsub_rewrite(command: &Com
     .any(|redirect| redirect.target.starts_with(">("))
 }
 
+/// rubash#2255 (§8 face): a list-only redirect that merely DUPS a
+/// stdio descriptor (`3>&1`, `4<&0`, move forms included) does not
+/// trigger the shell-writer decline in execute_shell_writer_pipeline.
+/// At the two-stage composition this path demonstrably delivers such
+/// a dup: the producer child's only foreign pipe is its own stream
+/// pipe — the stdio alias the pin guard (rubash#1626/#2284)
+/// recognizes — so the dup of fd 1/2 lands. Declining would reroute
+/// the producer to the sequential stage spawner, whose fd delivery
+/// cannot dup a capture-pipe stdio endpoint onto a numbered slot
+/// today (`sh -c 'echo o >&3' 3>&1 | wc -c` regressed from printing
+/// 2 to a child EBADF when the decline covered dups) — a
+/// pre-existing sequential-face defect, visible at mid/last stage
+/// positions on master, and not one of §8's shapes. File, close,
+/// and dup-of-a-non-stdio-fd bindings keep the decline: those are
+/// exactly the pins the consumer-chain pipes break. (At ≥3 stages
+/// the stdio dup is lost on BOTH paths today; the exemption
+/// preserves master behaviour there instead of changing its shape.)
+fn redirect_is_stdio_dup(redirect: &crate::parser::Redirect) -> bool {
+    redirect.fd_var.is_none()
+        && matches!(
+            redirect.kind,
+            crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::DuplicateOutput
+        )
+        && super::execution_misc::dup_spelling_source_fd(&redirect.target).is_some_and(|fd| fd <= 2)
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_and_or_list_command(
         &mut self,
@@ -2443,6 +2470,41 @@ impl Executor {
         if !command_is_compound_pipeline_stage(commands[0])
             && !self.command_first_word_is_function(commands[0])
             && !self.command_is_streamable_external_producer(commands[0])?
+        {
+            return Ok(None);
+        }
+        // rubash#2255 (§8 face): an EXTERNAL producer carrying its own
+        // numbered or {var} redirect (a list-only entry such as
+        // `3<seed`) must not take this path. The producer runs through
+        // the sequential stage spawner, whose fd delivery opens the
+        // binding and registers a pre_exec pin for its slot — but this
+        // path has already spawned the consumers on pre-created pipes,
+        // so the producer child is forked while those foreign
+        // anonymous pipes occupy the low descriptor slots. One parks
+        // exactly on the pin's target, and the pin guard
+        // (pin_ambient_fds_in_child, rubash#1626/#2284) cannot tell a
+        // foreign pipe apart from std's exec-error channel, so it
+        // skips the pin and the binding is silently dropped
+        // (`sh -c 'cat <&3' 3<seed.txt | cat | wc -c` printed 0; the
+        // child had no fd 3 at all, while fd >= 4 targets survived —
+        // the foreign pipes only reach the lowest slots). GNU
+        // applies the element's own list in its fork
+        // (execute_cmd.c:2620 execute_pipeline; redir.c:237
+        // do_redirections), so decline to the sequential stage loop,
+        // which spawns stage 0 in a clean fd layout and delivers the
+        // binding — the same decline the concurrent admissions make
+        // for list-only members (concurrent_external_stage_spec).
+        // Compound and function producers bind their numbered
+        // redirects through their own stage funnels, not the pin,
+        // and keep this path. A redirect that merely dups a stdio
+        // descriptor (`3>&1`) is likewise exempt — this path
+        // delivers it at the two-stage composition, and the
+        // sequential spawner cannot (see redirect_is_stdio_dup).
+        if !command_is_compound_pipeline_stage(commands[0])
+            && !self.command_first_word_is_function(commands[0])
+            && commands[0].redirects.iter().any(|redirect| {
+                redirect.is_list_only_redirect() && !redirect_is_stdio_dup(redirect)
+            })
         {
             return Ok(None);
         }
