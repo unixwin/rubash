@@ -393,6 +393,58 @@ pub(crate) fn shell_text_to_raw_bytes(text: &str) -> Vec<u8> {
     output
 }
 
+/// Byte length of the longest prefix of `text` whose
+/// [`shell_text_to_raw_bytes`] decoding is at most `raw_len` bytes,
+/// cut only at a decode-unit boundary. This is the inverse accounting
+/// for a consumer that read raw bytes off a shared descriptor: GNU
+/// keeps one kernel offset for fd 0 (lib/sh/zread.c:99 zread reads
+/// exactly the requested bytes), so a foreground external that read
+/// `raw_len` bytes of the FUNCTION_STDIN remainder advances the
+/// shell-text cursor by the transport length of those bytes — the
+/// cursor is a byte index into the shell text, and a unit a child
+/// stopped inside of (a multi-byte char read part-way) stays whole
+/// for the next reader, the one place the transport model cannot
+/// express GNU's mid-char resume.
+pub(crate) fn shell_text_prefix_for_raw_len(text: &str, raw_len: usize) -> usize {
+    let mut transport = 0usize;
+    let mut raw = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        // (transport bytes, raw bytes) of the decode unit starting at
+        // `ch` — the same unit grammar shell_text_to_raw_bytes walks.
+        let (unit_transport, unit_raw) = if ch == crate::executor::markers::LITERAL_CHAR_ESCAPE {
+            match chars.peek().copied() {
+                Some(next) => (ch.len_utf8() + next.len_utf8(), next.len_utf8()),
+                None => (ch.len_utf8(), ch.len_utf8()),
+            }
+        } else if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
+            match chars.peek().copied() {
+                Some(next) if next as u32 == RAW_BYTE_MARKER_ESCAPE => {
+                    (ch.len_utf8() + next.len_utf8(), ch.len_utf8())
+                }
+                Some(next)
+                    if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(next as u32)) =>
+                {
+                    (ch.len_utf8() + next.len_utf8(), 1)
+                }
+                _ => (ch.len_utf8(), ch.len_utf8()),
+            }
+        } else {
+            (ch.len_utf8(), ch.len_utf8())
+        };
+        if raw + unit_raw > raw_len {
+            break;
+        }
+        raw += unit_raw;
+        transport += unit_transport;
+        // Consume the unit's second char where the unit has one.
+        if unit_transport > ch.len_utf8() {
+            chars.next();
+        }
+    }
+    transport
+}
+
 /// Decode owner-tagged raw-byte marker pairs into byte chars (WTF-8 style:
 /// byte value == code point) for the Windows child-argv boundary.
 ///
