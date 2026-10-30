@@ -1729,6 +1729,11 @@ impl Executor {
             use std::io::Write;
             let _ = std::io::stdout().flush();
             let _ = std::io::stderr().flush();
+            // rubash#2179: the image is about to be replaced; any
+            // output-procsub feed still in flight would die with it.
+            // Complete the transfers first (the consumers themselves
+            // keep running, as GNU's do across this boundary).
+            self.drain_procsub_feeds();
             // rubash#1832: the direct path composed this process
             // environment from the shell state, whose SHLVL is the
             // live level — stamp the adjusted one (GNU's

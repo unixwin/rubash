@@ -2642,6 +2642,14 @@ impl Drop for Executor {
             crate::builtins::kill::unregister_signal_mailbox(std::process::id());
         }
 
+        // rubash#2179: outstanding output-procsub feeds complete here,
+        // BEFORE the process-exit skip below: unlike the environment,
+        // a feed's payload is observable outside this process — it
+        // belongs to a consumer child that outlives the shell. The
+        // process-exit executor is exactly the one whose feeds race
+        // `std::process::exit`, so the drain is not skipped for it.
+        self.drain_procsub_feeds();
+
         // startup21: the process-env restore models an in-process child
         // leaving its parent's env untouched (rubash#182). The process-exit
         // executor's process dies with this drop — nothing can observe its

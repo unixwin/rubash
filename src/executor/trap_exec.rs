@@ -2818,7 +2818,7 @@ impl Executor {
     /// arm's spawn-and-wait simulation.
     #[cfg(unix)]
     fn try_exec_image_replacement_with_stdio(
-        &self,
+        &mut self,
         cmd: &CommandNode,
         stdout: Option<Stdio>,
         stderr: Option<Stdio>,
@@ -2835,6 +2835,12 @@ impl Executor {
             Some(stdio) => stdio,
             None => self.exec_inherited_stdio(2).ok()?,
         };
+        // rubash#2179: a successful replacement ends this process
+        // lifetime; complete any outstanding output-procsub feeds
+        // first. (A decline inside replace_process_image leaves the
+        // shell running with the payloads already delivered — the
+        // state GNU is in at this point by construction.)
+        self.drain_procsub_feeds();
         let status = crate::builtins::exec::replace_process_image(
             &cmd.words[1..],
             &self.shell_state.env_vars,
@@ -3152,6 +3158,10 @@ impl Executor {
             // descriptor, keep the simulation rather than replacing
             // with the wrong (inherited) descriptors.
             if let Some(stdio) = stdio {
+                // rubash#2179: complete outstanding output-procsub
+                // feeds before a replacement ends this process
+                // lifetime (see try_exec_image_replacement_with_stdio).
+                self.drain_procsub_feeds();
                 if let Some(status) = crate::builtins::exec::replace_process_image(
                     &cmd.words[1..],
                     &self.shell_state.env_vars,

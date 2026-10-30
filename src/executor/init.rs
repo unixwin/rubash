@@ -840,6 +840,7 @@ impl Executor {
             owns_signal_mailbox,
             is_process_exit_executor: process_exit,
             background_children: HashMap::new(),
+            procsub_feed_handles: Vec::new(),
             procsub_stream_children: HashMap::new(),
             pending_job_completions: Vec::new(),
             pending_coproc_retirements: Vec::new(),

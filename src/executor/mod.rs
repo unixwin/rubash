@@ -576,6 +576,18 @@ pub struct Executor {
     /// executors keep the restore.
     is_process_exit_executor: bool,
     background_children: HashMap<u32, crate::fd::SpawnedChild>,
+    /// rubash#2179: writer threads feeding output process-substitution
+    /// consumers (external_setup::spawn_output_process_substitution_child).
+    /// The feed is the shell's half of the substitution rendezvous: in
+    /// GNU the producer's bytes enter the live pipe during the command
+    /// itself (subst.c:6362 process_substitute forks the consumer at
+    /// materialization), so at shell exit nothing remains to deliver.
+    /// Rubash's deferred feed must therefore be COMPLETED, not
+    /// abandoned, before this executor's process lifetime ends —
+    /// drain_procsub_feeds joins these threads, and Drop plus the
+    /// image-replacement paths call it. Finished handles are pruned at
+    /// the next spawn so a long-lived shell does not accumulate them.
+    procsub_feed_handles: Vec<std::thread::JoinHandle<()>>,
     /// rubash#1952: pids spawned as streamed input process
     /// substitutions (real children in background_children), mapped
     /// to whether the boundary reap has spent its one bounded grace
