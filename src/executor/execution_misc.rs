@@ -1028,24 +1028,31 @@ fn protect_unmatched_double_quoted_backticks(source: &str) -> String {
 /// (random.c:51), `last_value` backs get_random_number's resample-on-repeat
 /// loop (variables.c:1428-1431, reset to 0 by sbrand on every `RANDOM=`
 /// assignment), and `rseed32` is SRANDOM's separate seed (random.c:132) so
-/// SRANDOM draws never perturb the RANDOM sequence.
+/// SRANDOM draws never perturb the RANDOM sequence. `last32` mirrors
+/// random.c:133 `last_rand32`, the previous SRANDOM draw, which
+/// get_urandom32 records on every return and whose fallback arm
+/// resamples against.
 #[derive(Debug, Clone)]
 pub(crate) struct RandomGen {
     pub rseed: Cell<u32>,
     pub last_value: Cell<u32>,
     pub rseed32: Cell<u32>,
+    pub last32: Cell<u32>,
 }
 
 impl RandomGen {
     /// GNU variables.c:663-664 seeds both generators from genseed()
     /// (time/uid/pid mix) at startup; epoch microseconds is the rubash
-    /// equivalent of that entropy.
+    /// equivalent of that entropy. sbrand32 sets last_rand32 to the
+    /// seed (random.c:150-153), so `last32` starts at the rseed32 seed.
     pub(crate) fn seeded() -> Self {
         let seed = current_epoch_micros() as u32;
+        let seed32 = seed ^ 0x9e37_79b9;
         Self {
             rseed: Cell::new(seed),
             last_value: Cell::new(0),
-            rseed32: Cell::new(seed ^ 0x9e37_79b9),
+            rseed32: Cell::new(seed32),
+            last32: Cell::new(seed32),
         }
     }
 
@@ -1056,6 +1063,7 @@ impl RandomGen {
             rseed: Cell::new(self.rseed.get()),
             last_value: Cell::new(self.last_value.get()),
             rseed32: Cell::new(self.rseed32.get()),
+            last32: Cell::new(self.last32.get()),
         }
     }
 
@@ -1065,6 +1073,7 @@ impl RandomGen {
         self.rseed.set(saved.rseed.get());
         self.last_value.set(saved.last_value.get());
         self.rseed32.set(saved.rseed32.get());
+        self.last32.set(saved.last32.get());
     }
 
     /// GNU variables.c:1418-1423 get_random_number: entering a subshell
@@ -1147,14 +1156,83 @@ pub(in crate::executor) fn next_random_from_state(
     }
 }
 
-/// GNU lib/sh/random.c:140-146 brand32. SRANDOM on Linux reads
-/// getrandom(2) (random.c:226-240 get_urandom32) so its values are entropy
-/// and unseedable; this deterministic fallback only needs to stay off
-/// RANDOM's rseed.
+/// One 32-bit draw from the operating system's entropy source:
+/// /dev/urandom on unix (kept open across draws, mirroring the
+/// persistent urandfd of GNU's getrandom emulation, random.c:183-215),
+/// BCryptGenRandom's system-preferred RNG on Windows. None where the
+/// platform offers neither or the draw fails — the caller then takes
+/// the deterministic fallback, exactly get_urandom32's structure.
+fn os_entropy_u32() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        static URANDOM: std::sync::OnceLock<std::sync::Mutex<Option<std::fs::File>>> =
+            std::sync::OnceLock::new();
+        let slot =
+            URANDOM.get_or_init(|| std::sync::Mutex::new(std::fs::File::open("/dev/urandom").ok()));
+        let mut guard = slot.lock().ok()?;
+        let file = guard.as_mut()?;
+        let mut bytes = [0u8; 4];
+        file.read_exact(&mut bytes).ok()?;
+        Some(u32::from_ne_bytes(bytes))
+    }
+    #[cfg(windows)]
+    {
+        let mut bytes = [0u8; 4];
+        // NTSTATUS STATUS_SUCCESS is 0; a null algorithm handle with
+        // BCRYPT_USE_SYSTEM_PREFERRED_RNG draws from the system CNG
+        // generator — the Windows counterpart of a /dev/urandom read.
+        let status = unsafe {
+            windows_sys::Win32::Security::Cryptography::BCryptGenRandom(
+                std::ptr::null_mut(),
+                bytes.as_mut_ptr(),
+                bytes.len() as u32,
+                windows_sys::Win32::Security::Cryptography::BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status == 0 {
+            Some(u32::from_ne_bytes(bytes))
+        } else {
+            None
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
+/// SRANDOM's draw, mirroring GNU get_urandom32 (lib/sh/random.c:
+/// :219-240) behind variables.c:1441-1447 get_urandom. SRANDOM is
+/// registered with a NULL assign function (variables.c:1859 — RANDOM
+/// at :1857 gets assign_random instead), so per doc/bash.1 the
+/// generator "cannot be seeded, so assignments to this variable have
+/// no effect": there is no seeded SRANDOM sequence to match, and
+/// exact stream equality with GNU is impossible in principle (two
+/// GNU runs never agree). The observable contract is the shape of
+/// this function: the primary path returns the raw 32-bit OS-entropy
+/// draw unmasked; only when the platform has no entropy source does
+/// the Park-Miller brand32 stream (random.c:140-146) run, masked to
+/// BASH_RAND32_MAX and resampled while it repeats the previous draw.
+///
+/// rubash#2201: the pre-fix shape ran the brand32 fallback
+/// unconditionally, so on entropy-capable systems draws were capped
+/// below 2^31 and successive values were linearly related — the
+/// fallback is now the fallback again.
 pub(in crate::executor) fn next_srandom_from_state(state: &RandomGen) -> u32 {
-    let rseed = intrand32(state.rseed32.get());
-    state.rseed32.set(rseed);
-    rseed & 0x7fff_ffff
+    if let Some(value) = os_entropy_u32() {
+        state.last32.set(value);
+        return value;
+    }
+    loop {
+        let rseed = intrand32(state.rseed32.get());
+        state.rseed32.set(rseed);
+        let ret = rseed & 0x7fff_ffff;
+        if ret != state.last32.get() {
+            state.last32.set(ret);
+            return ret;
+        }
+    }
 }
 
 pub(in crate::executor) fn strip_shebang(source: &str) -> &str {
