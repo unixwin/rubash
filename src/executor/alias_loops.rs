@@ -225,32 +225,45 @@ impl Executor {
         } else {
             self.expand_aliases(&command.words)
         };
-        let mut do_index = command_index + 1;
-        while commands.get(do_index).is_some_and(|command| {
-            command.words.is_empty()
-                && command.brace_group.is_none()
-                && !command.has_assignment("__RUBASH_PARSE_ERROR__")
-        }) {
-            do_index += 1;
-        }
+        // rubash#2062: the `do` scan below is a pure function of the
+        // list, but it walks every following wordless command — running
+        // it before the marker checks made this probe cost Θ(remaining
+        // list) at every index of a long assignment list (Θ(N²) over
+        // the list). The scan's result is only consumed by the `echo`
+        // special case and by the `for` path, so run it only once one
+        // of those markers is confirmed present.
+        let scan_do_index = |from: usize| {
+            let mut do_index = from;
+            while commands.get(do_index).is_some_and(|command| {
+                command.words.is_empty()
+                    && command.brace_group.is_none()
+                    && !command.has_assignment("__RUBASH_PARSE_ERROR__")
+            }) {
+                do_index += 1;
+            }
+            do_index
+        };
 
-        if words.first().map(String::as_str) == Some("echo")
-            && commands
+        if words.first().map(String::as_str) == Some("echo") {
+            let do_index = scan_do_index(command_index + 1);
+            if commands
                 .get(do_index)
                 .is_some_and(|command| command.words.first().map(String::as_str) == Some("do"))
-        {
-            println!("{}", words[1..].join(" "));
-            let done_index = self
-                .find_matching_done_command(commands, do_index, 0)
-                .unwrap_or(command_index);
-            println!("bash: -c: line 7: syntax error near unexpected token `do'");
-            println!("bash: -c: line 7: `do echo foo=$foo bar=$bar'");
-            self.exit_code = 2;
-            return Ok(Some(done_index + 1));
+            {
+                println!("{}", words[1..].join(" "));
+                let done_index = self
+                    .find_matching_done_command(commands, do_index, 0)
+                    .unwrap_or(command_index);
+                println!("bash: -c: line 7: syntax error near unexpected token `do'");
+                println!("bash: -c: line 7: `do echo foo=$foo bar=$bar'");
+                self.exit_code = 2;
+                return Ok(Some(done_index + 1));
+            }
         }
         if words.first().map(String::as_str) != Some("for") {
             return Ok(None);
         }
+        let do_index = scan_do_index(command_index + 1);
         if let Some(next_index) =
             self.execute_alias_introduced_arithmetic_for(commands, command_index, &words)?
         {

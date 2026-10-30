@@ -23,8 +23,11 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+mod common;
+use common::wait_bounded;
 
 fn tempdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rubash661-{tag}-{}", std::process::id()));
@@ -33,32 +36,9 @@ fn tempdir(tag: &str) -> PathBuf {
     dir
 }
 
-fn wait_bounded(child: &mut Child, timeout: Duration) -> (Vec<u8>, Vec<u8>) {
-    let start = Instant::now();
-    loop {
-        match child.try_wait().expect("try_wait") {
-            Some(_) => break,
-            None => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    panic!("child did not exit within {timeout:?}");
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        }
-    }
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    if let Some(mut so) = child.stdout.take() {
-        use std::io::Read;
-        let _ = so.read_to_end(&mut out);
-    }
-    if let Some(mut se) = child.stderr.take() {
-        use std::io::Read;
-        let _ = se.read_to_end(&mut err);
-    }
-    (out, err)
-}
+/// The bounded wait itself is the shared helper in tests/common
+/// (rubash#2197): this binary's private copy carried the pre-#2056
+/// orphan-pipe hang shape and was deleted in favor of it.
 
 struct Session {
     stdout: String,
@@ -101,7 +81,14 @@ fn run_interactive(
     std::io::Write::write_all(child.stdin.as_mut().expect("stdin pipe"), input.as_bytes())
         .expect("write stdin");
     drop(child.stdin.take());
-    let (out, err) = wait_bounded(&mut child, Duration::from_secs(30));
+    let outcome = wait_bounded(&mut child, Duration::from_secs(30));
+    assert!(
+        !outcome.timed_out,
+        "child {} did not exit within the bound; partial stderr: {}",
+        outcome.pid,
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    let (out, err) = (outcome.stdout, outcome.stderr);
     Session {
         stdout: String::from_utf8_lossy(&out).into_owned(),
         stderr: String::from_utf8_lossy(&err).into_owned(),

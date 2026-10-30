@@ -2462,9 +2462,17 @@ fn time_uses_timeformat_variable() {
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    // rubash#2192: the %P component must not be pinned to a literal
+    // 0.00. GNU's %P is (self + children rusage) / real over the timed
+    // window (execute_cmd.c print_time_info), and for a sub-millisecond
+    // builtin the oracle itself prints unstable ratios (1.00, 2.00,
+    // 87.00, 90.00, 91.00 across five runs of this very probe) — any
+    // nonzero CPU in the window makes the ratio large. The pin's
+    // load-bearing parts are the %R consumption and the %% literal;
+    // %P is shape-checked only.
     assert_stderr_matches(
         &String::from_utf8_lossy(&output.stderr),
-        r"^elapsed:\d+\.\d{3} cpu:0\.00 percent:%\n$",
+        r"^elapsed:\d+\.\d{3} cpu:\d+\.\d{2} percent:%\n$",
     );
 }
 
@@ -2529,9 +2537,15 @@ fn timeformat_supports_precision_and_long_modifiers() {
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    // rubash#2192: precision (%3R/%2U/%0S) and the long modifier
+    // (%2lR) all expand exactly as GNU's print_formatted_time
+    // (execute_cmd.c:1346); only the trailing %P is shape-checked
+    // instead of pinned to 0.00, for the reason recorded on
+    // time_uses_timeformat_variable (the oracle's own %P for
+    // `time true` ranges 1.00-91.00 across runs).
     assert_stderr_matches(
         &String::from_utf8_lossy(&output.stderr),
-        r"^r:\d+\.\d{3} u:0\.00 s:0 long:\d+m\d+\.\d{2}s p:0\.00\n$",
+        r"^r:\d+\.\d{3} u:0\.00 s:0 long:\d+m\d+\.\d{2}s p:\d+\.\d{2}\n$",
     );
 }
 
@@ -2551,7 +2565,17 @@ fn time_reports_elapsed_wall_clock_for_slow_command() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_stderr_matches(&stderr, r"^real \d+\.\d{2}\nuser 0\.00\nsys 0\.00\n$");
+    // rubash#2192: user/sys are the shell's measured rusage deltas
+    // (GNU's SELF + CHILDREN model, execute_cmd.c print_time_info)
+    // printed at two decimals — the sys figure for a spawn sits on
+    // the 5ms rounding boundary and flips to 0.01 under CI load
+    // (observed; 0.00 in repeated isolated runs of both rubash and
+    // the GNU oracle). Shape-check them; the pin's subject is the
+    // wall-clock `real` figure asserted below.
+    assert_stderr_matches(
+        &stderr,
+        r"^real \d+\.\d{2}\nuser \d+\.\d{2}\nsys \d+\.\d{2}\n$",
+    );
     assert!(
         posix_real_seconds(&stderr) >= 0.50,
         "expected non-zero wall time, got stderr {stderr:?}"

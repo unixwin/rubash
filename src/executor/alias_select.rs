@@ -2,18 +2,43 @@ use super::alias_loop_match::control_word;
 use super::*;
 
 impl Executor {
+    /// rubash#2062: first index at or after `index` whose command
+    /// carries words (or `commands.len()` when none does). The select
+    /// probe needs only that command, but it runs at every index of
+    /// the enclosing list walk, so the unmemoized linear scan made a
+    /// list of N wordless commands (plain assignments) cost Θ(N²).
+    /// The scan is a pure function of the list, so its result is
+    /// memoized on the executor (see alias_select_scan_memo); a later
+    /// probe whose start lies between the memoized scan start and its
+    /// result reuses the result verbatim.
+    fn alias_select_first_word_index(&self, commands: &[CommandNode], index: usize) -> usize {
+        if let Some((ptr, len, from, found)) = *self.alias_select_scan_memo.borrow() {
+            if ptr == commands.as_ptr() as usize
+                && len == commands.len()
+                && from <= index
+                && index <= found
+            {
+                return found;
+            }
+        }
+        let mut found = index;
+        while commands
+            .get(found)
+            .is_some_and(|command| command.words.is_empty())
+        {
+            found += 1;
+        }
+        *self.alias_select_scan_memo.borrow_mut() =
+            Some((commands.as_ptr() as usize, commands.len(), index, found));
+        found
+    }
+
     pub(in crate::executor) fn execute_alias_introduced_select(
         &mut self,
         commands: &[CommandNode],
         index: usize,
     ) -> Result<Option<usize>, ExecuteError> {
-        let mut command_index = index;
-        while commands
-            .get(command_index)
-            .is_some_and(|command| command.words.is_empty())
-        {
-            command_index += 1;
-        }
+        let command_index = self.alias_select_first_word_index(commands, index);
         let Some(command) = commands.get(command_index) else {
             return Ok(None);
         };
