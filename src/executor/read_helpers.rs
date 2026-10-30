@@ -767,6 +767,30 @@ fn take_untrapped_sigint() -> bool {
     false
 }
 
+/// niubash#684: true when a 0x04 byte read from fd 0 carries canonical
+/// line-discipline VEOF semantics. GNU gets Ctrl-D EOF for free: in
+/// canonical mode the kernel line discipline turns the VEOF char into
+/// a zero-length read (builtins/read.def's zread, lib/sh/zread.c:99,
+/// sees EOF; read.def:767 breaks with eof=1). A Windows console in
+/// cooked (line-input) mode has no such discipline — conhost delivers
+/// the 0x04 as ordinary line data — so the read transports translate it
+/// themselves: at an empty record the byte IS the EOF; mid-record it
+/// merely flushes the buffered prefix, which a byte-wise reader has
+/// already received, so the byte is dropped and the record continues.
+/// Armed only when the handle is a console in line-input mode AND the
+/// read did not switch it to one-char mode (read.def:570-590): in
+/// one-char mode ICANON is off and 0x04 is data, exactly as GNU sees
+/// it. On Unix canonical ttys the kernel consumes VEOF itself, so the
+/// translation simply never fires there.
+pub(in crate::executor) fn stdin_veof_armed(
+    stdin_handle: crate::fd::HANDLE,
+    onechar_active: bool,
+) -> bool {
+    !onechar_active
+        && crate::fd::is_console_handle(stdin_handle)
+        && crate::fd::console_line_input_mode(stdin_handle)
+}
+
 pub(in crate::executor) fn read_stdin_until(
     deadline: Option<std::time::Instant>,
     silent: bool,
@@ -820,6 +844,9 @@ pub(in crate::executor) fn read_stdin_until(
     } else {
         None
     };
+    // niubash#684: canonical-console VEOF translation state for the byte
+    // loop below (see stdin_veof_armed).
+    let veof_armed = stdin_veof_armed(stdin_handle, onechar.is_some());
     // Echo ownership follows the mode guard: on a console the onechar mode
     // silenced the driver's echo, so a non-silent read re-emits each
     // consumed unit itself (read.def ttfd_onechar keeps ECHO on).
@@ -908,6 +935,21 @@ pub(in crate::executor) fn read_stdin_until(
                     break;
                 }
                 buf => {
+                    // niubash#684: canonical-console VEOF — see
+                    // stdin_veof_armed. At an empty record the marker
+                    // IS the EOF; do not count it as a read byte (the
+                    // callers key EOF-with-nothing-served on the byte
+                    // count, exactly like a zread that returned 0).
+                    // Mid-record the marker only flushes the buffered
+                    // prefix — already delivered byte-wise — so it is
+                    // dropped and the record continues.
+                    if veof_armed && buf[0] == 0x04 {
+                        if output.is_empty() {
+                            eof = true;
+                            break;
+                        }
+                        continue;
+                    }
                     read += buf.len();
                     decoder.queue_byte(buf[0]);
                 }

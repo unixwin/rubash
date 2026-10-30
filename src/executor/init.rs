@@ -979,6 +979,7 @@ impl Executor {
             read_interrupted_signal: None,
             read_sigint_guard_armed: false,
             read_eof_no_delimiter: false,
+            read_process_stdin_eof: false,
             timed_stdin: None,
             stdout_capture: None,
             stderr_capture: None,

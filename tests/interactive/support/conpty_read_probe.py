@@ -33,6 +33,17 @@ ticket symptom face:
                               returns 128+SIGALRM (read.def:553).
   t-no-input          contract `read -t 1 -n1` with no input: deadline fires
                               (rc 142) — the niubash#280 protection.
+  ctrld-read-eof      niubash#684  plain `read x` + Ctrl-D + Enter: the
+                              0x04 is the EOF — rc 1, empty assignment,
+                              and the shell survives for the next command
+                              (GNU: kernel VEOF -> zread 0 -> read.def:767
+                              eof=1, :949 failure). Pre-fix the byte was
+                              plain data (or the EOF fell through to a
+                              second blocking reader): the read hung for
+                              the NEXT line and consumed it as the record.
+  ctrld-midline-flush niubash#684  `abc` Ctrl-D `def` + Enter in one
+                              line: VEOF flush — the marker is not data,
+                              the record is "abcdef", rc 0.
 
 Exit code 0 = every leg passed; 1 = a leg failed; 2 = pywinpty missing
 (WSL/Linux CI — the live-console face needs a real console host).
@@ -211,6 +222,36 @@ def leg_t_no_input(s):
     assert line and "RC=142" in line, f"marker={line!r}"
 
 
+def leg_ctrld_read_eof(s):
+    # niubash#684 (ConPTY face): Ctrl-D during a plain canonical `read`
+    # is the EOF, not data. The Enter after it completes the console
+    # line the 0x04 sits in; the read must stop AT the marker (rc 1,
+    # empty assignment) without consuming any later line, and the
+    # shell must take the next command (GNU: read.def:767/:949 — the
+    # EOF ends only the current input).
+    s.write('read x; echo "D0#""RC=$? X=[$x]"\r')
+    time.sleep(0.5)
+    s.write("\x04")
+    s.write("\r")
+    line = s.marker("D0#RC=")
+    assert line and "RC=1" in line and "X=[]" in line, f"marker={line!r}"
+    s.write("echo ZZALIVE684\r")
+    line = s.marker("ZZALIVE684")
+    assert line, "shell did not survive the read EOF"
+
+
+def leg_ctrld_midline_flush(s):
+    # niubash#684: Ctrl-D mid-line is the VEOF flush — the buffered
+    # prefix and the rest of the line form ONE record ("abcdef"),
+    # the marker byte itself is never data, rc 0.
+    s.write('read y; echo "DM#""RC=$? Y=[$y]"\r')
+    time.sleep(0.5)
+    s.write("abc\x04def\r")
+    line = s.marker("DM#RC=")
+    assert line and "RC=0" in line and "Y=[abcdef]" in line, \
+        f"marker={line!r}"
+
+
 LEGS = {
     "n1-typed-ahead": leg_n1_typed_ahead,
     "n1-while-waiting": leg_n1_while_waiting,
@@ -222,6 +263,8 @@ LEGS = {
     "plain-queued-cooked": leg_plain_queued_cooked,
     "t-partial-assign": leg_t_partial_assign,
     "t-no-input": leg_t_no_input,
+    "ctrld-read-eof": leg_ctrld_read_eof,
+    "ctrld-midline-flush": leg_ctrld_midline_flush,
 }
 
 
