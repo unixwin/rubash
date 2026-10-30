@@ -3301,6 +3301,27 @@ pub(crate) fn write_stdout_bytes(output: &[u8]) -> io::Result<()> {
     write_real_stdout_uncaptured(output)
 }
 
+/// Flush the process stdio stdout buffer (rubash#2174). The uncaptured
+/// write path above ends at the Rust std stdout handle, whose internal
+/// line buffer keeps a block pending when it carries no newline; bytes
+/// in that buffer belong to the REAL process stdout by construction
+/// (capture writes never enter it). GNU never lets such bytes linger
+/// across a command boundary (execute_cmd.c:5648
+/// execute_builtin_or_function: fflush (stdout) after each builtin or
+/// function, before undoing redirections), because any foreign writer
+/// on the shared fd — an external command, a pipeline stage, a
+/// process-substitution consumer, a background child — writes straight
+/// to the fd and would overtake the pending bytes. The caller
+/// (execute_materialized_command) invokes this at the completion of
+/// every simple command, which keeps the invariant that the buffer is
+/// empty at every command boundary. With an empty buffer this is a
+/// no-op check (no syscall); stderr needs no twin — both of its write
+/// arms (write_stderr_bytes) write through unbuffered handles.
+pub(crate) fn flush_process_stdout() {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+}
+
 /// Write to the REAL process stdout object, ignoring any active thread-local
 /// capture. This is the destination a `Stdout` endpoint's dup record `None`
 /// names: GNU `N>&M` (redir.c:1169-1170 `dup2 (redir_fd, redirector)`)
