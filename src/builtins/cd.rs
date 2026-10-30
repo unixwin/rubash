@@ -475,6 +475,21 @@ where
     }
 }
 
+/// The logical destination display the real cd/pwd pair produces for
+/// `target` from the given session state: logical_destination_display
+/// built on validated_logical_pwd — the same chain cd_builtin binds
+/// into $PWD (builtins/cd.def bindpwd) and pwd_builtin prints verbatim.
+/// Exposed for the `$(cd X && pwd)` fast path (rubash#2220) so its
+/// bare-`pwd` rendering is the builtin's own chain rather than a
+/// parallel implementation that could drift from it.
+pub(crate) fn logical_destination_display_from(
+    env_vars: &HashMap<String, String>,
+    cwd: &Path,
+    target: &Path,
+) -> String {
+    paths::logical_destination_display(&paths::validated_logical_pwd(env_vars, cwd), target)
+}
+
 fn resolve_cdpath(
     target: &Target,
     env_vars: &HashMap<String, String>,

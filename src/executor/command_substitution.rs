@@ -1336,7 +1336,29 @@ impl Executor {
         // /c/… domain.
         let display = path.to_string_lossy().replace('\\', "/");
         let display = display.strip_prefix("//?/").unwrap_or(&display);
-        Some(crate::executor::path::shell_pwd_display_path(display).to_string())
+        let physical_display = crate::executor::path::shell_pwd_display_path(display);
+        if split_shell_words(right.trim()).len() > 1 {
+            // `pwd -P` (the only multi-word spelling the shape gate
+            // admits): the physical rendering is the verdict.
+            return Some(physical_display.to_string());
+        }
+        // rubash#2220: bare `pwd` prints the logical $PWD the cd builtin
+        // maintains (builtins/cd.def bindpwd; pwd_builtin echoes $PWD
+        // verbatim) — the textual chain from the session's validated
+        // logical cwd through the operand spelling — not the canonical
+        // path: symlink components and a leading // survive in it
+        // (`$(cd link && pwd)` prints the link path; `$(cd //etc &&
+        // pwd)` keeps //etc). Render through the builtin's own chain
+        // helpers so the shortcut cannot drift from the real cd/pwd
+        // pair; the physical probe above still gates existence and
+        // directory-ness, so a logical name for a missing directory is
+        // never produced.
+        let logical_display = crate::builtins::cd::logical_destination_display_from(
+            &self.shell_state.env_vars,
+            &self.shell_state.cwd,
+            std::path::Path::new(&target_display),
+        );
+        Some(crate::executor::path::shell_pwd_display_path(&logical_display).to_string())
     }
 
     fn command_list_substitution_output_typed(
