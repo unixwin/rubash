@@ -1245,11 +1245,49 @@ impl Executor {
 
     fn command_substitution_cd_pwd_output_impl(&self, source: &str) -> Option<String> {
         let (left, right) = command_substitution_cd_pwd_shape(source)?;
+        // Whether the target came from an explicit operand (vs the
+        // operand-less $HOME arm): GNU's extra operand resolutions
+        // (builtins/cd.def's `-'/CDPATH/cdable_vars steps) apply only to
+        // operands — the operand-less branch pins lflag = 0 (cd.def:325).
+        let mut operand_form = false;
         let target = if let Some(word) = split_shell_words(left.trim()).get(1) {
             // GNU subst.c expands the cd target with expand_string (parameter,
             // tilde) but not pathname expansion: `cd` takes a single directory,
             // so a glob pattern would be a literal path, not a match list.
-            self.expand_word(word)
+            let expanded = self.expand_word(word);
+            // rubash#2211: this shortcut computes ONE thing — a pure
+            // pathname resolution of the operand against the session
+            // cwd. Operand forms whose GNU resolution is not that are
+            // declined to the real executor (the fall-through below),
+            // whose cd builtin owns them exactly:
+            // - a leading `-` is cd's own syntax, never a pathname:
+            //   `-` alone is the OLDPWD keyword, which substitutes
+            //   $OLDPWD and PRINTS the destination into the capture
+            //   (builtins/cd.def:341-352), and `-L`/`-P`/`-e` are
+            //   options — bare `cd -P` is the operand-less $HOME move
+            //   in physical mode, not a directory named "-P".
+            // - a CDPATH-eligible relative name (not absolute, not
+            //   dot-led) while CDPATH carries a nonempty unit: cd.def's
+            //   step-5 search may land in a different directory and
+            //   announces the found path (cd.def:356-383; the builtin's
+            //   resolve_cdpath admission gates). An all-empty CDPATH
+            //   tries only the as-spelled name in the session cwd with
+            //   no announcement — the plain resolution computed here.
+            // - an operand that expands to the empty string: GNU gives
+            //   it dedicated non-resolution verdicts — a quoted empty
+            //   word is the "null directory" error (cd.def:331-336),
+            //   an unquoted empty expansion removes the operand
+            //   entirely (the operand-less $HOME move) — and which one
+            //   applies is a word-formation fact the expanded string
+            //   alone cannot carry.
+            if expanded.starts_with('-') || expanded.is_empty() {
+                return None;
+            }
+            if cdpath_search_could_apply(&expanded, &self.shell_state.env_vars) {
+                return None;
+            }
+            operand_form = true;
+            expanded
         } else {
             // GNU builtins/cd.def:316-322: the operand-less cd refuses only
             // a MISSING HOME (`dirname == 0`); a set-but-EMPTY value flows
@@ -1270,7 +1308,34 @@ impl Executor {
         };
         let target_display = target.clone();
         let target = shell_path_to_windows(&target, &self.shell_state.env_vars);
+        // rubash#2211: a relative target anchors at the SESSION cwd —
+        // the same join the cd builtin performs (builtins/cd.rs
+        // execute_with_io) and every spawn performs via
+        // Command::current_dir. GNU keeps exactly one cwd: cd moves the
+        // process's (builtins/cd.def change_to_directory -> chdir), and
+        // the child forked by subst.c:7143 command_substitute inherits
+        // it, so a relative operand inside $( ) resolves against the
+        // directory the shell most recently cd'd to. Under G-02 the
+        // process cwd never moves after startup, so the bare
+        // canonicalize this replaces resolved against the STARTUP
+        // directory — after any earlier cd the shortcut failed (or
+        // silently named the startup tree for `.`/`..`) while the
+        // redirected and subshell forms, which run the real builtin in
+        // the cloned executor, resolved correctly.
+        let target = if target.is_absolute() {
+            target
+        } else {
+            self.shell_state.cwd.join(&target)
+        };
         let Some((path, is_dir)) = canonical_physical_dir(&target) else {
+            // rubash#2211: with cdable_vars set, a bare name whose
+            // pathname resolution failed can still be claimed by the
+            // builtin's variable step (builtins/cd.def LCD_DOVARS;
+            // resolve_cdable_vars) — decline so the real executor
+            // runs it instead of taking the failure verdict here.
+            if operand_form && self.cdable_vars_could_apply(&target_display) {
+                return None;
+            }
             // GNU's cd builtin reports the failure from inside the
             // substitution child too (`echo "$(cd nope && pwd)"` prints
             // `cd: nope: No such file or directory` with the enclosing
@@ -1285,6 +1350,9 @@ impl Executor {
             return Some(String::new());
         };
         if !is_dir {
+            if operand_form && self.cdable_vars_could_apply(&target_display) {
+                return None;
+            }
             eprintln!(
                 "{}cd: {}: Not a directory",
                 self.parser_diagnostic_prefix(),
@@ -1304,6 +1372,24 @@ impl Executor {
         let display = path.to_string_lossy().replace('\\', "/");
         let display = display.strip_prefix("//?/").unwrap_or(&display);
         Some(crate::executor::path::shell_pwd_display_path(display).to_string())
+    }
+
+    /// rubash#2211: could the cd builtin's cdable_vars step
+    /// (builtins/cd.def LCD_DOVARS; the builtin's resolve_cdable_vars in
+    /// builtins/cd.rs) still claim this operand after its pathname
+    /// resolution failed? Only a bare shell name (no slash) with
+    /// cdable_vars set and a like-named variable present can be
+    /// claimed; anything else takes the shortcut's own failure verdict,
+    /// exactly as the builtin's fall-through reaches its error report.
+    fn cdable_vars_could_apply(&self, operand: &str) -> bool {
+        if operand.contains('/') || operand.contains('\\') {
+            return false;
+        }
+        if !crate::executor::support_names::is_shell_name(operand) {
+            return false;
+        }
+        crate::builtins::shopt::cdable_vars_enabled(&self.shell_state.env_vars)
+            && self.shell_state.env_vars.get(operand).is_some()
     }
 
     fn command_list_substitution_output_typed(
@@ -2242,6 +2328,19 @@ impl Executor {
                 .trim_capture_terminator()
                 .to_string();
         }
+        // rubash#2211: the plain filesystem read anchors a relative
+        // operand at the SESSION cwd, like every other comsub face
+        // (glob above already expands against shell_state.cwd; GNU's
+        // child inherits the shell's one cwd, subst.c:7143). The bare
+        // read this replaces resolved against the process cwd, which
+        // under G-02 stays at the startup directory — after any
+        // earlier cd, `$(<file)` read (or failed to find) the startup
+        // tree's file while `$(cat file)` read the current one.
+        let read_path = if read_path.is_absolute() {
+            read_path
+        } else {
+            self.shell_state.cwd.join(&read_path)
+        };
         if read_path.is_dir() {
             self.last_command_substitution_status.set(Some(0));
             return String::new();
@@ -2779,4 +2878,31 @@ pub(in crate::executor) fn command_substitution_cd_pwd_shape(source: &str) -> Op
         return None;
     }
     Some((left, right))
+}
+
+/// rubash#2211: could GNU's CDPATH search (builtins/cd.def step 5) send
+/// this operand somewhere other than the as-spelled session-cwd
+/// resolution the `$(cd X && pwd)` shortcut computes? Mirrors the
+/// builtin's resolve_cdpath admission gates (builtins/cd.rs): absolute
+/// spellings and dot-led operands are never searched, and only a CDPATH
+/// carrying at least one nonempty unit can redirect the move — an
+/// empty unit is the as-spelled name itself, tried in the session cwd
+/// with no announcement (resolve_cdpath's PrintPath::Never arm).
+fn cdpath_search_could_apply(operand: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {
+    if operand.starts_with('/') {
+        return false;
+    }
+    let path = std::path::Path::new(operand);
+    if path.is_absolute()
+        || matches!(
+            path.components().next(),
+            Some(std::path::Component::CurDir | std::path::Component::ParentDir)
+        )
+    {
+        return false;
+    }
+    match env_vars.get("CDPATH") {
+        Some(cdpath) => cdpath.split(':').any(|unit| !unit.is_empty()),
+        None => false,
+    }
 }

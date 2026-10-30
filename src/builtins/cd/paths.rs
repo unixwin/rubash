@@ -79,25 +79,39 @@ pub(super) fn logical_destination_display(old_pwd: &Path, target: &Path) -> Stri
     let old_display = path_display_text(old_pwd);
     // The raw combined text is the only place the exactly-two-slashes
     // prefix survives; both Path::components and split('/') erase it.
-    let combined_raw = if target.is_absolute() || target_display.starts_with('/') {
+    let absolute_target = target.is_absolute() || target_display.starts_with('/');
+    let combined_raw = if absolute_target {
         target_display.clone()
     } else {
         format!("{old_display}/{target_display}")
     };
+    // rubash#2211: the two-slashes EVIDENCE is the spelling the new path
+    // was built FROM — the target's own spelling for an absolute
+    // target, the old directory's spelling for a relative one — never
+    // the joined text. Joining manufactures the prefix at the seam:
+    // old "/" + "home" joins to "//home" although neither side spelled
+    // a double slash (GNU binds /home), and old "//" + "etc" joins to
+    // "///etc", which reads as a collapsible triple although the move
+    // stays under the // root (GNU binds //etc).
+    let slash_evidence = if absolute_target {
+        target_display.as_str()
+    } else {
+        old_display.as_str()
+    };
     if !cfg!(windows) {
         return preserve_leading_double_slash(
-            &combined_raw,
+            slash_evidence,
             &shell_display_path(&logical_destination(old_pwd, target)),
         );
     }
 
-    let normalized = if target.is_absolute() || target_display.starts_with('/') {
+    let normalized = if absolute_target {
         normalize_logical_display(&target_display)
     } else {
         normalize_logical_display(&combined_raw)
     };
     let normalized = windows_slash_drive_display_to_native(&normalized).unwrap_or(normalized);
-    preserve_leading_double_slash(&combined_raw, &normalized)
+    preserve_leading_double_slash(slash_evidence, &normalized)
 }
 
 /// POSIX leaves the meaning of exactly two leading slashes
