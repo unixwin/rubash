@@ -77,6 +77,18 @@ jobs:
           --test issue2043_sync_a_class_regressions
           --test issue2046_sync_b_class_regressions --profile ci
 
+      # rubash#2237: the test-builtin word-expansion pins. The
+      # issue1467 target sat outside every CI lane from 2026-10-25 on,
+      # which is exactly how its red stayed invisible until the #2172
+      # triage found it by hand; both targets spawn the built shell
+      # and assert GNU word-expansion behavior for `test`/`[ ]`
+      # (process-substitution paths, pathname expansion), so they
+      # belong with the other named-target regression lanes here.
+      - name: Run test-builtin word expansion regressions
+        run: >-
+          cargo nextest run --test issue1467_test_procsub_path_regressions
+          --test issue2237_bracket_word_expansion --profile ci
+
   # rubash#2176: cli_tests used to run as a continue-on-error step inside
   # the rust job above, which made its reds invisible -- the job showed
   # green no matter how the suite did, and that is how the #2163 `-- -c`

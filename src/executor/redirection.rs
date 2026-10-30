@@ -1231,7 +1231,22 @@ impl Executor {
                 && !crate::special_paths::is_zero_device(&target)
                 && !crate::special_paths::is_full_device(&target)
             {
-                let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+                // rubash#2240: anchor like the Input probe below —
+                // this probe's open CREATES the file (the `<>` open
+                // is part of the redirection, rubash#264), so the
+                // bare mapped path planted a stray empty file in the
+                // STARTUP directory after any cd (and passed its
+                // verdict against that wrong file), while the real
+                // bind opens at the session cwd. The empty word stays
+                // un-joined (the #2211 empty-operand rule).
+                let path = if target.is_empty() {
+                    shell_path_to_windows(&target, &self.shell_state.env_vars)
+                } else {
+                    self.session_path(crate::executor::path::windows_operand_file_path(
+                        shell_path_to_windows(&target, &self.shell_state.env_vars),
+                        &self.shell_state.env_vars,
+                    ))
+                };
                 if let Err(error) = FileFd::open_readwrite_pair(path) {
                     // posix_errors::path_error already renders the
                     // `{target}: {errno text}` shape — pass it through

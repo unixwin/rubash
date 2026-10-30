@@ -276,7 +276,16 @@ pub(in crate::executor) fn command_needs_process_substitution_materialization(
             .any(word_metadata_needs_process_substitution_materialization)
     {
         return cmd.words.iter().enumerate().any(|(index, word)| {
-            if cmd.word_metadata.get(index).is_some() {
+            // word_metadata is keyed by WordMetadata::word_index, not by
+            // position: a process-substitution word carries no entry (its
+            // record lives in the node-level aggregate), so a positional
+            // get() would read the NEXT word's entry and mask the bare
+            // substitution this check looks for (rubash#2237).
+            if cmd
+                .word_metadata
+                .iter()
+                .any(|metadata| metadata.word_index == index)
+            {
                 return false;
             }
             word.strip_prefix("<(")
@@ -871,20 +880,40 @@ impl Executor {
                 || procsub_word.starts_with(">("))
                 && procsub_word.ends_with(')');
             if is_bare_assignment && is_whole_procsub {
-                let next_metadata = rewritten.word_metadata.get(merge_index + 1).cloned();
+                // word_metadata is keyed by WordMetadata::word_index, not
+                // by position (a process-substitution word may carry no
+                // entry at all), so the absorbed word's entry is found and
+                // dropped by key, the merged word takes it under its own
+                // key, and every later key shifts down with its word
+                // (rubash#2237).
+                let next_metadata = rewritten
+                    .word_metadata
+                    .iter()
+                    .find(|metadata| metadata.word_index == merge_index + 1)
+                    .cloned();
                 rewritten.words[merge_index].push_str(&procsub_word);
                 // Drop the absorbed procsub word and hand its metadata to
                 // the merged word so the loop below materializes the
                 // substitution inside the assignment value.
                 rewritten.words.remove(merge_index + 1);
-                if merge_index + 1 < rewritten.word_metadata.len() {
-                    rewritten.word_metadata.remove(merge_index + 1);
-                }
-                if let Some(metadata) = next_metadata {
-                    if merge_index < rewritten.word_metadata.len() {
-                        rewritten.word_metadata[merge_index] = metadata;
+                rewritten
+                    .word_metadata
+                    .retain(|metadata| metadata.word_index != merge_index + 1);
+                if let Some(mut metadata) = next_metadata {
+                    metadata.word_index = merge_index;
+                    if let Some(slot) = rewritten
+                        .word_metadata
+                        .iter_mut()
+                        .find(|metadata| metadata.word_index == merge_index)
+                    {
+                        *slot = metadata;
                     } else {
                         rewritten.word_metadata.push(metadata);
+                    }
+                }
+                for metadata in &mut rewritten.word_metadata {
+                    if metadata.word_index > merge_index + 1 {
+                        metadata.word_index -= 1;
                     }
                 }
                 continue;
@@ -892,7 +921,19 @@ impl Executor {
             merge_index += 1;
         }
         for word_index in 0..rewritten.words.len() {
-            let metadata = rewritten.word_metadata.get(word_index).cloned();
+            // Keyed lookup, never positional: word_metadata carries no
+            // entry for a process-substitution word (its record lives in
+            // the node-level aggregate), so word_metadata[word_index]
+            // would hand this word the NEXT word's metadata — whose raw
+            // carries no substitution — and neither the recorded-entry
+            // branch nor the no-metadata standalone branch below would
+            // materialize the substitution (rubash#2237: `[ -r <( ) ]`
+            // failed while `test -r <( )` — no trailing word — worked).
+            let metadata = rewritten
+                .word_metadata
+                .iter()
+                .find(|metadata| metadata.word_index == word_index)
+                .cloned();
             let substitutions = metadata
                 .as_ref()
                 .map(|metadata| metadata.process_substitutions.clone())

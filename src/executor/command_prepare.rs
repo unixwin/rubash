@@ -1688,14 +1688,19 @@ impl Executor {
             self.evalerror_arith_pending.set(true);
             return Err(ExecuteError::ExpansionFailure(1));
         }
-        // The pre-glob materialization below feeds ONLY the test/[ branch:
+        // The pre-glob materialization below feeds ONLY the [[ branch:
         // the general branch re-derives every word inside its own loop (the
         // NoMatch / suppress_glob arms), so the extra per-word String copy
-        // is dead weight for every non-test command in every loop (GNU's
+        // is dead weight for every other command in every loop (GNU's
         // expand_word_list_internal materializes once, at the consumption
-        // point).
-        let is_test_cmd = cmd.words.first().is_some_and(|w| w == "[[" || w == "[");
-        if is_test_cmd {
+        // point). Only [[ ]] words are exempt from pathname expansion:
+        // GNU expands them as conditional words, not command words. `[` is
+        // the test builtin under another spelling (builtins/test.def) — an
+        // ordinary simple command whose words take the full expand_words
+        // pipeline (execute_cmd.c:4612), pathname expansion included, so it
+        // goes through the general branch with `test` (rubash#2237).
+        let is_conditional_cmd = cmd.words.first().is_some_and(|w| w == "[[");
+        if is_conditional_cmd {
             variable_expanded.words = expanded_words
                 .iter()
                 .map(|(word, _)| materialize_expanded_command_word(word))
@@ -1703,7 +1708,7 @@ impl Executor {
         }
         variable_expanded.word_kinds = Vec::new();
 
-        if !is_test_cmd {
+        if !is_conditional_cmd {
             let mut words = Vec::new();
             for (word, suppress_glob) in expanded_words {
                 // W_ARRAYREF rides as an in-band prefix through expansion;

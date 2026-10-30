@@ -2803,9 +2803,26 @@ impl Executor {
             if command.word_kinds.len() == command.words.len() {
                 first.word_kinds = command.word_kinds[prefix.command_index..].to_vec();
             }
-            if command.word_metadata.len() == command.words.len() {
-                first.word_metadata = command.word_metadata[prefix.command_index..].to_vec();
-            }
+            // rubash#2237: same keyed shift as the other time-prefix
+            // strips — word_metadata entries address words by
+            // WordMetadata::word_index and the vector is sparse (a
+            // process-substitution word carries no entry), so drop the
+            // consumed prefix's entries and shift the survivors' keys
+            // instead of slicing only the dense case.
+            first.word_metadata = command
+                .word_metadata
+                .iter()
+                .filter_map(|metadata| {
+                    metadata
+                        .word_index
+                        .checked_sub(prefix.command_index)
+                        .map(|shifted| {
+                            let mut metadata = metadata.clone();
+                            metadata.word_index = shifted;
+                            metadata
+                        })
+                })
+                .collect();
         }
 
         let started = time_command_started();
@@ -4517,6 +4534,17 @@ impl Executor {
             // BASH_SUBSHELL starts at this shell's depth + 1.
             child.env(
                 "__RUBASH_SUBSHELL_DEPTH",
+                (self.shell_state.subshell_depth.get() + 1).to_string(),
+            );
+            // rubash#1582: the same fork makes the coproc child's own
+            // pid the pid of the seeded level (variables.c:1511
+            // get_bashpid = getpid), so the BASHPID origin base rides
+            // with the depth — the `&` respawn and both procsub forms
+            // stamp the pair, and without the base this child's
+            // $BASHPID read its real pid + 1 while its own children
+            // observed the real pid as $PPID.
+            child.env(
+                "__RUBASH_BG_BASHPID_BASE",
                 (self.shell_state.subshell_depth.get() + 1).to_string(),
             );
         }
