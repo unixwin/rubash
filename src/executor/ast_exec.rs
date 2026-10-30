@@ -1102,10 +1102,18 @@ impl Executor {
             // session's scope is the attachment itself, not the
             // functrace inheritance the trap path checks.
             let session_here = self.debugger_session_here();
+            // #682: a DEBUG fire (or debugger seam arrival) runs arbitrary
+            // action commands that leave their own line stamps behind —
+            // run_debug_trap does not restore __RUBASH_CURRENT_LINE — so the
+            // funnel's post-trap restamp is GNU's :936 SET_LINE_NUMBER after
+            // the action and must not be skipped by the stamped-by-caller
+            // contract below.
+            let mut line_stamp_dirty = false;
             if !skips_debug_trap
                 && ((debug_trap_active && self.debug_trap_in_scope()) || session_here)
                 && !self.debug_trap_running
             {
+                line_stamp_dirty = true;
                 // Bash exposes the about-to-run command's line via LINENO
                 // inside the DEBUG trap action (dbg-support2.tests).
                 self.set_current_line(command);
@@ -2003,6 +2011,15 @@ impl Executor {
             }
 
             drop(_t_chain);
+            // #682 stamped-by-caller contract: this loop's set_current_line
+            // above already stamped the node the funnel is about to dispatch
+            // (nothing between them stamped a different line unless a DEBUG
+            // fire / seam ran — tracked by line_stamp_dirty), so arm the
+            // funnel's skip. Consumed on entry, and suppressed while the
+            // funnel's trap-scope line branch would stamp a different value.
+            if !line_stamp_dirty {
+                self.pre_stamped_line.set(true);
+            }
             // rubash#1525: the absorbed-write marker belongs to one
             // command execution; a flag left by a command whose own
             // write site was skipped (a pipeline stage) must not

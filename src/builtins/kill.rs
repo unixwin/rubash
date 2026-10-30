@@ -1086,7 +1086,8 @@ static SELF_SIGNALS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new
 /// hook) set it with Release; the drain reads it with Acquire and clears
 /// it only after both queues are empty, so a delivery that races the clear
 /// either lands before the clear (drained next poll) or re-sets the flag.
-#[cfg(unix)]
+/// All platforms: the Windows take_pending_signals branch uses the same
+/// gate for the same in-process queue (#682 lock-free boundary fast path).
 static PENDING_ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Counts polls so the mailbox-file scan (for signals sent by OTHER
@@ -1144,9 +1145,9 @@ pub(crate) fn queue_self_signal(signal: i32) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push(signal);
+    PENDING_ANY.store(true, std::sync::atomic::Ordering::Release);
     #[cfg(unix)]
     {
-        PENDING_ANY.store(true, std::sync::atomic::Ordering::Release);
         kernel_signals::note_self_delivery(signal);
     }
 }
@@ -1373,7 +1374,19 @@ pub fn take_pending_signals(pid: u32) -> io::Result<Vec<i32>> {
     // create), so it silently swallowed real deliveries.
     #[cfg(not(unix))]
     {
-        let mut signals = take_self_signals();
+        // rubash#437's lock-free gate, Windows twin: PENDING_ANY marks a
+        // non-empty in-process queue (queue_self_signal and
+        // requeue_pending_signals raise it on every push, all platforms), so
+        // a clear flag skips the SELF_SIGNALS mutex entirely. External
+        // deliveries never enter this queue — they arrive through the file
+        // mailbox polled below — so the gate cannot hide one. The clear
+        // mirrors the unix drain (take_all_signals): re-take under the lock
+        // before the Release store.
+        let mut signals = if PENDING_ANY.load(std::sync::atomic::Ordering::Acquire) {
+            take_self_signals()
+        } else {
+            Vec::new()
+        };
         let tick = FILE_POLL_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // catch_flag shape (see mod signal_hint): the kernel event fires the
         // instant a same-version cross-process delivery lands, so the
@@ -1397,6 +1410,20 @@ pub fn take_pending_signals(pid: u32) -> io::Result<Vec<i32>> {
                 || (tick % HINT_POLL_PERIOD == 0 && signal_hint::signaled()))
         {
             signals = take_file_signals(pid)?;
+        }
+        // Clear only when the flag says a producer ran (the gate load, not a
+        // lock) and a re-take under the lock finds the queue drained — the
+        // same discipline as the unix take_all_signals clear. A delivery
+        // that raced the first take is delivered here, never dropped; a
+        // delivery that raced the file poll keeps the flag up for the next
+        // boundary.
+        if signals.is_empty() && PENDING_ANY.load(std::sync::atomic::Ordering::Acquire) {
+            let taken = take_self_signals();
+            if taken.is_empty() {
+                PENDING_ANY.store(false, std::sync::atomic::Ordering::Release);
+            } else {
+                signals = taken;
+            }
         }
         Ok(signals)
     }
@@ -1436,12 +1463,12 @@ pub fn requeue_pending_signals(signals: Vec<i32>) {
     queue.splice(..0, signals);
     // This is a SECOND producer of SELF_SIGNALS (the other is
     // queue_self_signal), so it must set the same lock-free wakeup flag:
-    // the boundary poll's fast path (take_all_signals) skips the self queue
-    // when PENDING_ANY is clear, and a requeue that did not raise it would
-    // strand the re-queued signal forever. `wait`/observe_signals_while_blocked
+    // the boundary poll's fast path (take_all_signals, and the Windows twin
+    // in take_pending_signals) skips the self queue when PENDING_ANY is
+    // clear, and a requeue that did not raise it would strand the re-queued
+    // signal forever. `wait`/observe_signals_while_blocked
     // peek a delivery, put it back here, and rely on the NEXT command
     // boundary to dispatch the trap (wait.def:174).
-    #[cfg(unix)]
     PENDING_ANY.store(true, std::sync::atomic::Ordering::Release);
 }
 

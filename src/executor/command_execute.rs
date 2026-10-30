@@ -58,14 +58,32 @@ impl Executor {
         // own source line (dbg-support2.tests).
         {
             let _t = PhaseTimer::new(&super::exec_profile::P_LINECMD);
-            if self.debug_trap_running && self.shell_state.function_depth > 0 {
-                if let Some(line) = self.debug_trap_function_line {
-                    self.set_current_line_value(line);
+            // #682 stamped-by-caller contract: the ast_exec loop stamps this
+            // node's line pair immediately before the funnel call, and the
+            // funnel's own stamp recomputes the identical value from the same
+            // node and the unchanged ambient (GNU stamps line_number ONCE per
+            // command — execute_cmd.c SET_LINE_NUMBER; rubash's reader-loop
+            // stamp is that stamp, the funnel copy is redundant). Skip only
+            // that copy: the flag is consumed on entry (nested execute_command
+            // callers always stamp), and it is not honored when the trap-scope
+            // branch below would stamp debug_trap_function_line instead — an
+            // in-action command's funnel stamp differs from the loop's plain
+            // stamp. A DEBUG fire / debugger seam between the loop stamp and
+            // the funnel suppresses the flag at the setter (ast_exec), so the
+            // post-trap restamp (GNU's :936 behavior after the action) runs.
+            let pre_stamped = self.pre_stamped_line.replace(false);
+            let trap_line_scope =
+                self.debug_trap_running && self.shell_state.function_depth > 0;
+            if !pre_stamped || trap_line_scope {
+                if trap_line_scope {
+                    if let Some(line) = self.debug_trap_function_line {
+                        self.set_current_line_value(line);
+                    } else {
+                        self.set_current_line(cmd);
+                    }
                 } else {
                     self.set_current_line(cmd);
                 }
-            } else {
-                self.set_current_line(cmd);
             }
             self.set_current_command(cmd);
         }
