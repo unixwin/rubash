@@ -1866,6 +1866,8 @@ impl Executor {
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,
+            external_route_provider: self.external_route_provider.clone(),
+            external_stdio_slots: None,
             #[cfg(windows)]
             elevation_handler: None,
             external_file_builtins_enabled: self.external_file_builtins_enabled,

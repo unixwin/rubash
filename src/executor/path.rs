@@ -3251,6 +3251,20 @@ pub fn apply_required_windows_child_environment(
     process: &mut Command,
     env_vars: &HashMap<String, String>,
 ) {
+    for (name, value) in required_windows_child_environment_pairs(env_vars) {
+        process.env(name, value);
+    }
+}
+
+/// The data form of [`apply_required_windows_child_environment`]:
+/// the (name, value) pairs it would set on a child, in its order.
+/// The route seam (external_route) composes a routed call's
+/// environment from pairs, so the two forms share this one body.
+#[cfg(windows)]
+pub fn required_windows_child_environment_pairs(
+    env_vars: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
     for name in ["SystemRoot", "WINDIR", "ComSpec"] {
         let value = env_vars
             .get(name)
@@ -3258,7 +3272,7 @@ pub fn apply_required_windows_child_environment(
             .or_else(|| std::env::var(name).ok());
         if let Some(value) = value {
             if !value.contains('\0') {
-                process.env(name, value);
+                pairs.push((name.to_string(), value));
             }
         }
     }
@@ -3286,27 +3300,31 @@ pub fn apply_required_windows_child_environment(
         // rubash#329 source-(a) family, niubash#149), and the drive colon
         // then broke child scripts splicing $HOME into s:...: patterns.
         if !env_vars.contains_key("USERPROFILE") {
-            process.env("USERPROFILE", &native_home);
+            pairs.push(("USERPROFILE".to_string(), native_home.clone()));
         }
         if !env_vars.contains_key("HOME") {
-            process.env("HOME", &native_home);
+            pairs.push(("HOME".to_string(), native_home.clone()));
         }
         if let Some((drive, path)) = windows_drive_and_home_path(&native_home) {
             if !env_vars.contains_key("HOMEDRIVE") {
-                process.env("HOMEDRIVE", drive);
+                pairs.push(("HOMEDRIVE".to_string(), drive));
             }
             if !env_vars.contains_key("HOMEPATH") {
-                process.env("HOMEPATH", path);
+                pairs.push(("HOMEPATH".to_string(), path));
             }
         }
         let base = native_home.trim_end_matches('\\');
         if !env_vars.contains_key("APPDATA") {
-            process.env("APPDATA", format!("{base}\\AppData\\Roaming"));
+            pairs.push(("APPDATA".to_string(), format!("{base}\\AppData\\Roaming")));
         }
         if !env_vars.contains_key("LOCALAPPDATA") {
-            process.env("LOCALAPPDATA", format!("{base}\\AppData\\Local"));
+            pairs.push((
+                "LOCALAPPDATA".to_string(),
+                format!("{base}\\AppData\\Local"),
+            ));
         }
     }
+    pairs
 }
 
 #[cfg(not(windows))]
@@ -3314,6 +3332,13 @@ pub fn apply_required_windows_child_environment(
     _process: &mut Command,
     _env_vars: &HashMap<String, String>,
 ) {
+}
+
+#[cfg(not(windows))]
+pub fn required_windows_child_environment_pairs(
+    _env_vars: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    Vec::new()
 }
 
 #[cfg(windows)]

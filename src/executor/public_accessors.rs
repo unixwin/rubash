@@ -752,6 +752,31 @@ impl Executor {
         self.host_external_command_handler = Some(HostExternalCommandHandler(Box::new(handler)));
     }
 
+    /// Register the external-command route provider (niubash#567
+    /// P3; see `external_route` for the seam contract): after name
+    /// resolution, a simple command about to be spawned is offered
+    /// to the provider with its final argv, complete environment,
+    /// session cwd, live stdio handles, and a cancellation peek;
+    /// the provider executes it in-process or declines it back to
+    /// the spawn. Replaces any previous registration. Sessions
+    /// normally install it at build time through
+    /// `SessionBuilder::external_route_provider`.
+    pub fn set_external_route_provider(
+        &mut self,
+        provider: Box<dyn super::external_route::ExternalRouteProvider>,
+    ) {
+        self.external_route_provider = Some(std::rc::Rc::new(std::cell::RefCell::new(
+            super::external_route::ExternalRouteProviderSlot(provider),
+        )));
+    }
+
+    /// Remove the route provider registration, if any: dispatch
+    /// returns to spawn-only, byte-identical to an engine that
+    /// never had one.
+    pub fn clear_external_route_provider(&mut self) {
+        self.external_route_provider = None;
+    }
+
     #[cfg(windows)]
     pub fn set_elevation_handler<F>(&mut self, handler: F)
     where

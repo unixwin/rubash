@@ -299,6 +299,89 @@ fn drain_reader_to_temp(
     dev_operand_temp(&bytes, m)
 }
 
+/// rubash#1959: the Windows rendezvous for a procsub read end delivered
+/// as an argv word to an external child (`head -1 <(body)`, `$(cat
+/// <(body))`, and the pipeline word form alike — every spawn site funnels
+/// through `dev_fd_table_operand`). The anonymous pipe's read end has no
+/// openable path and the child cannot inherit numbered handles into argv
+/// names, so the face used to drain the producer to EOF into a temp file
+/// before spawn — the consumer started only after the producer exited.
+/// GNU's contract (subst.c:6362 process_substitute) is a live pipe under
+/// the operand name: the child reads while the producer still runs.
+///
+/// The endpoint is the #1903 WinuxCmd FIFO marker rendezvous (the same
+/// design piece the issue names): the argv word carries a path to an
+/// on-disk `!<fifo>` marker whose reader opens bridge to a deterministic
+/// named pipe. The external child's own runtime (WinuxCmd
+/// file_io.cppm open_binary_file → open_fifo_read_handle) creates the
+/// INBOUND server for the marker and blocks in ConnectNamedPipe; the
+/// pump thread below is the WRITER client (`open_winux_fifo_write`,
+/// GNU's blocking O_WRONLY fifo open), copying the procsub read end
+/// into the pipe byte-wise. A consumer that is not marker-aware reads
+/// the 7 marker bytes — the same degradation every WinuxCmd fifo shows
+/// a non-protocol consumer.
+///
+/// Ownership and lifetime: the pump owns a DuplicateHandle reference of
+/// the read end, so fd-table cleanup after the child exits (consume's
+/// seek-to-end, the command-scoped close of the procsub fd, FileFd drop)
+/// cannot race its reads. Closing the writer client is the child's EOF;
+/// a consumer gone early (GNU's SIGPIPE shape, `head -1`) fails the
+/// pump's writes and tears the pump down, which breaks the producer's
+/// pipe the same way. If no marker-aware reader ever opens the path, the
+/// pump parks in the write open and the producer parks on its full pipe
+/// — the same running-producer shape GNU leaves behind for an
+/// unconsumed substitution; nothing in the parent blocks on either. The
+/// marker file itself is removed with the materialization record (after
+/// the child exits, like every operand temp).
+#[cfg(windows)]
+fn procsub_fifo_marker_operand(file: &FileFd, m: &mut DevOperandMaterialization) -> Option<String> {
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "rubash-procsub-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    if crate::winux_fifo::create_winux_fifo(&path, false).is_err() {
+        return None;
+    }
+    let source = match crate::fd::duplicate_handle(file.handle) {
+        Ok(source) => source,
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+    };
+    let pump_path = path.clone();
+    std::thread::spawn(move || {
+        // Blocks until the child's reader creates the endpoint (and on
+        // ERROR_PIPE_BUSY waits its slice) — no parent-side thread is
+        // involved in that wait, so a consumer that never arrives costs
+        // only this parked thread, never a shell stall.
+        match crate::winux_fifo::open_winux_fifo_write(&pump_path, &|| false) {
+            Ok(sink) => {
+                use std::os::windows::io::IntoRawHandle;
+                let sink = sink.into_raw_handle() as crate::fd::HANDLE;
+                loop {
+                    match crate::fd::read_some(source, 65536) {
+                        Ok(chunk) if chunk.is_empty() => break,
+                        Ok(chunk) => {
+                            if crate::fd::write_all(sink, &chunk).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                crate::fd::close_handle(sink);
+            }
+            Err(_) => {}
+        }
+        crate::fd::close_handle(source);
+    });
+    m.temps.push(path.clone());
+    Some(path.to_string_lossy().into_owned())
+}
+
 impl Executor {
     /// Rewrite `/dev/std*`-family operand words in `args` to concrete paths.
     /// `stdin`/`stdout` describe how the caller wires the child's fd 0/1
@@ -477,16 +560,41 @@ impl Executor {
                     dev_operand_temp(&bytes, m)
                 }
                 FdReadEndpoint::File(file) => {
-                    m.consume_fds.push(fd);
                     // A pipe-backed endpoint (a process substitution's
                     // read end, rubash#1952) carries only a display
-                    // name, not a filesystem path — drain its handle
-                    // into a temp the child can open, like the
-                    // buffered endpoints above. Real file endpoints
+                    // name, not a filesystem path. Real file endpoints
                     // keep handing over their path.
                     if file.path.to_string_lossy().starts_with("<(") {
+                        // rubash#1959: deliver the live stream through
+                        // the #1903 fifo-marker rendezvous — the child
+                        // opens the marker path and its own runtime
+                        // bridges to the live pipe, instead of the
+                        // parent draining the producer to a temp file
+                        // before spawn (GNU subst.c:6362
+                        // process_substitute hands the child the pipe
+                        // read end itself). Fall back to the drain
+                        // when the rendezvous cannot be set up.
+                        #[cfg(windows)]
+                        {
+                            if let Some(path) = procsub_fifo_marker_operand(file, m) {
+                                // No consume record: the pump thread owns
+                                // the stream now, and the word fd is
+                                // command-scoped (removed at this very
+                                // command's end). A finish-time seek would
+                                // be dead semantics AND would serialize
+                                // against the pump's parked ReadFile on
+                                // the same pipe object — synchronous
+                                // handles allow one operation at a time,
+                                // so the shell would block until the
+                                // producer's next write (observed: the
+                                // whole producer lifetime).
+                                return Some(path);
+                            }
+                        }
+                        m.consume_fds.push(fd);
                         drain_handle_to_temp(file.handle, m)
                     } else {
+                        m.consume_fds.push(fd);
                         Some(file.path.to_string_lossy().into_owned())
                     }
                 }
