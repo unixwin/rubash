@@ -2176,10 +2176,17 @@ impl Executor {
         let Some(source_fd) = crate::executor::execution_misc::dev_stdio_redirect_fd(target) else {
             return false;
         };
+        // rubash#2256 (wave 2): the alias-layer resolver is the
+        // authority — it also sees a source bound READ-ONLY to a
+        // regular file, which has no write endpoint at all: the
+        // write-endpoint-only test this replaces declined the reopen
+        // for exactly that binding, the walk fell into its dup
+        // shortcut, and the builtin's flush wrote through the read
+        // handle (EBADF) where GNU's open() truncates the file fresh.
+        if self.fd_alias_reopen_path(source_fd).is_some() {
+            return true;
+        }
         match self.fd_table.output_endpoint(source_fd) {
-            Some(FdWriteEndpoint::File(file)) => std::fs::metadata(&file.path)
-                .map(|meta| meta.is_file())
-                .unwrap_or(false),
             Some(FdWriteEndpoint::Stdout) => {
                 crate::fd::disk_file_path(crate::fd::process_std_handle(1)).is_some()
             }
@@ -2237,8 +2244,52 @@ impl Executor {
             // instead of the source's shared handle. Pipe/capture/procsub
             // endpoints keep the shared-description match below (the
             // cases that already agreed with GNU).
+            // rubash#2256 (wave 2): the fresh-open path comes from the
+            // alias-layer resolver, which also sees a source bound
+            // READ-ONLY (or read-write) to the file — the write-endpoint
+            // match this replaces had no File arm for a read-bound
+            // source, so `> /dev/fd/6` with `6<file` fell into the
+            // shared clone / ENOENT arms below instead of opening the
+            // file fresh. The noclobber refusal rides the same resolved
+            // path (GNU's open carries O_EXCL under `set -C`), reported
+            // through this walk's open-failure protocol like the plain
+            // arm's create_redirect_output refusal.
+            if let Some(path) = self.fd_alias_reopen_path(source_fd) {
+                if !redirect.append
+                    && !redirect.clobber
+                    && crate::builtins::set::shell_option_enabled(
+                        &self.shell_state.env_vars,
+                        "noclobber",
+                    )
+                    && !Self::noclobber_target_is_device_like(&path)
+                {
+                    let error = std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!("{target}: cannot overwrite existing file"),
+                    );
+                    if state.open_failure_via_error {
+                        let mut slot = state.first_open_error.borrow_mut();
+                        if slot.is_none() {
+                            *slot = Some((error.kind(), error.to_string()));
+                        }
+                    } else {
+                        let mut stderr = Vec::new();
+                        writeln!(&mut stderr, "{}{error}", self.error_prefix())?;
+                        state.write_to_fd(self, 2, &stderr)?;
+                    }
+                    self.exit_code = 1;
+                    state.redirect_failed = true;
+                    return Ok(());
+                }
+                if let Ok(file_fd) =
+                    crate::executor::fd_table::FileFd::open_write(path, redirect.append, false)
+                {
+                    state.fds.insert(fd, OutputTarget::SharedFile(file_fd));
+                    state.saw_output_redirect = true;
+                    return Ok(());
+                }
+            }
             let reopened = match self.fd_table.output_endpoint(source_fd) {
-                Some(FdWriteEndpoint::File(file_fd)) => Some(file_fd.path.clone()),
                 Some(FdWriteEndpoint::Stdout) => {
                     crate::fd::disk_file_path(crate::fd::process_std_handle(1))
                 }

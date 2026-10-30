@@ -1003,6 +1003,21 @@ impl Executor {
             return None;
         }
         if let Some(read) = &entry.read {
+            // rubash#2256 (wave 2): fd 0 inherited from the process is
+            // not exempt from the alias rule — when the process stdin
+            // is a regular file, a child's open("/dev/fd/0") is fresh
+            // (the kernel resolves the fd magic link to the file), so
+            // the operand serves the whole file from offset 0 and the
+            // process offset does not move. The resolver's fd-0 arm
+            // names exactly that case (a regular-file endpoint is
+            // covered by the File arm below as well); the drain of the
+            // real fd 0 further down remains for pipes and terminals,
+            // where GNU's open attaches to the same stream.
+            if let Some(path) = self.fd_alias_reopen_path(fd) {
+                if let Ok(bytes) = std::fs::read(path) {
+                    return Some(bytes);
+                }
+            }
             // rubash#2256: a regular-file endpoint re-opens fresh for
             // an operand — the whole file from offset 0, and the
             // descriptor's own offset does not move (the stream serve
@@ -1021,7 +1036,9 @@ impl Executor {
             }
             // InheritedProcessStdin has no table-owned bytes: drain the
             // process's real fd 0 (GNU's dup shares it, so reading it here
-            // advances the parent's offset the same way).
+            // advances the parent's offset the same way). Only stream
+            // stdins reach this arm — a regular-file stdin was served
+            // fresh by the resolver check above.
             return Some(match read {
                 FdReadEndpoint::InheritedProcessStdin => {
                     let mut bytes = Vec::new();

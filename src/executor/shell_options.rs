@@ -2252,7 +2252,10 @@ impl Executor {
     /// through the OS fd-alias layer: the kernel resolves the open() to a
     /// dup of fd N's CURRENT open file description
     /// (execution_misc::dev_stdio_redirect_fd; the input side is
-    /// niubash#118). For a built-in writer this means: an explicit fd-table
+    /// niubash#118) — except for a regular-file target, where the
+    /// open is a fresh open of the file itself (rubash#2256; the
+    /// resolver arm in the function owns that case). For a built-in
+    /// writer this means: an explicit fd-table
     /// binding writes through `write_output_fd_redirect`, and an IMPLICIT
     /// std fd (no entry — the shell's own stdout/stderr) writes to that
     /// channel's default stream. Re-opening the alias as a literal Windows
@@ -2267,10 +2270,26 @@ impl Executor {
         &mut self,
         target: &str,
         output: &[u8],
+        append: bool,
+        clobber: bool,
     ) -> Option<Result<(), ExecuteError>> {
         let fd = redirect_target_fd(target)?;
         if self.fd_table.is_closed(fd) {
             return None;
+        }
+        // rubash#2256 (wave 2): when the alias layer resolves the
+        // target to a regular file, the redirect is an open() of
+        // that file — fresh, with the caller's truncate/append
+        // mode — not a write through the aliased descriptor's
+        // shared description (which landed the bytes at the
+        // source's current offset and never truncated: the W5
+        // herestring shape `cat <<<"hello" > /dev/fd/6` with
+        // `6<>file` overwrote the seed in place instead of
+        // replacing it).
+        if let Some(path) = self.fd_alias_reopen_path(fd) {
+            return Some(
+                self.write_fresh_alias_file_output(&path, target, output, append, clobber),
+            );
         }
         if self.fd_table.output_endpoint(fd).is_some() {
             return Some(self.write_output_fd_redirect(target, output).map(|_| ()));
@@ -2280,6 +2299,49 @@ impl Executor {
             2 => Some(self.write_default_stderr(output)),
             _ => None,
         }
+    }
+
+    /// The fresh-open write behind `write_dev_stdio_redirect_output`'s
+    /// resolver arm: the alias names a regular file, so the write is
+    /// an ordinary open of that file — truncate (with the noclobber
+    /// O_EXCL refusal under `set -C`, unless the redirect clobbers)
+    /// or append per the caller's redirect arm — and the aliased
+    /// descriptor's own offset never moves. Errors carry the alias
+    /// spelling, exactly as create_redirect_output shapes them.
+    fn write_fresh_alias_file_output(
+        &mut self,
+        path: &std::path::Path,
+        target: &str,
+        output: &[u8],
+        append: bool,
+        clobber: bool,
+    ) -> Result<(), ExecuteError> {
+        use std::io::Write as _;
+        let mut options = OpenOptions::new();
+        options.write(true);
+        if append {
+            options.append(true);
+        } else if !clobber
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noclobber")
+            && !Self::noclobber_target_is_device_like(path)
+        {
+            options.create_new(true);
+        } else {
+            options.create(true).truncate(true);
+        }
+        let mut file = options.open(path).map_err(|e| {
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("{target}: cannot overwrite existing file"),
+                )
+            } else {
+                crate::posix_errors::path_error(target, e)
+            }
+        })?;
+        file.write_all(output)
+            .map_err(|e| crate::posix_errors::path_error(target, e))?;
+        Ok(())
     }
 
     pub(in crate::executor) fn output_fd_redirects_to_stderr(&self, target: &str) -> bool {
@@ -3066,7 +3128,21 @@ impl Executor {
                     self.fd_table.drain_input_to_eof(source_fd);
                     return Some(input);
                 }
-                if source_fd == 0 {
+                if source_fd == 0
+                    && !self.fd_table.is_closed(0)
+                    && !matches!(
+                        self.fd_table.read_endpoint(0),
+                        Some(FdReadEndpoint::File(_))
+                    )
+                {
+                    // rubash#2249 (via #2256 wave 2): FUNCTION_STDIN is
+                    // fd 0's mirror only while fd 0 itself is unbound —
+                    // a function call's `<>` bind (or an exec rebind)
+                    // installs a real File endpoint on fd 0, and a
+                    // `<&0` dup must serve THAT endpoint (the fall-
+                    // through below), not the caller's staged stage
+                    // buffer. The guard mirrors
+                    // function_stdin_is_command_source's predicate.
                     if let Some(input) = self.shell_state.env_vars.get(FUNCTION_STDIN) {
                         return Some(input.clone());
                     }

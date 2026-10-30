@@ -560,6 +560,52 @@ impl Executor {
             // here and serve it through the same fd-table/dup machinery as
             // `<&N`.
             if let Some((fd, _move_fd)) = redirect_target_fd_and_move(&expanded_target) {
+                // rubash#2256 (wave 2): the serves below model a DUP
+                // (the `<&N` word: the consumer shares fd N's stream).
+                // A path SPELLING (`< /dev/fd/N`, kind Input) is an
+                // open() instead: for a regular-file source the
+                // resolver's fresh open reads from offset 0 and
+                // leaves fd N's own offset unmoved, so repeated
+                // `read x < /dev/fd/6` re-reads the first record
+                // instead of walking the shared offset.
+                if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+                    if let Some(path) = self.fd_alias_reopen_path(fd) {
+                        if let Ok(fresh) = FileFd::open_read(path) {
+                            if let Some(scratch) = self.allocate_dynamic_fd() {
+                                self.fd_table.open_input(
+                                    scratch,
+                                    FdReadEndpoint::File(fresh),
+                                    true,
+                                );
+                                let line = self.fd_table.read_text(
+                                    scratch,
+                                    delimiter,
+                                    char_limit,
+                                    exact_char_limit,
+                                    escape_aware,
+                                    raw,
+                                );
+                                self.fd_table.entries.remove(&scratch);
+                                return Some(match line {
+                                    Some(line) => trim_read_input(
+                                        line,
+                                        delimiter,
+                                        char_limit,
+                                        exact_char_limit,
+                                        escape_aware,
+                                        raw,
+                                    ),
+                                    None => {
+                                        if !self.fd_table.read_timed_out {
+                                            self.read_eof_no_delimiter = true;
+                                        }
+                                        String::new()
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
                 // `<&8` after `exec 8<&0` — a dup of the process stdin
                 // reads from the same transports as fd 0 itself
                 // (niubash#279: the console keystroke must reach the
@@ -1300,6 +1346,18 @@ impl Executor {
         // which GNU rejects on every face (the literal open fails
         // ENOENT in procfs).
         let fd = crate::special_paths::fd_alias_target(filename)?;
+        // rubash#2256 (wave 2): GNU source.def hands the word to
+        // _evalfile, whose open() resolves the alias through the
+        // kernel — a regular-file source therefore reads FRESH from
+        // offset 0 (and a second `source /dev/fd/N` re-reads it),
+        // while the snapshot serve below only models byte-channel
+        // endpoints (it declines File endpoints outright, which sent
+        // `source /dev/fd/6` with `6<file` to the literal filesystem
+        // open and ENOENT). Ask the alias-layer resolver first.
+        if let Some(path) = self.fd_alias_reopen_path(fd) {
+            let bytes = std::fs::read(path).ok()?;
+            return Some(bytes_to_shell_text(&bytes));
+        }
         let (data, offset) = self.fd_table.input_snapshot_bytes(fd)?;
         let content = data.get(offset..)?.to_vec();
         Some(bytes_to_shell_text(&content))
