@@ -1745,6 +1745,7 @@ impl Executor {
             tempenv_pipestatus_state: None,
             command_scoped_procsub_input_fds: Vec::new(),
             conditional_output_procsubs: Vec::new(),
+            current_conditional_redirects: None,
             pending_scalar_assignment: false,
             suppress_errexit: self.suppress_errexit,
             // rubash#1563: a fork copy inherits the parent's GNU frame

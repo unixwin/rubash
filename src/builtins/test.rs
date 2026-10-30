@@ -747,6 +747,18 @@ fn fd_alias_fact_test(
             "-f" | "-s" | "-p" | "-S" | "-b" | "-c" | "-u" | "-g" | "-k" | "-N" => false,
             _ => return None,
         },
+        // A socket inode (rubash#2132: an inherited socketpair end
+        // classified by its handle). Socket mode bits are the
+        // creation-mode 0777 class, so r/w answer from the granted
+        // letters exactly like the generic-file class; -S is the one
+        // verdict that is the class's own.
+        's' => match op {
+            "-a" | "-e" | "-S" | "-O" | "-G" => true,
+            "-r" => granted('r'),
+            "-w" => granted('w'),
+            "-f" | "-d" | "-x" | "-s" | "-p" | "-b" | "-c" | "-u" | "-g" | "-k" | "-N" => false,
+            _ => return None,
+        },
         // The null-device inode crw-rw-rw- (rubash#1898's symbolic bind).
         'n' => match op {
             "-a" | "-e" | "-r" | "-w" | "-c" => true,

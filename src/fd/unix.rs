@@ -65,6 +65,19 @@ pub fn is_pipe_handle(h: HANDLE) -> bool {
     }
 }
 
+/// S_ISSOCK — the handle refers to a socket. The Windows twin
+/// (windows_impl::is_socket_handle) exists for the spawn layer; the
+/// fd-fact classification (rubash#2132) needs the same judgment on
+/// unix, where an inherited socketpair end is otherwise
+/// indistinguishable from a pipe to a mode-only probe.
+pub fn is_socket_handle(h: HANDLE) -> bool {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::fstat(h, &mut st) == 0
+            && (u32::from(st.st_mode) & u32::from(libc::S_IFMT)) == u32::from(libc::S_IFSOCK)
+    }
+}
+
 /// The filesystem path an open regular-file descriptor refers to, or
 /// None for pipes/ttys/devices. GNU's `open("/proc/self/fd/N", O_RDONLY)`
 /// on a regular file performs a FRESH open at offset 0 — callers

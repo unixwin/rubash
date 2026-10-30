@@ -68,6 +68,21 @@ pub const FD_ACCESS_PREFIX: &str = "__RUBASH_FD_ACCESS_";
 /// the marks themselves so stage clones (command_substitution_executor
 /// fork copies) inherit it verbatim.
 pub const FD0_STAGE_PIPE: &str = "__RUBASH_FD0_STAGE_PIPE";
+/// rubash#2131: the fd-0 fact of a binding that travels as a staged
+/// FUNCTION_STDIN mirror (bind_command_fd0_input's text branch and the
+/// flat-subshell region feed): the mirror replaces fd 0 for its scope
+/// but installs no fd-table entry, so the entries-driven sync would
+/// answer from whatever binding the mirror superseded. The staging
+/// site records the staged source's own fact here — `T:<target>` for a
+/// file-referent fact, `A:<access mark>` for a device class, `D:<fd>`
+/// for a dup of another descriptor — in the same vocabulary the sync
+/// writes, and the guard restores it with the mirror. The sync lets
+/// it supersede the fd-0 entry mark only while the mirror actually
+/// governs fd 0 (the channel is staged, no pipeline stage owns fd 0,
+/// and the entry is still the ambient inherited one the mirror left
+/// untouched — an exec-bound File entry shadows the mirror upstream
+/// of the sync and keeps its own fact).
+pub const FD0_MIRROR_FACT: &str = "__RUBASH_FD0_MIRROR_FACT";
 /// rubash#2042: marks a file-backed open descriptor for the
 /// `test -r /proc/<pid>/fd/N` face. GNU answers -r TRUE for every
 /// live fd magic link regardless of the fd's open mode (measured on

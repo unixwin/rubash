@@ -320,6 +320,15 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "test") {
                     self.execute_external(cmd)
                 } else {
+                    // rubash#2131: GNU applies the command's own
+                    // redirections before the builtin runs (redir.c
+                    // do_redirections) — the other two test entries
+                    // (builtin_direct_command, command_no_alias_late)
+                    // already open them via this walk; without it the
+                    // fd-1 target existed only once the buffered writer
+                    // emitted, so the fd-fact sync's own-redirect
+                    // overlay stated a file that was not there yet.
+                    self.apply_no_output_builtin_redirects(cmd)?;
                     self.exit_code = self.execute_test_words(&cmd.words[1..], false, cmd)?;
                     Ok(())
                 }
@@ -328,6 +337,7 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "[") {
                     self.execute_external(cmd)
                 } else {
+                    self.apply_no_output_builtin_redirects(cmd)?;
                     self.exit_code = self.execute_test_words(&cmd.words[1..], true, cmd)?;
                     Ok(())
                 }
