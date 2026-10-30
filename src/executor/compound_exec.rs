@@ -1138,9 +1138,21 @@ impl Executor {
             .unwrap_or_else(|| "rubash".into());
         // Environment block for the child: process env merged with the
         // shell's env_vars (same filter the old Command::env loop applied).
+        // rubash#2259: the process-env base crosses through the same
+        // spawn-inherited adjudication as the env_vars loop below —
+        // pre-fix it ingested the raw environ, so any internal
+        // `__RUBASH_*` state a foreign parent (or an older binary's
+        // mirror) had planted there rode into the respawned child
+        // unadjudicated, including the parent's invocation
+        // classification. Explicit stamps inserted after this merge
+        // (SHELL_PID, the spawner stamp, the trap reset table, ...)
+        // are unaffected.
         let mut env_map: std::collections::BTreeMap<String, String> =
             crate::executor::env_helpers::process_env_pairs()
                 .into_iter()
+                .filter(|(key, _)| {
+                    !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key)
+                })
                 .collect();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
@@ -1159,11 +1171,14 @@ impl Executor {
         // forwarded above and must survive this reset filter.
         // Strip by the KEYS PRESENT IN env_map, not the live trap table:
         // stale OS-env copies of removed traps (the std::env mirror writes
-        // through setattr apply.rs but is not cleaned on trap removal) ride
-        // into env_map via the process-env ingest above, and a strip driven by
-        // env_vars would leave them (trap.tests: __RUBASH_TRAP_SIGHUP/
-        // __RUBASH_TRAP_SIGUSR2 leaked into the monitored `sleep N &`
-        // children after `trap - HUP`/`trap - USR2` had cleared the table).
+        // through setattr apply.rs but is not cleaned on trap removal) used
+        // to ride into env_map via the process-env ingest above — the
+        // rubash#2259 adjudication on that ingest now drops them there —
+        // and a strip driven by env_vars would leave any copy that still
+        // arrived (trap.tests: __RUBASH_TRAP_SIGHUP/__RUBASH_TRAP_SIGUSR2
+        // leaked into the monitored `sleep N &` children after
+        // `trap - HUP`/`trap - USR2` had cleared the table). The retain
+        // stays as the boundary assertion regardless of the ingest route.
         env_map.retain(|key, _| {
             !(key.starts_with("__RUBASH_TRAP") && key != "__RUBASH_TRAP_ORIG_IGN")
         });
