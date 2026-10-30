@@ -1913,10 +1913,57 @@ impl Executor {
     /// like a reaped signal death. Kill(2)-caused deliveries (any
     /// sender process, including this shell's own kill builtin) keep
     /// GNU's defer-to-completion semantics untouched, as do
-    /// non-terminating trapped signals (WINCH, CHLD...). A kill(2)
-    /// addressed to the whole process group still defers: the queues
-    /// cannot distinguish its addressing from a pid-addressed kill,
-    /// and no real child exists whose death could report it.
+    /// non-terminating trapped signals (WINCH, CHLD...).
+    ///
+    /// rubash#2241 refines the kill(2) boundary: siginfo cannot say
+    /// whether a kill(2) addressed this pid or this whole process
+    /// group, but the SENDER's group membership can (see
+    /// delivery_would_kill_virtual_child). bats' CTRL-C tests deliver
+    /// `kill -INT -- -pgid` from a driver process outside the group;
+    /// GNU's real sleep dies from that delivery and the trap runs at
+    /// once, so the virtual child dies the same death. A sender
+    /// inside the group is one of the shell's own jobs (`kill -INT
+    /// $$`), whose addressing was the shell alone — deferral stands.
+    /// rubash#2241: would a real foreground child have died from the
+    /// latest kill(2) delivery of `signal`? The emulated sleep's
+    /// virtual child shares the shell's process group exactly when
+    /// job control is off (GNU jobs.c:2390 make_child groups the
+    /// child only under job control; without it the child stays in
+    /// the shell's group, and with it a delivery that reached the
+    /// shell never reached the child's own group). A kill(2) arriving
+    /// from a sender OUTSIDE the shell's process group was addressed
+    /// to the shell alone or to its whole group; addressed to the
+    /// group, GNU's real child dies from it and jobs.c:3064 wait_for
+    /// dispatches the pending trap immediately. A sender INSIDE the
+    /// group — one of the shell's own jobs running `kill -INT $$` —
+    /// is rubash#1034's shape: the addressing was the shell alone and
+    /// the child sleeps on, so the trap keeps deferring. An exited
+    /// sender (getpgid fails) also defers: the #1034 sender exits
+    /// right after sending, while a group-kill sender (bats' driver)
+    /// is still alive, waiting on the group it killed. The one
+    /// indistinguishable residue — an outside sender pid-addressing
+    /// the shell alone — is accepted and modeled as a group delivery:
+    /// no observable separates the two, and deferring there is the
+    /// failure mode this issue is about.
+    #[cfg(unix)]
+    fn delivery_would_kill_virtual_child(&self, signal: i32) -> bool {
+        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor") {
+            return false;
+        }
+        let Some(sender) = crate::builtins::kill::last_delivery_sender_pid(signal) else {
+            return false;
+        };
+        if sender == std::process::id() {
+            return false;
+        }
+        let sender_pgid = unsafe { libc::getpgid(sender as libc::pid_t) };
+        if sender_pgid <= 0 {
+            return false;
+        }
+        let own_pgid = unsafe { libc::getpgid(0) };
+        own_pgid > 0 && sender_pgid != own_pgid
+    }
+
     pub(crate) fn sleep_interruptibly(
         &mut self,
         seconds: f64,
@@ -1988,7 +2035,12 @@ impl Executor {
                 #[cfg(unix)]
                 {
                     crate::builtins::kill::kernel_handler_installed(signal)
-                        && crate::builtins::kill::last_delivery_kernel_caused(signal)
+                        // Kernel-caused (terminal ^C): the real child
+                        // dies, rubash#1034. Kill(2)-caused: the real
+                        // child dies only when the delivery addressed
+                        // the shared process group (rubash#2241).
+                        && (crate::builtins::kill::last_delivery_kernel_caused(signal)
+                            || self.delivery_would_kill_virtual_child(signal))
                         && signal_trap_name(signal).is_some_and(|name| {
                             crate::builtins::trap::get_trap_action(
                                 &self.shell_state.env_vars,

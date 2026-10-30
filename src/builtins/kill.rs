@@ -2016,6 +2016,48 @@ mod kernel_signals {
     pub(super) fn note_self_delivery(sig: i32) {
         if is_managed(sig) {
             KERNEL_CAUSED.fetch_and(!bit(sig), Ordering::Relaxed);
+            // rubash#2241: the sender record agrees — a self delivery
+            // is an in-group, shell-only addressing by construction.
+            record_sender_pid(sig, std::process::id() as i32);
+        }
+    }
+
+    /// Sender pid of the most recently drained kill(2)-caused delivery,
+    /// indexed by signal number (0 = none recorded, kernel-caused, or
+    /// no sender information). Companion to KERNEL_CAUSED: the origin
+    /// bit alone cannot tell a GROUP-addressed kill(2) — the delivery
+    /// bats' CTRL-C tests use (kill -INT -- -pgid, rubash#2241) — from
+    /// one addressed to this shell alone (rubash#1034's deferral
+    /// shape); the sender's process-group membership can, because a
+    /// group delivery's sender necessarily sits OUTSIDE the target
+    /// group while a shell-only `kill -INT $$` from one of the shell's
+    /// own jobs comes from INSIDE it. Consumed only by the
+    /// virtual-child model in trap_exec::sleep_interruptibly.
+    static LAST_SENDER_PID: OnceLock<Mutex<[i32; 128]>> = OnceLock::new();
+
+    fn sender_pid_table() -> &'static Mutex<[i32; 128]> {
+        LAST_SENDER_PID.get_or_init(|| Mutex::new([0; 128]))
+    }
+
+    fn record_sender_pid(sig: i32, pid: i32) {
+        if !is_managed(sig) || !(0..128).contains(&sig) {
+            return;
+        }
+        if let Ok(mut table) = sender_pid_table().lock() {
+            table[sig as usize] = pid;
+        }
+    }
+
+    /// Sender pid recorded for the latest drained delivery of `sig`
+    /// (see LAST_SENDER_PID); None when nothing usable was recorded.
+    pub(super) fn last_delivery_sender_pid(sig: i32) -> Option<u32> {
+        if !is_managed(sig) || !(0..128).contains(&sig) {
+            return None;
+        }
+        let table = sender_pid_table().lock().ok()?;
+        match table[sig as usize] {
+            pid if pid > 0 => Some(pid as u32),
+            _ => None,
         }
     }
 
@@ -2865,11 +2907,23 @@ mod kernel_signals {
                 if is_managed(origin.signal) {
                     if matches!(origin.cause, Cause::Kernel) {
                         KERNEL_CAUSED.fetch_or(bit(origin.signal), Ordering::Relaxed);
+                        // rubash#2241: a kernel delivery has no sender
+                        // process; clear any stale sender record so the
+                        // virtual-child model never pairs this arrival
+                        // with an earlier kill(2)'s sender.
+                        record_sender_pid(origin.signal, 0);
                         if origin.signal == libc::SIGINT {
                             SIGINT_KERNEL_EPOCH.fetch_add(1, Ordering::Relaxed);
                         }
                     } else {
                         KERNEL_CAUSED.fetch_and(!bit(origin.signal), Ordering::Relaxed);
+                        // rubash#2241: keep the sender for the
+                        // group-addressing test in the virtual-child
+                        // model (see LAST_SENDER_PID).
+                        record_sender_pid(
+                            origin.signal,
+                            origin.process.map(|p| p.pid).unwrap_or(0),
+                        );
                     }
                 }
                 origin.signal
@@ -3275,6 +3329,14 @@ pub fn kernel_handler_installed(signal: i32) -> bool {
 #[cfg(unix)]
 pub fn last_delivery_kernel_caused(signal: i32) -> bool {
     kernel_signals::last_delivery_kernel_caused(signal)
+}
+
+/// Sender pid of the most recently drained kill(2) delivery of
+/// `signal`, when one was recorded (rubash#2241; see
+/// kernel_signals::LAST_SENDER_PID).
+#[cfg(unix)]
+pub fn last_delivery_sender_pid(signal: i32) -> Option<u32> {
+    kernel_signals::last_delivery_sender_pid(signal)
 }
 
 /// Monotonic count of kernel-caused SIGINT deliveries drained so far
