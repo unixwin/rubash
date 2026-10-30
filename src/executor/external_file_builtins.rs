@@ -2172,6 +2172,16 @@ impl Executor {
                             stdin_remaining = Some(Vec::new());
                         } else {
                             stdin_remaining = Some(self.cat_stdin_operand_bytes(cmd));
+                            // rubash#2101: the operand drain recorded
+                            // a hard read error — a directory bound to
+                            // fd 0 reads EISDIR, and GNU's cat reports
+                            // it for the `-` operand, sets status 1,
+                            // and continues with the next operand
+                            // (cat.c).
+                            if let Some(message) = self.fd_table.read_error.take() {
+                                writeln!(&mut diagnostics, "cat: -: {message}")?;
+                                status = 1;
+                            }
                         }
                     }
                     if let Some(bytes) = stdin_remaining.take() {
@@ -2428,6 +2438,18 @@ impl Executor {
                     None | Some(FdReadEndpoint::InheritedProcessStdin)
                 ) {
                     if let Some(bytes) = self.fd_table.read_all_bytes(0) {
+                        // rubash#2101: the drain recorded a hard read
+                        // error (a directory bound to fd 0 reads
+                        // EISDIR) — GNU's cat reports it for the
+                        // implicit `-` and fails (cat.c), it does not
+                        // exit 0 on the empty read.
+                        if let Some(message) = self.fd_table.read_error.take() {
+                            let mut stderr = Vec::new();
+                            writeln!(&mut stderr, "cat: -: {message}")?;
+                            self.write_buffered_builtin_output(cmd, &filter(&bytes), &stderr)?;
+                            self.exit_code = 1;
+                            return Ok(true);
+                        }
                         self.write_cat_output(cmd, &filter(&bytes))?;
                         self.exit_code = 0;
                         return Ok(true);

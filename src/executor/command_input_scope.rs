@@ -1556,8 +1556,18 @@ impl Executor {
     /// objects that yield a live kernel stream from open(2). Windows
     /// has no filesystem FIFOs or device nodes of this kind, so the
     /// class is regular files only there.
+    ///
+    /// rubash#2101: directories join the class on every platform.
+    /// GNU opens a directory for a compound's stdin exactly like a
+    /// file (redir.c redir_open) and binds the descriptor; the body
+    /// observes the read failure itself (the read builtin's EISDIR
+    /// diagnostic, an external reader's own error). Excluding them
+    /// dropped the binding to the text mirror, which swallowed the
+    /// error at bind time — `{ cat; } < dir` exited 0 silently. The
+    /// Windows open succeeds through the fd layer's directory retry
+    /// (open_file_read's FILE_FLAG_BACKUP_SEMANTICS arm).
     fn compound_fd0_stream_source(meta: &std::fs::Metadata) -> bool {
-        if meta.is_file() {
+        if meta.is_file() || meta.is_dir() {
             return true;
         }
         #[cfg(unix)]

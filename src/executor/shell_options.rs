@@ -29,6 +29,28 @@ fn services_db_path() -> std::path::PathBuf {
     root.join(r"System32\drivers\etc\services")
 }
 
+/// rubash#2101: open one redirect input target. A directory is a
+/// legal input in GNU (redir.c redir_open simply opens it; the child
+/// receives the descriptor and only a reading child fails, with its
+/// own diagnostic), but a plain Windows open refuses directories —
+/// retry those with FILE_FLAG_BACKUP_SEMANTICS, the flag the identity
+/// probes (src/executor/path.rs) already use to open directory
+/// handles. Unix opens directories natively.
+fn open_redirect_input_file(path: &std::path::Path) -> io::Result<File> {
+    let opened = File::open(path);
+    #[cfg(windows)]
+    {
+        if opened.is_err() && std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()) {
+            use std::os::windows::fs::OpenOptionsExt;
+            return std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(0x0200_0000)
+                .open(path);
+        }
+    }
+    opened
+}
+
 fn resolve_net_service_port(port_text: &str, udp: bool) -> Option<u16> {
     if let Ok(port) = port_text.parse::<u16>() {
         return Some(port);
@@ -400,7 +422,7 @@ impl Executor {
             target,
             Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
         ) {
-            return Some(File::open(&link.native));
+            return Some(open_redirect_input_file(std::path::Path::new(&link.native)));
         }
         // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): synthetic /proc files
         // serve as a pre-filled pipe converted to a File; reads hit EOF at
@@ -593,7 +615,7 @@ impl Executor {
             })
             .map_err(|e| crate::posix_errors::path_error(target, e));
         }
-        File::open(win_path).map_err(|e| crate::posix_errors::path_error(target, e))
+        open_redirect_input_file(&win_path).map_err(|e| crate::posix_errors::path_error(target, e))
     }
 
     pub(in crate::executor) fn open_fd_read_endpoint(
@@ -2939,7 +2961,14 @@ impl Executor {
                     // must stream 0xff through). Read bytes and re-encode to
                     // shell text; callers decode on the way out.
                     let mut buf = Vec::new();
-                    let _ = file.read_to_end(&mut buf);
+                    if file.read_to_end(&mut buf).is_err() && buf.is_empty() {
+                        // rubash#2101: a hard read error is not an
+                        // empty stream — a dup of a directory fd reads
+                        // EISDIR (GNU's reader reports it and fails).
+                        // Decline the text channel so the caller's
+                        // descriptor path surfaces the failure.
+                        return None;
+                    }
                     return Some(crate::executor::substitution_metadata::bytes_to_shell_text(
                         &buf,
                     ));
@@ -3069,7 +3098,15 @@ impl Executor {
             if let Ok(mut file) = self.open_fd_read_endpoint(0, "fd 0") {
                 use std::io::Read as _;
                 let mut buf = Vec::new();
-                let _ = file.read_to_end(&mut buf);
+                if file.read_to_end(&mut buf).is_err() && buf.is_empty() {
+                    // rubash#2101: same decline as the dup arm above —
+                    // an exec-bound directory's EISDIR is not an empty
+                    // stream. Returning None (not the ambient buffer
+                    // below) keeps the endpoint's shadow over
+                    // FUNCTION_STDIN; descriptor-path consumers then
+                    // surface the read failure themselves.
+                    return None;
+                }
                 return Some(crate::executor::substitution_metadata::bytes_to_shell_text(
                     &buf,
                 ));
