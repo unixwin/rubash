@@ -368,7 +368,14 @@ impl Executor {
             // readonly, UID/EUID/PPID, SHELLOPTS/BASHOPTS replay, SHLVL+1,
             // IFS default). Without this the in-process child fell back to
             // indexed-array handling for ${!BASH_CMDS[@]} (assoc audit C1).
-            Self::initialize_fresh_shell_env_vars(&mut child_env, &self.shell_state.cwd.clone());
+            Self::initialize_fresh_shell_env_vars(
+                &mut child_env,
+                &self.shell_state.cwd.clone(),
+                // An exec'd shell image is a genuinely new shell:
+                // SHLVL takes the startup increment (rubash#2058's
+                // keep applies only to fork-shaped respawns).
+                false,
+            );
             // The in-process child shares the parent's OS process, so the
             // child's PPID is the parent shell's pid (a real child would see
             // getppid() == the parent shell's getpid()).
