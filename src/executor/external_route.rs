@@ -368,7 +368,25 @@ mod tests {
             behavior,
             record: record.clone(),
         }));
+        pin_tool_path(&mut executor);
         (executor, record)
+    }
+
+    /// The battery's externals (`dd`, `printenv`) must resolve to
+    /// the platform's own tools on every CI runner: an inherited
+    /// PATH can carry another platform's binaries ahead of them
+    /// (the macOS runner's did — resolution landed on a foreign
+    /// binary and every spawn twin failed with "cannot execute
+    /// binary file" while the route arm, which never execs,
+    /// passed). Pin the system tool path in both arms alike.
+    fn pin_tool_path(executor: &mut Executor) {
+        assert_eq!(run(executor, "export PATH=/usr/bin:/bin"), 0);
+    }
+
+    fn baseline_executor() -> Executor {
+        let mut executor = Executor::new();
+        pin_tool_path(&mut executor);
+        executor
     }
 
     fn scratch(tag: &str) -> PathBuf {
@@ -406,7 +424,10 @@ mod tests {
             let (mut executor, record) = if routed {
                 routed_executor(claims, behavior)
             } else {
-                (Executor::new(), Rc::new(RefCell::new(Record::default())))
+                (
+                    baseline_executor(),
+                    Rc::new(RefCell::new(Record::default())),
+                )
             };
             assert_eq!(run(&mut executor, &format!("cd {}", dir.display())), 0);
             let status = run(&mut executor, script);
@@ -520,7 +541,10 @@ mod tests {
             let (mut executor, record) = if routed {
                 routed_executor(&["dd"], Behavior::CopyStdin)
             } else {
-                (Executor::new(), Rc::new(RefCell::new(Record::default())))
+                (
+                    baseline_executor(),
+                    Rc::new(RefCell::new(Record::default())),
+                )
             };
             assert_eq!(run(&mut executor, &format!("cd {}", dir.display())), 0);
             assert_eq!(
@@ -581,7 +605,7 @@ mod tests {
         // The routed call ran in the session cwd...
         assert_eq!(record.borrow().cwds, vec![sub.clone()]);
         // ...and its PWD answer matches the spawn answer.
-        let mut baseline = Executor::new();
+        let mut baseline = baseline_executor();
         assert_eq!(run(&mut baseline, &format!("cd {}", dir.display())), 0);
         assert_eq!(run(&mut baseline, "cd sub"), 0);
         assert_eq!(run(&mut baseline, "printenv PWD > pwd-base.txt"), 0);
@@ -597,7 +621,7 @@ mod tests {
         assert_eq!(run(&mut executor, "dd < /dev/null"), 42);
         // The spawn twin reports dd's own 0: the seam's contract
         // is that the provider's status IS the call's status.
-        let mut baseline = Executor::new();
+        let mut baseline = baseline_executor();
         assert_eq!(run(&mut baseline, "dd < /dev/null"), 0);
 
         // Cooperative cancellation lands as the interrupted
@@ -663,7 +687,7 @@ mod tests {
         assert!(!read(&dir, "t5.txt").contains("FFI"));
         // No provider at all: `type dd` is byte-identical to the
         // claiming session's line minus the suffix.
-        let mut baseline = Executor::new();
+        let mut baseline = baseline_executor();
         assert_eq!(run(&mut baseline, &format!("cd {}", dir.display())), 0);
         assert_eq!(run(&mut baseline, "type dd > t6.txt"), 0);
         assert_eq!(
