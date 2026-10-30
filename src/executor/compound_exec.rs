@@ -1093,6 +1093,26 @@ impl Executor {
                 use std::os::unix::process::CommandExt;
                 if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor")
                 {
+                    // rubash#2233: GNU job control puts the job in its
+                    // OWN process group at fork time (jobs.c:2390
+                    // make_child child arm: setpgid(mypid,
+                    // pipeline_pgrp), the first pipeline pid becoming
+                    // the group). The job table already RECORDS that
+                    // value (async_job_pgrp), but without the real
+                    // setpgid the child stayed in the shell's group:
+                    // hangup_all_jobs' killpg then targeted a group
+                    // that does not exist, and a session leader's exit
+                    // SIGHUP'd the job through the foreground group
+                    // whether or not huponexit was set. Give the
+                    // directly-spawned async child its recorded group;
+                    // errors are ignored like GNU's parent-side call
+                    // (jobs.c:2455) — a raced exit leaves the group
+                    // unformed and killpg answers ESRCH, also ignored.
+                    process.pre_exec(|| {
+                        // The enclosing unsafe block covers this call.
+                        libc::setpgid(0, 0);
+                        Ok(())
+                    });
                     process.pre_exec(crate::builtins::kill::child_pre_exec_reset);
                 } else {
                     process.pre_exec(crate::builtins::kill::child_pre_exec_reset_async);

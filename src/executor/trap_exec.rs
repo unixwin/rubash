@@ -1626,6 +1626,44 @@ impl Executor {
     /// delivery races the failed read (the handler can land a hair
     /// after the read returns), so an empty first drain earns one
     /// short-settle retry before the caller takes the read-error arm.
+    /// Classify one drained batch for the hangup verdict: returns
+    /// (found, saw_sighup) — found when an untrapped, termsig-armed
+    /// SIGHUP was in the batch (it is consumed and the hangup-death
+    /// mark recorded); every other signal is re-queued untouched.
+    /// The trap table keys by the canonical SIGNALS spelling
+    /// ("SIGHUP"); a "HUP" lookup reads a phantom key and would
+    /// misclassify a TRAPPED hangup as untrapped (the drains above
+    /// reach note_untrapped_hangup only after the canonical lookup
+    /// found no action).
+    #[cfg(unix)]
+    fn classify_drained_hangup(&mut self, signals: Vec<i32>) -> (bool, bool) {
+        let mut rest = Vec::new();
+        let mut found = false;
+        let mut saw_sighup = false;
+        for signal in signals {
+            if signal == libc::SIGHUP as i32 {
+                saw_sighup = true;
+                if !found
+                    && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "SIGHUP")
+                        .is_none()
+                    && self.hangup_termsig_armed()
+                {
+                    found = true;
+                    continue;
+                }
+            }
+            rest.push(signal);
+        }
+        if !rest.is_empty() {
+            crate::builtins::kill::requeue_pending_signals(rest);
+        }
+        if found {
+            self.exit_code = 128 + libc::SIGHUP as i32;
+            self.hangup_death_pending = true;
+        }
+        (found, saw_sighup)
+    }
+
     #[cfg(unix)]
     pub(crate) fn poll_untrapped_hangup(&mut self) -> bool {
         if self.hangup_death_pending {
@@ -1640,27 +1678,7 @@ impl Executor {
             if signals.is_empty() {
                 continue;
             }
-            let mut rest = Vec::new();
-            let mut found = false;
-            for signal in signals {
-                if !found
-                    && signal == libc::SIGHUP as i32
-                    && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "HUP")
-                        .is_none()
-                    && self.hangup_termsig_armed()
-                {
-                    found = true;
-                } else {
-                    rest.push(signal);
-                }
-            }
-            if !rest.is_empty() {
-                crate::builtins::kill::requeue_pending_signals(rest);
-            }
-            if found {
-                self.exit_code = 128 + libc::SIGHUP as i32;
-                self.hangup_death_pending = true;
-            }
+            let (found, _) = self.classify_drained_hangup(signals);
             return found;
         }
         false
@@ -1669,6 +1687,48 @@ impl Executor {
     /// Non-unix: no hangup delivery exists to poll for.
     #[cfg(not(unix))]
     pub(crate) fn poll_untrapped_hangup(&mut self) -> bool {
+        false
+    }
+
+    /// rubash#2233: the settled variant for callers that KNOW the
+    /// terminal is dead (the slave read returned EOF with POLLHUP on
+    /// the fd, or EIO): the kernel delivered SIGHUP at the same
+    /// moment it retired the terminal, but the mailbox queues it
+    /// asynchronously, and under load the queueing can lag the
+    /// reader's fold by far more than poll_untrapped_hangup's 5 ms
+    /// settle — the fold then wins and the hangup is lost (or is
+    /// noted mid-finish by the EXIT trap's drain, surfacing as a
+    /// plain 129 with no signal death). Drain until the delivery
+    /// lands or the budget expires; a SIGHUP that IS queued resolves
+    /// at once (an untrapped one classifies as the hangup, a trapped
+    /// or ignored one ends the wait as a plain fold — its trap must
+    /// not run on this path). GNU never faces this window: its
+    /// termsig handler is synchronous with the delivery.
+    #[cfg(unix)]
+    pub(crate) fn poll_untrapped_hangup_settled(&mut self, budget: std::time::Duration) -> bool {
+        if self.hangup_death_pending {
+            return true;
+        }
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            let signals = crate::builtins::kill::take_pending_signals_now(std::process::id())
+                .unwrap_or_default();
+            if !signals.is_empty() {
+                let (found, saw_sighup) = self.classify_drained_hangup(signals);
+                if found || saw_sighup {
+                    return found;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// Non-unix: no hangup delivery exists to poll for.
+    #[cfg(not(unix))]
+    pub(crate) fn poll_untrapped_hangup_settled(&mut self, _budget: std::time::Duration) -> bool {
         false
     }
 

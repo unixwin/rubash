@@ -4675,14 +4675,39 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             // to stderr before exiting (builtins/exit.def:59-62). The
             // prompt is already on stderr, so the line reads `$ exit`.
             Ok(0) => {
-                if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+                // rubash#2233: an EOF read on the interactive terminal
+                // is not always a genuine ^D: when the terminal hangs
+                // up (pty master closed), the slave read returns EOF
+                // (0 bytes) on Linux rather than EIO, so THIS arm is
+                // where the hangup surfaces — classify a pending
+                // untrapped SIGHUP exactly like the Err arm below
+                // before folding. GNU's termsig settlement preempts
+                // the fold (no `exit` echo, jobs hung up, EXIT trap,
+                // death by SIGHUP in finish_shell); a trapped SIGHUP
+                // is not classified (poll never dispatches), so the
+                // trapped/ignored controls still fold gracefully.
+                // When the fd itself already shows the hangup
+                // (POLLHUP/POLLERR), the delivery is certainly in
+                // flight, so the classification gets the settled
+                // poll: the mailbox queues asynchronously and under
+                // load its lag outlasts the plain poll's 5 ms settle.
+                // A genuine ^D on a live terminal shows neither flag
+                // and never pays the settle.
+                #[cfg(unix)]
+                let hangup = stdin_is_tty
+                    && (executor.poll_untrapped_hangup()
+                        || (tty_fd_shows_hangup()
+                            && executor.poll_untrapped_hangup_settled(HANGUP_SETTLE_BUDGET)));
+                #[cfg(not(unix))]
+                let hangup = false;
+                if !hangup && executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
                     let login = executor.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
                     eprintln!("{}", if login { "logout" } else { "exit" });
                 }
                 eof = true;
             }
             Ok(_) => {}
-            Err(_err) => {
+            Err(err) => {
                 // rubash#2233: a read ERROR on the interactive
                 // terminal (the hangup shape: the master closed and
                 // the blocked read wakes with EIO) reaches the reader
@@ -4696,9 +4721,15 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 // the trap unrun). The poll also covers the delivery
                 // that woke this read with EINTR instead of EIO. The
                 // fatal read-error arm (diagnostic + 128) is the
-                // SCRIPT reader's — see run_stdin_script.
+                // SCRIPT reader's — see run_stdin_script. An EIO
+                // error is the dead terminal itself, so — like the
+                // EOF arm's POLLHUP gate — it earns the settled poll
+                // for the in-flight delivery.
                 #[cfg(unix)]
-                let hangup = stdin_is_tty && executor.poll_untrapped_hangup();
+                let hangup = stdin_is_tty
+                    && (executor.poll_untrapped_hangup()
+                        || (err.raw_os_error() == Some(libc::EIO)
+                            && executor.poll_untrapped_hangup_settled(HANGUP_SETTLE_BUDGET)));
                 #[cfg(not(unix))]
                 let hangup = false;
                 if !hangup && executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
@@ -5200,6 +5231,33 @@ fn normalize_bridge_line(raw: &str) -> String {
     output
 }
 
+/// rubash#2233: how long the interactive reader's hangup
+/// classification waits for an in-flight SIGHUP once the terminal
+/// is KNOWN dead (POLLHUP on the fd, or an EIO read). The mailbox
+/// queues deliveries asynchronously; under load the queueing lag
+/// can outlast the plain poll's 5 ms settle by an order of
+/// magnitude. The budget is only ever spent on a dead terminal —
+/// a live terminal's genuine EOF never reaches the settled poll.
+#[cfg(unix)]
+const HANGUP_SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// rubash#2233: whether fd 0's poll face already shows the hangup
+/// (POLLHUP/POLLERR) — the terminal is dead, so a SIGHUP delivery
+/// is a certainty in flight rather than a possibility. A genuine
+/// ^D on a live terminal shows neither flag.
+#[cfg(unix)]
+fn tty_fd_shows_hangup() -> bool {
+    let mut pfd = libc::pollfd {
+        fd: 0,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one pollfd, zero timeout — a pure status query on the
+    // process's own stdin descriptor.
+    let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
+    rc > 0 && (pfd.revents & (libc::POLLHUP | libc::POLLERR)) != 0
+}
+
 /// Outcome of [`prompt_wait_for_input`].
 #[cfg(unix)]
 enum PromptWait {
@@ -5646,8 +5704,18 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
     // rubash#2233: the termsig funnel ends in kill_shell (sig.c:649):
     // restore SIG_DFL and re-raise, so after history, hangup, and the
     // EXIT trap the process dies BY SIGHUP rather than exiting 129.
+    // A hangup that landed while THIS finish was already running —
+    // its delivery drains inside the EXIT trap above and records
+    // the mark there, unwinding the trap with 129 — still owes the
+    // signal death: GNU's termsig preempts an in-progress
+    // exit_shell the same way. The jobs get their hangup at this
+    // late point in that case (the in-order funnel above handled
+    // the early one), then the death.
     #[cfg(unix)]
-    if hangup_death {
+    if hangup_death || executor.take_hangup_death_pending() {
+        if !hangup_death && executor.get_env("__RUBASH_INTERACTIVE") == Some("1") {
+            executor.hangup_all_jobs();
+        }
         die_by_sighup();
     }
     code
