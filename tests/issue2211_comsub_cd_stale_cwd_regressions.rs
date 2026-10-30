@@ -35,6 +35,15 @@
 //! oracle) with script files, 2026-10-30, master 80bf1950. Controls
 //! (redirected forms, plain subshell, startup cwd) pass on master too;
 //! the pins named for the defect shapes are red on master.
+//!
+//! Follow-up (same day): the anchor regressed the golden
+//! catfile-comsub p3/q9 shapes — a quoted empty operand joined onto
+//! the session cwd manufactured the directory itself and read as
+//! silent rc 0, where GNU's open of the word as spelled fails ENOENT
+//! (builtins/evalstring.c open_redir_file). The
+//! `issue2211_comsub_cat_file_quoted_empty_operand` pin covers that
+//! class; it is red on the anchored code, and on un-fixed master it
+//! passes only by accident (the un-anchored open of "" fails alone).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -306,6 +315,48 @@ echo \"file: [$(cd relfile.txt && pwd -P)]\"
     assert!(
         stderr.contains("cd: relfile.txt: Not a directory"),
         "not-a-directory diagnostic drifted: {stderr}"
+    );
+}
+
+#[test]
+fn issue2211_comsub_cat_file_quoted_empty_operand() {
+    // The catfile-comsub golden's p3/q9 shapes (follow-up to the
+    // session-cwd anchor above): a QUOTED empty operand is one empty
+    // word, and GNU's open_redir_file (builtins/evalstring.c:759)
+    // opens it as spelled — open("") fails ENOENT, reported as
+    // ": No such file or directory" with EXECUTION_FAILURE. The
+    // anchor must not manufacture the session directory out of it:
+    // joining "" onto the session cwd names the directory itself,
+    // whose read model is silent rc 0. The unquoted empty expansion
+    // (p6) is a different arm — zero words, the ambiguous redirect —
+    // and a nonempty relative operand still reads through the anchor.
+    // On the anchored-but-unfixed code the three quoted-empty rows
+    // report rc=0 with no diagnostic; on un-fixed master they pass
+    // only because the un-anchored open of "" fails on its own.
+    let fx = fixture("catempty");
+    let script = "\
+cd \"$BASE_A\" || exit 1
+unset uf
+y=$(< \"$uf\"); echo \"p3 rc=$?\"
+x=$(< \"\"); echo \"q9 rc=$?\"
+e=
+y=$(< \"$e\"); echo \"varq rc=$?\"
+y=$(< $uf); echo \"p6 rc=$?\"
+z=$(< relfile.txt); echo \"ctrl [$z] rc=$?\"
+";
+    let (stdout, stderr, _) = fx.run(script, &fx.launch);
+    assert_eq!(
+        stdout, "p3 rc=1\nq9 rc=1\nvarq rc=1\np6 rc=1\nctrl [RELATIVE-DATA] rc=0\n",
+        "stderr: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches(": No such file or directory").count(),
+        3,
+        "quoted-empty diagnostics drifted: {stderr}"
+    );
+    assert!(
+        stderr.contains("$uf: ambiguous redirect"),
+        "unquoted-empty diagnostic drifted: {stderr}"
     );
 }
 

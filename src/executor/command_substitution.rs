@@ -2336,7 +2336,17 @@ impl Executor {
         // under G-02 stays at the startup directory — after any
         // earlier cd, `$(<file)` read (or failed to find) the startup
         // tree's file while `$(cat file)` read the current one.
-        let read_path = if read_path.is_absolute() {
+        // The anchor is a resolution CONTEXT, not a concatenation: an
+        // empty operand names nothing in any directory. GNU's
+        // open_redir_file (builtins/evalstring.c:759) opens the
+        // expanded word as spelled — open("", O_RDONLY) fails ENOENT
+        // and internal_error reports ": No such file or directory"
+        // with EXECUTION_FAILURE — while joining "" onto the session
+        // cwd would manufacture the cwd directory itself and hand it
+        // to the is_dir arm below (silent, rc 0). The empty word
+        // therefore reaches the open attempt un-joined, exactly as
+        // spelled, and fails there like any other unopenable name.
+        let read_path = if read_path.is_absolute() || file_word.is_empty() {
             read_path
         } else {
             self.shell_state.cwd.join(&read_path)
