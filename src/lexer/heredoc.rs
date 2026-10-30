@@ -27,7 +27,19 @@ pub(super) fn heredoc_delimiters(
             // value is just `EOF`, so searching the source for that value can
             // accidentally find the closing delimiter in the body instead.
             let context = heredoc_operator_context(source, &pair[1].raw);
-            let strip_tabs = pair[0].value == "<<-";
+            // GNU parse.y:643-661: `<<-` is the LESS_LESS_MINUS operator
+            // and yields r_deblank_reading_until in ALL THREE grammar
+            // forms — bare, `NUMBER LESS_LESS_MINUS WORD`, and
+            // `REDIR_WORD LESS_LESS_MINUS WORD` — and make_cmd.c:527
+            // make_here_document derives kill_leading from that
+            // instruction alone, never from the fd prefix. The numbered
+            // form's lexer token carries the WHOLE slice (`3<<-`, see
+            // number_redirect.rs finish_number_input_redirect), so an
+            // exact `== "<<-"` comparison silently dropped deblank for
+            // every fd-prefixed `<<-`: the gather then neither stripped
+            // body tabs nor matched a tab-indented terminator line, and
+            // the body ran to end-of-input (rubash#2265).
+            let strip_tabs = pair[0].value.ends_with("<<-");
             let value = if strip_tabs {
                 pair[1].value.trim_start_matches('\t').to_string()
             } else {

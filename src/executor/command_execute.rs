@@ -1355,14 +1355,25 @@ impl Executor {
         }
         let mut stripped = cmd.clone();
         stripped.words = cmd.words[harvest_end..].to_vec();
-        if cmd.word_metadata.len() > prefix_end {
-            let skip = if cmd.word_metadata.len() == cmd.words.len() {
-                harvest_end
-            } else {
-                prefix_end
-            };
-            stripped.word_metadata = cmd.word_metadata[skip..].to_vec();
-        }
+        // rubash#2237: word_metadata entries address words by key
+        // (WordMetadata::word_index), exactly like the array-element
+        // records shifted below (#1568) — drop the removed words'
+        // entries and shift the survivors' keys. Slicing the vector by
+        // count instead assumed it is dense; it is not (a
+        // process-substitution word carries no entry), so the surviving
+        // words kept entries keyed to their pre-strip positions and a
+        // keyed consumer read the wrong word's metadata.
+        stripped.word_metadata = cmd
+            .word_metadata
+            .iter()
+            .filter_map(|metadata| {
+                metadata.word_index.checked_sub(harvest_end).map(|shifted| {
+                    let mut metadata = metadata.clone();
+                    metadata.word_index = shifted;
+                    metadata
+                })
+            })
+            .collect();
         stripped.assignments.extend(harvested);
         // rubash#1568: the parser's array-element records address
         // words by index; dropping the leading run leaves those

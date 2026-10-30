@@ -2822,9 +2822,26 @@ impl Executor {
             if command.word_kinds.len() == command.words.len() {
                 first.word_kinds = command.word_kinds[prefix.command_index..].to_vec();
             }
-            if command.word_metadata.len() == command.words.len() {
-                first.word_metadata = command.word_metadata[prefix.command_index..].to_vec();
-            }
+            // rubash#2237: same keyed shift as the other time-prefix
+            // strips — word_metadata entries address words by
+            // WordMetadata::word_index and the vector is sparse (a
+            // process-substitution word carries no entry), so drop the
+            // consumed prefix's entries and shift the survivors' keys
+            // instead of slicing only the dense case.
+            first.word_metadata = command
+                .word_metadata
+                .iter()
+                .filter_map(|metadata| {
+                    metadata
+                        .word_index
+                        .checked_sub(prefix.command_index)
+                        .map(|shifted| {
+                            let mut metadata = metadata.clone();
+                            metadata.word_index = shifted;
+                            metadata
+                        })
+                })
+                .collect();
         }
 
         let started = time_command_started();

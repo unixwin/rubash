@@ -6,6 +6,72 @@ pub(in crate::executor) struct ProcessSubstitutionFiles {
     outputs: Vec<OutputProcessSubstitution>,
 }
 
+/// rubash#2238: one foreground external command's shared stdin
+/// description, held between spawn preparation and the settle in
+/// `execute_external`. GNU gives the child the shell's own fd 0 —
+/// one open file description whose kernel offset every reader
+/// shares (lib/sh/zread.c:99 zread: the shell's own reads take
+/// exactly the requested bytes off that offset). Rubash's virtual
+/// stdin channels (the FUNCTION_STDIN mirror, a virtual fd-0 text
+/// endpoint) have no kernel descriptor, so the unread remainder is
+/// materialized to a temp file once and the child is handed a
+/// duplicate of the SAME open description (`File::try_clone` — dup /
+/// DuplicateHandle, shared offset on both platforms); the parent's
+/// kept handle then measures the child's true consumption at settle
+/// time, replacing the drain-to-EOF accounting that marked the whole
+/// remainder consumed no matter what the child actually read.
+#[derive(Debug)]
+pub(in crate::executor) struct PendingStdinFold {
+    pub(in crate::executor) channel: PendingStdinChannel,
+    /// The parent's handle on the shared description; its position
+    /// after the child exits is the raw byte count the child read.
+    pub(in crate::executor) file: std::fs::File,
+    /// Temp carrier for the materialized remainder; removed at
+    /// settle (the FdText channel's carrier is also registered in
+    /// the command's ProcessSubstitutionFiles and cleaned there —
+    /// removing twice is harmless).
+    pub(in crate::executor) temp_path: PathBuf,
+    /// The rewritten `redirect_in` target string, for the FdText
+    /// channel: the spawn wiring hands out the duplicate only to
+    /// the command this fold was materialized for.
+    pub(in crate::executor) target: Option<String>,
+    /// Set when the spawn wiring actually handed a duplicate of the
+    /// shared description to a spawned child. When no spawn consumed
+    /// it (an in-process emulation arm or the in-process ENOEXEC
+    /// fallback ran the command instead), the settle falls back to
+    /// the pre-#2238 accounting for the FdText channel and to no
+    /// accounting for the mirror (whose drain always ran through the
+    /// consumer's own pull).
+    pub(in crate::executor) handed_out: bool,
+    /// FdText channel only: set when the command's own stdin pull
+    /// (stdin_string_for_command_mut) resolved the rewritten carrier
+    /// redirect — an in-process emulation took the carrier text
+    /// through the pull, which is that face's consumption contract
+    /// (the same pull-and-drain the FUNCTION_STDIN tail performs).
+    /// An emulation that never pulls (mkdir and the other non-reader
+    /// file builtins) leaves this clear, and the endpoint then keeps
+    /// its bytes — the rubash#2239 R5 mechanism, where mkdir inside
+    /// the frame drained a parked call heredoc it never read.
+    pub(in crate::executor) pulled: bool,
+}
+
+#[derive(Debug)]
+pub(in crate::executor) enum PendingStdinChannel {
+    /// The FUNCTION_STDIN mirror: `base_offset` is the mirror cursor
+    /// (a byte index into the shell text) when the fold was created;
+    /// `remainder` is the text that was materialized, kept so the
+    /// settle can convert the child's raw-byte consumption back to
+    /// transport units.
+    FunctionMirror {
+        base_offset: usize,
+        remainder: String,
+    },
+    /// A virtual fd-table text endpoint (Text / ProcessSubstitution)
+    /// on `fd`: offsets are raw bytes of the endpoint's data, the
+    /// same units `FdTable::input_offset` reports.
+    FdText { fd: u32, base_offset: usize },
+}
+
 #[derive(Debug)]
 struct OutputProcessSubstitution {
     path: PathBuf,
@@ -210,7 +276,16 @@ pub(in crate::executor) fn command_needs_process_substitution_materialization(
             .any(word_metadata_needs_process_substitution_materialization)
     {
         return cmd.words.iter().enumerate().any(|(index, word)| {
-            if cmd.word_metadata.get(index).is_some() {
+            // word_metadata is keyed by WordMetadata::word_index, not by
+            // position: a process-substitution word carries no entry (its
+            // record lives in the node-level aggregate), so a positional
+            // get() would read the NEXT word's entry and mask the bare
+            // substitution this check looks for (rubash#2237).
+            if cmd
+                .word_metadata
+                .iter()
+                .any(|metadata| metadata.word_index == index)
+            {
                 return false;
             }
             word.strip_prefix("<(")
@@ -291,6 +366,141 @@ fn dynamic_fd_word(word: &str) -> Option<&str> {
 }
 
 impl Executor {
+    /// rubash#2235: resolve an fd-0 dup source (`<&N`) against the
+    /// command's OWN ordered redirect list when the ambient fd table
+    /// has no binding for N. GNU's do_redirections (redir.c:237)
+    /// walks ONE list in the forked child, so an entry binding N
+    /// earlier in the same list is exactly what the dup copies;
+    /// rubash's spawn composition splits that walk (the numbered
+    /// bindings are opened by `spawn_external_process` while the
+    /// fd-0 dup is resolved in `apply_external_stdin_redirect`), so
+    /// this scan replays the entries preceding the dup and opens
+    /// the winning input binding. The opened description is stashed
+    /// in `own_input_bindings` so the spawn stamps/pins the SAME
+    /// description at N — one description, shared offset, like
+    /// GNU's dup2. Returns None when no earlier entry binds N
+    /// readably (the caller keeps its EBADF error).
+    fn own_numbered_input_binding(
+        &mut self,
+        cmd: &CommandNode,
+        fd: u32,
+        dup_target: &str,
+    ) -> Option<std::rc::Rc<FileFd>> {
+        // The dup entry itself: the last fd-0 DuplicateInput entry
+        // whose expanded target is the field's target (the
+        // association the field arms established).
+        let dup_position = cmd.redirects.iter().rposition(|entry| {
+            entry.fd.unwrap_or(0) == 0
+                && matches!(entry.kind, crate::parser::RedirectKind::DuplicateInput)
+                && self.expand_redirect_target(entry) == dup_target
+        })?;
+        self.own_input_binding_before(cmd, fd, dup_position)
+    }
+
+    fn own_input_binding_before(
+        &mut self,
+        cmd: &CommandNode,
+        fd: u32,
+        before: usize,
+    ) -> Option<std::rc::Rc<FileFd>> {
+        if let Some(stashed) = self.own_input_bindings.get(&fd) {
+            return Some(stashed.clone());
+        }
+        for position in (0..before).rev() {
+            let entry = &cmd.redirects[position];
+            // {var} bindings land in the fd table before dispatch
+            // (the dynamic-fd applier); the ambient lookup the
+            // caller already ran is their service face.
+            if entry.fd_var.is_some() {
+                continue;
+            }
+            let entry_fd = entry
+                .fd
+                .unwrap_or(if entry.is_input_side() { 0 } else { 1 });
+            if entry_fd != fd {
+                continue;
+            }
+            match entry.kind {
+                crate::parser::RedirectKind::CloseInput => return None,
+                crate::parser::RedirectKind::DuplicateInput => {
+                    let target = self.expand_redirect_target(entry);
+                    if is_closed_redirect_target(&target) {
+                        return None;
+                    }
+                    let (source_fd, _) = redirect_target_fd_and_move(&target)?;
+                    if source_fd == fd {
+                        return None;
+                    }
+                    if let Some(endpoint) = self.fd_table.read_endpoint(source_fd) {
+                        return self
+                            .endpoint_as_own_input_binding(fd, source_fd, endpoint, &target);
+                    }
+                    return self.own_input_binding_before(cmd, source_fd, position);
+                }
+                crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite => {
+                    let target = self.expand_redirect_target(entry);
+                    if is_closed_redirect_target(&target)
+                        || redirect_target_is_dup_spelling(&target)
+                    {
+                        return None;
+                    }
+                    if let Some(alias_fd) = redirect_target_fd(&target) {
+                        // An fd-alias PATH spelling (/dev/fd/M):
+                        // GNU services it with an open over the
+                        // alias layer (rubash#1963), which yields
+                        // M's current endpoint.
+                        let endpoint = self.fd_table.read_endpoint(alias_fd)?;
+                        return self.endpoint_as_own_input_binding(fd, alias_fd, endpoint, &target);
+                    }
+                    let path = self
+                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let opened = if entry.kind == crate::parser::RedirectKind::ReadWrite {
+                        std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create(true)
+                            .open(&path)
+                    } else {
+                        self.open_input_redirect(&target)
+                    };
+                    let file = opened.ok()?;
+                    let bound = FileFd::from_file(file, path);
+                    self.own_input_bindings.insert(fd, bound.clone());
+                    return Some(bound);
+                }
+                _ => continue,
+            }
+        }
+        None
+    }
+
+    /// The own-binding form of a resolved endpoint: a File endpoint
+    /// is shared as-is; any other endpoint materializes through the
+    /// same temp-file service the ambient fd-0 dup arm uses, and the
+    /// parent's copy is consumed (the child drains the stream —
+    /// shared-offset semantics).
+    fn endpoint_as_own_input_binding(
+        &mut self,
+        fd: u32,
+        source_fd: u32,
+        endpoint: FdReadEndpoint,
+        target: &str,
+    ) -> Option<std::rc::Rc<FileFd>> {
+        match endpoint {
+            FdReadEndpoint::File(file) => {
+                self.own_input_bindings.insert(fd, file.clone());
+                Some(file)
+            }
+            _ => {
+                let file = self.open_fd_read_endpoint(source_fd, target).ok()?;
+                self.fd_table.consume_all_text(source_fd);
+                let bound = FileFd::from_file(file, target.to_string().into());
+                self.own_input_bindings.insert(fd, bound.clone());
+                Some(bound)
+            }
+        }
+    }
+
     pub(in crate::executor) fn apply_external_stdin_redirect(
         &mut self,
         cmd: &CommandNode,
@@ -350,6 +560,28 @@ impl Executor {
         } else if let Some(ref redirect) = cmd.redirect_in {
             let target = self.expand_redirect_target(redirect);
             if redirect.fd.unwrap_or(0) == 0 {
+                // rubash#2238: this redirect is the carrier
+                // apply_default_external_stdin_file rewrote for a
+                // virtual fd-0 endpoint — hand the child a duplicate
+                // of the fold's shared description instead of a fresh
+                // open, so the settle can measure its reads (GNU:
+                // dup of the one fd-0 description, shared offset).
+                if let Some(fold) = self.pending_stdin_fold.as_mut() {
+                    if fold.target.as_deref() == Some(redirect.target.as_str()) {
+                        match fold.file.try_clone() {
+                            Ok(dup) => {
+                                fold.handed_out = true;
+                                process.stdin(Stdio::from(dup));
+                                return Ok(());
+                            }
+                            // The duplicate could not be made: the
+                            // fresh open below serves the child from
+                            // an unmeasurable description — settle
+                            // with the pre-#2238 drain instead.
+                            Err(_) => fold.pulled = true,
+                        }
+                    }
+                }
                 // `<&N` and the move form `<&N-` (make_cmd.c:704-718) both
                 // hand the child a dup of fd N's open file description; the
                 // move's close of fd N is scoped to the command in the
@@ -393,9 +625,20 @@ impl Executor {
                             process.stdin(Stdio::from(file));
                             return Ok(());
                         }
-                        // `cmd <&N` with N closed/absent — GNU redir.c
-                        // dup2 fails EBADF; the open never happens.
+                        // `cmd <&N` with N closed/absent in the
+                        // ambient table — but an earlier entry of the
+                        // command's OWN list may bind N (GNU's one
+                        // ordered walk, redir.c:237; rubash#2235).
+                        // Only when no own entry binds it either is
+                        // the fd truly absent: GNU's dup2 then fails
+                        // EBADF and the open never happens.
                         None => {
+                            if let Some(file_fd) = self.own_numbered_input_binding(cmd, fd, &target)
+                            {
+                                let dup = crate::fd::duplicate_handle(file_fd.handle)?;
+                                process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
+                                return Ok(());
+                            }
                             return Err(io::Error::new(
                                 io::ErrorKind::Other,
                                 format!("{fd}: Bad file descriptor"),
@@ -421,6 +664,24 @@ impl Executor {
                 && (self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
                     || self.virtual_fd_stdin_remaining(0).is_some())
             {
+                // rubash#2238: when the aliased fd 0 IS the
+                // FUNCTION_STDIN mirror, the alias dups the shared
+                // stream (GNU: `< /dev/stdin` is a dup2 of fd 0) —
+                // hand the fold's duplicate so the child's reads
+                // advance the mirror cursor measurably.
+                if self.function_stdin_remaining().is_some()
+                    && self.virtual_fd_stdin_remaining(0).is_none()
+                    && !matches!(
+                        self.fd_table.read_endpoint(0),
+                        Some(FdReadEndpoint::File(_))
+                    )
+                    && !self.fd_table.is_closed(0)
+                {
+                    if let Some(file) = self.inherited_mirror_stdin_dup() {
+                        process.stdin(Stdio::from(file));
+                        return Ok(());
+                    }
+                }
                 process.stdin(Stdio::piped());
                 return Ok(());
             }
@@ -478,6 +739,21 @@ impl Executor {
             // readers that ran BEFORE the exec keep the pipe bytes.
             let dup = crate::fd::duplicate_handle(file_fd.handle)?;
             process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
+        } else if self.function_stdin_is_command_source(cmd) {
+            // rubash#2238: the child inherits the FUNCTION_STDIN
+            // stream itself — GNU hands it the shell's fd 0
+            // description, so its reads advance the same cursor the
+            // shell's `read` uses. Give it the fold's duplicate of
+            // the materialized remainder and let the settle in
+            // execute_external advance the mirror cursor by the
+            // measured consumption; the piped feed (whose pull
+            // drains the mirror to EOF) is the fallback when the
+            // fold cannot be armed.
+            if let Some(file) = self.inherited_mirror_stdin_dup() {
+                process.stdin(Stdio::from(file));
+            } else {
+                process.stdin(Stdio::piped());
+            }
         } else if self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
             || self.virtual_fd_stdin_remaining(0).is_some()
         {
@@ -700,10 +976,18 @@ impl Executor {
         // is one relaxed AtomicBool load.
         let _profiler_external =
             super::profiler::enter_external(cmd.words.first().map(String::as_str).unwrap_or("?"));
+        // rubash#2238: a stdin fold created during THIS dispatch is
+        // settled below; a fold already pending belongs to an outer
+        // dispatch (a re-entrant call from a trap body) and is left
+        // for that dispatch's own settle.
+        let fold_is_ours = self.pending_stdin_fold.is_none();
         let (mut cmd, mut process_substitutions) =
             self.command_with_process_substitution_files(cmd)?;
         self.apply_default_external_stdin_file(&mut cmd, &mut process_substitutions)?;
         let result = self.execute_external_inner(&cmd);
+        if fold_is_ours {
+            self.settle_pending_stdin_fold();
+        }
         // GNU execute_cmd.c: external commands fork before do_redirections
         // — a `{var}` bind happened only in the child, so the parent's
         // variable is untouched and the allocated descriptor dies there.
@@ -742,20 +1026,40 @@ impl Executor {
                 || procsub_word.starts_with(">("))
                 && procsub_word.ends_with(')');
             if is_bare_assignment && is_whole_procsub {
-                let next_metadata = rewritten.word_metadata.get(merge_index + 1).cloned();
+                // word_metadata is keyed by WordMetadata::word_index, not
+                // by position (a process-substitution word may carry no
+                // entry at all), so the absorbed word's entry is found and
+                // dropped by key, the merged word takes it under its own
+                // key, and every later key shifts down with its word
+                // (rubash#2237).
+                let next_metadata = rewritten
+                    .word_metadata
+                    .iter()
+                    .find(|metadata| metadata.word_index == merge_index + 1)
+                    .cloned();
                 rewritten.words[merge_index].push_str(&procsub_word);
                 // Drop the absorbed procsub word and hand its metadata to
                 // the merged word so the loop below materializes the
                 // substitution inside the assignment value.
                 rewritten.words.remove(merge_index + 1);
-                if merge_index + 1 < rewritten.word_metadata.len() {
-                    rewritten.word_metadata.remove(merge_index + 1);
-                }
-                if let Some(metadata) = next_metadata {
-                    if merge_index < rewritten.word_metadata.len() {
-                        rewritten.word_metadata[merge_index] = metadata;
+                rewritten
+                    .word_metadata
+                    .retain(|metadata| metadata.word_index != merge_index + 1);
+                if let Some(mut metadata) = next_metadata {
+                    metadata.word_index = merge_index;
+                    if let Some(slot) = rewritten
+                        .word_metadata
+                        .iter_mut()
+                        .find(|metadata| metadata.word_index == merge_index)
+                    {
+                        *slot = metadata;
                     } else {
                         rewritten.word_metadata.push(metadata);
+                    }
+                }
+                for metadata in &mut rewritten.word_metadata {
+                    if metadata.word_index > merge_index + 1 {
+                        metadata.word_index -= 1;
                     }
                 }
                 continue;
@@ -763,7 +1067,19 @@ impl Executor {
             merge_index += 1;
         }
         for word_index in 0..rewritten.words.len() {
-            let metadata = rewritten.word_metadata.get(word_index).cloned();
+            // Keyed lookup, never positional: word_metadata carries no
+            // entry for a process-substitution word (its record lives in
+            // the node-level aggregate), so word_metadata[word_index]
+            // would hand this word the NEXT word's metadata — whose raw
+            // carries no substitution — and neither the recorded-entry
+            // branch nor the no-metadata standalone branch below would
+            // materialize the substitution (rubash#2237: `[ -r <( ) ]`
+            // failed while `test -r <( )` — no trailing word — worked).
+            let metadata = rewritten
+                .word_metadata
+                .iter()
+                .find(|metadata| metadata.word_index == word_index)
+                .cloned();
             let substitutions = metadata
                 .as_ref()
                 .map(|metadata| metadata.process_substitutions.clone())
@@ -823,6 +1139,15 @@ impl Executor {
         // (list position, carrier path) for the input substitution
         // the redirect_in arm materializes in collected form.
         let mut input_carrier_positions: Vec<(usize, PathBuf)> = Vec::new();
+        // rubash#2235: every list position the redirect_in arm served
+        // (either form) — the input list pass below must not
+        // materialize the field's entry a second time — and the
+        // streamed endpoints by position, so a later output
+        // consumer's spawn plan can bind a dup of a prefix input
+        // entry to the same live pipe (GNU's fork inherits the
+        // description process_substitute bound, subst.c:6362).
+        let mut input_served_positions: Vec<usize> = Vec::new();
+        let mut input_streamed_positions: Vec<(usize, std::rc::Rc<FileFd>)> = Vec::new();
         let find_redirect_position = |fd: Option<u32>,
                                       input_side: bool,
                                       target: &str,
@@ -857,6 +1182,27 @@ impl Executor {
                 if let Some(streamed) = self.process_substitution_child_fd_word(source, cmd_line) {
                     let old_target = redirect.target.clone();
                     redirect.target = streamed;
+                    // rubash#2235: record the served position and the
+                    // live endpoint (see input_served_positions).
+                    if let Some(position) = find_redirect_position(
+                        redirect.fd,
+                        true,
+                        &old_target,
+                        &[crate::parser::RedirectKind::Input],
+                    ) {
+                        input_served_positions.push(position);
+                        if let Some(word_fd) = redirect
+                            .target
+                            .strip_prefix("/dev/fd/")
+                            .and_then(|fd| fd.parse::<u32>().ok())
+                        {
+                            if let Some(FdReadEndpoint::File(file)) =
+                                self.fd_table.read_endpoint(word_fd)
+                            {
+                                input_streamed_positions.push((position, file.clone()));
+                            }
+                        }
+                    }
                     redirect_target_rewrites.push((old_target, redirect.target.clone()));
                 } else if let Some((output, body_timing)) =
                     self.process_substitution_output_bytes_timed(source)
@@ -880,6 +1226,7 @@ impl Executor {
                         &[crate::parser::RedirectKind::Input],
                     ) {
                         input_carrier_positions.push((position, path.clone()));
+                        input_served_positions.push(position);
                     }
                     files.inputs.push(path);
                 }
@@ -1278,6 +1625,80 @@ impl Executor {
             materialized_positions.push((files.outputs.len() - 1, position, path.clone()));
             materialized_by_fd_target.push((effective_fd, old_target, path));
         }
+        // rubash#2235: the input list pass — input substitutions no
+        // field serves. The dedicated redirect_in mirror carries only
+        // one fd-0 entry; a numbered entry (`3< <(...)`) is list-only,
+        // so the field arm never saw it and its producer was never
+        // spawned — the input-side sibling of #2196's output pass.
+        // Materialize each unserved entry in list order, mirroring
+        // the redirect_in arm exactly: stream first (the spawned
+        // body's pipe, named by its word fd), the timed collection
+        // as the spawn-failure fallback. Every entry materializes,
+        // including one a later entry for the same fd overwrites:
+        // GNU forks one producer per redirect entry (redir.c:237
+        // do_redirections walks the list in order, expanding each
+        // entry's word — process_substitute, subst.c:6362 — at its
+        // own turn), so the losing entry's producer still runs.
+        for position in 0..rewritten.redirects.len() {
+            if input_served_positions.contains(&position)
+                || materialized_positions
+                    .iter()
+                    .any(|(_, served, _)| *served == position)
+            {
+                continue;
+            }
+            let source = {
+                let redirect = &rewritten.redirects[position];
+                // {var} entries are not unserved either: the
+                // dynamic-fd applier owns them (see the output list
+                // pass above).
+                if !matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+                ) || redirect.fd_var.is_some()
+                {
+                    continue;
+                }
+                let Some(source) = redirect
+                    .target
+                    .strip_prefix("<(")
+                    .and_then(|target| target.strip_suffix(')'))
+                    // rubash#1931: recorded-span admission, as above.
+                    .filter(|_| redirect_target_span_is_recorded(redirect))
+                else {
+                    continue;
+                };
+                source.to_string()
+            };
+            if let Some(streamed) = self.process_substitution_child_fd_word(&source, cmd_line) {
+                let old_target = rewritten.redirects[position].target.clone();
+                rewritten.redirects[position].target = streamed;
+                redirect_target_rewrites
+                    .push((old_target, rewritten.redirects[position].target.clone()));
+                input_served_positions.push(position);
+                if let Some(word_fd) = rewritten.redirects[position]
+                    .target
+                    .strip_prefix("/dev/fd/")
+                    .and_then(|fd| fd.parse::<u32>().ok())
+                {
+                    if let Some(FdReadEndpoint::File(file)) = self.fd_table.read_endpoint(word_fd) {
+                        input_streamed_positions.push((position, file.clone()));
+                    }
+                }
+            } else if let Some((output, body_timing)) =
+                self.process_substitution_output_bytes_timed(&source)
+            {
+                let path = self.write_process_substitution_temp_bytes(&output)?;
+                self.procsub_stream_set_timing(&path, body_timing);
+                let old_target = rewritten.redirects[position].target.clone();
+                rewritten.redirects[position].target = shell_display_path(&path.to_string_lossy());
+                redirect_target_rewrites
+                    .push((old_target, rewritten.redirects[position].target.clone()));
+                input_carrier_positions.push((position, path.clone()));
+                input_served_positions.push(position);
+                files.inputs.push(path);
+            }
+        }
         for redirect in &mut rewritten.redirects {
             if let Some((_, new_target)) = redirect_target_rewrites
                 .iter()
@@ -1306,12 +1727,15 @@ impl Executor {
             .collect();
         let input_carrier_by_position: std::collections::HashMap<usize, PathBuf> =
             input_carrier_positions.into_iter().collect();
+        let input_streamed_by_position: std::collections::HashMap<usize, std::rc::Rc<FileFd>> =
+            input_streamed_positions.into_iter().collect();
         for (output_index, position, _) in &materialized_positions {
             let plan = self.procsub_spawn_plan(
                 &original_redirects,
                 *position,
                 &carrier_by_position,
                 &input_carrier_by_position,
+                &input_streamed_by_position,
             );
             files.outputs[*output_index].spawn_plan = plan;
         }
@@ -1338,6 +1762,7 @@ impl Executor {
         position: usize,
         carrier_by_position: &std::collections::HashMap<usize, PathBuf>,
         input_carrier_by_position: &std::collections::HashMap<usize, PathBuf>,
+        input_streamed_by_position: &std::collections::HashMap<usize, std::rc::Rc<FileFd>>,
     ) -> ProcsubSpawnPlan {
         fn set(plan: &mut ProcsubSpawnPlan, fd: u32, disposition: ProcsubSpawnFd) {
             if let Some(slot) = plan.fds.iter_mut().find(|(candidate, _)| *candidate == fd) {
@@ -1431,7 +1856,19 @@ impl Executor {
                     if fd == 0 {
                         continue;
                     }
-                    if let Some(carrier) = input_carrier_by_position.get(&index) {
+                    // rubash#2235: a streamed prefix entry binds the
+                    // consumer's fd to the producer's live pipe — the
+                    // same description GNU's fork inherits.
+                    if let Some(file) = input_streamed_by_position.get(&index) {
+                        set(
+                            &mut plan,
+                            fd,
+                            ProcsubSpawnFd::File {
+                                read: Some(file.clone()),
+                                write: None,
+                            },
+                        );
+                    } else if let Some(carrier) = input_carrier_by_position.get(&index) {
                         set(&mut plan, fd, ProcsubSpawnFd::CarrierRead(carrier.clone()));
                     } else {
                         match self.procsub_plan_capture(redirect, ProcsubPlanMode::Read) {
@@ -1982,12 +2419,44 @@ impl Executor {
 
         let input = self.virtual_fd_stdin_remaining_bytes(0).unwrap_or_default();
         let path = self.write_process_substitution_temp_bytes(&input)?;
-        let input_len = self.virtual_fd_stdin_len(0);
-        self.fd_table.consume_all_text(0);
-        self.shell_state
-            .env_vars
-            .insert(fd_stdin_offset_key(0), input_len);
         let target = shell_display_path(&path.to_string_lossy());
+        // rubash#2238: hand the child a duplicate of ONE open file
+        // description for the carrier and measure what it reads (the
+        // PendingStdinFold settle in execute_external) instead of
+        // marking the whole endpoint consumed up front — GNU fd 0 is
+        // a shared kernel description, so a child that reads nothing
+        // (mkdir) or one line (head) leaves the rest for the next
+        // reader. The route seam keeps the drain accounting: its
+        // provider contract derives the handle from the pulled text
+        // (route_stdin_handle), so the fold is armed only when no
+        // route provider is registered.
+        let folded = if self.external_route_provider.is_none() && self.pending_stdin_fold.is_none()
+        {
+            std::fs::File::open(&path)
+                .ok()
+                .map(|file| PendingStdinFold {
+                    channel: PendingStdinChannel::FdText {
+                        fd: 0,
+                        base_offset: self.fd_table.input_offset(0).unwrap_or(0),
+                    },
+                    file,
+                    temp_path: path.clone(),
+                    target: Some(target.clone()),
+                    handed_out: false,
+                    pulled: false,
+                })
+        } else {
+            None
+        };
+        if let Some(fold) = folded {
+            self.pending_stdin_fold = Some(fold);
+        } else {
+            let input_len = self.virtual_fd_stdin_len(0);
+            self.fd_table.consume_all_text(0);
+            self.shell_state
+                .env_vars
+                .insert(fd_stdin_offset_key(0), input_len);
+        }
         rewritten.redirect_in = Some(Box::new(Redirect {
             fd: Some(0),
             fd_var: None,
@@ -2009,6 +2478,130 @@ impl Executor {
         }));
         files.inputs.push(path);
         Ok(())
+    }
+
+    /// rubash#2238: the FUNCTION_STDIN mirror as a shared file
+    /// description for one foreground external. Returns a duplicate
+    /// of the fold's description for the child's stdin, or `None`
+    /// when a route provider is registered (the route seam owns that
+    /// face's accounting) or the materialization fails — the caller
+    /// then falls back to the piped feed, whose pull performs the
+    /// old accounting. Callers gate on the mirror being this
+    /// command's effective stdin source
+    /// (`function_stdin_is_command_source`, or the fd-0-alias
+    /// predicate at the `< /dev/stdin` arm).
+    fn inherited_mirror_stdin_dup(&mut self) -> Option<std::fs::File> {
+        if self.external_route_provider.is_some() {
+            return None;
+        }
+        if let Some(fold) = self.pending_stdin_fold.as_mut() {
+            if matches!(fold.channel, PendingStdinChannel::FunctionMirror { .. }) {
+                let dup = fold.file.try_clone().ok()?;
+                fold.handed_out = true;
+                return Some(dup);
+            }
+            return None;
+        }
+        let remainder = self.function_stdin_remaining()?;
+        let base_offset = self
+            .shell_state
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let raw = crate::executor::substitution_metadata::shell_text_to_raw_bytes(&remainder);
+        let path = self.process_substitution_temp_path().ok()?;
+        fs::write(&path, &raw).ok()?;
+        let file = std::fs::File::open(&path).ok()?;
+        let dup = file.try_clone().ok()?;
+        self.pending_stdin_fold = Some(PendingStdinFold {
+            channel: PendingStdinChannel::FunctionMirror {
+                base_offset,
+                remainder,
+            },
+            file,
+            temp_path: path,
+            target: None,
+            handed_out: true,
+            pulled: false,
+        });
+        Some(dup)
+    }
+
+    /// rubash#2238: fold one foreground external's measured stdin
+    /// consumption back onto the stream cursor it inherited. GNU
+    /// keeps a single kernel offset for fd 0, shared by the shell
+    /// and every child it forks (execute_cmd.c: the child inherits
+    /// the description itself), so the cursor advances by exactly
+    /// what the child read — no more (the old drain-to-EOF marking),
+    /// no less.
+    fn settle_pending_stdin_fold(&mut self) {
+        use std::io::Seek;
+        let Some(fold) = self.pending_stdin_fold.take() else {
+            return;
+        };
+        let PendingStdinFold {
+            channel,
+            mut file,
+            temp_path,
+            handed_out,
+            pulled,
+            ..
+        } = fold;
+        let consumed = if handed_out {
+            file.seek(std::io::SeekFrom::Current(0))
+                .ok()
+                .map(|pos| pos as usize)
+        } else {
+            None
+        };
+        match channel {
+            PendingStdinChannel::FunctionMirror {
+                base_offset,
+                remainder,
+            } => {
+                if let Some(consumed) = consumed {
+                    let delta =
+                        crate::executor::substitution_metadata::shell_text_prefix_for_raw_len(
+                            &remainder, consumed,
+                        );
+                    self.shell_state.env_vars.insert(
+                        FUNCTION_STDIN_OFFSET.to_string(),
+                        (base_offset + delta).to_string(),
+                    );
+                }
+                // Not handed out: no spawn consumed the mirror, and
+                // any in-process consumer accounted through its own
+                // pull — leave the cursor as it stands.
+            }
+            PendingStdinChannel::FdText { fd, base_offset } => {
+                if let Some(consumed) = consumed {
+                    let offset = base_offset + consumed;
+                    self.fd_table.set_input_offset(fd, offset);
+                    self.shell_state
+                        .env_vars
+                        .insert(fd_stdin_offset_key(fd), offset.to_string());
+                } else if pulled {
+                    // No spawn took the description, but the
+                    // command's own stdin pull resolved the carrier —
+                    // an in-process emulation consumed the text
+                    // through the pull (that face's pull-and-drain
+                    // contract), or the spawn fell back to an
+                    // unmeasurable fresh open of the carrier: keep
+                    // the pre-#2238 drain accounting.
+                    let input_len = self.virtual_fd_stdin_len(fd);
+                    self.fd_table.consume_all_text(fd);
+                    self.shell_state
+                        .env_vars
+                        .insert(fd_stdin_offset_key(fd), input_len);
+                }
+                // Neither handed out nor pulled: the command never
+                // touched the stream (mkdir and the other non-reader
+                // emulations) — the endpoint keeps its bytes, as
+                // GNU's shared fd 0 leaves them for the next reader.
+            }
+        }
+        let _ = fs::remove_file(&temp_path);
     }
 
     pub(in crate::executor) fn finish_process_substitutions(

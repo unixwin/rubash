@@ -180,13 +180,26 @@ impl Executor {
         if cmd.word_kinds.len() == cmd.words.len() {
             timed.word_kinds = cmd.word_kinds[index..].to_vec();
         }
-        // Keep word_metadata index-aligned with the stripped words,
-        // as the parser fold and the pipeline-prefix strip both do:
-        // the restore below reads the recorded raw spellings through
-        // it, and any other metadata consumer expects the alignment.
-        if cmd.word_metadata.len() == cmd.words.len() {
-            timed.word_metadata = cmd.word_metadata[index..].to_vec();
-        }
+        // Keep word_metadata keyed to the stripped words (rubash#2237,
+        // the #1568 shift pattern): entries address words by
+        // WordMetadata::word_index and the vector is sparse (a
+        // process-substitution word carries no entry), so drop the
+        // consumed prefix's entries and shift the survivors' keys. A
+        // positional slice covers only the dense case and left the
+        // sparse case's keys pointing at pre-strip positions, so a
+        // keyed consumer (process-substitution materialization) read
+        // the wrong word's metadata for `time [ -r <( ) ]`.
+        timed.word_metadata = cmd
+            .word_metadata
+            .iter()
+            .filter_map(|metadata| {
+                metadata.word_index.checked_sub(index).map(|shifted| {
+                    let mut metadata = metadata.clone();
+                    metadata.word_index = shifted;
+                    metadata
+                })
+            })
+            .collect();
         // rubash#1661: nodes that reach this name-dispatch without a
         // parse-time fold carry the same displaced classification the
         // parser fold restores — the assignment words sat behind the
