@@ -1762,28 +1762,34 @@ impl Executor {
     ) {
     }
 
-    fn spawn_external_process(
+    /// rubash#2255: deliver a command's fd bindings to a hand-built
+    /// child process — the segment of spawn_external_process that
+    /// (1) stamps every fd-table entry >= 3 through the __RUBASH_FD_*
+    /// env channel, (2) opens the command's OWN numbered (fd >= 3)
+    /// redirects and stamps/pins them the same way, and (3) registers
+    /// the unix pre_exec pin that dup2's the ambient + own descriptors
+    /// onto their slot numbers. GNU runs ONE ordered do_redirections
+    /// walk in every forked child (redir.c:237 do_redirections;
+    /// execute_cmd.c:2620 execute_pipeline forks every element
+    /// through the same machinery), so a hand-built pipeline stage
+    /// needs exactly this segment, not a stage-local copy:
+    /// spawn_external_process (simple commands) and
+    /// execute_external_pipeline_stage_inner (sequential pipeline
+    /// stages) share it. Returns the parent-side inheritable
+    /// duplicates the caller closes once its spawn resolves (the
+    /// child holds its own copies).
+    ///
+    /// The pin registration rides inside the helper so both callers
+    /// register identically; spawn_external_process's signal-reset
+    /// pre_exec (rubash#229) therefore registers after the pin
+    /// instead of before it — the two closures are independent (one
+    /// only dup2/closes descriptors, the other only resets signal
+    /// dispositions), so their relative order is inert.
+    pub(in crate::executor) fn apply_external_fd_delivery(
         &mut self,
         cmd: &CommandNode,
-        program: &PathBuf,
-        mut process: Command,
-        used_shell: bool,
-        dev_ops: crate::executor::dev_fd_operands::DevOperandMaterialization,
-        // rubash#1832: true when the caller composed the process
-        // environment to finality itself (the `env` emulation — its
-        // composition already folded the tail SHLVL adjustment in and
-        // applied env's own -i/-u/assignments). The exec-replace seam
-        // must not stamp SHLVL over such an environment after the
-        // fact; the direct disk-command path composes from shell
-        // state and passes false.
-        env_composed_final: bool,
-        // niubash#567: the stdin text a declined route attempt
-        // already pulled with the feed's own pull (route_stdin_handle),
-        // when the stdin source was a text buffer. The feed below
-        // uses it instead of pulling again, so the body's embedded
-        // substitutions run exactly once on either route.
-        pre_materialized_stdin: Option<String>,
-    ) -> Result<(), ExecuteError> {
+        mut process: &mut Command,
+    ) -> Vec<crate::fd::HANDLE> {
         // rubash#180: GNU's forked disk-command child inherits every fd >= 3
         // the command opened (`"$SH" -c 'echo hi >&3' 3>f` writes f) or that
         // a persistent `exec 3>f` bound in the parent. std::process::Command
@@ -2010,15 +2016,6 @@ impl Executor {
             pins.extend(command_fd_pins);
             pins
         };
-        // rubash#229: restore GNU's child signal dispositions between fork
-        // and exec (trap.c:1489 restore_original_signals) — without this a
-        // policy/trap SIG_IGN in the shell survives exec and makes children
-        // unkillable by that signal (sh -c 'kill -QUIT $$' exited 0).
-        #[cfg(unix)]
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            process.pre_exec(crate::builtins::kill::child_pre_exec_reset);
-        }
         // rubash#1626: pin the ambient descriptors at their slot numbers
         // (see the pin table built above). Registered before the /dev/fd
         // operand attach below so a command-scoped operand pin — the
@@ -2031,6 +2028,46 @@ impl Executor {
                 process.pre_exec(move || pin_ambient_fds_in_child(&pins));
             }
         }
+        parent_side_dups
+    }
+
+    fn spawn_external_process(
+        &mut self,
+        cmd: &CommandNode,
+        program: &PathBuf,
+        mut process: Command,
+        used_shell: bool,
+        dev_ops: crate::executor::dev_fd_operands::DevOperandMaterialization,
+        // rubash#1832: true when the caller composed the process
+        // environment to finality itself (the `env` emulation — its
+        // composition already folded the tail SHLVL adjustment in and
+        // applied env's own -i/-u/assignments). The exec-replace seam
+        // must not stamp SHLVL over such an environment after the
+        // fact; the direct disk-command path composes from shell
+        // state and passes false.
+        env_composed_final: bool,
+        // niubash#567: the stdin text a declined route attempt
+        // already pulled with the feed's own pull (route_stdin_handle),
+        // when the stdin source was a text buffer. The feed below
+        // uses it instead of pulling again, so the body's embedded
+        // substitutions run exactly once on either route.
+        pre_materialized_stdin: Option<String>,
+    ) -> Result<(), ExecuteError> {
+        // rubash#2255: the fd delivery (ambient table stamps, the
+        // command's own numbered redirects, the unix pin
+        // registration) is shared with the sequential pipeline stage
+        // spawner — see apply_external_fd_delivery.
+        let parent_side_dups = self.apply_external_fd_delivery(cmd, &mut process);
+        // rubash#229: restore GNU's child signal dispositions between fork
+        // and exec (trap.c:1489 restore_original_signals) — without this a
+        // policy/trap SIG_IGN in the shell survives exec and makes children
+        // unkillable by that signal (sh -c 'kill -QUIT $$' exited 0).
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            process.pre_exec(crate::builtins::kill::child_pre_exec_reset);
+        }
+
         // rubash#438: pin the buffered process-substitution pipe read ends at
         // their /dev/fd/N numbers in the child (fork-exec dup2), so the
         // literal argv word resolves through the OS /dev/fd layer like a
