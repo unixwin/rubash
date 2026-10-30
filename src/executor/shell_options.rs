@@ -874,6 +874,68 @@ impl Executor {
     ///   /proc/self/fd/N ENOENT face). An fd with no entry at all was
     ///   never opened, where the marks are simply not consulted.
     /// Rewritten fresh each call, like the other marks.
+    /// rubash#2132: the fd-alias fact of one of the process's own
+    /// stdio handles, classified by the handle itself — GNU's
+    /// sh_stataccess stats the descriptor the process actually holds
+    /// (eaccess.c:116), so an inherited /dev/null is a character
+    /// device, an inherited regular file answers from its referent,
+    /// and only a real pipe is a pipe. The judgments reuse the fd
+    /// layer's handle probes (console / pipe / socket / disk-file
+    /// path); on unix the char-device and directory faces resolve
+    /// through /proc/self/fd, and anything unclassifiable keeps the
+    /// historical pipe default (the common harness ambient).
+    fn process_stdio_fact(&self, fd: u32) -> FdFactMark {
+        let handle = crate::fd::process_std_handle(fd);
+        if crate::fd::is_console_handle(handle) {
+            return FdFactMark::Access("crw".to_string());
+        }
+        if crate::fd::is_pipe_handle(handle) {
+            return FdFactMark::Access("prw".to_string());
+        }
+        if crate::fd::is_socket_handle(handle) {
+            return FdFactMark::Access("srw".to_string());
+        }
+        if let Some(path) = crate::fd::disk_file_path(handle) {
+            return FdFactMark::Target(path.to_string_lossy().into_owned());
+        }
+        #[cfg(unix)]
+        {
+            if crate::fd::is_char_device_handle(handle) {
+                // /dev/null and kin carry the null-class inode
+                // (crw-rw-rw-); any other char device answers with
+                // the console class's mode shape.
+                if let Ok(link) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
+                    let name = link
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    if matches!(name.as_str(), "null" | "zero" | "full") {
+                        return FdFactMark::Access("nrw".to_string());
+                    }
+                }
+                return FdFactMark::Access("crw".to_string());
+            }
+            // A directory handed to the process: the referent path
+            // answers, exactly like an opened directory bind.
+            if let Ok(link) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
+                if link.is_dir() {
+                    return FdFactMark::Target(link.to_string_lossy().into_owned());
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            if crate::fd::is_char_device_handle(handle) {
+                // FILE_TYPE_CHAR beyond the console: the null-class
+                // devices (NUL and kin) — a Windows directory handle
+                // reports FILE_TYPE_DISK and took the target branch
+                // above via GetFinalPathNameByHandleW.
+                return FdFactMark::Access("nrw".to_string());
+            }
+        }
+        FdFactMark::Access("prw".to_string())
+    }
+
     pub(in crate::executor) fn sync_fd_alias_facts(&mut self, cmd: Option<&CommandNode>) {
         let redirects = cmd.map(|command| command.redirects.as_slice());
         self.sync_fd_alias_facts_scoped(cmd, redirects);
@@ -989,18 +1051,27 @@ impl Executor {
                         can_r = true;
                     }
                 }
-                // The inherited stdin is a console or the parent's pipe
-                // end (an invocation `< file` binds File above); both
-                // inodes carry owner r+w bits.
-                Some(FdReadEndpoint::InheritedProcessStdin) => {
-                    class = if self.stdin_source_is_terminal() {
-                        'c'
-                    } else {
-                        'p'
-                    };
-                    can_r = true;
-                    can_w = true;
-                }
+                // rubash#2132: the inherited stdin is whatever the
+                // parent handed the process — a console, a pipe, a
+                // regular file, /dev/null, a directory, a socket —
+                // and GNU's fstat answers from THAT inode. Classify
+                // the real handle; the old console-or-pipe default
+                // called a /dev/null stdin a pipe.
+                Some(FdReadEndpoint::InheritedProcessStdin) => match self.process_stdio_fact(0) {
+                    FdFactMark::Target(path) => {
+                        target = Some(path);
+                    }
+                    FdFactMark::Access(mark) => {
+                        class = mark.as_bytes().first().map_or('p', |byte| *byte as char);
+                        can_r = mark.contains('r');
+                        can_w = mark.contains('w');
+                    }
+                    _ => {
+                        class = 'p';
+                        can_r = true;
+                        can_w = true;
+                    }
+                },
                 // TextInput pipes (text feeds, process substitution,
                 // coproc stdout): fifo prw-r--r--.
                 Some(
@@ -1042,7 +1113,30 @@ impl Executor {
                     }
                 }
                 Some(FdWriteEndpoint::Stdout) => {
-                    if self.stdout_sink_is_terminal() {
+                    // rubash#2132: same coarse default as the stdin
+                    // arm — a non-terminal sink was called a pipe even
+                    // when the process's stdout is a regular file.
+                    // A live capture sink IS a pipe in GNU (the
+                    // substitution child's fd 1); anything else is the
+                    // process's own stdout handle, classified by it.
+                    if self.stdout_capture.is_some() || stdout_capture_active() {
+                        if class == 'f' {
+                            class = 'p';
+                        }
+                    } else if entry.read.is_none() {
+                        match self.process_stdio_fact(1) {
+                            FdFactMark::Target(path) => {
+                                if target.is_none() {
+                                    target = Some(path);
+                                }
+                            }
+                            FdFactMark::Access(mark) => {
+                                class = mark.as_bytes().first().map_or('p', |byte| *byte as char);
+                                can_r = mark.contains('r');
+                            }
+                            _ => {}
+                        }
+                    } else if self.stdout_sink_is_terminal() {
                         class = 'c';
                     } else if class == 'f' {
                         class = 'p';
@@ -1050,7 +1144,24 @@ impl Executor {
                     can_w = true;
                 }
                 Some(FdWriteEndpoint::Stderr) => {
-                    if crate::fd::is_console_handle(crate::fd::process_std_handle(2)) {
+                    // rubash#2132: the process's stderr handle,
+                    // classified like the other ambient stdio ends
+                    // (the console probe it replaces is the helper's
+                    // first judgment already).
+                    if entry.read.is_none() {
+                        match self.process_stdio_fact(2) {
+                            FdFactMark::Target(path) => {
+                                if target.is_none() {
+                                    target = Some(path);
+                                }
+                            }
+                            FdFactMark::Access(mark) => {
+                                class = mark.as_bytes().first().map_or('p', |byte| *byte as char);
+                                can_r = mark.contains('r');
+                            }
+                            _ => {}
+                        }
+                    } else if crate::fd::is_console_handle(crate::fd::process_std_handle(2)) {
                         class = 'c';
                     } else if class == 'f' {
                         class = 'p';
