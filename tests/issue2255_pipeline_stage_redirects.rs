@@ -253,3 +253,60 @@ fn issue2255_pipeline_plain_control() {
     assert_eq!(stdout, "3\n", "stderr: {stderr}");
     assert_eq!(stderr, "");
 }
+
+#[test]
+fn issue2255_pipeline_middle_stage_numbered_output() {
+    // Output face of the same family at a MIDDLE stage: the child
+    // received its `3>o.txt` binding and its bytes landed in the
+    // file, but the driver's post-stage routing walk then re-ran
+    // the ordered redirects and its create/truncate validation
+    // open wiped the file back to empty. GNU performs one open per
+    // redirection (redir.c:237 do_redirections, in the element's
+    // fork), so the content survives the pipeline.
+    let dir = test_dir("middle-output");
+    let (stdout, stderr, code) = run_in(&dir, "printf x | sh -c 'echo o >&3' 3>o.txt | wc -c\n");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "0\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert!(
+        wait_file_contents(&dir.join("o.txt"), "o\n"),
+        "o.txt contents: {:?}",
+        std::fs::read_to_string(dir.join("o.txt"))
+    );
+}
+
+#[test]
+fn issue2255_pipeline_last_stage_numbered_output() {
+    // Output face at the LAST stage — same routing-walk truncation
+    // as the middle stage (the final stage's streams are routed by
+    // write_pipeline_output through the same walk).
+    let dir = test_dir("last-output");
+    let (stdout, stderr, code) = run_in(&dir, "printf x | cat | sh -c 'echo o >&3' 3>o.txt\n");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert!(
+        wait_file_contents(&dir.join("o.txt"), "o\n"),
+        "o.txt contents: {:?}",
+        std::fs::read_to_string(dir.join("o.txt"))
+    );
+}
+
+#[test]
+fn issue2255_pipeline_stage_numbered_output_dup_chain() {
+    // The routing walk must still RESOLVE a numbered binding for
+    // the streams it does place: `2>&3` after `3>o.txt` sends the
+    // stage's captured stderr into the same file (the resolution
+    // is recorded without re-opening the file the child wrote
+    // through, and the captured stream flushes by append).
+    let dir = test_dir("output-dup-chain");
+    let (stdout, stderr, code) = run_in(&dir, "sh -c 'echo e >&2' 3>o.txt 2>&3 | wc -c\n");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "0\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert!(
+        wait_file_contents(&dir.join("o.txt"), "e\n"),
+        "o.txt contents: {:?}",
+        std::fs::read_to_string(dir.join("o.txt"))
+    );
+}

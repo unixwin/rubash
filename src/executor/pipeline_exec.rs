@@ -620,6 +620,33 @@ pub(in crate::executor) fn compound_redirect_needs_procsub_rewrite(command: &Com
     .any(|redirect| redirect.target.starts_with(">("))
 }
 
+/// rubash#2255 (§8 face): a list-only redirect that merely DUPS a
+/// stdio descriptor (`3>&1`, `4<&0`, move forms included) does not
+/// trigger the shell-writer decline in execute_shell_writer_pipeline.
+/// At the two-stage composition this path demonstrably delivers such
+/// a dup: the producer child's only foreign pipe is its own stream
+/// pipe — the stdio alias the pin guard (rubash#1626/#2284)
+/// recognizes — so the dup of fd 1/2 lands. Declining would reroute
+/// the producer to the sequential stage spawner, whose fd delivery
+/// cannot dup a capture-pipe stdio endpoint onto a numbered slot
+/// today (`sh -c 'echo o >&3' 3>&1 | wc -c` regressed from printing
+/// 2 to a child EBADF when the decline covered dups) — a
+/// pre-existing sequential-face defect, visible at mid/last stage
+/// positions on master, and not one of §8's shapes. File, close,
+/// and dup-of-a-non-stdio-fd bindings keep the decline: those are
+/// exactly the pins the consumer-chain pipes break. (At ≥3 stages
+/// the stdio dup is lost on BOTH paths today; the exemption
+/// preserves master behaviour there instead of changing its shape.)
+fn redirect_is_stdio_dup(redirect: &crate::parser::Redirect) -> bool {
+    redirect.fd_var.is_none()
+        && matches!(
+            redirect.kind,
+            crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::DuplicateOutput
+        )
+        && super::execution_misc::dup_spelling_source_fd(&redirect.target).is_some_and(|fd| fd <= 2)
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_and_or_list_command(
         &mut self,
@@ -2469,13 +2496,15 @@ impl Executor {
         // for list-only members (concurrent_external_stage_spec).
         // Compound and function producers bind their numbered
         // redirects through their own stage funnels, not the pin,
-        // and keep this path.
+        // and keep this path. A redirect that merely dups a stdio
+        // descriptor (`3>&1`) is likewise exempt — this path
+        // delivers it at the two-stage composition, and the
+        // sequential spawner cannot (see redirect_is_stdio_dup).
         if !command_is_compound_pipeline_stage(commands[0])
             && !self.command_first_word_is_function(commands[0])
-            && commands[0]
-                .redirects
-                .iter()
-                .any(|redirect| redirect.is_list_only_redirect())
+            && commands[0].redirects.iter().any(|redirect| {
+                redirect.is_list_only_redirect() && !redirect_is_stdio_dup(redirect)
+            })
         {
             return Ok(None);
         }

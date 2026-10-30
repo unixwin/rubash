@@ -278,6 +278,28 @@ struct OutputFdState {
     /// it — the route's long-standing behaviour) instead of being
     /// written through this walk state (rubash#1844).
     open_failure_via_error: bool,
+    /// Pipeline-routing mode (route_pipeline_stage_streams, including
+    /// the materialized-stage routing in execute_pipeline_stage): the
+    /// walk runs AFTER the element executed, and the element's own
+    /// setup already realized every numbered (fd > 2) binding — an
+    /// external stage's child held a real descriptor
+    /// (apply_external_fd_delivery) and wrote through it; an in-shell
+    /// stage wrote through its installed fd-table binding. This walk
+    /// only RESOLVES the ordered list so fds 1/2 — whose captures it
+    /// does place — see the ordered dup resolutions. Re-opening a
+    /// numbered target here (the plain arm's create/truncate
+    /// validation open, the /dev/fd arm's fresh reopen) truncates the
+    /// file the element just wrote and silently drops its bytes:
+    /// the rubash#2255 output face (mid/last-stage `3>f` content
+    /// landed, then routing re-truncated it to empty; a stage-0
+    /// producer declined to this loop hit the same wall). Numbered
+    /// entries therefore resolve to their target records with no
+    /// filesystem open; fds 1/2 keep full apply semantics because
+    /// this walk IS their realization (their opens are validated
+    /// pre-run by pipeline_stage_stdio_targets and their payloads
+    /// are flushed by the routing caller, never written by the
+    /// element through a delivered descriptor).
+    resolve_only_numbered: bool,
     first_open_error: std::cell::RefCell<Option<(std::io::ErrorKind, String)>>,
     /// rubash#2121: dup/clone aliasing recorded by the ordered walk —
     /// alias fd → the fd whose binding it cloned (`2>&1` after
@@ -1758,6 +1780,7 @@ impl Executor {
             persist_move_closes: false,
             diagnostics_muted: false,
             open_failure_via_error: false,
+            resolve_only_numbered: false,
             first_open_error: std::cell::RefCell::new(None),
             shared_with: HashMap::new(),
             path_handle_cache: std::cell::RefCell::new(HashMap::new()),
@@ -2255,6 +2278,21 @@ impl Executor {
             // through this walk's open-failure protocol like the plain
             // arm's create_redirect_output refusal.
             if let Some(path) = self.fd_alias_reopen_path(source_fd) {
+                // Routing resolution (OutputFdState::resolve_only_
+                // numbered): the element's setup already performed
+                // this fresh open for its descriptor; a second one
+                // here would truncate the file the element wrote.
+                // Record the path target so a later dup of this fd
+                // in the same list resolves onto it and its captured
+                // stream flushes by append, like a plain Path.
+                if state.resolve_only_numbered && fd > 2 {
+                    state.fds.insert(
+                        fd,
+                        OutputTarget::Path(shell_display_path(&path.to_string_lossy())),
+                    );
+                    state.saw_output_redirect = true;
+                    return Ok(());
+                }
                 if !redirect.append
                     && !redirect.clobber
                     && crate::builtins::set::shell_option_enabled(
@@ -2367,6 +2405,13 @@ impl Executor {
             let fifo_validation: Option<Result<(), std::io::Error>> = None;
             let open_result: Result<(), std::io::Error> = match fifo_validation {
                 Some(result) => result,
+                // Routing resolution (OutputFdState::resolve_only_
+                // numbered): the element's setup already opened this
+                // target for its descriptor — a validation re-open
+                // here (truncate / append / net-connect alike) can
+                // only destroy what the element wrote through it.
+                // Fall through to the target record below, unchanged.
+                None if state.resolve_only_numbered && fd > 2 => Ok(()),
                 None if crate::special_paths::is_net_redirect_target(&target) => {
                     // rubash#1967: net twin of the #1868 FIFO
                     // validation above — this walk's create would
@@ -2513,6 +2558,10 @@ impl Executor {
         // regardless of the ambient fd 1 binding; fd 2 stays ambient.
         state.fds.insert(1, OutputTarget::Stdout);
         state.defer_stdout_writes = true;
+        // The stage already ran with its numbered bindings realized
+        // by its own setup; this walk resolves them, never re-opens
+        // them (see OutputFdState::resolve_only_numbered, rubash#2255).
+        state.resolve_only_numbered = true;
         if !self.apply_ordered_output_redirects(cmd, &mut state)? {
             return Ok(false);
         }
