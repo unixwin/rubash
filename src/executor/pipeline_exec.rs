@@ -227,7 +227,10 @@ fn internal_pipeline_program_name(program: &std::path::Path) -> Option<&str> {
 /// as the observable contract (same convention as builtins/kill.rs
 /// signal_process's TerminateProcess(128+signal)). Death notices are not
 /// affected: exit_status_signal stays None on Windows, matching GNU's
-/// silence for SIGPIPE deaths of foreground members in scripts.
+/// silence for SIGPIPE deaths of foreground members in scripts. Since
+/// rubash#2250 the hard-kill feeding this synthesis is armed only by
+/// non-Unix waits; on Unix a member's reaped status is reported verbatim
+/// and a reported 141 is always a genuine kernel SIGPIPE death.
 fn lingerer_sigpipe_status() -> std::process::ExitStatus {
     // SIGPIPE is 13 on every platform bash models (builtins/kill.rs signal
     // table). Windows: the raw value IS the exit code (GetExitCodeProcess)
@@ -341,6 +344,23 @@ fn wait_for_windows_pipeline_member(
     // unconditional deadline killed healthy producers mid-stream and
     // truncated `seq 5000000 | wc -l`-shaped pipelines at whatever had flowed
     // by the cap (silent data loss, rc=0, per-run drift).
+    //
+    // rubash#2250: the deadline is a Windows-only emulation and must never
+    // arm on Unix. A downstream exit proves only that this member's write
+    // end reached EOF — not that the member died. A member in exit transit
+    // (an interpreter child's teardown after its last write, EXIT-trap
+    // work, plain scheduling latency on a loaded host) is still a live
+    // process, and GNU's wait_for reports the status it eventually exits
+    // with, verbatim (jobs.c process_exit_status). Arming the deadline on
+    // Unix converted that transit into a fabricated SIGPIPE death: the
+    // member was SIGKILLed and PIPESTATUS recorded 141 instead of its real
+    // status (~50% for shell-process producers in the #2236 battery). On
+    // Unix the emulation is also unnecessary: SIGPIPE is SIG_DFL
+    // process-wide since rubash#1333, so a member that keeps writing into
+    // the dead pipe dies of the kernel's SIGPIPE on its own and this wait
+    // reaps that genuine 141. The arming and kill below are therefore
+    // runtime-gated with cfg!(not(unix)) — compiled everywhere (the
+    // Windows path stays byte-identical), never armed on Unix.
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
     const NATURAL_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
     let mut downstream = downstream;
@@ -358,10 +378,12 @@ fn wait_for_windows_pipeline_member(
             Some(next) => next.try_wait().map_err(ExecuteError::IoError)?.is_some(),
             None => true,
         };
-        if downstream_gone && kill_deadline.is_none() {
+        if cfg!(not(unix)) && downstream_gone && kill_deadline.is_none() {
             kill_deadline = Some(std::time::Instant::now() + NATURAL_EXIT_WINDOW);
         }
-        if kill_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        if cfg!(not(unix))
+            && kill_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
             // D10: hard-kill the whole tree — winuxcmd `powershell` is a
             // dispatcher whose `pwsh` grandchild would otherwise outlive
             // this Child and hold the niu stdout-pump write end open.
@@ -3428,8 +3450,11 @@ impl Executor {
     /// hands the LAST pipe's read end to the in-shell tail as fd 0 (via
     /// `pipeline_stdin_stream`), so the tail pulls the stream on demand. When
     /// the tail stops reading (it exits, or reads one record), its read end is
-    /// dropped, the producers meet EPIPE, and each lingering member is reaped
-    /// with the SIGPIPE-shaped status 141 (`wait_for_windows_pipeline_member`).
+    /// dropped and the producers meet EPIPE: on Unix a producer that keeps
+    /// writing dies of the kernel's SIGPIPE and is reaped with its genuine
+    /// 141, while on Windows the lingering member is reaped with the
+    /// SIGPIPE-shaped status 141 (`wait_for_windows_pipeline_member`;
+    /// rubash#2250).
     /// Admission is a WHITELIST: the tail must be a literal builtin from
     /// `streaming_builtin_tail` and every prefix member a plain external, so a
     /// shape this path cannot faithfully stream keeps the existing executor.
@@ -3601,9 +3626,11 @@ impl Executor {
 
         // Reap the producer chain BEFORE propagating any tail error: each
         // member is waited against its immediate downstream, and the last
-        // member against nothing (the tail is already gone), so a lingering
-        // producer is SIGPIPE-shaped after the natural exit window
-        // (wait_for_windows_pipeline_member -> 141).
+        // member against nothing (the tail is already gone). On Windows a
+        // lingering producer is SIGPIPE-shaped after the natural exit
+        // window (wait_for_windows_pipeline_member -> 141); on Unix the
+        // wait is unbounded and the producer's reaped status is reported
+        // verbatim — a genuine SIGPIPE death included (rubash#2250).
         let mut statuses: Vec<i32> = Vec::with_capacity(tail_index + 1);
         for index in 0..tail_index {
             let (head, downstream) = processes.split_at_mut(index + 1);
@@ -4092,16 +4119,29 @@ impl Executor {
                     status
                 }
                 None => {
-                    // The sequential tail consumed this member's output and
-                    // the downstream already exited, so a member still alive
-                    // here is the broken-pipe lingerer — report the SIGPIPE
-                    // shape GNU observes (rubash#382; lingerer_sigpipe_status).
-                    // Tree-kill first (D10): a dispatcher grandchild would
-                    // otherwise outlive this Child and pin niu's exit drain.
-                    kill_lingerer(&mut process);
-                    process.wait().map_err(ExecuteError::IoError)?;
+                    // The last member has exited, but that proves only that
+                    // this member's write end reached EOF (or that the last
+                    // member stopped reading) — not that this member died.
+                    // A member still alive here may simply be in exit
+                    // transit: an interpreter child doing teardown after
+                    // its last write, EXIT-trap work, or scheduling latency
+                    // under load. GNU's wait_for (jobs.c:3064) blocks for
+                    // the member's own exit and surfaces the reaped status
+                    // verbatim (jobs.c process_exit_status); the shell
+                    // never kills a member from its wait path and never
+                    // rewrites a status. The previous arm did both — one
+                    // try_wait, then a tree-kill plus the synthesized
+                    // SIGPIPE shape (rubash#382) — which fabricated a 141
+                    // for any member caught in transit (rubash#2250: ~50%
+                    // for shell-process producers piped into `cat`). Wait
+                    // for the member's real exit instead: a member that
+                    // keeps writing into the dead pipe dies of the
+                    // kernel's SIGPIPE on its own (SIGPIPE is SIG_DFL
+                    // process-wide since rubash#1333), so a genuine 141
+                    // still arrives — as a reaped status, not a synthesis.
+                    let status = process.wait().map_err(ExecuteError::IoError)?;
                     super::read_helpers::note_reaped_child_cpu(&process);
-                    lingerer_sigpipe_status()
+                    status
                 }
             };
             results.push((

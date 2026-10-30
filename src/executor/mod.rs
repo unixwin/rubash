@@ -1723,6 +1723,18 @@ pub struct Executor {
     /// produced it; reset at the start of every
     /// `apply_external_redirects`.
     external_stdio_slots: Option<external_redirects::PlannedStdioSlots>,
+    /// rubash#2235: bindings of the command's OWN numbered input
+    /// redirects (`3<file`, `3< <(...)`) that
+    /// `apply_external_stdin_redirect` opened while resolving an
+    /// fd-0 dup (`<&3`) against the command's ordered list — GNU's
+    /// do_redirections (redir.c:237) walks ONE list in the child, so
+    /// the dup and the binding share one open file description.
+    /// Stashed here so the immediately following
+    /// `spawn_external_process` stamps/pins the SAME description for
+    /// the child's fd slot instead of opening the target a second
+    /// time. Reset at the start of every `apply_external_redirects`.
+    own_input_bindings:
+        std::collections::HashMap<u32, std::rc::Rc<crate::executor::fd_table::FileFd>>,
     /// rubash#2238: a foreground external command that inherits the
     /// shell's stdin stream (the FUNCTION_STDIN mirror or a virtual
     /// fd-0 text endpoint) is handed a duplicate of one open file

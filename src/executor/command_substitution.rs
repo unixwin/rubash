@@ -2011,6 +2011,7 @@ impl Executor {
             host_external_command_handler: None,
             external_route_provider: self.external_route_provider.clone(),
             external_stdio_slots: None,
+            own_input_bindings: std::collections::HashMap::new(),
             // A forked comsub child starts with no pending stdin fold:
             // the fold belongs to the parent's in-flight external
             // dispatch, whose child description the fork does not own.
