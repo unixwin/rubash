@@ -596,10 +596,47 @@ impl Executor {
                     &self.shell_state.env_vars,
                 ))
             };
-            FileFd::open_read(path).ok()
+            // rubash#2261: a `<>` redirect is GNU's r_input_output
+            // (make_cmd.c:682-683 — the redirect's flags are
+            // O_RDWR|O_CREAT; redir.c:725 redir_open performs the
+            // open): ONE descriptor serving both directions, so the
+            // install must bind the read-write pair exactly like the
+            // function-call face does (function_call_stdin,
+            // rubash#2249) — the plain open_read below installed only
+            // the read endpoint, and a child write like `echo x >&0`
+            // failed Bad file descriptor. A failed pair open falls
+            // through to function_call_stdin below, which reports the
+            // failing target (or binds its own pair) as for `<`. Net
+            // targets keep that same fall-through: their ladder result
+            // names no filesystem object, and function_call_stdin's
+            // net arm binds the connected socket in both directions.
+            if redirect.kind == crate::parser::RedirectKind::ReadWrite
+                && !crate::special_paths::is_net_redirect_target(&target)
+            {
+                let (read_file, write_file) = FileFd::open_readwrite_pair(path).ok()?;
+                return Some((read_file, Some((write_file, target))));
+            }
+            FileFd::open_read(path).ok().map(|file| (file, None))
         });
-        if let Some(file) = file_stdin {
+        if let Some((file, write_end)) = file_stdin {
             self.set_fd_input_file(0, file, false);
+            if let Some((write_file, target)) = write_end {
+                // rubash#2261: the write half of the `<>` pair plus
+                // the fd-0 output env bookkeeping set_fd_readwrite_file
+                // keeps (mirrors save_and_apply_fd0_readwrite_env on
+                // the function face). The undo needs no per-binding
+                // record here: saved_fd_table / saved_env above
+                // snapshot the whole table and env before this install
+                // and are restored after the child runs — the same
+                // save/restore contract the function face spells out
+                // per binding (FunctionCallStdinBinding).
+                self.fd_table
+                    .open_output(0, FdWriteEndpoint::File(write_file), false);
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_output_process_substitution_key(0));
+                self.shell_state.env_vars.insert(fd_output_key(0), target);
+            }
             self.shell_state.env_vars.remove(FUNCTION_STDIN);
             self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
             self.shell_state.env_vars.remove(INHERIT_PROCESS_STDIN);
