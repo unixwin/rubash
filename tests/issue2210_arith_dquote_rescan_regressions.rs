@@ -230,15 +230,12 @@ printf 'export: %s\n' "$s2"
 }
 
 /// A redirect target built the same way names the file with the
-/// backslash intact. PARKED: redirect targets expand through the
-/// &self `expand_word` gate (expand_word.rs) over the NON-mut walker,
-/// whose splice sites carry no expansion-result protection — the same
-/// mechanism in the sibling walker. Fixing it needs the protection
-/// ported across that walker's consumer set; the evidence and the
-/// recommended shape are in the #2210 cluster REPORT for the follow-up
-/// issue. Un-ignore when that port lands.
+/// backslash intact. Redirect targets expand through the &self
+/// `expand_word` gate (expand_word.rs) over the NON-mut walker; the
+/// expansion-result protection was ported there under rubash#2216
+/// (this pin was parked #[ignore]d under #2210 until that port
+/// landed).
 #[test]
-#[ignore]
 fn issue2210_redirect_target() {
     let case = make_case("redir");
     let out = run_script(
@@ -249,6 +246,54 @@ printf '%s\n' t_*
 "#,
     );
     assert_eq!(out, "t_2_a\\(b\n");
+}
+
+/// rubash#2216 sibling (probe3 R4): the gate also opens on a command
+/// substitution in the source word; a sibling variable's data
+/// backslash in the same redirect operand stays intact.
+#[test]
+fn issue2216_redirect_comsub_trigger() {
+    let case = make_case("redir-comsub");
+    let out = run_script(
+        &case,
+        r#"body2='a\(b'
+printf 'hi\n' > "u_$(echo 1)_$body2"
+printf '%s\n' u_*
+"#,
+    );
+    assert_eq!(out, "u_1_a\\(b\n");
+}
+
+/// rubash#2216 sibling (probe3 R5): the corrupted backslash comes
+/// from the redirect operand's own double-quoted source literal
+/// rather than from a variable's value.
+#[test]
+fn issue2216_redirect_source_literal() {
+    let case = make_case("redir-literal");
+    let out = run_script(
+        &case,
+        r#"printf 'hi\n' > "u_$((1+1))_a\(b"
+printf '%s\n' u_*
+"#,
+    );
+    assert_eq!(out, "u_2_a\\(b\n");
+}
+
+/// rubash#2216 boundary control (probe3 R3): a redirect operand with
+/// the variable but no `$(`/backtick in the source word never opens
+/// the trailing-unescape gate; the backslash survives on both the
+/// pre- and post-fix engine.
+#[test]
+fn issue2216_redirect_var_only_control() {
+    let case = make_case("redir-varonly");
+    let out = run_script(
+        &case,
+        r#"body2='a\(b'
+printf 'hi\n' > "u_$body2"
+printf '%s\n' u_*
+"#,
+    );
+    assert_eq!(out, "u_a\\(b\n");
 }
 
 /// The git test-lib shape end to end: a body string carried through a

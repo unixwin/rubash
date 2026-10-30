@@ -482,6 +482,82 @@ fn copy_dollar_paren_substitution_cursor<'a>(out: &mut String, rest: &'a str) ->
     copy_dollar_paren_body_raw_cursor(out, &rest[1..])
 }
 
+/// Cursor form of `copy_dollar_bracket_arithmetic` (rest at the `$` of a
+/// `$[...]` old-style arithmetic expansion — GNU subst.c param_expand
+/// case '['). The whole span is copied verbatim with the `$` LIVE. The
+/// generic `$`-follower arm of the double-quote cookers marks a `$` not
+/// followed by `(`, `{`, a special, or a name start as DATA_DOLLAR;
+/// before this arm that is what left `$[1+1]` unexpanded inside double
+/// quotes (rubash#2217). Cooking the contents byte-by-byte instead
+/// would let a `"` inside the expression (e.g. `$["1+1"]`) end the
+/// quoted span early, so — exactly like the `$(` arm above — the span
+/// travels as one unit and the expansion walkers re-collect it.
+fn copy_dollar_bracket_arithmetic_cursor<'a>(out: &mut String, rest: &'a str) -> &'a str {
+    out.push('$');
+    let rest = &rest[1..]; // past '$'
+    if !rest.starts_with('[') {
+        return rest; // unreachable from the dispatcher; keeps parity
+    }
+    out.push('[');
+    copy_dollar_bracket_body_raw_cursor(out, &rest[1..], true)
+}
+
+/// Cursor form of `copy_dollar_bracket_body_raw` (rest just past the
+/// `$[`). Returns the remainder just past the matching `]`, or the
+/// empty slice when the span runs to the end of input (the EOF verdict
+/// machinery owns that diagnostic). Bracket matching is plain counting
+/// — every `[` nests, every `]` closes — the rule shared by GNU's
+/// read-time hunt (parse.y:5527 parse_matched_pair with P_ARITH,
+/// counting at parse.y:3974-3980), rubash's own EOF hunt (lexer/skip.rs
+/// db_scan_bracket_hunt), and the expansion walkers' collectors, so
+/// every layer agrees on the span.
+///
+/// With `deescape_dq` (the double-quote cookers) the two escape pairs
+/// GNU's read_token_word resolves inside double quotes before
+/// expansion — `\\` and `\"` — are emitted as the single escaped
+/// character: GNU's arithmetic diagnostics expose the post-resolution
+/// string (`$[1\\+1]` inside quotes errors on `1\+1`, and `$[\"1+1\"]`
+/// evaluates the quote-stripped `1+1`), and rubash's arithmetic
+/// pre-expansion strips a bare `"` pair exactly like the unquoted
+/// form. `\$` and `` \` `` deliberately stay raw: the pre-expansion
+/// already treats them as quoted dollars/backticks, matching GNU's
+/// CTLESC-quoted outcome (`$[\$x+1]` errors on the unexpanded `$x+1`
+/// in both). The raw copiers pass false — their spans are re-cooked
+/// later, and translating there would double-apply.
+fn copy_dollar_bracket_body_raw_cursor<'a>(
+    out: &mut String,
+    rest: &'a str,
+    deescape_dq: bool,
+) -> &'a str {
+    let bytes = rest.as_bytes();
+    let mut depth = 1usize;
+    let mut idx = 0usize;
+    let mut seg_start = 0usize;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if deescape_dq && b == b'\\' && matches!(bytes.get(idx + 1), Some(b'\\') | Some(b'"')) {
+            out.push_str(&rest[seg_start..idx]);
+            out.push(char::from(bytes[idx + 1]));
+            idx += 2;
+            seg_start = idx;
+            continue;
+        }
+        idx += 1;
+        match b {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    out.push_str(&rest[seg_start..idx]);
+    &rest[idx..]
+}
+
 /// Cursor form of `copy_dollar_paren_body_raw` (rest just past the `$(`).
 /// Every consumed byte is pushed verbatim; the case-depth tracker and the
 /// `rest` lookahead are transcribed unchanged (the lookahead now passes the
@@ -671,6 +747,12 @@ fn copy_double_quoted_raw_cursor(out: &mut String, rest: &str) -> usize {
                 idx += 1;
                 out.push('(');
                 let consumed = copy_dollar_paren_body_raw_cursor(out, &rest[idx..]);
+                idx = rest.len() - consumed.len();
+            }
+            '$' if rest.as_bytes().get(idx) == Some(&b'[') => {
+                idx += 1;
+                out.push('[');
+                let consumed = copy_dollar_bracket_body_raw_cursor(out, &rest[idx..], false);
                 idx = rest.len() - consumed.len();
             }
             _ => {}
@@ -966,6 +1048,11 @@ fn remove_double_quoted_into_cursor<'a>(
                     rest = copy_braced_parameter_after_dollar_cursor(&mut *out, rest, posix);
                     continue;
                 }
+                Some(&b'[') => {
+                    pending_name = false;
+                    rest = copy_dollar_bracket_arithmetic_cursor(&mut *out, rest);
+                    continue;
+                }
                 Some(&b @ (b'?' | b'$' | b'!' | b'#' | b'-' | b'@' | b'*' | b'0'..=b'9')) => {
                     pending_name = false;
                     out.push('$');
@@ -1210,6 +1297,11 @@ fn remove_double_quoted_into(
             copy_braced_parameter_after_dollar(out, chars, posix);
             continue;
         }
+        if quoted == '$' && chars.peek() == Some(&'[') {
+            pending_name = false;
+            copy_dollar_bracket_arithmetic(out, chars);
+            continue;
+        }
         if quoted == '$'
             && matches!(
                 chars.peek().copied(),
@@ -1314,6 +1406,49 @@ fn copy_dollar_paren_substitution(
     }
     out.push('(');
     copy_dollar_paren_body_raw(out, chars);
+}
+
+/// Char form of `copy_dollar_bracket_arithmetic_cursor` (chars just past
+/// the `$` of a `$[...]` span). See the cursor form for the GNU anchors
+/// and the rubash#2217 rationale.
+fn copy_dollar_bracket_arithmetic(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) {
+    out.push('$');
+    if chars.next() != Some('[') {
+        return;
+    }
+    out.push('[');
+    copy_dollar_bracket_body_raw(out, chars, true);
+}
+
+/// Char form of `copy_dollar_bracket_body_raw_cursor` (chars just past
+/// the `$[`): copy through the matching `]` by plain bracket counting,
+/// with the same `deescape_dq` rule as the cursor form.
+fn copy_dollar_bracket_body_raw(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    deescape_dq: bool,
+) {
+    let mut depth = 1usize;
+    while let Some(ch) = chars.next() {
+        if deescape_dq && ch == '\\' && matches!(chars.peek(), Some('\\') | Some('"')) {
+            out.push(chars.next().expect("peeked escape char"));
+            continue;
+        }
+        out.push(ch);
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn copy_single_quoted_raw(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
@@ -1462,6 +1597,11 @@ fn copy_double_quoted_raw(out: &mut String, chars: &mut std::iter::Peekable<std:
                 chars.next();
                 out.push('(');
                 copy_dollar_paren_body_raw(out, chars);
+            }
+            '$' if chars.peek() == Some(&'[') => {
+                chars.next();
+                out.push('[');
+                copy_dollar_bracket_body_raw(out, chars, false);
             }
             _ => {}
         }
