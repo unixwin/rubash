@@ -614,6 +614,17 @@ impl Executor {
         self.shell_state.bind_registry.borrow().generation
     }
 
+    /// A readline variable's current value (`bind -v` / `set NAME VALUE`),
+    /// e.g. `keyseq-timeout` after `bind 'set keyseq-timeout 250'`. Hosts
+    /// mirror these into their editor; `None` means the variable is unknown.
+    pub fn bind_readline_variable(&self, name: &str) -> Option<String> {
+        self.shell_state
+            .bind_registry
+            .borrow()
+            .variable_value(name)
+            .map(str::to_owned)
+    }
+
     /// `set editing-mode` seen through inputrc files, if any.
     pub fn bind_editing_mode(&self) -> Option<String> {
         self.shell_state.bind_registry.borrow().editing_mode.clone()
