@@ -1860,6 +1860,42 @@ impl Executor {
                 _ => continue,
             };
             let target = self.expand_redirect_target(redirect);
+            // rubash#2235: a numbered input entry whose target is an
+            // fd-alias PATH spelling (/dev/fd/M, /proc/self/fd/M) —
+            // above all a streamed list-level input procsub after
+            // materialization — binds fd to M's endpoint: GNU
+            // services the alias with an open over the alias layer
+            // (rubash#1963), which for a file/procsub endpoint yields
+            // the endpoint itself. The generic skip below would
+            // leave the slot unbound and the child would read EBADF
+            // at fd. Only File endpoints are served here (the
+            // streamed procsub registration is always one); other
+            // endpoint kinds keep the skip.
+            if matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+            ) && !redirect_target_is_dup_spelling(&target)
+                && (target.starts_with("/dev/fd/") || target.starts_with("/proc/self/fd/"))
+            {
+                if let Some(alias_fd) = redirect_target_fd(&target) {
+                    if let Some(crate::executor::fd_table::FdReadEndpoint::File(file)) =
+                        self.fd_table.read_endpoint(alias_fd)
+                    {
+                        let file = file.clone();
+                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                            #[cfg(unix)]
+                            command_fd_pins.push((dup, fd));
+                            process.env(format!("__RUBASH_FD_HANDLE_{fd}"), format!("{dup:#x}"));
+                            process.env(
+                                format!("__RUBASH_FD_PATH_{fd}"),
+                                file.path.to_string_lossy().into_owned(),
+                            );
+                            parent_side_dups.push(dup);
+                        }
+                    }
+                }
+                continue;
+            }
             if redirect_target_fd(&target).is_some()
                 || is_closed_redirect_target(&target)
                 || is_null_device(&target)
@@ -1886,8 +1922,24 @@ impl Executor {
                 // local one and must win the slot.
                 continue;
             }
-            let opened =
-                if write {
+            // rubash#2235: the fd-0 dup resolution may already have
+            // opened this entry's binding (see own_input_bindings):
+            // stamp/pin THAT description — one description shared
+            // with the child's stdin dup, GNU's dup2 shape — instead
+            // of opening the target a second time (a second open of
+            // a streamed procsub word would name the producer pipe
+            // through the alias layer with a fresh offset, and a
+            // plain file would restart at offset 0).
+            let stashed = if write {
+                None
+            } else {
+                self.own_input_bindings.get(&fd).cloned()
+            };
+            let mut opened_file: Option<std::fs::File> = None;
+            let raw = if let Some(file) = &stashed {
+                file.handle
+            } else {
+                let opened = if write {
                     if redirect.append {
                         open_redirect_append(&self.session_path(shell_path_to_windows(
                             &target,
@@ -1900,18 +1952,21 @@ impl Executor {
                 } else {
                     self.open_input_redirect(&target)
                 };
-            let Ok(file) = opened else {
-                continue;
-            };
-            #[cfg(windows)]
-            let raw = {
-                use std::os::windows::io::AsRawHandle;
-                file.as_raw_handle() as crate::fd::HANDLE
-            };
-            #[cfg(unix)]
-            let raw = {
-                use std::os::unix::io::AsRawFd;
-                file.as_raw_fd()
+                let Ok(file) = opened else {
+                    continue;
+                };
+                #[cfg(windows)]
+                let raw = {
+                    use std::os::windows::io::AsRawHandle;
+                    file.as_raw_handle() as crate::fd::HANDLE
+                };
+                #[cfg(unix)]
+                let raw = {
+                    use std::os::unix::io::AsRawFd;
+                    file.as_raw_fd()
+                };
+                opened_file = Some(file);
+                raw
             };
             let Ok(dup) = crate::fd::duplicate_handle_inheritable(raw) else {
                 continue;
@@ -1924,12 +1979,15 @@ impl Executor {
             );
             process.env(
                 format!("__RUBASH_FD_{}PATH_{fd}", if write { "W" } else { "" }),
-                target.clone(),
+                match &stashed {
+                    Some(file) => file.path.to_string_lossy().into_owned(),
+                    None => target.clone(),
+                },
             );
             parent_side_dups.push(dup);
             // The parent's own open was transient (GNU closes it after the
             // fork); the dup above is what the child holds.
-            drop(file);
+            drop(opened_file);
         }
         // rubash#1626: the env channel above only reaches rubash children
         // (init.rs restores the named handles at startup); a foreign child
