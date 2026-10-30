@@ -279,6 +279,19 @@ struct OutputFdState {
     /// written through this walk state (rubash#1844).
     open_failure_via_error: bool,
     first_open_error: std::cell::RefCell<Option<(std::io::ErrorKind, String)>>,
+    /// rubash#2121: dup/clone aliasing recorded by the ordered walk —
+    /// alias fd → the fd whose binding it cloned (`2>&1` after
+    /// `> target` records 2 → 1). GNU's `2>&1` is a dup2 of ONE open
+    /// file description, so two fds aliasing the same Path binding
+    /// share a single flush open; without this record the flush opened
+    /// the target once per fd (a net target connected twice for
+    /// `> /dev/tcp/... 2>&1`). Cleared whenever an fd is rebound to a
+    /// non-clone target.
+    shared_with: HashMap<u32, u32>,
+    /// rubash#2121: flush-open cache keyed by the sharing ROOT fd (the
+    /// fd an alias chain resolves to): the handle the first alias's
+    /// flush opened, reused by every other alias of the same binding.
+    path_handle_cache: std::cell::RefCell<HashMap<u32, std::rc::Rc<std::fs::File>>>,
 }
 
 impl Executor {
@@ -475,9 +488,97 @@ impl Executor {
         Ok(true)
     }
 
+    /// rubash#2121: whether the funnel that will apply `cmd`'s
+    /// redirects is one whose apply LOSES superseded output entries —
+    /// the deferred binding model (the buffered builtin routes and,
+    /// for a pipeline stage, the stage stdio wiring): those funnels
+    /// validate net output targets without connecting and open only
+    /// the final binding at flush/wiring time, so the reject gate must
+    /// settle a fully superseded net output entry's open itself.
+    /// Funnels with a real ordered apply open every entry already and
+    /// must not be settled for (a second connect): external commands
+    /// outside a pipeline (plan_external_stdio walks the list with
+    /// real handles), function calls (apply_function_call_redirects),
+    /// and the builtins whose semantics ARE a redirect apply or a
+    /// re-dispatch under one (exec, eval, source/. — they open every
+    /// entry through the builtin-redirect / inherited-apply paths).
+    /// `command` and `builtin` are transparent prefixes — the
+    /// effective word classifies. The lookup order mirrors the
+    /// dispatcher's own: a function shadows a builtin of the same
+    /// name, except that POSIX mode precludes the function for a
+    /// special builtin's name (execute_function_command_invocation).
+    /// `in_pipeline_stage` flips only the external arm: a pipeline
+    /// stage's wiring is the deferred model even for disk commands,
+    /// while a plain external command goes through the planner.
+    pub(in crate::executor) fn superseded_net_output_settlement_applies(
+        &self,
+        cmd: &CommandNode,
+        in_pipeline_stage: bool,
+    ) -> bool {
+        let Some(first) = cmd.words.first() else {
+            // A redirect-only command has no downstream apply at all.
+            return true;
+        };
+        let mut word = first.as_str();
+        let mut index = 0usize;
+        loop {
+            match word {
+                "command" => {
+                    let mut next = index + 1;
+                    let mut query_only = false;
+                    while let Some(arg) = cmd.words.get(next) {
+                        if arg == "--" {
+                            next += 1;
+                            break;
+                        }
+                        if !arg.starts_with('-') || arg.len() == 1 {
+                            break;
+                        }
+                        // `command -v` / `-V` only query; the command
+                        // builtin itself is what runs (buffered route).
+                        if arg[1..].chars().any(|ch| ch == 'v' || ch == 'V') {
+                            query_only = true;
+                        }
+                        next += 1;
+                    }
+                    if query_only {
+                        break;
+                    }
+                    match cmd.words.get(next) {
+                        Some(effective) => {
+                            index = next;
+                            word = effective.as_str();
+                        }
+                        None => break,
+                    }
+                }
+                "builtin" => match cmd.words.get(index + 1) {
+                    Some(effective) => {
+                        index += 1;
+                        word = effective.as_str();
+                    }
+                    None => break,
+                },
+                _ => break,
+            }
+        }
+        let posix_precludes_function = self.posix_mode_enabled() && is_posix_special_builtin(word);
+        if !posix_precludes_function && self.function_name_for_command_word(word).is_some() {
+            return false;
+        }
+        if matches!(word, "exec" | "eval" | "source" | ".") {
+            return false;
+        }
+        if is_shell_builtin_name(word) {
+            return true;
+        }
+        in_pipeline_stage
+    }
+
     pub(in crate::executor) fn reject_invalid_redirects(
         &mut self,
         cmd: &CommandNode,
+        settle_superseded_net_outputs: bool,
     ) -> Result<Option<RedirectRejection>, ExecuteError> {
         // Semantic identity of a redirect for this scan (the same key the
         // expand_redirect_target memo uses): the ordered `redirects` list
@@ -531,24 +632,63 @@ impl Executor {
         // losing net entry's open must be settled in this gate — the
         // one walk every funnel passes exactly once — while the winner
         // stays probe-pure (its bind performs the single connect).
-        let mut later_fd0_supplier = vec![false; candidates.len()];
-        let mut seen_fd0_supplier = false;
+        //
+        // rubash#2121 generalizes the scan behind both settlements:
+        // every candidate's BOUND fds (the redirector side its apply
+        // binds — combined forms bind 1+2, every other file/dup/close
+        // form its single redirector, a {var} form a fresh descriptor
+        // that supersedes nothing) accumulate over the later
+        // candidates into one map, and "fully superseded" is judged
+        // against it. The fd-0 supplier set is the fd-0 slice of that
+        // map; it also counts an output form spelled onto fd 0
+        // (`0> file` binds fd 0 exactly like an input form does in
+        // do_redirections), which the #2098 kind list missed.
+        //
+        // Only REAL list entries count as later binders. The mirror
+        // fields appended after `cmd.redirects` are projections OF
+        // those entries, not list members: a combined entry projects
+        // to an fd-1 mirror and an fd-2 mirror with distinct semantic
+        // keys, so counting mirrors would judge the entry superseded
+        // by its own projection and settle a WINNER (an extra connect
+        // the flush then repeats). When the list itself is empty the
+        // mirrors are the only representation and do form the list.
+        let real_redirect_count = cmd.redirects.len();
+        let bound_fds = |redirect: &Redirect| -> Vec<u32> {
+            if redirect.fd_var.is_some() {
+                return Vec::new();
+            }
+            match redirect.kind {
+                crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend => vec![1, 2],
+                crate::parser::RedirectKind::Input
+                | crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::CloseInput
+                | crate::parser::RedirectKind::HereDoc
+                | crate::parser::RedirectKind::HereString
+                | crate::parser::RedirectKind::ReadWrite => {
+                    vec![redirect.fd.unwrap_or(0)]
+                }
+                crate::parser::RedirectKind::Output
+                | crate::parser::RedirectKind::Append
+                | crate::parser::RedirectKind::ClobberOutput
+                | crate::parser::RedirectKind::DuplicateOutput
+                | crate::parser::RedirectKind::CloseOutput => {
+                    vec![redirect.fd.unwrap_or(1)]
+                }
+                _ => Vec::new(),
+            }
+        };
+        let mut later_binds: Vec<std::collections::HashSet<u32>> =
+            vec![std::collections::HashSet::new(); candidates.len()];
+        let mut seen_binds: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for (index, redirect) in candidates.iter().enumerate().rev() {
-            later_fd0_supplier[index] = seen_fd0_supplier;
-            if redirect.fd.unwrap_or(0) == 0
-                && matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::Input
-                        | crate::parser::RedirectKind::DuplicateInput
-                        | crate::parser::RedirectKind::ReadWrite
-                        | crate::parser::RedirectKind::CloseInput
-                        | crate::parser::RedirectKind::HereDoc
-                        | crate::parser::RedirectKind::HereString
-                )
-            {
-                seen_fd0_supplier = true;
+            later_binds[index] = seen_binds.clone();
+            if index < real_redirect_count || real_redirect_count == 0 {
+                seen_binds.extend(bound_fds(redirect));
             }
         }
+        let later_fd0_supplier: Vec<bool> =
+            later_binds.iter().map(|binds| binds.contains(&0)).collect();
 
         for (index, redirect) in candidates.iter().enumerate() {
             if matches!(redirect.kind, crate::parser::RedirectKind::HereString) {
@@ -1000,6 +1140,63 @@ impl Executor {
                 )
                 && crate::special_paths::is_net_redirect_target(&target)
                 && later_fd0_supplier[index]
+                // rubash#2121: an injected group redirect is the
+                // compound apply's already-performed binding, not an
+                // entry of this command's list — never settle it.
+                && !crate::executor::support_names::is_injected_group_redirect(redirect)
+            {
+                if let Err(error) = self.open_net_redirect(&target) {
+                    let text = crate::posix_errors::message(&error);
+                    return self
+                        .reject_redirect_at(cmd, index, &text)
+                        .map(|_| Some(RedirectRejection::Command));
+                }
+            }
+            // rubash#2121: the output-side twin of the #2098 settlement
+            // above. The output walk is validate-only for net targets
+            // (#1967) and its flush opens only the FINAL binding, so a
+            // net output entry whose every bound fd is superseded by a
+            // later entry never connects — GNU's do_redirections opens
+            // it in order and the later dup2 merely replaces it. Settle
+            // it here under the same rule (connect once, drop the
+            // descriptor; a refusal fails the command at this entry,
+            // routed through the bindings applied so far, so a failing
+            // winner is never opened). Only PARTIALLY superseded
+            // entries stay unsettled: a combined entry that loses fd 1
+            // but keeps fd 2 is still a winner — its flush performs the
+            // one connect. ReadWrite entries are not settled here:
+            // their apply opens every entry already (their fd-0 face
+            // is the block above). Whether this settlement runs at all
+            // is the caller's funnel classification
+            // (superseded_net_output_settlement_applies): funnels with
+            // a real apply open these entries themselves.
+            if settle_superseded_net_outputs
+                && matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Output
+                        | crate::parser::RedirectKind::Append
+                        | crate::parser::RedirectKind::ClobberOutput
+                        | crate::parser::RedirectKind::CombinedOutput
+                        | crate::parser::RedirectKind::CombinedAppend
+                )
+                && crate::special_paths::is_net_redirect_target(&target)
+                && {
+                    // A {var} entry binds a fresh descriptor: its
+                    // bound set is empty, the vacuous `all` must not
+                    // read as "fully superseded".
+                    let entry_binds = bound_fds(redirect);
+                    !entry_binds.is_empty()
+                        && entry_binds
+                            .iter()
+                            .all(|fd| later_binds[index].contains(fd))
+                }
+                // rubash#2121: same injected-binding exclusion as the
+                // fd-0 block above — a group's materialized stdio
+                // bindings (`{ echo e >&2; } > net 2>&1` injects the
+                // fd-1 binding as a plain Output entry the inner dup
+                // then "supersedes") were already opened by the
+                // compound apply; settling one connects a second time.
+                && !crate::executor::support_names::is_injected_group_redirect(redirect)
             {
                 if let Err(error) = self.open_net_redirect(&target) {
                     let text = crate::posix_errors::message(&error);
@@ -1547,6 +1744,8 @@ impl Executor {
             diagnostics_muted: false,
             open_failure_via_error: false,
             first_open_error: std::cell::RefCell::new(None),
+            shared_with: HashMap::new(),
+            path_handle_cache: std::cell::RefCell::new(HashMap::new()),
         };
         state.fds.insert(1, OutputTarget::Stdout);
         state.fds.insert(2, OutputTarget::Stderr);
@@ -1776,6 +1975,9 @@ impl Executor {
                             source_target
                         };
                         state.fds.insert(fd, source_target);
+                        // rubash#2121: record the clone so the flush
+                        // shares one open across the alias pair.
+                        state.shared_with.insert(fd, source_fd);
                         state.saw_output_redirect = true;
                         continue;
                     }
@@ -1802,12 +2004,16 @@ impl Executor {
                     }
                     let stdout_target = state.fd_target(1).cloned().unwrap_or(OutputTarget::Stdout);
                     state.fds.insert(2, stdout_target);
+                    // rubash#2121: fd 2 clones fd 1's binding (&> / &>>
+                    // is ONE open file description in GNU).
+                    state.shared_with.insert(2, 1);
                 }
                 crate::parser::RedirectKind::DuplicateOutput => {
                     let target_fd = redirect_fd_or_default(redirect, 1);
                     let target = self.expand_redirect_target(redirect);
                     if is_closed_redirect_target(&target) {
                         state.fds.insert(target_fd, OutputTarget::Closed);
+                        state.shared_with.remove(&target_fd);
                         state.saw_output_redirect = true;
                         continue;
                     }
@@ -1864,9 +2070,13 @@ impl Executor {
                             .fd_target(target_fd)
                             .is_some_and(|target| *target != OutputTarget::Closed);
                         state.fds.insert(target_fd, source_target);
+                        // rubash#2121: record the clone (see the file
+                        // arm above).
+                        state.shared_with.insert(target_fd, source_fd);
                         state.saw_output_redirect = true;
                         if move_source {
                             state.fds.insert(source_fd, OutputTarget::Closed);
+                            state.shared_with.remove(&source_fd);
                             if state.persist_move_closes && !target_was_open {
                                 self.close_persistent_output_fd(source_fd)?;
                                 self.shell_state
@@ -1903,6 +2113,9 @@ impl Executor {
                             let stdout_target =
                                 state.fd_target(1).cloned().unwrap_or(OutputTarget::Stdout);
                             state.fds.insert(2, stdout_target);
+                            // rubash#2121: r_err_and_out — fd 2 clones
+                            // fd 1's binding (redir.c:832-838).
+                            state.shared_with.insert(2, 1);
                         }
                     } else {
                         // report_ambiguous_redirect (redir.c:846-870): dup
@@ -1923,9 +2136,9 @@ impl Executor {
                     }
                 }
                 crate::parser::RedirectKind::CloseOutput => {
-                    state
-                        .fds
-                        .insert(redirect_fd_or_default(redirect, 1), OutputTarget::Closed);
+                    let closed_fd = redirect_fd_or_default(redirect, 1);
+                    state.fds.insert(closed_fd, OutputTarget::Closed);
+                    state.shared_with.remove(&closed_fd);
                     state.saw_output_redirect = true;
                 }
                 _ => {}
@@ -1969,6 +2182,9 @@ impl Executor {
         target: &str,
         redirect: &Redirect,
     ) -> Result<(), ExecuteError> {
+        // rubash#2121: a fresh open supersedes any clone aliasing this
+        // fd held — the fd is no longer a dup of its former source.
+        state.shared_with.remove(&fd);
         if is_closed_redirect_target(target) {
             state.fds.insert(fd, OutputTarget::Closed);
         } else if is_null_device(target) {
@@ -2264,7 +2480,7 @@ impl Executor {
             target => {
                 let target = target.clone();
                 let taken = std::mem::take(stdout);
-                self.write_stage_stream_to_target(cmd, 1, &target, &taken, stderr, status)?;
+                self.write_stage_stream_to_target(cmd, &state, 1, &target, &taken, stderr, status)?;
             }
         }
         match &stderr_target {
@@ -2281,7 +2497,7 @@ impl Executor {
             target => {
                 let target = target.clone();
                 let taken = std::mem::take(stderr);
-                self.write_stage_stream_to_target(cmd, 2, &target, &taken, stdout, status)?;
+                self.write_stage_stream_to_target(cmd, &state, 2, &target, &taken, stdout, status)?;
             }
         }
         Ok(true)
@@ -2296,6 +2512,7 @@ impl Executor {
     fn write_stage_stream_to_target(
         &mut self,
         cmd: &CommandNode,
+        state: &OutputFdState,
         fd: u32,
         target: &OutputTarget,
         output: &str,
@@ -2387,7 +2604,12 @@ impl Executor {
                 // plain path it is the same mapped append open as
                 // before; a net target connects, a synthetic /proc
                 // entry lands in its sink.
-                let file = self.open_append_target(path)?;
+                // rubash#2121: the open goes through the walk state's
+                // flush cache, so a dup-aliased pair (`> net 2>&1` as a
+                // pipeline stage) shares ONE open even when this stream
+                // is empty — previously this arm opened unconditionally
+                // and the empty second stream connected a second time.
+                let file = state.open_flush_file(self, fd, path)?;
                 // GNU builtins/common.c:320-334 sh_chkwrite: a builtin's
                 // failed flush is reported by the BUILTIN as
                 // `<name>: write error: <strerror>` (builtin_error via
@@ -2509,6 +2731,66 @@ impl OutputFdState {
         })
     }
 
+    /// rubash#2121: resolve an fd's clone-alias chain to its root fd
+    /// (the fd whose binding every alias in the chain cloned).
+    fn shared_owner(&self, fd: u32) -> u32 {
+        let mut owner = fd;
+        for _ in 0..=self.shared_with.len() {
+            match self.shared_with.get(&owner) {
+                Some(&source) => owner = source,
+                None => break,
+            }
+        }
+        owner
+    }
+
+    /// rubash#2121: when `fd`'s current binding is the Path `path` and
+    /// the binding is shared — `fd` aliases another fd, or another fd
+    /// aliases `fd` — return the root fd that owns the one flush open.
+    /// The walk clones the target VALUE into the alias, so an identical
+    /// Path string at the root is the binding identity; a root since
+    /// rebound to a different target ends the sharing.
+    fn path_sharing_owner(&self, fd: u32, path: &str) -> Option<u32> {
+        let owner = self.shared_owner(fd);
+        let participates = owner != fd || self.shared_with.values().any(|&source| source == fd);
+        if !participates {
+            return None;
+        }
+        match self.fd_target(owner) {
+            Some(OutputTarget::Path(owner_path)) if owner_path == path => Some(owner),
+            _ => None,
+        }
+    }
+
+    fn cached_shared_handle(&self, owner: u32) -> Option<std::rc::Rc<std::fs::File>> {
+        self.path_handle_cache.borrow().get(&owner).cloned()
+    }
+
+    /// rubash#2121: the flush open for a Path target. A shared binding
+    /// opens ONCE — GNU's dup2 aliases share one open file description,
+    /// so `> /dev/tcp/... 2>&1` connects a single time no matter which
+    /// alias flushes first — and the handle is cached under the root
+    /// fd for every other alias. An unshared binding opens fresh, the
+    /// long-standing behavior.
+    fn open_flush_file(
+        &self,
+        executor: &mut Executor,
+        fd: u32,
+        path: &str,
+    ) -> Result<std::rc::Rc<std::fs::File>, ExecuteError> {
+        if let Some(owner) = self.path_sharing_owner(fd, path) {
+            if let Some(handle) = self.cached_shared_handle(owner) {
+                return Ok(handle);
+            }
+            let file = std::rc::Rc::new(executor.open_append_target(path)?);
+            self.path_handle_cache
+                .borrow_mut()
+                .insert(owner, file.clone());
+            return Ok(file);
+        }
+        Ok(std::rc::Rc::new(executor.open_append_target(path)?))
+    }
+
     fn write_to_fd(
         &self,
         executor: &mut Executor,
@@ -2535,14 +2817,40 @@ impl OutputFdState {
                 // (`: > /dev/tcp/...` is exactly this shape through
                 // the no-output pass; an empty buffered stream owes
                 // the peer its one connection the same way).
+                // rubash#2121: a dup-aliased binding still owes only
+                // ONE connection across the alias pair — if any
+                // alias's flush already opened the shared handle this
+                // empty stream connects nothing; otherwise this
+                // pairing open IS the shared open and is cached under
+                // the root fd for the other alias.
                 if crate::special_paths::is_net_redirect_target(&path) {
+                    if let Some(owner) = self.path_sharing_owner(fd, &path) {
+                        if self.cached_shared_handle(owner).is_none() {
+                            let pairing = executor.open_net_redirect(&path)?;
+                            self.path_handle_cache
+                                .borrow_mut()
+                                .insert(owner, std::rc::Rc::new(pairing));
+                        }
+                        return Ok(());
+                    }
                     let _pairing = executor.open_net_redirect(&path)?;
                     return Ok(());
                 }
                 let resolved = executor
                     .session_path(shell_path_to_windows(&path, &executor.shell_state.env_vars));
                 if crate::executor::shell_options::redirect_path_is_fifo(&resolved) {
-                    let _pairing = open_redirect_append(&resolved)?;
+                    // rubash#2121: the FIFO pairing obeys the same
+                    // single-open rule for a dup-aliased binding.
+                    if let Some(owner) = self.path_sharing_owner(fd, &path) {
+                        if self.cached_shared_handle(owner).is_none() {
+                            let pairing = open_redirect_append(&resolved)?;
+                            self.path_handle_cache
+                                .borrow_mut()
+                                .insert(owner, std::rc::Rc::new(pairing));
+                        }
+                    } else {
+                        let _pairing = open_redirect_append(&resolved)?;
+                    }
                 }
             }
             return Ok(());
@@ -2666,7 +2974,9 @@ impl OutputFdState {
                 // The open classifies through the registry
                 // (rubash#1964), whose filesystem arm performs exactly
                 // that session-anchored mapped append.
-                let file = executor.open_append_target(&path)?;
+                // rubash#2121: a dup-aliased binding routes through
+                // open_flush_file so the alias pair shares one open.
+                let file = self.open_flush_file(executor, fd, &path)?;
                 crate::fd::write_file_all(&file, output)?;
                 Ok(())
             }

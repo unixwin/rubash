@@ -1623,10 +1623,19 @@ impl Executor {
                 // an empty pipe (GNU's next element reads nothing).
                 match target {
                     MergedSharedFile::Path(path) => {
-                        let mut file = open_redirect_append(&self.session_path(
-                            shell_path_to_windows(&path, &self.shell_state.env_vars),
-                        ))
-                        .map_err(ExecuteError::IoError)?;
+                        // rubash#2121: open through the registry-
+                        // classifying append (open_append_target), not
+                        // a raw filesystem open of the session-mapped
+                        // word — for `/dev/tcp/... 2>&1` on an external
+                        // pipeline stage the raw open turned the net
+                        // word into a bogus filesystem path (ENOENT,
+                        // zero connects, stage rc 1) where GNU connects
+                        // once and delivers the merged bytes. Plain
+                        // files take the same session-anchored mapped
+                        // append as before (rubash#1964).
+                        let mut file = self
+                            .open_append_target(&path)
+                            .map_err(ExecuteError::IoError)?;
                         file.write_all(&merged)?;
                     }
                     MergedSharedFile::Handle(handle) => {

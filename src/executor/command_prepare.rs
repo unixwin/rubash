@@ -425,7 +425,11 @@ impl Executor {
         // same fatal redirect-word class as a commanded target (rubash#535;
         // GNU probe: `set -u; > $nope` exits 1, no next line). The walker
         // has reported the diagnostic and set the status.
-        if let Some(rejection) = self.reject_invalid_redirects(cmd)? {
+        let settle_superseded_net_outputs =
+            self.superseded_net_output_settlement_applies(cmd, false);
+        if let Some(rejection) =
+            self.reject_invalid_redirects(cmd, settle_superseded_net_outputs)?
+        {
             if rejection == super::redirection::RedirectRejection::FatalNounset {
                 self.finish_heredoc_expansion_error(cmd, Self::FATAL_PARAMETER_EXPANSION_STATUS)?;
             }
@@ -3672,10 +3676,13 @@ impl Executor {
         // gate's `"${X[0]}": Bad file descriptor` (issue #518). Placement
         // mirrors execute_materialized_command: before the tempenv applies,
         // because redirect words expand against the caller's bindings.
-        let redirect_rejection = match self.reject_invalid_redirects(&materialized_cmd) {
-            Ok(rejection) => rejection,
-            Err(error) => return Some(Err(error)),
-        };
+        let settle_superseded_net_outputs =
+            self.superseded_net_output_settlement_applies(&materialized_cmd, false);
+        let redirect_rejection =
+            match self.reject_invalid_redirects(&materialized_cmd, settle_superseded_net_outputs) {
+                Ok(rejection) => rejection,
+                Err(error) => return Some(Err(error)),
+            };
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
