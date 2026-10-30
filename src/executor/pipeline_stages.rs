@@ -1375,16 +1375,25 @@ impl Executor {
         // iterate theme's per-prompt `$BASH --norc -i < /dev/null | sed`
         // wedged the whole ConPTY session), and `echo hi | cat < /dev/null`
         // fed the upstream payload where GNU feeds the empty file.
-        let fd0_file_redirect =
+        // rubash#2255: the fd-0 dup/close winners take the same
+        // shared adjudication — a `<&N` dup resolves against the
+        // ambient fd table and (via the replay apply_external_stdin_
+        // redirect performs for the plain path) the command's own
+        // list; a closed fd 0 stays closed. Before this, only the
+        // file winners were adjudicated and a dup winner silently
+        // fell through to the pipe payload below.
+        let fd0_redirect_wins =
             match crate::executor::shell_options::fd0_stdin_redirect_winner(command) {
                 Some(crate::parser::RedirectKind::Input)
-                | Some(crate::parser::RedirectKind::ReadWrite) => true,
+                | Some(crate::parser::RedirectKind::ReadWrite)
+                | Some(crate::parser::RedirectKind::DuplicateInput)
+                | Some(crate::parser::RedirectKind::CloseInput) => true,
                 // A heredoc/here-string winner is the payload already fed
                 // through the piped arm below (initial_pipeline_input).
                 Some(_) => false,
                 None => command.redirect_in.is_some(),
             };
-        if fd0_file_redirect {
+        if fd0_redirect_wins {
             self.apply_external_stdin_redirect(command, &mut process)?;
         } else if stdin_inherit {
             process.stdin(Stdio::inherit());
@@ -1546,11 +1555,17 @@ impl Executor {
             }
         }
 
-        // rubash#1688: this sequential stage spawner builds its child by
-        // hand like the concurrent pipeline loops — pin the ambient
-        // descriptors, or a member of a mixed (builtin-headed) pipeline
-        // sees EBADF on every `exec` fd the concurrent path delivers.
-        self.attach_ambient_fd_pins(command, &mut process);
+        // rubash#1688 + rubash#2255: this sequential stage spawner
+        // builds its child by hand, so run the SAME fd delivery
+        // spawn_external_process runs for a simple command
+        // (apply_external_fd_delivery): the ambient descriptors are
+        // pinned/stamped (a member of a mixed pipeline otherwise sees
+        // EBADF on every `exec` fd) AND the stage's own numbered
+        // redirects are opened and delivered — GNU applies the
+        // element's own redirections in its fork before exec
+        // (redir.c:237 do_redirections), so a stage child must find
+        // its `3<seed` binding at fd 3.
+        let stage_fd_delivery_dups = self.apply_external_fd_delivery(command, &mut process);
         // rubash#438: pin the buffered process-substitution pipe read ends at
         // their /dev/fd/N numbers in the child (fork-exec dup2), so the
         // literal argv word resolves through the OS /dev/fd layer.
@@ -1558,7 +1573,15 @@ impl Executor {
         crate::executor::dev_fd_operands::attach_unix_dev_fd_operands(&mut process, &dev_ops);
         process.current_dir(&self.shell_state.cwd);
         suppress_orphan_console(&mut process);
-        let mut child = process.spawn()?;
+        let spawned = process.spawn();
+        // The child holds its own duplicated inheritable handles;
+        // close the parent-side duplicates the fd delivery opened —
+        // the same unwind spawn_external_process performs once its
+        // spawn resolves, on both outcomes.
+        for dup in stage_fd_delivery_dups {
+            crate::fd::close_handle(dup);
+        }
+        let mut child = spawned?;
         adopt_orphan_console(child.id());
         // Drop the Command NOW: std retains the `Stdio::from(PipeWriter)`
         // values set above, and a live Command keeps the merged pipe's
