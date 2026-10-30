@@ -32,7 +32,7 @@
 //! run back-to-back on a helper thread — the create→connect gap is
 //! a rendezvous race window (a writer already spinning in its open
 //! retry loop can connect, write and disconnect inside it, losing
-//! its bytes; see `open_winux_fifo_read`) — while the caller polls
+//! its bytes; see `open_winuxcmd_fifo_read`) — while the caller polls
 //! and, on interrupt, closes the handle, which aborts the pending
 //! connect. The handle that lands in the fd table is therefore an
 //! ordinary synchronous pipe handle the fd layer's
@@ -56,10 +56,10 @@ pub(crate) const FIFO_MARKER: &[u8] = b"!<fifo>";
 
 /// True when `path` names a WinuxCmd FIFO marker file. Always false
 /// off Windows.
-pub(crate) fn path_is_winux_fifo(path: &Path) -> bool {
+pub(crate) fn path_is_winuxcmd_fifo(path: &Path) -> bool {
     #[cfg(windows)]
     {
-        imp::path_is_winux_fifo(path)
+        imp::path_is_winuxcmd_fifo(path)
     }
     #[cfg(not(windows))]
     {
@@ -98,8 +98,8 @@ pub(crate) fn marker_access_error(path: &Path, write: bool) -> Option<io::Error>
 /// FILE_ATTRIBUTE_READONLY when `readonly`). On a write failure the
 /// partial file is removed, like `create_winux_fifo_w`.
 #[cfg(windows)]
-pub(crate) fn create_winux_fifo(path: &Path, readonly: bool) -> io::Result<()> {
-    imp::create_winux_fifo(path, readonly)
+pub(crate) fn create_winuxcmd_fifo(path: &Path, readonly: bool) -> io::Result<()> {
+    imp::create_winuxcmd_fifo(path, readonly)
 }
 
 /// The deterministic `\\.\pipe\winuxcmd-fifo-<hash>` endpoint name for
@@ -108,7 +108,7 @@ pub(crate) fn create_winux_fifo(path: &Path, readonly: bool) -> io::Result<()> {
 /// shell side canonicalizes with the same verbatim-stripped native
 /// form the #1995 path work produces.
 #[cfg(windows)]
-pub(crate) fn winux_fifo_pipe_name(path: &Path) -> String {
+pub(crate) fn winuxcmd_fifo_pipe_name(path: &Path) -> String {
     let canonical =
         crate::executor::path::canonicalize_native(path).unwrap_or_else(|_| path.to_path_buf());
     pipe_name_from_canonical(&canonical.to_string_lossy())
@@ -193,22 +193,22 @@ pub(crate) fn fifo_sigint_pending() -> bool {
 /// fires the pending connect is aborted and an Interrupted error
 /// returned (GNU's EINTR shape for a blocking open).
 #[cfg(windows)]
-pub(crate) fn open_winux_fifo_read(
+pub(crate) fn open_winuxcmd_fifo_read(
     path: &Path,
     interrupted: &dyn Fn() -> bool,
 ) -> io::Result<std::fs::File> {
-    imp::open_winux_fifo_read(path, interrupted)
+    imp::open_winuxcmd_fifo_read(path, interrupted)
 }
 
 /// Open the write (client) side of the rendezvous for the marker at
 /// `path`: wait until a reader creates the endpoint, then connect.
-/// Same interrupt contract as [`open_winux_fifo_read`].
+/// Same interrupt contract as [`open_winuxcmd_fifo_read`].
 #[cfg(windows)]
-pub(crate) fn open_winux_fifo_write(
+pub(crate) fn open_winuxcmd_fifo_write(
     path: &Path,
     interrupted: &dyn Fn() -> bool,
 ) -> io::Result<std::fs::File> {
-    imp::open_winux_fifo_write(path, interrupted)
+    imp::open_winuxcmd_fifo_write(path, interrupted)
 }
 
 /// Slurp a marker target's whole stream for a builtin text consumer
@@ -225,10 +225,10 @@ pub(crate) fn slurp_marker_bytes(
     path: &Path,
     env_vars: &HashMap<String, String>,
 ) -> Option<io::Result<Vec<u8>>> {
-    if !path_is_winux_fifo(path) {
+    if !path_is_winuxcmd_fifo(path) {
         return None;
     }
-    let mut file = match open_winux_fifo_read(path, &|| fifo_wait_interrupted(env_vars)) {
+    let mut file = match open_winuxcmd_fifo_read(path, &|| fifo_wait_interrupted(env_vars)) {
         Ok(file) => file,
         Err(error) => return Some(Err(error)),
     };
@@ -241,7 +241,7 @@ pub(crate) fn slurp_marker_bytes(
 mod imp {
     #![allow(non_snake_case)]
 
-    use super::{winux_fifo_pipe_name, FIFO_MARKER};
+    use super::{winuxcmd_fifo_pipe_name, FIFO_MARKER};
     use crate::fd::{BOOL, DWORD, HANDLE};
     use std::ffi::c_void;
     use std::io;
@@ -307,7 +307,7 @@ mod imp {
         io::Error::new(io::ErrorKind::Interrupted, "Interrupted system call")
     }
 
-    pub(super) fn path_is_winux_fifo(path: &Path) -> bool {
+    pub(super) fn path_is_winuxcmd_fifo(path: &Path) -> bool {
         use std::os::windows::fs::MetadataExt;
         let Ok(meta) = std::fs::metadata(path) else {
             return false;
@@ -326,7 +326,7 @@ mod imp {
         matches!(file.read_exact(&mut buffer), Ok(())) && &buffer == FIFO_MARKER
     }
 
-    pub(super) fn create_winux_fifo(path: &Path, readonly: bool) -> io::Result<()> {
+    pub(super) fn create_winuxcmd_fifo(path: &Path, readonly: bool) -> io::Result<()> {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -351,11 +351,11 @@ mod imp {
         Ok(())
     }
 
-    pub(super) fn open_winux_fifo_read(
+    pub(super) fn open_winuxcmd_fifo_read(
         path: &Path,
         interrupted: &dyn Fn() -> bool,
     ) -> io::Result<std::fs::File> {
-        let pipe_name = winux_fifo_pipe_name(path);
+        let pipe_name = winuxcmd_fifo_pipe_name(path);
         let wide = wide_z(&pipe_name);
         // CreateNamedPipeW and the blocking ConnectNamedPipeW run
         // back-to-back on the helper thread, and the thread's spawn
@@ -467,11 +467,11 @@ mod imp {
         }
     }
 
-    pub(super) fn open_winux_fifo_write(
+    pub(super) fn open_winuxcmd_fifo_write(
         path: &Path,
         interrupted: &dyn Fn() -> bool,
     ) -> io::Result<std::fs::File> {
-        let pipe_name = winux_fifo_pipe_name(path);
+        let pipe_name = winuxcmd_fifo_pipe_name(path);
         let wide = wide_z(&pipe_name);
         loop {
             if interrupted() {
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn issue1903_marker_detection_is_inert_off_windows() {
         #[cfg(not(windows))]
-        assert!(!super::path_is_winux_fifo(std::path::Path::new(
+        assert!(!super::path_is_winuxcmd_fifo(std::path::Path::new(
             "/nonexistent"
         )));
     }

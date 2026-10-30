@@ -201,7 +201,7 @@ pub(in crate::executor) fn open_redirect_append(
     path: &std::path::Path,
 ) -> std::io::Result<std::fs::File> {
     #[cfg(windows)]
-    if crate::winux_fifo::path_is_winux_fifo(path) {
+    if crate::winuxcmd_fifo::path_is_winuxcmd_fifo(path) {
         // rubash#1903: an append open of a fifo marker is the write
         // side of the rendezvous (O_APPEND is meaningless on a pipe,
         // exactly the device rule below). This is also the flush-side
@@ -209,9 +209,9 @@ pub(in crate::executor) fn open_redirect_append(
         // walk probe-validates the target, and this open is the one
         // real open GNU performs. The interrupt predicate is the
         // reduced SIGINT peek — this helper holds no Executor.
-        return crate::winux_fifo::open_winux_fifo_write(
+        return crate::winuxcmd_fifo::open_winuxcmd_fifo_write(
             path,
-            &crate::winux_fifo::fifo_sigint_pending,
+            &crate::winuxcmd_fifo::fifo_sigint_pending,
         );
     }
     if is_dos_device_path(path) {

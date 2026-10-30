@@ -438,7 +438,7 @@ impl Executor {
         // stdin_string_for_command).
         #[cfg(windows)]
         if let Some(result) =
-            crate::winux_fifo::slurp_marker_bytes(&path, &self.shell_state.env_vars)
+            crate::winuxcmd_fifo::slurp_marker_bytes(&path, &self.shell_state.env_vars)
         {
             let buf = result.ok()?;
             return Some(bytes_to_shell_text(&buf));

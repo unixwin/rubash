@@ -120,7 +120,7 @@ impl Executor {
         // `read x < g` face).
         #[cfg(windows)]
         if let Some(result) =
-            crate::winux_fifo::slurp_marker_bytes(&path, &self.shell_state.env_vars)
+            crate::winuxcmd_fifo::slurp_marker_bytes(&path, &self.shell_state.env_vars)
         {
             let input = match result {
                 Ok(bytes) => crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),

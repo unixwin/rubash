@@ -2316,9 +2316,9 @@ impl Executor {
                 // runs to the writer's EOF, which is the fifo's own
                 // close semantics.
                 #[cfg(windows)]
-                if crate::winux_fifo::path_is_winux_fifo(&win) {
-                    let read = crate::winux_fifo::open_winux_fifo_read(&win, &|| {
-                        crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+                if crate::winuxcmd_fifo::path_is_winuxcmd_fifo(&win) {
+                    let read = crate::winuxcmd_fifo::open_winuxcmd_fifo_read(&win, &|| {
+                        crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
                     })
                     .and_then(|mut file| {
                         use std::io::Read;
@@ -2648,7 +2648,7 @@ impl Executor {
         // arm shares the same admission, and the only grep arm
         // (pipeline_exec::inline_grep_args) declines file operands
         // identically. cat, the one emulated reader that does take
-        // operands, is bridged above (path_is_winux_fifo).
+        // operands, is bridged above (path_is_winuxcmd_fifo).
         //
         // cmd.words are the already-expanded argv (the simple-command
         // executor expanded each word once, execute_cmd.c
@@ -2691,7 +2691,7 @@ impl Executor {
         // become an instant regular-file EOF)". The premise is gone:
         // the shell now recognizes the WinuxCmd fifo marker and
         // bridges redirect opens of it to the named-pipe rendezvous
-        // (crate::winux_fifo), so creating the marker in WinuxCmd's
+        // (crate::winuxcmd_fifo), so creating the marker in WinuxCmd's
         // on-disk format completes the semantics instead of faking
         // them — `mkfifo f; echo hi > f & cat f` works end to end,
         // and WinuxCmd tools bridge the same marker from their side.
@@ -2838,7 +2838,8 @@ impl Executor {
                         failed = true;
                         continue;
                     }
-                    if let Err(error) = crate::winux_fifo::create_winux_fifo(&path, readonly) {
+                    if let Err(error) = crate::winuxcmd_fifo::create_winuxcmd_fifo(&path, readonly)
+                    {
                         let _ = writeln!(
                             stderr,
                             "mkfifo: cannot create fifo '{expanded}': {}",

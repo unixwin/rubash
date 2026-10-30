@@ -750,9 +750,9 @@ impl Executor {
                 // plain open of the marker file (same family as the
                 // fd-0 bind in compound_fd0_stream_file).
                 #[cfg(windows)]
-                if crate::winux_fifo::path_is_winux_fifo(&path) {
-                    let file = crate::winux_fifo::open_winux_fifo_read(&path, &|| {
-                        crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+                if crate::winuxcmd_fifo::path_is_winuxcmd_fifo(&path) {
+                    let file = crate::winuxcmd_fifo::open_winuxcmd_fifo_read(&path, &|| {
+                        crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
                     })
                     .map_err(|error| crate::posix_errors::path_error(&target, error))?;
                     self.set_fd_input_file(fd, FileFd::from_file(file, path), true);
@@ -1551,9 +1551,9 @@ impl Executor {
         // is the read side of the named-pipe rendezvous, and the slot
         // binds the live pipe handle.
         #[cfg(windows)]
-        if crate::winux_fifo::path_is_winux_fifo(&path) {
-            let file = crate::winux_fifo::open_winux_fifo_read(&path, &|| {
-                crate::winux_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+        if crate::winuxcmd_fifo::path_is_winuxcmd_fifo(&path) {
+            let file = crate::winuxcmd_fifo::open_winuxcmd_fifo_read(&path, &|| {
+                crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
             })
             .ok()?;
             return Some(FileFd::from_file(file, path));

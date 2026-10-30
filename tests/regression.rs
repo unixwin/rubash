@@ -5873,7 +5873,7 @@ mod issue_1951 {
 /// blocks until the peer side opens (fifo open semantics).
 ///
 /// The pins cover the shell half of the WinuxCmd protocol
-/// (crate::winux_fifo): marker creation by the emulated `mkfifo`, the
+/// (crate::winuxcmd_fifo): marker creation by the emulated `mkfifo`, the
 /// redirect round trip in the issue's exact shape, both blocking-open
 /// directions across two shell processes (the cross-process shape is
 /// what pairs with a WinuxCmd tool on the other side), the append and
@@ -5982,7 +5982,7 @@ mod issue_1903 {
     const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
 
     #[test]
-    fn issue1903_mkfifo_creates_winux_marker() {
+    fn issue1903_mkfifo_creates_winuxcmd_marker() {
         let dir = case_scratch("1903-create");
         let (stdout, stderr, code) = run(&dir, "mkfifo f\n");
         assert_eq!(code, Some(0), "stderr:\n{stderr}");
@@ -6099,7 +6099,7 @@ mod issue_1903 {
     }
 
     #[test]
-    fn issue1903_foreign_winux_marker_is_honored() {
+    fn issue1903_foreign_winuxcmd_marker_is_honored() {
         // A marker in WinuxCmd's on-disk format created OUTSIDE the
         // shell (here: by hand — content + SYSTEM attribute, the two
         // things detection keys on) must rendezvous exactly like one
