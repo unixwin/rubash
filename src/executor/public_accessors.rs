@@ -2106,10 +2106,13 @@ impl Executor {
             );
         }
 
-        // Script/-c mode: line segment present
+        // Script/-c mode: line segment present. The name is the file
+        // of the code currently executing (see current_error_file_name),
+        // paired with __RUBASH_CURRENT_LINE, which tracks that same
+        // innermost frame.
         let line = self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE");
-        let script = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME");
-        match (script, line) {
+        let script = self.current_error_file_name();
+        match (script.as_deref(), line) {
             (Some(script), Some(line)) => {
                 // Script mode: "script: line N:"
                 format!("{script}: line {line}: ")
@@ -2126,6 +2129,28 @@ impl Executor {
                 "bash: ".to_string()
             }
         }
+    }
+
+    /// GNU error.c get_name_for_error: the diagnostic prolog name is
+    /// the file of the code CURRENTLY EXECUTING — BASH_SOURCE[0], the
+    /// innermost source frame (a function's definition file, a sourced
+    /// file) — not the top-level script name. Pairing the innermost
+    /// frame's line (__RUBASH_CURRENT_LINE already tracks it) with
+    /// __RUBASH_SCRIPT_NAME attributed the right line to the wrong
+    /// file (rubash#2212: a nounset error inside a function defined in
+    /// a sourced fixture reported the outer script's name with the
+    /// fixture's line). Falls back to the script name when the
+    /// composed view has no usable frame (the -c face).
+    fn current_error_file_name(&self) -> Option<String> {
+        self.dynamic_stack_array_values("BASH_SOURCE")
+            .and_then(|view| view.into_iter().next())
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                self.shell_state
+                    .env_vars
+                    .get("__RUBASH_SCRIPT_NAME")
+                    .cloned()
+            })
     }
 
     /// Whether `shopt -s gnu_errfmt` is active (GNU error.c:71
@@ -2170,8 +2195,8 @@ impl Executor {
         }
 
         let line = self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE");
-        let script = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME");
-        match (script, line) {
+        let script = self.current_error_file_name();
+        match (script.as_deref(), line) {
             (Some(script), Some(line)) => {
                 let line: usize = line.parse().unwrap_or(1);
                 self.gnu_error_line(script, line)
