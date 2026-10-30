@@ -1203,6 +1203,66 @@ impl Executor {
                 entry.target = shell_display_path(&carrier.to_string_lossy());
             }
         }
+        // rubash#2196: the list pass — output substitutions no field
+        // serves. Numbered fds (`3> >(...)`) and {var} fds are
+        // list-only (nodes.rs: the dedicated mirrors carry only fds
+        // 0-2), so the field arms never saw them and the consumer
+        // was never spawned. Materialize each unserved entry keyed
+        // by position: an identical target text on another entry is
+        // a distinct substitution (GNU forks one consumer per
+        // redirect entry — redir.c:237 with subst.c:6362).
+        for position in 0..rewritten.redirects.len() {
+            if materialized_positions
+                .iter()
+                .any(|(_, served, _)| *served == position)
+            {
+                continue;
+            }
+            let (source, old_target, effective_fd) = {
+                let redirect = &rewritten.redirects[position];
+                // Combined kinds are not served here: a combined
+                // entry is field-served by construction (the
+                // shared-combined arms above own it), so treating
+                // it as unserved could only double-materialize it.
+                if !matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Output
+                        | crate::parser::RedirectKind::Append
+                        | crate::parser::RedirectKind::ClobberOutput
+                ) || exec_keeps_output_process_substitution(&exec_words, redirect)
+                {
+                    continue;
+                }
+                let Some(source) = redirect
+                    .target
+                    .strip_prefix(">(")
+                    .and_then(|target| target.strip_suffix(')'))
+                    // rubash#1931: recorded-span admission, as above.
+                    .filter(|_| redirect_target_span_is_recorded(redirect))
+                else {
+                    continue;
+                };
+                (
+                    source.to_string(),
+                    redirect.target.clone(),
+                    redirect.fd.unwrap_or(1),
+                )
+            };
+            let path = self.empty_process_substitution_temp()?;
+            rewritten.redirects[position].target = shell_display_path(&path.to_string_lossy());
+            redirect_target_rewrites.push((
+                old_target.clone(),
+                rewritten.redirects[position].target.clone(),
+            ));
+            files.outputs.push(OutputProcessSubstitution {
+                path: path.clone(),
+                source,
+                line: cmd_line,
+                spawn_plan: ProcsubSpawnPlan::default(),
+            });
+            materialized_positions.push((files.outputs.len() - 1, position, path.clone()));
+            materialized_by_fd_target.push((effective_fd, old_target, path));
+        }
         for redirect in &mut rewritten.redirects {
             if let Some((_, new_target)) = redirect_target_rewrites
                 .iter()
