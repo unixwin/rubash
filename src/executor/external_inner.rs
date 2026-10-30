@@ -14,6 +14,17 @@ use super::*;
 /// that number in the child (its exec-error channel). It is
 /// recognizable as an open FIFO at the target that is not one of the
 /// pin sources; overwriting it would corrupt spawn error reporting.
+/// One FIFO shape is NOT the error channel: a stdio pipe the spawn
+/// machinery dup2'd onto its slot (0/1/2) and left open at its
+/// original number until exec. A pipeline stage's own stdout pipe
+/// parks exactly like that, and when its number collides with a
+/// pin's target the pin is GNU's redirection for the element
+/// (execute_cmd.c:2620 execute_pipeline runs redir.c:237
+/// do_redirections in the forked child) and must win the slot
+/// (rubash#2255). The two are told apart by identity: both ends of
+/// one pipe share an inode, so a FIFO whose (dev, inode) matches a
+/// stdio descriptor is the stdio leftover, while the error channel
+/// is a pipe of its own and never matches.
 #[cfg(unix)]
 pub(in crate::executor) fn pin_ambient_fds_in_child(
     pins: &[(std::os::unix::io::RawFd, u32)],
@@ -38,7 +49,10 @@ pub(in crate::executor) fn pin_ambient_fds_in_child(
         }
     }
     for (temp, target) in staged {
-        if !sources.contains(&target) && fd_is_anonymous_pipe(target) {
+        if !sources.contains(&target)
+            && fd_is_anonymous_pipe(target)
+            && !fd_is_stdio_pipe_alias(target)
+        {
             unsafe { libc::close(temp) };
             continue;
         }
@@ -60,6 +74,33 @@ fn fd_is_anonymous_pipe(fd: std::os::unix::io::RawFd) -> bool {
     // bionic (Android) types the S_IF* constants as u16 while st_mode
     // is u32, so the raw comparison does not compile there.
     (u32::from(stat.st_mode) & u32::from(libc::S_IFMT)) == u32::from(libc::S_IFIFO)
+}
+
+/// Whether `fd` is the same anonymous pipe as one of the child's
+/// arranged stdio descriptors (0/1/2) — the spawn machinery's stdio
+/// leftover at its pre-dup2 number (see pin_ambient_fds_in_child).
+/// Both ends of a pipe share one (dev, inode) identity; std's
+/// exec-error channel is a separate pipe and never matches a stdio
+/// descriptor, so it keeps the pin guard's protection.
+#[cfg(unix)]
+fn fd_is_stdio_pipe_alias(fd: std::os::unix::io::RawFd) -> bool {
+    fn pipe_identity(fd: std::os::unix::io::RawFd) -> Option<(libc::dev_t, libc::ino_t)> {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+            return None;
+        }
+        // Widened through u32 like fd_is_anonymous_pipe above (bionic).
+        if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT)) != u32::from(libc::S_IFIFO) {
+            return None;
+        }
+        Some((stat.st_dev, stat.st_ino))
+    }
+    let Some(identity) = pipe_identity(fd) else {
+        return false;
+    };
+    [0, 1, 2]
+        .iter()
+        .any(|&stdio_fd| pipe_identity(stdio_fd) == Some(identity))
 }
 
 /// The result of one route-seam attempt (see
