@@ -38,7 +38,7 @@ fn run_rubash(root: &PathBuf, script: &str) -> (String, String, bool) {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
         .arg(script)
-        .env("WINUXSH_ROOT", root.to_string_lossy().into_owned())
+        .env("__RUBASH_SHELL_ROOT", root.to_string_lossy().into_owned())
         .env_remove("__RUBASH_ARGV_DIALECT")
         .output()
         .expect("run rubash");

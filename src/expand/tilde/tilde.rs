@@ -247,7 +247,7 @@ fn pw_dir_from_lookup(
 /// Windows has no system passwd database, so `~user` reads the winuxcmd
 /// `/etc/passwd` convention: the file resolves through the same
 /// shell_path_to_windows mapping the cd builtin uses, which means
-/// `__RUBASH_SHELL_ROOT` / `WINUXSH_ROOT` / `RUBASH_ROOT` decide where
+/// `__RUBASH_SHELL_ROOT` / `RUBASH_ROOT` decide where
 /// `/etc` lives. No passwd file ships with the repository — tests create
 /// their own fixture under a temporary root and delete it afterwards.
 #[cfg(not(unix))]

@@ -660,15 +660,10 @@ impl Executor {
     /// directory itself contains the real `bin`, `usr/bin`, `etc`, and `tmp`
     /// directories used by the shell.
     pub fn set_shell_root(&mut self, root: impl AsRef<std::path::Path>) {
-        let value = root.as_ref().to_string_lossy().into_owned();
-        self.shell_state
-            .env_vars
-            .insert("__RUBASH_SHELL_ROOT".to_string(), value.clone());
-        // deprecated: niu bridge, remove after niu stops reading
-        self.shell_state
-            .env_vars
-            .insert("WINUXSH_ROOT".to_string(), value);
-        self.mark_exported("WINUXSH_ROOT");
+        self.shell_state.env_vars.insert(
+            "__RUBASH_SHELL_ROOT".to_string(),
+            root.as_ref().to_string_lossy().into_owned(),
+        );
     }
 
     /// Configure the native WinuxCmd dispatcher used for shell commands that
