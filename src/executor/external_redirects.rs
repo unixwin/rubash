@@ -198,6 +198,9 @@ impl Executor {
         // (external_stdio_piped_fallback).
         self.external_stdio_piped_fallback = false;
         self.external_stdio_slots = None;
+        // rubash#2235: a fresh command recomputes its own numbered
+        // input bindings (see Executor::own_input_bindings).
+        self.own_input_bindings.clear();
         match self.plan_external_stdio(cmd)? {
             Some(plan) => {
                 let ExternalStdioPlan {
