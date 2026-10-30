@@ -21,7 +21,7 @@ Rubash itself is not a shell product. It ships a reference CLI used by the compa
 
 ### Get it
 
-Prebuilt tarballs for Linux (x86_64) and macOS (aarch64) are attached to each [release](https://github.com/unixwin/rubash/releases) (latest: v1.4.3). On Windows, the engine ships inside [niubash](https://github.com/unixwin/niubash) — that is the binary to install; this repo ships no Windows binary of its own.
+Prebuilt tarballs for Linux (x86_64) and macOS (aarch64) are attached to each [release](https://github.com/unixwin/rubash/releases) (latest: v1.4.3, as of 2026-10-30). On Windows, the engine ships inside [niubash](https://github.com/unixwin/niubash) — that is the binary to install; this repo ships no Windows binary of its own.
 
 ### Build from source
 
@@ -59,7 +59,7 @@ MSYS_NO_PATHCONV=1 wsl bash /path/to/rubash/scripts/true-baseline.sh array    # 
 
 - **Our own differential suite** — 246 original cases byte-compared against a locally built GNU Bash 5.3.20 (stdout, stderr, exit status): **244/246 identical**, up from 222/246 at the first audit (2026-10-22). The 2 residuals are documented platform differences.
 - **GNU's own corpus** — the 83-suite upstream test corpus as the consistency yardstick; the full ledger is below.
-- **The real ecosystem** — nvm, bats-core, bash-it, oh-my-bash, bash-completion, modernish, run for real. Every divergence becomes a public issue and a pinned regression test: as of 2026-10-25, rubash has 1,050 issues filed and 1,039 closed.
+- **The real ecosystem** — nvm, bats-core, bash-it, oh-my-bash, bash-completion, modernish, run for real. Every divergence becomes a public issue and a pinned regression test: as of 2026-10-30, rubash has 1,440 issues filed and 1,408 closed.
 
 **Why native matters.** Git for Windows describes its own shell, verbatim, as "a BASH emulation used to run Git from the command line" — an emulation built to run Git. Its bash is a port riding on a POSIX emulation layer (`msys-2.0.dll`), and the emulation leaks: fork emulation, argument rewriting, device quirks in every script. Rubash has no such layer — one self-contained binary speaking Win32 directly.
 
@@ -156,13 +156,13 @@ The same true-baseline method (script files, byte-level diff vs GNU 5.3.x) appli
 | **git's own test framework** (t/test-lib.sh) | runs end-to-end under the engine |
 | **GNU 83-suite on Linux native binary** | 17/24 byte-identical (2026-09-27 wt4/linuxrun lane, ledger archived in #477/#581); the corpus is now replayed in CI on every push (`Bash upstream test progress`, Ubuntu) |
 
-Everything above is pinned as regression fixtures under `tests/` (767 integration test files as of 2026-10-27, incl. `tests/regression.rs` — GNU-golden matrices, suite-slice snapshots, and perf canaries) running in CI on every push — plus a C-source line-level audit (`docs/SOURCE-AUDIT.md`, 336 behaviors inventoried) that keeps finding and closing gaps before suites hit them.
+Everything above is pinned as regression fixtures under `tests/` (906 integration test files as of 2026-10-30, incl. `tests/regression.rs` — GNU-golden matrices, suite-slice snapshots, and perf canaries) running in CI on every push — plus a C-source line-level audit (`docs/SOURCE-AUDIT.md`, 336 behaviors inventoried) that keeps finding and closing gaps before suites hit them.
 
 ## Performance
 
 Measured, not claimed — under one protocol, published whether it flatters us or not. The reference asset is the 2026-10-25 baseline (PERF-BASELINE-2026-10-25 in the public [shellbench](https://github.com/unixwin/shellbench) repo): release builds, Linux, against a self-built GNU Bash 5.3.20; the in-repo ledger is [`docs/performance.md`](docs/performance.md) and perf canaries ride the CI regression suite.
 
-**The honest headline.** On interpreter-bound micro-work, current release builds pay a roughly uniform **~3× floor tax** against GNU Bash 5.3.20 — arithmetic, function calls, assignment, and read loops land at 2.8–3.2× the per-op cost. It is one mechanism (dispatch cost), not hundreds of separate ones, and beating GNU across the full table is the project's stated performance goal: the hard gate for the flagship release after 1.5.0, tracked against this published baseline. The worst single shape today is `$((a[i]))` array-element arithmetic reads at ~11× — the first target on the perf list.
+**The honest headline.** On interpreter-bound micro-work, current release builds pay a roughly uniform **~3× floor tax** against GNU Bash 5.3.20 — arithmetic, function calls, assignment, and read loops land at 2.8–3.2× the per-op cost. It is one mechanism (dispatch cost), not hundreds of separate ones, and beating GNU across the full table is the project's stated performance goal: the hard gate for the flagship release after 1.5.0, tracked against this published baseline. The worst single shape in this baseline, `$((a[i]))` array-element arithmetic reads at ~11×, has since closed to 2.99× (2026-10-28 round, same protocol) — back at floor-tax level.
 
 **Where the process model wins.** Workloads whose cost is process creation run the other way, because pipeline stages and command substitution execute in-process: the pipe benchmark costs **0.05×** GNU's time and the command-substitution loop **0.11×**; across the 409-case shellbench breadth table, the substitution class median is 0.538×. Breadth today, of 408 comparable cases: 53 ahead, 17 close, 338 behind — the behind set is the floor tax above, stated plainly.
 
@@ -170,10 +170,10 @@ Measured, not claimed — under one protocol, published whether it flatters us o
 
 ## Roadmap
 
-Both items below are **in design** — scoped, anchored to the code, and open for comment; neither is a shipped feature yet.
+Both items below were designed in the open — scoped, anchored to the code, and finalized in design docs — and land in **1.5.0**.
 
-- **1.5.0 — embeddable engine API** ([#595](https://github.com/unixwin/rubash/issues/595)): a four-layer workspace split (`rubash-core` / `-driver` / `-interactive` / facade) and a stable, semver'd Session-level API — input injection, output streams, lifecycle, event callbacks, rc policy — with niubash as the reference host. Finalized design: [`docs/design/1.5.0-session-api.md`](docs/design/1.5.0-session-api.md); RFC draft v1: [`docs/design/1.5.0-workspace-and-engine-api.md`](docs/design/1.5.0-workspace-and-engine-api.md).
-- **Native script debugger** ([#497](https://github.com/unixwin/rubash/issues/497)): `rubash --debug` (an interactive, gdb-grammar front end intended to replace the bashdb workflow) and `rubash --dap` (the same debug session over the Debug Adapter Protocol, for editors) as two views over one engine-owned event stream. Finalized design: [`docs/design/debugger-full-design.md`](docs/design/debugger-full-design.md); M0 design: [`docs/design/debugger-m0.md`](docs/design/debugger-m0.md).
+- **Embeddable engine API** ([#595](https://github.com/unixwin/rubash/issues/595)): a stable, semver'd Session-level public contract — input injection, output streams, lifecycle, event callbacks, rc policy — with niubash fully migrated onto it as the reference host. Finalized design: [`docs/design/1.5.0-session-api.md`](docs/design/1.5.0-session-api.md); RFC draft v1: [`docs/design/1.5.0-workspace-and-engine-api.md`](docs/design/1.5.0-workspace-and-engine-api.md).
+- **Native script debugger** ([#497](https://github.com/unixwin/rubash/issues/497)): `rubash --debug` (an interactive, gdb-grammar front end intended to replace the bashdb workflow) and `rubash --dap` (the same debug session over the Debug Adapter Protocol, for editors) as two views over one engine-owned event stream — the API's second real consumer. Finalized design: [`docs/design/debugger-full-design.md`](docs/design/debugger-full-design.md); M0 design: [`docs/design/debugger-m0.md`](docs/design/debugger-m0.md).
 
 ## Milestones
 
@@ -238,7 +238,7 @@ The engine presents a **selectable platform identity** instead of outsourcing it
 ## Testing
 
 ```bash
-# Unit + integration tests (767 integration test files under tests/, as of 2026-10-27)
+# Unit + integration tests (906 integration test files under tests/, as of 2026-10-30)
 cargo test --lib
 cargo test --test cli_tests
 
@@ -299,4 +299,4 @@ Issues, compatibility reproductions, focused regression tests, and implementatio
 
 ---
 
-*Last updated: 2026-10-27*
+*Last updated: 2026-10-30*
