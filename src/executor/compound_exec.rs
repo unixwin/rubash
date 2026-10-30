@@ -3966,11 +3966,34 @@ impl Executor {
     where
         F: FnOnce(&mut Executor) -> Result<T, ExecuteError>,
     {
+        let saved_fd_inputs = self.bind_numbered_heredoc_redirects(cmd, true);
+        let result = f(self);
+        self.restore_numbered_heredoc_redirects(saved_fd_inputs);
+        result
+    }
+
+    /// The binding half of with_loop_fd_heredocs, split out so a caller
+    /// whose body is not a single closure — the in-process script child
+    /// (execute_direct_shell_script), whose run spans its whole
+    /// save/swap/restore bracket — can bind the same set and restore it
+    /// at its own boundary. Returns the shadowed fd-table entries for
+    /// restore_numbered_heredoc_redirects. `include_stdin` false skips
+    /// an explicit fd-0 heredoc: that face's fd 0 is served by its
+    /// command-input scope, exactly like open_compound_numbered_input_
+    /// redirects leaves fd-0 file inputs to the fd-0 binder.
+    pub(in crate::executor) fn bind_numbered_heredoc_redirects(
+        &mut self,
+        cmd: &CommandNode,
+        include_stdin: bool,
+    ) -> Vec<(u32, Option<crate::executor::fd_table::FdEntry>)> {
         let mut saved_fd_inputs = Vec::new();
         for redirect in &cmd.heredoc_redirects {
             let Some(fd) = redirect.fd else {
                 continue;
             };
+            if fd == 0 && !include_stdin {
+                continue;
+            }
             if redirect.body.is_none() && redirect.body_carrier.is_none() {
                 continue;
             }
@@ -3987,8 +4010,15 @@ impl Executor {
             self.fd_table
                 .open_input(fd, FdReadEndpoint::text(&body), true);
         }
+        saved_fd_inputs
+    }
 
-        let result = f(self);
+    /// The restore half of bind_numbered_heredoc_redirects: each bound
+    /// slot returns to the entry it shadowed (or to unbound).
+    pub(in crate::executor) fn restore_numbered_heredoc_redirects(
+        &mut self,
+        saved_fd_inputs: Vec<(u32, Option<crate::executor::fd_table::FdEntry>)>,
+    ) {
         for (fd, old_entry) in saved_fd_inputs {
             match old_entry {
                 Some(entry) => {
@@ -3999,7 +4029,6 @@ impl Executor {
                 }
             }
         }
-        result
     }
 
     fn if_command_needs_alias_scan(&self, if_command: &IfCommand) -> bool {
