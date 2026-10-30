@@ -1656,6 +1656,21 @@ pub struct Executor {
     /// whose current value still equals the journal's final state.
     env_write_journal: EnvWriteJournal,
     history_provider: Option<crate::history::SharedHistoryProvider>,
+    /// The engine's dispatch-time stamp ledger for the provider list,
+    /// parallel to it (niubash#646). GNU stamps every add_history at the
+    /// add moment (readline/history.c hist_inittime); on the provider
+    /// contract the host records the accepted line before the engine sees
+    /// it, so the engine stamps when it first observes the entry — the
+    /// interactive dispatch (`pre_process_interactive_line`) and the
+    /// builtin's own provider mutations (`history -s` appends, `-d`
+    /// removals, `-c`), reconciling by position each time. `Rc<RefCell>`
+    /// so an Executor fork copy (command_substitute's clone) shares the
+    /// ledger exactly like it shares the provider itself — a subshell's
+    /// `history` listing must not fork the stamps off the parent's.
+    /// Hosts that carry their own stamps report them through
+    /// `HistoryProvider::entry_timestamps` (niubash#622) and take
+    /// precedence when the channel is aligned and non-empty.
+    provider_stamp_ledger: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
 }
 
 #[cfg(test)]

@@ -1890,6 +1890,10 @@ impl Executor {
             // the parent restores them at its own Drop.)
             env_write_journal: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
             history_provider: self.history_provider.clone(),
+            // The stamp ledger rides the same Rc the provider does (see
+            // the field docs): a fork copy must not fork the stamps off
+            // the parent's list.
+            provider_stamp_ledger: self.provider_stamp_ledger.clone(),
         }
     }
 
