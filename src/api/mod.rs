@@ -77,7 +77,7 @@ pub use capabilities::{
 pub use diagnostic::{Diagnostic, DiagnosticKind, ParseFailure, SessionError};
 pub use events::{CommandEvent, JobInfo, SessionEvents};
 pub use session::{
-    Flow, ParsedUnit, PreparedLine, RunOptions, RunOutcome, Session, SessionBuilder,
+    CloseReport, Flow, ParsedUnit, PreparedLine, RunOptions, RunOutcome, Session, SessionBuilder,
 };
 pub use syntax::{FunctionSite, LineClass, SyntaxView};
 pub use views::{OptionState, OptionsView, StateViews, VariableSnapshot, VariablesView};
