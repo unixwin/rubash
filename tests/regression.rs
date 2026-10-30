@@ -5892,6 +5892,74 @@ mod issue_1582 {
         assert_eq!(status, Some(0), "stderr:\n{stderr}");
         assert_eq!(stdout, "rc=143\n", "stderr:\n{stderr}");
     }
+
+    /// rubash#1582 (respawn origin seed): a coproc body is a real
+    /// forked process (execute_cmd.c coproc make_child), so its
+    /// $BASHPID is its own pid — the pid the parent records in
+    /// ${C_PID} and the pid its own children observe as $PPID
+    /// (variables.c:1511 get_bashpid = getpid). The coproc respawn
+    /// stamped the subshell depth but not the BASHPID origin base,
+    /// so the body read its real pid + 1. GNU bash 5.3.20 prints
+    /// MATCH for this probe.
+    #[cfg(unix)]
+    #[test]
+    fn issue1582_coproc_bashpid_matches_child_ppid() {
+        let dir = case_scratch("1582-coproc");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "coproc C { echo \"CBP=$BASHPID\"; /bin/sh -c 'echo \"CPP=$PPID\"'; }\n\
+             IFS= read -r -u \"${C[0]}\" l1\n\
+             IFS= read -r -u \"${C[0]}\" l2\n\
+             cbp=${l1#CBP=}; cpp=${l2#CPP=}\n\
+             if [ \"$cbp\" = \"$cpp\" ] && [ \"$cbp\" = \"${C_PID}\" ]; then echo MATCH; else echo DIFFER; fi\n\
+             exec {C[0]}<&- {C[1]}>&-\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "MATCH\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1582 (respawn origin seed): the streaming input
+    /// process substitution's producer is a real forked process
+    /// (subst.c:6362 process_substitute), so its $BASHPID is the
+    /// pid its own children observe as $PPID. The producer respawn
+    /// stamped the subshell depth but not the BASHPID origin base,
+    /// so the body read its real pid + 1. GNU bash 5.3.20 prints
+    /// MATCH for this probe.
+    #[cfg(unix)]
+    #[test]
+    fn issue1582_input_procsub_producer_bashpid_matches_child_ppid() {
+        let dir = case_scratch("1582-inprod");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "exec 3< <(/bin/sh -c 'echo $PPID'; echo \"PB=$BASHPID\")\n\
+             IFS= read -r -u 3 pp\n\
+             IFS= read -r -u 3 pbline\n\
+             exec 3<&-\n\
+             pb=${pbline#PB=}\n\
+             if [ \"$pb\" = \"$pp\" ]; then echo MATCH; else echo DIFFER; fi\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "MATCH\n", "stderr:\n{stderr}");
+    }
+
+    /// rubash#1582 (respawn origin seed, guard for the form that
+    /// already stamped the pair): the output process substitution's
+    /// consumer is a real forked process (subst.c:6362), so its
+    /// $BASHPID is the pid its own children observe as $PPID. GNU
+    /// bash 5.3.20 prints MATCH for this probe.
+    #[cfg(unix)]
+    #[test]
+    fn issue1582_output_procsub_consumer_bashpid_matches_child_ppid() {
+        let dir = case_scratch("1582-outcons");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "echo hello > >( /bin/sh -c 'echo $PPID' > o_pp.txt; echo \"$BASHPID\" > o_bp.txt )\n\
+             sleep 1\n\
+             if [ \"$(cat o_bp.txt)\" = \"$(cat o_pp.txt)\" ]; then echo MATCH; else echo DIFFER; fi\n",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "MATCH\n", "stderr:\n{stderr}");
+    }
 }
 
 mod issue_1646 {
