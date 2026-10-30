@@ -2025,6 +2025,13 @@ impl Executor {
                     option_name,
                     enabled,
                 );
+                if option_name == "history" && enabled {
+                    // builtins/set.def:210 routes the `history` option through
+                    // bash_set_history; the FLAG_ON arm re-arms recording and
+                    // loads $HISTFILE when nothing has been recorded this
+                    // session (niubash#660 resume semantics).
+                    self.reload_history_file_on_rearm();
+                }
                 if option_name == "ignoreeof" {
                     // set.def:388-399 set_ignoreeof binds/unbinds IGNOREEOF —
                     // mirror the env write into the typed owner expansion

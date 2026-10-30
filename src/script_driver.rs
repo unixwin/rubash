@@ -4103,10 +4103,46 @@ pub fn bind_interactive_screen_size(executor: &mut Executor) {
 /// file (truncating it to HISTFILESIZE lines), then read HISTFILE into the
 /// list when it exists.
 pub fn initialize_interactive_history(executor: &mut Executor) {
-    executor.set_shell_option("history", true);
+    // GNU shell.c:1835-1837 init_interactive (shell.c:1866-1867
+    // init_interactive_script for the `-i script` arm this site also
+    // serves): `if (enable_history_list == -1) enable_history_list = 1;`
+    // — the interactive default arms history only when nothing has set
+    // the option yet. This used to force the option ON unconditionally,
+    // which re-armed recording after a startup file had opted out with
+    // `set +o history`: the session recorded and its lines were saved to
+    // $HISTFILE at exit anyway (niubash#660). GNU's post-startup load
+    // site (shell.c:806-811) never touches the option.
+    if executor.get_env("__RUBASH_SETOPT_history").is_none() {
+        executor.set_shell_option("history", true);
+    }
     // shell.c init_interactive: interactive shells also default histexpand
     // (set -H) on, so !!/!str expand on each accepted line.
     executor.set_shell_option("histexpand", true);
+    // The HISTFILE default is NOT this site's business. GNU defaults
+    // HISTFILE once, at shell_initialize (shell.c:580) — variables.c:654-661
+    // `if (remember_on_history) { name = bash_default_histfile();
+    // set_if_not("HISTFILE", name); }` — BEFORE the startup files run
+    // (shell.c:722), and the load site reads whatever HISTFILE then holds
+    // (bashhist.c:336 get_string_value at load time). Re-defaulting here —
+    // AFTER the startup files — resurrected the default after an rcfile
+    // `unset HISTFILE`, so an unset-redirected session still loaded and
+    // saved the default file (niubash#661); an rcfile reassignment was
+    // honored only by luck of set_if_not. rubash main.rs
+    // apply_interactive_history_defaults now owns the default, pre-startup.
+    let Some(session) = executor.get_session_history() else {
+        return;
+    };
+    // GNU shell.c:810-811: the whole load — the HISTSIZE/HISTFILESIZE
+    // defaults inside load_history (bashhist.c:323-328), the
+    // sv_histsize("HISTFILESIZE") file truncation and the read itself —
+    // runs only when the startup files have not already put lines into
+    // the list (`history -s` in an rcfile must not be doubled by the
+    // file load): `if (shell_initialized == 0 && history_lines_this_session
+    // == 0) load_history();`.
+    let lines_this_session = session.borrow().lines_this_session;
+    if lines_this_session != 0 {
+        return;
+    }
     if executor.get_env("HISTSIZE").is_none() {
         executor.set_env("HISTSIZE", "500");
     }
@@ -4115,21 +4151,6 @@ pub fn initialize_interactive_history(executor: &mut Executor) {
             executor.set_env("HISTFILESIZE", &histsize);
         }
     }
-    // GNU variables.c/bind_variable defaults: HISTFILE falls back to
-    // ~/.bash_history when unset (bashhist.c reads and appends that
-    // file). Without the default, an unset HISTFILE silently disabled
-    // both the startup load below and the exit save in finish_shell,
-    // losing the whole interactive history (rubash#1216).
-    if executor.get_env("HISTFILE").is_none() {
-        if let Some(home) = executor.get_env("HOME") {
-            if !home.is_empty() {
-                executor.set_env("HISTFILE", &format!("{home}/.bash_history"));
-            }
-        }
-    }
-    let Some(session) = executor.get_session_history() else {
-        return;
-    };
     let Some(histfile) = executor.get_env("HISTFILE").map(String::from) else {
         return;
     };
