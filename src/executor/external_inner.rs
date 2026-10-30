@@ -9,6 +9,27 @@ type FdPinVec = Vec<(std::os::unix::io::RawFd, u32)>;
 #[cfg(not(unix))]
 type FdPinVec = Vec<(i32, u32)>;
 
+/// rubash#2278: the binding a numbered dup entry delivered to its
+/// slot, when that binding is not a FileFd the walk's walk_opened
+/// map can hold — recorded so a LATER dup entry in the same list
+/// sourcing that slot resolves to the same binding (GNU's single
+/// ordered walk, redir.c:237 do_redirections, where every dup2
+/// reads the descriptor as bound at its own position).
+#[derive(Clone, Copy)]
+enum NumberedDupBinding {
+    /// The child's own wired stdio slot carries the binding: the
+    /// dup's source slot is not rebound by any later entry of the
+    /// list, so the wired slot the spawn arranged IS the binding
+    /// the dup saw at its position (the #2277 step-5 shape).
+    ChildSlot(u32),
+    /// A parent-side inheritable duplicate of the shell's ambient
+    /// stdio descriptor, captured at the dup's position: a later
+    /// entry rebinds the source slot, so the at-position binding is
+    /// the ambient one even though the child's wired slot will
+    /// hold the later binding.
+    Handle(crate::fd::HANDLE),
+}
+
 /// rubash#1626: pin the shell's ambient fd-table descriptors at their
 /// slot numbers in a forked child, between fork and exec — GNU's child
 /// inherits every descriptor `exec N>file` bound, at the same number.
@@ -1944,6 +1965,12 @@ impl Executor {
             u32,
             std::rc::Rc<crate::executor::fd_table::FileFd>,
         > = std::collections::HashMap::new();
+        // rubash#2278: bindings the numbered dup arm below delivers
+        // that are not FileFds (stdio sources), by slot, so a later
+        // dup entry sourcing that slot chains onto the same binding
+        // (see NumberedDupBinding).
+        let mut numbered_dup_bindings: std::collections::HashMap<u32, NumberedDupBinding> =
+            std::collections::HashMap::new();
         let mut fd_var_claimed: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for (position, redirect) in cmd.redirects.iter().enumerate() {
             if redirect.fd_var.is_some() {
@@ -2002,6 +2029,38 @@ impl Executor {
                     }
                 }
                 continue;
+            }
+            // rubash#2278: a numbered dup entry (`3<&0`, `4>&3`,
+            // `3>&1`) — GNU's ordered walk services it with a dup2
+            // of the source AS BOUND AT THIS POSITION
+            // (redir.c:237 do_redirections; redir.c:1138
+            // do_redirection_internal, the dup2 itself at :1193),
+            // and the generic skip below would leave the slot
+            // unbound in the child (EBADF). Plain (non-move) dup
+            // spellings resolve through deliver_numbered_dup; move
+            // spellings (`4<&3-`) keep the fall-through they have
+            // today.
+            if matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::DuplicateInput
+                    | crate::parser::RedirectKind::DuplicateOutput,
+            ) && redirect_target_is_dup_spelling(&target)
+            {
+                if let Some(source_fd) = redirect_target_fd(&target) {
+                    self.deliver_numbered_dup(
+                        cmd,
+                        position,
+                        redirect,
+                        fd,
+                        source_fd,
+                        &mut process,
+                        &mut command_fd_pins,
+                        &mut parent_side_dups,
+                        &mut walk_opened,
+                        &mut numbered_dup_bindings,
+                    );
+                    continue;
+                }
             }
             if redirect_target_fd(&target).is_some()
                 || is_closed_redirect_target(&target)
@@ -2169,6 +2228,7 @@ impl Executor {
             fd_var_claimed.insert(var_fd);
             self.deliver_fd_var_text_binding(
                 var_fd,
+                var_fd,
                 &mut process,
                 &mut command_fd_pins,
                 &mut parent_side_dups,
@@ -2295,6 +2355,7 @@ impl Executor {
                     fd_var_claimed.insert(var_fd);
                     self.deliver_fd_var_text_binding(
                         var_fd,
+                        var_fd,
                         process,
                         command_fd_pins,
                         parent_side_dups,
@@ -2321,23 +2382,27 @@ impl Executor {
         }
     }
 
-    /// rubash#2272: materialize the text body bound at `var_fd` (a
-    /// heredoc / here-string body the dynamic-fd applier stored as
-    /// a Text endpoint) into a carrier file and stamp/pin the
-    /// carrier at that number — the installation the numbered
-    /// heredoc arm performs with external_fd_heredoc_input (#2270),
-    /// except the body here comes from the fd table's snapshot: the
-    /// applier already expanded it, and a partially consumed
-    /// persistent binding delivers its remaining text, as a GNU
-    /// descriptor positioned at the same offset would.
+    /// rubash#2272: materialize the text body bound at
+    /// `snapshot_fd` (a heredoc / here-string body the dynamic-fd
+    /// applier stored as a Text endpoint) into a carrier file and
+    /// stamp/pin the carrier at `deliver_fd` — the installation the
+    /// numbered heredoc arm performs with
+    /// external_fd_heredoc_input (#2270), except the body here
+    /// comes from the fd table's snapshot: the applier already
+    /// expanded it, and a partially consumed persistent binding
+    /// delivers its remaining text, as a GNU descriptor positioned
+    /// at the same offset would. The two numbers differ only for
+    /// the numbered dup arm (#2278), which reads the snapshot at
+    /// the dup's source and delivers at the dup's target.
     fn deliver_fd_var_text_binding(
         &mut self,
-        var_fd: u32,
+        snapshot_fd: u32,
+        deliver_fd: u32,
         process: &mut Command,
         command_fd_pins: &mut FdPinVec,
         parent_side_dups: &mut Vec<crate::fd::HANDLE>,
     ) {
-        let Some((text, offset)) = self.fd_table.input_snapshot(var_fd) else {
+        let Some((text, offset)) = self.fd_table.input_snapshot(snapshot_fd) else {
             return;
         };
         let body = text.get(offset.min(text.len())..).unwrap_or("").to_string();
@@ -2366,7 +2431,7 @@ impl Executor {
             process,
             command_fd_pins,
             parent_side_dups,
-            var_fd,
+            deliver_fd,
             false,
             raw,
             carrier,
@@ -2513,7 +2578,13 @@ impl Executor {
         // body, a materialized stdin): deliver its remaining bytes
         // through a carrier, like the heredoc arm.
         if !write && self.fd_table.input_snapshot(var_fd).is_some() {
-            self.deliver_fd_var_text_binding(var_fd, process, command_fd_pins, parent_side_dups);
+            self.deliver_fd_var_text_binding(
+                var_fd,
+                var_fd,
+                process,
+                command_fd_pins,
+                parent_side_dups,
+            );
             return;
         }
         // (5) A stdio source: the description the child must share
@@ -2529,6 +2600,182 @@ impl Executor {
             command_fd_pins.push((source_fd as std::os::unix::io::RawFd, var_fd));
             #[cfg(not(unix))]
             let _ = &*command_fd_pins;
+        }
+    }
+
+    /// rubash#2278: deliver one NUMBERED dup entry (`3<&0`,
+    /// `4>&3`, `3>&1`) to the spawn. The numbered walk skipped dup
+    /// spellings outright, so the child's slot stayed unbound
+    /// (EBADF) even though GNU's single ordered walk services
+    /// every dup with a dup2 of the source as bound at that walk
+    /// position (redir.c:237 do_redirections; redir.c:1138
+    /// do_redirection_internal, dup2 at :1193). Resolution order
+    /// mirrors deliver_fd_var_dup's ladder, adapted to a walk with
+    /// no dynamic-fd applier: (1) a binding this walk already
+    /// delivered for the source slot, (2) the fd-0 replay for the
+    /// command's own stdin binding, (3) the ambient fd table's
+    /// endpoint at the source (a File endpoint stamps/pins
+    /// directly; a text snapshot rides a carrier), (4) a stdio
+    /// source — pinned child-locally when no later entry rebinds
+    /// the source slot (the wired slot then IS the at-position
+    /// binding), or captured parent-side from the shell's ambient
+    /// stdio descriptor when a later entry does rebind it
+    /// (`3<&0 <seed` must deliver the AMBIENT stdin, not the seed
+    /// the later entry wires into the child's fd 0). An
+    /// unresolvable source delivers nothing: a closed source was
+    /// already diagnosed on the redirect preflight face, exactly
+    /// as in the {var} ladder.
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_numbered_dup(
+        &mut self,
+        cmd: &CommandNode,
+        position: usize,
+        redirect: &crate::parser::Redirect,
+        fd: u32,
+        source_fd: u32,
+        process: &mut Command,
+        command_fd_pins: &mut FdPinVec,
+        parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+        walk_opened: &mut std::collections::HashMap<
+            u32,
+            std::rc::Rc<crate::executor::fd_table::FileFd>,
+        >,
+        numbered_dup_bindings: &mut std::collections::HashMap<u32, NumberedDupBinding>,
+    ) {
+        let write = matches!(redirect.kind, crate::parser::RedirectKind::DuplicateOutput);
+        // (1) A binding this walk already delivered for the source.
+        if let Some(file) = walk_opened.get(&source_fd).cloned() {
+            let path = file.path.to_string_lossy().into_owned();
+            self.stamp_child_fd_handle(
+                process,
+                command_fd_pins,
+                parent_side_dups,
+                fd,
+                write,
+                file.handle,
+                path,
+            );
+            walk_opened.insert(fd, file);
+            return;
+        }
+        if let Some(binding) = numbered_dup_bindings.get(&source_fd).copied() {
+            #[cfg(unix)]
+            {
+                let source = match binding {
+                    NumberedDupBinding::ChildSlot(slot) => slot as std::os::unix::io::RawFd,
+                    NumberedDupBinding::Handle(handle) => handle,
+                };
+                command_fd_pins.push((source, fd));
+            }
+            #[cfg(not(unix))]
+            let _ = &*command_fd_pins;
+            numbered_dup_bindings.insert(fd, binding);
+            return;
+        }
+        // (2) fd-0 sources: fd-0 entries never enter this walk
+        // (the stdin face owns them), so resolve the command's own
+        // stdin binding through the #2235 replay, as the {var}
+        // ladder's step (2) does.
+        if !write && source_fd == 0 {
+            if let Some(file) = self.own_input_binding_before(cmd, 0, position) {
+                let path = file.path.to_string_lossy().into_owned();
+                self.stamp_child_fd_handle(
+                    process,
+                    command_fd_pins,
+                    parent_side_dups,
+                    fd,
+                    false,
+                    file.handle,
+                    path,
+                );
+                walk_opened.insert(fd, file);
+                return;
+            }
+        }
+        // (3) The ambient fd table's endpoint at the source.
+        let table_file = if write {
+            match self.fd_table.write_endpoint(source_fd) {
+                Some(crate::executor::fd_table::FdWriteEndpoint::File(file)) => Some(file),
+                Some(crate::executor::fd_table::FdWriteEndpoint::CoprocStdin {
+                    fd: file, ..
+                }) => Some(file),
+                _ => None,
+            }
+        } else {
+            match self.fd_table.read_endpoint(source_fd) {
+                Some(crate::executor::fd_table::FdReadEndpoint::File(file)) => Some(file),
+                Some(crate::executor::fd_table::FdReadEndpoint::CoprocStdout {
+                    fd: file, ..
+                }) => Some(file),
+                _ => None,
+            }
+        };
+        if let Some(file) = table_file {
+            let path = file.path.to_string_lossy().into_owned();
+            self.stamp_child_fd_handle(
+                process,
+                command_fd_pins,
+                parent_side_dups,
+                fd,
+                write,
+                file.handle,
+                path,
+            );
+            walk_opened.insert(fd, file);
+            return;
+        }
+        if !write && self.fd_table.input_snapshot(source_fd).is_some() {
+            // A text endpoint (a heredoc body, a materialized
+            // stdin): deliver its remaining bytes through a
+            // carrier, like the {var} ladder's step (4).
+            self.deliver_fd_var_text_binding(
+                source_fd,
+                fd,
+                process,
+                command_fd_pins,
+                parent_side_dups,
+            );
+            return;
+        }
+        // (4) A stdio source: the binding at this position is the
+        // shell's ambient stdio, or an own-list binding of the
+        // slot that the stdio faces already wired (an earlier
+        // `>file` for a `3>&1`) — both are exactly what the
+        // child's wired slot holds UNLESS a later entry rebinds
+        // the slot, in which case the ambient descriptor must be
+        // captured parent-side before the spawn rewires it.
+        if source_fd <= 2 {
+            if self.fd_table.is_closed(source_fd) {
+                return;
+            }
+            let rebound_later = cmd.redirects.iter().enumerate().any(|(index, entry)| {
+                index > position
+                    && entry.fd_var.is_none()
+                    && entry
+                        .fd
+                        .unwrap_or(if entry.is_input_side() { 0 } else { 1 })
+                        == source_fd
+            });
+            if rebound_later {
+                #[cfg(unix)]
+                if let Ok(dup) =
+                    crate::fd::duplicate_handle_inheritable(source_fd as std::os::unix::io::RawFd)
+                {
+                    command_fd_pins.push((dup, fd));
+                    parent_side_dups.push(dup);
+                    numbered_dup_bindings.insert(fd, NumberedDupBinding::Handle(dup));
+                    return;
+                }
+                // The ambient descriptor could not be captured
+                // (or the platform has no raw stdio handle to
+                // capture): fall through to the child-local pin,
+                // which at least delivers the slot's final binding.
+            }
+            #[cfg(unix)]
+            command_fd_pins.push((source_fd as std::os::unix::io::RawFd, fd));
+            #[cfg(not(unix))]
+            let _ = &*command_fd_pins;
+            numbered_dup_bindings.insert(fd, NumberedDupBinding::ChildSlot(source_fd));
         }
     }
 
