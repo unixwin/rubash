@@ -1250,11 +1250,38 @@ impl Executor {
         // (builtins/cd.def's `-'/CDPATH/cdable_vars steps) apply only to
         // operands — the operand-less branch pins lflag = 0 (cd.def:325).
         let mut operand_form = false;
-        let target = if let Some(word) = split_shell_words(left.trim()).get(1) {
+        // rubash#2219: operand presence is a WORD question, not a text
+        // question — the split (split_shell_words_with_quote_info) now
+        // reports a quoted empty word, and the cases separate on what
+        // expansion does to the word:
+        //   * the raw word is already empty (`cd ""`, `cd ''`): the word
+        //     exists but names nothing — GNU's cd refuses it as a null
+        //     directory (builtins/cd.def:333). Decided here, before any
+        //     expansion runs: decline to the real cd/pwd pair, which
+        //     owns that verdict.
+        //   * the word expands to nothing (`cd "$e"`, `cd $e`): quoted,
+        //     that is again the null-directory refusal; unquoted, the
+        //     word is removed entirely and the body is the operand-less
+        //     $HOME move (cd.def:316). The two verdicts are the real
+        //     builtin's to give — decline, as the set-but-empty HOME
+        //     arm below already declines rather than drift.
+        //   * an UNQUOTED word expands to text containing blanks: the
+        //     real parse field-splits it (subst.c
+        //     expand_word_list_internal), which can make the body a
+        //     multi-operand cd — a shape this single-target model
+        //     cannot express. Decline. (A quoted word never splits, so
+        //     its blanks stay fast-path territory.)
+        let target = if let Some((word, quoted)) = split_shell_words_with_quote_info(left.trim())
+            .into_iter()
+            .nth(1)
+        {
+            if word.is_empty() {
+                return None;
+            }
             // GNU subst.c expands the cd target with expand_string (parameter,
             // tilde) but not pathname expansion: `cd` takes a single directory,
             // so a glob pattern would be a literal path, not a match list.
-            let expanded = self.expand_word(word);
+            let expanded = self.expand_word(&word);
             // rubash#2211: this shortcut computes ONE thing — a pure
             // pathname resolution of the operand against the session
             // cwd. Operand forms whose GNU resolution is not that are
@@ -1284,6 +1311,13 @@ impl Executor {
                 return None;
             }
             if cdpath_search_could_apply(&expanded, &self.shell_state.env_vars) {
+                return None;
+            }
+            // rubash#2219: the unquoted-blank decline from the list
+            // above — field splitting is a word-formation fact, so it
+            // is decided here on the expanded text together with the
+            // word's `quoted` flag.
+            if !quoted && expanded.chars().any(|ch| ch == ' ' || ch == '\t') {
                 return None;
             }
             operand_form = true;
@@ -1371,7 +1405,29 @@ impl Executor {
         // /c/… domain.
         let display = path.to_string_lossy().replace('\\', "/");
         let display = display.strip_prefix("//?/").unwrap_or(&display);
-        Some(crate::executor::path::shell_pwd_display_path(display).to_string())
+        let physical_display = crate::executor::path::shell_pwd_display_path(display);
+        if split_shell_words(right.trim()).len() > 1 {
+            // `pwd -P` (the only multi-word spelling the shape gate
+            // admits): the physical rendering is the verdict.
+            return Some(physical_display.to_string());
+        }
+        // rubash#2220: bare `pwd` prints the logical $PWD the cd builtin
+        // maintains (builtins/cd.def bindpwd; pwd_builtin echoes $PWD
+        // verbatim) — the textual chain from the session's validated
+        // logical cwd through the operand spelling — not the canonical
+        // path: symlink components and a leading // survive in it
+        // (`$(cd link && pwd)` prints the link path; `$(cd //etc &&
+        // pwd)` keeps //etc). Render through the builtin's own chain
+        // helpers so the shortcut cannot drift from the real cd/pwd
+        // pair; the physical probe above still gates existence and
+        // directory-ness, so a logical name for a missing directory is
+        // never produced.
+        let logical_display = crate::builtins::cd::logical_destination_display_from(
+            &self.shell_state.env_vars,
+            &self.shell_state.cwd,
+            std::path::Path::new(&target_display),
+        );
+        Some(crate::executor::path::shell_pwd_display_path(&logical_display).to_string())
     }
 
     /// rubash#2211: could the cd builtin's cdable_vars step
