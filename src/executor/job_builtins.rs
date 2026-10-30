@@ -2933,11 +2933,27 @@ impl Executor {
                     self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                     return Ok(null_filename_status);
                 }
-                let mut p = provider.borrow_mut();
+                // niubash#646: sv_histtimefmt (variables.c:6168-6177) arms
+                // the file faces whenever HISTTIMEFORMAT exists as a
+                // variable (`history_write_timestamps = (v != 0)`), and
+                // the effective stamps come from the host's
+                // entry_timestamps channel or the engine's dispatch-time
+                // ledger. Fetched before the scoped borrows below — and
+                // after a `-c` clears the list, so a stamp slice never
+                // outlives the list it ran parallel to.
                 if do_clear {
-                    p.clear()?;
+                    provider.borrow_mut().clear()?;
+                    // `-c` empties entries and timestamps together
+                    // (builtins/history.def:185); the ledger follows.
+                    self.sync_provider_stamp_ledger();
                     let _ = std::fs::write(&file, "");
                 }
+                let write_ts = self.get_env("HISTTIMEFORMAT").is_some();
+                let io_stamps = if write_ts {
+                    self.provider_history_stamps().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 // The file modes report through the builtin's own
                 // diagnostic surface, exactly like the session path in
                 // history_exec.rs: an io failure is a builtin outcome
@@ -2946,7 +2962,19 @@ impl Executor {
                 // `history -a <missing-dir>/f` through a host provider
                 // surfaced as just `No such file or directory`).
                 if do_append {
-                    if let Err(err) = p.append_history(&file) {
+                    // histfile.c:815 history_append: with
+                    // history_write_timestamps a stamped entry is two file
+                    // lines (`#<epoch>` then the command). The plain call
+                    // below is the unarmed legacy path — byte-identical
+                    // to the trait default.
+                    let outcome = if write_ts {
+                        provider
+                            .borrow_mut()
+                            .append_history_timestamped(&file, &io_stamps)
+                    } else {
+                        provider.borrow_mut().append_history(&file)
+                    };
+                    if let Err(err) = outcome {
                         // bashhist.c:450 maybe_append_history: the
                         // `cannot create' line belongs to the branch
                         // where the target does not exist (stat ->
@@ -2967,7 +2995,8 @@ impl Executor {
                     }
                 }
                 if do_read_new {
-                    if p.read_new_history(&file).is_err() {
+                    let outcome = provider.borrow_mut().read_new_history(&file);
+                    if outcome.is_err() {
                         // GNU read failures are silent: the
                         // read-error report in builtins/history.def
                         // is wrapped in `#if 0' in both the RFLAG
@@ -2978,16 +3007,38 @@ impl Executor {
                         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                         return Ok(1);
                     }
+                    // The list grew by the file's new entries; the ledger
+                    // fills their read-time stamps (histfile.c add_history
+                    // → hist_inittime; per-entry file stamp parsing through
+                    // a provider is the host's niubash#622 read face).
+                    self.sync_provider_stamp_ledger();
                 }
                 if do_read {
-                    if p.read_history(&file).is_err() {
+                    let outcome = provider.borrow_mut().read_history(&file);
+                    if outcome.is_err() {
                         // Silent, like -n above (rubash#1852).
                         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                         return Ok(1);
                     }
+                    self.sync_provider_stamp_ledger();
                 }
                 if do_write {
-                    if p.write_history(&file).is_err() {
+                    // histfile.c:738 history_write_slow: with
+                    // history_write_timestamps each entry that HAS a stamp
+                    // is preceded by its `#<epoch>` line; HISTFILESIZE
+                    // still counts command lines (histfile.c:633). The
+                    // plain call is the unarmed legacy path — a store that
+                    // has not opted into the stamp channel must not find
+                    // `#<epoch>` side lines its reader would swallow as
+                    // entries (the niubash#646 file-face blocker).
+                    let outcome = if write_ts {
+                        provider
+                            .borrow_mut()
+                            .write_history_timestamped(&file, &io_stamps)
+                    } else {
+                        provider.borrow_mut().write_history(&file)
+                    };
+                    if outcome.is_err() {
                         // GNU write_history failures are silent
                         // (histfile.c history_do_write returns the
                         // errno unreported).
@@ -3002,13 +3053,29 @@ impl Executor {
             let clear = do_clear || args.iter().any(|arg| arg == "-c" || arg == "-pc");
             let save = args.iter().position(|arg| arg == "-s" || arg == "-ps");
             let delete = args.iter().position(|arg| arg == "-d");
+            // niubash#646: display_history renders the entry stamps only
+            // when HISTTIMEFORMAT is set AND non-empty
+            // (builtins/history.def:400 `histtimefmt && *histtimefmt`),
+            // while sv_histtimefmt arms the file faces on the variable's
+            // bare existence (variables.c:6168-6177) — the same split the
+            // session path keeps in history_exec.rs.
+            let time_format = self
+                .get_env("HISTTIMEFORMAT")
+                .filter(|format| !format.is_empty())
+                .map(str::to_string);
             let entries = if clear {
                 provider.borrow_mut().clear()?;
+                // builtins/history.def:185: -c clears entries and
+                // timestamps together; the ledger follows.
+                self.sync_provider_stamp_ledger();
                 Vec::new()
             } else if let Some(index) = save {
                 let command = args[index + 1..].join(" ");
                 if !command.is_empty() {
                     provider.borrow_mut().append(command)?;
+                    // The -s push is an add_history: its stamp is the add
+                    // time (readline/history.c hist_inittime).
+                    self.sync_provider_stamp_ledger();
                 }
                 Vec::new()
             } else if let Some(index) = delete {
@@ -3049,7 +3116,20 @@ impl Executor {
                                     && start <= end =>
                             {
                                 entries.drain(start as usize..=end as usize);
+                                // The stamp ledger mirrors the exact index
+                                // surgery: remove_history_range moves the
+                                // HIST_ENTRY structs with their timestamp
+                                // fields intact (lib/readline/history.c),
+                                // so survivors keep their own stamps.
+                                {
+                                    let mut ledger = self.provider_stamp_ledger.borrow_mut();
+                                    if (start as usize) < ledger.len() {
+                                        let last = (end as usize).min(ledger.len() - 1);
+                                        ledger.drain(start as usize..=last);
+                                    }
+                                }
                                 provider.borrow_mut().replace(entries.clone())?;
+                                self.sync_provider_stamp_ledger();
                             }
                             _ => {
                                 writeln!(
@@ -3064,7 +3144,18 @@ impl Executor {
                     } else if let Some(value) = history_number(arg) {
                         if value >= 0 && (value as usize) < entries.len() {
                             entries.remove(value as usize);
+                            // Ledger mirror: the removed entry's stamp goes
+                            // with it; the survivors' stamps travel with
+                            // their entries (remove_history_range keeps the
+                            // timestamp fields attached).
+                            {
+                                let mut ledger = self.provider_stamp_ledger.borrow_mut();
+                                if (value as usize) < ledger.len() {
+                                    ledger.remove(value as usize);
+                                }
+                            }
                             provider.borrow_mut().replace(entries.clone())?;
+                            self.sync_provider_stamp_ledger();
                         } else {
                             writeln!(
                                 stderr,
@@ -3081,11 +3172,26 @@ impl Executor {
                 provider.borrow_mut().entries()?
             };
             let mut surplus = false;
+            // niubash#646: the stamps behind the listing come from the
+            // host's entry_timestamps channel (niubash#622) or, when that
+            // is not carrying stamps, the engine's dispatch-time ledger —
+            // synced here so entries the engine never observed (loaded
+            // before the first dispatch) still carry their read-time
+            // stamps, the histfile.c add_history shape, instead of
+            // rendering stamp-less (`??`).
+            let stamps = if time_format.is_some() {
+                self.provider_history_stamps().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let status = crate::builtins::history::execute_with_history(
                 args,
                 &self.diagnostic_prefix(),
                 &entries,
                 provider_history_base,
+                time_format.as_deref(),
+                &stamps,
+                &self.shell_state.env_vars,
                 &mut stdout,
                 &mut stderr,
                 &mut surplus,

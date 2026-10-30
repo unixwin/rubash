@@ -5552,6 +5552,18 @@ pub fn pre_process_interactive_line(executor: &mut Executor, line: &str) -> Inte
         posix,
     };
 
+    // niubash#646: the dispatch of an accepted line is the engine's
+    // observation of the host's save-at-accept add — the moment GNU
+    // stamps the entry (bashhist.c maybe_add_history → really_add_history
+    // → add_history → readline/history.c hist_inittime). Reconciling the
+    // stamp ledger HERE (before the no-expansion early return below —
+    // most lines take it) is what makes an accepted line's stamp its
+    // add time rather than the time of the first later `history` call.
+    // A recording veto (`interactive_history_veto_recording`, set
+    // +o history) drops the entry afterwards and the ledger tail goes
+    // with it.
+    executor.sync_provider_stamp_ledger();
+
     // bashhist.c:541-550 history_expansion_p: the expansion char or the
     // quick-substitution char anywhere in the line.
     let wants_expansion = line.contains(ctx.chars.expand) || line.contains(ctx.chars.subst);
